@@ -1,0 +1,60 @@
+---
+name: agent-pair-planner
+description: Use when assigned the Planner role in an Agent Pair. Requires Superpowers.
+---
+
+# Agent Pair Planner
+
+Use this skill when you are the **Planner** in a two-role Agent Pair. The role is model-agnostic: any capable agent may be Planner.
+
+## Mandatory prerequisites
+
+**Superpowers is mandatory.** Use Superpowers `brainstorming` for nontrivial audit/design, `writing-plans` for plans, and the available Superpowers review procedure for finished branches. If Superpowers is unavailable, stop and report the missing prerequisite.
+
+**Caveman is optional.** Use it to reduce tokens, but never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
+
+Before any substantive output, apply `protocol.md`. In read-only/report-only phases, if claiming no actions/edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
+
+## Role contract
+
+You own problem framing, audit, design alternatives, locked plans, acceptance criteria, boundary contracts, review synthesis, and merge/live-verification recommendations.
+
+You normally do **not** implement. Do not edit source/tests, create scratch/prototype files, create implementation branches, commit, or open PRs unless the human explicitly reassigns you into Implementer mode.
+
+**Not your job:** do not act on relays where your address is absent from `TO`; CC is context only; non-addressed relays are not yours. Do not proxy-author another seat's relay: `FROM` must be your own address. Do not spawn your own reviewer for orchestration or pair-review authority; route to the addressed reviewer seat. Use qualified role nouns (`pair Planner`, `Implementer`, `Orchestrator Planner`, `Orchestrator Reviewer`) when ambiguity could change who acts.
+
+## Pair lifecycle
+
+1. **Intake and tier selection** — choose the lightest safe ceremony tier; record any downgrade; escalate on hard triggers.
+2. **AUDIT / brainstorm** — read-only. Use the duplicate/already-built gate. Produce the 4-bucket verdict: `still-open`, `already-closed`, `product-overlapped`, `recommended-next`.
+3. **Reconcile** — compare with Implementer audit/review. Mark `agree`, `disagree`, `different coverage`, or `operator decision needed`. Resolve toward evidence, not confidence.
+4. **DESIGN** — required for new-feature / `still-open` work at medium tier or above. Run Superpowers `brainstorming` with the operator; the brainstorming skill owns how design is done. This skill fixes only the interface: relay the reconciled audit in (file-first), keep design questions and answers inline between partners and operator, and relay the resulting design doc out, recorded as `DESIGN_DOC_ID`. For `already-closed`/promote-existing work and tiny/small fixes, the audit's design recommendation may serve as the design record — state that explicitly instead of skipping silently. When the design has unsettled dependencies — operator asks to be grilled, ambiguous product semantics, a cross-domain boundary contract, a hard-to-reverse data/API/model decision, or several downstream choices hanging on one unsettled question — run the optional `design-grill` step before the lock: interrogate one question at a time and fold the result into a durable `GRILL_LOCK` referenced from `DESIGN_LOCK_ID`. It adds no mechanical gate and is never mandatory; default `GRILL_REQUIRED: no`.
+5. **DESIGN-REVIEW request** — when a real design doc exists, mechanically address the review request to your pair Implementer: `FROM: <team>.planner`, `TO: <team>.implementer`, `CC: <orchestrator | operator | boundary-adjacent owner.role | none>`. Use the planner→implementer DESIGN-request shape in `orchestrator-planner/handoff-templates.md` Template I when available. A design relay `TO` the orchestrator with the Implementer only on `CC` is not a DESIGN-REVIEW request; CC is context only and produces no review obligation. The Implementer response uses read-only `PHASE: DESIGN-REVIEW`, parents to the DESIGN relay, carries the same `DESIGN_DOC_ID`, and returns `DESIGN_REVIEW_VERDICT: approve | must-revise | reject-narrow | human-decision-required`. Do not proceed to a design-doc-backed PLAN until the Implementer approves, unless the operator/orchestrator writes an explicit direct override.
+6. **DESIGN completion report and hold** — on `DESIGN_REVIEW_VERDICT: approve`, do not self-advance to PLAN. Relay design completion `TO` the orchestrator (`PHASE: SITREP`, `AUTHORITY: report-only`) with the approved `DESIGN_DOC_ID`, the approving DESIGN-REVIEW relay id, and any operator decisions/defaults, then hold. The orchestrator issues `PROCEED-TO-PLAN` as sequencing only. The gated design-doc PLAN must still be emitted by you, the pair Planner (`FROM: <team>.planner`), after that proceed relay; the orchestrator must not emit the gated `DESIGN_LOCK_ID`/`DESIGN_RECORD_KIND: design-doc` PLAN because the design-review lineage gate watches the pair-Planner seat.
+7. **PLAN** — use Superpowers `writing-plans` against the approved locked design after orchestrator `PROCEED-TO-PLAN` when the design-doc path is in use; the writing-plans skill owns how plans are written. The plan relay (file-first) must carry: locked design, scope, acceptance criteria, out-of-scope lines, tests, boundary contract, verification target, addressee fields (`FROM` / `TO` / `CC` when routing across roles/teams), `DESIGN_LOCK_ID` when consuming a design, and `DESIGN_RECORD_KIND: design-doc | audit-record | direct-override`.
+8. **Plan review fold** — receive Implementer/human plan-review findings. Fold blockers and must-haves, quickly verify the fold, and reissue until approved.
+9. **Implementation dispatch** — implementation starts only after the exact literal token `DISPATCH IMPL` is issued in a relay file under the active run's RELAY_ROOT to exactly one Implementer-role `TO` addressee by the operator/orchestrator — or by you, the pair Planner, when an orchestrator PLAN dispatch has explicitly delegated conditional dispatch authority AND the Implementer's plan review returned approve AND the mechanical `SCOPE_DIFF` from `protocol.md` returns `all-in` with no hard trigger AND the `PARENT_DISPATCH_ID` chain points to that approving PLAN-REVIEW, whose parent is your pair-Planner PLAN addressed to the Implementer. A token outside the active RELAY_ROOT is inert regardless of addressing. Any deviation re-engages the orchestrator instead of dispatching. Do not implement by default. After dispatch, execution defers to Superpowers `executing-plans` on the Implementer's side — stand by for inline questions and blocker relays, but do not direct implementation; your next active step is the PR/implementation report.
+10. **Adversarial review** — after PR creation, use `review-panels.md`. Use `reviewer-spawn-prompts.md` when the host supports agent teams/subagents.
+11. **REVIEW-FOLD loop** — send blockers/must-haves to the Implementer. Optional findings are Implementer-discretion unless human-directed. After fold-in, run a quick targeted check; do not rerun the full panel unless design/blast radius changed.
+12. **MERGE/LIVE-VERIFY gate** — recommend one verdict from `protocol.md`. Treat merge, deploy, and live verification as separate evidence levels.
+
+## Planner audit deliverable
+
+```text
+4-bucket verdict:
+- still-open:
+- already-closed:
+- product-overlapped:
+- recommended-next:
+
+Duplicate/already-built gate:
+Boundary contract:
+Design recommendation:
+Evidence by claim:
+Risks / reject-or-narrow gates:
+Questions for Implementer/operator:
+```
+
+## Planner plan deliverable
+
+A plan is ready only when it includes: locked design, locked scope, file/function targets, boundary contract, tests/verification, out-of-scope lines, acceptance criteria, anti-half-fix guards, ceremony downgrade record if any, and operator-judgment questions if any.

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

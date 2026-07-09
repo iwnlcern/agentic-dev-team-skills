@@ -1,0 +1,18 @@
+ROLE: Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: d-x
+CEREMONY_TIER: tiny
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+CEREMONY_DOWNGRADE: proposed skipped review because low risk.
+ESCALATION_SCAN:
+- authz/tenant/RLS/permissions/secrets: n/a — not assessed
+- migration/backfill/destructive-write/canonical-data-repair: probably fine
+- money/inventory/orders/planning/accounting/trust-critical-state: none
+ESCALATION_SCAN_RESULT: all-no
+WHY_DOWNGRADE_IS_SAFE:
+- low risk overall
+ACTIONS_GIT_REF: no edits claimed; final git status --short = empty
+FINAL_GIT_STATUS_SHORT:
+none — clean tree

@@ -1,0 +1,26 @@
+ROLE: Implementer
+PHASE: REVIEW-FOLD
+AUTHORITY: fold-in-only
+DISPATCH_ID: d-fd13
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no
+FROM: pair-1.implementer
+TO: pair-1.planner
+FOLD_SCOPE:
+- src/parse.js -> in
+FOLD_SCOPE_RESULT: all-in
+
+Fold scope restated with full detail:
+
+FOLD_SCOPE:
+- src/parse.js -> in
+- src/format.js -> out
+FOLD_SCOPE_RESULT: all-in
+
+Folded review findings: fixed the parser issue and touched the formatter integration.
+
+ACTIONS_GIT_REF:
+  commit 4f2a9c1 on branch fix/parser — NOT merged, awaiting MERGE-GATE authorization
+
+FINAL_GIT_STATUS_SHORT: none — clean tree

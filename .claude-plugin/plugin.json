@@ -1,0 +1,10 @@
+{
+  "name": "agentic-dev-team-skills",
+  "description": "Run software work as a team of agents: paired planner/implementer roles under separated authority, orchestrator roles that coordinate multiple pairs, relay-based handoffs, and a relay linter.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jack Li"
+  },
+  "license": "Apache-2.0",
+  "keywords": ["skills", "multi-agent", "orchestration", "code-review", "workflow", "agent-pair"]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "agentic-dev-team-skills",
+  "owner": {
+    "name": "Jack Li"
+  },
+  "metadata": {
+    "description": "A kit of skills for running software work as a team of agents."
+  },
+  "plugins": [
+    {
+      "name": "agentic-dev-team-skills",
+      "source": ".",
+      "description": "Paired planner/implementer roles under separated authority, orchestrator coordination, relay-based handoffs, and relay-lint.",
+      "category": "orchestration"
+    }
+  ]
+}

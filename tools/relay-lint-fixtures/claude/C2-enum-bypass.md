@@ -1,0 +1,10 @@
+ROLE: Planner
+PHASE: AUDIT
+AUTHORITY: read-only
+DISPATCH_ID: d-x
+CEREMONY_TIER: tiny | operator-waived
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+
+FINAL_GIT_STATUS_SHORT:
+none — clean tree
