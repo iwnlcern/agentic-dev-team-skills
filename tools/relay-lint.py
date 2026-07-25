@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 # clock at authoring time. Freshness is only enforced where it is meaningful --
 # on explicitly-linted files (the authoring path) -- never on a historical sweep.
 FILENAME_TS_RE = re.compile(r"(\d{8})[-T]?(\d{6})(Z?)")
-DEFAULT_MAX_DRIFT_MINUTES = 15
+DEFAULT_MAX_DRIFT_MINUTES = 2
 INDEX_TIME_FORMATS = (
     "%Y%m%d-%H%M%S", "%Y%m%d-%H%M%SZ", "%Y%m%dT%H%M%SZ",
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
@@ -1246,20 +1246,15 @@ def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[i
         errors.append(f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)")
     return errors
 
-def lint_relay_index(
-    path: Path,
-    *,
-    freshness: bool = True,
-    max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
-    audit: bool = False,
-) -> LintResult:
+def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     """Check an append-only relay INDEX for timestamp truth and monotonicity.
 
-    Enforced on rows after the `monotonic-from` marker (all rows when no marker
-    is present): every stamp is a real date/time, stamps never decrease, no stamp
-    predates the marker, each row's stamp matches its file's own filename stamp,
-    and the newest row is close to the real clock. Rows before the marker are
-    grandfathered history and reported only under audit.
+    This is an ORDERING check, not a drift check. Enforced on rows after the
+    `monotonic-from` marker (all rows when no marker is present): every stamp is a
+    real date/time, stamps never decrease, no stamp predates the marker, each row's
+    stamp matches its file's own filename stamp, and the newest row is not in the
+    future. An index that has not been appended to recently is not a defect. Rows
+    before the marker are grandfathered history, reported only under audit.
     """
     result = LintResult()
     text = read(path)
@@ -1328,13 +1323,23 @@ def lint_relay_index(
                 f"line {lineno}: index time {raw} disagrees with its filename timestamp {fraw}"
             )
 
-    # The newest row is the one just appended: it must reflect the real clock.
-    if freshness and parsed:
-        lineno, raw, dt, _fc = parsed[-1]
-        _s, _d, _r, is_utc = filename_timestamp(parsed[-1][3])
-        msg = drift_error(raw, dt, is_utc, max_drift_minutes)
-        if msg:
-            result.error(f"line {lineno}: newest index {msg}")
+    # Ordering only -- no lower bound. An index nobody has appended to for a while
+    # is not a defect, so the newest row is checked against a ceiling, not a window:
+    # a row cannot claim a time later than the clock that appended it. The tight
+    # wall-clock window belongs on the relay filename, which is authored once.
+    if parsed:
+        lineno, raw, dt, file_cell = parsed[-1]
+        _s, _d, _r, is_utc = filename_timestamp(file_cell)
+        now = clock_now(is_utc)
+        if dt > now:
+            ahead = (dt - now).total_seconds() / 60.0
+            magnitude = f"{ahead / 1440.0:.1f} days" if ahead >= 1440 else f"{ahead:.0f} min"
+            zone = "UTC" if is_utc else "local"
+            result.error(
+                f"line {lineno}: newest index time {raw} is {magnitude} ahead of the {zone} clock "
+                f"(now {now.strftime('%Y%m%d-%H%M%S')}); an append-only index cannot carry a row "
+                "stamped later than the append that wrote it"
+            )
 
     if audit:
         hist = [(ln, raw, dt) for ln, raw, dt, _fc in grandfathered if dt is not None]
@@ -1653,10 +1658,10 @@ def main(argv: List[str]) -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="relay .md files to lint")
     parser.add_argument("--relay-root", type=Path, help="lint all .md files under a dispatch relay directory and cross-check lineage")
     parser.add_argument("--templates", action="store_true", help="lint relay templates with placeholder values instead of strict real-relay values")
-    parser.add_argument("--index", type=Path, help="check an append-only relay INDEX for timestamp validity, monotonicity, and filename agreement")
+    parser.add_argument("--index", type=Path, help="check an append-only relay INDEX for timestamp validity, monotonicity, filename agreement, and no future newest row")
     parser.add_argument("--index-audit", action="store_true", help="with --index, also report grandfathered pre-marker history as warnings")
-    parser.add_argument("--no-freshness", action="store_true", help="skip the authoring-drift check (use when re-verifying a historical relay)")
-    parser.add_argument("--max-drift-minutes", type=int, default=DEFAULT_MAX_DRIFT_MINUTES, help=f"authoring-drift tolerance in minutes (default {DEFAULT_MAX_DRIFT_MINUTES})")
+    parser.add_argument("--no-freshness", action="store_true", help="skip the filename authoring-drift check (use when re-verifying a historical relay)")
+    parser.add_argument("--max-drift-minutes", type=int, default=DEFAULT_MAX_DRIFT_MINUTES, help=f"filename authoring-drift tolerance in minutes (default {DEFAULT_MAX_DRIFT_MINUTES})")
     args = parser.parse_args(argv)
     if not args.paths and not args.relay_root and not args.index:
         parser.print_help(sys.stderr)
@@ -1671,10 +1676,7 @@ def main(argv: List[str]) -> int:
         overall.errors.extend(r.errors)
         overall.warnings.extend(r.warnings)
     if args.index:
-        r = lint_relay_index(
-            args.index, freshness=freshness,
-            max_drift_minutes=args.max_drift_minutes, audit=args.index_audit,
-        )
+        r = lint_relay_index(args.index, audit=args.index_audit)
         print_result(str(args.index), r)
         overall.errors.extend(r.errors)
         overall.warnings.extend(r.warnings)

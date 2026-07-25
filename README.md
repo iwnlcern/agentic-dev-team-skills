@@ -41,8 +41,10 @@ whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix 
 own correctness gate (`python3 tools/check-relay-lint-fixtures.py`, plus
 `python3 tools/check-timestamp-drift.py` for the clock-dependent checks).
 
-Current version: **v2.8.8.2** — adds relay-filename timestamp-drift and index-monotonicity checks, so a
-relay stamped with a time nobody read off a clock fails the lint instead of silently reordering the trail.
+Current version: **v2.8.8.3** — relay-filename timestamp-drift and index-ordering checks, so a relay
+stamped with a time nobody read off a clock fails the lint instead of silently reordering the trail. The
+filename carries the tight wall-clock window (±2 min); the index is checked for ordering only, so an index
+that has not been appended to recently still passes.
 
 ## Install
 
@@ -78,13 +80,14 @@ A typical run:
    ```sh
    python3 tools/relay-lint.py path/to/relay.md            # one relay, incl. authoring-drift check
    python3 tools/relay-lint.py --relay-root .relays/<run>  # a whole run, with lineage cross-checks
-   python3 tools/relay-lint.py --index .relays/<run>/INDEX.md  # index: real times, non-decreasing
+   python3 tools/relay-lint.py --index .relays/<run>/INDEX.md  # index: real times, non-decreasing, not ahead of the clock
    ```
 
-   Linting one relay also checks that its filename timestamp is a real time close to the clock, so a
-   stamp nobody read off a clock fails before the handoff. Add `--no-freshness` when re-verifying an
-   older relay, `--max-drift-minutes N` to change the ±15 min tolerance, and `--index-audit` to see
-   history grandfathered by a `monotonic-from` marker.
+   Linting one relay also checks that its filename timestamp is a real time within ±2 min of the clock,
+   so a stamp nobody read off a clock fails before the handoff. Add `--no-freshness` when re-verifying an
+   older relay, `--max-drift-minutes N` to loosen the tolerance, and `--index-audit` to see history
+   grandfathered by a `monotonic-from` marker. `--index` deliberately applies no drift window: it is an
+   ordering check, so a quiet index passes while a row stamped ahead of the clock fails.
 
 Running more than one pair at once is what the orchestrator roles are for: `orchestrator-planner`
 decomposes and routes work across pairs, and `orchestrator-reviewer` adversarially checks the

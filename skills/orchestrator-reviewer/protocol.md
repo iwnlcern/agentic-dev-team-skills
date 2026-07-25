@@ -387,8 +387,9 @@ Timestamp policy: `<YYYYMMDD-HHMMSS>` must be the **real clock time at which you
 A stamp you invented is a false claim about when a decision was made, and it makes the append-only trail unorderable: a relay can appear to precede its own parent.
 The same rule governs the index `time` cell, which must equal the stamp in the filename it points at.
 
-Verify it, do not trust it: `relay-lint <file>` fails a stamp that is not a real date/time or that drifts more than ±15 minutes from the clock (`--max-drift-minutes N` to tighten, `--no-freshness` when re-verifying an older relay).
-`relay-lint --index <RELAY_ROOT>/INDEX.md` fails a row that decreases, disagrees with its filename, or is not a real time.
+Verify it, do not trust it. The two checks are deliberately different, because a filename is authored once and an index is read forever:
+`relay-lint <file>` is the **wall-clock** check — it fails a stamp that is not a real date/time or that drifts more than ±2 minutes from the clock (`--max-drift-minutes N` to loosen, `--no-freshness` when re-verifying an older relay). Name the file from the clock immediately before you lint it.
+`relay-lint --index <RELAY_ROOT>/INDEX.md` is an **ordering** check, not a drift check — it fails a row that decreases, disagrees with its filename, is not a real time, or is stamped ahead of the clock. An index nobody has appended to for hours or days is not a defect and passes.
 A drifted name is a rename, not a rewrite: fix the filename and the index row rather than back-fitting other relays to the wrong time.
 
 Index policy: append each new row at the END of the file, after the last existing row, so INDEX.md stays in write order. Do not place a row next to an earlier row from the same seat or otherwise group rows by owner/role — that is a read-modify-write upsert and races during concurrent work. Append-only, end-of-file rows are the rule.

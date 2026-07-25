@@ -113,9 +113,10 @@ def main() -> int:
         edge = stamp(now - datetime.timedelta(minutes=5))
         p = relay(f"DESIGN-orchestrator-planner-{edge}.md")
         check(
-            "inside tolerance passes / outside fails",
+            "tolerance is tunable and defaults tight",
             lint.lint_file(p, freshness=True, max_drift_minutes=15).ok
-            and not lint.lint_file(p, freshness=True, max_drift_minutes=2).ok,
+            and not lint.lint_file(p, freshness=True).ok
+            and lint.DEFAULT_MAX_DRIFT_MINUTES == 2,
         )
 
         # An impossible time is a defect in every mode, freshness or not.
@@ -143,32 +144,37 @@ def main() -> int:
             return p
 
         good = index_row(fresh, fresh)
-        r = lint.lint_relay_index(index(good), freshness=True)
+        r = lint.lint_relay_index(index(good))
         check("index: good row passes", r.ok, "; ".join(r.errors))
 
+        # An index nobody has appended to for hours is not a defect: ordering only.
+        old = stamp(now - datetime.timedelta(hours=11))
+        r = lint.lint_relay_index(index(index_row(old, old)))
+        check("index: quiet index with an old newest row passes", r.ok, "; ".join(r.errors))
+
         back = stamp(now - datetime.timedelta(hours=2))
-        r = lint.lint_relay_index(index(good + index_row(back, back)), freshness=True)
+        r = lint.lint_relay_index(index(good + index_row(back, back)))
         check(
             "index: decreasing row rejected",
             not r.ok and any("non-decreasing" in e for e in r.errors),
             "; ".join(r.errors),
         )
 
-        r = lint.lint_relay_index(index(index_row(fresh, drifted)), freshness=True)
+        r = lint.lint_relay_index(index(index_row(fresh, drifted)))
         check(
             "index: row disagreeing with its filename rejected",
             not r.ok and any("disagrees with its filename" in e for e in r.errors),
             "; ".join(r.errors),
         )
 
-        r = lint.lint_relay_index(index(index_row(drifted, drifted)), freshness=True)
+        r = lint.lint_relay_index(index(index_row(drifted, drifted)))
         check(
             "index: fabricated future row rejected",
-            not r.ok and any("in the future" in e for e in r.errors),
+            not r.ok and any("ahead of the" in e for e in r.errors),
             "; ".join(r.errors),
         )
 
-        r = lint.lint_relay_index(index(index_row("20260712-016200", fresh)), freshness=True)
+        r = lint.lint_relay_index(index(index_row("20260712-016200", fresh)))
         check(
             "index: impossible time rejected",
             not r.ok and any("not a valid timestamp" in e for e in r.errors),
@@ -178,10 +184,10 @@ def main() -> int:
         # The marker grandfathers everything above it and floors everything below.
         hist = index_row(stamp(now - datetime.timedelta(days=30)), stamp(now - datetime.timedelta(days=30)))
         hist += index_row(stamp(now - datetime.timedelta(days=31)), stamp(now - datetime.timedelta(days=31)))
-        r = lint.lint_relay_index(index(hist, marker=fresh), freshness=False)
+        r = lint.lint_relay_index(index(hist, marker=fresh))
         check("index: pre-marker history grandfathered", r.ok, "; ".join(r.errors))
 
-        r = lint.lint_relay_index(index(hist, marker=fresh), freshness=False, audit=True)
+        r = lint.lint_relay_index(index(hist, marker=fresh), audit=True)
         check(
             "index: audit surfaces grandfathered history",
             any("grandfathered history" in w for w in r.warnings),
@@ -194,7 +200,7 @@ def main() -> int:
             + index_row(back, back),
             encoding="utf-8",
         )
-        r = lint.lint_relay_index(p, freshness=False)
+        r = lint.lint_relay_index(p)
         check(
             "index: post-marker row below the boundary rejected",
             not r.ok and any("predates the monotonic-from boundary" in e for e in r.errors),
