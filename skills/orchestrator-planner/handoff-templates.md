@@ -2,7 +2,7 @@
 
 The orchestrator-review visibility gate requires orchestrator-planner authority relays in the broad SET to CC `<run>.orchestrator-reviewer` unless the run has an operator-authored `ORCH_REVIEW_WAIVER`. This is visibility, not approval.
 
-Use these relay-ready templates. Always write the routing relay; do not replace a non-PR routing relay with a review panel. Panels are for code/PR review or explicitly requested adversarial review of a written relay. Write full relays to the file-first transport described in `protocol.md`, preferably `.relays/<RUN_ID>/<DISPATCH_ID>/<PHASE>-<ROLE>-<timestamp>.md`, then print only a compact pointer, the relay routing lines (`FROM`, `TO`, and `CC` when present), plus a 3–6 line summary. If the receiver cannot access the path, relay or attach the file contents.
+Use these relay-ready templates. Always write the routing relay; do not replace a non-PR routing relay with a review panel. Panels are for code/PR review or explicitly requested adversarial review of a written relay. Write full relays to the file-first transport described in `protocol.md`, preferably `.relays/<RUN_ID>/<DISPATCH_ID>/<PHASE>-<ROLE>-<timestamp>.md` (the `<timestamp>` is the real clock time at authoring — see the timestamp policy in `protocol.md`), then print only a compact pointer, the relay routing lines (`FROM`, `TO`, and `CC` when present), plus a 3–6 line summary. If the receiver cannot access the path, relay or attach the file contents.
 
 Canonical inline pointer shape:
 

@@ -74,7 +74,7 @@ CC:
 - `RUN_ID`: short dotted or hyphenated run id, e.g. `site-qi-2026-06-19`.
 - `DISPATCH_ID`: stable per handoff, not per whole cycle, e.g. `qi-a-plan`, `qi-a-plan-review`, `qi-a-impl`.
 - Addresses: dotted lowercase owner-role form, e.g. `qi-a.planner`, `qi-a.implementer`, `site-qi.orchestrator-planner`.
-- Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC.
+- Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC. Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence. `relay-lint` fails an impossible or drifted stamp, and `relay-lint --index` fails an index whose `time` column decreases or disagrees with the filename it points at.
 
 ## Lifecycle mapping
 

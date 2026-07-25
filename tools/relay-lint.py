@@ -10,10 +10,33 @@ It does not verify whether claims are true.
 from __future__ import annotations
 
 import argparse
+import datetime
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
+# Relay filename timestamps must name the real authoring time. Wall-clock drift
+# is a fabrication risk, not a cosmetic one: a stamp the author invented makes the
+# append-only trail unorderable and lets a relay appear to precede its own parent.
+# The stamp is checked for (a) being a real date/time and (b) being close to the
+# clock at authoring time. Freshness is only enforced where it is meaningful --
+# on explicitly-linted files (the authoring path) -- never on a historical sweep.
+FILENAME_TS_RE = re.compile(r"(\d{8})[-T]?(\d{6})(Z?)")
+DEFAULT_MAX_DRIFT_MINUTES = 15
+INDEX_TIME_FORMATS = (
+    "%Y%m%d-%H%M%S", "%Y%m%d-%H%M%SZ", "%Y%m%dT%H%M%SZ",
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
+)
+# Position-based strictness boundary for an append-only index. Rows *after* the
+# marker line must be non-decreasing and at/after the marker's own stamp; rows
+# before it are grandfathered history (see --index-audit). Position, not value,
+# defines the boundary -- a value-based cutoff would be defeated by pre-existing
+# rows stamped in the future, which would force every later row to keep matching
+# the fabrication instead of the real clock.
+INDEX_MONOTONIC_MARKER_RE = re.compile(
+    r"<!--\s*relay-lint:\s*monotonic-from\s+(\S[^>]*?)\s*-->", re.IGNORECASE
+)
 
 ROLE_VALUES = {
     "Planner", "Implementer", "Orchestrator Planner", "Orchestrator Reviewer", "Reviewer",
@@ -798,11 +821,105 @@ def relay_order_key(path: Path) -> Tuple[int, object, str]:
         return (3, path.name, path.name)
 
 
-def lint_file(path: Path, *, template_mode: bool = False) -> LintResult:
+def clock_now(is_utc: bool) -> datetime.datetime:
+    if is_utc:
+        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return datetime.datetime.now()
+
+
+def parse_stamp(raw: str) -> Optional[datetime.datetime]:
+    """Parse an index/marker timestamp in any accepted form; None if not a real time."""
+    raw = raw.strip()
+    for fmt in INDEX_TIME_FORMATS:
+        try:
+            return datetime.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def filename_timestamp(name: str) -> Tuple[str, Optional[datetime.datetime], str, bool]:
+    """Extract the relay filename stamp.
+
+    Returns (status, dt, raw, is_utc) where status is "absent" (no stamp-shaped
+    text), "invalid" (stamp-shaped but not a real date/time, e.g. minute 62), or
+    "ok". A stamp-shaped-but-invalid name is a defect in every mode: it can never
+    be ordered and no real clock ever produced it.
+    """
+    stem = Path(name).stem
+    m = FILENAME_TS_RE.search(stem)
+    if not m:
+        return ("absent", None, "", False)
+    raw = f"{m.group(1)}-{m.group(2)}"
+    is_utc = bool(m.group(3))
+    try:
+        dt = datetime.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return ("invalid", None, raw, is_utc)
+    return ("ok", dt, raw, is_utc)
+
+
+def drift_error(raw: str, dt: datetime.datetime, is_utc: bool, max_drift_minutes: int) -> Optional[str]:
+    now = clock_now(is_utc)
+    drift_min = (dt - now).total_seconds() / 60.0
+    if abs(drift_min) <= max_drift_minutes:
+        return None
+    if abs(drift_min) >= 1440:
+        magnitude = f"{abs(drift_min) / 1440.0:.1f} days"
+    else:
+        magnitude = f"{abs(drift_min):.0f} min"
+    direction = "in the future" if drift_min > 0 else "in the past"
+    zone = "UTC" if is_utc else "local"
+    return (
+        f"timestamp {raw} is {magnitude} {direction} of the {zone} clock "
+        f"(now {now.strftime('%Y%m%d-%H%M%S')}, tolerance +/-{max_drift_minutes} min); "
+        "stamp the relay with the real current time"
+    )
+
+
+def check_filename_timestamp(
+    result: LintResult,
+    path: Path,
+    *,
+    freshness: bool,
+    max_drift_minutes: int,
+    template_mode: bool,
+) -> None:
+    if template_mode:
+        return
+    status, dt, raw, is_utc = filename_timestamp(path.name)
+    if status == "invalid":
+        result.error(f"filename timestamp {raw} is not a real date/time")
+        return
+    if status == "absent":
+        if freshness:
+            result.error(
+                "filename carries no YYYYMMDD-HHMMSS timestamp; authoring drift cannot be verified"
+            )
+        return
+    if not freshness or dt is None:
+        return
+    msg = drift_error(raw, dt, is_utc, max_drift_minutes)
+    if msg:
+        result.error(f"filename {msg}")
+
+
+def lint_file(
+    path: Path,
+    *,
+    template_mode: bool = False,
+    freshness: bool = False,
+    max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
+) -> LintResult:
     text = read(path)
     clean = sanitized_text(text)
     result = LintResult()
     fields = header_fields(text)
+
+    check_filename_timestamp(
+        result, path, freshness=freshness,
+        max_drift_minutes=max_drift_minutes, template_mode=template_mode,
+    )
 
     if not template_mode:
         for f in MIN_HEADER_FIELDS:
@@ -1129,6 +1246,116 @@ def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[i
         errors.append(f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)")
     return errors
 
+def lint_relay_index(
+    path: Path,
+    *,
+    freshness: bool = True,
+    max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
+    audit: bool = False,
+) -> LintResult:
+    """Check an append-only relay INDEX for timestamp truth and monotonicity.
+
+    Enforced on rows after the `monotonic-from` marker (all rows when no marker
+    is present): every stamp is a real date/time, stamps never decrease, no stamp
+    predates the marker, each row's stamp matches its file's own filename stamp,
+    and the newest row is close to the real clock. Rows before the marker are
+    grandfathered history and reported only under audit.
+    """
+    result = LintResult()
+    text = read(path)
+    lines = text.splitlines()
+
+    marker_line = 0
+    marker_dt: Optional[datetime.datetime] = None
+    m = INDEX_MONOTONIC_MARKER_RE.search(text)
+    if m:
+        for i, line in enumerate(lines, 1):
+            if INDEX_MONOTONIC_MARKER_RE.search(line):
+                marker_line = i
+        marker_dt = parse_stamp(m.group(1))
+        if marker_dt is None:
+            result.error(f"monotonic-from marker value {m.group(1)!r} is not a valid timestamp")
+
+    rows: List[Tuple[int, str, Optional[datetime.datetime], str]] = []
+    for lineno, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if cells[0].lower() == "time":
+            continue
+        if set(cells[0]) <= set("-: "):
+            continue
+        rows.append((lineno, cells[0], parse_stamp(cells[0]), cells[-1]))
+
+    if not rows:
+        result.error(f"no index rows found in {path}")
+        return result
+
+    scoped = [r for r in rows if r[0] > marker_line]
+    grandfathered = [r for r in rows if r[0] <= marker_line]
+
+    for lineno, raw, dt, _file_cell in scoped:
+        if dt is None:
+            result.error(f"line {lineno}: index time {raw!r} is not a valid timestamp")
+
+    parsed = [(ln, raw, dt, fc) for ln, raw, dt, fc in scoped if dt is not None]
+
+    # Stamps must never decrease, and none may predate the strictness boundary.
+    for (lineno, raw, dt, _fc), (_pln, praw, pdt, _pfc) in zip(parsed[1:], parsed[:-1]):
+        if dt < pdt:
+            result.error(
+                f"line {lineno}: index time {raw} precedes the previous row {praw}; "
+                "an append-only index must be non-decreasing"
+            )
+    if marker_dt is not None:
+        for lineno, raw, dt, _fc in parsed:
+            if dt < marker_dt:
+                result.error(
+                    f"line {lineno}: index time {raw} predates the monotonic-from boundary "
+                    f"{marker_dt.strftime('%Y%m%d-%H%M%S')}"
+                )
+
+    # The row must agree with the relay file it points at.
+    for lineno, raw, dt, file_cell in parsed:
+        status, fdt, fraw, _is_utc = filename_timestamp(file_cell)
+        if status == "invalid":
+            result.error(f"line {lineno}: referenced file timestamp {fraw} is not a real date/time")
+        elif status == "ok" and fdt != dt:
+            result.error(
+                f"line {lineno}: index time {raw} disagrees with its filename timestamp {fraw}"
+            )
+
+    # The newest row is the one just appended: it must reflect the real clock.
+    if freshness and parsed:
+        lineno, raw, dt, _fc = parsed[-1]
+        _s, _d, _r, is_utc = filename_timestamp(parsed[-1][3])
+        msg = drift_error(raw, dt, is_utc, max_drift_minutes)
+        if msg:
+            result.error(f"line {lineno}: newest index {msg}")
+
+    if audit:
+        hist = [(ln, raw, dt) for ln, raw, dt, _fc in grandfathered if dt is not None]
+        unparsed = [(ln, raw) for ln, raw, dt, _fc in grandfathered if dt is None]
+        viol = [
+            (ln, praw, raw)
+            for (ln, raw, dt), (_pln, praw, pdt) in zip(hist[1:], hist[:-1])
+            if dt < pdt
+        ]
+        result.warn(
+            f"grandfathered history: {len(grandfathered)} rows before the marker, "
+            f"{len(viol)} non-monotonic, {len(unparsed)} unparseable"
+        )
+        for ln, praw, raw in viol:
+            result.warn(f"line {ln}: (grandfathered) {praw} -> {raw} decreases")
+        for ln, raw in unparsed:
+            result.warn(f"line {ln}: (grandfathered) unparseable time {raw!r}")
+
+    return result
+
+
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     result = LintResult()
     files = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
@@ -1426,19 +1653,37 @@ def main(argv: List[str]) -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="relay .md files to lint")
     parser.add_argument("--relay-root", type=Path, help="lint all .md files under a dispatch relay directory and cross-check lineage")
     parser.add_argument("--templates", action="store_true", help="lint relay templates with placeholder values instead of strict real-relay values")
+    parser.add_argument("--index", type=Path, help="check an append-only relay INDEX for timestamp validity, monotonicity, and filename agreement")
+    parser.add_argument("--index-audit", action="store_true", help="with --index, also report grandfathered pre-marker history as warnings")
+    parser.add_argument("--no-freshness", action="store_true", help="skip the authoring-drift check (use when re-verifying a historical relay)")
+    parser.add_argument("--max-drift-minutes", type=int, default=DEFAULT_MAX_DRIFT_MINUTES, help=f"authoring-drift tolerance in minutes (default {DEFAULT_MAX_DRIFT_MINUTES})")
     args = parser.parse_args(argv)
-    if not args.paths and not args.relay_root:
+    if not args.paths and not args.relay_root and not args.index:
         parser.print_help(sys.stderr)
         return 2
+    freshness = not args.no_freshness
 
     overall = LintResult()
     if args.relay_root:
+        # A historical sweep never checks freshness: those relays are legitimately old.
         r = lint_relay_root(args.relay_root, template_mode=args.templates)
         print_result(str(args.relay_root), r)
         overall.errors.extend(r.errors)
         overall.warnings.extend(r.warnings)
+    if args.index:
+        r = lint_relay_index(
+            args.index, freshness=freshness,
+            max_drift_minutes=args.max_drift_minutes, audit=args.index_audit,
+        )
+        print_result(str(args.index), r)
+        overall.errors.extend(r.errors)
+        overall.warnings.extend(r.warnings)
     for path in args.paths:
-        r = lint_file(path, template_mode=args.templates)
+        # Explicitly-linted files are the authoring path: enforce drift here.
+        r = lint_file(
+            path, template_mode=args.templates,
+            freshness=freshness, max_drift_minutes=args.max_drift_minutes,
+        )
         print_result(str(path), r)
         overall.errors.extend(r.errors)
         overall.warnings.extend(r.warnings)

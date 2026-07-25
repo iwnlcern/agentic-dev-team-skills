@@ -38,7 +38,11 @@ evidence levels, lineage, merge gating) that every role applies before it acts.
 Plus **`tools/`** — `relay-lint`, a small linter that structurally checks the relay artifacts (shape,
 enums, addressing, lineage, merge-token grammar; it's truth-agnostic — it checks structure, not
 whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix that's the linter's
-own correctness gate (`python3 tools/check-relay-lint-fixtures.py`).
+own correctness gate (`python3 tools/check-relay-lint-fixtures.py`, plus
+`python3 tools/check-timestamp-drift.py` for the clock-dependent checks).
+
+Current version: **v2.8.8.2** — adds relay-filename timestamp-drift and index-monotonicity checks, so a
+relay stamped with a time nobody read off a clock fails the lint instead of silently reordering the trail.
 
 ## Install
 
@@ -72,9 +76,15 @@ A typical run:
 4. Lint relays before handing them off:
 
    ```sh
-   python3 tools/relay-lint.py path/to/relay.md            # one relay
+   python3 tools/relay-lint.py path/to/relay.md            # one relay, incl. authoring-drift check
    python3 tools/relay-lint.py --relay-root .relays/<run>  # a whole run, with lineage cross-checks
+   python3 tools/relay-lint.py --index .relays/<run>/INDEX.md  # index: real times, non-decreasing
    ```
+
+   Linting one relay also checks that its filename timestamp is a real time close to the clock, so a
+   stamp nobody read off a clock fails before the handoff. Add `--no-freshness` when re-verifying an
+   older relay, `--max-drift-minutes N` to change the ±15 min tolerance, and `--index-audit` to see
+   history grandfathered by a `monotonic-from` marker.
 
 Running more than one pair at once is what the orchestrator roles are for: `orchestrator-planner`
 decomposes and routes work across pairs, and `orchestrator-reviewer` adversarially checks the

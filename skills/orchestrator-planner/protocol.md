@@ -383,7 +383,16 @@ RELAY_ROOT=${RELAY_ROOT:-.relays/<project-or-run-slug>}
 
 If repo-local writes are inappropriate, use `/tmp/relays/<project-or-run-slug>/` with the same layout. Avoid a single global `/tmp/relays` directory.
 
+Timestamp policy: `<YYYYMMDD-HHMMSS>` must be the **real clock time at which you author the relay** — read the clock, do not infer it from the previous relay's name, continue a numbering pattern, or round to a tidy cadence.
+A stamp you invented is a false claim about when a decision was made, and it makes the append-only trail unorderable: a relay can appear to precede its own parent.
+The same rule governs the index `time` cell, which must equal the stamp in the filename it points at.
+
+Verify it, do not trust it: `relay-lint <file>` fails a stamp that is not a real date/time or that drifts more than ±15 minutes from the clock (`--max-drift-minutes N` to tighten, `--no-freshness` when re-verifying an older relay).
+`relay-lint --index <RELAY_ROOT>/INDEX.md` fails a row that decreases, disagrees with its filename, or is not a real time.
+A drifted name is a rename, not a rewrite: fix the filename and the index row rather than back-fitting other relays to the wrong time.
+
 Index policy: append each new row at the END of the file, after the last existing row, so INDEX.md stays in write order. Do not place a row next to an earlier row from the same seat or otherwise group rows by owner/role — that is a read-modify-write upsert and races during concurrent work. Append-only, end-of-file rows are the rule.
+Index rows must be **non-decreasing in `time`**. An existing index whose history predates this rule can be grandfathered by appending a boundary marker — `<!-- relay-lint: monotonic-from <YYYYMMDD-HHMMSS> -->` — after the last historical row; rows below it are then held to the rule and rows above it are inspected with `--index-audit`.
 
 ```text
 | time | phase | role | dispatch | to | owner | status | file |

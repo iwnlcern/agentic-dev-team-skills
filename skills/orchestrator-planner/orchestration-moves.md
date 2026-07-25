@@ -26,6 +26,8 @@ Use stable dispatch IDs for every relay:
 <team>-<bundle>-<phase>-<YYYYMMDD>-<seq>
 ```
 
+`<YYYYMMDD>` is the real calendar date on which you open the dispatch, read from the clock — not carried over from a sibling dispatch id and not advanced to keep a tidy sequence. `<seq>` is the only counter. The same rule governs relay filename stamps and index rows; see the timestamp policy in `protocol.md`.
+
 Record:
 
 - parent dispatch ID,
