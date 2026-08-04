@@ -38,6 +38,7 @@ EXPECTED = [
     ("root", "rolevocab/RVn1-cross-owner-review", 1),
     ("root", "rolevocab/RVn2-wrong-to", 1),
     ("root", "rolevocab/RVn3-non-addressee-implreport", 1),
+    ("root", "rolevocab/RVn4-cross-role-implreport", 1),
     ("file", "claude/A1-valid-audit.md", 0),
     ("file", "claude/A2-valid-downgrade.md", 0),
     ("file", "claude/B2-why-before-scan.md", 1),
@@ -220,6 +221,9 @@ EXPECTED_ERROR_SET = {
     ],
     "rolevocab/RVn3-non-addressee-implreport": [
         "02-impl-report.md: IMPL report FROM 'zz.pair-implementer' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/RVn4-cross-role-implreport": [
+        "02-impl-report.md: IMPL report FROM 'qi.pair-planner' is not the addressee of the parent DISPATCH IMPL relay",
     ],
     "design-review/DR15-verdict-human-decision": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
