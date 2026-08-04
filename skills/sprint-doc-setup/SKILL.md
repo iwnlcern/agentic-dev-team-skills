@@ -38,7 +38,7 @@ Use repo-root-relative paths. Keep tracked durable docs in the sprint tree; keep
 .relays/<RUN_ID>/<DISPATCH_ID>/<PHASE>-<ROLE>-<YYYYMMDD-HHMMSS>.md
 ```
 
-The `boot/` subtree is for orchestrator-planner `init` relays only. Boot relays use the existing relay schema (`PHASE: SITREP`, `AUTHORITY: report-only`) and grant no work authority; they bring operator-relayed seats online.
+The `boot/` subtree exists only in orchestrator-tier (and above) runs, for orchestrator-planner `init` relays. Boot relays use the existing relay schema (`PHASE: SITREP`, `AUTHORITY: report-only`) and grant no work authority; they bring operator-relayed seats online.
 
 `INDEX.md` is append-oriented and is the one relay-adjacent file normally skipped by relay-lint. It should include at least:
 
@@ -47,6 +47,10 @@ The `boot/` subtree is for orchestrator-planner `init` relays only. Boot relays 
 ```
 
 Do not assume `.relays/` is shared across worktrees or sessions. If a receiver cannot access the path, relay the file contents verbatim or attach the file.
+
+## Standalone pair runs
+
+For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree. Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise. The daemon is optional, but the artifacts are not: the D7 ceremony floor still files relays, maintains an `INDEX.md`, and produces the full auditable trail.
 
 ## Header convention
 
@@ -72,7 +76,7 @@ CC:
 ## Naming conventions
 
 - `RUN_ID`: short dotted or hyphenated run id, e.g. `site-qi-2026-06-19`.
-- `DISPATCH_ID`: stable per handoff, not per whole cycle, e.g. `qi-a-plan`, `qi-a-plan-review`, `qi-a-impl`.
+- `DISPATCH_ID`: stable per commissioned work cycle, named by work, not phase — `v29-split`, not `v29-audit-split`; successor phases reuse the cycle's ID. `protocol.md` remains the semantic authority for cycle semantics.
 - Addresses: dotted lowercase owner-role form, e.g. `qi-a.planner`, `qi-a.implementer`, `site-qi.orchestrator-planner`.
 - Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC. Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence. `relay-lint` fails an impossible or drifted stamp, and `relay-lint --index` fails an index whose `time` column decreases or disagrees with the filename it points at.
 
