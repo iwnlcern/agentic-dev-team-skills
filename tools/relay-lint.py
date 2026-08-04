@@ -1436,11 +1436,16 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         phases.append((f, relay_order_key(f), fields.get("PHASE", ""), fields, tx))
     by_id = dispatch_id_map(phases)
 
-    def one_by_id(did: str | None):
-        if not did:
-            return None
-        items = by_id.get(did, [])
-        return sorted(items, key=lambda item: item[1])[0] if items else None
+    def resolve_parent(by_id, did, before_order, predicate):
+        items = by_id.get(did or "", [])
+        if not items:
+            return None, [], []
+        if len(items) == 1:
+            return items[0], items, []
+        qualifying = sorted((it for it in items if it[1] < before_order and predicate(it)), key=lambda it: it[1])
+        if not qualifying:
+            return None, items, []
+        return qualifying[-1], items, qualifying[:-1]
 
     def owner_review_by_id(did: str | None, owner: str | None, want_lock: str, before_order):
         # Latest same-owner Implementer DESIGN-REVIEW of the
@@ -1587,10 +1592,32 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL requires PARENT_DISPATCH_ID to an approving PLAN-REVIEW relay; absence is not a delegated-dispatch escape hatch")
             continue
 
-        review_item = one_by_id(fields.get("PARENT_DISPATCH_ID"))
+        did = fields.get("PARENT_DISPATCH_ID")
+        review_item, holders, extra_qualifying = resolve_parent(
+            by_id,
+            did,
+            order,
+            lambda it: it[2] == "PLAN-REVIEW"
+            and (lambda a: len(a) == 1 and addr_is(a[0], dispatch_owner, "implementer"))(
+                split_addresses(it[3].get("FROM"))
+            ),
+        )
         if review_item is None:
-            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {fields.get('PARENT_DISPATCH_ID')!r} does not resolve to a relay in this lineage")
+            if holders:
+                result.error(
+                    f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} is held by {len(holders)} relays "
+                    f"({', '.join(h[0].name for h in holders)}); none is an earlier PLAN-REVIEW relay "
+                    f"from {dispatch_owner}.implementer"
+                )
+            else:
+                result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} does not resolve to a relay in this lineage")
             continue
+        if extra_qualifying:
+            result.warn(
+                f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
+                f"PLAN-REVIEW parent; selected latest {review_item[0].name}; candidates: "
+                f"{', '.join(h[0].name for h in extra_qualifying)}"
+            )
         rp, ro, rph, rfields, rtext = review_item
         if ro >= order:
             result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {fields.get('PARENT_DISPATCH_ID')!r} is not earlier than the dispatch relay")
@@ -1599,10 +1626,32 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         rfrom = split_addresses(rfields.get("FROM"))
         if len(rfrom) != 1 or not addr_is(rfrom[0], dispatch_owner, "implementer"):
             result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must be FROM {dispatch_owner}.implementer")
-        plan_item = one_by_id(rfields.get("PARENT_DISPATCH_ID"))
+        plan_did = rfields.get("PARENT_DISPATCH_ID")
+        plan_item, holders, extra_qualifying = resolve_parent(
+            by_id,
+            plan_did,
+            ro,
+            lambda it: it[2] == "PLAN"
+            and (lambda a: len(a) == 1 and addr_is(a[0], dispatch_owner, "planner"))(
+                split_addresses(it[3].get("FROM"))
+            ),
+        )
         if plan_item is None:
-            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent")
+            if holders:
+                result.error(
+                    f"{f.relative_to(path)}: PLAN-REVIEW parent {plan_did!r} is held by {len(holders)} relays "
+                    f"({', '.join(h[0].name for h in holders)}); none is an earlier PLAN relay "
+                    f"from {dispatch_owner}.planner"
+                )
+            else:
+                result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent")
             continue
+        if extra_qualifying:
+            result.warn(
+                f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {plan_did!r} qualify as the "
+                f"PLAN parent; selected latest {plan_item[0].name}; candidates: "
+                f"{', '.join(h[0].name for h in extra_qualifying)}"
+            )
         pp, po, pph, pfields, ptext = plan_item
         if po >= ro:
             result.error(f"{f.relative_to(path)}: pair-Planner PLAN parent is not earlier than the PLAN-REVIEW relay")
@@ -1627,15 +1676,41 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         if not fields.get("PARENT_DISPATCH_ID"):
             result.error(f"{f.relative_to(path)}: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay")
             continue
-        parent = one_by_id(fields.get("PARENT_DISPATCH_ID"))
+        actor_from = split_addresses(fields.get("FROM"))
+        did = fields.get("PARENT_DISPATCH_ID")
+        parent, holders, extra_qualifying = resolve_parent(
+            by_id,
+            did,
+            order,
+            lambda it: len(actor_from) == 1
+            and own_line_dispatch_present(it[4])
+            and (lambda t: len(t) == 1
+                 and address_owner(t[0]) == address_owner(actor_from[0])
+                 and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0])))(
+                split_addresses(it[3].get("TO"))
+            ),
+        )
         if parent is None:
-            result.error(f"{f.relative_to(path)}: IMPL report parent {fields.get('PARENT_DISPATCH_ID')!r} does not resolve to a relay in this lineage")
+            if holders:
+                actor = actor_from[0] if len(actor_from) == 1 else fields.get("FROM", "")
+                result.error(
+                    f"{f.relative_to(path)}: IMPL report parent {did!r} is held by {len(holders)} relays "
+                    f"({', '.join(h[0].name for h in holders)}); none is an earlier DISPATCH IMPL relay "
+                    f"addressed to {actor}"
+                )
+            else:
+                result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} does not resolve to a relay in this lineage")
             continue
+        if extra_qualifying:
+            result.warn(
+                f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
+                f"DISPATCH IMPL parent; selected latest {parent[0].name}; candidates: "
+                f"{', '.join(h[0].name for h in extra_qualifying)}"
+            )
         pp, po, pph, pfields, ptext = parent
         if not own_line_dispatch_present(ptext):
             result.error(f"{f.relative_to(path)}: IMPL report parent must be a DISPATCH IMPL relay")
             continue
-        actor_from = split_addresses(fields.get("FROM"))
         parent_to = split_addresses(pfields.get("TO"))
         if len(actor_from) == 1 and len(parent_to) == 1 and not (
             address_owner(actor_from[0]) == address_owner(parent_to[0])

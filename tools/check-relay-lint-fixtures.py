@@ -131,6 +131,11 @@ EXPECTED = [
     ("root", "lineage/LI5-edgeless-delegated-cc-trap", 1),
     ("root", "lineage/LI6-edgeless-no-approve", 1),
     ("root", "lineage/LI7-edgeless-non-addressee-report", 1),
+    ("root", "ambiguity/AMB1a-shared-id-dispatch", 0),
+    ("root", "ambiguity/AMB1b-shared-id-planhop", 0),
+    ("root", "ambiguity/AMB1c-shared-id-implreport", 0),
+    ("root", "ambiguity/AMB2-none-qualify", 1),
+    ("root", "ambiguity/AMB3-latest-wins", 1),
     ("file", "rowtruth/RT1-valid-fold-evidence.md", 0),
     ("file", "rowtruth/RT2-missing-fold-evidence.md", 1),
     ("file", "rowtruth/RT3-valid-scope-evidence.md", 0),
@@ -356,8 +361,20 @@ EXPECTED_ERROR_SET = {
     "lineage/LI7-edgeless-non-addressee-report": [
         "01-impl-report.md: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay",
     ],
+    "ambiguity/AMB2-none-qualify": [
+        "03-dispatch.md: DISPATCH IMPL parent 'amb2' is held by 2 relays (01-noise.md, 02-plan.md); none is an earlier PLAN-REVIEW relay from qi.implementer",
+    ],
+    "ambiguity/AMB3-latest-wins": [
+        "04-dispatch.md: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve",
+    ],
     "p9/P9b-claim-after-scan-blank-line.md": [
         "structurally detectable edit/commit/PR/migration claim lacks ACTIONS_GIT_REF",
+    ],
+}
+
+EXPECTED_WARN_SET: dict[str, list[str]] = {
+    "ambiguity/AMB3-latest-wins": [
+        "04-dispatch.md: 2 relays under 'amb3' qualify as the PLAN-REVIEW parent; selected latest 03-review-mustrevise.md; candidates: 02-review-approve.md",
     ],
 }
 
@@ -389,6 +406,9 @@ def main() -> int:
             ok = observed == expected and observed_errors == expected_sorted
         else:
             ok = observed == expected
+        expected_warns = EXPECTED_WARN_SET.get(rel)
+        if expected_warns is not None:
+            ok = ok and sorted(result.warnings) == sorted(expected_warns)
         failed = failed or not ok
         label = f"--relay-root {rel}" if kind == "root" else rel
         print(f"{label}: expected={expected} observed={observed} {'PASS' if ok else 'FAIL'}")
