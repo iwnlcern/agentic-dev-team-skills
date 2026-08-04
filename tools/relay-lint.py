@@ -98,6 +98,7 @@ def canonical_role(role: str | None) -> str | None:
 
 
 LINEAGE_DIRECT_FROM_ROLES = {"operator", "orchestrator", "orchestrator-planner"}
+UNRULED_AUTHORITY_ROLES = {"master-planner", "master-reviewer", "domain-planner", "domain-reviewer"}
 
 CANONICAL_SCAN_ROWS = [
     "authz/tenant/RLS/permissions/secrets",
@@ -533,8 +534,14 @@ def address_owner(address: str) -> str | None:
     return val.rsplit(".", 1)[0].lower()
 
 
+def addr_is(address: str | None, owner: str | None, role: str) -> bool:
+    if address is None or owner is None:
+        return False
+    return address_owner(address) == owner and canonical_role(address_role(address)) == role
+
+
 def is_implementer_address(address: str) -> bool:
-    return address_role(address) == "implementer"
+    return canonical_role(address_role(address)) == "implementer"
 
 
 def validate_address_fields(result: LintResult, fields: Dict[str, str], *, template_mode: bool) -> Dict[str, List[str]]:
@@ -667,6 +674,26 @@ def own_line_dispatch_present(text: str) -> bool:
 
 def own_line_merge_present(text: str) -> bool:
     return re.search(r"^DISPATCH MERGE\s*$", operational_token_text(text), flags=re.MULTILINE) is not None
+
+
+def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
+    """Fail-closed surfaces for role words whose authority semantics await the orchestrator ruling."""
+    errors: List[str] = []
+    from_addrs = split_addresses(fields.get("FROM"))
+    role = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
+    if role not in UNRULED_AUTHORITY_ROLES:
+        return errors
+    if own_line_dispatch_present(text):
+        errors.append(
+            f"authority semantics for FROM role {role!r} are unruled; "
+            "a dispatch token from this seat is fail-closed pending the orchestrator ruling"
+        )
+    if fields.get("DESIGN_RECORD_KIND") == "direct-override":
+        errors.append(
+            f"authority semantics for FROM role {role!r} are unruled; "
+            "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling"
+        )
+    return errors
 
 
 def inline_dispatch_mentions(text: str) -> List[int]:
@@ -982,6 +1009,10 @@ def lint_file(
             result.error("DISPATCH IMPL requires exactly one TO addressee")
         elif not is_implementer_address(to_addrs[0]):
             result.error("DISPATCH IMPL requires TO to be exactly one implementer-role address")
+
+    if not template_mode:
+        for err in unruled_authority_errors(text, fields):
+            result.error(err)
 
     has_merge_dispatch = own_line_merge_present(text)
     if has_merge_dispatch and not template_mode:
@@ -1424,7 +1455,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             if item_phase != "DESIGN-REVIEW" or item_fields.get("DESIGN_DOC_ID") != want_lock or item_order >= before_order:
                 continue
             addrs = split_addresses(item_fields.get("FROM"))
-            if len(addrs) == 1 and normalized_addr(addrs[0]) == same_owner_addr(owner, "implementer"):
+            if len(addrs) == 1 and addr_is(addrs[0], owner, "implementer"):
                 owned.append(item)
         return sorted(owned, key=lambda item: item[1])[-1] if owned else None
 
@@ -1440,7 +1471,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             if item_phase != "DESIGN" or item_fields.get("DESIGN_DOC_ID") != want_lock or item_order >= before_order:
                 continue
             addrs = split_addresses(item_fields.get("FROM"))
-            if len(addrs) == 1 and normalized_addr(addrs[0]) == same_owner_addr(owner, "planner"):
+            if len(addrs) == 1 and addr_is(addrs[0], owner, "planner"):
                 owned.append(item)
         return sorted(owned, key=lambda item: item[1])[-1] if owned else None
 
@@ -1456,7 +1487,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             continue
         from_addr = from_addrs[0]
         plan_owner = from_owner(from_addr)
-        if from_role(from_addr) != "planner" or not plan_owner or plan_owner in SPECIAL_ADDRESS_VALUES:
+        if canonical_role(from_role(from_addr)) != "planner" or not plan_owner or plan_owner in SPECIAL_ADDRESS_VALUES:
             continue
         lock_id = fields.get("DESIGN_LOCK_ID", "")
         kind = fields.get("DESIGN_RECORD_KIND")
@@ -1507,7 +1538,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         if rph != "DESIGN-REVIEW":
             result.error(f"{f.relative_to(path)}: design-doc PLAN parent must be a DESIGN-REVIEW relay")
         rfrom = split_addresses(rfields.get("FROM"))
-        if len(rfrom) != 1 or normalized_addr(rfrom[0]) != same_owner_addr(plan_owner, "implementer"):
+        if len(rfrom) != 1 or not addr_is(rfrom[0], plan_owner, "implementer"):
             result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must be FROM {plan_owner}.implementer")
         if rfields.get("DESIGN_REVIEW_VERDICT") != "approve":
             result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve")
@@ -1523,7 +1554,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         if vdph != "DESIGN":
             result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must point to a DESIGN relay")
         vfrom = split_addresses(vdfields.get("FROM"))
-        if len(vfrom) != 1 or normalized_addr(vfrom[0]) != same_owner_addr(plan_owner, "planner"):
+        if len(vfrom) != 1 or not addr_is(vfrom[0], plan_owner, "planner"):
             result.error(f"{f.relative_to(path)}: DESIGN-REVIEW must review the pair Planner's DESIGN relay")
         if vdfields.get("DESIGN_DOC_ID") != lock_id:
             result.error(f"{f.relative_to(path)}: DESIGN parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}")
@@ -1545,7 +1576,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         # mandatory for that path because the observed failures were edge-less.
         if from_role_val in LINEAGE_DIRECT_FROM_ROLES:
             continue
-        if from_role_val != "planner":
+        if canonical_role(from_role_val) != "planner":
             continue
         if not dispatch_owner or dispatch_owner in SPECIAL_ADDRESS_VALUES:
             continue
@@ -1566,7 +1597,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         if rph != "PLAN-REVIEW" or not plan_review_approved(rtext):
             result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve")
         rfrom = split_addresses(rfields.get("FROM"))
-        if len(rfrom) != 1 or normalized_addr(rfrom[0]) != same_owner_addr(dispatch_owner, "implementer"):
+        if len(rfrom) != 1 or not addr_is(rfrom[0], dispatch_owner, "implementer"):
             result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must be FROM {dispatch_owner}.implementer")
         plan_item = one_by_id(rfields.get("PARENT_DISPATCH_ID"))
         if plan_item is None:
@@ -1578,10 +1609,9 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         if pph != "PLAN":
             result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must point to a PLAN relay")
         pfrom = split_addresses(pfields.get("FROM"))
-        if len(pfrom) != 1 or normalized_addr(pfrom[0]) != same_owner_addr(dispatch_owner, "planner"):
+        if len(pfrom) != 1 or not addr_is(pfrom[0], dispatch_owner, "planner"):
             result.error(f"{f.relative_to(path)}: PLAN-REVIEW must review the pair Planner's PLAN, not a CC'd orchestrator dispatch")
-        pto = [normalized_addr(a) for a in split_addresses(pfields.get("TO"))]
-        if same_owner_addr(dispatch_owner, "implementer") not in pto:
+        if not any(addr_is(a, dispatch_owner, "implementer") for a in split_addresses(pfields.get("TO"))):
             result.error(f"{f.relative_to(path)}: pair-Planner PLAN must address the Implementer in TO for review")
 
     # Non-addressee action trap: if an IMPL report claims substantive
@@ -1607,7 +1637,10 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             continue
         actor_from = split_addresses(fields.get("FROM"))
         parent_to = split_addresses(pfields.get("TO"))
-        if len(actor_from) == 1 and len(parent_to) == 1 and normalized_addr(actor_from[0]) != normalized_addr(parent_to[0]):
+        if len(actor_from) == 1 and len(parent_to) == 1 and not (
+            address_owner(actor_from[0]) == address_owner(parent_to[0])
+            and canonical_role(address_role(actor_from[0])) == canonical_role(address_role(parent_to[0]))
+        ):
             result.error(f"{f.relative_to(path)}: IMPL report FROM {actor_from[0]!r} is not the addressee of the parent DISPATCH IMPL relay")
 
     # Merge-claim visibility: report claiming a merge commit needs an earlier merge authorization.

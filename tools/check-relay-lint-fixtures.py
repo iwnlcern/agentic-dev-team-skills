@@ -24,6 +24,20 @@ EXPECTED = [
     ("file", "rolevocab/RV4-invalid-role.md", 1),
     ("file", "rolevocab/RV5-planner-from-pair-planner.md", 0),
     ("file", "rolevocab/RV6-pair-implementer-from-implementer.md", 0),
+    ("file", "rolevocab/RV7a-master-dispatch-failclosed.md", 1),
+    ("file", "rolevocab/RV7b-domain-direct-override.md", 1),
+    ("root", "rolevocab/RV5-new-vocab-chain", 0),
+    ("root", "rolevocab/RV5d-newvocab-designdoc-chain", 0),
+    ("root", "rolevocab/RV5dneg-designdoc-no-approve", 1),
+    ("root", "rolevocab/RV6-mixed-vocab-chain", 0),
+    ("root", "rolevocab/RV6i-mixed-dispatch-implreport", 0),
+    ("root", "rolevocab/RV7a-master-dispatch-failclosed", 1),
+    ("root", "rolevocab/RV7b-domain-direct-override", 1),
+    ("root", "rolevocab/RV7c-master-merge-grant", 1),
+    ("root", "rolevocab/RV7d-master-broadset-no-fire", 0),
+    ("root", "rolevocab/RVn1-cross-owner-review", 1),
+    ("root", "rolevocab/RVn2-wrong-to", 1),
+    ("root", "rolevocab/RVn3-non-addressee-implreport", 1),
     ("file", "claude/A1-valid-audit.md", 0),
     ("file", "claude/A2-valid-downgrade.md", 0),
     ("file", "claude/B2-why-before-scan.md", 1),
@@ -173,6 +187,33 @@ EXPECTED = [
 ]
 
 EXPECTED_ERROR_SET = {
+    "rolevocab/RV7a-master-dispatch-failclosed.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7b-domain-direct-override.md": [
+        "authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV5dneg-designdoc-no-approve": [
+        "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
+    ],
+    "rolevocab/RV7a-master-dispatch-failclosed": [
+        "RV7a-master-dispatch-failclosed.md: authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7b-domain-direct-override": [
+        "RV7b-domain-direct-override.md: authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7c-master-merge-grant": [
+        "02-impl-report.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "rolevocab/RVn1-cross-owner-review": [
+        "03-dispatch.md: PLAN-REVIEW parent must be FROM qi.implementer",
+    ],
+    "rolevocab/RVn2-wrong-to": [
+        "03-dispatch.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+    ],
+    "rolevocab/RVn3-non-addressee-implreport": [
+        "02-impl-report.md: IMPL report FROM 'zz.pair-implementer' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
     "design-review/DR15-verdict-human-decision": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
     ],
