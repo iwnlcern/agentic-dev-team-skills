@@ -1,0 +1,14 @@
+{
+  "author": "Jack Li",
+  "description": "Nested pair, orchestration, domain, and master planning skills.",
+  "keywords": [
+    "agents",
+    "domain",
+    "master",
+    "orchestration",
+    "relays"
+  ],
+  "license": "Apache-2.0",
+  "name": "adt-master",
+  "version": "2.9.0"
+}
