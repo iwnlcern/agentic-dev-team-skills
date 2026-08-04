@@ -2,7 +2,7 @@
 
 TEMPLATE_STATE: report-only, not applied
 FROM: operator
-TO: `master.orchestrator-planner` (the deployment's current top session)
+TO: master.orchestrator-planner
 PHASE: SITREP
 DEPLOYMENT: pdc
 AUTHORITY_GRANTED: none
