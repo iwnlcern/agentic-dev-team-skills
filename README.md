@@ -13,65 +13,113 @@ same failure mode: context fragments across agents, decisions get made on partia
 plausible-but-wrong work survives because every checker shares the author's blind spots and the
 deadline.
 
-This is the opposite bet. It forces agents into separated roles with real authority boundaries, makes
-them cross-check each other's work, and turns every substantive handoff into a compact, inspectable
-artifact (a "relay") so the orchestrator and the human stay in control. It's built from one primitive
-— the **Agent Pair** (a Planner and an Implementer who review each other's work under separated
-authority) — and scales up to Orchestrator Pairs coordinating several Agent Pairs at once.
+This is the opposite bet. It separates planning, implementation, and review authority; makes roles
+cross-check each other's work; and turns every substantive handoff into a compact, inspectable
+artifact (a "relay") so the governing team and the human stay in control. A two-seat pair is the
+smallest unit. Higher tiers decompose, route, commission, and arbitrate work across nested teams.
 
 ## What's inside
 
-Six skills, under `skills/`:
+### Four-tier vocabulary
 
-| Skill | What it does |
+The tier lives in the role word; there is no separate tier field.
+
+| Tier | Seats | Who implements in the codebase |
+|---|---|---|
+| Pair | Pair Planner and Pair Implementer | Pair Implementer |
+| Orchestrator | Orchestrator Planner and Orchestrator Reviewer | Downstream Pair Implementers |
+| Domain | Domain Planner and Domain Reviewer | Commissioned sub-team Pair Implementers |
+| Master | Master Planner and Master Reviewer | Commissioned sub-team Pair Implementers |
+
+Legacy bare forms remain valid and class at pair tier: `Planner`, `Implementer`, and `Reviewer` are
+pair-tier equivalents. Review panels are ephemeral lenses, not addressable roles. Naming buys
+clarity, not enforcement — every seat retains disk-write authority.
+
+#### Master tier — what v2.9 does and does not claim
+
+v2.9 claims the proven mechanics: decomposition/routing, commissioning, an arbitration round trip,
+ledgers, and charters. It does not claim these provisional boundaries are mechanically enforced:
+
+1. nested-run lineage is declared, not verified — interim: sub-teams answer up via relays with the authorizing dispatch named in the local charter, escalations thread through named dispatch dirs, an unauthorized child trail is caught by reconciliation, not by a gate;
+2. rulings do not bind downward mechanically — interim: hand-relayed amendment cascade and operator retire-and-reboot of stale sessions;
+3. no containment — tier words state who implements; nothing confines a seat's writes.
+
+All three close when v29-engine lands; procedure text then updates in a v2.9.x edit with no label to lift.
+
+### Three nested plugins, ten skills
+
+Each higher plugin contains the complete lower-tier bundle, so installing one plugin is enough for
+that tier and everything below it.
+
+| Plugin | Skills in its generated bundle |
 |---|---|
-| `agent-pair-planner` | the Planner half of an Agent Pair — audit, design, locked plans, review synthesis |
-| `agent-pair-implementer` | the Implementer half — plan review, execution, evidence, adversarial review of the Planner's work |
-| `orchestrator-planner` | coordinates two or more Agent Pairs — decomposes, routes, sequences, integrates |
-| `orchestrator-reviewer` | adversarially reviews the orchestrator's own decomposition, routing, and relays |
-| `design-grill` | optional pre-lock design pressure-test (wraps Matt Pocock's `grill-me`) |
-| `sprint-doc-setup` | scaffolds the sprint's doc + relay tree |
+| `adt-pair` | `pair-planner`, `pair-implementer`, `design-grill` |
+| `adt-orchestrator` | Everything in `adt-pair`, plus `orchestrator-planner`, `orchestrator-reviewer`, `sprint-doc-setup` |
+| `adt-master` | Everything in `adt-orchestrator`, plus `domain-planner`, `domain-reviewer`, `master-planner`, `master-reviewer` |
 
-Each role skill carries a `protocol.md` — the shared rules (phase headers, addressing, authority,
-evidence levels, lineage, merge gating) that every role applies before it acts.
+Every generated role skill carries its adjacent `protocol.md` and tier-specific shared assets. The
+repository's canonical `skills/` and `shared/` directories are the semantic sources for the
+generator.
 
-Plus **`tools/`** — `relay-lint`, a small linter that structurally checks the relay artifacts (shape,
-enums, addressing, lineage, merge-token grammar; it's truth-agnostic — it checks structure, not
-whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix that's the linter's
+Plus **`tools/`** — `relay-lint`, a small linter that structurally checks relay artifacts (shape,
+enums, addressing, lineage, merge-token grammar; it is truth-agnostic — it checks structure, not
+whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix that is the linter's
 own correctness gate (`python3 tools/check-relay-lint-fixtures.py`, plus
-`python3 tools/check-timestamp-drift.py` for the clock-dependent checks).
+`python3 tools/check-timestamp-drift.py` for clock-dependent checks).
 
-Current version: **v2.8.8.3** — relay-filename timestamp-drift and index-ordering checks, so a relay
-stamped with a time nobody read off a clock fails the lint instead of silently reordering the trail. The
-filename carries the tight wall-clock window (±2 min); the index is checked for ordering only, so an index
-that has not been appended to recently still passes.
+Current version: v2.9.0 — four-tier vocabulary, three nested plugins, canonical-source generator.
 
 ## Install
 
-It's shaped as a Claude Code plugin. Add the repo as a marketplace and install:
+The generated trees under `plugins/` are the only install artifact. Add the repository as a Claude
+Code marketplace, then install the tier you need:
 
-```
+```text
 /plugin marketplace add iwnlcern/agentic-dev-team-skills
-/plugin install agentic-dev-team-skills
+/plugin install adt-pair
+/plugin install adt-orchestrator
+/plugin install adt-master
 ```
 
-Or just drop the `skills/` folders into your skills directory (e.g. `~/.claude/skills/`) and keep
-`tools/` alongside them.
+Manual/drop-in: copy `plugins/adt-<tier>/skills/*` into the host skills root and
+`plugins/adt-<tier>/tools/` alongside. The generated tree is itself the drop-in bundle.
+
+Do not install the canonical `skills/` dirs directly. They are sources, not install artifacts;
+installing them directly ships broken skills (no adjacent `protocol.md`).
+
+### Migrating existing installs
+
+The rename `agentic-dev-team-skills` → `adt-orchestrator` is content-preserving. Automatic migration
+requires Claude Code ≥ v2.1.193. Upgrade Claude Code first, then run:
+
+```text
+/plugin marketplace update
+```
+
+Clients below that floor must uninstall `agentic-dev-team-skills` and install `adt-orchestrator`
+manually. For managed or enterprise installations, an administrator must update `enabledPlugins`
+from the old plugin name to `adt-orchestrator`.
+
+Manual installs migrate via the S7 rename SITREPs (skill-dir names now equal role words):
+
+- historical `agent-pair-planner` → `pair-planner`
+- historical `agent-pair-implementer` → `pair-implementer`
 
 ## Usage
 
-The smallest unit is one **Agent Pair**: two agent sessions, one loaded with `agent-pair-planner`,
-the other with `agent-pair-implementer`. The Planner audits, designs, and writes the locked plan; the
-Implementer reviews the plan, executes only after an explicit dispatch, and has its work adversarially
-reviewed back. Neither side self-approves. Every substantive handoff between them is a relay file
-that you (or your orchestration layer) carry across sessions.
+The smallest unit is one pair-tier team: two agent sessions, one loaded with `pair-planner` and the
+other with `pair-implementer`. The Pair Planner audits, designs, writes the locked plan, and reviews
+implementation evidence. The Pair Implementer independently audits, reviews the plan, executes only
+after an explicit dispatch, and performs adversarial review. Neither side self-approves. Every
+substantive handoff between them is a relay file that you or your orchestration layer carries across
+sessions.
 
 A typical run:
 
 1. Run `sprint-doc-setup` once to scaffold the sprint tree — `docs/sprints/YYYY-MM-DD-<topic>/` with
-   a `.relays/` substrate for the operational traffic.
-2. Boot each session into its role: load the role skill, apply `protocol.md`, act only within the
-   seat and phase you're addressed in.
+   a `.relays/` substrate for operational traffic.
+2. Boot each session into its role: load the role skill, apply `protocol.md`, and act only within the
+   seat and phase addressed to it.
 3. Work moves phase by phase — AUDIT → DESIGN (optionally `design-grill`) → PLAN → plan review →
    dispatch → implementation → adversarial review → merge gate — with each handoff a lint-clean
    relay file.
@@ -83,15 +131,18 @@ A typical run:
    python3 tools/relay-lint.py --index .relays/<run>/INDEX.md  # index: real times, non-decreasing, not ahead of the clock
    ```
 
-   Linting one relay also checks that its filename timestamp is a real time within ±2 min of the clock,
-   so a stamp nobody read off a clock fails before the handoff. Add `--no-freshness` when re-verifying an
-   older relay, `--max-drift-minutes N` to loosen the tolerance, and `--index-audit` to see history
-   grandfathered by a `monotonic-from` marker. `--index` deliberately applies no drift window: it is an
-   ordering check, so a quiet index passes while a row stamped ahead of the clock fails.
+   Linting one relay also checks that its filename timestamp is a real time within ±2 min of the
+   clock, so a stamp nobody read off a clock fails before the handoff. Add `--no-freshness` when
+   re-verifying an older relay, `--max-drift-minutes N` to loosen the tolerance, and `--index-audit`
+   to see history grandfathered by a `monotonic-from` marker. `--index` deliberately applies no
+   drift window: it is an ordering check, so a quiet index passes while a row stamped ahead of the
+   clock fails.
 
 Running more than one pair at once is what the orchestrator roles are for: `orchestrator-planner`
-decomposes and routes work across pairs, and `orchestrator-reviewer` adversarially checks the
-orchestrator itself — the decomposition, the routing, and the relays.
+decomposes and routes work across pair-tier teams, and `orchestrator-reviewer` adversarially checks
+the orchestrator itself — its decomposition, routing, and relays. The domain and master tiers add
+spec-of-record ownership, commissioned sub-teams, and cross-domain arbitration without moving
+implementation into governance seats.
 
 ## Built with it
 
@@ -103,18 +154,18 @@ ledgers and gate evidence (`docs/sprints/`), and the governing team's workspace 
 if you want to see what these roles, phases, and relays look like under real load, that's the place
 to read.
 
-It's also the natural next layer: these skills are conventions, and a sufficiently confused agent can
-break a convention. frank is the enforcement counterpart — it takes the parts these skills can only
-ask for politely (identity, lineage, gate outcomes) and makes them structural.
+It is also the natural next layer: these skills are conventions, and a sufficiently confused agent
+can break a convention. frank is the enforcement counterpart — it takes the parts these skills can
+only ask for politely (identity, lineage, gate outcomes) and makes them structural.
 
 ## Requirements
 
 - **Superpowers** — the skills build on its brainstorming, planning, plan-execution, and review
-  procedures. If it's not installed, the skills tell the agent to stop and report the missing
+  procedures. If it is not installed, the skills tell the agent to stop and report the missing
   prerequisite.
 - **Python 3** — only if you want `relay-lint` (in `tools/`). The skills reference it but degrade
-  gracefully: they note when it's unavailable rather than failing. Install `tools/` under your skills
-  root, or point at it however your host resolves skills.
+  gracefully: they note when it is unavailable rather than failing. Install the generated `tools/`
+  directory under your skills root, or point at it however your host resolves skills.
 
 ## License
 
