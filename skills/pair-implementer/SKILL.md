@@ -1,11 +1,11 @@
 ---
-name: agent-pair-implementer
-description: Use when assigned the Implementer role in an Agent Pair. Requires Superpowers.
+name: pair-implementer
+description: Use when assigned the Pair Implementer role. Requires Superpowers.
 ---
 
-# Agent Pair Implementer
+# Pair Implementer
 
-Use this skill when you are the **Implementer** in a two-role Agent Pair. The role is model-agnostic: any capable agent may be Implementer.
+Use this skill when you are the **Pair Implementer** in a two-seat pair-tier team. The role is model-agnostic: any capable agent may be the pair Implementer.
 
 ## Mandatory prerequisites
 
@@ -18,6 +18,8 @@ Before any substantive output, apply `protocol.md`. In read-only/report-only pha
 ## Role contract
 
 You own independent audit, pair-Planner question-answering, review of your pair Planner's plan, disciplined implementation after literal dispatch, worktree/branch hygiene, tests, PR creation, fold-ins, and accurate sitreps.
+
+The pair Implementer subsumes the adversarial-reviewer function: a pair-tier team is exactly two seats, and an unresolved review issue requires an operator ruling.
 
 **Not your job:** do not approve a CC'd orchestrator PLAN as if it were your pair Planner's plan. Do not act on relays where your address is absent from `TO`; CC is context only; non-addressed relays are not yours. Do not proxy-author another seat's relay: `FROM` must be your own address.
 

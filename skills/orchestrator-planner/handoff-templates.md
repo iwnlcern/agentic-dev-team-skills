@@ -523,7 +523,7 @@ CC: operator
 SUBJECT: BOOT — initialize <seat> for RUN_ID <run>
 
 You are <pair>.<role> or <run>.orchestrator-reviewer for RUN_ID <run>.
-Load <agent-pair-planner | agent-pair-implementer | orchestrator-reviewer>.
+Load <pair-planner | pair-implementer | orchestrator-reviewer>.
 Sprint root: <repo-relative sprint doc root>
 Relay root: .relays/<RUN_ID>/
 INDEX: .relays/<RUN_ID>/INDEX.md
