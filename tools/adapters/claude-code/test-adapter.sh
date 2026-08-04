@@ -4,6 +4,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ROOT="$(cd "$TOOLS_DIR/.." && pwd)"
 HOOK="$SCRIPT_DIR/relay-lint-posttooluse.sh"
+BASH_GUARD="$SCRIPT_DIR/bash-relay-guard.sh"
+SETTINGS="$SCRIPT_DIR/settings-snippet.json"
 BASH_BIN="$(command -v bash)"
 tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp"; }
@@ -48,6 +50,42 @@ assert_case() {
   fi
   echo "PASS $name"
 }
+run_bash_guard() {
+  local command="$1" background="$2" event="$3" skills="$4" home_dir="$5" path_value="$6"
+  python3 -c 'import json,sys; print(json.dumps({"hook_event_name":sys.argv[1],"tool_input":{"command":sys.argv[2],"run_in_background":sys.argv[3] == "true"}}))' \
+    "$event" "$command" "$background" \
+    | RELAY_LINT_SKILLS_ROOT="$skills" HOME="$home_dir" PATH="$path_value" "$BASH_BIN" "$BASH_GUARD" 2>"$tmp/stderr"
+}
+assert_guard_case() {
+  local name="$1" command="$2" background="$3" event="$4" expected="$5" want="$6"
+  shift 6
+  run_bash_guard "$command" "$background" "$event" "$skills_root" "$tmp/home" "$PATH_NORMAL"
+  local rc=$?
+  if [ "$rc" -ne "$expected" ]; then
+    echo "FAIL $name: expected exit $expected got $rc" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if [ -n "$want" ] && ! grep -Fq "$want" "$tmp/stderr"; then
+    echo "FAIL $name: expected stderr to contain: $want" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if [ -z "$want" ] && [ -s "$tmp/stderr" ]; then
+    echo "FAIL $name: expected silent stderr" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  local forbidden
+  for forbidden in "$@"; do
+    if grep -Fq "$forbidden" "$tmp/stderr"; then
+      echo "FAIL $name: stderr must not contain: $forbidden" >&2
+      cat "$tmp/stderr" >&2
+      return 1
+    fi
+  done
+  echo "PASS $name"
+}
 fail=0
 PATH_NORMAL="$PATH"
 assert_case "a-clean-relay" "$clean_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
@@ -85,5 +123,55 @@ broken_skills="$tmp/broken-skills"
 mkdir -p "$broken_skills/tools"
 printf 'definitely not python\n' > "$broken_skills/tools/relay-lint.py"
 assert_case "e-broken-linter" "$clean_relay" "$broken_skills" "$tmp/home" "$PATH_NORMAL" 2 "linter execution failed" || fail=1
+
+g1_relay="$tmp/work/.relays/run1/g1-$stamp.md"
+printf 'x\n' > "$g1_relay"
+assert_guard_case "g1-literal-relay-redirect" "printf x > $g1_relay" false PostToolUse 2 "FAILS lint" || fail=1
+
+g2_target="$tmp/work/src/x.md"
+printf 'x\n' > "$g2_target"
+assert_guard_case "g2-non-relay-redirect" "printf x > $g2_target" false PostToolUse 0 "" || fail=1
+
+g3_index="$tmp/work/.relays/run1/INDEX.md"
+printf '%s\n' \
+  '| time | phase | role | dispatch | parent | from | to | cc | status | file |' \
+  '|---|---|---|---|---|---|---|---|---|---|' \
+  '| 20260601-130000 | AUDIT | Planner | d-g3 | — | pair-1.planner | orchestrator | — | returned | raw | split |' \
+  > "$g3_index"
+assert_guard_case "g3-index-heredoc-routes-index-mode" "cat <<'EOF' > $g3_index" false PostToolUse 2 "header declares" || fail=1
+
+printf 'x\n' > "$tmp/work/a.md"
+assert_guard_case "g4-mv-to-relay-directory-is-generic" "mv $tmp/work/a.md $tmp/work/.relays/run1/" false PostToolUse 2 "could not be linted" || fail=1
+
+g5_relay="$tmp/work/.relays/run1/g5-$stamp.md"
+printf 'x\n' > "$g5_relay"
+assert_guard_case "g5-interpreter-one-liner-is-residual" "python3 -c \"open('$g5_relay','w')\"" false PostToolUse 0 "" || fail=1
+
+g6_relay="$tmp/work/.relays/run1/g6-$stamp.md"
+printf 'x\n' > "$g6_relay"
+assert_guard_case "g6-background-write-is-generic" "printf x > $g6_relay" true PostToolUse 2 "backgrounded Bash command" "FAILS lint" || fail=1
+
+g7_relay="$tmp/work/.relays/run1/g7-$stamp.md"
+printf 'x\n' > "$g7_relay"
+assert_guard_case "g7-write-then-false-failure-event" "printf x > $g7_relay; false" false PostToolUseFailure 2 "FAILS lint" || fail=1
+
+g8_one="$tmp/work/.relays/run1/one-$stamp.md"
+g8_two="$tmp/work/.relays/run1/two-$stamp.md"
+printf 'x\n' > "$g8_one"
+printf 'x\n' > "$g8_two"
+printf 'x\n' > "$tmp/work/b.md"
+assert_guard_case "g8-multiple-relay-targets-are-generic" "cp $tmp/work/a.md $g8_one; cp $tmp/work/b.md $g8_two" false PostToolUse 2 "could not be linted" "$(basename "$g8_one")" "$(basename "$g8_two")" "FAILS lint" || fail=1
+
+g9_relay="$tmp/work/.relays/run1/NOTINDEX-$stamp.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$g9_relay"
+assert_guard_case "g9-notindex-routes-explicit-file-mode" "printf x > $g9_relay" false PostToolUse 0 "" || fail=1
+
+# This proves SHIPPED CONFIGURATION, not live host installation.
+if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); expected="bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""; events=("PostToolUse","PostToolUseFailure"); assert all(any(e.get("matcher") == "Bash" and any(h.get("type") == "command" and h.get("command") == expected for h in e.get("hooks", [])) for e in d.get("hooks", {}).get(event, [])) for event in events)' "$SETTINGS"; then
+  echo "PASS s1-shipped-bash-registration-both-events"
+else
+  echo "FAIL s1-shipped-bash-registration-both-events: expected Bash guard under PostToolUse and PostToolUseFailure" >&2
+  fail=1
+fi
 
 exit "$fail"
