@@ -41,6 +41,8 @@ INDEX_MONOTONIC_MARKER_RE = re.compile(
 ROLE_VALUES = {
     "Planner", "Implementer", "Orchestrator Planner", "Orchestrator Reviewer", "Reviewer",
     "Downstream Agent Pair", "Downstream Implementer",
+    "Master Planner", "Master Reviewer", "Domain Planner", "Domain Reviewer",
+    "Pair Planner", "Pair Implementer",
 }
 PHASE_VALUES = {
     "AUDIT", "DESIGN", "DESIGN-REVIEW", "PLAN", "PLAN-REVIEW", "IMPL", "REVIEW-FOLD",
@@ -55,6 +57,8 @@ CEREMONY_VALUES = {"tiny", "small", "medium", "large", "production-risk"}
 EVIDENCE_VALUES = {"E1", "E2", "E3", "E4"}
 ADDRESS_ROLE_VALUES = {
     "planner", "implementer", "orchestrator-planner", "orchestrator-reviewer", "reviewer",
+    "master-planner", "master-reviewer", "domain-planner", "domain-reviewer",
+    "pair-planner", "pair-implementer",
 }
 SPECIAL_ADDRESS_VALUES = {"orchestrator", "operator"}
 VERDICT_VALUES = {
@@ -77,7 +81,22 @@ ROLE_TO_ADDRESS_ROLE = {
     "Orchestrator Reviewer": "orchestrator-reviewer",
     "Reviewer": "reviewer",
     "Downstream Implementer": "implementer",
+    "Master Planner": "master-planner",
+    "Master Reviewer": "master-reviewer",
+    "Domain Planner": "domain-planner",
+    "Domain Reviewer": "domain-reviewer",
+    "Pair Planner": "pair-planner",
+    "Pair Implementer": "pair-implementer",
 }
+# D3: the pair tier gains a prefix; bare legacy forms stay valid permanently.
+# Gates compare canonical roles so pair-planner/planner are one seat-role.
+PAIR_ROLE_CANONICAL = {"pair-planner": "planner", "pair-implementer": "implementer"}
+
+
+def canonical_role(role: str | None) -> str | None:
+    return PAIR_ROLE_CANONICAL.get(role, role) if role is not None else None
+
+
 LINEAGE_DIRECT_FROM_ROLES = {"operator", "orchestrator", "orchestrator-planner"}
 
 CANONICAL_SCAN_ROWS = [
@@ -593,7 +612,7 @@ def role_from_consistency_error(fields: Dict[str, str]) -> str | None:
     actual = from_role(from_addrs[0])
     if actual in SPECIAL_ADDRESS_VALUES:
         return None
-    if actual and actual != expected:
+    if actual and canonical_role(actual) != canonical_role(expected):
         return f"ROLE/FROM mismatch: ROLE={role!r} but FROM={from_addrs[0]!r}; do not proxy-author another seat's relay"
     return None
 

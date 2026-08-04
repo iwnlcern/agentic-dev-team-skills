@@ -15,6 +15,13 @@ LINT = ROOT / "tools" / "relay-lint.py"
 FIXTURES = ROOT / "tools" / "relay-lint-fixtures"
 
 EXPECTED = [
+    ("file", "rolevocab/RV1a-pair-planner.md", 0),
+    ("file", "rolevocab/RV1b-pair-implementer.md", 0),
+    ("file", "rolevocab/RV2a-master-planner.md", 0),
+    ("file", "rolevocab/RV2b-master-reviewer.md", 0),
+    ("file", "rolevocab/RV3a-domain-planner.md", 0),
+    ("file", "rolevocab/RV3b-domain-reviewer.md", 0),
+    ("file", "rolevocab/RV4-invalid-role.md", 1),
     ("file", "claude/A1-valid-audit.md", 0),
     ("file", "claude/A2-valid-downgrade.md", 0),
     ("file", "claude/B2-why-before-scan.md", 1),
