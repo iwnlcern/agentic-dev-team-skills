@@ -11,7 +11,7 @@ This protocol defines workflow scope only. It does not ask any agent to bypass p
 Use the compact header below for substantive outputs. Add tier/risk-dependent fields only when they affect routing, merge, lineage, or verification.
 
 ```text
-ROLE: <Planner | Implementer | Orchestrator Planner | Orchestrator Reviewer | Reviewer>
+ROLE: <Master Planner | Master Reviewer | Domain Planner | Domain Reviewer | Orchestrator Planner | Orchestrator Reviewer | Pair Planner | Pair Implementer | Planner | Implementer | Reviewer>
 PHASE: <AUDIT | DESIGN | DESIGN-REVIEW | PLAN | PLAN-REVIEW | IMPL | REVIEW-FOLD | MERGE-GATE | LIVE-VERIFY | SITREP | RECONCILE>
 AUTHORITY: <read-only | design-only | plan-only | review-only | implementation | fold-in-only | merge-gated | live-verify | report-only>
 DISPATCH_ID: <stable id>
@@ -25,6 +25,8 @@ TO: <owner.role>[, ...]
 CC: <owner.role>[, ...]
 ```
 
+`Planner`, `Implementer`, and `Reviewer` are legacy values, accepted permanently and classed at pair tier.
+
 Addressing fields:
 
 ```text
@@ -33,7 +35,7 @@ TO:   <OWNER>.<role> [, ...]    # acting addressee(s); owns the reply; replies a
 CC:   <OWNER>.<role> [, ...]    # context only; no phase authority, no action, no reply obligation
 ```
 
-Roles in addresses are lowercase: `planner`, `implementer`, `orchestrator-planner`, `orchestrator-reviewer`, or `reviewer`. `operator` and `orchestrator` are special addresses. Addresses are compared case-insensitively and normalized to lowercase canonical form; non-canonical case may lint as a warning, but it must not split lineage ownership. Use `TO: operator` when a relay is explicitly asking for a human/operator judgment.
+Roles in addresses are lowercase: `master-planner`, `master-reviewer`, `domain-planner`, `domain-reviewer`, `orchestrator-planner`, `orchestrator-reviewer`, `pair-planner`, `pair-implementer`, plus legacy `planner`, `implementer`, and `reviewer` (pair-tier-equivalent, accepted permanently). The tier lives in the role word; there is no tier header field. Review panels are not addressable roles; they report inline to the planner that spawned them. `operator` and `orchestrator` are special addresses. Addresses are compared case-insensitively and normalized to lowercase canonical form; non-canonical case may lint as a warning, but it must not split lineage ownership. Use `TO: operator` when a relay is explicitly asking for a human/operator judgment.
 
 `TO` is required on orchestrator-tier or multi-pair relays and on any relay containing a live dispatch token. A missing `TO` means legacy phase-implied routing; such relays may lint dirty when a tool needs explicit routing.
 
@@ -159,7 +161,7 @@ SCOPE_DIFF:
 SCOPE_DIFF_RESULT: <all-in | deviation-present>
 ```
 
-Any file or directory not covered by the dispatch's in-scope list is a deviation. There is no `minor`, `single-line`, `integration hook`, `boundary-contract-supporting`, or `needed-for-acceptance` exception, and an Implementer plan-review approve does not convert an out-of-scope file into an in-scope one. Whether an out-of-scope edit is necessary is the orchestrator's call, not the pair's. If `SCOPE_DIFF_RESULT` is `deviation-present`, do not issue the token; relay the plan plus the justification to the orchestrator and wait.
+Any file or directory not covered by the dispatch's in-scope list is a deviation. There is no `minor`, `single-line`, `integration hook`, `boundary-contract-supporting`, or `needed-for-acceptance` exception, and an Implementer plan-review approve does not convert an out-of-scope file into an in-scope one. Whether an out-of-scope edit is necessary is the orchestrator's call, not the pair's. If `SCOPE_DIFF_RESULT` is `deviation-present`, do not issue the token; relay the plan plus the justification to the orchestrator (or the operator when no orchestrator seat exists) and wait.
 
 ```text
 DISPATCH IMPL
@@ -303,7 +305,7 @@ When a task is under operator or schedule pressure, explicitly reject these obse
 | `The operator's "just fix it now" constituted dispatch.` | Not dispatch. Only a bare, unfenced, un-backticked `DISPATCH IMPL` alone on its own line authorizes implementation. Inline, quoted, or fenced mentions are inert. |
 | `Prior state is in the transaction log, so it is reversible.` | Not reversible for this workflow unless the artifact captures prior app-level state or provides an explicit executable restore path. |
 | `It is tiny / one file / obvious.` | Size does not override hard escalation triggers, phase scope, evidence target, or operator judgment categories. |
-| `The out-of-scope file is just a small integration hook the acceptance criterion needs.` | Deviation. Run SCOPE_DIFF, mark it OUT, relay to the orchestrator with the justification; do not self-dispatch. |
+| `The out-of-scope file is just a small integration hook the acceptance criterion needs.` | Deviation. Run SCOPE_DIFF, mark it OUT, relay to the orchestrator (or the operator when no orchestrator seat exists) with the justification; do not self-dispatch. |
 | `Tests are green and the dispatch was valid, so I can merge.` | No. Merge has its own human/operator gate and its own addressee. IMPL exits with branch/PR/report unless a separate merge-authorization relay exists. |
 | `I was CC'd, so this is my task.` | CC grants nothing: no phase change, no authority, no action. Act only on relays whose `TO` includes your address; if a CC'd relay seems to require action from you, relay a question to its `FROM` instead. |
 | `I saw the relay in context, so it is mine.` | No. Address membership is the only thing that makes a relay yours. If your address is absent from both `TO` and `CC`, do not interpret, approve, dispatch, or act; ask `FROM` where it should be routed. |
@@ -367,6 +369,8 @@ Incoming sitreps are E0 until reconciled against repo/PR/task/deploy/runtime evi
 
 File-first relays are the default for every substantive relay (audit, design lock, plan, plan review, fold-in report, sitrep, merge/live-verify verdict) whenever the agent has disk access — design-phase questions and answers between partners are inline by default; only the resulting design lock is a file relay. When writing a relay: write the full relay to the relay file, then print only a compact pointer plus a 3-6 line summary inline. The inline pointer block must also carry the relay's routing lines — `FROM`, `TO`, and `CC` when present — verbatim from the relay header, so an operator relaying by hand knows who acts and who is informed without opening the file. This keeps the conversation lean and leaves a durable artifact the partner, orchestrator, or operator can relay verbatim. Terminal-only relays are the fallback, not the default — use them only when the agent lacks write access or the receiver cannot reach any filesystem, and in that case relay the full contents inline. The file contents are the payload; a path is only a convenience when the receiver shares the filesystem.
 
+Work cycles: A `DISPATCH_ID` names a work cycle — what one commissioning dispatch opens — ending at whichever terminus it reaches (`audit* → design* → plan* → implementation → merge* → live-verify*`, stars marking legitimate termini). Successor reuse of the ID within a cycle is correct and must never be flagged; reusing an ID to open new work is an error; filing follows commissioning — a message lives in the cycle it belongs to, and separately commissioned work is its own cycle. The merge gate already requires grant and claim to share a `DISPATCH_ID` across the whole cycle.
+
 Default durable relay root:
 
 ```text
@@ -404,7 +408,7 @@ For orchestrator-tier relays, terminal output should normally be a compact point
 
 ## Relay lint
 
-When `relay-lint` is available, run it on substantive relay files before handing them off, before delegated dispatch, or before an adapter/CI job consumes them. The linter is available when installed at `<skills-root>/tools/relay-lint.py` or as `relay-lint` on `PATH`. Here `<skills-root>` means the directory that contains all four role skill folders, not an individual role folder; examples are `~/.claude/skills/tools/relay-lint.py` and `~/.codex/skills/tools/relay-lint.py`. Agents resolve in that order, and if neither exists they write `RELAY_LINT: unavailable — <reason>`. The linter is truth-agnostic: it checks structure, enums, address grammar, ROLE/FROM consistency, phase/authority consistency, downgrade-field ordering, action-reference substance, final-status proof substance, contiguous field-block grammar, row-shaped detached rows, delegated-dispatch shape, mandatory pair-Planner parent-lineage shape, addressed merge-token shape, merge-claim lineage, and REVIEW-FOLD FOLD_SCOPE shape. It does not prove that claims are true.
+When `relay-lint` is available, run it on substantive relay files before handing them off, before delegated dispatch, or before an adapter/CI job consumes them. The linter resolves as `tools/relay-lint.py` within the same skills root the loaded skill was resolved from — each plugin ships it — else as `relay-lint` on `PATH`. If neither exists, write `RELAY_LINT: unavailable — <reason>`. The linter is truth-agnostic: it checks structure, enums, address grammar, ROLE/FROM consistency, phase/authority consistency, downgrade-field ordering, action-reference substance, final-status proof substance, contiguous field-block grammar, row-shaped detached rows, delegated-dispatch shape, mandatory pair-Planner parent-lineage shape, addressed merge-token shape, merge-claim lineage, and REVIEW-FOLD FOLD_SCOPE shape. It does not prove that claims are true.
 
 The relay file is the report of record for linted relays. Terminal summaries are not enough for `FINAL_GIT_STATUS_SHORT`, `ACTIONS_GIT_REF`, scan fields, or dispatch authority; put them in the relay file. Older relay files may lint dirty because this report-of-record rule was not yet in force.
 
