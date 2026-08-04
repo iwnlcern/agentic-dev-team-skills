@@ -48,6 +48,37 @@ REVIEW_ASSETS = {
 }
 REVIEW_SKILLS = {"pair-planner", "orchestrator-planner"}
 MASTER_SKILLS = {"domain-planner", "domain-reviewer", "master-planner", "master-reviewer"}
+LOCKED_SHARED_ASSETS = {
+    "protocol.md": frozenset().union(*PLUGINS.values()),
+    "review-panels.md": frozenset({"pair-planner", "orchestrator-planner"}),
+    "reviewer-spawn-prompts.md": frozenset({"pair-planner", "orchestrator-planner"}),
+    "design-request-template.md": frozenset({"pair-planner", "orchestrator-planner"}),
+    "master-tier-boundary.md": frozenset(MASTER_SKILLS),
+}
+LOCKED_TOOLS_SET = (
+    "relay-lint.py",
+    "check-relay-lint-fixtures.py",
+    "check-timestamp-drift.py",
+    "relay-lint-fixtures",
+    "adapters",
+)
+EXACT_INVENTORY_SENTINELS = {
+    "adt-orchestrator": {
+        "skills/orchestrator-planner/handoff-templates.md",
+        "skills/orchestrator-planner/orchestration-moves.md",
+        "skills/orchestrator-planner/sitrep-reconciliation.md",
+        "tools/check-relay-lint-fixtures.py",
+        "tools/check-timestamp-drift.py",
+    },
+    "adt-master": {
+        "skills/orchestrator-planner/handoff-templates.md",
+        "skills/orchestrator-planner/orchestration-moves.md",
+        "skills/orchestrator-planner/sitrep-reconciliation.md",
+        "skills/master-planner/charter-template.md",
+        "tools/check-relay-lint-fixtures.py",
+        "tools/check-timestamp-drift.py",
+    },
+}
 VOCABULARY = (
     ("Master Planner", "t-x.master-planner"),
     ("Master Reviewer", "t-x.master-reviewer"),
@@ -92,6 +123,53 @@ def file_map(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def canonical_files(source: Path, destination: str) -> set[str]:
+    expect(source.exists(), f"canonical input is missing: {source.relative_to(ROOT)}")
+    if source.is_file():
+        return {destination}
+    return {
+        (Path(destination) / path.relative_to(source)).as_posix()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+
+
+def expected_plugin_files(plugin: str) -> set[str]:
+    """Derive a plugin's locked file inventory from canonical inputs, not the generator."""
+    expected = {".claude-plugin/plugin.json"}
+    skills = PLUGINS[plugin]
+    for skill in skills:
+        expected |= canonical_files(ROOT / "skills" / skill, f"skills/{skill}")
+    for asset, recipients in LOCKED_SHARED_ASSETS.items():
+        for skill in skills & recipients:
+            source = ROOT / "shared" / asset
+            expect(source.is_file(), f"canonical shared asset is missing: shared/{asset}")
+            expected.add(f"skills/{skill}/{asset}")
+    for tool in LOCKED_TOOLS_SET:
+        expected |= canonical_files(ROOT / "tools" / tool, f"tools/{tool}")
+    expected |= canonical_files(ROOT / "vendor" / "mattpocock", "vendor/mattpocock")
+    expected |= canonical_files(ROOT / "LICENSE", "LICENSE")
+    expected |= canonical_files(ROOT / "LICENSES", "LICENSES")
+    return expected
+
+
+def assert_exact_plugin_file_inventory(plugin: str, plugin_root: Path) -> None:
+    expected = expected_plugin_files(plugin)
+    sentinels = EXACT_INVENTORY_SENTINELS.get(plugin, set())
+    expect(sentinels <= expected, f"{plugin} expected inventory omits sentinels: {sorted(sentinels - expected)}")
+    actual = {
+        path.relative_to(plugin_root).as_posix()
+        for path in plugin_root.rglob("*")
+        if path.is_file()
+    }
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    expect(
+        not missing and not extra,
+        f"{plugin} exact file inventory differs: missing: {missing}; extra: {extra}",
+    )
 
 
 def copy_generator_inputs(destination: Path) -> Path:
@@ -184,6 +262,7 @@ def check_inventory() -> None:
 def check_adjacency() -> None:
     for plugin, skills in PLUGINS.items():
         plugin_root = PLUGINS_ROOT / plugin
+        assert_exact_plugin_file_inventory(plugin, plugin_root)
         for skill in skills:
             skill_root = plugin_root / "skills" / skill
             expect((skill_root / "protocol.md").is_file(), f"{plugin}/{skill} lacks protocol.md")
@@ -201,6 +280,17 @@ def check_adjacency() -> None:
             expect((plugin_root / required).is_file(), f"{plugin} lacks file {required}")
         for required in ("tools/relay-lint-fixtures", "tools/adapters", "LICENSES"):
             expect((plugin_root / required).is_dir(), f"{plugin} lacks directory {required}")
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-exact-inventory-") as temporary:
+        fixture = Path(temporary) / "adt-orchestrator"
+        missing = "skills/orchestrator-planner/handoff-templates.md"
+        shutil.copytree(PLUGINS_ROOT / "adt-orchestrator", fixture)
+        (fixture / missing).unlink()
+        try:
+            assert_exact_plugin_file_inventory("adt-orchestrator", fixture)
+        except AssertionError as error:
+            expect(f"missing: ['{missing}']" in str(error), f"omitted inventory file was not diagnosed: {error}")
+        else:
+            raise AssertionError("exact inventory did not fail for a missing non-adjacent skill asset")
 
 
 def install_tier(plugin: str, scratch_base: Path) -> Path:
