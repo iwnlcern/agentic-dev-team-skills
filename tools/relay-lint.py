@@ -1296,6 +1296,34 @@ def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[i
         errors.append(f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)")
     return errors
 
+
+def split_index_cells(stripped: str) -> list[str]:
+    cells: list[str] = []
+    cur: list[str] = []
+    backslashes = 0
+    for ch in stripped:
+        if ch == "\\":
+            backslashes += 1
+            cur.append(ch)
+            continue
+        if ch == "|":
+            if backslashes % 2 == 1:
+                cur[-1:] = ["|"]
+            else:
+                cells.append("".join(cur).strip())
+                cur = []
+            backslashes = 0
+            continue
+        backslashes = 0
+        cur.append(ch)
+    cells.append("".join(cur).strip())
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return cells
+
+
 def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     """Check an append-only relay INDEX for timestamp truth and monotonicity.
 
@@ -1322,18 +1350,34 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
             result.error(f"monotonic-from marker value {m.group(1)!r} is not a valid timestamp")
 
     rows: List[Tuple[int, str, Optional[datetime.datetime], str]] = []
+    header_arity: int | None = None
+    grandfathered_arity_issues: List[Tuple[int, int]] = []
     for lineno, line in enumerate(lines, 1):
         stripped = line.strip()
         if not stripped.startswith("|"):
             continue
-        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        cells = split_index_cells(stripped)
         if len(cells) < 2:
             continue
         if cells[0].lower() == "time":
+            if header_arity is None:
+                header_arity = len(cells)
             continue
         if set(cells[0]) <= set("-: "):
             continue
+        if header_arity is not None and len(cells) != header_arity:
+            message = (
+                f"line {lineno}: row has {len(cells)} cells, header declares {header_arity}; "
+                "a literal | in cell prose must be escaped as \\|"
+            )
+            if lineno > marker_line:
+                result.error(message)
+            else:
+                grandfathered_arity_issues.append((lineno, len(cells)))
         rows.append((lineno, cells[0], parse_stamp(cells[0]), cells[-1]))
+
+    if header_arity is None:
+        result.warn("no header row; arity not checked")
 
     if not rows:
         result.error(f"no index rows found in {path}")
@@ -1407,6 +1451,11 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
             result.warn(f"line {ln}: (grandfathered) {praw} -> {raw} decreases")
         for ln, raw in unparsed:
             result.warn(f"line {ln}: (grandfathered) unparseable time {raw!r}")
+        for ln, arity in grandfathered_arity_issues:
+            result.warn(
+                f"line {ln}: (grandfathered) row has {arity} cells, "
+                f"header declares {header_arity}; a literal | in cell prose must be escaped as \\|"
+            )
 
     return result
 

@@ -46,6 +46,11 @@ INDEX_HEADER = (
     "|---|---|---|---|---|---|---|---|---|---|\n"
 )
 
+INDEX_HEADER_8 = (
+    "| time | phase | role | dispatch | parent | from | to | file |\n"
+    "|---|---|---|---|---|---|---|---|\n"
+)
+
 
 def load_linter():
     spec = importlib.util.spec_from_file_location("relay_lint", LINT)
@@ -60,10 +65,10 @@ def stamp(dt: datetime.datetime) -> str:
     return dt.strftime("%Y%m%d-%H%M%S")
 
 
-def index_row(time_cell: str, file_stamp: str) -> str:
+def index_row(time_cell: str, file_stamp: str, status: str = "routed") -> str:
     return (
         f"| {time_cell} | DESIGN | orchestrator-planner | d | p "
-        f"| master.orchestrator-planner | operator | x | routed "
+        f"| master.orchestrator-planner | operator | x | {status} "
         f"| a/DESIGN-orchestrator-planner-{file_stamp}.md |\n"
     )
 
@@ -135,9 +140,9 @@ def main() -> int:
         )
 
         # -- index: monotonicity, boundary, filename agreement, freshness ----
-        def index(rows: str, marker: str | None = None) -> Path:
+        def index(rows: str, marker: str | None = None, header: str = INDEX_HEADER) -> Path:
             p = tmp / "INDEX.md"
-            body = INDEX_HEADER + rows
+            body = header + rows
             if marker is not None:
                 body += f"\n<!-- relay-lint: monotonic-from {marker} -->\n"
             p.write_text(body, encoding="utf-8")
@@ -206,6 +211,68 @@ def main() -> int:
             not r.ok and any("predates the monotonic-from boundary" in e for e in r.errors),
             "; ".join(r.errors),
         )
+
+        # -- index: header-declared arity and escaped literal pipes ----------
+        p = tmp / "INDEX.md"
+        p.write_text(
+            INDEX_HEADER
+            + f"<!-- relay-lint: monotonic-from {fresh} -->\n"
+            + index_row(fresh, fresh, "routed | extra"),
+            encoding="utf-8",
+        )
+        r = lint.lint_relay_index(p)
+        check(
+            "index: post-marker extra raw pipe rejected by header arity",
+            not r.ok and sum("cells, header declares" in e for e in r.errors) == 1,
+            "; ".join(r.errors),
+        )
+
+        odd_pipe_row = index_row(fresh, fresh, r"a \| b")
+        r = lint.lint_relay_index(index(odd_pipe_row))
+        check(
+            "index: odd backslash escapes a literal status pipe",
+            r.ok
+            and hasattr(lint, "split_index_cells")
+            and lint.split_index_cells(odd_pipe_row.strip())[-2] == "a | b",
+            "; ".join(r.errors),
+        )
+
+        r = lint.lint_relay_index(index(index_row(fresh, fresh, r"a \\| b")))
+        check(
+            "index: even backslashes leave a delimiter and reject the row",
+            not r.ok and any("cells, header declares" in e for e in r.errors),
+            "; ".join(r.errors),
+        )
+
+        malformed_history = index_row(fresh, fresh, "routed | extra")
+        r = lint.lint_relay_index(index(malformed_history, marker=fresh))
+        check("index: pre-marker malformed row stays grandfathered", r.ok, "; ".join(r.errors))
+
+        r = lint.lint_relay_index(index(malformed_history, marker=fresh), audit=True)
+        check(
+            "index: audit reports pre-marker header-arity drift",
+            r.ok and any("cells, header declares" in w for w in r.warnings),
+            "; ".join(r.warnings),
+        )
+
+        p = tmp / "INDEX.md"
+        p.write_text(index_row(fresh, fresh), encoding="utf-8")
+        r = lint.lint_relay_index(p)
+        check(
+            "index: headerless rows warn without arity errors",
+            r.ok
+            and not any("cells, header declares" in e for e in r.errors)
+            and sum("no header row" in w for w in r.warnings) == 1,
+            "; ".join(r.warnings),
+        )
+
+        eight_cell_row = (
+            f"| {fresh} | DESIGN | orchestrator-planner | d | p "
+            f"| master.orchestrator-planner | operator "
+            f"| a/DESIGN-orchestrator-planner-{fresh}.md |\n"
+        )
+        r = lint.lint_relay_index(index(eight_cell_row, header=INDEX_HEADER_8))
+        check("index: matching eight-column header passes", r.ok, "; ".join(r.errors))
 
     width = max(len(n) for n, _o, _d in results)
     failed = False
