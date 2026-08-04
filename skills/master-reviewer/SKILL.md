@@ -1,6 +1,6 @@
 ---
 name: master-reviewer
-description: Use when assigned the Master Reviewer role governing two or more domain pairs. Requires Superpowers.
+description: Use when assigned the Master Reviewer role adversarially reviewing the Master Planner's governance and decomposition across two or more domain pairs. Requires Superpowers.
 ---
 
 # Master Reviewer
