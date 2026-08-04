@@ -53,8 +53,8 @@ that tier and everything below it.
 
 | Plugin | Skills in its generated bundle |
 |---|---|
-| `adt-pair` | `pair-planner`, `pair-implementer`, `design-grill` |
-| `adt-orchestrator` | Everything in `adt-pair`, plus `orchestrator-planner`, `orchestrator-reviewer`, `sprint-doc-setup` |
+| `adt-pair` | `pair-planner`, `pair-implementer`, `design-grill`, `sprint-doc-setup` |
+| `adt-orchestrator` | Everything in `adt-pair`, plus `orchestrator-planner`, `orchestrator-reviewer` |
 | `adt-master` | Everything in `adt-orchestrator`, plus `domain-planner`, `domain-reviewer`, `master-planner`, `master-reviewer` |
 
 Every generated role skill carries its adjacent `protocol.md` and tier-specific shared assets. The

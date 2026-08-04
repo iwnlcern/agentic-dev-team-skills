@@ -19,7 +19,7 @@ PLUGINS_ROOT = ROOT / "plugins"
 PYTHON = "python3"
 
 PLUGINS = {
-    "adt-pair": {"pair-planner", "pair-implementer", "design-grill"},
+    "adt-pair": {"pair-planner", "pair-implementer", "design-grill", "sprint-doc-setup"},
     "adt-orchestrator": {
         "pair-planner",
         "pair-implementer",
@@ -41,6 +41,16 @@ PLUGINS = {
         "master-reviewer",
     },
 }
+ROLE_SKILLS = {
+    "pair-planner",
+    "pair-implementer",
+    "orchestrator-planner",
+    "orchestrator-reviewer",
+    "master-planner",
+    "master-reviewer",
+    "domain-planner",
+    "domain-reviewer",
+}
 REVIEW_ASSETS = {
     "review-panels.md",
     "reviewer-spawn-prompts.md",
@@ -49,7 +59,7 @@ REVIEW_ASSETS = {
 REVIEW_SKILLS = {"pair-planner", "orchestrator-planner"}
 MASTER_SKILLS = {"domain-planner", "domain-reviewer", "master-planner", "master-reviewer"}
 LOCKED_SHARED_ASSETS = {
-    "protocol.md": frozenset().union(*PLUGINS.values()),
+    "protocol.md": frozenset(ROLE_SKILLS),
     "review-panels.md": frozenset({"pair-planner", "orchestrator-planner"}),
     "reviewer-spawn-prompts.md": frozenset({"pair-planner", "orchestrator-planner"}),
     "design-request-template.md": frozenset({"pair-planner", "orchestrator-planner"}),
@@ -266,6 +276,14 @@ def check_inventory() -> None:
             actual_skills == expected_skills,
             f"{plugin} skill inventory differs: missing {expected_skills - actual_skills}, extra {actual_skills - expected_skills}",
         )
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    expected_rows = (
+        "| `adt-pair` | `pair-planner`, `pair-implementer`, `design-grill`, `sprint-doc-setup` |",
+        "| `adt-orchestrator` | Everything in `adt-pair`, plus `orchestrator-planner`, `orchestrator-reviewer` |",
+        "| `adt-master` | Everything in `adt-orchestrator`, plus `domain-planner`, `domain-reviewer`, `master-planner`, `master-reviewer` |",
+    )
+    for row in expected_rows:
+        expect(readme.count(row) == 1, f"README lacks exact locked inventory row: {row}")
 
 
 def check_adjacency() -> None:
@@ -274,7 +292,10 @@ def check_adjacency() -> None:
         assert_exact_plugin_file_inventory(plugin, plugin_root)
         for skill in skills:
             skill_root = plugin_root / "skills" / skill
-            expect((skill_root / "protocol.md").is_file(), f"{plugin}/{skill} lacks protocol.md")
+            if skill in ROLE_SKILLS:
+                expect((skill_root / "protocol.md").is_file(), f"{plugin}/{skill} lacks protocol.md")
+            else:
+                expect(not (skill_root / "protocol.md").exists(), f"{plugin}/{skill} unexpectedly carries protocol.md")
             if skill in REVIEW_SKILLS:
                 for asset in REVIEW_ASSETS:
                     expect((skill_root / asset).is_file(), f"{plugin}/{skill} lacks {asset}")
@@ -324,7 +345,10 @@ def check_cold_install(scratch_base: Path) -> dict[str, Path]:
         installations[plugin] = scratch
         for skill in skills:
             skill_root = scratch / "skills" / skill
-            expect((skill_root / "protocol.md").is_file(), f"{plugin} cold install lacks {skill}/protocol.md")
+            if skill in ROLE_SKILLS:
+                expect((skill_root / "protocol.md").is_file(), f"{plugin} cold install lacks {skill}/protocol.md")
+            else:
+                expect(not (skill_root / "protocol.md").exists(), f"{plugin} cold install gives {skill} protocol.md")
             if skill in REVIEW_SKILLS:
                 for asset in REVIEW_ASSETS:
                     expect((skill_root / asset).is_file(), f"{plugin} cold install lacks {skill}/{asset}")
@@ -362,7 +386,7 @@ def relay_text(role: str, address: str) -> str:
 def check_protocol_linter_coherence(installations: dict[str, Path], scratch_base: Path) -> None:
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     for plugin, scratch in installations.items():
-        for skill in PLUGINS[plugin]:
+        for skill in PLUGINS[plugin] & ROLE_SKILLS:
             protocol = (scratch / "skills" / skill / "protocol.md").read_text(encoding="utf-8")
             for role, address in VOCABULARY:
                 suffix = address.rsplit(".", 1)[1]

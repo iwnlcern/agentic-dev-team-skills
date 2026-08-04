@@ -22,7 +22,7 @@ OUTPUT_ROOT = ROOT / "plugins"
 PLUGINS = {
     "adt-pair": {
         "description": "Pair-tier planning and implementation skills for governed software work.",
-        "skills": ("pair-planner", "pair-implementer", "design-grill"),
+        "skills": ("pair-planner", "pair-implementer", "design-grill", "sprint-doc-setup"),
         "keywords": ("agents", "pair", "planning", "review", "relays"),
     },
     "adt-orchestrator": {
@@ -56,7 +56,16 @@ PLUGINS = {
 }
 
 SHARED_MAP = {
-    "protocol.md": tuple(skill for plugin in PLUGINS.values() for skill in plugin["skills"]),
+    "protocol.md": (
+        "pair-planner",
+        "pair-implementer",
+        "orchestrator-planner",
+        "orchestrator-reviewer",
+        "master-planner",
+        "master-reviewer",
+        "domain-planner",
+        "domain-reviewer",
+    ),
     "review-panels.md": ("pair-planner", "orchestrator-planner"),
     "reviewer-spawn-prompts.md": ("pair-planner", "orchestrator-planner"),
     "design-request-template.md": ("pair-planner", "orchestrator-planner"),
