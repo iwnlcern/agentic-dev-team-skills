@@ -12,7 +12,10 @@ OWNER_RENAME_DECISION: not made; proposal only
 This is a report-only template for the operator to relay to pdc's top session. The top
 session distributes the information down the deployment tree. This SITREP grants no
 authority, is not an implementation or deployment instruction, and does not report that
-pdc has applied any rename. Any later execution needs separate operator authority.
+pdc has applied any rename. Any later execution needs a later relay with addressed
+operator authority. Every action-shaped statement below is conditional on that later
+authority and a recorded deployment choice; until both exist, the mappings are
+descriptive and non-actionable.
 
 ## Evidence-grounded pdc shapes
 
@@ -33,13 +36,14 @@ Evidence sources (read-only):
 - `/Users/jack/Programming/pdc/ROADMAP.md`
 - `/Users/jack/Programming/pdc/master/RECONCILE.md`
 
-Before any separately authorized rename, the top session must inventory which of these
-or later seats are actually live. Historical names in those files are evidence of shapes,
-not instructions to revive or rename retired sessions.
+If a rename is later separately authorized, its first step is for the top session to
+inventory which of these or later seats are actually live. Historical names in those
+files are evidence of shapes, not instructions to revive or rename retired sessions.
 
-## Complete mechanical seat rules
+## Conditional mechanical seat rules
 
-Apply the first matching row to each live seat:
+After later addressed operator authority and the deployment's roster/owner decisions,
+the authorized migration applies the first matching row to each live seat:
 
 | Seat shape | Legacy address | New address |
 |---|---|---|
@@ -54,10 +58,10 @@ Apply the first matching row to each live seat:
 
 For pdc, `<pair-owner>` includes sub-team pair owners such as `s2-core`, `s2-harness`,
 `s3-pack`, and `s3-open`; a later pdc pair owner follows the same rule. Thus, for example,
-`s3-pack.planner` becomes `s3-pack.pair-planner`, while the sub-team apex
-`s3.orchestrator-planner` keeps its already-correct role word. Do not transform relay
-directory names, dispatch IDs, branch names, or incidental text that merely contains an
-owner-like string.
+`s3-pack.planner` would become `s3-pack.pair-planner`, while the sub-team apex
+`s3.orchestrator-planner` keeps its already-correct role word. Relay directory names,
+dispatch IDs, branch names, and incidental text that merely contains an owner-like string
+remain outside any later migration authority.
 
 ## Apex owner proposal — deployment choice, not acceptance
 
@@ -67,9 +71,9 @@ documented stutter `master.master-planner` (and, symmetrically,
 
 Alongside it, this template proposes that pdc may choose to rename the apex owner from
 `master` to `pdc`, yielding `pdc.master-planner` and `pdc.master-reviewer`. This is only a
-proposal. pdc has not accepted it, and this template does not choose it. The deployment
-must explicitly choose either the mechanical `master.*` owner result or an accepted owner
-rename before its apex agents act.
+proposal. pdc has not accepted it, and this template does not choose it. If migration is
+later authorized, the deployment records an explicit choice between the mechanical
+`master.*` owner result and an accepted owner rename before its apex agents act.
 
 Under D3, agents rename themselves: after separate operator authority and a deployment
 choice, each live agent changes its own seat identity and reports the result upward. No
@@ -77,10 +81,10 @@ top session or peer silently rewrites another agent's identity.
 
 ## Per-host skill-pointer mapping
 
-For each live session, replace the legacy skill pointer it loads with the role-word target
-for its new tier. The source is always the generated plugin tree, never canonical
-`skills/`. Materialize the same mapping independently on every host where that session can
-run.
+After later addressed operator authority, each live session replaces the legacy skill
+pointer it loads with the role-word target for its new tier. The source is always the
+generated plugin tree, never canonical `skills/`. The authorized migration materializes
+the same mapping independently on every host where that session can run.
 
 | Seat use | Legacy dir in `~/.claude/skills` | Role-word dir in `~/.claude/skills` | Generated source |
 |---|---|---|---|
@@ -104,10 +108,11 @@ run.
 | Pair planner | `agent-pair-planner` | `pair-planner` | `plugins/adt-pair/skills/pair-planner` |
 | Pair implementer | `agent-pair-implementer` | `pair-implementer` | `plugins/adt-pair/skills/pair-implementer` |
 
-An old directory name can map to different role words for different tiers. Create the
-new role-word pointer required by each session; do not globally repoint a shared legacy
-alias in a way that changes another session's role. Verify each new pointer resolves to
-the listed `plugins/adt-<tier>/skills/<role-word>` source before that session adopts it.
+An old directory name can map to different role words for different tiers. Under later
+authority, the migration creates the new role-word pointer required by each session and
+does not globally repoint a shared legacy alias in a way that changes another session's
+role. The migration verifies each new pointer resolves to the listed
+`plugins/adt-<tier>/skills/<role-word>` source before that session adopts it.
 
 ## Compatibility and history rule
 
@@ -116,13 +121,16 @@ the listed `plugins/adt-<tier>/skills/<role-word>` source before that session ad
   `.orchestrator-planner` / `.orchestrator-reviewer` uses at other tiers.
 - Going forward: after a seat has completed a separately authorized rename, every newly
   authored relay uses its new tier-specific role word.
-- Immutable history: do not rename, edit, regenerate, or rewrite historical relays,
-  indexes, ledgers, reconciliation records, commits, or archived session records. Old
-  bytes remain old bytes and remain readable.
+- Immutable history: historical relays, indexes, ledgers, reconciliation records,
+  commits, and archived session records remain unchanged. No later migration authority
+  extends to those bytes, which remain readable in their original form.
 
 ## Report-back shape after a later authorized migration
 
-Each agent's later report should identify its old address, its chosen new address, the
-Claude and/or Codex role-word pointer it verified, and the unchanged-history check. Until
-those reports exist and are reconciled, the honest state remains: template delivered,
-rename not proven applied, and apex owner proposal not accepted.
+After a later authorized migration, each agent's report identifies its old address, its
+chosen new address, the Claude and/or Codex role-word pointer it verified, and the
+unchanged-history check. Until those reports exist and are reconciled, the honest state
+remains: template delivered, rename not proven applied, and apex owner proposal not
+accepted.
+
+FINAL_GIT_STATUS_SHORT: <paste the target deployment's literal final git status --short output; use none — clean tree only when empty, or unavailable — reason>
