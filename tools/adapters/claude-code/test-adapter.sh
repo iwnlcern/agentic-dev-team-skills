@@ -12,9 +12,14 @@ skills_root="$tmp/skills"
 mkdir -p "$skills_root/tools"
 cp "$TOOLS_DIR/relay-lint.py" "$skills_root/tools/relay-lint.py"
 mkdir -p "$tmp/work/.relays/run1" "$tmp/work/src"
-cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$tmp/work/.relays/run1/clean.md"
-cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$tmp/work/.relays/run1/dirty-fd1.md"
-cp "$TOOLS_DIR/relay-lint-fixtures/content/E1-empty-final-git-status.md" "$tmp/work/.relays/run1/dirty-e1.md"
+# Explicit-file lint is the authoring path: stamped, fresh filenames are the contract; tests author like agents author.
+stamp="$(date +%Y%m%d-%H%M%S)"
+clean_relay="$tmp/work/.relays/run1/clean-$stamp.md"
+fd1_relay="$tmp/work/.relays/run1/dirty-fd1-$stamp.md"
+e1_relay="$tmp/work/.relays/run1/dirty-e1-$stamp.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$clean_relay"
+cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$fd1_relay"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E1-empty-final-git-status.md" "$e1_relay"
 touch "$tmp/work/.relays/run1/.keep" "$tmp/work/.relays/run1/INDEX.md" "$tmp/work/src/note.md"
 run_hook() {
   local file="$1" skills="$2" home_dir="$3" path_value="$4"
@@ -43,9 +48,9 @@ assert_case() {
 }
 fail=0
 PATH_NORMAL="$PATH"
-assert_case "a-clean-relay" "$tmp/work/.relays/run1/clean.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
-assert_case "b-dirty-fd1" "$tmp/work/.relays/run1/dirty-fd1.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
-assert_case "b2-dirty-e1-tripwire" "$tmp/work/.relays/run1/dirty-e1.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FINAL_GIT_STATUS_SHORT is empty" || fail=1
+assert_case "a-clean-relay" "$clean_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+assert_case "b-dirty-fd1" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
+assert_case "b2-dirty-e1-tripwire" "$e1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FINAL_GIT_STATUS_SHORT is empty" || fail=1
 assert_case "c-non-relay-path" "$tmp/work/src/note.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_case "c2-non-md-relay-root" "$tmp/work/.relays/run1/.keep" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_case "c3-index-md-skipped" "$tmp/work/.relays/run1/INDEX.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
@@ -55,13 +60,13 @@ if PATH="$tmp/bin" command -v relay-lint >/dev/null 2>&1; then
   echo "FAIL d-no-linter: sanitized PATH unexpectedly has relay-lint" >&2
   fail=1
 else
-  assert_case "d-no-linter" "$tmp/work/.relays/run1/clean.md" "$tmp/empty-skills" "$tmp/empty-home" "$tmp/bin" 2 "UNLINTED" || fail=1
+  assert_case "d-no-linter" "$clean_relay" "$tmp/empty-skills" "$tmp/empty-home" "$tmp/bin" 2 "UNLINTED" || fail=1
 fi
 
 # Broken linter should be attributed to linter execution, not relay lint failure.
 broken_skills="$tmp/broken-skills"
 mkdir -p "$broken_skills/tools"
 printf 'definitely not python\n' > "$broken_skills/tools/relay-lint.py"
-assert_case "e-broken-linter" "$tmp/work/.relays/run1/clean.md" "$broken_skills" "$tmp/home" "$PATH_NORMAL" 2 "linter execution failed" || fail=1
+assert_case "e-broken-linter" "$clean_relay" "$broken_skills" "$tmp/home" "$PATH_NORMAL" 2 "linter execution failed" || fail=1
 
 exit "$fail"
