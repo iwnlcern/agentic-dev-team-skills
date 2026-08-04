@@ -1,5 +1,7 @@
 {
-  "author": "Jack Li",
+  "author": {
+    "name": "Jack Li"
+  },
   "description": "Pair-tier planning and implementation skills for governed software work.",
   "keywords": [
     "agents",

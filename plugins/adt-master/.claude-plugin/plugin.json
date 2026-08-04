@@ -1,5 +1,7 @@
 {
-  "author": "Jack Li",
+  "author": {
+    "name": "Jack Li"
+  },
   "description": "Nested pair, orchestration, domain, and master planning skills.",
   "keywords": [
     "agents",

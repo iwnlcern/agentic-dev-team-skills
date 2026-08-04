@@ -243,9 +243,18 @@ def check_strict_json() -> None:
     expect(json_files, "no generated JSON files found")
     for path in json_files:
         try:
-            json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:
             raise AssertionError(f"invalid JSON in {path.relative_to(ROOT)}: {error}") from error
+        if path.name == "plugin.json":
+            expect(
+                set(payload) == {"author", "description", "keywords", "license", "name", "version"},
+                f"plugin manifest schema differs in {path.relative_to(ROOT)}",
+            )
+            expect(
+                payload["author"] == {"name": "Jack Li"},
+                f"plugin manifest author differs in {path.relative_to(ROOT)}: {payload['author']!r}",
+            )
 
 
 def check_inventory() -> None:

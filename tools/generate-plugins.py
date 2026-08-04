@@ -115,7 +115,7 @@ def copy_tree(source: Path, destination: Path) -> None:
 
 def write_plugin_manifest(plugin: str, data: dict[str, object], destination: Path) -> None:
     payload = {
-        "author": "Jack Li",
+        "author": {"name": "Jack Li"},
         "description": data["description"],
         "keywords": list(data["keywords"]),
         "license": "Apache-2.0",

@@ -2,7 +2,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/.claude-plugin/plugin.json",
-    "sha256": "e18908f1bf7bc7b51b25ec8e083a6b9c42305f809472c2ff30e847b8f4fd4afe",
+    "sha256": "9ddb94ea4b8eacc44407e3a25673727631d9383b4bc5ad0d688c3e2d1b5ff0df",
     "source": "tools/generate-plugins.py"
   },
   {
@@ -2108,7 +2108,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/.claude-plugin/plugin.json",
-    "sha256": "6a982f922afbb155da12932c2d08315a131c58fc675b406d82b959d3819d6284",
+    "sha256": "9786c645ac38ad210fa476dcf170246f0cdabf035126b5841a24ca7f1bf6166d",
     "source": "tools/generate-plugins.py"
   },
   {
@@ -4136,7 +4136,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/.claude-plugin/plugin.json",
-    "sha256": "bf625773e550bd602946b5722039e2c0040437a0a65c68a28f09d2e7a732ef52",
+    "sha256": "6134d6511d3096daa4247284aa1cdf0b76027732adb6dec24d39f76374665d9d",
     "source": "tools/generate-plugins.py"
   },
   {
