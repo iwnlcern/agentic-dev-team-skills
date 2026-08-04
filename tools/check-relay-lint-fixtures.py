@@ -110,6 +110,8 @@ EXPECTED = [
     ("file", "content/E14-scopediff-row-after-result.md", 1),
     ("file", "content/E15-dual-scopediff-decoy.md", 1),
     ("file", "content/E16-dual-scopediff-contiguous.md", 1),
+    ("root", "rootindex/R-IDX1-valid", 0),
+    ("root", "rootindex/R-IDX2-decreasing", 1),
     ("file", "fold/FD1-fold-edit-no-foldscope.md", 1),
     ("file", "fold/FD2-valid-fold-report.md", 0),
     ("file", "fold/FD3-out-row-with-edit.md", 1),
@@ -369,6 +371,9 @@ EXPECTED_ERROR_SET = {
     ],
     "p9/P9b-claim-after-scan-blank-line.md": [
         "structurally detectable edit/commit/PR/migration claim lacks ACTIONS_GIT_REF",
+    ],
+    "rootindex/R-IDX2-decreasing": [
+        "INDEX.md: line 4: index time 20260601-110000 precedes the previous row 20260601-120000; an append-only index must be non-decreasing",
     ],
 }
 

@@ -1413,8 +1413,10 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
 
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     result = LintResult()
-    files = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
-    if not files:
+    all_md = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
+    index_files = [p for p in all_md if p.name == "INDEX.md"]
+    files = [p for p in all_md if p.name != "INDEX.md"]
+    if not all_md:
         result.error(f"no .md relay files found under {path}")
         return result
     per_file: List[Tuple[Path, LintResult]] = [(f, lint_file(f, template_mode=template_mode)) for f in files]
@@ -1423,6 +1425,13 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             result.error(f"{f.relative_to(path)}: {e}")
         for w in r.warnings:
             result.warn(f"{f.relative_to(path)}: {w}")
+
+    for idx in index_files:
+        r = lint_relay_index(idx)
+        for e in r.errors:
+            result.error(f"{idx.relative_to(path)}: {e}")
+        for w in r.warnings:
+            result.warn(f"{idx.relative_to(path)}: {w}")
 
     # Cross-file implementation-dispatch lineage. Pair-Planner
     # dispatches are parent-lineage aware when PARENT_DISPATCH_ID is present: the
