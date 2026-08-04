@@ -11,7 +11,7 @@ trap cleanup EXIT
 skills_root="$tmp/skills"
 mkdir -p "$skills_root/tools"
 cp "$TOOLS_DIR/relay-lint.py" "$skills_root/tools/relay-lint.py"
-mkdir -p "$tmp/work/.relays/run1" "$tmp/work/src"
+mkdir -p "$tmp/work/.relays/run1" "$tmp/work/.relays/run2" "$tmp/work/src"
 # Explicit-file lint is the authoring path: stamped, fresh filenames are the contract; tests author like agents author.
 stamp="$(date +%Y%m%d-%H%M%S)"
 clean_relay="$tmp/work/.relays/run1/clean-$stamp.md"
@@ -20,7 +20,9 @@ e1_relay="$tmp/work/.relays/run1/dirty-e1-$stamp.md"
 cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$clean_relay"
 cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$fd1_relay"
 cp "$TOOLS_DIR/relay-lint-fixtures/content/E1-empty-final-git-status.md" "$e1_relay"
-touch "$tmp/work/.relays/run1/.keep" "$tmp/work/.relays/run1/INDEX.md" "$tmp/work/src/note.md"
+index_relay="$tmp/work/.relays/run1/INDEX.md"
+raw_split_index="$tmp/work/.relays/run2/INDEX.md"
+touch "$tmp/work/.relays/run1/.keep" "$index_relay" "$tmp/work/src/note.md"
 run_hook() {
   local file="$1" skills="$2" home_dir="$3" path_value="$4"
   printf '{"tool_input":{"file_path":"%s"}}' "$file" | RELAY_LINT_SKILLS_ROOT="$skills" HOME="$home_dir" PATH="$path_value" "$BASH_BIN" "$HOOK" 2>"$tmp/stderr"
@@ -53,7 +55,22 @@ assert_case "b-dirty-fd1" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL"
 assert_case "b2-dirty-e1-tripwire" "$e1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FINAL_GIT_STATUS_SHORT is empty" || fail=1
 assert_case "c-non-relay-path" "$tmp/work/src/note.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_case "c2-non-md-relay-root" "$tmp/work/.relays/run1/.keep" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
-assert_case "c3-index-md-skipped" "$tmp/work/.relays/run1/INDEX.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+assert_case "c3-empty-index-md" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+printf '%s\n' \
+  '| time | phase | role | dispatch | parent | from | to | cc | status | file |' \
+  '|---|---|---|---|---|---|---|---|---|---|' \
+  '| 20260601-120000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | AUDIT-planner-20260601-120000.md |' \
+  > "$index_relay"
+assert_case "i1-valid-index-md" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+printf '%s\n' '| 20260601-110000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | AUDIT-planner-20260601-110000.md |' >> "$index_relay"
+assert_case "i2-decreasing-index-row" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "precedes the previous row" || fail=1
+printf '%s\n' \
+  '| time | phase | role | dispatch | parent | from | to | cc | status | file |' \
+  '|---|---|---|---|---|---|---|---|---|---|' \
+  '| 20260601-120000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | AUDIT-planner-20260601-120000.md |' \
+  '| 20260601-130000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | raw | split |' \
+  > "$raw_split_index"
+assert_case "i3-raw-split-index-row" "$raw_split_index" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "header declares" || fail=1
 mkdir -p "$tmp/bin" "$tmp/empty-skills" "$tmp/empty-home"
 ln -s "$(command -v python3)" "$tmp/bin/python3"
 if PATH="$tmp/bin" command -v relay-lint >/dev/null 2>&1; then
