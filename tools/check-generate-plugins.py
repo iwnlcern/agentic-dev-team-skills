@@ -1,125 +1,104 @@
 #!/usr/bin/env python3
-"""Behavioral checks for the canonical plugin generator."""
+"""Behavioral acceptance checks for the canonical plugin generator."""
 
 from __future__ import annotations
 
-import hashlib
+import datetime
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-plugins.py"
+PLUGINS_ROOT = ROOT / "plugins"
+PYTHON = "python3"
+
 PLUGINS = {
-    "adt-pair": ("pair-planner", "pair-implementer", "design-grill"),
-    "adt-orchestrator": (
-        "pair-planner",
-        "pair-implementer",
-        "design-grill",
-        "orchestrator-planner",
-        "orchestrator-reviewer",
-        "sprint-doc-setup",
-    ),
-    "adt-master": (
-        "pair-planner",
-        "pair-implementer",
-        "design-grill",
-        "orchestrator-planner",
-        "orchestrator-reviewer",
-        "sprint-doc-setup",
-        "domain-planner",
-        "domain-reviewer",
-        "master-planner",
-        "master-reviewer",
-    ),
-}
-PLUGIN_METADATA = {
-    "adt-pair": {
-        "author": "Jack Li",
-        "description": "Pair-tier planning and implementation skills for governed software work.",
-        "keywords": ["agents", "pair", "planning", "review", "relays"],
-        "license": "Apache-2.0",
-        "name": "adt-pair",
-        "version": "2.9.0",
-    },
+    "adt-pair": {"pair-planner", "pair-implementer", "design-grill"},
     "adt-orchestrator": {
-        "author": "Jack Li",
-        "description": "Nested pair and orchestration skills for governed software work.",
-        "keywords": ["agents", "orchestration", "planning", "review", "relays"],
-        "license": "Apache-2.0",
-        "name": "adt-orchestrator",
-        "version": "2.9.0",
+        "pair-planner",
+        "pair-implementer",
+        "design-grill",
+        "orchestrator-planner",
+        "orchestrator-reviewer",
+        "sprint-doc-setup",
     },
     "adt-master": {
-        "author": "Jack Li",
-        "description": "Nested pair, orchestration, domain, and master planning skills.",
-        "keywords": ["agents", "domain", "master", "orchestration", "relays"],
-        "license": "Apache-2.0",
-        "name": "adt-master",
-        "version": "2.9.0",
-    },
-}
-SHARED_RECIPIENTS = {
-    "protocol.md": set().union(*PLUGINS.values()),
-    "review-panels.md": {"pair-planner", "orchestrator-planner"},
-    "reviewer-spawn-prompts.md": {"pair-planner", "orchestrator-planner"},
-    "design-request-template.md": {"pair-planner", "orchestrator-planner"},
-    "master-tier-boundary.md": {
+        "pair-planner",
+        "pair-implementer",
+        "design-grill",
+        "orchestrator-planner",
+        "orchestrator-reviewer",
+        "sprint-doc-setup",
         "domain-planner",
         "domain-reviewer",
         "master-planner",
         "master-reviewer",
     },
 }
-
-
-def fail(message: str) -> None:
-    print(message, file=sys.stderr)
-    raise SystemExit(1)
+REVIEW_ASSETS = {
+    "review-panels.md",
+    "reviewer-spawn-prompts.md",
+    "design-request-template.md",
+}
+REVIEW_SKILLS = {"pair-planner", "orchestrator-planner"}
+MASTER_SKILLS = {"domain-planner", "domain-reviewer", "master-planner", "master-reviewer"}
+VOCABULARY = (
+    ("Master Planner", "t-x.master-planner"),
+    ("Master Reviewer", "t-x.master-reviewer"),
+    ("Domain Planner", "t-x.domain-planner"),
+    ("Domain Reviewer", "t-x.domain-reviewer"),
+    ("Pair Planner", "t-x.pair-planner"),
+    ("Pair Implementer", "t-x.pair-implementer"),
+    ("Planner", "t-x.planner"),
+)
 
 
 def expect(condition: bool, message: str) -> None:
     if not condition:
-        fail(message)
+        raise AssertionError(message)
 
 
-def run_generator_check(root: Path) -> subprocess.CompletedProcess[str]:
+def output(result: subprocess.CompletedProcess[str]) -> str:
+    return (result.stdout + result.stderr).strip()
+
+
+def run_generator(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(root / "tools" / "generate-plugins.py"), "--check"],
+        [PYTHON, str(root / "tools" / "generate-plugins.py"), *arguments],
         cwd=root,
         text=True,
         capture_output=True,
     )
 
 
-def expected_source(path: str) -> str:
-    parts = path.split("/")
-    if parts[1:3] == [".claude-plugin", "plugin.json"]:
-        return "tools/generate-plugins.py"
-    if parts[1] == "skills":
-        skill, remainder = parts[2], parts[3:]
-        if len(remainder) == 1 and skill in SHARED_RECIPIENTS.get(remainder[0], set()):
-            return f"shared/{remainder[0]}"
-        return "skills/" + skill + "/" + "/".join(remainder)
-    if parts[1] == "tools":
-        return "/".join(parts[1:])
-    if parts[1] == "vendor":
-        return "/".join(parts[1:])
-    if parts[1] == "LICENSE":
-        return "LICENSE"
-    if parts[1] == "LICENSES":
-        return "/".join(parts[1:])
-    raise AssertionError(f"unexpected generated path: {path}")
+def expect_success(result: subprocess.CompletedProcess[str], context: str) -> None:
+    expect(result.returncode == 0, f"{context} exited {result.returncode}: {output(result)}")
 
 
-def copy_check_fixture(destination: Path) -> Path:
+def expect_drift(result: subprocess.CompletedProcess[str], path: str) -> None:
+    expect(result.returncode == 1, f"drift for {path} exited {result.returncode}: {output(result)}")
+    expect(f"different: {path}" in output(result), f"drift for {path} was not reported: {output(result)}")
+
+
+def file_map(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def copy_generator_inputs(destination: Path) -> Path:
+    destination.mkdir(exist_ok=True)
     fixture = destination / "repo"
     fixture.mkdir()
-    for name in ("skills", "shared", "tools", "vendor", "LICENSE", "LICENSES", "plugins"):
+    for name in ("skills", "shared", "tools", "vendor", "LICENSE", "LICENSES"):
         source = ROOT / name
         target = fixture / name
         if source.is_dir():
@@ -129,119 +108,233 @@ def copy_check_fixture(destination: Path) -> Path:
     return fixture
 
 
-def expect_drift(result: subprocess.CompletedProcess[str], category: str, path: str) -> None:
-    output = result.stdout + result.stderr
-    expect(result.returncode == 1, f"{category}-path drift did not exit 1: {output}")
-    expect(f"{category}: {path}" in output, f"{category}-path drift was not reported: {output}")
+def copy_repository_fixture(destination: Path) -> Path:
+    fixture = copy_generator_inputs(destination)
+    shutil.copytree(PLUGINS_ROOT, fixture / "plugins")
+    return fixture
 
 
-def check_drift_reporting() -> None:
+def check_determinism() -> None:
     with tempfile.TemporaryDirectory(prefix="check-generate-plugins-") as temporary:
-        fixture = copy_check_fixture(Path(temporary))
-        missing_path = "adt-pair/skills/pair-planner/SKILL.md"
-        missing_target = fixture / "plugins" / missing_path
-        missing_target.unlink()
-        expect_drift(run_generator_check(fixture), "missing", missing_path)
+        temp_root = Path(temporary)
+        first = copy_generator_inputs(temp_root / "first")
+        second = copy_generator_inputs(temp_root / "second")
+        expect_success(run_generator(first), "first generation")
+        expect_success(run_generator(second), "second generation")
+        expect(file_map(first / "plugins") == file_map(second / "plugins"), "two isolated generations differ")
 
-        extra_path = "adt-pair/extra-plugin-file.txt"
-        (fixture / "plugins" / extra_path).write_text("extra\n", encoding="utf-8")
-        expect_drift(run_generator_check(fixture), "extra", extra_path)
 
-        differing_path = "adt-pair/skills/pair-planner/protocol.md"
-        differing_target = fixture / "plugins" / differing_path
-        differing_target.write_bytes(differing_target.read_bytes() + b"\n")
-        expect_drift(run_generator_check(fixture), "different", differing_path)
+def check_clean() -> None:
+    expect_success(run_generator(ROOT, "--check"), "clean --check")
+
+
+def check_manifest_mutation() -> None:
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-") as temporary:
+        fixture = copy_repository_fixture(Path(temporary))
+        manifest = fixture / "plugins" / "PROVENANCE.json"
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+        expect_drift(run_generator(fixture, "--check"), "PROVENANCE.json")
+        expect_success(run_generator(fixture), "manifest mutation regeneration")
+        expect_success(run_generator(fixture, "--check"), "manifest mutation regenerated --check")
+
+
+def check_banner_mutation() -> None:
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-") as temporary:
+        fixture = copy_repository_fixture(Path(temporary))
+        relative = "adt-pair/skills/pair-planner/SKILL.md"
+        generated = fixture / "plugins" / relative
+        text = generated.read_text(encoding="utf-8")
+        expect(text.startswith("<!-- GENERATED by tools/generate-plugins.py"), "target lacks generated banner")
+        generated.write_text(text.replace("kit v2.9.0", "kit v0.0.0", 1), encoding="utf-8")
+        expect_drift(run_generator(fixture, "--check"), relative)
+
+
+def check_body_mutation() -> None:
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-") as temporary:
+        fixture = copy_repository_fixture(Path(temporary))
+        relative = "adt-pair/skills/pair-planner/SKILL.md"
+        generated = fixture / "plugins" / relative
+        text = generated.read_text(encoding="utf-8")
+        expect("name: pair-planner" in text, "target lacks expected generated skill body")
+        generated.write_text(text.replace("name: pair-planner", "name: altered-planner", 1), encoding="utf-8")
+        expect_drift(run_generator(fixture, "--check"), relative)
+
+
+def check_strict_json() -> None:
+    json_files = sorted(PLUGINS_ROOT.rglob("*.json"))
+    expect(json_files, "no generated JSON files found")
+    for path in json_files:
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise AssertionError(f"invalid JSON in {path.relative_to(ROOT)}: {error}") from error
+
+
+def check_inventory() -> None:
+    actual_plugins = {path.name for path in PLUGINS_ROOT.iterdir() if path.is_dir()}
+    expect(actual_plugins == set(PLUGINS), f"plugin inventory differs: expected {set(PLUGINS)}, got {actual_plugins}")
+    for plugin, expected_skills in PLUGINS.items():
+        actual_skills = {path.name for path in (PLUGINS_ROOT / plugin / "skills").iterdir() if path.is_dir()}
+        expect(
+            actual_skills == expected_skills,
+            f"{plugin} skill inventory differs: missing {expected_skills - actual_skills}, extra {actual_skills - expected_skills}",
+        )
+
+
+def check_adjacency() -> None:
+    for plugin, skills in PLUGINS.items():
+        plugin_root = PLUGINS_ROOT / plugin
+        for skill in skills:
+            skill_root = plugin_root / "skills" / skill
+            expect((skill_root / "protocol.md").is_file(), f"{plugin}/{skill} lacks protocol.md")
+            if skill in REVIEW_SKILLS:
+                for asset in REVIEW_ASSETS:
+                    expect((skill_root / asset).is_file(), f"{plugin}/{skill} lacks {asset}")
+            if skill in MASTER_SKILLS:
+                expect(plugin == "adt-master", f"{plugin}/{skill} is a master-only skill outside adt-master")
+                expect((skill_root / "master-tier-boundary.md").is_file(), f"{plugin}/{skill} lacks master-tier-boundary.md")
+        for required in (
+            "tools/relay-lint.py",
+            "vendor/mattpocock/grill-me/SKILL.md",
+            "LICENSE",
+        ):
+            expect((plugin_root / required).is_file(), f"{plugin} lacks file {required}")
+        for required in ("tools/relay-lint-fixtures", "tools/adapters", "LICENSES"):
+            expect((plugin_root / required).is_dir(), f"{plugin} lacks directory {required}")
+
+
+def install_tier(plugin: str, scratch_base: Path) -> Path:
+    scratch = scratch_base / plugin
+    plugin_root = PLUGINS_ROOT / plugin
+    shutil.copytree(plugin_root / "skills", scratch / "skills")
+    shutil.copytree(plugin_root / "tools", scratch / "tools")
+    return scratch
+
+
+def run_linter(linter: Path, relay: Path, empty_cwd: Path, *, no_freshness: bool = False) -> subprocess.CompletedProcess[str]:
+    arguments = [PYTHON, str(linter), str(relay)]
+    if no_freshness:
+        arguments.append("--no-freshness")
+    return subprocess.run(arguments, cwd=empty_cwd, text=True, capture_output=True)
+
+
+def check_cold_install(scratch_base: Path) -> dict[str, Path]:
+    installations: dict[str, Path] = {}
+    for plugin, skills in PLUGINS.items():
+        scratch = install_tier(plugin, scratch_base)
+        installations[plugin] = scratch
+        for skill in skills:
+            skill_root = scratch / "skills" / skill
+            expect((skill_root / "protocol.md").is_file(), f"{plugin} cold install lacks {skill}/protocol.md")
+            if skill in REVIEW_SKILLS:
+                for asset in REVIEW_ASSETS:
+                    expect((skill_root / asset).is_file(), f"{plugin} cold install lacks {skill}/{asset}")
+            if skill in MASTER_SKILLS:
+                expect((skill_root / "master-tier-boundary.md").is_file(), f"{plugin} cold install lacks {skill}/master-tier-boundary.md")
+        linter = scratch / "tools" / "relay-lint.py"
+        fixture = scratch / "tools" / "relay-lint-fixtures" / "claude" / "A1-valid-audit.md"
+        expect(linter.is_file(), f"{plugin} cold install lacks tools/relay-lint.py")
+        expect(fixture.is_file(), f"{plugin} cold install lacks claude/A1-valid-audit.md")
+        empty_cwd = scratch_base / f"empty-cwd-{plugin}"
+        empty_cwd.mkdir()
+        expect_success(run_linter(linter, fixture, empty_cwd, no_freshness=True), f"{plugin} cold-install linter")
+    return installations
+
+
+def relay_text(role: str, address: str) -> str:
+    return "\n".join(
+        (
+            f"ROLE: {role}",
+            "PHASE: AUDIT",
+            "AUTHORITY: read-only",
+            "DISPATCH_ID: task-7-vocabulary",
+            "CEREMONY_TIER: small",
+            "EVIDENCE_TARGET: E1",
+            "HUMAN_GATE_REQUIRED: no",
+            f"FROM: {address}",
+            "TO: operator",
+            "",
+            "FINAL_GIT_STATUS_SHORT: none — clean tree",
+            "",
+        )
+    )
+
+
+def check_protocol_linter_coherence(installations: dict[str, Path], scratch_base: Path) -> None:
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for plugin, scratch in installations.items():
+        for skill in PLUGINS[plugin]:
+            protocol = (scratch / "skills" / skill / "protocol.md").read_text(encoding="utf-8")
+            for role, address in VOCABULARY:
+                suffix = address.rsplit(".", 1)[1]
+                expect(role in protocol, f"{plugin} {skill} protocol lacks ROLE vocabulary {role}")
+                expect(f"`{suffix}`" in protocol, f"{plugin} {skill} protocol lacks address vocabulary {suffix}")
+        relay_root = scratch / "acceptance-relays"
+        relay_root.mkdir()
+        empty_cwd = scratch_base / f"coherence-empty-cwd-{plugin}"
+        empty_cwd.mkdir()
+        linter = scratch / "tools" / "relay-lint.py"
+        for role, address in VOCABULARY:
+            filename_role = role.lower().replace(" ", "-")
+            relay = relay_root / f"AUDIT-{filename_role}-{stamp}.md"
+            relay.write_text(relay_text(role, address), encoding="utf-8")
+            expect_success(run_linter(linter, relay, empty_cwd), f"{plugin} vocabulary {role}/{address}")
+
+
+def check_no_json_banner() -> None:
+    for path in sorted(PLUGINS_ROOT.rglob("*.json")):
+        first = path.read_bytes()[:1]
+        expect(first not in {b"<", b"#"}, f"comment banner found in {path.relative_to(ROOT)}")
+
+
+def run_check(name: str, check: Callable[[], object]) -> tuple[bool, object | None]:
+    try:
+        result = check()
+    except Exception as error:
+        print(f"FAIL {name}: {error}")
+        return False, None
+    print(f"PASS {name}")
+    return True, result
 
 
 def main() -> int:
     if not GENERATOR.is_file():
-        fail("generate-plugins.py not found")
+        print("FAIL generator present: generate-plugins.py not found")
+        return 1
 
-    result = run_generator_check(ROOT)
-    expect(result.returncode == 0, result.stdout + result.stderr)
+    failures = 0
+    for name, check in (
+        ("determinism", check_determinism),
+        ("clean --check", check_clean),
+        ("manifest mutation", check_manifest_mutation),
+        ("banner mutation", check_banner_mutation),
+        ("body mutation", check_body_mutation),
+        ("strict JSON", check_strict_json),
+        ("inventory", check_inventory),
+        ("adjacency", check_adjacency),
+    ):
+        passed, _ = run_check(name, check)
+        if not passed:
+            failures += 1
 
-    plugins_root = ROOT / "plugins"
-    expected_root_entries = set(PLUGINS) | {"PROVENANCE.json"}
-    expect(
-        {path.name for path in plugins_root.iterdir()} == expected_root_entries,
-        "plugins/ root inventory differs from the three generated bundles and manifest",
-    )
-
-    for plugin, skills in PLUGINS.items():
-        plugin_root = plugins_root / plugin
-        manifest_path = plugin_root / ".claude-plugin" / "plugin.json"
-        manifest_text = manifest_path.read_text(encoding="utf-8")
-        expect(not manifest_text.startswith("<!-- GENERATED"), f"{manifest_path} has a banner")
-        manifest = json.loads(manifest_text)
-        expected_manifest = PLUGIN_METADATA[plugin]
-        expect(set(manifest) == set(expected_manifest), f"{manifest_path} has the wrong schema")
-        expect(manifest == expected_manifest, f"{manifest_path} has the wrong metadata")
-        expect(
-            manifest_text == json.dumps(expected_manifest, indent=2, sort_keys=True) + "\n",
-            f"{manifest_path} is not sorted-key JSON with one trailing newline",
-        )
-        expect(
-            "provisional" not in manifest["description"].lower(),
-            f"{manifest_path} carries a provisional disclosure",
-        )
-        expect(
-            {path.name for path in (plugin_root / "skills").iterdir()} == set(skills),
-            f"{plugin} skill inventory is wrong",
-        )
-        for skill in skills:
-            skill_file = plugin_root / "skills" / skill / "SKILL.md"
-            expect(skill_file.is_file(), f"{skill_file} is missing")
-            expect(
-                skill_file.read_text(encoding="utf-8").startswith("<!-- GENERATED by tools/generate-plugins.py from skills/"),
-                f"{skill_file} lacks its markdown provenance banner",
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-cold-install-") as temporary:
+        scratch_base = Path(temporary)
+        cold_install_passed, installations = run_check("cold install", lambda: check_cold_install(scratch_base))
+        no_banner_passed, _ = run_check("no banner in comment-free formats", check_no_json_banner)
+        if not no_banner_passed:
+            failures += 1
+        if not cold_install_passed:
+            failures += 1
+            print("FAIL protocol/linter coherence: cold install did not produce scratch installations")
+            failures += 1
+        else:
+            coherence_passed, _ = run_check(
+                "protocol/linter coherence",
+                lambda: check_protocol_linter_coherence(installations, scratch_base),
             )
-
-    protocol = plugins_root / "adt-pair" / "skills" / "pair-planner" / "protocol.md"
-    expect(protocol.is_file(), f"{protocol} is missing")
-    expect(
-        protocol.read_text(encoding="utf-8").startswith(
-            "<!-- GENERATED by tools/generate-plugins.py from shared/protocol.md — kit v2.9.0. Do not edit; edit the canonical source. -->\n\n"
-        ),
-        f"{protocol} has the wrong banner",
-    )
-
-    provenance_path = plugins_root / "PROVENANCE.json"
-    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    paths = [entry["path"] for entry in provenance]
-    expect(paths == sorted(paths), "PROVENANCE.json paths are not sorted")
-    expect(
-        [(entry["path"], entry["source"]) for entry in provenance]
-        == sorted((entry["path"], entry["source"]) for entry in provenance),
-        "PROVENANCE.json path/source pairs are not ordered",
-    )
-    expect("PROVENANCE.json" not in paths, "PROVENANCE.json hashes itself")
-    generated_paths = sorted(
-        path.relative_to(plugins_root).as_posix()
-        for path in plugins_root.rglob("*")
-        if path.is_file() and path != provenance_path
-    )
-    expect(paths == generated_paths, "PROVENANCE.json does not inventory every generated file")
-    for entry in provenance:
-        generated = plugins_root / entry["path"]
-        expect(
-            set(entry) == {"path", "source", "sha256", "kit_version"},
-            f"{entry['path']} has the wrong provenance schema",
-        )
-        expect(
-            entry["source"] == expected_source(entry["path"]),
-            f"{entry['path']} has the wrong canonical source",
-        )
-        expect(
-            (ROOT / entry["source"]).is_file(),
-            f"{entry['path']} source does not resolve to a canonical file",
-        )
-        expect(entry["kit_version"] == "2.9.0", f"{entry['path']} has the wrong kit version")
-        expect(
-            entry["sha256"] == hashlib.sha256(generated.read_bytes()).hexdigest(),
-            f"{entry['path']} has the wrong sha256",
-        )
-    check_drift_reporting()
-    return 0
+            if not coherence_passed:
+                failures += 1
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
