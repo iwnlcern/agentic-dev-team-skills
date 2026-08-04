@@ -27,7 +27,7 @@ tools/adapters/claude-code/test-adapter.sh
 
 Merge the JSON from `settings-snippet.json` into `~/.claude/settings.json` after installing `tools/` to the shared skills root. The snippet invokes each hook as `bash <script>`, so it does not depend on a script's execute bit surviving the copy/extract — a `cp -R` or `unzip` that drops the `+x` mode no longer breaks the hooks.
 
-The Write/Edit hook lints relay `*.md` files under a `.relays/` path and skips non-relay and non-md writes. It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
+The Write/Edit hook lints relay `*.md` files under a `.relays/` or visible `relays/` path and skips non-relay and non-md writes. It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
 
 The Bash guard is registered under both `PostToolUse` and `PostToolUseFailure`. It recognizes literal relay-root writes using redirection, `tee`, `cp`, or `mv`. When exactly one existing relay Markdown target can be resolved, the guard lints it with the same linter-location chain as the Write/Edit hook. Multiple, unresolved, or backgrounded targets receive a generic manual-lint advisory without a filename lint claim. Both hooks return exit 2 feedback when advisory attention is needed, distinguish relay-lint failures from linter execution failures, and never hard-block; protocol gates remain authoritative.
 
@@ -49,7 +49,9 @@ Evidence: transport-compliant relays with freelanced bookkeeping repeatedly reac
 
 The Bash advisory guard recognizes literal paths only; variable/`cd`-relative paths, interpreter one-liners, `sed -i`, `git apply`/`checkout`, symlinked roots, and backgrounded-command final state are not verified; advisory coverage, not containment.
 
-Notebook tooling and other host channels remain outside these hooks. The Write/Edit hook matches `*.md` under `.relays/` by convention, so `.markdown` files are skipped. Protocol gates and explicit relay-lint runs remain authoritative.
+Any `.md` under a directory named `relays/` may draw a non-blocking advisory even when it is not a relay; this is bounded by the hooks' exit-2 feedback posture.
+
+Notebook tooling and other host channels remain outside these hooks. The Write/Edit hook matches `*.md` under `.relays/` or `relays/` by convention, so `.markdown` files are skipped. Protocol gates and explicit relay-lint runs remain authoritative.
 
 
 ### Git-state enforcement against silent merges — designed, deferred

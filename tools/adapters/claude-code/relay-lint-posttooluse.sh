@@ -7,8 +7,8 @@ set -u
 file_path="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("file_path", ""))')"
 mode="file"
 case "$file_path" in
-  */.relays/INDEX.md|*/.relays/*/INDEX.md) mode="--index" ;;
-  */.relays/*.md) mode="file" ;;
+  */.relays/INDEX.md|*/.relays/*/INDEX.md|*/relays/INDEX.md|*/relays/*/INDEX.md) mode="--index" ;;
+  */.relays/*.md|*/relays/*.md) mode="file" ;;
   *) exit 0 ;;
 esac
 skills_root="${RELAY_LINT_SKILLS_ROOT:-$HOME/.claude/skills}"

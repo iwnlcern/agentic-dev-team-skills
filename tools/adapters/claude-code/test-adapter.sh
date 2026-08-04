@@ -88,6 +88,44 @@ assert_guard_case() {
 }
 fail=0
 PATH_NORMAL="$PATH"
+
+# v1-v5 name the visible-root recognition boundary. Each shape is exercised
+# through both adapter entry points so their routing cannot drift apart.
+visible_relay="$tmp/work/master/relays/run1/v1-$stamp.md"
+visible_index_root="$tmp/work/master/relays/INDEX.md"
+visible_index_nested="$tmp/work/master/relays/run1/INDEX.md"
+near_miss="$tmp/work/docs/relays-notes.md"
+hidden_relay="$tmp/work/.relays/run1/v4-$stamp.md"
+hidden_index="$tmp/work/.relays/run-v5/INDEX.md"
+mkdir -p "$tmp/work/master/relays/run1" "$tmp/work/.relays/run-v5"
+
+printf 'x\n' > "$visible_relay"
+assert_case "v1-write-visible-relay-root" "$visible_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
+printf 'x\n' > "$visible_relay"
+assert_guard_case "v1-bash-visible-relay-root" "printf x > $visible_relay" false PostToolUse 2 "FAILS lint" || fail=1
+
+: > "$visible_index_root"
+assert_case "v2-write-visible-index-direct-root" "$visible_index_root" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+: > "$visible_index_root"
+assert_guard_case "v2-bash-visible-index-direct-root" "printf x > $visible_index_root" false PostToolUse 2 "no index rows found" || fail=1
+: > "$visible_index_nested"
+assert_case "v2-write-visible-index-nested" "$visible_index_nested" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+: > "$visible_index_nested"
+assert_guard_case "v2-bash-visible-index-nested" "printf x > $visible_index_nested" false PostToolUse 2 "no index rows found" || fail=1
+
+assert_case "v3-write-relays-near-miss" "$near_miss" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+assert_guard_case "v3-bash-relays-near-miss" "printf x > $near_miss" false PostToolUse 0 "" || fail=1
+
+printf 'x\n' > "$hidden_relay"
+assert_case "v4-write-hidden-relay-root" "$hidden_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
+printf 'x\n' > "$hidden_relay"
+assert_guard_case "v4-bash-hidden-relay-root" "printf x > $hidden_relay" false PostToolUse 2 "FAILS lint" || fail=1
+
+: > "$hidden_index"
+assert_case "v5-write-hidden-index" "$hidden_index" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+: > "$hidden_index"
+assert_guard_case "v5-bash-hidden-index" "printf x > $hidden_index" false PostToolUse 2 "no index rows found" || fail=1
+
 assert_case "a-clean-relay" "$clean_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_case "b-dirty-fd1" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
 assert_case "b2-dirty-e1-tripwire" "$e1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FINAL_GIT_STATUS_SHORT is empty" || fail=1

@@ -6,14 +6,14 @@ payload="$(cat)"
 command="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("tool_input",{}).get("command",""))')"
 bg="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(str(d.get("tool_input",{}).get("run_in_background",False)).lower())')"
 case "$command" in
-  *".relays/"*) ;;
+  *".relays/"*|*"/relays/"*) ;;
   *) exit 0 ;;
 esac
 case "$command" in
   *">"*|*"tee "*|*"cp "*|*"mv "*) ;;
   *) exit 0 ;;
 esac
-targets="$(printf '%s' "$command" | grep -oE '[^ >]*\.relays/[^ ;|&"'"'"']*\.md' | sort -u)"
+targets="$(printf '%s' "$command" | grep -oE '[^ >]*(\.relays|/relays)/[^ ;|&"'"'"']*\.md' | sort -u)"
 target_count="$(printf '%s' "$targets" | grep -c . || true)"
 target=""
 [ "$target_count" = "1" ] && target="$targets"
