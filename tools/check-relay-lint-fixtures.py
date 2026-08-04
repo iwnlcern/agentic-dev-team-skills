@@ -22,6 +22,8 @@ EXPECTED = [
     ("file", "rolevocab/RV3a-domain-planner.md", 0),
     ("file", "rolevocab/RV3b-domain-reviewer.md", 0),
     ("file", "rolevocab/RV4-invalid-role.md", 1),
+    ("file", "rolevocab/RV5-planner-from-pair-planner.md", 0),
+    ("file", "rolevocab/RV6-pair-implementer-from-implementer.md", 0),
     ("file", "claude/A1-valid-audit.md", 0),
     ("file", "claude/A2-valid-downgrade.md", 0),
     ("file", "claude/B2-why-before-scan.md", 1),
