@@ -79,9 +79,9 @@ Model-specific files (`model-<family>.md`) follow the same pattern and ship empt
 Host and model files map protocol mechanics onto a host; they never change the protocol, and on conflict the protocol wins.
 """
 
-CODEX_INSTALL_TEXT = """Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
-Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills, audit §5 E1).
-Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills; review finding B5); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
+CODEX_INSTALL_TEXT = """- Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
+  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills, audit §5 E1).
+  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills; review finding B5); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
 """
 
 PDC_CODEX_FORWARD_POINTER = (
