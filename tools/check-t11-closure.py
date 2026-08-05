@@ -54,6 +54,22 @@ def one_value(linter, text: str, label: str, key: str) -> tuple[str | None, int 
     return values[0], None
 
 
+def one_distinct_value(
+    linter, text: str, label: str, key: str
+) -> tuple[str | None, int | None]:
+    values = occurrences(linter, text, key)
+    distinct_values = set(values)
+    if len(distinct_values) != 1:
+        return None, refuse(
+            f"{label}: {key} occurs {len(distinct_values)} times in operational text; "
+            "required exactly 1"
+        )
+    value = next(iter(distinct_values))
+    if value == "":
+        return None, refuse(f"{label}: {key} value is empty")
+    return value, None
+
+
 def require_value(label: str, key: str, got: str, want: str) -> int | None:
     if got != want:
         return refuse(f"{label}: {key} is {got!r}; required {want!r}")
@@ -175,7 +191,7 @@ def run_gate(
             "PARENT_DISPATCH_ID",
             "PLAN_LOCK_ID",
         ):
-            value, error = one_value(linter, review_text, "review relay", key)
+            value, error = one_distinct_value(linter, review_text, "review relay", key)
             if error is not None:
                 return error
             review_values[key] = value or ""
@@ -246,8 +262,17 @@ def read_pins(path: Path) -> tuple[str, str, str, str]:
     return design_path, design_sha, design_id, review_parent
 
 
-def selftest(root: Path) -> int:
-    fixtures = [root / "G1-valid", *sorted(root.glob("R[0-9][0-9]-*"))]
+def selftest(root: Path, only: str | None = None) -> int:
+    fixtures = [
+        root / "G1-valid",
+        root / "G2-duplicate-identical-verdict",
+        *sorted(root.glob("R[0-9][0-9]-*")),
+    ]
+    if only is not None:
+        fixtures = [fixture for fixture in fixtures if fixture.name == only]
+        if not fixtures:
+            print(f"selftest: unknown fixture {only!r}", file=__import__("sys").stderr)
+            return 1
     for fixture in fixtures:
         with tempfile.TemporaryDirectory(prefix="t11closure.") as tmp:
             copied = Path(tmp) / fixture.name
@@ -299,7 +324,7 @@ def selftest(root: Path) -> int:
             expected_stderr = (copied / "expected-reason.txt").read_text(
                 encoding="utf-8"
             )
-            if fixture.name == "G1-valid":
+            if fixture.name in {"G1-valid", "G2-duplicate-identical-verdict"}:
                 good = (
                     status == 0
                     and stdout.getvalue() == "t11-closure: PASS\n"
@@ -312,13 +337,17 @@ def selftest(root: Path) -> int:
                     and stderr.getvalue() == expected_stderr
                 )
             if not good:
+                if only is not None:
+                    print(stderr.getvalue(), end="", file=__import__("sys").stderr)
+                    return 1
                 print(
                     f"selftest: {fixture.name}: status={status} "
                     f"stdout={stdout.getvalue()!r} stderr={stderr.getvalue()!r}",
                     file=__import__("sys").stderr,
                 )
                 return 1
-    print(f"t11-closure selftest: {len(fixtures)}/{len(fixtures)} passed")
+    if only is None:
+        print(f"t11-closure selftest: {len(fixtures)}/{len(fixtures)} passed")
     return 0
 
 
@@ -332,9 +361,10 @@ def main() -> int:
     parser.add_argument("--plan-root", type=Path)
     parser.add_argument("--review-parent")
     parser.add_argument("--selftest", type=Path)
+    parser.add_argument("--only")
     args = parser.parse_args()
     if args.selftest:
-        return selftest(args.selftest)
+        return selftest(args.selftest, args.only)
     if not all(
         (
             args.closure,
