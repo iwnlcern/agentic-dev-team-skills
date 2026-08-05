@@ -252,6 +252,17 @@ def selftest(root: Path) -> int:
         with tempfile.TemporaryDirectory(prefix="t11closure.") as tmp:
             copied = Path(tmp) / fixture.name
             shutil.copytree(fixture, copied)
+            if fixture.name.startswith("R25-"):
+                outside = copied.parent / "outside.md"
+                shutil.copy2(root / "outside.md", outside)
+                try:
+                    outside.read_bytes()
+                except OSError as exc:
+                    print(
+                        f"selftest: {fixture.name}: readable outside target missing: {exc}",
+                        file=__import__("sys").stderr,
+                    )
+                    return 1
             if fixture.name.startswith("R26-"):
                 replacement = str(copied.resolve())
                 for name in ("parent.md", "review.md"):
