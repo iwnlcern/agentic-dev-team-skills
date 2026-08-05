@@ -11,7 +11,7 @@ result as a durable artifact so downstream agents inherit the decisions.
 
 This step adds **no mechanical gate**. Nothing here is linted and `GRILL_LOCK` is not a
 relay phase or a relay field — it is a durable design sub-artifact. The phase boundaries,
-dispatch tokens, and merge gate in `protocol.md` are unchanged and remain the only
+dispatch tokens, and merge gate in the role skills' adjacent `protocol.md` are unchanged and remain the only
 enforced surfaces. Grilling is a human-alignment tool, not an authority or evidence gate;
 it does not substitute for any mechanical artifact.
 

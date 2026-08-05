@@ -82,7 +82,8 @@ Code marketplace, then install the tier you need:
 ```
 
 Manual/drop-in: copy `plugins/adt-<tier>/skills/*` into the host skills root and
-`plugins/adt-<tier>/tools/` alongside. The generated tree is itself the drop-in bundle.
+`plugins/adt-<tier>/tools/`, `plugins/adt-<tier>/vendor/`, and
+`plugins/adt-<tier>/LICENSES/` alongside. The generated tree is itself the drop-in bundle.
 
 Do not install the canonical `skills/` dirs directly. They are sources, not install artifacts;
 installing them directly ships broken skills (no adjacent `protocol.md`).

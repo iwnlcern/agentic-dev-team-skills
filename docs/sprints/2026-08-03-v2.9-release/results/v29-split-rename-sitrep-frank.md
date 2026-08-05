@@ -54,6 +54,7 @@ the authorized migration applies the first matching row to each live seat:
 | Domain implementer/reviewer seat | `m-N.implementer` | `m-N.domain-reviewer` |
 | Sub-team apex planner | `sN.orchestrator-planner` | `sN.orchestrator-planner` (already the new role word) |
 | Sub-team apex reviewer | `sN.orchestrator-reviewer` | `sN.orchestrator-reviewer` (already the new role word) |
+| Legacy third reviewer seat | `sN.reviewer` | retired in place (not renamed) |
 | Pair planner, including a sub-team or direct slice pair | `<pair-owner>.planner` | `<pair-owner>.pair-planner` |
 | Pair implementer, including a sub-team or direct slice pair | `<pair-owner>.implementer` | `<pair-owner>.pair-implementer` |
 
@@ -111,6 +112,11 @@ the same mapping independently on every host where that session can run.
 | Pair planner | `agent-pair-planner` | `pair-planner` | `plugins/adt-pair/skills/pair-planner` |
 | Pair implementer | `agent-pair-implementer` | `pair-implementer` | `plugins/adt-pair/skills/pair-implementer` |
 
+For manual/drop-in installation, each session also copies
+`plugins/adt-<tier>/tools/`, `plugins/adt-<tier>/vendor/`, and
+`plugins/adt-<tier>/LICENSES/` alongside the generated skills. The `vendor/` and
+`LICENSES/` directories preserve the vendored `grill-me` skill and its MIT notice.
+
 An old directory name can map to different role words for different tiers. Under later
 authority, the migration creates the new role-word pointer required by each session and
 does not globally repoint a shared legacy alias in a way that changes another session's
@@ -120,7 +126,7 @@ role. The migration verifies each new pointer resolves to the listed
 ## Compatibility and history rule
 
 - Permanent legacy readability: classifiers and readers must continue to accept existing
-  legacy role/address forms, including bare `.planner` / `.implementer` and historical
+  legacy role/address forms, including bare `.planner` / `.implementer` / `.reviewer` and historical
   `.orchestrator-planner` / `.orchestrator-reviewer` uses at other tiers.
 - Going forward: after a seat has completed a separately authorized rename, every newly
   authored relay uses its new tier-specific role word.

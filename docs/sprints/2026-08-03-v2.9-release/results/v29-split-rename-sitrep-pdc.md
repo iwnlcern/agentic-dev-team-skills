@@ -108,6 +108,11 @@ the same mapping independently on every host where that session can run.
 | Pair planner | `agent-pair-planner` | `pair-planner` | `plugins/adt-pair/skills/pair-planner` |
 | Pair implementer | `agent-pair-implementer` | `pair-implementer` | `plugins/adt-pair/skills/pair-implementer` |
 
+For manual/drop-in installation, each session also copies
+`plugins/adt-<tier>/tools/`, `plugins/adt-<tier>/vendor/`, and
+`plugins/adt-<tier>/LICENSES/` alongside the generated skills. The `vendor/` and
+`LICENSES/` directories preserve the vendored `grill-me` skill and its MIT notice.
+
 An old directory name can map to different role words for different tiers. Under later
 authority, the migration creates the new role-word pointer required by each session and
 does not globally repoint a shared legacy alias in a way that changes another session's

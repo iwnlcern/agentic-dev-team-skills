@@ -84,6 +84,7 @@ TOOLS_SET = (
     "relay-lint-fixtures",
     "adapters",
 )
+VERBATIM_COPY_ROOTS = tuple(f"tools/{path}" for path in TOOLS_SET) + ("vendor",)
 
 
 def sorted_files(path: Path) -> Iterable[Path]:
@@ -100,7 +101,18 @@ def banner(source: str, suffix: str, data: bytes) -> bytes:
         "Do not edit; edit the canonical source."
     ).encode("utf-8")
     if suffix == ".md":
-        return b"<!-- " + message + b" -->\n\n" + data
+        comment = b"<!-- " + message + b" -->\n"
+        if data.startswith(b"---"):
+            if not data.startswith(b"---\n"):
+                raise ValueError(f"frontmatter in {source} does not start with a standalone --- delimiter")
+            closing = data.find(b"\n---\n", 4)
+            if closing < 0:
+                raise ValueError(f"frontmatter in {source} has no closing --- delimiter")
+            frontmatter_end = closing + len(b"\n---\n")
+            rendered = data[:frontmatter_end] + b"\n" + comment + data[frontmatter_end:]
+            assert rendered.startswith(b"---"), f"frontmatter moved away from byte zero in {source}"
+            return rendered
+        return comment + b"\n" + data
     if suffix in {".py", ".sh"}:
         prefix = b"# " + message + b"\n\n"
         if data.startswith(b"#!"):
@@ -110,9 +122,15 @@ def banner(source: str, suffix: str, data: bytes) -> bytes:
     return data
 
 
+def is_verbatim_copy(source: str) -> bool:
+    return any(source == root or source.startswith(f"{root}/") for root in VERBATIM_COPY_ROOTS)
+
+
 def copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    rendered = banner(source_relative(source), source.suffix, source.read_bytes())
+    relative = source_relative(source)
+    data = source.read_bytes()
+    rendered = data if is_verbatim_copy(relative) else banner(relative, source.suffix, data)
     destination.write_bytes(rendered)
     destination.chmod(stat.S_IMODE(source.stat().st_mode))
 

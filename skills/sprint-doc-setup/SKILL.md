@@ -6,7 +6,7 @@ description: Use when setting up or maintaining the working document tree for an
 
 # Sprint Doc Setup
 
-Use this skill to create or maintain the file substrate for one orchestrator-team sprint. This skill owns **where sprint documents and relays live**, their naming conventions, and lint-clean relay formatting. It does not define relay semantics; use the role skills' `protocol.md` for authority, dispatch, merge, scope, and evidence rules.
+Use this skill to create or maintain the file substrate for one orchestrator-team sprint. This skill owns **where sprint documents and relays live**, their naming conventions, and lint-clean relay formatting. It does not define relay semantics; use the role skills' adjacent `protocol.md` for authority, dispatch, merge, scope, and evidence rules.
 
 ## Mandatory prerequisites
 
@@ -54,7 +54,7 @@ For a standalone pair run, the operator boots seats directly; do not create a `b
 
 ## Header convention
 
-Use the canonical header fields from `protocol.md`:
+Use the canonical header fields from the role skills' adjacent `protocol.md`:
 
 ```text
 ROLE:
@@ -76,7 +76,7 @@ CC:
 ## Naming conventions
 
 - `RUN_ID`: short dotted or hyphenated run id, e.g. `site-qi-2026-06-19`.
-- `DISPATCH_ID`: stable per commissioned work cycle, named by work, not phase — `v29-split`, not `v29-audit-split`; successor phases reuse the cycle's ID. `protocol.md` remains the semantic authority for cycle semantics.
+- `DISPATCH_ID`: stable per commissioned work cycle, named by work, not phase — `v29-split`, not `v29-audit-split`; successor phases reuse the cycle's ID. The role skills' adjacent `protocol.md` remains the semantic authority for cycle semantics.
 - Addresses: dotted lowercase owner-role form, e.g. `qi-a.planner`, `qi-a.implementer`, `site-qi.orchestrator-planner`.
 - Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC. Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence. `relay-lint` fails an impossible or drifted stamp, and `relay-lint --index` fails an index whose `time` column decreases or disagrees with the filename it points at.
 
@@ -102,7 +102,7 @@ RECONCILE    -> RECONCILE.md updates or a tracked reconcile doc
 - `INDEX.md` is routing context, not an authority relay.
 - Do not proxy-author relays for another seat. `FROM` is your own address.
 - Append each new `INDEX.md` row at the END of the file, after the last existing row, in write order; never tuck a row next to your seat's earlier row or group rows by owner/role. That grouping is a read-modify-write upsert and races during concurrent work.
-- Do not let this skill redefine relay semantics. It adopts the schema in `protocol.md`.
+- Do not let this skill redefine relay semantics. It adopts the schema in the role skills' adjacent `protocol.md`.
 
 ## Deliverable
 
