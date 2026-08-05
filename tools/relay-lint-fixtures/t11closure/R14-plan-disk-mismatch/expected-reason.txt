@@ -1,0 +1,1 @@
+t11-closure: plan file digest mismatch: recomputed sha256 does not equal the declared lock
