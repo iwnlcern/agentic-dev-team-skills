@@ -85,9 +85,9 @@ Manual/drop-in: copy `plugins/adt-<tier>/skills/*` into the host skills root and
 `plugins/adt-<tier>/tools/`, `plugins/adt-<tier>/vendor/`, and
 `plugins/adt-<tier>/LICENSES/` alongside. The generated tree is itself the drop-in bundle.
 
-Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
-Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills, audit §5 E1).
-Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills; review finding B5); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
+- Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
+  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills, audit §5 E1).
+  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills; review finding B5); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
 
 Do not install the canonical `skills/` dirs directly. They are sources, not install artifacts;
 installing them directly ships broken skills (no adjacent `protocol.md`).
