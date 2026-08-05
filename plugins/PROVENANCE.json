@@ -260,19 +260,19 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "2483e051717f851177f34d81742c9dad5e0cc1738c4fbb834413aae25b39452a",
+    "sha256": "76872de5fe29ad01e4b2489f77410cdd529fa805be57029e998272db6e82add2",
     "source": "tools/adapters/README.md"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/claude-code/bash-relay-guard.sh",
-    "sha256": "cdc57021d56038fbabf3a2152d3e317a57da9b17a6b83bd3190c764d5fdffa2d",
+    "sha256": "0b31217f978c7c794877e3614a2ba1f0201b708a48b424cd0b1ee10414688b48",
     "source": "tools/adapters/claude-code/bash-relay-guard.sh"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/claude-code/relay-lint-posttooluse.sh",
-    "sha256": "92eda991de1a10b138b4a6b41c3c4ef0783de148fa735d2faff52ed64af92950",
+    "sha256": "e6df5fad2d9c702ab214d1dfe854b7d63a497fd49e775165e97f959a3b94bd6b",
     "source": "tools/adapters/claude-code/relay-lint-posttooluse.sh"
   },
   {
@@ -284,7 +284,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9f0d87ef762898f489c96c796d267532704fc02aa4c7101e22bae2385db3b35f",
+    "sha256": "08935cb572c84a4ea8eba9deaaf94b3fec68a39fdf4ce67f110e613bc78c2913",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -2312,19 +2312,19 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "2483e051717f851177f34d81742c9dad5e0cc1738c4fbb834413aae25b39452a",
+    "sha256": "76872de5fe29ad01e4b2489f77410cdd529fa805be57029e998272db6e82add2",
     "source": "tools/adapters/README.md"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/claude-code/bash-relay-guard.sh",
-    "sha256": "cdc57021d56038fbabf3a2152d3e317a57da9b17a6b83bd3190c764d5fdffa2d",
+    "sha256": "0b31217f978c7c794877e3614a2ba1f0201b708a48b424cd0b1ee10414688b48",
     "source": "tools/adapters/claude-code/bash-relay-guard.sh"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/claude-code/relay-lint-posttooluse.sh",
-    "sha256": "92eda991de1a10b138b4a6b41c3c4ef0783de148fa735d2faff52ed64af92950",
+    "sha256": "e6df5fad2d9c702ab214d1dfe854b7d63a497fd49e775165e97f959a3b94bd6b",
     "source": "tools/adapters/claude-code/relay-lint-posttooluse.sh"
   },
   {
@@ -2336,7 +2336,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9f0d87ef762898f489c96c796d267532704fc02aa4c7101e22bae2385db3b35f",
+    "sha256": "08935cb572c84a4ea8eba9deaaf94b3fec68a39fdf4ce67f110e613bc78c2913",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -4292,19 +4292,19 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "2483e051717f851177f34d81742c9dad5e0cc1738c4fbb834413aae25b39452a",
+    "sha256": "76872de5fe29ad01e4b2489f77410cdd529fa805be57029e998272db6e82add2",
     "source": "tools/adapters/README.md"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/claude-code/bash-relay-guard.sh",
-    "sha256": "cdc57021d56038fbabf3a2152d3e317a57da9b17a6b83bd3190c764d5fdffa2d",
+    "sha256": "0b31217f978c7c794877e3614a2ba1f0201b708a48b424cd0b1ee10414688b48",
     "source": "tools/adapters/claude-code/bash-relay-guard.sh"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/claude-code/relay-lint-posttooluse.sh",
-    "sha256": "92eda991de1a10b138b4a6b41c3c4ef0783de148fa735d2faff52ed64af92950",
+    "sha256": "e6df5fad2d9c702ab214d1dfe854b7d63a497fd49e775165e97f959a3b94bd6b",
     "source": "tools/adapters/claude-code/relay-lint-posttooluse.sh"
   },
   {
@@ -4316,7 +4316,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9f0d87ef762898f489c96c796d267532704fc02aa4c7101e22bae2385db3b35f",
+    "sha256": "08935cb572c84a4ea8eba9deaaf94b3fec68a39fdf4ce67f110e613bc78c2913",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {

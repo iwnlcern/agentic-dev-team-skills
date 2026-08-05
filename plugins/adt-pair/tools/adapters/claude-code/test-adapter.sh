@@ -212,4 +212,107 @@ else
   fail=1
 fi
 
+# f0-f4 pin the complete four-step resolution order:
+# configured root -> ~/.agents/skills -> deprecated ~/.codex/skills -> PATH.
+# f0: a live configured root beats a conflicting .agents linter.
+# f1: .agents beats the deprecated root when the configured root is absent.
+# f2: the deprecated root still resolves alone.
+# f3: the deprecated root beats a conflicting PATH linter.
+# f4: PATH resolves when no filesystem root exists.
+fallback_home="$tmp/home-fallback"
+mkdir -p "$fallback_home/.agents/skills/tools" "$fallback_home/.codex/skills/tools"
+cp "$TOOLS_DIR/relay-lint.py" "$fallback_home/.agents/skills/tools/relay-lint.py"
+printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("DECOY-CODEX-LINTER", file=sys.stderr)' 'sys.exit(1)' \
+  > "$fallback_home/.codex/skills/tools/relay-lint.py"
+absent_root="$tmp/no-such-skills-root"
+fallback_relay="$tmp/work/.relays/run1/fallback-$stamp.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$fallback_relay"
+
+confroot_home="$tmp/home-confroot"
+mkdir -p "$confroot_home/.agents/skills/tools"
+printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("DECOY-AGENTS-LINTER", file=sys.stderr)' 'sys.exit(1)' \
+  > "$confroot_home/.agents/skills/tools/relay-lint.py"
+
+# PATH is decoy-armed for f0-f3: an ambient relay-lint on the host must never
+# be reachable as a silent lower fallthrough, or precedence passes stop being
+# exclusive to the claimed winner (R8).
+decoy_bin="$tmp/decoy-bin"
+mkdir -p "$decoy_bin"
+printf '%s\n' '#!/bin/sh' 'echo "DECOY-PATH-LINTER" >&2' 'exit 1' > "$decoy_bin/relay-lint"
+chmod +x "$decoy_bin/relay-lint"
+PATH_WITH_DECOY="$decoy_bin:$PATH_NORMAL"
+
+assert_case "f0-write-confroot-beats-agents" "$fallback_relay" "$skills_root" "$confroot_home" "$PATH_WITH_DECOY" 0 "" || fail=1
+run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$skills_root" "$confroot_home" "$PATH_WITH_DECOY"
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL f0-bash-confroot-beats-agents: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS f0-bash-confroot-beats-agents"
+fi
+
+assert_case "f1-write-agents-beats-deprecated" "$fallback_relay" "$absent_root" "$fallback_home" "$PATH_WITH_DECOY" 0 "" || fail=1
+run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$fallback_home" "$PATH_WITH_DECOY"
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL f1-bash-agents-beats-deprecated: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS f1-bash-agents-beats-deprecated"
+fi
+
+rm "$fallback_home/.agents/skills/tools/relay-lint.py"
+assert_case "f2-write-deprecated-still-resolves" "$fallback_relay" "$absent_root" "$fallback_home" "$PATH_WITH_DECOY" 2 "DECOY-CODEX-LINTER" || fail=1
+run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$fallback_home" "$PATH_WITH_DECOY"
+rc=$?
+if [ "$rc" -ne 2 ] || ! grep -Fq "DECOY-CODEX-LINTER" "$tmp/stderr"; then
+  echo "FAIL f2-bash-deprecated-still-resolves: expected exit 2 with decoy marker, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS f2-bash-deprecated-still-resolves"
+fi
+
+pathbeat_home="$tmp/home-pathbeat"
+mkdir -p "$pathbeat_home/.codex/skills/tools"
+cp "$TOOLS_DIR/relay-lint.py" "$pathbeat_home/.codex/skills/tools/relay-lint.py"
+
+assert_case "f3-write-deprecated-beats-path" "$fallback_relay" "$absent_root" "$pathbeat_home" "$PATH_WITH_DECOY" 0 "" || fail=1
+run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$pathbeat_home" "$PATH_WITH_DECOY"
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL f3-bash-deprecated-beats-path: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS f3-bash-deprecated-beats-path"
+fi
+
+empty_home="$tmp/home-empty"
+mkdir -p "$empty_home"
+real_bin="$tmp/real-bin"
+mkdir -p "$real_bin"
+printf '%s\n' '#!/bin/sh' "exec python3 \"$TOOLS_DIR/relay-lint.py\" \"\$@\"" > "$real_bin/relay-lint"
+chmod +x "$real_bin/relay-lint"
+PATH_WITH_REAL="$real_bin:$PATH_NORMAL"
+
+assert_case "f4-write-path-only-resolves" "$fallback_relay" "$absent_root" "$empty_home" "$PATH_WITH_REAL" 0 "" || fail=1
+run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$empty_home" "$PATH_WITH_REAL"
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL f4-bash-path-only-resolves: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS f4-bash-path-only-resolves"
+fi
+
+# l1 pins D1's byte-identity mandate: the resolution ladder must stay
+# byte-identical across both hook entry points (variants Task 4 Step 2 extraction).
+awk '/^if \[ -f "\$skills_root\/tools\/relay-lint\.py" \]/,/^  run_lint relay-lint$/' \
+  "$SCRIPT_DIR/relay-lint-posttooluse.sh" > "$tmp/ladder-hook"
+awk '/^if \[ -f "\$skills_root\/tools\/relay-lint\.py" \]/,/^  run_lint relay-lint$/' \
+  "$SCRIPT_DIR/bash-relay-guard.sh" > "$tmp/ladder-guard"
+if [ ! -s "$tmp/ladder-hook" ]; then
+  echo "FAIL l1-ladder-byte-identity: empty extraction — awk range did not match" >&2; fail=1
+elif ! cmp -s "$tmp/ladder-hook" "$tmp/ladder-guard"; then
+  echo "FAIL l1-ladder-byte-identity: resolution ladders differ between hook and guard" >&2
+  diff "$tmp/ladder-hook" "$tmp/ladder-guard" >&2; fail=1
+else
+  echo "PASS l1-ladder-byte-identity"
+fi
+
 exit "$fail"

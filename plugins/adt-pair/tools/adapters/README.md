@@ -9,10 +9,12 @@ Copy the entire `tools/` directory to the shared skills root before enabling ada
 ```bash
 cp -R tools "$HOME/.claude/skills/tools"
 # or for Codex-host installs:
-cp -R tools "$HOME/.codex/skills/tools"
+cp -R tools "$HOME/.agents/skills/tools"
 ```
 
-`<skills-root>` means the directory containing the four role skill folders, not an individual role directory. The Claude Code hook resolves relay-lint in this order: `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py`, `$HOME/.codex/skills/tools/relay-lint.py`, then `relay-lint` on `PATH`.
+`~/.codex/skills` remains a working deprecated fallback destination; new installs use `~/.agents/skills`, matching Codex's own back-compat posture.
+
+`<skills-root>` means the skills root the installed skill tree was resolved from — each generated plugin tree ships its own `tools/`. Both hooks resolve relay-lint in this order: `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py`, `$HOME/.agents/skills/tools/relay-lint.py`, `$HOME/.codex/skills/tools/relay-lint.py` (deprecated), then `relay-lint` on `PATH`.
 
 ## Shipped adapter: Claude Code relay-write hooks
 

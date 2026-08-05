@@ -41,7 +41,10 @@ run_lint() {
 }
 if [ -f "$skills_root/tools/relay-lint.py" ]; then
   run_lint python3 "$skills_root/tools/relay-lint.py"
+elif [ -f "$HOME/.agents/skills/tools/relay-lint.py" ]; then
+  run_lint python3 "$HOME/.agents/skills/tools/relay-lint.py"
 elif [ -f "$HOME/.codex/skills/tools/relay-lint.py" ]; then
+  # deprecated Codex root, retained for back-compat
   run_lint python3 "$HOME/.codex/skills/tools/relay-lint.py"
 elif command -v relay-lint >/dev/null 2>&1; then
   run_lint relay-lint
