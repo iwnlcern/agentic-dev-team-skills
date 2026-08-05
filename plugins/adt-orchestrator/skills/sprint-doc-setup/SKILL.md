@@ -1,6 +1,5 @@
 ---
 name: sprint-doc-setup
-
 description: Use when setting up or maintaining the working document tree for an orchestrator-team sprint. Requires Superpowers.
 ---
 

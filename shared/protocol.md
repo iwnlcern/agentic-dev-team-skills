@@ -6,6 +6,13 @@ Use this protocol for substantive relays, reviews, sitreps, plan verdicts, imple
 
 This protocol defines workflow scope only. It does not ask any agent to bypass platform, tool, repository, safety, or operator restrictions. If an instruction conflicts with a higher-priority policy or tool boundary, pause and report the conflict.
 
+## Host adaptation
+
+Claude Code is the default host and has no adaptation file.
+If your harness is something else, read the matching `harness-<host>.md` beside this protocol before acting — `harness-codex.md` for OpenAI Codex.
+Model-specific files (`model-<family>.md`) follow the same pattern and ship empty: one may be added only when it cites a reproducible failure, and it is deleted when the failure stops reproducing.
+Host and model files map protocol mechanics onto a host; they never change the protocol, and on conflict the protocol wins.
+
 ## Minimal phase header
 
 Use the compact header below for substantive outputs. Add tier/risk-dependent fields only when they affect routing, merge, lineage, or verification.

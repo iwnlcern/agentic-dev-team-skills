@@ -55,17 +55,20 @@ PLUGINS = {
     },
 }
 
+ROLE_SKILLS = (
+    "pair-planner",
+    "pair-implementer",
+    "orchestrator-planner",
+    "orchestrator-reviewer",
+    "master-planner",
+    "master-reviewer",
+    "domain-planner",
+    "domain-reviewer",
+)
+
 SHARED_MAP = {
-    "protocol.md": (
-        "pair-planner",
-        "pair-implementer",
-        "orchestrator-planner",
-        "orchestrator-reviewer",
-        "master-planner",
-        "master-reviewer",
-        "domain-planner",
-        "domain-reviewer",
-    ),
+    "harness-codex.md": ROLE_SKILLS,
+    "protocol.md": ROLE_SKILLS,
     "review-panels.md": ("pair-planner", "orchestrator-planner"),
     "reviewer-spawn-prompts.md": ("pair-planner", "orchestrator-planner"),
     "design-request-template.md": ("pair-planner", "orchestrator-planner"),

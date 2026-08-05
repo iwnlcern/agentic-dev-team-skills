@@ -113,6 +113,8 @@ For manual/drop-in installation, each session also copies
 `plugins/adt-<tier>/LICENSES/` alongside the generated skills. The `vendor/` and
 `LICENSES/` directories preserve the vendored `grill-me` skill and its MIT notice.
 
+For Codex, `.agents/skills` is the current convention; `~/.codex/skills` remains a working deprecated destination.
+
 An old directory name can map to different role words for different tiers. Under later
 authority, the migration creates the new role-word pointer required by each session and
 does not globally repoint a shared legacy alias in a way that changes another session's
