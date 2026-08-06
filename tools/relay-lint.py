@@ -693,6 +693,16 @@ def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
             f"authority semantics for FROM role {role!r} are unruled; "
             "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling"
         )
+    elif fields.get("DESIGN_LOCK_ID") or fields.get("DESIGN_RECORD_KIND"):
+        errors.append(
+            f"authority semantics for FROM role {role!r} are unruled; "
+            "a design-lock claim from this seat is fail-closed pending the orchestrator ruling"
+        )
+    if fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() == "yes":
+        errors.append(
+            f"authority semantics for FROM role {role!r} are unruled; "
+            "a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling"
+        )
     return errors
 
 
@@ -1743,6 +1753,8 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             lambda it: len(actor_from) == 1
             and own_line_dispatch_present(it[4])
             and (lambda t: len(t) == 1
+                 and address_role(t[0]) is not None
+                 and address_role(actor_from[0]) is not None
                  and address_owner(t[0]) == address_owner(actor_from[0])
                  and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0])))(
                 split_addresses(it[3].get("TO"))
@@ -1771,7 +1783,9 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             continue
         parent_to = split_addresses(pfields.get("TO"))
         if len(actor_from) == 1 and len(parent_to) == 1 and not (
-            address_owner(actor_from[0]) == address_owner(parent_to[0])
+            address_role(actor_from[0]) is not None
+            and address_role(parent_to[0]) is not None
+            and address_owner(actor_from[0]) == address_owner(parent_to[0])
             and canonical_role(address_role(actor_from[0])) == canonical_role(address_role(parent_to[0]))
         ):
             result.error(f"{f.relative_to(path)}: IMPL report FROM {actor_from[0]!r} is not the addressee of the parent DISPATCH IMPL relay")

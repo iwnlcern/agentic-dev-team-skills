@@ -26,6 +26,9 @@ EXPECTED = [
     ("file", "rolevocab/RV6-pair-implementer-from-implementer.md", 0),
     ("file", "rolevocab/RV7a-master-dispatch-failclosed.md", 1),
     ("file", "rolevocab/RV7b-domain-direct-override.md", 1),
+    ("file", "rolevocab/RV7e-domain-designlock-kind.md", 1),
+    ("file", "rolevocab/RV7e2-domain-designlock-id-only.md", 1),
+    ("file", "rolevocab/RV7f-master-delegated-authority.md", 1),
     ("root", "rolevocab/RV5-new-vocab-chain", 0),
     ("root", "rolevocab/RV5d-newvocab-designdoc-chain", 0),
     ("root", "rolevocab/RV5dneg-designdoc-no-approve", 1),
@@ -33,6 +36,11 @@ EXPECTED = [
     ("root", "rolevocab/RV6i-mixed-dispatch-implreport", 0),
     ("root", "rolevocab/RV7a-master-dispatch-failclosed", 1),
     ("root", "rolevocab/RV7b-domain-direct-override", 1),
+    ("root", "rolevocab/RV7e-domain-designlock-kind", 1),
+    ("root", "rolevocab/RV7e2-domain-designlock-id-only", 1),
+    ("root", "rolevocab/RV7f-master-delegated-authority", 1),
+    ("root", "rolevocab/RV7g-malformed-address-hardening", 1),
+    ("root", "rolevocab/AMB4-multiholder-malformed", 1),
     ("root", "rolevocab/RV7c-master-merge-grant", 1),
     ("root", "rolevocab/RV7d-master-broadset-no-fire", 0),
     ("root", "rolevocab/RVn1-cross-owner-review", 1),
@@ -201,6 +209,15 @@ EXPECTED_ERROR_SET = {
     "rolevocab/RV7b-domain-direct-override.md": [
         "authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
     ],
+    "rolevocab/RV7e-domain-designlock-kind.md": [
+        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e2-domain-designlock-id-only.md": [
+        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7f-master-delegated-authority.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
     "rolevocab/RV5dneg-designdoc-no-approve": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
     ],
@@ -209,6 +226,27 @@ EXPECTED_ERROR_SET = {
     ],
     "rolevocab/RV7b-domain-direct-override": [
         "RV7b-domain-direct-override.md: authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e-domain-designlock-kind": [
+        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e2-domain-designlock-id-only": [
+        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7f-master-delegated-authority": [
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7g-malformed-address-hardening": [
+        "01-dispatch.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "01-dispatch.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+        "02-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-impl-report.md: IMPL report FROM 'qi.grand-vizier' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB4-multiholder-malformed": [
+        "02-dispatch-malformed-to.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-dispatch-malformed-to.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+        "03-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "03-impl-report.md: IMPL report parent 'amb4' is held by 2 relays (01-noise.md, 02-dispatch-malformed-to.md); none is an earlier DISPATCH IMPL relay addressed to qi.grand-vizier",
     ],
     "rolevocab/RV7c-master-merge-grant": [
         "02-impl-report.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
