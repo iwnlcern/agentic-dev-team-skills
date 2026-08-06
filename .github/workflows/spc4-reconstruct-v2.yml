@@ -1,0 +1,197 @@
+name: SPC4 reconstruction v2
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-reconstruct-v2.yml'
+      - 'spc4/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DATASET_DOI: 'doi:10.7910/DVN/YBDTBT'
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Record system information
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p results
+          uname -a | tee results/uname.txt
+          python --version | tee results/python-version.txt
+          java -version 2>&1 | tee results/java-version.txt
+          df -h | tee results/disk-before.txt
+
+      - name: Fetch Harvard Dataverse metadata and data files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip requests
+          mkdir -p results/dataverse/files results/dataverse/extracted
+          python - <<'PY'
+          from __future__ import annotations
+          import json, os, pathlib, shutil, tarfile, zipfile
+          import requests
+
+          root = pathlib.Path('results/dataverse')
+          files_dir = root / 'files'
+          extracted = root / 'extracted'
+          doi = os.environ['DATASET_DOI']
+          session = requests.Session()
+          session.headers['User-Agent'] = 'SPC4-research-reproduction/1.0'
+          meta_url = 'https://dataverse.harvard.edu/api/datasets/:persistentId/'
+          r = session.get(meta_url, params={'persistentId': doi}, timeout=120)
+          r.raise_for_status()
+          meta = r.json()
+          (root / 'metadata.json').write_text(json.dumps(meta, indent=2, sort_keys=True))
+
+          latest = meta['data']['latestVersion']
+          records = []
+          for entry in latest.get('files', []):
+              df = entry.get('dataFile', {})
+              rec = {
+                  'id': df.get('id'),
+                  'filename': df.get('filename'),
+                  'filesize': int(df.get('filesize') or 0),
+                  'contentType': df.get('contentType'),
+                  'description': entry.get('description'),
+                  'directoryLabel': entry.get('directoryLabel'),
+                  'restricted': entry.get('restricted', False),
+                  'storageIdentifier': df.get('storageIdentifier'),
+              }
+              records.append(rec)
+          (root / 'file_manifest.json').write_text(json.dumps(records, indent=2, sort_keys=True))
+          total = sum(x['filesize'] for x in records)
+          print(f'{len(records)} files; total bytes={total}')
+          for rec in records:
+              print(rec)
+
+          cap = 1_500_000_000
+          downloaded = []
+          for rec in records:
+              if rec['restricted'] or not rec['id'] or rec['filesize'] > cap:
+                  continue
+              rel = pathlib.Path(rec['directoryLabel'] or '') / rec['filename']
+              dest = files_dir / rel
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              url = f"https://dataverse.harvard.edu/api/access/datafile/{rec['id']}"
+              with session.get(url, stream=True, timeout=600) as rr:
+                  rr.raise_for_status()
+                  with dest.open('wb') as out:
+                      shutil.copyfileobj(rr.raw, out, length=1024 * 1024)
+              actual = dest.stat().st_size
+              print(f'downloaded {dest} ({actual} bytes)')
+              downloaded.append({'id': rec['id'], 'path': str(dest), 'size': actual})
+          (root / 'downloaded.json').write_text(json.dumps(downloaded, indent=2, sort_keys=True))
+
+          def safe_path(base: pathlib.Path, member: str) -> pathlib.Path:
+              target = (base / member).resolve()
+              if base.resolve() not in target.parents and target != base.resolve():
+                  raise RuntimeError(f'unsafe archive member: {member}')
+              return target
+
+          queue = [pathlib.Path(x['path']) for x in downloaded]
+          seen = set()
+          while queue:
+              src = queue.pop(0)
+              key = (str(src.resolve()), src.stat().st_size)
+              if key in seen:
+                  continue
+              seen.add(key)
+              rel = src.relative_to(files_dir)
+              outdir = extracted / rel
+              try:
+                  if zipfile.is_zipfile(src):
+                      outdir.mkdir(parents=True, exist_ok=True)
+                      with zipfile.ZipFile(src) as z:
+                          for name in z.namelist():
+                              safe_path(outdir, name)
+                          z.extractall(outdir)
+                      queue.extend(p for p in outdir.rglob('*') if p.is_file())
+                  elif tarfile.is_tarfile(src):
+                      outdir.mkdir(parents=True, exist_ok=True)
+                      with tarfile.open(src) as t:
+                          for member in t.getmembers():
+                              safe_path(outdir, member.name)
+                          t.extractall(outdir, filter='data')
+                      queue.extend(p for p in outdir.rglob('*') if p.is_file())
+              except Exception as exc:
+                  print(f'archive extraction skipped for {src}: {exc}')
+          PY
+
+          find results/dataverse -type f -printf '%s\t%p\n' | sort -n > results/dataverse/file-tree.txt
+          grep -RIna --binary-files=without-match -E '18nh0*00000601|ycjkdnhQyUtMsaVweFIRCXOBgLJDkP|ribbon_cert|0.friend|zero.friend|RBG' results/dataverse \
+            > results/dataverse/keyword-matches.txt || true
+          head -n 1000 results/dataverse/keyword-matches.txt || true
+
+      - name: Install topology software and inspect databases
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --pre --upgrade snappy spherogram snappy_manifolds cypari
+          python -m pip install --upgrade regina || true
+          python -m pip freeze | sort | tee results/pip-freeze.txt
+          python - <<'PY'
+          from __future__ import annotations
+          import json, pathlib, traceback
+          out = {'imports': {}, 'ribbon_links': {}}
+          for module in ('cypari', 'snappy_manifolds', 'spherogram', 'snappy', 'regina'):
+              try:
+                  m = __import__(module)
+                  out['imports'][module] = {'ok': True, 'version': getattr(m, '__version__', None), 'path': getattr(m, '__file__', None)}
+              except Exception as exc:
+                  out['imports'][module] = {'ok': False, 'error': repr(exc), 'traceback': traceback.format_exc()}
+          try:
+              import snappy
+              census = snappy.RibbonLinks
+              out['ribbon_links']['repr'] = repr(census)
+              out['ribbon_links']['count'] = len(census)
+              hits = []
+              for i, item in enumerate(census):
+                  try:
+                      name = item.name()
+                  except Exception:
+                      name = repr(item)
+                  text = name + ' ' + repr(getattr(item, 'ribbon_cert', None))
+                  if '18nh00000601' in text or '00000601' in text:
+                      hits.append({'index': i, 'name': name, 'repr': repr(item), 'ribbon_cert': repr(getattr(item, 'ribbon_cert', None))})
+              out['ribbon_links']['direct_hits'] = hits
+          except Exception as exc:
+              out['ribbon_links']['error'] = repr(exc)
+              out['ribbon_links']['traceback'] = traceback.format_exc()
+          pathlib.Path('results/software-inspection.json').write_text(json.dumps(out, indent=2, sort_keys=True))
+          print(json.dumps(out, indent=2, sort_keys=True))
+          PY
+
+      - name: Summarize retained outputs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p results
+          df -h | tee results/disk-after.txt
+          find results -type f -printf '%s\t%p\n' | sort -n | tail -n 200 | tee results/largest-files.txt
+          exit 0
+
+      - name: Upload reconstruction artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc4-reconstruction-v2-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
