@@ -1,0 +1,95 @@
+name: SPC4 extract compact inputs
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-extract-small.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spc4-compute-20260806
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Extract selected Dunfield-Gong files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade requests
+          rm -rf research-output/spc4/dg_selected
+          mkdir -p research-output/spc4/dg_selected
+          python - <<'PY'
+          import pathlib, shutil, zipfile, requests
+
+          archive = pathlib.Path('/tmp/plausibly_slice_V1.zip')
+          with requests.get(
+              'https://dataverse.harvard.edu/api/access/datafile/13283715',
+              stream=True,
+              timeout=900,
+              headers={'User-Agent': 'SPC4-research-reproduction/1.2'},
+          ) as r:
+              r.raise_for_status()
+              with archive.open('wb') as out:
+                  shutil.copyfileobj(r.raw, out, length=4 * 1024 * 1024)
+
+          suffixes = (
+              '/README.txt',
+              '/knots_mentioned_PD_codes.csv',
+              '/code/rbg_cert_final.py',
+              '/code/rbg.py',
+              '/code/known_0_friends.py',
+              '/code/find_0_friends.py',
+              '/code/check_ribbon_cert.py',
+              '/code/README.txt',
+              '/data/unknown_with_0-friend_final.csv',
+              '/data/zero_friends_column_descript.txt',
+              '/data/plausibly_column_descript.txt',
+          )
+          outdir = pathlib.Path('research-output/spc4/dg_selected')
+          with zipfile.ZipFile(archive) as z:
+              names = z.namelist()
+              (outdir / 'archive_listing.txt').write_text('\n'.join(names) + '\n')
+              for name in names:
+                  if name.endswith(suffixes):
+                      dest = outdir / pathlib.PurePosixPath(name).name
+                      # Disambiguate the two README files.
+                      if dest.exists():
+                          dest = outdir / (pathlib.PurePosixPath(name).parent.name + '_' + dest.name)
+                      with z.open(name) as src, dest.open('wb') as dst:
+                          shutil.copyfileobj(src, dst)
+                      print(name, '->', dest)
+          PY
+
+          rg -n -i '18.*nh.*0*6001|00000601|ycjkdnhQyUtMsaVweFIRCXOBgLJDkP' \
+            research-output/spc4/dg_selected \
+            > research-output/spc4/dg_selected/target_hits.txt || true
+          find research-output/spc4/dg_selected -type f -printf '%s\t%p\n' | sort -n \
+            > research-output/spc4/dg_selected/file_manifest.txt
+          cat research-output/spc4/dg_selected/target_hits.txt || true
+
+      - name: Commit compact inputs to isolated branch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'SPC4 research automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add research-output/spc4/dg_selected
+          if git diff --cached --quiet; then
+            echo 'No changes to commit.'
+          else
+            git commit -m 'Preserve compact Dunfield-Gong SPC4 inputs'
+            git push origin HEAD:spc4-compute-20260806
+          fi
