@@ -1,0 +1,68 @@
+name: SPC4 KnotJob recovery
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-knotjob.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  knotjob:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+
+      - name: Download, inspect, and smoke-test KnotJob
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p results/KnotJob
+          curl --fail --location --retry 4 --retry-all-errors \
+            'https://www.maths.dur.ac.uk/users/dirk.schuetz/KnotJob.zip' \
+            --output /tmp/KnotJob.zip
+          cp /tmp/KnotJob.zip results/KnotJob/KnotJob.zip
+          unzip -q /tmp/KnotJob.zip -d /tmp/knotjob
+          find /tmp/knotjob -maxdepth 5 -type f -printf '%s\t%p\n' | sort -n \
+            | tee results/KnotJob/archive-files.txt
+          java -version 2>&1 | tee results/KnotJob/java-version.txt
+          JAR="$(find /tmp/knotjob -type f -name '*.jar' | head -n 1)"
+          test -n "$JAR"
+          cp "$JAR" results/KnotJob/KnotJob.jar
+          sha256sum /tmp/KnotJob.zip "$JAR" | tee results/KnotJob/SHA256SUMS.txt
+          cat > /tmp/k2.txt <<'EOF'
+          [[5, 2, 0, 3], [3, 0, 4, 1], [1, 4, 2, 5]]
+          EOF
+          set +e
+          timeout 20m java -Xmx12g -jar "$JAR" /tmp/k2.txt -s0 -s2 -s3 -sqo -sl0 \
+            > results/KnotJob/smoke-stdout.txt 2> results/KnotJob/smoke-stderr.txt
+          STATUS=$?
+          set -e
+          echo "$STATUS" > results/KnotJob/smoke-exit-code.txt
+          find /tmp -maxdepth 2 -type f -name 'k2.txt*' -printf '%s\t%p\n' \
+            | tee results/KnotJob/smoke-output-files.txt
+          for f in /tmp/k2.txt_*; do
+            if [ -f "$f" ]; then
+              cp "$f" "results/KnotJob/$(basename "$f")"
+            fi
+          done
+          test "$STATUS" -eq 0
+
+      - name: Upload KnotJob bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc4-knotjob-${{ github.run_id }}
+          path: results/KnotJob/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
