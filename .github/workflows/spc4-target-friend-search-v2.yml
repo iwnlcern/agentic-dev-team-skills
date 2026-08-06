@@ -1,0 +1,72 @@
+name: SPC4 target friend search v2
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-target-friend-search-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  search:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spc4-compute-20260806
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install topology stack
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --pre --upgrade \
+            requests snappy spherogram snappy_manifolds cypari sympy
+
+      - name: Extract and run the preserved search program
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import textwrap
+
+          source = Path('.github/workflows/spc4-target-friend-search.yml').read_text()
+          blocks = re.findall(r"python - <<'PY'\n(.*?)\n\s*PY", source, flags=re.S)
+          if not blocks:
+              raise RuntimeError('No embedded Python programs found')
+          program = textwrap.dedent(max(blocks, key=len))
+          Path('/tmp/spc4_target_search.py').write_text(program)
+          print('Extracted search program lines:', len(program.splitlines()))
+          PY
+          rm -rf research-output/spc4/target_friend_search
+          mkdir -p research-output/spc4/target_friend_search
+          python /tmp/spc4_target_search.py
+          find research-output/spc4/target_friend_search -type f -printf '%s\t%p\n' | sort -n \
+            > research-output/spc4/target_friend_search/file_manifest.txt
+
+      - name: Commit preserved results
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'SPC4 research automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add research-output/spc4/target_friend_search || true
+          if git diff --cached --quiet; then
+            echo 'No result files to commit.'
+          else
+            git commit -m 'Preserve corrected target zero-friend search results'
+            git pull --rebase origin spc4-compute-20260806
+            git push origin HEAD:spc4-compute-20260806
+          fi
