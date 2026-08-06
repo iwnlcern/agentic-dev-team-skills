@@ -1,0 +1,267 @@
+name: SPC4 obstructed friend scan
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-obstructed-friend-scan.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spc4-compute-20260806
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Scan all zero-friend tables
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade requests
+          rm -rf research-output/spc4/obstructed_friend_scan
+          mkdir -p research-output/spc4/obstructed_friend_scan/pd
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import bz2
+          import csv
+          import io
+          import json
+          import pathlib
+          import re
+          import shutil
+          import zipfile
+          from collections import Counter, defaultdict
+
+          import requests
+
+          OUT = pathlib.Path('research-output/spc4/obstructed_friend_scan')
+          ARCHIVE = pathlib.Path('/tmp/plausibly_slice_V1.zip')
+          URL = 'https://dataverse.harvard.edu/api/access/datafile/13283715'
+          with requests.get(URL, stream=True, timeout=900,
+                            headers={'User-Agent': 'SPC4-obstructed-friend-scan/1.0'}) as r:
+              r.raise_for_status()
+              with ARCHIVE.open('wb') as f:
+                  shutil.copyfileobj(r.raw, f, length=4 * 1024 * 1024)
+
+          def meaningful_nonzero(value: object) -> bool:
+              if value is None:
+                  return False
+              s = str(value).strip()
+              if not s or s.lower() in {'nan', 'none', '{}', '()'}:
+                  return False
+              try:
+                  obj = ast.literal_eval(s)
+              except Exception:
+                  try:
+                      return abs(float(s)) > 1e-12
+                  except Exception:
+                      nums = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', s)]
+                      return any(abs(x) > 1e-12 for x in nums)
+              if isinstance(obj, (int, float, complex)):
+                  return abs(obj) > 1e-12
+              if isinstance(obj, dict):
+                  return any(meaningful_nonzero(v) for v in obj.values())
+              if isinstance(obj, (list, tuple, set)):
+                  return any(meaningful_nonzero(v) for v in obj)
+              return False
+
+          def open_csv(z: zipfile.ZipFile, name: str):
+              raw = z.open(name)
+              if name.lower().endswith('.bz2'):
+                  text = bz2.open(raw, mode='rt', encoding='utf-8', errors='replace', newline='')
+              else:
+                  text = io.TextIOWrapper(raw, encoding='utf-8', errors='replace', newline='')
+              return raw, text
+
+          invariant_columns = ('s_0', 's0', 's_2', 's2', 's_3', 's3',
+                               'Sq1_odd', 'sqo', 'sl_3_0', 'sl3s0')
+          friend_tables_suffix = (
+              '/data/zero_friends.csv.bz2',
+              '/data/more_zero_friends.csv.bz2',
+              '/data/unknown_with_0-friend_final.csv',
+          )
+          all_rows = []
+          headers = {}
+          with zipfile.ZipFile(ARCHIVE) as z:
+              names = z.namelist()
+              tables = [n for n in names if n.endswith(friend_tables_suffix)]
+              for name in tables:
+                  raw, text = open_csv(z, name)
+                  with raw, text:
+                      reader = csv.DictReader(text)
+                      headers[name] = reader.fieldnames
+                      for line_no, row in enumerate(reader, start=2):
+                          nonzero = {
+                              c: row.get(c)
+                              for c in invariant_columns
+                              if c in row and meaningful_nonzero(row.get(c))
+                          }
+                          if not nonzero:
+                              continue
+                          rec = dict(row)
+                          rec['_source'] = name
+                          rec['_line'] = line_no
+                          rec['_nonzero_accepted'] = nonzero
+                          all_rows.append(rec)
+
+              base_names = {r.get('base_knot', '').strip() for r in all_rows if r.get('base_knot')}
+              base_meta = {}
+              base_tables = [n for n in names if n.endswith((
+                  '/data/plausibly_slice.csv.bz2',
+                  '/data/plausibly_unknown.csv',
+                  '/data/plausibly_slice_16.csv',
+              ))]
+              for name in base_tables:
+                  raw, text = open_csv(z, name)
+                  with raw, text:
+                      reader = csv.DictReader(text)
+                      for row in reader:
+                          knot = (row.get('name') or '').strip()
+                          if knot in base_names and knot not in base_meta:
+                              base_meta[knot] = dict(row)
+
+          def as_int(x, default=10**9):
+              try:
+                  return int(float(str(x).strip()))
+              except Exception:
+                  return default
+
+          enriched = []
+          status_counts = Counter()
+          by_base = defaultdict(list)
+          for row in all_rows:
+              base = row.get('base_knot', '').strip()
+              meta = base_meta.get(base, {})
+              rec = {
+                  'friend_name': row.get('name'),
+                  'base_knot': base,
+                  'friend_crossings': as_int(row.get('num_cross')),
+                  'base_crossings': as_int(meta.get('num_cross')),
+                  'base_slice_in_friend_table': row.get('base_slice'),
+                  'base_slice': meta.get('slice'),
+                  'base_ribbon': meta.get('ribbon'),
+                  'base_ribbon_bound': meta.get('ribbon_bound'),
+                  'base_ribbon_to': meta.get('ribbon_to'),
+                  'base_ribbon_cert': meta.get('ribbon_cert'),
+                  'base_concord_to': meta.get('concord_to'),
+                  'base_PD_code': meta.get('PD_code'),
+                  'friend_PD_code': row.get('PD_code'),
+                  'friend_tri': row.get('tri'),
+                  'friend_volume': row.get('volume'),
+                  'friend_slice': row.get('slice'),
+                  'friend_ribbon': row.get('ribbon'),
+                  'friend_ribbon_to': row.get('ribbon_to'),
+                  'nonzero_accepted': row['_nonzero_accepted'],
+                  'RBG_DT': row.get('RBG_DT'),
+                  'RBG_PD': row.get('RBG_PD'),
+                  'framing': row.get('framing'),
+                  'source': row['_source'],
+                  'source_line': row['_line'],
+              }
+              effective_base_slice = str(rec['base_slice_in_friend_table'] or rec['base_slice'] or '').strip()
+              rec['effective_base_slice'] = effective_base_slice
+              status_counts[effective_base_slice or 'blank'] += 1
+              enriched.append(rec)
+              by_base[base].append(rec)
+
+          enriched.sort(key=lambda r: (
+              0 if r['effective_base_slice'] == '1' else 1,
+              r['base_crossings'], r['friend_crossings'], r['base_knot'], r['friend_name']))
+
+          actual_hits = [r for r in enriched if r['effective_base_slice'] == '1']
+          unknown = [r for r in enriched if r['effective_base_slice'] not in {'1', '-1'}]
+          unknown.sort(key=lambda r: (
+              r['base_crossings'], r['friend_crossings'],
+              0 if r.get('base_ribbon_bound') not in (None, '', 'nan') else 1,
+              r['base_knot'], r['friend_name']))
+
+          base_summary = []
+          for base, rows in by_base.items():
+              meta = base_meta.get(base, {})
+              accepted = sorted({k for r in rows for k in r['_nonzero_accepted']})
+              base_summary.append({
+                  'base_knot': base,
+                  'base_crossings': as_int(meta.get('num_cross')),
+                  'base_slice': meta.get('slice'),
+                  'base_ribbon': meta.get('ribbon'),
+                  'base_ribbon_bound': meta.get('ribbon_bound'),
+                  'base_ribbon_to': meta.get('ribbon_to'),
+                  'base_ribbon_cert': meta.get('ribbon_cert'),
+                  'base_concord_to': meta.get('concord_to'),
+                  'base_PD_code': meta.get('PD_code'),
+                  'num_obstructed_friends': len(rows),
+                  'best_friend_crossings': min(as_int(r.get('num_cross')) for r in rows),
+                  'accepted_invariants': accepted,
+                  'friends': sorted((r.get('name') for r in rows if r.get('name'))),
+              })
+          base_summary.sort(key=lambda x: (
+              0 if str(x['base_slice']).strip() == '1' else 1,
+              x['base_crossings'], x['best_friend_crossings'], x['base_knot']))
+
+          summary = {
+              'headers': headers,
+              'num_obstructed_friend_rows': len(enriched),
+              'num_distinct_bases': len(base_summary),
+              'base_slice_status_counts': dict(status_counts),
+              'num_known_slice_base_hits': len(actual_hits),
+              'known_slice_base_hits': actual_hits[:100],
+              'top_unknown_rows': unknown[:500],
+              'top_unknown_bases': [x for x in base_summary if str(x['base_slice']).strip() not in {'1', '-1'}][:500],
+          }
+          (OUT / 'SUMMARY.json').write_text(json.dumps(summary, indent=2, sort_keys=True))
+          (OUT / 'known_slice_base_hits.json').write_text(json.dumps(actual_hits, indent=2, sort_keys=True))
+          (OUT / 'top_unknown_rows.json').write_text(json.dumps(unknown[:5000], indent=2, sort_keys=True))
+          (OUT / 'base_summary.json').write_text(json.dumps(base_summary, indent=2, sort_keys=True))
+
+          # Store the simplest 100 friend and base diagrams as verifier-ready one-line PD files.
+          for i, rec in enumerate(unknown[:100]):
+              stem = f"{i:03d}_{rec['base_knot']}__{rec['friend_name']}".replace('/', '_')
+              for role, field in [('k1', 'base_PD_code'), ('k2', 'friend_PD_code')]:
+                  value = rec.get(field)
+                  if not value:
+                      continue
+                  try:
+                      pd = ast.literal_eval(value)
+                  except Exception:
+                      continue
+                  (OUT / 'pd' / f'{stem}_{role}.txt').write_text(repr(pd) + '\n')
+
+          lines = [
+              f"obstructed friend rows: {len(enriched)}",
+              f"distinct bases: {len(base_summary)}",
+              f"known-slice base hits: {len(actual_hits)}",
+              f"base slice status counts: {dict(status_counts)}",
+              '', 'TOP UNKNOWN BASES:',
+          ]
+          for x in summary['top_unknown_bases'][:100]:
+              lines.append(
+                  f"{x['base_knot']} base_c={x['base_crossings']} "
+                  f"friends={x['num_obstructed_friends']} best_friend_c={x['best_friend_crossings']} "
+                  f"inv={x['accepted_invariants']} ribbon_bound={x['base_ribbon_bound']}"
+              )
+          (OUT / 'REPORT.txt').write_text('\n'.join(lines) + '\n')
+          print('\n'.join(lines[:120]))
+          PY
+
+      - name: Commit compact scan results
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'SPC4 research automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add research-output/spc4/obstructed_friend_scan
+          git commit -m 'Preserve obstructed zero-friend candidate scan'
+          git pull --rebase origin spc4-compute-20260806
+          git push origin HEAD:spc4-compute-20260806
