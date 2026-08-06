@@ -1,0 +1,81 @@
+Column descriptions
+===================
+
+This file describes the data contained in::
+
+  zero_friends.csv
+
+Each row represents a knot that is a 0-friend of one of the knots in
+PS_19. Specifically, these are the 78,507 0-friends in the ZF
+collection of Section 5.3.  All of these knots are hyperbolic, as are
+their 0-surgeries.  Moreover, the datafile::
+
+  more_zero_friends.csv
+
+has another 79,667 0-friends of the knots in PS_19, namely those where
+we have a diagram of at most 90 crossings and where we don't know if
+the 0-friend is smoothly slice.
+
+The content of each column is as follows.
+
+* name: The name of the 0-friend knot.  For example, K12n309_0 is the
+  first 0-friend of K12n309, and K12n309_1 is its second 0-friend.
+
+* base_knot: The name of the original plausibly slice knot in PS_19
+  that it is 0-friends with.
+
+* volume: The hyperbolic volume of the knot exterior.
+
+* tri: An ideal triangulation of the knot exterior.  It is given by
+  the triangulation's isosignature, which is accepted by SnapPy and
+  Regina.
+
+* num_tets: The number of tetrahedra in the preceding triangulation.
+
+* PD_code: The planar description (PD) code of the simplest known
+  diagram for the knot.
+
+* num_cross: The number of crossings in the preceding diagram.
+
+* core_len: The complex length the hyperbolic geodesic in the core of
+  the Dehn-filled solid torus in the 0-surgery.  Here "j" is the
+  squareroot of -1.
+   
+* det: The determinant of the knot.
+
+* alex: The Alexander polynomial.
+
+* slice: 1 means the knot is known to be smoothly slice, -1 means it
+  is known not to be smoothly slice, and 0 if this is unknown.
+
+* ribbon: Whether the knot is known to be ribbon, using the same
+  1, -1, 0 scheme as the slice column.
+
+* base_slice: Whether the base knot is known to be smoothly slice.
+
+* ribbon_to: A dictionary of pairs other_knot:band where applying the
+  band to the knot results in other_knot.  For example for K11a58::
+
+    ribbon_to = "{'K6a3': '1609_0_1', 'unknot': '2702_0_-1'}"
+
+  This means applying the compressed band '1609_0_1' to K11a58 yields
+  K6a3, whereas the second band gives the unknot. 
+ 
+* ribbon_by_two_bands: 1 means a 2-band ribbon concordance to the
+  unknot was found. Unfortunately, we did not record these in detail.
+  
+* ribbon_by_three_bands: 1 means a 3-band ribbon concordance to the
+  unknot was found.
+
+* s_2, s_3: Rasmussen's s-invariant over F_2, and F_3.
+  Computed with KnotJob.
+
+* Sq1_odd: The first Steenrod square invariant of the Sarkar-
+  Scaduto-Stoffregen *odd* Khovanov homotopy type.  Computed
+  with KnotJob.
+
+* bls_odd and Sq1_sum: The s^{\beta_15} and s^\beta invariants of
+  Dunfield-Lipshitz-Schuetz, which are defined in terms of
+  equivalences classes of local even-odd (LEO) triples.  Computed with
+  KnotJob.  These are weaker than the CLS_red LEO invariant computed
+  for PS_19 but are easier to compute.

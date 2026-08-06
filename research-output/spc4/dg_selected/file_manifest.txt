@@ -1,0 +1,16 @@
+0	research-output/spc4/dg_selected/file_manifest.txt
+0	research-output/spc4/dg_selected/target_hits.txt
+694	research-output/spc4/dg_selected/plausibly_slice_V1_README.txt
+1080	research-output/spc4/dg_selected/snappy_census_README.txt
+2007	research-output/spc4/dg_selected/archive_listing.txt
+2077	research-output/spc4/dg_selected/data_README.txt
+2802	research-output/spc4/dg_selected/rbg_cert_final.py
+2872	research-output/spc4/dg_selected/zero_friends_column_descript.txt
+3280	research-output/spc4/dg_selected/README.txt
+5016	research-output/spc4/dg_selected/find_0_friends.py
+5577	research-output/spc4/dg_selected/check_ribbon_cert.py
+5851	research-output/spc4/dg_selected/plausibly_column_descript.txt
+8294	research-output/spc4/dg_selected/known_0_friends.py
+24485	research-output/spc4/dg_selected/rbg.py
+55209	research-output/spc4/dg_selected/unknown_with_0-friend_final.csv
+64501	research-output/spc4/dg_selected/knots_mentioned_PD_codes.csv

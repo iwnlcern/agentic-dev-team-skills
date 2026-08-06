@@ -1,0 +1,171 @@
+Column descriptions
+===================
+
+This file describes the data contained in each of the files::
+
+  plausibly_slice.csv
+  plausibly_hyperbolic.csv
+
+
+plausibly_slice.csv
+===================
+
+Here is the content of each column of this file:
+
+* name: The name of the knot, following the conventions of SnapPy (<= 16
+  crossings) or Burton (> 16 crossings).
+
+* num_cross: The number of crossings of the knot.
+
+* alt: 1 if the knot is alternating and 0 otherwise.
+
+* volume: Typically, the hyperbolic volume of the knot exterior; it
+  is -1 for the very few non-hyperbolic knots.
+
+* det: The determinant of the knot.
+
+* alex: The Alexander polynomial.
+
+* genus3: The Seifert genus of the knot. Computed from HFK.
+
+* fibered: 1 of the knot is fibered and 0 otherwise. Computed from HFK.
+
+* slice: 1 means the knot is known to be smoothly slice, -1 means it
+  is known not to be smoothly slice, and 0 if this is unknown.
+
+* ribbon: Whether the knot is known to be ribbon, using the same
+  1, -1, 0 scheme as the slice column.
+
+* top_slice: Whether the knot is known to be topologically slice,
+  using the same 1, -1, 0 scheme as the slice column.
+
+* HFK: The knot Floer homology, encoded as a Poincare polynomial where
+  "a" is the Alexander variable and "m" the Maslov one.  Computed over
+  F_2 using Szabo's HFK calculator.
+
+* HFK_rk: The total dimension of HFK.
+
+* tau, nu, epsilon: Concordance invariants defined using HFK.
+
+* ribbon_bound: When present, it means the knot has a ribbon disk with
+  at most that number of bands.  This is the data used in Table 7 of
+  the paper.
+
+* ribbon_to: A dictionary of pairs other_knot:band where applying the
+  band to the knot results in other_knot.  For example, for K11a58::
+
+    ribbon_to = "{'K6a3': '1609_0_1', 'unknot': '2702_0_-1'}"
+
+  This means applying the compressed band '1609_0_1' to K11a58 yields
+  K6a3, whereas the second band gives the unknot.  This data was used
+  in Section 7 of the paper.
+
+* ribbon_cert: We have 173,482 knots with a known ribbon disk that is
+  not induced from the data in the ribbon_to column.  For each of
+  these, a complete ribbon certificate is given in the format of 2.10.
+
+* concord_to: Records the slice disks discussed in Section 2.6.  The
+  format is similar to ribbon_to, and we give two examples.  For
+  18nh_31631762 it is::
+
+    "{'unknot':[[(11,1,12,0),...(33,30,34,31)],3,[10,0],[14,15]]}"
+
+  where the value is read::
+
+    [some PD_code of 18nh_31631762,
+     add 3 twists to the digon chains given by
+     crossings [10, 0] and [14, 15]]
+
+  For 19ah_12847233, it describes the technique in Figure 9::
+
+    "{'unknot': [(some PD code of 19ah_12847233),
+                 'inserted 4_1s at 5 and 16',
+                 (PD code of resulting knot), 'unknot']}"
+
+* s_0, s_2, s_3: Rasmussen's s-invariant over Q, F_2, and F_3.
+  Computed with KnotJob.
+
+* s_Z: Schuetz's integral s-invariant.  Computed with KnotJob.
+
+* Sq1: Lipshitz-Sarkar's first Steenrod square invariant of the
+  Khovanov homotopy type.  Computed with KnotJob.
+
+* Sq1_odd: The first Steenrod square invariant of the Sarkar-
+  Scaduto-Stoffregen *odd* Khovanov homotopy type.  Computed
+  with KnotJob.
+
+* Sq2, Sq2_odd0, Sq2_odd1: Second Steenrod square invariants of the
+  even and odd Khovanov homotopy types.  Computed with KnotJob.
+
+* CLS_red: The \tilde{s}_c invariant of Dunfield-Lipshitz-Schuetz,
+  which is defined in terms of equivalences classes of local even-odd
+  (LEO) triples.  Computed with KnotJob.
+
+* sl_3_0, sl_3_2, sl_3_3: The s-invariants associated to the sl_3
+  Khovanov homology.  Computed with KnotJob.
+
+* Kh_xo_Q, Kh_xo_3, Kh_xo_5: The X-torsion order in Khovanov homology
+  over the fields Q, F_3, and F_5.  Computed with KnotJob.
+
+* bifac_obs: 1 means this alternating knot cannot be smoothly slice by
+  the Goeritz bifactorability criterion coming from Donaldson's
+  Theorem; 0 means the criterion fails or does not apply.
+
+* HKL_basic: When this is (m, q), the Herald-Kirk-Livingston (HKL)
+  obstruction from Lemma 3.5 with those parameters shows that this
+  knot is not topologically slice.  This means in SnapPy that::
+
+    M.slice_obstruction_HKL((m, q), method='basic')
+
+  will return True.
+
+* HKL_fancy: When this is (m, q), the corresponding HKL test using
+  Theorem 3.8 and Proposition 3.15 obstructs this knot from being
+  topologically slice.  This means in SnapPy that::
+
+    M.slice_obstruction_HKL((m, q), method='advanced')
+
+  will return True.
+
+* HKL_direct: When this is (m, q), the corresponding HKL test of
+  Section 3.20 obstructs this knots from being topologically slice.
+  This means in SnapPy that::
+
+    M.slice_obstruction_HKL((m, q), method='direct')
+
+  will return True.
+
+* HKL_ribbon_obs: When this is m, Theorem 3.12 applies for the m-fold
+  cover and shows this knot is not topologically homotopy ribbon. This
+  means in Snappy that::
+
+    M.slice_obstruction_HKL((m, 2), ribbon_mode=True)
+
+  will return True.
+
+
+plausibly_hyperbolic.csv
+========================
+
+Here is the content of each column of this file:
+
+* name: name of the knot, following the conventions of SnapPy (<= 16
+  crossings) or Burton (> 16 crossings).
+
+* volume: Typically, the hyperbolic volume of the knot exterior; it
+  is -1 for the very few non-hyperbolic knots.
+
+* vol_0_sur: The hyperbolic volume of the 0-surgery on the knot. For
+  the 114 non-hyperbolic 0-surgeries, the volume is -1.
+
+* core_len: The complex length the hyperbolic geodesic in the core of
+  the Dehn-filled solid torus in the 0-surgery.  Here "j" is the
+  squareroot of -1.
+
+* cusp_area, cusp_shape, cusp_density: For hyperbolic knots, these
+  record information about the geometry of the maximal cusp.
+
+* systole_real: length of the shortest closed geodesic in the
+  hyperbolic structure of the knot exterior.
+
+* systole_imag: twist or holonomy around the shortest closed geodesic.
