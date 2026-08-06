@@ -1,0 +1,34 @@
+120	research-output/spc4/kegel_spreer/archive/__MACOSX/code/._.DS_Store
+120	research-output/spc4/kegel_spreer/archive/__MACOSX/data/._.DS_Store
+120	research-output/spc4/kegel_spreer/archive/__MACOSX/data/concordance friend data F2-F6/._.DS_Store
+212	research-output/spc4/kegel_spreer/archive/__MACOSX/data/._concordance friend data F2-F6
+233	research-output/spc4/kegel_spreer/archive/__MACOSX/data/._low_crossing_friends.csv
+233	research-output/spc4/kegel_spreer/archive/__MACOSX/data/concordance friend data F2-F6/._F6.csv
+268	research-output/spc4/kegel_spreer/archive/__MACOSX/data/concordance friend data F2-F6/._F2.csv
+268	research-output/spc4/kegel_spreer/archive/__MACOSX/data/concordance friend data F2-F6/._F3.csv
+268	research-output/spc4/kegel_spreer/archive/__MACOSX/data/concordance friend data F2-F6/._F4.csv
+268	research-output/spc4/kegel_spreer/archive/__MACOSX/data/concordance friend data F2-F6/._F5.csv
+6148	research-output/spc4/kegel_spreer/archive/code/.DS_Store
+6148	research-output/spc4/kegel_spreer/archive/data/.DS_Store
+6148	research-output/spc4/kegel_spreer/archive/data/concordance friend data F2-F6/.DS_Store
+16740	research-output/spc4/kegel_spreer/archive/data/.ipynb_checkpoints/Verification-checkpoint.ipynb
+16740	research-output/spc4/kegel_spreer/archive/data/Verification.ipynb
+27357	research-output/spc4/kegel_spreer/archive/data/.ipynb_checkpoints/Untitled-checkpoint.ipynb
+28319	research-output/spc4/kegel_spreer/archive/data/concordance friend data F2-F6/F2.csv
+33447	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/ribbon_search for F4-checkpoint.ipynb
+37969	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/ribbon_search for F2-checkpoint.ipynb
+54995	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/Jonathan friend code update-checkpoint.ipynb
+82657	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/Friend search-checkpoint.ipynb
+82657	research-output/spc4/kegel_spreer/archive/code/Friend search.ipynb
+117218	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/Concordance search-checkpoint.ipynb
+117218	research-output/spc4/kegel_spreer/archive/code/Concordance search.ipynb
+184950	research-output/spc4/kegel_spreer/archive/data/census_friends.csv
+251577	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/Concordance friends and ribbon search-checkpoint.ipynb
+251577	research-output/spc4/kegel_spreer/archive/code/Concordance friends and ribbon search.ipynb
+352083	research-output/spc4/kegel_spreer/archive/code/.ipynb_checkpoints/Piccirillo friend code-checkpoint.ipynb
+352083	research-output/spc4/kegel_spreer/archive/code/Piccirillo friend code.ipynb
+927481	research-output/spc4/kegel_spreer/archive/data/concordance friend data F2-F6/F6.csv
+1428580	research-output/spc4/kegel_spreer/archive/data/concordance friend data F2-F6/F4.csv
+4306901	research-output/spc4/kegel_spreer/archive/data/concordance friend data F2-F6/F3.csv
+6191744	research-output/spc4/kegel_spreer/archive/data/low_crossing_friends.csv
+19434948	research-output/spc4/kegel_spreer/archive/data/concordance friend data F2-F6/F5.csv
