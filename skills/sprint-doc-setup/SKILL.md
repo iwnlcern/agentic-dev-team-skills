@@ -101,6 +101,7 @@ RECONCILE    -> RECONCILE.md updates or a tracked reconcile doc
 - `INDEX.md` is routing context, not an authority relay.
 - Do not proxy-author relays for another seat. `FROM` is your own address.
 - Append each new `INDEX.md` row at the END of the file, after the last existing row, in write order; never tuck a row next to your seat's earlier row or group rows by owner/role. That grouping is a read-modify-write upsert and races during concurrent work.
+- A `monotonic-from` marker is never yours to insert: eligibility, the stamp-repair rule (rename the file and fix the index row), and the operator gate are defined in `protocol.md`'s index policy — route the request there rather than appending the line that makes your own red index green.
 - Do not let this skill redefine relay semantics. It adopts the schema in the role skills' adjacent `protocol.md`.
 
 ## Deliverable

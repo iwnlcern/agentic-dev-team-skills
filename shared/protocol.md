@@ -320,11 +320,11 @@ When a task is under operator or schedule pressure, explicitly reject these obse
 
 ## Hard escalation triggers
 
-Escalate to human/operator, or require the heavier workflow, when work touches: authz, tenant isolation, RLS, permissions, secrets; migrations, backfills, destructive writes, canonical data repair; money, inventory, orders, planning, accounting, trust-critical state; AI/automation that acts downstream; workers, schedulers, queues, retries, async side effects; cross-repo/service contracts, generated schemas, shared APIs/events; user-visible controls backed by materializers/downstream consumers; test/runtime role mismatch; broad scope expansion; ambiguous product semantics; accepting residual risk; skipping live verification.
+Escalate to human/operator, or require the heavier workflow, when work touches: authz, tenant isolation, RLS, permissions, secrets; migrations, backfills, destructive writes, canonical data repair; money, inventory, orders, planning, accounting, trust-critical state; AI/automation that acts downstream; workers, schedulers, queues, retries, async side effects; cross-repo/service contracts, generated schemas, shared APIs/events; user-visible controls backed by materializers/downstream consumers; test/runtime role mismatch; broad scope expansion; ambiguous product semantics; accepting residual risk; skipping live verification; inserting an index monotonic-from marker.
 
 ## Operator-judgment categories
 
-Flag human decision for product semantics, user-visible behavior, irreversible data changes, broad scope expansion, ambiguous ownership, conflicting acceptance criteria, accepting residual risk, skipping live verification, merging despite failed/partial tests, or lowering ceremony below the hard-trigger level without post-scan informed waiver.
+Flag human decision for product semantics, user-visible behavior, irreversible data changes, broad scope expansion, ambiguous ownership, conflicting acceptance criteria, accepting residual risk, skipping live verification, merging despite failed/partial tests, lowering ceremony below the hard-trigger level without post-scan informed waiver, or inserting an index monotonic-from marker.
 
 ## Duplicate/already-built audit gate
 
@@ -405,6 +405,15 @@ A drifted name is a rename, not a rewrite: fix the filename and the index row ra
 
 Index policy: append each new row at the END of the file, after the last existing row, so INDEX.md stays in write order. Do not place a row next to an earlier row from the same seat or otherwise group rows by owner/role — that is a read-modify-write upsert and races during concurrent work. Append-only, end-of-file rows are the rule.
 Index rows must be **non-decreasing in `time`**. An existing index whose history predates this rule can be grandfathered by appending a boundary marker — `<!-- relay-lint: monotonic-from <YYYYMMDD-HHMMSS> -->` — after the last historical row; rows below it are then held to the rule and rows above it are inspected with `--index-audit`.
+A marker's only legitimate class is an operator-ratified **historical** inversion: rows already disordered by concurrent writers, after the disordering write stream has stabilized, where no corrected relay can repair them.
+An **active or recurring** concurrent-append inversion is not that class — it is registered and waited out (the register-and-wait discipline), never marker-waved, because a marker only grandfathers history and prevents nothing.
+A wrong stamp is not that class either: a drifted name is a rename — fix the filename and the index row, per the timestamp policy above — never a marker.
+Inserting a marker to turn a red index green, when what is actually red is a stamp or a live race, repairs the instrument instead of the fault: the mechanism forgives everything above the marker, so one appended line can take an index from failing to passing with nothing fixed.
+Marker insertion is therefore a hard escalation trigger and an operator-gated act — no seat, including a top-level planner, inserts one on its own authority; in the escalation scan it surfaces under the `broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip` row, because a marker is precisely the acceptance of residual, unrepaired disorder.
+Markers belong only to legacy hand-authored index bytes: once cutover has enabled a daemon-owned projection, the index is regenerated from the ledger, an ordering inversion is inexpressible, and introducing a marker into that projection signals a defect rather than a repair — while legacy bytes in a root whose daemon has not yet cut over, or has rolled back, remain historical input, not a defect.
+Never insert a marker over an inversion whose cause has not been established, and specifically never over duplicate or missing rows: those are data-integrity defects that a monotonicity marker silently conceals, and a marker-induced clean monotonicity result proves only the ordering of the ungrandfathered suffix — it establishes neither row uniqueness nor index/disk completeness.
+Be honest about the mechanism's edge: implementations have shipped a defect where, in an index with more than one marker, each later marker moved the boundary while the floor value was silently retained from the oldest — so later ratified markers were weaker than their ratifiers believed.
+A mechanism that forgives the past and can silently weaken the future is not one a seat may invoke for itself.
 
 ```text
 | time | phase | role | dispatch | to | owner | status | file |
