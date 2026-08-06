@@ -1,0 +1,42 @@
+name: SPC4 SnapPy wheelhouse
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-wheelhouse.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheelhouse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download binary dependency closure
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p wheelhouse metadata
+          python -m pip install --upgrade pip
+          python -m pip download --pre --only-binary=:all: --dest wheelhouse \
+            snappy spherogram snappy_manifolds cypari regina
+          find wheelhouse -type f -printf '%s\t%f\n' | sort -n | tee metadata/files.txt
+          sha256sum wheelhouse/* | tee metadata/SHA256SUMS.txt
+          du -sh wheelhouse | tee metadata/size.txt
+      - name: Upload wheelhouse
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc4-snappy-wheelhouse-${{ github.run_id }}
+          path: |
+            wheelhouse/
+            metadata/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
