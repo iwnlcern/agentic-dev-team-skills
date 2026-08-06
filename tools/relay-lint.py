@@ -1835,10 +1835,18 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         fields = header_fields(read(f))
         for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
             val = fields.get(key)
-            if val and ("/" in val or val.endswith(".md")):
-                ref = (path / val).resolve() if not Path(val).is_absolute() else Path(val)
-                if not ref.exists():
-                    result.error(f"{f.relative_to(path)}: {key} references missing file {val}")
+            bare = val.split(" @ ", 1)[0] if val else ""
+            if bare and ("/" in bare or bare.endswith(".md")):
+                if Path(bare).is_absolute():
+                    found = Path(bare).exists()
+                else:
+                    found = (
+                        (path / bare).exists()
+                        or Path(bare).exists()
+                        or (path.parent.parent / bare).exists()
+                    )
+                if not found:
+                    result.error(f"{f.relative_to(path)}: {key} references missing file {bare}")
 
     return result
 

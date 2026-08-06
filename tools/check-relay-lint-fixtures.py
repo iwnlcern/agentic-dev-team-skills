@@ -200,9 +200,19 @@ EXPECTED = [
     ("root", "orch-review/EX4-reconcile", 0),
     ("root", "orch-review/EX5-proceed-nodeleg", 0),
     ("root", "orch-review/EX6-boot-to-reviewer", 0),
+    ("root", "lockpath/LP1-old-form/.relays/v29", 0),
+    ("root", "lockpath/LP2-new-form", 0),
+    ("root", "lockpath/LP3-missing", 1),
+    ("root", "lockpath/LP4-bare-id", 0),
 ]
 
 EXPECTED_ERROR_SET = {
+    "lockpath/LP1-old-form/.relays/v29": [],
+    "lockpath/LP2-new-form": [],
+    "lockpath/LP3-missing": [
+        "01-plan.md: PLAN_LOCK_ID references missing file no-such-file.md",
+    ],
+    "lockpath/LP4-bare-id": [],
     "rolevocab/RV7a-master-dispatch-failclosed.md": [
         "authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed pending the orchestrator ruling",
     ],
