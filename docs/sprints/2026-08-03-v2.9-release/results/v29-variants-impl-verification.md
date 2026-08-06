@@ -10,8 +10,6 @@ TESTED_SHA: `c8b90d20b636259247fcb9f1370e25a04723a3d5`.
 
 The commands and literal outputs recorded below are the Task 4 E2 evidence for the immutable tested bytes.
 
-The complete fixture-corpus transcript is preserved verbatim in `.superpowers/sdd/PL-v29-variants-20260804/task-4-report.md`.
-
 ## Claim evidence levels
 
 | Claim | E-level | Proof |
@@ -22,7 +20,7 @@ The complete fixture-corpus transcript is preserved verbatim in `.superpowers/sd
 | Relay-lint and timestamp fixture corpora pass. | E2 | The two fixture commands below. |
 | Root AGENTS.md is unique. | E2 | The find census below. |
 | The two hook fallback ladders are non-empty and byte-identical. | E2 | The awk and cmp proof below. |
-| Deprecated Codex-root occurrences are fully classified. | E2 | The two censuses below. |
+| Deprecated Codex-root occurrences within `tools/` `*.sh`/`*.md`, fixtures excluded, are fully classified. | E2 | The two censuses below. |
 | AGENTS.md and the named production surfaces exist. | E1 | Their successful file-presence reads in the find and named-surface census. |
 
 ## Command proofs and literal verdict output
@@ -116,6 +114,8 @@ python3 tools/check-relay-lint-fixtures.py
 Exit status: 0.
 
 Literal output:
+
+The block below is a verbatim recapture from a fresh successful run at fold time.
 
 ```text
 rolevocab/RV1a-pair-planner.md: expected=0 observed=0 PASS
@@ -215,10 +215,10 @@ merge-token/MT5-wrong-phase-token.md: expected=1 observed=1 PASS
 --relay-root merge-token/MT6-token-outside-root: expected=1 observed=1 PASS
   expected_errors=1 observed_errors=1
 --relay-root merge-token/MT7-duplicate-authorization-decoy: expected=1 observed=1 PASS
+  expected_errors=2 observed_errors=2
+--relay-root merge-token/MT8-denied-only-no-auth: expected=1 observed=1 PASS
   expected_errors=1 observed_errors=1
-merge-token/MT8-denied-only-no-auth: expected=1 observed=1 PASS
-  expected_errors=1 observed_errors=1 PASS
-merge-token/MT9-cross-dispatch-runroot: expected=1 observed=1 PASS
+--relay-root merge-token/MT9-cross-dispatch-runroot: expected=1 observed=1 PASS
   expected_errors=1 observed_errors=1
 content/E1-empty-final-git-status.md: expected=1 observed=1 PASS
 content/E2-empty-actions-git-ref.md: expected=1 observed=1 PASS
@@ -452,6 +452,31 @@ Classification of every Part A hit (6):
 | `bash-relay-guard.sh:48` | deprecated production fallback execution |
 | `README.md:15` | documentation: deprecated fallback note |
 | `README.md:17` | documentation: resolution-order sentence |
+
+The plan expected a `codex/skills` hit in the D1 comment, but that comment contains no such string, so the stated Part A comment hit was unmeetable and the census records the reachable six-hit denominator instead.
+
+### Hook fallback ordering
+
+```sh
+grep -n 'agents/skills\|codex/skills' \
+  tools/adapters/claude-code/relay-lint-posttooluse.sh \
+  tools/adapters/claude-code/bash-relay-guard.sh
+```
+
+Exit status: 0.
+
+```text
+tools/adapters/claude-code/relay-lint-posttooluse.sh:25:elif [ -f "$HOME/.agents/skills/tools/relay-lint.py" ]; then
+tools/adapters/claude-code/relay-lint-posttooluse.sh:26:  run_lint python3 "$HOME/.agents/skills/tools/relay-lint.py"
+tools/adapters/claude-code/relay-lint-posttooluse.sh:27:elif [ -f "$HOME/.codex/skills/tools/relay-lint.py" ]; then
+tools/adapters/claude-code/relay-lint-posttooluse.sh:29:  run_lint python3 "$HOME/.codex/skills/tools/relay-lint.py"
+tools/adapters/claude-code/bash-relay-guard.sh:44:elif [ -f "$HOME/.agents/skills/tools/relay-lint.py" ]; then
+tools/adapters/claude-code/bash-relay-guard.sh:45:  run_lint python3 "$HOME/.agents/skills/tools/relay-lint.py"
+tools/adapters/claude-code/bash-relay-guard.sh:46:elif [ -f "$HOME/.codex/skills/tools/relay-lint.py" ]; then
+tools/adapters/claude-code/bash-relay-guard.sh:48:  run_lint python3 "$HOME/.codex/skills/tools/relay-lint.py"
+```
+
+The line-numbered output proves that `.agents/skills` precedes the deprecated `.codex/skills` fallback in both hooks.
 
 ### Census Part B: full population
 
