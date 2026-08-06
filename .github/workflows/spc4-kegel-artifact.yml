@@ -1,0 +1,26 @@
+name: SPC4 Kegel-Spreer artifact
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-kegel-artifact.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spc4-compute-20260806
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kegel-spreer-exotic-traces-${{ github.run_id }}
+          path: research-output/spc4/kegel_spreer/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
