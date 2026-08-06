@@ -29,6 +29,14 @@ EXPECTED = [
     ("file", "rolevocab/RV7e-domain-designlock-kind.md", 1),
     ("file", "rolevocab/RV7e2-domain-designlock-id-only.md", 1),
     ("file", "rolevocab/RV7f-master-delegated-authority.md", 1),
+    ("file", "rolevocab/RV7h-delegated-bypass-order.md", 1),
+    ("file", "rolevocab/RV7i-lock-empty-first.md", 1),
+    ("file", "rolevocab/RV7j-override-then-conflict.md", 1),
+    ("file", "rolevocab/RV7k-samevalue-duplicate.md", 1),
+    ("file", "rolevocab/RV7l-override-plus-lock-conflict.md", 1),
+    ("file", "rolevocab/RV7m-kind-conflict-plus-lock.md", 1),
+    ("file", "rolevocab/RV7n-delegated-replacement.md", 1),
+    ("file", "rolevocab/RV7o-lock-replacement.md", 1),
     ("root", "rolevocab/RV5-new-vocab-chain", 0),
     ("root", "rolevocab/RV5d-newvocab-designdoc-chain", 0),
     ("root", "rolevocab/RV5dneg-designdoc-no-approve", 1),
@@ -40,6 +48,14 @@ EXPECTED = [
     ("root", "rolevocab/RV7e2-domain-designlock-id-only", 1),
     ("root", "rolevocab/RV7f-master-delegated-authority", 1),
     ("root", "rolevocab/RV7g-malformed-address-hardening", 1),
+    ("root", "rolevocab/RV7h-delegated-bypass-order", 1),
+    ("root", "rolevocab/RV7i-lock-empty-first", 1),
+    ("root", "rolevocab/RV7j-override-then-conflict", 1),
+    ("root", "rolevocab/RV7k-samevalue-duplicate", 1),
+    ("root", "rolevocab/RV7l-override-plus-lock-conflict", 1),
+    ("root", "rolevocab/RV7m-kind-conflict-plus-lock", 1),
+    ("root", "rolevocab/RV7n-delegated-replacement", 1),
+    ("root", "rolevocab/RV7o-lock-replacement", 1),
     ("root", "rolevocab/AMB4-multiholder-malformed", 1),
     ("root", "rolevocab/RV7c-master-merge-grant", 1),
     ("root", "rolevocab/RV7d-master-broadset-no-fire", 0),
@@ -228,6 +244,32 @@ EXPECTED_ERROR_SET = {
     "rolevocab/RV7f-master-delegated-authority.md": [
         "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
     ],
+    "rolevocab/RV7h-delegated-bypass-order.md": [
+        "DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7i-lock-empty-first.md": [
+        "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7j-override-then-conflict.md": [
+        "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7k-samevalue-duplicate.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7l-override-plus-lock-conflict.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7m-kind-conflict-plus-lock.md": [
+        "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+        "authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7n-delegated-replacement.md": [
+        "DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7o-lock-replacement.md": [
+        "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
     "rolevocab/RV5dneg-designdoc-no-approve": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
     ],
@@ -251,6 +293,32 @@ EXPECTED_ERROR_SET = {
         "01-dispatch.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
         "02-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
         "02-impl-report.md: IMPL report FROM 'qi.grand-vizier' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/RV7h-delegated-bypass-order": [
+        "01-plan.md: DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7i-lock-empty-first": [
+        "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7j-override-then-conflict": [
+        "01-plan.md: DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7k-samevalue-duplicate": [
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7l-override-plus-lock-conflict": [
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7m-kind-conflict-plus-lock": [
+        "01-plan.md: DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7n-delegated-replacement": [
+        "01-plan.md: DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7o-lock-replacement": [
+        "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
     ],
     "rolevocab/AMB4-multiholder-malformed": [
         "02-dispatch-malformed-to.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",

@@ -683,22 +683,45 @@ def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
     role = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
     if role not in UNRULED_AUTHORITY_ROLES:
         return errors
+    authority_keys = (
+        "DELEGATED_DISPATCH_AUTHORITY",
+        "DESIGN_LOCK_ID",
+        "DESIGN_RECORD_KIND",
+    )
+    occurrences: Dict[str, List[str]] = {key: [] for key in authority_keys}
+    for line in sanitized_text(text).splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
+        if match and match.group(1) in occurrences:
+            occurrences[match.group(1)].append(match.group(2).strip())
+
+    resolved: Dict[str, str] = {}
+    for key in authority_keys:
+        values = occurrences[key]
+        distinct_values = set(values)
+        if len(distinct_values) > 1:
+            errors.append(
+                f"{key} carries {len(distinct_values)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present"
+            )
+        elif values:
+            resolved[key] = values[0]
+
     if own_line_dispatch_present(text):
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
             "a dispatch token from this seat is fail-closed pending the orchestrator ruling"
         )
-    if fields.get("DESIGN_RECORD_KIND") == "direct-override":
+    if resolved.get("DESIGN_RECORD_KIND") == "direct-override":
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
             "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling"
         )
-    elif fields.get("DESIGN_LOCK_ID") or fields.get("DESIGN_RECORD_KIND"):
+    elif resolved.get("DESIGN_LOCK_ID") or resolved.get("DESIGN_RECORD_KIND"):
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
             "a design-lock claim from this seat is fail-closed pending the orchestrator ruling"
         )
-    if fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() == "yes":
+    if resolved.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() == "yes":
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
             "a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling"
