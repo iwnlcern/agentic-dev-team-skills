@@ -1,0 +1,49 @@
+name: SPC4 Kegel-Spreer data
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-kegel-data.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spc4-compute-20260806
+          fetch-depth: 0
+      - name: Download and inspect archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf research-output/spc4/kegel_spreer
+          mkdir -p research-output/spc4/kegel_spreer/archive
+          curl --fail --location --retry 5 --retry-all-errors \
+            'https://raw.githubusercontent.com/MarcKegel/marckegel.github.io/main/Friend_search/exotic_traces.zip' \
+            -o /tmp/exotic_traces.zip
+          sha256sum /tmp/exotic_traces.zip > research-output/spc4/kegel_spreer/SHA256SUMS.txt
+          unzip -q /tmp/exotic_traces.zip -d research-output/spc4/kegel_spreer/archive
+          find research-output/spc4/kegel_spreer/archive -type f -printf '%s\t%p\n' | sort -n \
+            > research-output/spc4/kegel_spreer/file_manifest.txt
+          grep -RIna --binary-files=without-match -E \
+            'slice|ribbon|friend|PD|Rasmussen|KnotJob|s-invariant|zero surgery|0-surgery' \
+            research-output/spc4/kegel_spreer/archive \
+            > research-output/spc4/kegel_spreer/keyword_hits.txt || true
+          sed -n '1,1000p' research-output/spc4/kegel_spreer/keyword_hits.txt || true
+      - name: Commit recovered data
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'SPC4 research automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add research-output/spc4/kegel_spreer
+          git commit -m 'Preserve Kegel-Spreer exotic trace data'
+          git pull --rebase origin spc4-compute-20260806
+          git push origin HEAD:spc4-compute-20260806
