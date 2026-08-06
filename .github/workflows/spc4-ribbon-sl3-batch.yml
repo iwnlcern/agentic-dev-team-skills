@@ -1,0 +1,89 @@
+name: SPC4 ribbon friend sl3 batch
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-ribbon-sl3-batch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sl3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ['005', '006', '007', '008']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '23'
+      - name: Recover KnotJob and write optimized PD
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            'https://www.maths.dur.ac.uk/users/dirk.schuetz/KnotJob.zip' \
+            -o /tmp/KnotJob.zip
+          unzip -q /tmp/KnotJob.zip -d /tmp/knotjob
+          JAR="$(find /tmp/knotjob -type f -name 'KnotJob.jar' | head -n 1)"
+          test -n "$JAR"
+          echo "JAR=$JAR" >> "$GITHUB_ENV"
+          case '${{ matrix.candidate }}' in
+            005)
+              cat > candidate.txt <<'EOF'
+[[18, 30, 19, 29], [28, 20, 29, 19], [17, 10, 18, 11], [11, 20, 12, 21], [21, 16, 22, 17], [22, 0, 23, 47], [46, 10, 47, 9], [45, 30, 46, 31], [27, 44, 28, 45], [12, 44, 13, 43], [42, 16, 43, 15], [41, 0, 42, 1], [35, 15, 36, 14], [13, 37, 14, 36], [34, 1, 35, 2], [31, 26, 32, 27], [32, 38, 33, 37], [2, 33, 3, 34], [3, 40, 4, 41], [4, 24, 5, 23], [24, 6, 25, 5], [8, 26, 9, 25], [7, 38, 8, 39], [39, 6, 40, 7]]
+EOF
+              ;;
+            006)
+              cat > candidate.txt <<'EOF'
+[[21, 0, 22, 1], [53, 20, 0, 21], [38, 2, 39, 1], [52, 40, 53, 39], [40, 52, 41, 51], [19, 50, 20, 51], [26, 49, 27, 50], [22, 27, 23, 28], [48, 23, 49, 24], [10, 26, 11, 25], [24, 10, 25, 9], [11, 19, 12, 18], [12, 41, 13, 42], [37, 29, 38, 28], [2, 29, 3, 30], [30, 14, 31, 13], [3, 37, 4, 36], [14, 36, 15, 35], [4, 16, 5, 15], [17, 9, 18, 8], [47, 16, 48, 17], [42, 7, 43, 8], [6, 43, 7, 44], [46, 5, 47, 6], [31, 35, 32, 34], [33, 44, 34, 45], [45, 32, 46, 33]]
+EOF
+              ;;
+            007)
+              cat > candidate.txt <<'EOF'
+[[12, 2, 13, 1], [2, 14, 3, 13], [25, 0, 26, 1], [3, 24, 4, 25], [14, 23, 15, 24], [15, 5, 16, 4], [26, 11, 27, 12], [10, 27, 11, 28], [16, 50, 17, 49], [48, 0, 49, 55], [47, 28, 48, 29], [54, 29, 55, 30], [50, 18, 51, 17], [40, 51, 41, 52], [30, 40, 31, 39], [31, 52, 32, 53], [53, 38, 54, 39], [41, 18, 42, 19], [32, 19, 33, 20], [42, 5, 43, 6], [33, 6, 34, 7], [7, 21, 8, 20], [8, 37, 9, 38], [46, 10, 47, 9], [43, 35, 44, 34], [21, 44, 22, 45], [35, 23, 36, 22], [45, 36, 46, 37]]
+EOF
+              ;;
+            008)
+              cat > candidate.txt <<'EOF'
+[[1, 16, 2, 17], [17, 2, 18, 3], [38, 16, 39, 15], [39, 1, 40, 0], [14, 61, 15, 0], [13, 41, 14, 40], [18, 22, 19, 21], [37, 22, 38, 23], [23, 61, 24, 60], [24, 41, 25, 42], [59, 43, 60, 42], [25, 13, 26, 12], [11, 27, 12, 26], [27, 11, 28, 10], [58, 9, 59, 10], [43, 9, 44, 8], [57, 29, 58, 28], [44, 29, 45, 30], [45, 57, 46, 56], [55, 47, 56, 46], [3, 54, 4, 55], [20, 54, 21, 53], [52, 20, 53, 19], [30, 47, 31, 48], [48, 31, 49, 32], [7, 33, 8, 32], [51, 36, 52, 37], [33, 50, 34, 51], [6, 50, 7, 49], [4, 36, 5, 35], [34, 6, 35, 5]]
+EOF
+              ;;
+          esac
+          sha256sum candidate.txt "$JAR" | tee SHA256SUMS.txt
+      - name: Compute sl3 invariant
+        shell: bash
+        run: |
+          set -uo pipefail
+          /usr/bin/time -v timeout 30m java -Xmx6g -jar "$JAR" candidate.txt -sl0 \
+            > stdout.txt 2> stderr.txt
+          STATUS=$?
+          echo "$STATUS" > exit-code.txt
+          find . -maxdepth 1 -type f -printf '%s\t%f\n' | sort -n > files.txt
+          cat stdout.txt || true
+          cat stderr.txt || true
+          cat candidate.txt_sl3s0 || true
+          exit "$STATUS"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ribbon-sl3-${{ matrix.candidate }}-${{ github.run_id }}
+          path: |
+            candidate.txt
+            candidate.txt_sl3s0
+            stdout.txt
+            stderr.txt
+            exit-code.txt
+            SHA256SUMS.txt
+            files.txt
+          if-no-files-found: warn
+          compression-level: 9
+          retention-days: 30
