@@ -1,0 +1,10 @@
+0	research-output/spc4/target_friend_search/file_manifest.txt
+173	research-output/spc4/target_friend_search/SUMMARY.json
+221	research-output/spc4/target_friend_search/friend_search.json
+704	research-output/spc4/target_friend_search/target_pd.json
+1204	research-output/spc4/target_friend_search/target_info.json
+1564	research-output/spc4/target_friend_search/rbg_pair.json
+2802	research-output/spc4/target_friend_search/rbg_cert_final.py
+5016	research-output/spc4/target_friend_search/find_0_friends.py
+24485	research-output/spc4/target_friend_search/rbg.py
+92101	research-output/spc4/target_friend_search/target_rows.json

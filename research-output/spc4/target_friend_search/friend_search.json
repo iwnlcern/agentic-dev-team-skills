@@ -1,0 +1,8 @@
+{
+  "cutoff": 3.0,
+  "events": [],
+  "fatal": "Zero surgery is not positively hyperbolic in this triangulation",
+  "friends": [],
+  "zero_homology": "0",
+  "zero_solution_type": "contains negatively oriented tetrahedra"
+}
