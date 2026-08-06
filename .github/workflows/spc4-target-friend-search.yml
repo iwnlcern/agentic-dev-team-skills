@@ -1,0 +1,478 @@
+name: SPC4 target friend search
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-target-friend-search.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  search:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: spc4-compute-20260806
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install topology stack
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --pre --upgrade \
+            snappy spherogram snappy_manifolds cypari sympy
+          python - <<'PY'
+          import snappy, spherogram, cypari, sympy
+          print('snappy', snappy.__version__, snappy.__file__)
+          print('spherogram', getattr(spherogram, '__version__', None), spherogram.__file__)
+          print('cypari', getattr(cypari, '__version__', None), cypari.__file__)
+          print('sympy', sympy.__version__)
+          PY
+
+      - name: Reconstruct target, RBG partner, and word-drilled friends
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf research-output/spc4/target_friend_search
+          mkdir -p research-output/spc4/target_friend_search
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import bz2
+          import csv
+          import io
+          import json
+          import math
+          import pathlib
+          import re
+          import shutil
+          import sys
+          import time
+          import traceback
+          import zipfile
+          from fractions import Fraction
+
+          import requests
+          import snappy
+          import sympy as sp
+
+          OUT = pathlib.Path('research-output/spc4/target_friend_search')
+          TARGET = '18nh_00000601'
+          ARCHIVE = pathlib.Path('/tmp/plausibly_slice_V1.zip')
+
+          def jdump(obj, name):
+              (OUT / name).write_text(json.dumps(obj, indent=2, sort_keys=True, default=str))
+
+          # Download the public Dunfield--Gong archive.
+          with requests.get(
+              'https://dataverse.harvard.edu/api/access/datafile/13283715',
+              stream=True,
+              timeout=900,
+              headers={'User-Agent': 'SPC4-research-reproduction/2.0'},
+          ) as r:
+              r.raise_for_status()
+              with ARCHIVE.open('wb') as f:
+                  shutil.copyfileobj(r.raw, f, length=4 * 1024 * 1024)
+          print('archive', ARCHIVE.stat().st_size)
+
+          def targetish(text: str) -> bool:
+              s = text.replace('-', '_').lower()
+              return ('18nh_00000601' in s or
+                      '18nh00000601' in s or
+                      re.search(r'18\s*nh\s*_?\s*0*6001', s) is not None)
+
+          # Extract every row mentioning the target, streaming compressed CSVs.
+          row_hits = []
+          with zipfile.ZipFile(ARCHIVE) as z:
+              for name in z.namelist():
+                  lower = name.lower()
+                  if not (lower.endswith('.csv') or lower.endswith('.csv.bz2')):
+                      continue
+                  try:
+                      raw = z.open(name)
+                      if lower.endswith('.bz2'):
+                          stream = bz2.open(raw, mode='rt', encoding='utf-8', errors='replace', newline='')
+                      else:
+                          stream = io.TextIOWrapper(raw, encoding='utf-8', errors='replace', newline='')
+                      with raw, stream:
+                          reader = csv.DictReader(stream)
+                          for line_no, row in enumerate(reader, start=2):
+                              joined = '\x1f'.join(str(v) for v in row.values())
+                              if targetish(joined):
+                                  row_hits.append({'file': name, 'line': line_no, 'row': row})
+                                  print('TARGET ROW', name, line_no, row)
+                  except Exception as exc:
+                      print('scan failed', name, repr(exc))
+              # Preserve source scripts used as references.
+              for suffix in ('/code/find_0_friends.py', '/code/rbg.py', '/code/rbg_cert_final.py'):
+                  name = next(n for n in z.namelist() if n.endswith(suffix))
+                  (OUT / pathlib.PurePosixPath(name).name).write_bytes(z.read(name))
+          jdump(row_hits, 'target_rows.json')
+
+          if not row_hits:
+              raise RuntimeError('Target was not found in archive CSVs')
+
+          # Collect candidate PD and triangulation fields from all matching rows.
+          target_pd = None
+          target_tri = None
+          for hit in row_hits:
+              row = hit['row']
+              for key in ('PD_code', 'pd_code', 'pd', 'PD'):
+                  val = row.get(key)
+                  if val and val.strip() not in ('', 'nan', 'None'):
+                      try:
+                          pd = ast.literal_eval(val)
+                          if isinstance(pd, (list, tuple)) and pd:
+                              target_pd = [list(map(int, x)) for x in pd]
+                      except Exception:
+                          pass
+              for key in ('tri', 'isosig', 'triangulation'):
+                  val = row.get(key)
+                  if val and val.strip() not in ('', 'nan', 'None'):
+                      target_tri = val.strip()
+
+          if target_pd is not None:
+              jdump(target_pd, 'target_pd.json')
+              target_link = snappy.Link(target_pd)
+              target_ext = target_link.exterior()
+          elif target_tri is not None:
+              target_ext = snappy.Manifold(target_tri)
+          else:
+              raise RuntimeError('No target PD or triangulation field found')
+
+          if target_tri is not None:
+              try:
+                  tri_ext = snappy.Manifold(target_tri)
+                  if target_pd is not None:
+                      print('PD/tri isometric', target_ext.is_isometric_to(tri_ext))
+                  target_ext = tri_ext
+              except Exception:
+                  traceback.print_exc()
+
+          target_ext.set_name(TARGET)
+          target_info = {
+              'name': TARGET,
+              'pd': target_pd,
+              'tri': target_tri,
+              'volume': str(target_ext.volume()),
+              'num_tetrahedra': target_ext.num_tetrahedra(),
+              'homology': str(target_ext.homology()),
+              'solution_type': target_ext.solution_type(),
+          }
+          jdump(target_info, 'target_info.json')
+
+          def simplify_link(L, rounds=30):
+              L = L.copy()
+              for mode in ('basic', 'level', 'global'):
+                  for _ in range(rounds):
+                      try:
+                          changed = L.simplify(mode)
+                      except Exception:
+                          break
+                      if not changed:
+                          break
+              return L
+
+          def exterior_diagrams(E, attempts=12):
+              diagrams = []
+              seen = set()
+              for attempt in range(attempts):
+                  T = snappy.Triangulation(E)
+                  for _ in range(attempt):
+                      T.randomize()
+                  try:
+                      L = T.exterior_to_link()
+                  except Exception as exc:
+                      print('exterior_to_link failed', attempt, repr(exc))
+                      continue
+                  if not L:
+                      continue
+                  L = simplify_link(L)
+                  pd = [list(map(int, x)) for x in L.PD_code()]
+                  key = repr(pd)
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  diagrams.append({
+                      'attempt': attempt,
+                      'crossings': len(pd),
+                      'components': len(L.link_components),
+                      'pd': pd,
+                      'dt': repr(L.DT_code()),
+                  })
+              diagrams.sort(key=lambda x: (x['components'] != 1, x['crossings']))
+              return diagrams
+
+          # Reconstruct the RBG pair from Table 11 / Figure 19.
+          RBG_DT = 'DT[ycjkdnhQyUtMsaVweFIRCXOBgLJDkP]'
+          RBG_FRAMINGS = [(1, 1), (0, 1), (0, 1)]
+          rbg_link = snappy.Link(RBG_DT)
+          rbg_ext = rbg_link.exterior()
+          E = rbg_ext.copy(); E.dehn_fill([RBG_FRAMINGS[0], (0, 0), RBG_FRAMINGS[2]])
+          blue_ext = E.filled_triangulation()
+          E = rbg_ext.copy(); E.dehn_fill([RBG_FRAMINGS[0], RBG_FRAMINGS[1], (0, 0)])
+          green_ext = E.filled_triangulation()
+
+          matches = {}
+          for color, ext in [('blue', blue_ext), ('green', green_ext)]:
+              try:
+                  matches[color] = bool(snappy.Manifold(ext).is_isometric_to(snappy.Manifold(target_ext)))
+              except Exception as exc:
+                  matches[color] = {'error': repr(exc)}
+          if matches.get('blue') is True:
+              ribbon_ext = green_ext
+              target_color = 'blue'
+          elif matches.get('green') is True:
+              ribbon_ext = blue_ext
+              target_color = 'green'
+          else:
+              ribbon_ext = None
+              target_color = None
+          rbg_result = {
+              'dt': RBG_DT,
+              'framings': RBG_FRAMINGS,
+              'crossings': len(rbg_link.crossings),
+              'matches_target': matches,
+              'target_color': target_color,
+              'rbg_pd': [list(map(int, x)) for x in rbg_link.PD_code()],
+          }
+          if ribbon_ext is not None:
+              rbg_result['ribbon_friend_diagrams'] = exterior_diagrams(ribbon_ext, attempts=20)
+              try:
+                  rbg_result['same_zero_surgery'] = bool(
+                      snappy.Manifold(target_ext).filled_triangulation([(0, 1)]).is_isometric_to(
+                          snappy.Manifold(ribbon_ext).filled_triangulation([(0, 1)])))
+              except Exception as exc:
+                  rbg_result['same_zero_surgery'] = {'error': repr(exc)}
+          jdump(rbg_result, 'rbg_pair.json')
+
+          # ---- Sage-free version of find_0_friends.py ----
+          def exponent_vector(word, generators):
+              idx = {g: i for i, g in enumerate(generators)}
+              ans = [0] * len(generators)
+              for ch in str(word):
+                  lo = ch.lower()
+                  if lo in idx:
+                      ans[idx[lo]] += -1 if ch.isupper() else 1
+              return ans
+
+          def primitive_abelianization_vector(G):
+              gens = [str(x) for x in G.generators()]
+              rows = [exponent_vector(r, gens) for r in G.relators()]
+              A = sp.Matrix(rows)
+              basis = A.nullspace()
+              if len(basis) != 1:
+                  raise RuntimeError(f'Expected H1 rank 1, nullity={len(basis)}, gens={gens}, rows={rows}')
+              vec = basis[0]
+              den = 1
+              for x in vec:
+                  den = sp.ilcm(den, int(sp.denom(x)))
+              ints = [int(x * den) for x in vec]
+              g = 0
+              for x in ints:
+                  g = math.gcd(g, abs(x))
+              if g:
+                  ints = [x // g for x in ints]
+              return gens, ints
+
+          def is_three_sphere(T, tries=6):
+              T = snappy.Triangulation(T)
+              order = T.homology().order()
+              if order == 'infinite' or order > 1:
+                  return False
+              G = snappy.Manifold(T)
+              if G.solution_type(enum=True) == 1:
+                  return False
+              for _ in range(tries):
+                  try:
+                      if T.fundamental_group().num_generators() == 0:
+                          return True
+                      F = T.filled_triangulation()
+                      if F.fundamental_group().num_generators() == 0:
+                          return True
+                  except Exception:
+                      pass
+                  T.randomize()
+              return False
+
+          def is_knot_exterior(F):
+              F = snappy.Manifold(F)
+              if F.num_cusps() != 1 or F.homology().elementary_divisors() != [0]:
+                  return False
+              try:
+                  slopes = F.short_slopes(4.0)[0]
+              except Exception:
+                  slopes = []
+              a, b = F.homological_longitude()
+              for slope in slopes:
+                  if abs(a * slope[1] - b * slope[0]) != 1:
+                      continue
+                  M = snappy.Triangulation(F)
+                  M.dehn_fill(slope)
+                  if is_three_sphere(M):
+                      return tuple(map(int, slope))
+              return False
+
+          def safely_isometric(A, B, tries=15):
+              A, B = snappy.Manifold(A), snappy.Manifold(B)
+              try:
+                  if abs(A.volume() - B.volume()) > 1e-8:
+                      return False
+              except Exception:
+                  pass
+              for _ in range(tries):
+                  try:
+                      return bool(A.is_isometric_to(B))
+                  except Exception:
+                      A.randomize(); B.randomize()
+              return False
+
+          def length_spectrum(M, cutoff):
+              M = snappy.Manifold(M)
+              for _ in range(8):
+                  try:
+                      return M.length_spectrum(cutoff, grouped=False, include_words=True)
+                  except Exception:
+                      M.randomize()
+              return None
+
+          if sys.getrecursionlimit() < 50000:
+              sys.setrecursionlimit(50000)
+          original = snappy.ManifoldHP(target_ext)
+          zero = original.copy(); zero.dehn_fill((0, 1))
+          search_log = {
+              'zero_solution_type': zero.solution_type(),
+              'zero_homology': str(zero.homology()),
+              'cutoff': 3.0,
+              'events': [],
+              'friends': [],
+          }
+          if zero.solution_type(enum=True) != 1:
+              search_log['fatal'] = 'Zero surgery is not positively hyperbolic in this triangulation'
+          else:
+              G = zero.fundamental_group(False, False, False)
+              generators, abel_vec = primitive_abelianization_vector(G)
+              search_log['group'] = {
+                  'generators': generators,
+                  'relators': [str(x) for x in G.relators()],
+                  'abelianization_vector': abel_vec,
+              }
+              geodesics = length_spectrum(zero, 3.0)
+              if geodesics is None:
+                  search_log['fatal'] = 'Could not compute length spectrum'
+              else:
+                  search_log['num_geodesics'] = len(geodesics)
+                  found_exts = []
+                  for idx, geo in enumerate(geodesics):
+                      event = {
+                          'index': idx,
+                          'word': str(geo.word),
+                          'length': str(geo.length),
+                      }
+                      exp = exponent_vector(geo.word, generators)
+                      phi = sum(a*b for a, b in zip(exp, abel_vec))
+                      event['abelianization'] = phi
+                      if abs(phi) != 1:
+                          event['outcome'] = 'skip_non_generator'
+                          search_log['events'].append(event)
+                          continue
+                      try:
+                          F = zero.drill_word(geo.word).filled_triangulation()
+                          event['drilled_solution_type'] = F.solution_type()
+                          if F.solution_type(enum=True) not in [1, 2]:
+                              event['outcome'] = 'skip_bad_solution'
+                          elif safely_isometric(original, F):
+                              event['outcome'] = 'skip_original_exterior'
+                          else:
+                              slope = is_knot_exterior(F)
+                              event['s3_slope'] = slope
+                              if not slope:
+                                  event['outcome'] = 'skip_not_knot_exterior'
+                              else:
+                                  K = snappy.Manifold(F)
+                                  raw_vol = str(K.volume())
+                                  K.dehn_fill(slope)
+                                  K.set_peripheral_curves('fillings')
+                                  K.dehn_fill((0, 0))
+                                  K.randomize()
+                                  if any(safely_isometric(K, Q) for Q in found_exts):
+                                      event['outcome'] = 'duplicate_friend'
+                                  else:
+                                      found_exts.append(K)
+                                      diagrams = exterior_diagrams(K, attempts=24)
+                                      friend = {
+                                          'source_geodesic_index': idx,
+                                          'word': str(geo.word),
+                                          'length': str(geo.length),
+                                          's3_slope_before_rebasis': slope,
+                                          'raw_volume': raw_vol,
+                                          'volume': str(K.volume()),
+                                          'triangulation_isosig': K.triangulation_isosig(),
+                                          'num_tetrahedra': K.num_tetrahedra(),
+                                          'homology': str(K.homology()),
+                                          'diagrams': diagrams,
+                                      }
+                                      # Verify the inherited 0-filling is the target's 0-surgery.
+                                      try:
+                                          Z0 = original.copy(); Z0.dehn_fill((0, 1))
+                                          Z1 = snappy.Manifold(K); Z1.dehn_fill((0, 1))
+                                          friend['same_zero_surgery'] = safely_isometric(Z0, Z1)
+                                      except Exception as exc:
+                                          friend['same_zero_surgery'] = {'error': repr(exc)}
+                                      search_log['friends'].append(friend)
+                                      event['outcome'] = 'new_friend'
+                                      event['friend_index'] = len(search_log['friends']) - 1
+                      except Exception as exc:
+                          event['outcome'] = 'error'
+                          event['error'] = repr(exc)
+                          event['traceback'] = traceback.format_exc()
+                      search_log['events'].append(event)
+                      jdump(search_log, 'friend_search_checkpoint.json')
+          jdump(search_log, 'friend_search.json')
+
+          summary = {
+              'target_rows': len(row_hits),
+              'target_crossings': len(target_pd) if target_pd else None,
+              'rbg_target_color': target_color,
+              'ribbon_friend_best_crossings': (
+                  rbg_result.get('ribbon_friend_diagrams', [{}])[0].get('crossings')
+                  if rbg_result.get('ribbon_friend_diagrams') else None),
+              'new_friends': len(search_log.get('friends', [])),
+              'new_friend_best_crossings': [
+                  f['diagrams'][0]['crossings'] if f.get('diagrams') else None
+                  for f in search_log.get('friends', [])
+              ],
+          }
+          jdump(summary, 'SUMMARY.json')
+          print(json.dumps(summary, indent=2))
+          PY
+
+          find research-output/spc4/target_friend_search -type f -printf '%s\t%p\n' | sort -n \
+            > research-output/spc4/target_friend_search/file_manifest.txt
+
+      - name: Commit preserved results
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'SPC4 research automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add research-output/spc4/target_friend_search || true
+          if git diff --cached --quiet; then
+            echo 'No result files to commit.'
+          else
+            git commit -m 'Preserve target zero-friend search results'
+            git pull --rebase origin spc4-compute-20260806
+            git push origin HEAD:spc4-compute-20260806
+          fi
