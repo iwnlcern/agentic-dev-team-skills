@@ -1,0 +1,234 @@
+name: SPC4 dataset analysis
+
+on:
+  push:
+    branches: [spc4-compute-20260806]
+    paths:
+      - '.github/workflows/spc4-analyze-dataset.yml'
+      - 'spc4/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Download archive and extract relevant files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p results/selected results/matches
+          python -m pip install --upgrade pip requests
+          python - <<'PY'
+          from __future__ import annotations
+          import bz2
+          import csv
+          import io
+          import json
+          import pathlib
+          import re
+          import shutil
+          import zipfile
+          import requests
+
+          archive = pathlib.Path('/tmp/plausibly_slice_V1.zip')
+          url = 'https://dataverse.harvard.edu/api/access/datafile/13283715'
+          with requests.get(url, stream=True, timeout=900,
+                            headers={'User-Agent': 'SPC4-research-reproduction/1.1'}) as r:
+              r.raise_for_status()
+              with archive.open('wb') as out:
+                  shutil.copyfileobj(r.raw, out, length=4 * 1024 * 1024)
+          print('archive bytes', archive.stat().st_size)
+
+          selected_basenames = {
+              'README.txt',
+              'knots_mentioned_PD_codes.csv',
+              'rbg_cert_final.py',
+              'rbg.py',
+              'known_0_friends.py',
+              'find_0_friends.py',
+              'check_ribbon_cert.py',
+              'unknown_with_0-friend_final.csv',
+              'zero_friends_column_descript.txt',
+              'plausibly_column_descript.txt',
+          }
+          selected_suffixes = (
+              '/code/rbg_cert_final.py',
+              '/code/rbg.py',
+              '/code/known_0_friends.py',
+              '/code/find_0_friends.py',
+              '/code/check_ribbon_cert.py',
+              '/data/unknown_with_0-friend_final.csv',
+              '/data/zero_friends_column_descript.txt',
+              '/knots_mentioned_PD_codes.csv',
+          )
+
+          root = pathlib.Path('results')
+          selected = root / 'selected'
+          matches_dir = root / 'matches'
+          patterns = [
+              re.compile(r'18\s*[_-]?\s*nh\s*[_-]?\s*0*6001', re.I),
+              re.compile(r'18nh0*00000601', re.I),
+              re.compile(r'00000601', re.I),
+              re.compile(r'ycjkdnhQyUtMsaVweFIRCXOBgLJDkP'),
+          ]
+
+          def wanted(text: str) -> bool:
+              return any(p.search(text) for p in patterns)
+
+          manifest = []
+          with zipfile.ZipFile(archive) as z:
+              names = z.namelist()
+              (root / 'archive_listing.txt').write_text('\n'.join(names) + '\n')
+              for info in z.infolist():
+                  manifest.append({
+                      'name': info.filename,
+                      'compressed_size': info.compress_size,
+                      'size': info.file_size,
+                      'crc': info.CRC,
+                  })
+                  if info.is_dir():
+                      continue
+                  base = pathlib.PurePosixPath(info.filename).name
+                  if base in selected_basenames or info.filename.endswith(selected_suffixes):
+                      dest = selected / info.filename
+                      dest.parent.mkdir(parents=True, exist_ok=True)
+                      with z.open(info) as src, dest.open('wb') as out:
+                          shutil.copyfileobj(src, out, length=1024 * 1024)
+              (root / 'archive_manifest.json').write_text(json.dumps(manifest, indent=2))
+
+              # Scan all reasonably small text/code/CSV entries directly.
+              small_hits = []
+              for info in z.infolist():
+                  if info.is_dir() or info.file_size > 150_000_000:
+                      continue
+                  lower = info.filename.lower()
+                  if not lower.endswith(('.txt', '.csv', '.py', '.md', '.json', '.sage')):
+                      continue
+                  try:
+                      text = z.read(info).decode('utf-8', 'replace')
+                  except Exception as exc:
+                      small_hits.append({'file': info.filename, 'error': repr(exc)})
+                      continue
+                  lines = text.splitlines()
+                  hits = [
+                      {'line': i + 1, 'text': line}
+                      for i, line in enumerate(lines)
+                      if wanted(line)
+                  ]
+                  if hits:
+                      small_hits.append({'file': info.filename, 'hits': hits})
+              (matches_dir / 'small_text_hits.json').write_text(json.dumps(small_hits, indent=2))
+
+              # Stream the large bzip2 CSVs without materializing them.
+              bz_entries = [n for n in names if n.lower().endswith('.csv.bz2')]
+              bz_report = []
+              for name in bz_entries:
+                  report = {'file': name, 'header': None, 'hits': [], 'error': None}
+                  try:
+                      with z.open(name) as compressed:
+                          with bz2.open(compressed, mode='rt', encoding='utf-8', errors='replace', newline='') as text:
+                              for i, line in enumerate(text, start=1):
+                                  if i == 1:
+                                      report['header'] = line.rstrip('\r\n')
+                                  if wanted(line):
+                                      report['hits'].append({'line': i, 'text': line.rstrip('\r\n')})
+                                      if len(report['hits']) >= 5000:
+                                          break
+                  except Exception as exc:
+                      report['error'] = repr(exc)
+                  if report['hits'] or report['error']:
+                      bz_report.append(report)
+              (matches_dir / 'compressed_csv_hits.json').write_text(json.dumps(bz_report, indent=2))
+
+          # Produce a compact, grep-friendly report.
+          with (matches_dir / 'all_hits.txt').open('w') as out:
+              out.write('=== SMALL TEXT HITS ===\n')
+              for item in small_hits:
+                  out.write(f"FILE {item.get('file')}\n")
+                  for hit in item.get('hits', []):
+                      out.write(f"{hit['line']}: {hit['text']}\n")
+              out.write('\n=== COMPRESSED CSV HITS ===\n')
+              for item in bz_report:
+                  out.write(f"FILE {item['file']}\nHEADER {item.get('header')}\n")
+                  for hit in item.get('hits', []):
+                      out.write(f"{hit['line']}: {hit['text']}\n")
+                  if item.get('error'):
+                      out.write(f"ERROR {item['error']}\n")
+          PY
+
+          find results/selected -type f -printf '%s\t%p\n' | sort -n > results/selected_files.txt
+          sed -n '1,2000p' results/matches/all_hits.txt
+
+      - name: Install SnapPy stack and inspect ribbon database
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euxo pipefail
+          python -m pip install --pre --upgrade snappy spherogram snappy_manifolds cypari
+          python -m pip install --upgrade regina || true
+          python -m pip freeze | sort > results/pip-freeze.txt
+          python - <<'PY'
+          from __future__ import annotations
+          import json
+          import pathlib
+          import traceback
+
+          result = {'imports': {}, 'ribbon_links': {}}
+          for name in ('cypari', 'snappy_manifolds', 'spherogram', 'snappy', 'regina'):
+              try:
+                  mod = __import__(name)
+                  result['imports'][name] = {
+                      'ok': True,
+                      'version': getattr(mod, '__version__', None),
+                      'path': getattr(mod, '__file__', None),
+                  }
+              except Exception as exc:
+                  result['imports'][name] = {
+                      'ok': False,
+                      'error': repr(exc),
+                      'traceback': traceback.format_exc(),
+                  }
+          try:
+              import snappy
+              table = snappy.RibbonLinks
+              result['ribbon_links']['repr'] = repr(table)
+              result['ribbon_links']['count'] = len(table)
+              result['ribbon_links']['schema'] = {
+                  'table': getattr(table, '_table', None),
+                  'db_path': getattr(table, '_db_path', None),
+                  'filter': getattr(table, '_filter', None),
+              }
+              # Direct name/text search is deliberately limited; target identification
+              # follows after the dataset rows reveal the exact ribbon friend.
+              sample = table[0]
+              result['ribbon_links']['sample'] = {
+                  'name': sample.name(),
+                  'pd': repr(sample.PD_code()),
+                  'ribbon_cert': repr(sample.ribbon_cert),
+              }
+          except Exception as exc:
+              result['ribbon_links']['error'] = repr(exc)
+              result['ribbon_links']['traceback'] = traceback.format_exc()
+          pathlib.Path('results/software-inspection.json').write_text(json.dumps(result, indent=2, sort_keys=True))
+          print(json.dumps(result, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload compact analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc4-dataset-analysis-${{ github.run_id }}
+          path: results/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 30
