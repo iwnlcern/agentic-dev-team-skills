@@ -116,7 +116,8 @@ def oracle(path: Path, audit: bool) -> OracleResult:
 
     marker_line = 0
     marker_time: dt.datetime | None = None
-    first_marker = MARKER_RE.search(text)
+    _markers = list(MARKER_RE.finditer(text))
+    first_marker = _markers[-1] if _markers else None
     if first_marker:
         marker_time = parse_time(first_marker.group(1))
         for lineno, line in enumerate(lines, 1):

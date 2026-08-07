@@ -63,6 +63,21 @@ EXPECTED = [
     ("root", "rolevocab/RVn2-wrong-to", 1),
     ("root", "rolevocab/RVn3-non-addressee-implreport", 1),
     ("root", "rolevocab/RVn4-cross-role-implreport", 1),
+    ("root", "rolevocab/AMB5-singleton-retrospective", 1),
+    ("root", "rolevocab/AMB6-alias-retrospective", 1),
+    ("root", "rolevocab/AMB7-dispatch-late-review", 1),
+    ("root", "rolevocab/AMB8-review-late-plan", 1),
+    ("root", "rolevocab/AMB9-late-tokenless", 1),
+    ("root", "rolevocab/AMB10-late-wrong-owner", 1),
+    ("root", "rolevocab/AMB11-late-malformed-pair", 1),
+    ("root", "rolevocab/AMB12-late-cross-role", 1),
+    ("root", "rolevocab/AMB13-late-two-from", 1),
+    ("root", "rolevocab/AMB14-late-two-to", 1),
+    ("root", "rolevocab/KR4A-direct-issuer-prose", 0),
+    ("root", "rolevocab/KR4B-planner-prose-nofield", 1),
+    ("index", "indexmarker/IDX1-below-floor", 1),
+    ("index", "indexmarker/IDX2-first-marker-floor", 1),
+    ("index", "indexmarker/IDX3-above-floor", 0),
     ("file", "claude/A1-valid-audit.md", 0),
     ("file", "claude/A2-valid-downgrade.md", 0),
     ("file", "claude/B2-why-before-scan.md", 1),
@@ -341,6 +356,51 @@ EXPECTED_ERROR_SET = {
     "rolevocab/RVn4-cross-role-implreport": [
         "02-impl-report.md: IMPL report FROM 'qi.pair-planner' is not the addressee of the parent DISPATCH IMPL relay",
     ],
+    "rolevocab/AMB5-singleton-retrospective": [
+        "01-impl-report.md: IMPL report parent 'amb5' is held by 1 relays (02-dispatch.md); none is an earlier DISPATCH IMPL relay addressed to qi.implementer",
+    ],
+    "rolevocab/AMB6-alias-retrospective": [
+        "01-impl-report.md: IMPL report parent 'amb6' is held by 1 relays (02-dispatch.md); none is an earlier DISPATCH IMPL relay addressed to qi.pair-implementer",
+    ],
+    "rolevocab/AMB7-dispatch-late-review": [
+        "02-dispatch.md: DISPATCH IMPL parent 'amb7rev' is not earlier than the dispatch relay",
+    ],
+    "rolevocab/AMB8-review-late-plan": [
+        "03-dispatch.md: pair-Planner PLAN parent is not earlier than the PLAN-REVIEW relay",
+    ],
+    "rolevocab/AMB9-late-tokenless": [
+        "01-impl-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB10-late-wrong-owner": [
+        "01-impl-report.md: IMPL report FROM 'qi.implementer' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB11-late-malformed-pair": [
+        "01-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-dispatch.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-dispatch.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+        "01-impl-report.md: IMPL report FROM 'qi.grand-vizier' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB12-late-cross-role": [
+        "01-impl-report.md: IMPL report FROM 'qi.pair-planner' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB13-late-two-from": [
+        "01-impl-report.md: FROM must contain exactly one address",
+    ],
+    "rolevocab/AMB14-late-two-to": [
+        "02-dispatch.md: DISPATCH IMPL requires exactly one TO addressee",
+    ],
+    "rolevocab/KR4A-direct-issuer-prose": [],
+    "rolevocab/KR4B-planner-prose-nofield": [
+        "03-dispatch.md: delegated DISPATCH IMPL missing SCOPE_DIFF",
+        "03-dispatch.md: delegated DISPATCH IMPL missing SCOPE_DIFF_RESULT",
+    ],
+    "indexmarker/IDX1-below-floor": [
+        "line 4: index time 20260801-110000 predates the monotonic-from boundary 20260801-120000",
+    ],
+    "indexmarker/IDX2-first-marker-floor": [
+        "line 5: index time 20260801-110000 predates the monotonic-from boundary 20260801-120000",
+    ],
+    "indexmarker/IDX3-above-floor": [],
     "design-review/DR15-verdict-human-decision": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
     ],
@@ -521,6 +581,8 @@ def main() -> int:
         target = FIXTURES / rel
         if kind == "file":
             result = lint.lint_file(target)
+        elif kind == "index":
+            result = lint.lint_relay_index(target / "INDEX.md")
         else:
             result = lint.lint_relay_root(target)
         observed = 0 if result.ok else 1
@@ -535,7 +597,7 @@ def main() -> int:
         if expected_warns is not None:
             ok = ok and sorted(result.warnings) == sorted(expected_warns)
         failed = failed or not ok
-        label = f"--relay-root {rel}" if kind == "root" else rel
+        label = f"--relay-root {rel}" if kind == "root" else f"--index {rel}" if kind == "index" else rel
         print(f"{label}: expected={expected} observed={observed} {'PASS' if ok else 'FAIL'}")
         if expected_errors is not None:
             print(f"  expected_errors={len(expected_errors)} observed_errors={len(result.errors)}")

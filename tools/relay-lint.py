@@ -540,8 +540,42 @@ def addr_is(address: str | None, owner: str | None, role: str) -> bool:
     return address_owner(address) == owner and canonical_role(address_role(address)) == role
 
 
+def dispatch_is_delegated(fields: Dict[str, str], clean: str) -> bool:
+    """KR-4 (D26): the prose operand applies only to seats that can act on
+    borrowed authority. Operator/orchestrator/orchestrator-planner-issued
+    dispatches carry their own authorization, so prose mentioning delegation
+    never reclassifies them; the structural field always counts."""
+    if fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() in {"yes", "true"}:
+        return True
+    from_addrs = split_addresses(fields.get("FROM"))
+    from_role_val = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
+    if from_role_val in LINEAGE_DIRECT_FROM_ROLES:
+        return False
+    return re.search(r"delegated", clean, flags=re.IGNORECASE) is not None
+
+
 def is_implementer_address(address: str) -> bool:
     return canonical_role(address_role(address)) == "implementer"
+
+
+def impl_dispatch_parent_qualifies(actor_from: List[str], item) -> bool:
+    """rev19 shared structural predicate: item qualifies as the IMPL report's
+    DISPATCH IMPL parent for actor_from iff it carries a live own-line token
+    and is addressed, one-to-one, to the same owner and canonical role with
+    both roles parseable. Consumed by BOTH multi-holder qualification and the
+    singleton order-eligibility branch; design rev19 forbids any second copy."""
+    if len(actor_from) != 1:
+        return False
+    if not own_line_dispatch_present(item[4]):
+        return False
+    t = split_addresses(item[3].get("TO"))
+    return (
+        len(t) == 1
+        and address_role(t[0]) is not None
+        and address_role(actor_from[0]) is not None
+        and address_owner(t[0]) == address_owner(actor_from[0])
+        and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0]))
+    )
 
 
 def validate_address_fields(result: LintResult, fields: Dict[str, str], *, template_mode: bool) -> Dict[str, List[str]]:
@@ -1167,7 +1201,7 @@ def lint_file(
 
     # Delegated dispatch requires substantive SCOPE_DIFF.
     has_dispatch = own_line_dispatch_present(text)
-    delegated = re.search(r"delegated", clean, flags=re.IGNORECASE) is not None or fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() in {"yes", "true"}
+    delegated = dispatch_is_delegated(fields, clean)
     if has_dispatch and delegated:
         if "SCOPE_DIFF" not in fields:
             result.error("delegated DISPATCH IMPL missing SCOPE_DIFF")
@@ -1373,7 +1407,8 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
 
     marker_line = 0
     marker_dt: Optional[datetime.datetime] = None
-    m = INDEX_MONOTONIC_MARKER_RE.search(text)
+    _markers = list(INDEX_MONOTONIC_MARKER_RE.finditer(text))
+    m = _markers[-1] if _markers else None
     if m:
         for i, line in enumerate(lines, 1):
             if INDEX_MONOTONIC_MARKER_RE.search(line):
@@ -1773,15 +1808,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             by_id,
             did,
             order,
-            lambda it: len(actor_from) == 1
-            and own_line_dispatch_present(it[4])
-            and (lambda t: len(t) == 1
-                 and address_role(t[0]) is not None
-                 and address_role(actor_from[0]) is not None
-                 and address_owner(t[0]) == address_owner(actor_from[0])
-                 and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0])))(
-                split_addresses(it[3].get("TO"))
-            ),
+            lambda it: impl_dispatch_parent_qualifies(actor_from, it),
         )
         if parent is None:
             if holders:
@@ -1793,6 +1820,12 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
                 )
             else:
                 result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} does not resolve to a relay in this lineage")
+            continue
+        if len(holders) == 1 and impl_dispatch_parent_qualifies(actor_from, parent) and parent[1] >= order:
+            result.error(
+                f"{f.relative_to(path)}: IMPL report parent {did!r} is held by 1 relays "
+                f"({parent[0].name}); none is an earlier DISPATCH IMPL relay addressed to {actor_from[0]}"
+            )
             continue
         if extra_qualifying:
             result.warn(
