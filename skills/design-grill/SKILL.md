@@ -1,6 +1,6 @@
 ---
 name: design-grill
-description: Use during the DESIGN phase when a design or product decision must be stress-tested before DESIGN_LOCK_ID — when the operator asks to be grilled, when new-feature/still-open work at medium tier or above has ambiguous product semantics or a cross-domain boundary contract, or when a hard-to-reverse data/API/model decision or several downstream choices hang on one unsettled question.
+description: "Use during the DESIGN phase only when an addressed DESIGN dispatch carries GRILL_REQUIRED: yes. Stress-test the dispatched decision before DESIGN_LOCK_ID; when the field is absent and trigger conditions apply, the pair Planner stops and asks the orchestrator whether to amend the dispatch instead of invoking this skill."
 ---
 
 # Design Grill
