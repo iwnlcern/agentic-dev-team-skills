@@ -5,7 +5,7 @@ description: Use during the DESIGN phase when a design or product decision must 
 
 # Design Grill
 
-An optional pre-lock design-pressure step inside the **DESIGN** phase. It resolves design
+An optional-by-default pre-lock design-pressure step inside the **DESIGN** phase. It resolves design
 dependencies one question at a time before a `DESIGN_LOCK_ID` is written, and records the
 result as a durable artifact so downstream agents inherit the decisions.
 
@@ -23,7 +23,7 @@ Record one line in the design record:
 GRILL_REQUIRED: <yes | no>
 ```
 
-`yes` when any of these is true:
+`GRILL_REQUIRED: yes` in an addressed DESIGN dispatch is a mandatory pre-lock step for that design. Use `yes` when any of these is true:
 - the operator explicitly asked to be grilled;
 - new-feature / `still-open` work at medium ceremony tier or above;
 - ambiguous product semantics;
@@ -31,9 +31,9 @@ GRILL_REQUIRED: <yes | no>
 - a hard-to-reverse data / API / model decision;
 - multiple downstream decisions depend on one unsettled choice.
 
-Otherwise `no` — skip it. This step is never mandatory; the protocol's existing ceremony
-pressure already scales effort to stakes, so do not grill tiny/small fixes or
-`already-closed`/promote-existing work.
+Absent the field, when these trigger conditions hold, the pair Planner stops and asks the orchestrator whether to amend the dispatch rather than deciding alone.
+`no` means the trigger was evaluated and did not apply, or was already satisfied by a cited existing lock.
+The grill step itself remains optional by default and adds no mechanical gate; what binds is the addressed dispatch field, not the skill's existence. Without a binding `yes`, do not grill tiny/small fixes or `already-closed`/promote-existing work.
 
 ## How to run it
 

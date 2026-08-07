@@ -4,13 +4,20 @@
 
 Copy-paste these for Claude Code-style agent teams, subagents, or equivalent background workers. Reviewers are read-only unless explicitly reassigned.
 
+`HUMAN_GATE_REQUIRED: yes` if and only if the current relay's requested next transition cannot occur without a fresh operator decision. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed. Standing downstream gates are named only after `downstream:` or in prose, never in the enum value. The field is a predicate re-evaluated at each relay, not a latch.
+
 ## Shared review context
 
 ```text
 Shared review context:
 PR / branch: <repo#PR or branch>
 DISPATCH_ID: <id>
-PLAN_LOCK_ID: <id/hash/title>
+DESIGN_LOCK_ID: <logical design id | none>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
+PLAN_LOCK_ID: <logical plan id>
+PLAN_ARTIFACT: <plan artifact filename stem; omit line when absent>
+PLAN_SHA256: <lowercase-hex sha256; omit line when absent>
 Locked design / plan: <path or summary>
 Acceptance criteria:
 1. <criterion>

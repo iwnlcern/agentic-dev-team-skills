@@ -23,15 +23,16 @@ Use the compact header below for substantive outputs. Add tier/risk-dependent fi
 ROLE: <Master Planner | Master Reviewer | Domain Planner | Domain Reviewer | Orchestrator Planner | Orchestrator Reviewer | Pair Planner | Pair Implementer | Planner | Implementer | Reviewer>
 PHASE: <AUDIT | DESIGN | DESIGN-REVIEW | PLAN | PLAN-REVIEW | IMPL | REVIEW-FOLD | MERGE-GATE | LIVE-VERIFY | SITREP | RECONCILE>
 AUTHORITY: <read-only | design-only | plan-only | review-only | implementation | fold-in-only | merge-gated | live-verify | report-only>
-DISPATCH_ID: <stable id>
+DISPATCH_ID: <handoff id for authority-chain relay | cycle id otherwise>
 PARENT_DISPATCH_ID: <immediate predecessor dispatch id; required for pair-Planner DISPATCH IMPL and substantive IMPL action reports>
 RUN_ID: <sprint/run id; local/router grouping, not a lint input>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + for what>
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <owner.role | orchestrator | operator>
 TO: <owner.role>[, ...]
 CC: <owner.role>[, ...]
+SUBJECT: <display summary>
 ```
 
 `Planner`, `Implementer`, and `Reviewer` are legacy values, accepted permanently and classed at pair tier.
@@ -59,6 +60,12 @@ Other classes: one or more as the phase requires.
 ```
 
 CC is targeted context, not broadcast. CC only when the recipient's next decision plausibly depends on the relay, usually because its boundary contract is adjacent to the relay's surface.
+
+`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer.
+A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed.
+Standing downstream gates are named only after `downstream:` or in prose, never in the enum value.
+The field is a predicate re-evaluated at each relay, not a latch.
+The `yes | no` shape is unchanged; variant spellings (`HUMAN_GATE_REQUIRED_FOR_MERGE`) are legacy display, never gate input.
 
 Tier/risk-dependent/local fields:
 
@@ -99,6 +106,27 @@ Canonical fields: `ROLE`, `PHASE`, `AUTHORITY`, `DISPATCH_ID`, `PARENT_DISPATCH_
 `PARENT_DISPATCH_ID` is the immediate predecessor edge that lineage gates walk. For pair-Planner-issued `DISPATCH IMPL` and substantive IMPL action reports, absence of this edge is itself a structural error; it is not a delegated-dispatch escape hatch. It is agent-authored, so the guarantee is confusion-robust only: relay-lint proves that a valid-shaped chain exists; it does not prove the reviewer semantically engaged the right plan. A future router-derived parent edge can make the same shape gate forgery-robust.
 
 Local or display fields: `RUN_ID`, `IN_REPLY_TO`, `BASE`, and `RELAY_PATH`. `IN_REPLY_TO` is relay-to-relay display/threading context and is not a gate input. `BASE` and `RELAY_PATH` are host bookkeeping. Do not invent a second threading scheme inside helper skills.
+
+`SUBJECT` joins the local/display field list beside `IN_REPLY_TO`, placed after `CC`; display-only, never a gate input.
+
+## Artifact identity, location, and integrity
+
+Identity, location, and integrity are three properties in three fields, never one.
+`DESIGN_LOCK_ID` and `PLAN_LOCK_ID` are logical identity values, compared by the shipped equality gate byte-unchanged; a lock value is never a filename stem, never a path, and never compound (no digest suffix, no errata annotation, no ` @ sha256`).
+Byte integrity rides `DESIGN_SHA256` / `PLAN_SHA256`: optional fields carrying the lowercase-hex sha256 of the referenced artifact's bytes as of the referencing relay; a legitimate amendment keeps the identity value and floats the digest forward in the next relay (the grill's fork-1 amendment policy, surviving on the digest field), so a digest mismatch with no acknowledging relay is the tamper signal.
+Location rides `DESIGN_ARTIFACT` / `PLAN_ARTIFACT`: optional locator fields carrying the artifact's filename stem, resolving to `designs/<stem>.md` or `plans/<stem>.md` under the owning sprint tree; consumers resolve through the locator field and never by parsing the identity value.
+New artifacts name their files by one stem grammar per document class — `designs/DD-<cycle>-<YYYYMMDD>.md`, `plans/PL-<cycle>-<YYYYMMDD>.md`, amendments and errata by suffix (`-erratum-N`, `-supplement-N`, `-amendment-N`) — and that stem is what the locator field carries.
+
+The routed digest check is fail-closed: a present digest requires its paired locator (`DESIGN_SHA256` with no `DESIGN_ARTIFACT` is the exact refusal, and the shape checks are gated on digest occurrence); exact-file mode checks field well-formedness only, root mode additionally resolves through the locator and compares; a locator without a digest fires no shape check, with the unconditional conflicting-duplicate refusal the one exception. These mechanics are owned by v29-detection rev25 and are cited here, not claimed by this text.
+
+At lint scope, an acknowledging relay is any later relay carrying shape-valid locator and digest values for the same field pair and stem; the check treats the newest such declaration as current and adjudicates nothing about it.
+The limit is named rather than discoverable: a later shape-valid carrier therefore silences a digest mismatch at lint — including a carrier that is foreign, rejected, or structurally dirty under other checks.
+Lint acknowledges; it does not judge legitimacy.
+Legitimacy is reviewer- and reader-owned: for a design or plan artifact, a digest change is legitimate only when its acknowledging carrier belongs to the protocol-valid approval or direct-override lineage for that artifact — the matching approving DESIGN-REVIEW/PLAN-REVIEW lineage, or a valid operator/orchestrator direct override.
+The owning register records the history and supplies reviewer evidence; it does not substitute for required approval or override.
+An acknowledgment outside that lineage is a reviewer flag, never a digest-lint error.
+Forward practice: an amendment's carriers — the amending relay and its approving review — declare the locator beside the digest so the amendment governs its own stem; Amendment 2's own carriers predate this rule and stand as the register's fired example of the digest-without-locator class.
+This check narrows silent tampering without closing acknowledged tampering.
 
 ## Design-review lineage gate
 
@@ -209,6 +237,9 @@ E2 — local command proof: test, lint, typecheck, fixture, migration dry run, s
 E3 — integration/runtime proof: local stack, staging, worker, scheduler, DB/API check.
 E4 — deployed/live proof: deployed SHA verified plus real target/tenant/environment workflow verified.
 ```
+
+`EVIDENCE_TARGET` is the minimum evidence level capable of proving the relay's strongest acceptance claim — selected by the claim, not by the phase and not by the strongest incidental command; static committed-source proof is E1 even when obtained by a shell command.
+A receiving seat that believes a different level applies returns the delta rather than silently substituting.
 
 Do not write “fixed,” “done,” “safe,” or “verified” without an evidence level. Passing tests are E2, not E4. Merge is not deploy; deploy is not live verification.
 
@@ -332,6 +363,10 @@ Flag human decision for product semantics, user-visible behavior, irreversible d
 
 AUDIT relays must check whether the feature/fix is already implemented, feature-flagged, present in a dead path, exposed through an alternate UI/API, covered by an existing test, or product-overlapped. Use the 4-bucket definitions above. If existing code is found, do not rebuild it; recommend promote, enable, wire, test, reroute, or close.
 
+Every addressed audit return receives a disposition artifact that maps each finding exactly once to one of {owned obligation with a named target artifact or gate, explicit rejection with reason, overlap edge to an owning item, verified closure with evidence}; a finding with no mapping makes any "reconciled" claim for that return false.
+Each finding mapping names the artifact or evidence checked before disposition, or states exactly `none — <reason>`; a mapping carrying neither is incomplete.
+The obligation ledger must be readable by seats other than the one that created the obligation.
+
 ## Boundary contract fields
 
 Use when work crosses domains/components/services or creates data for another consumer.
@@ -378,23 +413,30 @@ Incoming sitreps are E0 until reconciled against repo/PR/task/deploy/runtime evi
 
 File-first relays are the default for every substantive relay (audit, design lock, plan, plan review, fold-in report, sitrep, merge/live-verify verdict) whenever the agent has disk access — design-phase questions and answers between partners are inline by default; only the resulting design lock is a file relay. When writing a relay: write the full relay to the relay file, then print only a compact pointer plus a 3-6 line summary inline. The inline pointer block must also carry the relay's routing lines — `FROM`, `TO`, and `CC` when present — verbatim from the relay header, so an operator relaying by hand knows who acts and who is informed without opening the file. This keeps the conversation lean and leaves a durable artifact the partner, orchestrator, or operator can relay verbatim. Terminal-only relays are the fallback, not the default — use them only when the agent lacks write access or the receiver cannot reach any filesystem, and in that case relay the full contents inline. The file contents are the payload; a path is only a convenience when the receiver shares the filesystem.
 
-Work cycles: A `DISPATCH_ID` names a work cycle — what one commissioning dispatch opens — ending at whichever terminus it reaches (`audit* → design* → plan* → implementation → merge* → live-verify*`, stars marking legitimate termini). Successor reuse of the ID within a cycle is correct and must never be flagged; reusing an ID to open new work is an error; filing follows commissioning — a message lives in the cycle it belongs to, and separately commissioned work is its own cycle. The merge gate already requires grant and claim to share a `DISPATCH_ID` across the whole cycle.
+Authority-chain relays — PLAN, PLAN-REVIEW, IMPL, and the merge grant/claim pair — carry handoff-scoped ids, and each `PARENT_DISPATCH_ID` names its immediate predecessor; every other relay in the cycle carries the cycle id; one directory per cycle.
+Allocation is mechanical: PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id, because that gate requires the pair; non-authority-chain status relays carry the cycle id, never a handoff id.
+The cycle directory is named by that cycle id. An authority-chain relay's handoff-scoped `DISPATCH_ID` does not create or select another directory; follow its `PARENT_DISPATCH_ID` lineage to the cycle id and file it in the existing cycle directory.
 
-Default durable relay root:
+References to a relay are folder-qualified paths resolving against the declared root (`IN_REPLY_TO: v29-conventions/DESIGN-planner-20260806-165840.md`), never bare filenames.
+A relay's owner of record is its `FROM` header; folder names and file names are routing labels and never establish ownership.
+
+Durable relay root:
 
 ```text
-.relays/<project-or-run-slug>/
+.relays/<RUN_ID>/
 ```
 
 Use:
 
 ```text
-RELAY_ROOT=${RELAY_ROOT:-.relays/<project-or-run-slug>}
-<RELAY_ROOT>/<DISPATCH_ID>/<PHASE>-<ROLE>-<YYYYMMDD-HHMMSS>.md
+RELAY_ROOT=.relays/<RUN_ID>
+<RELAY_ROOT>/<cycle-id>/<PHASE>-<ROLE>-<YYYYMMDD-HHMMSS>.md
 <RELAY_ROOT>/INDEX.md
 ```
 
-If repo-local writes are inappropriate, use `/tmp/relays/<project-or-run-slug>/` with the same layout. Avoid a single global `/tmp/relays` directory.
+The relay root is literal `.relays` (a rule, not a default) anchored beside the sprint or lane documents it serves, with exactly one run level `.relays/<RUN_ID>/` for orchestrator teams.
+The effective root of a run is recorded once, by the INDEX `root:` marker; a `RELAY_ROOT` override or operator-directed divergence is valid only when so recorded.
+A divergent directory without a recorded override is nonconformance, not a second compliant reading.
 
 Timestamp policy: `<YYYYMMDD-HHMMSS>` must be the **real clock time at which you author the relay** — read the clock, do not infer it from the previous relay's name, continue a numbering pattern, or round to a tidy cadence.
 A stamp you invented is a false claim about when a decision was made, and it makes the append-only trail unorderable: a relay can appear to precede its own parent.
@@ -405,7 +447,28 @@ Verify it, do not trust it. The two checks are deliberately different, because a
 `relay-lint --index <RELAY_ROOT>/INDEX.md` is an **ordering** check, not a drift check — it fails a row that decreases, disagrees with its filename, is not a real time, or is stamped ahead of the clock. An index nobody has appended to for hours or days is not a defect and passes.
 A drifted name is a rename, not a rewrite: fix the filename and the index row rather than back-fitting other relays to the wrong time.
 
-Index policy: append each new row at the END of the file, after the last existing row, so INDEX.md stays in write order. Do not place a row next to an earlier row from the same seat or otherwise group rows by owner/role — that is a read-modify-write upsert and races during concurrent work. Append-only, end-of-file rows are the rule.
+The following INDEX-writer and append-order rules are legacy/pre-cutover/rollback text; the daemon mechanism is v29-engine D1's and is not claimed here.
+Before daemon activation, the relay author appends exactly its own row immediately after filing; a concurrency inversion is registered, never rewritten.
+Form A ships with the gated-append rule: re-read the tail immediately before appending; append at end-of-file in write order.
+Never re-sort: an observed inversion is registered (a row or relay noting it), never repaired by rewriting rows.
+The gated append narrows the concurrency race without closing it; only the serialized daemon writer (v29-engine D1) closes it.
+After daemon activation, only the daemon appends, and the daemon assigns the row timestamp at serialized append; seats stop writing the file.
+Rollback to hand mode re-enters the first sentence.
+
+A root marker in an INDEX declares the base against which that index's `file` cells resolve; the `file` cell is the only qualified-reference surface this form and the routed check cover, and broader reference grammar — other columns, prose, header fields — remains reviewer- and reader-owned. The rooted file-cell mechanism is owned by v29-detection rev25 and routed through v29-faults; any implementation tempted to grow the surface must stop and relay.
+Resolution is marker-gated: an index without a marker receives no resolution semantics from the kit and no resolution check — there is no repo-root default and no implied base.
+pdc grandfathers by doing nothing; any existing corpus opts in by appending one marker line; every new index carries the marker from its template, pre-filled by team structure.
+
+The root marker has the exact own-line shape `root: <path>`; recognition walks fence-sanitized text and accepts a marker only when the entire line, modulo surrounding whitespace, is that form.
+The canonical `<path>` is a POSIX-separator path relative to the directory containing the INDEX (`.` and `..` permitted), so the declaration survives tree moves; absolute values are recognized and resolve standalone, but an absolute marker in a tracked index is a reviewer-detected conformance violation. Untracked machine-local indexes may use absolute values without violation.
+Template prefills: an independent team's run INDEX at `.relays/<run>/INDEX.md` declaring the `.relays/` root writes `root: ..`; a subservient team's run-local INDEX declaring its own run directory writes `root: .`; a master team's INDEX at `master/relays/INDEX.md` declaring `master/` writes `root: ..`.
+Exactly one recognized root marker per index, or none: a second recognized marker is a duplicate refusal that suppresses row resolution — an error, never an update mechanism.
+The root marker may sit on any line, so an existing append-only index opts in by appending its first and only marker at end-of-file; templates place it in the header before the first row.
+
+A `file` cell is either a path resolving under the declared root, or the explicit literal form `none — <short reason>` (beginning with the exact word `none` and an em-dash), which the resolution check skips by rule; pdc's existing parenthetical prose cells are the declared-legacy reading of the same intent and are never rewritten.
+`none — <short reason>` is a declared, reason-bearing value — the row deliberately carries no relay artifact — and not an absence; the bare `—` absence marker is not a valid `file` cell, because a row that exists always either points at its relay or declares why there is none.
+The two forms never render the same observable state: `—` marks a value unknown or inapplicable elsewhere in the row; `none — <reason>` marks a known, deliberate no-relay state in the one cell where silence would otherwise be ambiguous.
+
 Index rows must be **non-decreasing in `time`**. An existing index whose history predates this rule can be grandfathered by appending a boundary marker — `<!-- relay-lint: monotonic-from <YYYYMMDD-HHMMSS> -->` — after the last historical row; rows below it are then held to the rule and rows above it are inspected with `--index-audit`.
 A marker's only legitimate class is an operator-ratified **historical** inversion: rows already disordered by concurrent writers, after the disordering write stream has stabilized, where no corrected relay can repair them.
 An **active or recurring** concurrent-append inversion is not that class — it is registered and waited out (the register-and-wait discipline), never marker-waved, because a marker only grandfathers history and prevents nothing.
@@ -417,9 +480,55 @@ Never insert a marker over an inversion whose cause has not been established, an
 Be honest about the mechanism's edge: implementations have shipped a defect where, in an index with more than one marker, each later marker moved the boundary while the floor value was silently retained from the oldest — so later ratified markers were weaker than their ratifiers believed.
 A mechanism that forgives the past and can silently weaken the future is not one a seat may invoke for itself.
 
+One INDEX schema, stated once:
+
 ```text
-| time | phase | role | dispatch | to | owner | status | file |
+| time | phase | role | dispatch | parent | from | to | cc | status | file |
 ```
+
+The eight-column example is deleted as stale text (zero live instances in any corpus).
+
+The `role` cell is the lowercase hyphenated role word from the address grammar; absent values are exactly `—`.
+The `status` cell is one kebab-case token (no spaces, parentheses, or sentences).
+Sampling rule of record: the census ran over every operational INDEX root in each deployment (this kit 1, pdc 5, harness 9, personal-website 5 — twenty roots), matching the whole status cell case-insensitively, with meaning established from the matched rows' phase, seat, and target artifact.
+The partition is three-way — canonical, legacy synonym, free — derived from two rules rather than a bare list.
+Candidate rule: the reserved universe is the grill-recorded review-cycle vocabulary plus one close-out value; within it, a token is reserved when attested in at least two deployments with one meaning; seven tokens qualify.
+Alias rule: a token whose meaning is demonstrated identical to a reserved meaning — or identical plus information another INDEX column or the relay header already carries (phase qualification, thread parentage) — is a forward-only legacy synonym: legal in history, non-canonical in new rows, and not a free-tail value; a token whose meaning is not demonstrated identical to any reserved meaning is free.
+
+The seven canonical tokens: `sent` (relay filed/transported; harness, pdc), `dispatched` (authority-bearing dispatch issued to a named seat; all four), `review-requested` (a review is asked of the addressee; all four), `approve` (review verdict approve; all four), `must-revise` (review verdict demanding an exact successor, from any review seat — pair review or reviewer lens; all four), `returned` (deltas returned to the requester; this kit, personal-website), `complete` (the addressed unit of work closed; pdc, harness, personal-website — the close-out value, the only close-out meeting the criterion).
+
+```text
+legacy synonym -> canonical (identity demonstrated at the rows)
+  revise                    -> must-revise   (4 corpora; same reviewer seat issues both
+                                              for the same demand -- pdc INDEX rows 7/94)
+  design-review-requested   -> review-requested   (4; phase column carries the qualifier)
+  plan-review-requested     -> review-requested   (4; same)
+  re-review-requested       -> review-requested   (3; iteration visible from the thread)
+  plan-for-review           -> review-requested   (2)
+  design-complete           -> complete      (4; phase-qualified close-out)
+  audit-complete            -> complete      (2; same)
+  fold-complete             -> complete      (2; same)
+  dispatch-impl-issued      -> dispatched    (2; phase-qualified)
+  delivered                 -> sent          (2)
+  replied                   -> sent          (2; parentage is the parent column's)
+  reported                  -> sent          (2; phase column carries SITREP)
+
+free (meaning outside the seven, or identity not demonstrated)
+  folded, blocked, human-decision-required, acknowledged, ack, received,
+  confirm, decision-requested, merge-blocked,
+  review-fold-required (demanding a fold of a review is not requesting
+  a review -- pdc s2 INDEX row 90, harness s1 INDEX row 56),
+  boot, proceed-to-plan (a status projection of the M12 legacy practice),
+  correction, ruling-requested, locked, reconciled, still-open, unblocked,
+  merged, merged-not-deployed, merge-authorized, merge-ready-recommended,
+  scope-all-in, fold-scope-all-in, fold-accepted, design-complete-hold,
+  design-complete-holding, cleared (pdc-only),
+  and every single-deployment or run-specific tail (e.g. folded-e2-green)
+```
+
+The shipped merge/live-verification verdict list (`merge-blocked`, `merged-not-deployed`, `deployed-not-live-verified`, `failed-live-verification`, `complete`, `human-decision-required`) is that gate's verdict vocabulary, owned there; projecting those words into a status cell stays free, and this form reserves none of them on that ground (`complete` is reserved as the grill universe's close-out value, not as a merge verdict).
+Widening the reserved universe beyond the grill record was declined; a future cycle may reserve more tokens by one-line amendment under the same rules.
+The lint exemption is stated as a rule, not "normally": the INDEX is exempt from relay-lint's relay checks and subject to its `--index` checks.
 
 For orchestrator-tier relays, terminal output should normally be a compact pointer, the relay's routing lines (`FROM`, `TO`, and `CC` when present), plus a one-line summary. If the receiver cannot access the file path, relay the file contents verbatim or attach the file.
 

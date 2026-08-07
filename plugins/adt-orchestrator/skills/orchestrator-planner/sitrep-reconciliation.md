@@ -22,7 +22,7 @@ OWNER: <team/pair/agent>
 BASE: <repo>@<branch>@<sha or unknown>
 TARGET_BRANCH: <branch or none>
 DISPATCH_REQUIRED_FOR_IMPL: <yes/no>
-HUMAN_GATE_REQUIRED_FOR_MERGE: <yes/no>
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 LIVE_VERIFY_REQUIRED: <yes/no + reason>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 CEREMONY_DOWNGRADE: <none | skipped steps + why safe>
@@ -60,6 +60,8 @@ Next requested action:
 ```
 
 If a team sends a free-form sitrep, extract these fields and ask them to use the standard format next time.
+
+`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed. Standing downstream gates are named only after `downstream:` or in prose, never in the enum value. The field is a predicate re-evaluated at each relay, not a latch.
 
 ## Claim-evidence ladder
 
@@ -270,7 +272,7 @@ OWNER: <team/pair>
 BASE: <repo>@<branch>@<sha or unknown>
 TARGET_BRANCH: <branch or none>
 DISPATCH_REQUIRED_FOR_IMPL: <yes/no>
-HUMAN_GATE_REQUIRED_FOR_MERGE: yes
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: merge requires human/operator gate>
 LIVE_VERIFY_REQUIRED: <yes/no + reason>
 CEREMONY_TIER: <tier>
 CEREMONY_DOWNGRADE: <none or rationale>
