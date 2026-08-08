@@ -121,6 +121,15 @@ VOCABULARY = (
     ("Pair Implementer", "t-x.pair-implementer"),
     ("Planner", "t-x.planner"),
 )
+RETIRED_M01_COMPOUND_PLACEHOLDERS = (
+    "<id/hash/title>",
+    "<design id/title to create>",
+    "<design id/title/hash",
+    "<approved design id/title/hash>",
+    "<approved design doc id/hash",
+    "<plan id/title to create>",
+    "<locked plan id/title/hash>",
+)
 
 
 def expect(condition: bool, message: str) -> None:
@@ -156,6 +165,35 @@ def file_map(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def check_retired_m01_compound_placeholders() -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "shared", "skills", "plugins"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout.split(b"\0")
+    hits: list[str] = []
+    for raw_relative in tracked:
+        if not raw_relative:
+            continue
+        relative = Path(os.fsdecode(raw_relative))
+        parts = relative.parts
+        in_shipped_surface = (
+            parts[0] in {"shared", "skills"}
+            or (len(parts) >= 3 and parts[0] == "plugins" and parts[2] == "skills")
+        )
+        if not in_shipped_surface:
+            continue
+        for line_number, line in enumerate((ROOT / relative).read_text(encoding="utf-8").splitlines(), 1):
+            for pattern in RETIRED_M01_COMPOUND_PLACEHOLDERS:
+                if pattern in line:
+                    hits.append(f"{relative.as_posix()}:{line_number}: {pattern}")
+    expect(
+        not hits,
+        "retired M01 compound placeholders found:\n" + "\n".join(hits),
+    )
 
 
 def canonical_files(source: Path, destination: str) -> set[str]:
@@ -659,6 +697,7 @@ def main() -> int:
     for name, check in (
         ("determinism", check_determinism),
         ("clean --check", check_clean),
+        ("retired M01 compound placeholders", check_retired_m01_compound_placeholders),
         ("manifest mutation", check_manifest_mutation),
         ("banner mutation", check_banner_mutation),
         ("body mutation", check_body_mutation),
