@@ -2001,6 +2001,14 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             continue
         if not implementation_work_claimed(text, fields):
             continue
+        if from_is_direct_authority(fields) and own_line_dispatch_present(text):
+            # KR-8 Class A (D26): a relay issued by a direct-authority seat
+            # (operator/orchestrator/orchestrator-planner) that itself carries
+            # the live own-line token IS the dispatch, not a report owing a
+            # parent edge. Seat-scoped deliberately: any other FROM -- an
+            # implementer embedding a live token to dodge the trap -- still
+            # falls through and is caught below.
+            continue
         if not fields.get("PARENT_DISPATCH_ID"):
             result.error(f"{f.relative_to(path)}: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay")
             continue

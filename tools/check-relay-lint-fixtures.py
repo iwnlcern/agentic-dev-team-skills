@@ -204,6 +204,10 @@ A5_SEAM = {
 }
 
 EXPECTED = A5_EXPECTED + [
+    ("root", "kr8a/KR8A1-carrier-exempt", 0),
+    ("root", "kr8a/KR8A2-nocarrier-control", 1),
+    ("root", "kr8a/KR8A3-implementer-token-control", 1),
+    ("root", "kr8a/KR8A4-fenced-token-control", 1),
     ("file", "rolevocab/RV1a-pair-planner.md", 0),
     ("file", "rolevocab/RV1b-pair-implementer.md", 0),
     ("file", "rolevocab/RV2a-master-planner.md", 0),
@@ -427,6 +431,16 @@ EXPECTED = A5_EXPECTED + [
 ]
 
 EXPECTED_ERROR_SET = {
+    "kr8a/KR8A1-carrier-exempt": [],
+    "kr8a/KR8A2-nocarrier-control": [
+        "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "kr8a/KR8A3-implementer-token-control": [
+        "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "kr8a/KR8A4-fenced-token-control": [
+        "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
     "lockpath/LP1-old-form/.relays/v29": [],
     "lockpath/LP2-new-form": [],
     "lockpath/LP3-missing": [
@@ -747,6 +761,9 @@ EXPECTED_ERROR_SET = {
 }
 
 EXPECTED_WARN_SET: dict[str, list[str]] = {
+    "kr8a/KR8A4-fenced-token-control": [
+        "02-report.md: DISPATCH IMPL appears inside fenced code on line 16; quoted/fenced tokens are inert",
+    ],
     "ambiguity/AMB3-latest-wins": [
         "04-dispatch.md: 2 relays under 'amb3' qualify as the PLAN-REVIEW parent; selected latest 03-review-mustrevise.md; candidates: 02-review-approve.md",
     ],
