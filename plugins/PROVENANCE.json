@@ -134,7 +134,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/design-request-template.md",
-    "sha256": "ac5ef0522772446de05119f242838b03a0da9b3c39ac540f48990d7614825e4c",
+    "sha256": "f3df99669a62ab97d4e5939dcd55b93cd8500f67804cc6f86e490471113ae482",
     "source": "shared/design-request-template.md"
   },
   {
@@ -224,7 +224,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-planner/design-request-template.md",
-    "sha256": "ac5ef0522772446de05119f242838b03a0da9b3c39ac540f48990d7614825e4c",
+    "sha256": "f3df99669a62ab97d4e5939dcd55b93cd8500f67804cc6f86e490471113ae482",
     "source": "shared/design-request-template.md"
   },
   {
@@ -2186,7 +2186,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/design-request-template.md",
-    "sha256": "ac5ef0522772446de05119f242838b03a0da9b3c39ac540f48990d7614825e4c",
+    "sha256": "f3df99669a62ab97d4e5939dcd55b93cd8500f67804cc6f86e490471113ae482",
     "source": "shared/design-request-template.md"
   },
   {
@@ -2276,7 +2276,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-planner/design-request-template.md",
-    "sha256": "ac5ef0522772446de05119f242838b03a0da9b3c39ac540f48990d7614825e4c",
+    "sha256": "f3df99669a62ab97d4e5939dcd55b93cd8500f67804cc6f86e490471113ae482",
     "source": "shared/design-request-template.md"
   },
   {
@@ -4256,7 +4256,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-planner/design-request-template.md",
-    "sha256": "ac5ef0522772446de05119f242838b03a0da9b3c39ac540f48990d7614825e4c",
+    "sha256": "f3df99669a62ab97d4e5939dcd55b93cd8500f67804cc6f86e490471113ae482",
     "source": "shared/design-request-template.md"
   },
   {

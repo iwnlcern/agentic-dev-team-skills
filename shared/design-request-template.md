@@ -18,7 +18,7 @@ TO: <team>.implementer
 CC: <orchestrator | operator | boundary-adjacent owner.role | none>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <DESIGN relay dispatch id from orchestrator/operator>
-DESIGN_DOC_ID: <design id/title/hash>
+DESIGN_DOC_ID: <logical design id>
 DESIGN_RECORD_KIND: design-doc
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
@@ -29,7 +29,7 @@ Current scope for the `TO` addressee: read-only DESIGN-REVIEW. No source/test ed
 Anti-pattern: `TO: orchestrator` with `<team>.implementer` only on `CC` is not a DESIGN-REVIEW request. CC is context only; it grants no phase authority and creates no review obligation. If this relay is misaddressed, reissue it with `TO: <team>.implementer`.
 
 Design doc to review:
-- DESIGN_DOC_ID: <design id/title/hash>
+- DESIGN_DOC_ID: <logical design id>
 - Location / relay pointer: <path or attachment>
 - Selected option:
 - Rejected alternatives:
