@@ -155,6 +155,16 @@ def render_relay(ledger, root, seq):
         body = bytes(body)
     if _digest(body) != expected_digest:
         raise ValueError("stored relay body digest mismatch")
+    parent = rel.split("/", 1)[0]
+    if "/" not in rel or parent in ("", ".", ".."):
+        raise ValueError("relay path must name one lane directory")
+    try:
+        os.mkdir(parent, 0o700, dir_fd=root.dirfd)
+        os.fsync(root.dirfd)
+    except FileExistsError:
+        pass
+    parent_fd = os.open(parent, _DIRECTORY_FLAGS, dir_fd=root.dirfd)
+    os.close(parent_fd)
     try:
         digest = atomic_create(root, rel, body)
     except FileExistsError:

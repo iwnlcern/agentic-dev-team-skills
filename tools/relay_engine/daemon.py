@@ -4,6 +4,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 import errno
 import fcntl
+import base64
 import hashlib
 import io
 import json
@@ -19,6 +20,9 @@ import uuid
 
 from relay_engine import errors, strings
 from relay_engine.ledger import init_schema, open_ledger
+from relay_engine.ledger import admit, epoch_state
+from relay_engine.envelope import body_sha256, content_hash, parse_draft
+from relay_engine.render import index_rows, render_index, render_relay
 from relay_engine.paths import Root, TempWrite, ensure_engine_dir
 
 
@@ -521,10 +525,77 @@ class _SocketService:
             thread.join(2.5)
 
 
-def _default_handler(ledger, state, handlers, request):
+def _tag_is_current(root, envelope, tag):
+    directory = ".engine/seats/%s" % envelope.from_seat
+    try:
+        path = root.resolve_inside(directory)
+    except (OSError, ValueError):
+        return False
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return False
+    candidates = []
+    for name in names:
+        if name.endswith(".key"):
+            candidates.append(directory + "/" + name)
+            continue
+        occupant_dir = os.path.join(path, name)
+        try:
+            info = os.lstat(occupant_dir)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            continue
+        try:
+            candidates.extend(directory + "/" + name + "/" + child
+                              for child in os.listdir(occupant_dir)
+                              if child.endswith(".key"))
+        except OSError:
+            continue
+    for candidate in candidates:
+        try:
+            value = root.open_read(candidate).decode("utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if value == tag:
+            return True
+    return False
+
+
+def _submit_handler(ledger, root, args):
+    try:
+        body = base64.b64decode(args["body_b64"], validate=True)
+        envelope = parse_draft(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, errors.EngineError) as exc:
+        raise errors.error_for("E-ENVELOPE") from exc
+    if args["envelope"] != envelope.headers:
+        raise errors.error_for("E-ENVELOPE")
+    if not _tag_is_current(root, envelope, args["tag"]):
+        raise errors.error_for("E-KEY-MISMATCH")
+    admission = admit(
+        ledger, root, envelope, body, args["submission_id"],
+        claimed_body_sha256=args["body_sha256"],
+        claimed_content_hash=args["content_hash"],
+        admits_against=args.get("admits_against"))
+    rendered = render_relay(ledger, root, admission.seq)
+    render_index(root, index_rows(ledger), 10, epoch_state(ledger))
+    advisory_row = ledger.execute(
+        "SELECT advisories_json FROM relays WHERE seq=?",
+        (admission.seq,)).fetchone()
+    return {"path": admission.rendered_path,
+            "render_state": ("rendered" if rendered.event == "rendered"
+                             else "render-conflict"),
+            "advisories": json.loads(advisory_row[0]),
+            "duplicate": admission.replay}
+
+
+def _default_handler(ledger, root, state, handlers, request):
     op = request["op"]
     if op in handlers:
         return handlers[op](request["args"])
+    if op == "submit":
+        return _submit_handler(ledger, root, request["args"])
     if op == "daemon.stop":
         return {"ok": True}
     if op == "status":
@@ -566,7 +637,7 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override):
         _trace(trace, "log-bound")
         holder = {}
         writer = SerialWriter(lambda request: _default_handler(
-            holder["ledger"], state, handlers, request))
+            holder["ledger"], root, state, handlers, request))
         writer.start()
         _trace(trace, "writer-started")
         try:

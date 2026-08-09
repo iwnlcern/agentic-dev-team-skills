@@ -1,6 +1,7 @@
 """Keyed, validated user-visible text emission for relay-engine."""
 
 from dataclasses import dataclass
+import json
 import re
 import string as _string
 import sys
@@ -16,12 +17,22 @@ class RejectedValue:
             self.digest, self.length)
 
 
+@dataclass(frozen=True)
+class MachineResult:
+    value: object
+
+    def __str__(self):
+        return json.dumps(self.value, sort_keys=True, separators=(",", ":"))
+
+
 INVENTORY = {
     "explain-heading": "{code}",
     "explain-cause": "cause: {cause}",
     "explain-remedy": "remedy: {remedy}",
     "usage-error": "usage error",
     "unexpected-error": "unexpected error",
+    "daemon-start-failed": "daemon start failed",
+    "command-result": "{result}",
     "rejected-value": "unrecognized-input (sha256:{digest}, length {length})",
 }
 
@@ -66,6 +77,10 @@ def _is_rejected(value):
     return isinstance(value, RejectedValue)
 
 
+def _is_machine_result(value):
+    return isinstance(value, MachineResult)
+
+
 def _is_reason(value):
     return isinstance(value, str) and value in _REASONS
 
@@ -86,6 +101,7 @@ _VALIDATORS.update({
     ("explain-remedy", "remedy"): _is_text,
     ("rejected-value", "digest"): _is_digest12,
     ("rejected-value", "length"): _is_count,
+    ("command-result", "result"): _is_machine_result,
 })
 
 
@@ -124,6 +140,12 @@ def rejected_value(digest, length):
     if str(value) != rendered:
         raise AssertionError("rejected value renderer mismatch")
     return value
+
+
+def machine_result(value):
+    result = MachineResult(value)
+    str(result)
+    return result
 
 
 def _make_emitter():
