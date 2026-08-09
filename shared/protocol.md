@@ -409,7 +409,7 @@ Incoming sitreps are E0 until reconciled against repo/PR/task/deploy/runtime evi
 
 ## Relay transport
 
-File-first relays are the default for every substantive relay (audit, design lock, plan, plan review, fold-in report, sitrep, merge/live-verify verdict) whenever the agent has disk access — design-phase questions and answers between partners are inline by default; only the resulting design lock is a file relay. When writing a relay: write the full relay to the relay file, then print only a compact pointer plus a 3-6 line summary inline. The inline pointer block must also carry the relay's routing lines — `FROM`, `TO`, and `CC` when present — verbatim from the relay header, so an operator relaying by hand knows who acts and who is informed without opening the file. This keeps the conversation lean and leaves a durable artifact the partner, orchestrator, or operator can relay verbatim. Terminal-only relays are the fallback, not the default — use them only when the agent lacks write access or the receiver cannot reach any filesystem, and in that case relay the full contents inline. The file contents are the payload; a path is only a convenience when the receiver shares the filesystem.
+File-first relays are the default for every substantive relay (audit, design lock, plan, plan review, fold-in report, sitrep, merge/live-verify verdict) whenever the agent has disk access — design-phase questions and answers between partners are inline by default; only the resulting design lock is a file relay. When writing a relay: write the full relay to the relay file, then print inline the pointer context — `FROM` verbatim from the relay header and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` block defined in the Hand-off pointer section, so an operator relaying by hand knows who acts and who is informed without opening the file. Nothing follows the block. This keeps the conversation lean and leaves a durable artifact the partner, orchestrator, or operator can relay verbatim. Terminal-only relays are the fallback, not the default — use them only when the agent lacks write access or the receiver cannot reach any filesystem, and in that case relay the full contents inline. The file contents are the payload; a path is only a convenience when the receiver shares the filesystem.
 
 Authority-chain relays — PLAN, PLAN-REVIEW, IMPL, and the merge grant/claim pair — carry handoff-scoped ids, and each `PARENT_DISPATCH_ID` names its immediate predecessor; every other relay in the cycle carries the cycle id; one directory per cycle.
 Allocation is mechanical: PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id, because that gate requires the pair; non-authority-chain status relays carry the cycle id, never a handoff id.
@@ -528,7 +528,30 @@ The shipped merge/live-verification verdict list (`merge-blocked`, `merged-not-d
 Widening the reserved universe beyond the grill record was declined; a future cycle may reserve more tokens by one-line amendment under the same rules.
 The lint exemption is stated as a rule, not "normally": the INDEX is exempt from relay-lint's relay checks and subject to its `--index` checks.
 
-For orchestrator-tier relays, terminal output should normally be a compact pointer, the relay's routing lines (`FROM`, `TO`, and `CC` when present), plus a one-line summary. If the receiver cannot access the file path, relay the file contents verbatim or attach the file.
+## Hand-off pointer
+
+Every turn that files one or more relays MUST end its terminal output with one
+hand-off pointer block per relay filed, so the operator can hand-relay without
+hunting or asking:
+
+    RELAY: <repo-relative path to the relay file>
+    TO: <the acting addressee seats, verbatim from the relay header>
+    CC: <context-only seats; omit the line when none>
+
+FROM and the 3–6 line summary remain required pointer content and PRECEDE the
+block: context first, then the exact terminal RELAY/TO/CC lines the operator
+copies. Nothing follows the block.
+
+This binds every seat at every tier. Multiple relays filed in one turn each get
+their own block, in filing order. TO lists only the seats the hand-relay must
+reach; CC never obligates. A pointer without a filed relay is a defect.
+
+If the receiver cannot access the path, additionally relay the file contents
+verbatim or attach the file.
+
+The pointer is terminal output, outside relay-lint's surface, so it is not
+linter-enforced: the operator enforces it by declining to hand-relay a relay
+that arrives without one.
 
 
 ## Relay lint
