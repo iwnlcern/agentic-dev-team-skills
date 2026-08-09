@@ -30,6 +30,8 @@ _TEXT = {
     "error-header-remedy": "supply every required submission header",
     "error-envelope-cause": "submitted envelope does not match server-derived bytes",
     "error-envelope-remedy": "rebuild the envelope from the unchanged draft",
+    "error-envelope-edge-cause": "admits_against did not resolve to exactly one existing relay under the root",
+    "error-envelope-edge-remedy": "field: admits_against; expected: a single root-relative path resolving to exactly one existing relay; existing targets: {targets}",
     "error-replay-cause": "submission id was replayed with changed content",
     "error-replay-remedy": "retry the original bytes or allocate a new submission id",
     "error-storage-cause": "the run record could not complete the operation",
@@ -88,6 +90,8 @@ strings.register_inventory(
     {
         ("error-framing-cause", "reason"): lambda v: v in strings.FRAMING_REASONS,
         ("error-header-cause", "field"): lambda v: (isinstance(v, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", v) is not None),
+        ("error-envelope-edge-remedy", "targets"):
+            strings.IS_EXISTING_TARGETS,
         ("error-wire-version-cause", "rejected_version"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-op-cause", "rejected_op"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-args-cause", "op"): lambda v: v in strings.OPS,
@@ -125,6 +129,11 @@ ERRORS = {
     "E-DAEMON-STOPPING": _spec("daemon-stopping", "wire"),
 }
 
+ERROR_VARIANTS = {
+    ("E-ENVELOPE", "edge-resolution"):
+        _spec("envelope-edge", "integrity"),
+}
+
 POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}
 
 
@@ -137,9 +146,13 @@ class EngineError(Exception):
     def __init__(self, code, cause_key, remedy_key, cls, **params):
         if code not in ERRORS:
             raise KeyError(code)
-        spec = ERRORS[code]
-        if (cause_key, remedy_key, cls) != (
-                spec.cause_key, spec.remedy_key, spec.cls):
+        registered = [ERRORS[code]] + [
+            spec for (variant_code, _), spec in ERROR_VARIANTS.items()
+            if variant_code == code
+        ]
+        if (cause_key, remedy_key, cls) not in {
+                (spec.cause_key, spec.remedy_key, spec.cls)
+                for spec in registered}:
             raise KeyError("error specification is not registered")
         self.code = code
         self.cause_key = cause_key
@@ -155,10 +168,16 @@ class EngineError(Exception):
                 "remedy": self.remedy, "cls": self.cls}
 
 
-def error_for(code, **params):
+def error_for(code, *, variant=None, **params):
     if code not in ERRORS:
         raise KeyError(code)
-    spec = ERRORS[code]
+    if variant is None:
+        spec = ERRORS[code]
+    else:
+        try:
+            spec = ERROR_VARIANTS[(code, variant)]
+        except KeyError as exc:
+            raise KeyError("error variant is not registered") from exc
     return EngineError(code, spec.cause_key, spec.remedy_key, spec.cls,
                        **params)
 

@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 
-from relay_engine import errors
+from relay_engine import errors, strings
 from relay_engine.envelope import (Envelope, body_sha256, content_hash,
                                    parse_draft, valid_run_id)
 from relay_engine.jcs import commissioned_by_value, jcs_encode, parse_record
@@ -314,13 +314,21 @@ def _resolve_edge(ledger, admits_against):
             os.path.isabs(admits_against) or
             any(part in ("", ".", "..")
                 for part in admits_against.split("/"))):
-        raise errors.error_for("E-ENVELOPE")
+        raise _edge_resolution_error(ledger)
     row = ledger.execute(
         "SELECT seq FROM relays WHERE rendered_path=?", (admits_against,)
     ).fetchone()
     if row is None:
-        raise errors.error_for("E-ENVELOPE")
+        raise _edge_resolution_error(ledger)
     return row[0]
+
+
+def _edge_resolution_error(ledger):
+    paths = [row[0] for row in ledger.execute(
+        "SELECT rendered_path FROM relays")]
+    return errors.error_for(
+        "E-ENVELOPE", variant="edge-resolution",
+        targets=strings.existing_targets(paths))
 
 
 def _server_envelope(body):

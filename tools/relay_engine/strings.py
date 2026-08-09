@@ -25,6 +25,14 @@ class MachineResult:
         return json.dumps(self.value, sort_keys=True, separators=(",", ":"))
 
 
+@dataclass(frozen=True)
+class ExistingTargets:
+    value: str
+
+    def __str__(self):
+        return self.value
+
+
 INVENTORY = {
     "explain-heading": "{code}",
     "explain-cause": "cause: {cause}",
@@ -38,6 +46,7 @@ INVENTORY = {
 
 _VALIDATORS = {}
 _FACTORY_CALLED = False
+LIST_BUDGET = 4096
 _CODE_VALUES = {
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
@@ -79,6 +88,10 @@ def _is_rejected(value):
 
 def _is_machine_result(value):
     return isinstance(value, MachineResult)
+
+
+def _is_existing_targets(value):
+    return isinstance(value, ExistingTargets)
 
 
 def _is_reason(value):
@@ -148,6 +161,35 @@ def machine_result(value):
     return result
 
 
+def existing_targets(paths):
+    ordered = []
+    for path in paths:
+        if (not isinstance(path, str) or not path or path.startswith("/") or
+                any(part in ("", ".", "..") for part in path.split("/")) or
+                "," in path or ";" in path or "\n" in path):
+            raise ValueError("canonical root-relative relay path required")
+        path.encode("utf-8")
+        ordered.append(path)
+    ordered.sort(key=lambda value: value.encode("utf-8"))
+    if not ordered:
+        return ExistingTargets(
+            "none — no existing relays under the root to admit against")
+
+    prefix = []
+    used = 0
+    for path in ordered:
+        addition = len(path.encode("utf-8")) + (2 if prefix else 0)
+        if used + addition > LIST_BUDGET:
+            break
+        prefix.append(path)
+        used += addition
+    rendered = ", ".join(prefix)
+    omitted = len(ordered) - len(prefix)
+    if omitted:
+        rendered += " … plus %d more of %d total" % (omitted, len(ordered))
+    return ExistingTargets(rendered)
+
+
 def _make_emitter():
     global _FACTORY_CALLED
     if _FACTORY_CALLED:
@@ -193,3 +235,4 @@ emit, emit_verbatim, report_diagnostic, set_diagnostic_sink = _make_emitter()
 VALIDATOR_IDENTITIES = _VALIDATORS
 OPS = frozenset(_OPS)
 FRAMING_REASONS = frozenset(_REASONS)
+IS_EXISTING_TARGETS = _is_existing_targets
