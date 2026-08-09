@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+import time
 
 from relay_engine import client, daemon, errors, migrate, rules, strings
 from relay_engine.ledger import open_ledger
@@ -44,8 +45,20 @@ def _cmd_daemon_start(args):
 
 
 def _cmd_daemon_stop(args):
-    client.request(_command_root(args), "daemon.stop", {},
-                   timeout=args.timeout)
+    root_name = _command_root(args)
+    client.request(root_name, "daemon.stop", {}, timeout=args.timeout)
+    deadline = time.monotonic() + args.timeout
+    with Root(root_name) as root:
+        while True:
+            try:
+                lease = daemon.acquire_lease(root)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("daemon stop barrier timed out")
+                time.sleep(0.01)
+            else:
+                lease.close()
+                break
     return 0
 
 
@@ -138,7 +151,8 @@ def _cmd_lint(args):
     results = {}
     if args.relay_root is not None:
         result = rules.lint_relay_root(
-            Path(args.relay_root), template_mode=args.templates)
+            Path(args.relay_root), template_mode=args.templates,
+            engine_root=True)
         results[args.relay_root] = {
             "errors": result.errors, "warnings": result.warnings}
     if args.index is not None:

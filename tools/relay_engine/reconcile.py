@@ -1,6 +1,7 @@
 """Reconciliation, verification, rendering, and reader views."""
 
 import hashlib
+import json
 import os
 import re
 
@@ -43,11 +44,23 @@ def reconcile(ledger, root):
     paths, inventoried = admissible_paths(root)
     if epoch_state(ledger) != "active":
         return {"epoch": "inert", "ingested": [],
-                "inventoried": inventoried + paths}
+                "inventoried": inventoried + paths,
+                "hand": _hand_entries(ledger)}
     candidates, malformed = prepare_candidates(ledger, root, paths)
     ingested = ingest_candidates(ledger, candidates)
     return {"epoch": "active", "ingested": ingested,
-            "inventoried": inventoried, "malformed": malformed}
+            "inventoried": inventoried, "malformed": malformed,
+            "hand": _hand_entries(ledger)}
+
+
+def _hand_entries(ledger):
+    return [
+        {"path": path, "origin": "hand",
+         "advisories": json.loads(advisories)}
+        for path, advisories in ledger.execute(
+            "SELECT rendered_path,advisories_json FROM relays "
+            "WHERE origin='hand' ORDER BY seq")
+    ]
 
 
 def prepare_candidates(ledger, root, paths):

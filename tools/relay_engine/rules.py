@@ -44,11 +44,13 @@ ROLE_VALUES = {
 PHASE_VALUES = {
     "AUDIT", "DESIGN", "DESIGN-REVIEW", "PLAN", "PLAN-REVIEW", "IMPL", "REVIEW-FOLD",
     "MERGE-GATE", "LIVE-VERIFY", "SITREP", "RECONCILE",
+    "BOOT",
 }
 AUTHORITY_VALUES = {
     "read-only", "plan-only", "design-only", "review-only", "implementation",
     "fold-in-only", "merge-gated", "live-verify", "report-only",
     "design-only for Planner; read-only challenge/answers for Implementer",
+    "seat-registration",
 }
 CEREMONY_VALUES = {"tiny", "small", "medium", "large", "production-risk"}
 EVIDENCE_VALUES = {"E1", "E2", "E3", "E4"}
@@ -112,6 +114,7 @@ CANONICAL_SCAN_ROWS_NORMALIZED = {row.lower(): row for row in CANONICAL_SCAN_ROW
 
 # Allowed authority hints by phase. Some templates combine semicolon-separated authorities.
 PHASE_AUTHORITY_ALLOWED = {
+    "BOOT": {"seat-registration"},
     "AUDIT": {"read-only", "review-only", "report-only"},
     "DESIGN": {"design-only", "read-only", "review-only", "plan-only"},
     "DESIGN-REVIEW": {"review-only", "read-only"},
@@ -1727,9 +1730,17 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     return result
 
 
-def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
+def lint_relay_root(path: Path, *, template_mode: bool = False,
+                    engine_root: bool = False) -> LintResult:
     result = LintResult()
     all_md = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
+    if engine_root:
+        relay_name = re.compile(
+            r"^[A-Z][A-Z-]*-[A-Za-z0-9-]+-\d{8}-\d{6}Z?\.md$")
+        all_md = [item for item in all_md if item.name == "INDEX.md" or
+                  (item.name not in {"SEATS.md"} and
+                   relay_name.fullmatch(item.name) is not None and
+                   ".engine" not in item.relative_to(path).parts)]
     index_files = [p for p in all_md if p.name == "INDEX.md"]
     files = [p for p in all_md if p.name != "INDEX.md"]
     if not all_md:
