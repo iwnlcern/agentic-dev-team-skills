@@ -118,6 +118,38 @@ class TestEngineDir(unittest.TestCase):
             os.close(first)
             os.close(second)
 
+    def test_gitignore_fresh_create_is_byte_exact(self):
+        engine_fd = ensure_engine_dir(self.root.dirfd)
+        os.close(engine_fd)
+        path = os.path.join(self.temp.name, ".engine", ".gitignore")
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"*\n")
+
+    def test_gitignore_reuse_is_idempotent(self):
+        first = ensure_engine_dir(self.root.dirfd)
+        os.close(first)
+        path = os.path.join(self.temp.name, ".engine", ".gitignore")
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as f:
+            before = f.read()
+        second = ensure_engine_dir(self.root.dirfd)
+        os.close(second)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(before, b"*\n")
+
+    def test_gitignore_divergent_existing_is_preserved(self):
+        os.mkdir(os.path.join(self.temp.name, ".engine"))
+        path = os.path.join(self.temp.name, ".engine", ".gitignore")
+        divergent = b"operator-owned\n"
+        with open(path, "wb") as f:
+            f.write(divergent)
+        engine_fd = ensure_engine_dir(self.root.dirfd)
+        os.close(engine_fd)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), divergent)
+
     def test_symlink_and_plain_file_refuse(self):
         outside = os.path.join(self.temp.name, "outside")
         os.mkdir(outside)

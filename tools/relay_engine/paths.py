@@ -196,9 +196,18 @@ def ensure_engine_dir(root_dirfd):
     except FileExistsError:
         pass
     fd = os.open(".engine", _OPEN_DIR, dir_fd=root_dirfd)
-    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise NotADirectoryError(".engine")
+        with TempWrite._from_parent(fd, ".gitignore") as pending:
+            pending.write(b"*\n")
+            try:
+                pending.rename_noclobber()
+            except FileExistsError:
+                pass
+    except BaseException:
         os.close(fd)
-        raise NotADirectoryError(".engine")
+        raise
     return fd
 
 

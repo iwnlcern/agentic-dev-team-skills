@@ -1,5 +1,8 @@
 # Relay engine
 
+Status: the relay engine is not adopted. The shipped skills workflow remains
+current practice; this document describes a relay root operating under a daemon.
+
 `relay` creates, checks, and records governed relays beneath one canonical
 root. Start one daemon for the root before registering seats or submitting
 work. The daemon is the designated writer of the run record and of the
@@ -24,6 +27,9 @@ out-of-band escalation instruction emitted by the command.
    `relay verify`.
 5. Stop the designated writer with `relay daemon stop --root <root>`.
 
-Use `relay lint --relay-root <root>` to check the rendered relay tree. Migration
-commands inventory legacy material before any explicit cutover, and reconcile
-marks bypassed material without presenting it as a supported creation path.
+Use `relay lint --relay-root <root>` to check an engine-rendered relay tree. It
+considers only paths matching the engine's rendered filename grammar and is not
+a substitute for the standalone `relay-lint` when checking hand-authored trees.
+Migration commands inventory legacy material before any explicit cutover, and
+reconcile marks bypassed material without presenting it as a supported creation
+path.

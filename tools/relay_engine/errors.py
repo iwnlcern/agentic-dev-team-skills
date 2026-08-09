@@ -35,7 +35,7 @@ _TEXT = {
     "error-replay-cause": "submission id was replayed with changed content",
     "error-replay-remedy": "retry the original bytes or allocate a new submission id",
     "error-storage-cause": "the run record could not complete the operation",
-    "error-storage-remedy": "inspect operator diagnostics and retry after repair",
+    "error-storage-remedy": "ask the operator to inspect diagnostics and retry after repair",
     "error-daemon-down-cause": "no live designated writer owns this root",
     "error-daemon-down-remedy": E_DAEMON_DOWN_ESCALATION,
     "error-seat-occupied-cause": "the seat already has a current occupancy",

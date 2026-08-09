@@ -1,15 +1,49 @@
 import ast
+import argparse
 import os
+from pathlib import Path
+import re
 import tempfile
 import unittest
 
-from relay_engine import strings
+from relay_engine import cli, strings
 
 
 FORBIDDEN_ATTRS = {"__closure__", "__globals__", "__dict__", "__wrapped__",
                    "__getattribute__"}
 FORBIDDEN_IMPORTS = {"logging", "subprocess", "inspect"}
 SINK_ATTRS = {"stdout", "stderr", "__stdout__", "__stderr__"}
+
+
+def storage_term_matches(readme_text=None, inventory=None, parser=None):
+    expression = re.compile(r"sqlite|database|ledger", re.IGNORECASE)
+    package = Path(__file__).parents[1]
+    if readme_text is None:
+        readme_text = (package / "README.md").read_text(encoding="utf-8")
+    if inventory is None:
+        inventory = strings.INVENTORY
+    if parser is None:
+        parser = cli.build_parser()
+    surface = [("README", readme_text)]
+    surface.extend(("inventory:" + key, value)
+                   for key, value in sorted(inventory.items()))
+
+    def subparsers(parser):
+        return next(action for action in parser._actions
+                    if isinstance(action, argparse._SubParsersAction))
+
+    def visit(parser, prefix=()):
+        for name, child in sorted(subparsers(parser).choices.items()):
+            command = prefix + (name,)
+            surface.append(("help:" + " ".join(command),
+                            child.format_help()))
+            if any(isinstance(action, argparse._SubParsersAction)
+                   for action in child._actions):
+                visit(child, command)
+
+    visit(parser)
+    return [(name, match.group(0)) for name, value in surface
+            for match in expression.finditer(value)]
 
 
 def gate_violations(paths):
@@ -125,6 +159,29 @@ class TestGate(unittest.TestCase):
 
     def test_production_tree_uses_only_keyed_output(self):
         self.assertEqual(gate_violations(self.production_paths()), [])
+
+    def test_engine_surface_has_no_storage_terms(self):
+        self.assertEqual(storage_term_matches(), [])
+        self.assertEqual(
+            storage_term_matches(readme_text="sQlItE", inventory={}),
+            [("README", "sQlItE")])
+        probe_key = "test-storage-term-probe"
+        strings.INVENTORY[probe_key] = "DaTaBaSe"
+        try:
+            self.assertEqual(storage_term_matches(),
+                             [("inventory:" + probe_key, "DaTaBaSe")])
+        finally:
+            del strings.INVENTORY[probe_key]
+        parser = cli.build_parser()
+        subparsers = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction))
+        probe = subparsers.add_parser(
+            "synthetic-storage-probe", description="LeDgEr")
+        probe.set_defaults(handler=lambda _args: 0)
+        self.assertEqual(
+            storage_term_matches(readme_text="", inventory={}, parser=parser),
+            [("help:synthetic-storage-probe", "LeDgEr")])
 
     def check_bad(self, source, needle):
         with tempfile.TemporaryDirectory() as root:
