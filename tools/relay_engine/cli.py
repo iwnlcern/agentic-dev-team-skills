@@ -9,10 +9,10 @@ def _cmd_explain(code):
     if code not in errors.ERRORS:
         strings.emit("stderr", "usage-error")
         return 2
-    item = errors.error_for(code)
-    strings.emit("stdout", "explain-heading", code=item.code)
-    strings.emit("stdout", "explain-cause", cause=item.cause)
-    strings.emit("stdout", "explain-remedy", remedy=item.remedy)
+    explanation, remedy = errors.explain_for(code)
+    strings.emit("stdout", "explain-heading", code=code)
+    strings.emit("stdout", "explain-cause", cause=explanation)
+    strings.emit("stdout", "explain-remedy", remedy=remedy)
     return 0
 
 

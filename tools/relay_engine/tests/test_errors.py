@@ -45,8 +45,12 @@ class TestErrorRegistry(unittest.TestCase):
                                      "registration", "command", "wire"})
             self.assertIn(spec.cause_key, strings.INVENTORY)
             self.assertIn(spec.remedy_key, strings.INVENTORY)
+            self.assertIn(spec.explain_key, strings.INVENTORY)
             self.assertTrue(strings.INVENTORY[spec.cause_key])
             self.assertTrue(strings.INVENTORY[spec.remedy_key])
+            self.assertTrue(strings.INVENTORY[spec.explain_key])
+            self.assertEqual(strings._placeholders(
+                strings.INVENTORY[spec.explain_key]), ())
 
     def test_commissioning_refusals_are_command_class(self):
         for code in ("commission-conflict", "commission-late",
@@ -204,6 +208,14 @@ class TestExplainCLI(unittest.TestCase):
         self.assertEqual(out.returncode, 2)
         self.assertEqual(out.stdout, "")
         self.assertNotIn("NO-SUCH-CODE", out.stderr)
+
+    def test_every_registered_code_is_explainable_without_incident_values(self):
+        for code in sorted(ALL_CODES):
+            with self.subTest(code=code):
+                out = self.run_relay("explain", code)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn(code, out.stdout)
+                self.assertEqual(out.stderr, "")
 
     def test_daemon_down_escalation_sentence_is_pinned(self):
         self.assertEqual(

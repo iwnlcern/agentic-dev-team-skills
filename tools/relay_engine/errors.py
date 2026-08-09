@@ -13,6 +13,7 @@ E_DAEMON_DOWN_ESCALATION = "Hand-relay this escalation to the eligible starter: 
 class ErrorSpec:
     cause_key: str
     remedy_key: str
+    explain_key: str
     cls: str
 
 
@@ -25,7 +26,7 @@ _TEXT = {
     "error-superseded-remedy": "re-read the superseding ruling and admit against current authority",
     "error-path-escape-cause": "draft path is outside the canonical root",
     "error-path-escape-remedy": "use the canonical drafts location",
-    "error-header-cause": "required relay header is missing or invalid",
+    "error-header-cause": "required relay header missing or invalid: {field}",
     "error-header-remedy": "supply every required submission header",
     "error-envelope-cause": "submitted envelope does not match server-derived bytes",
     "error-envelope-remedy": "rebuild the envelope from the unchanged draft",
@@ -59,10 +60,34 @@ _TEXT = {
     "error-daemon-stopping-remedy": "retry after restart; replay semantics make the retry safe",
 }
 
+_TEXT.update({
+    "error-key-mismatch-explain": "the registration tag must identify the current seat occupancy",
+    "error-id-collision-explain": "dispatch ids are reusable only inside their current open id scope",
+    "error-superseded-explain": "admission cannot target authority replaced by an applied ruling",
+    "error-path-escape-explain": "draft reads stay beneath the canonical root without following links",
+    "error-header-explain": "submission requires the complete relay header contract",
+    "error-envelope-explain": "the server-derived envelope and submitted envelope must agree",
+    "error-replay-explain": "one submission id must always carry one content identity",
+    "error-storage-explain": "the run record could not durably complete the requested operation",
+    "error-daemon-down-explain": "mutating work requires the root's live designated writer",
+    "error-seat-occupied-explain": "one seat has one current occupancy until explicit replacement",
+    "error-commission-conflict-explain": "one child run has one canonical commissioning record",
+    "error-commission-late-explain": "commissioning must precede child application state",
+    "error-run-id-mismatch-explain": "the root's established run id is immutable",
+    "error-run-id-uninitialized-explain": "a fresh root must establish its run id before adoption",
+    "error-run-id-invalid-explain": "run ids use the filename-safe bounded grammar",
+    "error-framing-explain": "wire input must be one complete length-prefixed UTF-8 JSON frame",
+    "error-wire-version-explain": "wire requests use protocol version one",
+    "error-wire-op-explain": "wire requests name one operation from the daemon table",
+    "error-wire-args-explain": "wire operation arguments must match the operation schema",
+    "error-daemon-stopping-explain": "the stop barrier refuses work arriving after its cutoff",
+})
+
 strings.register_inventory(
     _TEXT,
     {
         ("error-framing-cause", "reason"): lambda v: v in strings.FRAMING_REASONS,
+        ("error-header-cause", "field"): lambda v: (isinstance(v, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", v) is not None),
         ("error-wire-version-cause", "rejected_version"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-op-cause", "rejected_op"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-args-cause", "op"): lambda v: v in strings.OPS,
@@ -71,27 +96,33 @@ strings.register_inventory(
 )
 
 
+def _spec(stem, cls):
+    return ErrorSpec("error-%s-cause" % stem,
+                     "error-%s-remedy" % stem,
+                     "error-%s-explain" % stem, cls)
+
+
 ERRORS = {
-    "E-KEY-MISMATCH": ErrorSpec("error-key-mismatch-cause", "error-key-mismatch-remedy", "policy"),
-    "E-ID-COLLISION": ErrorSpec("error-id-collision-cause", "error-id-collision-remedy", "policy"),
-    "E-SUPERSEDED": ErrorSpec("error-superseded-cause", "error-superseded-remedy", "policy"),
-    "E-PATH-ESCAPE": ErrorSpec("error-path-escape-cause", "error-path-escape-remedy", "policy"),
-    "E-HEADER": ErrorSpec("error-header-cause", "error-header-remedy", "integrity"),
-    "E-ENVELOPE": ErrorSpec("error-envelope-cause", "error-envelope-remedy", "integrity"),
-    "E-REPLAY-MISMATCH": ErrorSpec("error-replay-cause", "error-replay-remedy", "integrity"),
-    "E-STORAGE": ErrorSpec("error-storage-cause", "error-storage-remedy", "integrity"),
-    "E-DAEMON-DOWN": ErrorSpec("error-daemon-down-cause", "error-daemon-down-remedy", "client"),
-    "seat-occupied": ErrorSpec("error-seat-occupied-cause", "error-seat-occupied-remedy", "registration"),
-    "commission-conflict": ErrorSpec("error-commission-conflict-cause", "error-commission-conflict-remedy", "command"),
-    "commission-late": ErrorSpec("error-commission-late-cause", "error-commission-late-remedy", "command"),
-    "run-id-mismatch": ErrorSpec("error-run-id-mismatch-cause", "error-run-id-mismatch-remedy", "command"),
-    "run-id-uninitialized": ErrorSpec("error-run-id-uninitialized-cause", "error-run-id-uninitialized-remedy", "command"),
-    "run-id-invalid": ErrorSpec("error-run-id-invalid-cause", "error-run-id-invalid-remedy", "command"),
-    "E-FRAMING": ErrorSpec("error-framing-cause", "error-framing-remedy", "wire"),
-    "E-WIRE-VERSION": ErrorSpec("error-wire-version-cause", "error-wire-version-remedy", "wire"),
-    "E-WIRE-OP": ErrorSpec("error-wire-op-cause", "error-wire-op-remedy", "wire"),
-    "E-WIRE-ARGS": ErrorSpec("error-wire-args-cause", "error-wire-args-remedy", "wire"),
-    "E-DAEMON-STOPPING": ErrorSpec("error-daemon-stopping-cause", "error-daemon-stopping-remedy", "wire"),
+    "E-KEY-MISMATCH": _spec("key-mismatch", "policy"),
+    "E-ID-COLLISION": _spec("id-collision", "policy"),
+    "E-SUPERSEDED": _spec("superseded", "policy"),
+    "E-PATH-ESCAPE": _spec("path-escape", "policy"),
+    "E-HEADER": _spec("header", "integrity"),
+    "E-ENVELOPE": _spec("envelope", "integrity"),
+    "E-REPLAY-MISMATCH": _spec("replay", "integrity"),
+    "E-STORAGE": _spec("storage", "integrity"),
+    "E-DAEMON-DOWN": _spec("daemon-down", "client"),
+    "seat-occupied": _spec("seat-occupied", "registration"),
+    "commission-conflict": _spec("commission-conflict", "command"),
+    "commission-late": _spec("commission-late", "command"),
+    "run-id-mismatch": _spec("run-id-mismatch", "command"),
+    "run-id-uninitialized": _spec("run-id-uninitialized", "command"),
+    "run-id-invalid": _spec("run-id-invalid", "command"),
+    "E-FRAMING": _spec("framing", "wire"),
+    "E-WIRE-VERSION": _spec("wire-version", "wire"),
+    "E-WIRE-OP": _spec("wire-op", "wire"),
+    "E-WIRE-ARGS": _spec("wire-args", "wire"),
+    "E-DAEMON-STOPPING": _spec("daemon-stopping", "wire"),
 }
 
 POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}
@@ -130,3 +161,11 @@ def error_for(code, **params):
     spec = ERRORS[code]
     return EngineError(code, spec.cause_key, spec.remedy_key, spec.cls,
                        **params)
+
+
+def explain_for(code):
+    if code not in ERRORS:
+        raise KeyError(code)
+    spec = ERRORS[code]
+    return (strings.render(spec.explain_key),
+            strings.render(spec.remedy_key))
