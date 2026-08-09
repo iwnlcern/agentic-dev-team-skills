@@ -537,6 +537,18 @@ class TestRuntime(unittest.TestCase):
                 root_name, socket_override=socket_name, timeout=5))
             self.assertTrue(self.roundtrip(
                 socket_name, self.request("daemon.stop"))["ok"])
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    with Root(root_name) as root:
+                        lease = acquire_lease(root)
+                except BlockingIOError:
+                    time.sleep(0.02)
+                    continue
+                lease.close()
+                break
+            else:
+                self.fail("replacement daemon did not release the lock")
 
     def test_pid_reuse_token_allows_stale_socket_cleanup(self):
         with tempfile.TemporaryDirectory() as root_name:
