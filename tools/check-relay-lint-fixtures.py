@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -784,6 +785,12 @@ EXPECTED_ERROR_SET.update(A5_ERRORS)
 
 
 def main() -> int:
+    if "--neutral-cwd" in sys.argv[1:]:
+        # CWD-independence control (v29-detection-lp2-cwd-repair): run the
+        # whole suite from a fresh empty directory so no expectation can
+        # lean on the invoker's CWD. LP2's environment-dependent positive
+        # control is the class this catches.
+        os.chdir(tempfile.mkdtemp(prefix="relay-fixtures-neutral."))
     lint = load_linter()
     failed = False
     for kind, rel, expected in EXPECTED:
