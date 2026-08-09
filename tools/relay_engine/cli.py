@@ -1,6 +1,7 @@
 """Relay-engine command entry points."""
 
 import argparse
+import base64
 import os
 from pathlib import Path
 import stat
@@ -154,6 +155,22 @@ def _cmd_lint(args):
     return 1 if any(value["errors"] for value in results.values()) else 0
 
 
+def cmd_show(args):
+    result = client.request(
+        _command_root(args), "show",
+        {"target": args.target, "body": args.body}, timeout=args.timeout)
+    if args.body:
+        body = base64.b64decode(result.pop("body_b64"), validate=True)
+        strings.emit_verbatim(sys.stdout.buffer, body)
+        return 0
+    return _emit_result(result)
+
+
+def _cmd_operation(args):
+    return _emit_result(client.request(
+        _command_root(args), args.command, {}, timeout=args.timeout))
+
+
 def _root_option(parser):
     parser.add_argument("--root")
 
@@ -263,6 +280,19 @@ def build_parser():
     lint.add_argument("--max-drift-minutes", type=int,
                       default=rules.DEFAULT_MAX_DRIFT_MINUTES)
     lint.set_defaults(handler=_cmd_lint)
+
+    show = commands.add_parser("show")
+    show.add_argument("target")
+    show.add_argument("--body", action="store_true")
+    _root_option(show)
+    _timeout_option(show)
+    show.set_defaults(handler=cmd_show)
+
+    for name in ("render", "verify", "reconcile"):
+        operation = commands.add_parser(name)
+        _root_option(operation)
+        _timeout_option(operation)
+        operation.set_defaults(handler=_cmd_operation)
     return parser
 
 

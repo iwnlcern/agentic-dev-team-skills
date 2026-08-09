@@ -10,6 +10,7 @@ from relay_engine.envelope import parse_draft
 from relay_engine.jcs import commissioned_by_value, parse_record
 from relay_engine.ledger import admit, establish_run_identity, init_schema
 from relay_engine.paths import Root, ensure_engine_dir
+from relay_engine.tests.check_crash_matrix import matrix_case
 
 
 DRAFT = """## relay
@@ -201,6 +202,19 @@ class TestCommission(unittest.TestCase):
             (path.relative_to(self.temp.name), path.read_bytes())
             for path in Path(self.temp.name).rglob("*") if path.is_file())
         self.assertEqual(after, before)
+
+    def test_commission_txn_crash(self):
+        test_id = (self.__class__.__module__ + "." +
+                   self.__class__.__name__ + "." + self._testMethodName)
+        with matrix_case("commission-txn", test_id):
+            self.ledger.execute("BEGIN IMMEDIATE")
+            self.ledger.execute(
+                "INSERT INTO commissions(child_run_id,dispatch_seq,"
+                "dispatch_content_digest,record_digest) VALUES(?,?,?,?)",
+                ("crash-child", 1, "a" * 64, "b" * 64))
+            self.ledger.execute("ROLLBACK")
+            self.assertEqual(self.ledger.execute(
+                "SELECT COUNT(*) FROM commissions").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

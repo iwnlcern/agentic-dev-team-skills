@@ -18,8 +18,8 @@ import threading
 import time
 import uuid
 
-from relay_engine import (commission, cycles, errors, rules, seats, strings,
-                          supersede)
+from relay_engine import (commission, cycles, errors, reconcile, rules, seats,
+                          strings, supersede)
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -34,7 +34,8 @@ _diag_lock = threading.Lock()
 _log_fd = None
 _PROCESS_STARTED = str(time.time_ns())
 _STARTUP_STAGES = {"run-identity": commission.startup_run_identity,
-                   "top-seat": seats.startup_top_seat}
+                   "top-seat": seats.startup_top_seat,
+                   "recovery": reconcile.startup_recovery}
 
 
 class WireFault(Exception):
@@ -109,6 +110,7 @@ _SCHEMAS = {
                      {"dispatch_ref", "replace"}),
     "seat.stand_down": ({"address"}, set()),
     "seat.show": ({"address"}, set()),
+    "show": ({"target"}, {"body"}),
     "status": (set(), set()),
     "roster": (set(), set()),
     "commission": ({"dispatch_relay_path", "child_run_id"}, set()),
@@ -139,7 +141,7 @@ def _validate_args(op, args):
         if key == "envelope":
             if not isinstance(value, dict):
                 raise _args_fault(op, "envelope:object")
-        elif key == "replace":
+        elif key in {"replace", "body"}:
             if not isinstance(value, bool):
                 raise _args_fault(op, "replace:boolean")
         elif not isinstance(value, str):
@@ -606,11 +608,22 @@ def _default_handler(ledger, root, state, handlers, request):
         except ValueError as exc:
             raise errors.error_for("E-ENVELOPE") from exc
         return supersede.adopt_ruling(ledger, root, bundle)
+    if op == "show":
+        value = reconcile.show(ledger, request["args"]["target"])
+        body = value.pop("body")
+        if request["args"].get("body", False):
+            value["body_b64"] = base64.b64encode(body).decode("ascii")
+        return value
+    if op == "render":
+        return reconcile.render_all(ledger, root)
+    if op == "verify":
+        return reconcile.verify(ledger, root)
+    if op == "reconcile":
+        return reconcile.reconcile(ledger, root)
     if op == "daemon.stop":
         return {"ok": True}
     if op == "status":
-        return {"daemon": dict(state), "epoch": "active",
-                "pending_renders": 0, "projection_events": []}
+        return reconcile.status(ledger, state)
     raise _args_fault(op, "op:unavailable").error
 
 

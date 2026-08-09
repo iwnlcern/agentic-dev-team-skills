@@ -351,7 +351,7 @@ class TestRuntime(unittest.TestCase):
             self.assertEqual(trace, [
                 "open-root", "ensure-engine", "flock", "starting-record",
                 "log-bound", "writer-started", "schema-init",
-                "run-identity:present", "top-seat:present", "recovery:absent",
+                "run-identity:present", "top-seat:present", "recovery:present",
                 "socket-bound", "ready-record", "ready-byte",
                 "ready-pipe-closed",
             ])

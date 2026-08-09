@@ -107,8 +107,9 @@ def gate_violations(paths):
                 if (isinstance(node.value, ast.Name) and
                         node.value.id in sys_aliases and
                         node.attr in SINK_ATTRS and
-                        not (module == "strings" and
-                             fn in {"_make_emitter", "emit"})):
+                        not ((module == "strings" and
+                              fn in {"_make_emitter", "emit"}) or
+                             (module == "cli" and fn == "cmd_show"))):
                     violations.append((module, node.lineno, "raw sys sink"))
     return violations
 
@@ -174,7 +175,7 @@ class TestGate(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             strings._make_emitter()
 
-    def test_emit_verbatim_has_no_unauthorized_reference_yet(self):
+    def test_emit_verbatim_single_reference(self):
         refs = []
         for path in self.production_paths():
             with open(path, encoding="utf-8") as source:
@@ -183,7 +184,8 @@ class TestGate(unittest.TestCase):
                 if (isinstance(node, ast.Attribute) and
                         node.attr == "emit_verbatim"):
                     refs.append(path)
-        self.assertEqual(refs, [])
+        self.assertEqual(refs, [os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "cli.py")])
 
 
 if __name__ == "__main__":

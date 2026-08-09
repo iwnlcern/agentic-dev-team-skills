@@ -13,6 +13,7 @@ from relay_engine.ledger import (InjectedFault, admit, epoch_state,
                                  establish_run_identity, init_schema,
                                  open_ledger)
 from relay_engine.paths import Root, ensure_engine_dir
+from relay_engine.tests.check_crash_matrix import matrix_case
 
 
 DRAFT = """## relay
@@ -484,6 +485,49 @@ class TestAdmission(LedgerFixture):
                       "UPDATE MIGRATION_EVENTS",
                       "DELETE FROM MIGRATION_EVENTS"):
             self.assertNotIn(token, upper)
+
+
+class TestAdmissionFaults(LedgerFixture):
+    def setUp(self):
+        super().setUp()
+        self.initialize()
+
+    def _identity(self):
+        return (self.__class__.__module__ + "." +
+                self.__class__.__name__ + "." + self._testMethodName)
+
+    def _rolled_back(self, point, **effects):
+        with matrix_case(point, self._identity()):
+            with self.assertRaises(InjectedFault):
+                self.submit("matrix-" + point, clock=lambda: WALL,
+                            fault=point, **effects)
+            self.assertEqual(self.ledger.execute(
+                "SELECT COUNT(*) FROM relays").fetchone()[0], 0)
+
+    def test_after_relay_insert(self):
+        self._rolled_back("after-relay-insert")
+
+    def test_after_cycle_events(self):
+        self._rolled_back("after-cycle-events", cycle_events=[{
+            "dispatch_id": "v29-engine-plan-1", "event": "open",
+            "commissioning_seq": None, "cause_seq": None}])
+
+    def test_after_supersession_edges(self):
+        self._rolled_back("after-supersession-edges",
+                          supersession_edges=[])
+
+    def test_pre_commit(self):
+        self._rolled_back("pre-commit")
+
+    def test_post_commit_pre_response(self):
+        point = "post-commit-pre-response"
+        with matrix_case(point, self._identity()):
+            with self.assertRaises(InjectedFault) as fault:
+                self.submit("matrix-" + point, clock=lambda: WALL,
+                            fault=point)
+            self.assertTrue(fault.exception.committed)
+            self.assertEqual(self.ledger.execute(
+                "SELECT COUNT(*) FROM relays").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from contextlib import redirect_stdout
 from relay_engine import cli, client, daemon, errors, seats
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.paths import Root, ensure_engine_dir
+from relay_engine.tests.check_crash_matrix import matrix_case
 
 
 class TestSeats(unittest.TestCase):
@@ -141,6 +142,24 @@ class TestSeats(unittest.TestCase):
             (path.relative_to(self.temp.name), path.read_bytes())
             for path in Path(self.temp.name).rglob("*") if path.is_file())
         self.assertEqual(after, before)
+
+    def test_registration_txn_crash(self):
+        test_id = (self.__class__.__module__ + "." +
+                   self.__class__.__name__ + "." + self._testMethodName)
+        with matrix_case("registration-txn", test_id):
+            before = self.ledger.execute(
+                "SELECT COUNT(*) FROM seat_events").fetchone()[0]
+            with self.assertRaises(Exception):
+                from relay_engine.ledger import append_seat_events
+                append_seat_events(self.ledger, [{
+                    "address": "v29-crash.planner", "event": "occupied",
+                    "occupant_id": "one", "key_id": "one",
+                }, {
+                    "address": "v29-crash.planner", "event": "invalid",
+                    "occupant_id": "two", "key_id": "two",
+                }])
+            self.assertEqual(self.ledger.execute(
+                "SELECT COUNT(*) FROM seat_events").fetchone()[0], before)
 
 
 if __name__ == "__main__":

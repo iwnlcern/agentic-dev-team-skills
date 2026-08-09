@@ -49,7 +49,7 @@ _CODE_VALUES = {
 }
 _OPS = {
     "submit", "seat.register", "seat.replace", "seat.stand_down",
-    "seat.show", "status", "roster", "commission", "adopt_commission",
+    "seat.show", "show", "status", "roster", "commission", "adopt_commission",
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
     "migrate.check", "daemon.stop",
 }
