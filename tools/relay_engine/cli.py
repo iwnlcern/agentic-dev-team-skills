@@ -2,10 +2,11 @@
 
 import argparse
 import os
+from pathlib import Path
 import stat
 import sys
 
-from relay_engine import client, daemon, errors, strings
+from relay_engine import client, daemon, errors, rules, strings
 
 
 def _cmd_explain(args):
@@ -127,6 +128,32 @@ def _cmd_adopt_ruling(args):
         timeout=args.timeout))
 
 
+def _cmd_lint(args):
+    if not args.paths and args.relay_root is None and args.index is None:
+        strings.emit("stderr", "usage-error")
+        return 2
+    results = {}
+    if args.relay_root is not None:
+        result = rules.lint_relay_root(
+            Path(args.relay_root), template_mode=args.templates)
+        results[args.relay_root] = {
+            "errors": result.errors, "warnings": result.warnings}
+    if args.index is not None:
+        result = rules.lint_relay_index(
+            Path(args.index), audit=args.index_audit)
+        results[args.index] = {
+            "errors": result.errors, "warnings": result.warnings}
+    for name in args.paths:
+        result = rules.lint_file(
+            Path(name), template_mode=args.templates,
+            freshness=not args.no_freshness,
+            max_drift_minutes=args.max_drift_minutes)
+        results[name] = {"errors": result.errors,
+                         "warnings": result.warnings}
+    _emit_result(results)
+    return 1 if any(value["errors"] for value in results.values()) else 0
+
+
 def _root_option(parser):
     parser.add_argument("--root")
 
@@ -225,6 +252,17 @@ def build_parser():
     _root_option(adopt_ruling)
     _timeout_option(adopt_ruling)
     adopt_ruling.set_defaults(handler=_cmd_adopt_ruling)
+
+    lint = commands.add_parser("lint")
+    lint.add_argument("paths", nargs="*")
+    lint.add_argument("--relay-root")
+    lint.add_argument("--index")
+    lint.add_argument("--templates", action="store_true")
+    lint.add_argument("--index-audit", action="store_true")
+    lint.add_argument("--no-freshness", action="store_true")
+    lint.add_argument("--max-drift-minutes", type=int,
+                      default=rules.DEFAULT_MAX_DRIFT_MINUTES)
+    lint.set_defaults(handler=_cmd_lint)
     return parser
 
 

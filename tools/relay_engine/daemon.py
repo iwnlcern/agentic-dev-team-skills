@@ -18,7 +18,8 @@ import threading
 import time
 import uuid
 
-from relay_engine import commission, cycles, errors, seats, strings, supersede
+from relay_engine import (commission, cycles, errors, rules, seats, strings,
+                          supersede)
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -552,7 +553,7 @@ def _submit_handler(ledger, root, args):
         cycle_events=cycle_events,
         supersession_edges=supersession_edges,
         advisories=tuple(cycle_advisories) + tuple(
-            supersession_advisories))
+            supersession_advisories) + rules.advisories_for(envelope))
     rendered = render_relay(ledger, root, admission.seq)
     render_index(root, index_rows(ledger), 10, epoch_state(ledger))
     advisory_row = ledger.execute(
