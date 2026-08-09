@@ -44,6 +44,13 @@ def reconcile(ledger, root):
     if epoch_state(ledger) != "active":
         return {"epoch": "inert", "ingested": [],
                 "inventoried": inventoried + paths}
+    candidates, malformed = prepare_candidates(ledger, root, paths)
+    ingested = ingest_candidates(ledger, candidates)
+    return {"epoch": "active", "ingested": ingested,
+            "inventoried": inventoried, "malformed": malformed}
+
+
+def prepare_candidates(ledger, root, paths):
     candidates = []
     malformed = []
     for rel in paths:
@@ -60,8 +67,14 @@ def reconcile(ledger, root):
         except (OSError, UnicodeDecodeError, ValueError,
                 errors.EngineError):
             malformed.append(rel)
+    return candidates, malformed
+
+
+def ingest_candidates(ledger, candidates, *, own_transaction=True):
+    """Insert a prepared path-ordered hand batch atomically."""
     ingested = []
-    ledger.execute("BEGIN IMMEDIATE")
+    if own_transaction:
+        ledger.execute("BEGIN IMMEDIATE")
     try:
         for rel, stamp, body, envelope in candidates:
             seq = ledger.execute(
@@ -85,12 +98,13 @@ def reconcile(ledger, root):
                  jcs_encode(["hand-authored-import"]).decode("utf-8")))
             ingested.append(rel)
     except BaseException:
-        ledger.execute("ROLLBACK")
+        if own_transaction:
+            ledger.execute("ROLLBACK")
         raise
     else:
-        ledger.execute("COMMIT")
-    return {"epoch": "active", "ingested": ingested,
-            "inventoried": inventoried, "malformed": malformed}
+        if own_transaction:
+            ledger.execute("COMMIT")
+    return ingested
 
 
 def projection_entries(ledger):

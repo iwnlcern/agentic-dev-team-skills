@@ -7,7 +7,9 @@ from pathlib import Path
 import stat
 import sys
 
-from relay_engine import client, daemon, errors, rules, strings
+from relay_engine import client, daemon, errors, migrate, rules, strings
+from relay_engine.ledger import open_ledger
+from relay_engine.paths import Root
 
 
 def _cmd_explain(args):
@@ -171,6 +173,23 @@ def _cmd_operation(args):
         _command_root(args), args.command, {}, timeout=args.timeout))
 
 
+def _cmd_migrate(args):
+    root_name = _command_root(args)
+    if args.migrate_command == "check":
+        return _emit_result(client.request(
+            root_name, "migrate.check", {}, timeout=args.timeout))
+    with Root(root_name) as root, daemon.acquire_lease(root) as lease:
+        ledger = open_ledger(lease.engine_dirfd)
+        try:
+            if args.migrate_command == "cutover":
+                result = migrate.cutover(ledger, root, args.receipt)
+            else:
+                result = migrate.rollback(ledger, root, args.archive)
+        finally:
+            ledger.close()
+    return _emit_result(result)
+
+
 def _root_option(parser):
     parser.add_argument("--root")
 
@@ -293,6 +312,23 @@ def build_parser():
         _root_option(operation)
         _timeout_option(operation)
         operation.set_defaults(handler=_cmd_operation)
+    migrate_command = commands.add_parser("migrate")
+    migrate_commands = migrate_command.add_subparsers(
+        dest="migrate_command", required=True)
+    migrate_check = migrate_commands.add_parser("check")
+    _root_option(migrate_check)
+    _timeout_option(migrate_check)
+    migrate_check.set_defaults(handler=_cmd_migrate)
+    migrate_cutover = migrate_commands.add_parser("cutover")
+    migrate_cutover.add_argument("receipt")
+    _root_option(migrate_cutover)
+    _timeout_option(migrate_cutover)
+    migrate_cutover.set_defaults(handler=_cmd_migrate)
+    migrate_rollback = migrate_commands.add_parser("rollback")
+    migrate_rollback.add_argument("archive")
+    _root_option(migrate_rollback)
+    _timeout_option(migrate_rollback)
+    migrate_rollback.set_defaults(handler=_cmd_migrate)
     return parser
 
 
