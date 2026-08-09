@@ -195,6 +195,57 @@ class TestSubmitE2E(unittest.TestCase):
         self.thread.join(5)
         self.assertFalse(self.thread.is_alive())
 
+    def test_daemon_down_restart_replay_composite(self):
+        self.assertEqual(client.request(
+            self.root_name, "daemon.stop", {}), {"ok": True})
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+
+        with self.assertRaises(client.RemoteError) as down:
+            submit(self.root_name, self.draft_rel, self.key_rel)
+        self.assertEqual(down.exception.code, "E-DAEMON-DOWN")
+        sidecar = Path(self.root_name, self.draft_rel + ".sid")
+        original_id = sidecar.read_text()
+
+        def restart():
+            self.read_fd, write_fd = os.pipe()
+            self.thread = threading.Thread(
+                target=daemon.start, args=(self.root_name,),
+                kwargs={"ready_fd": write_fd,
+                        "socket_override": self.socket_name})
+            self.thread.start()
+            self.assertEqual(os.read(self.read_fd, 1), b"R")
+            os.close(self.read_fd)
+            self.read_fd = None
+
+        restart()
+        real_roundtrip = client._roundtrip
+        committed = []
+
+        def lose_response(*args, **kwargs):
+            response = real_roundtrip(*args, **kwargs)
+            committed.append(response)
+            raise TimeoutError
+
+        client._roundtrip = lose_response
+        try:
+            with self.assertRaises(TimeoutError):
+                submit(self.root_name, self.draft_rel, self.key_rel)
+        finally:
+            client._roundtrip = real_roundtrip
+        self.assertEqual(sidecar.read_text(), original_id)
+        self.assertFalse(committed[0]["result"]["duplicate"])
+
+        self.assertEqual(client.request(
+            self.root_name, "daemon.stop", {}), {"ok": True})
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+        restart()
+        replay = submit(self.root_name, self.draft_rel, self.key_rel)
+        self.assertTrue(replay["duplicate"])
+        self.assertEqual(replay["path"], committed[0]["result"]["path"])
+        self.assertFalse(sidecar.exists())
+
 
 class TestDaemonDown(unittest.TestCase):
     def test_down_refusal_has_exact_escalation_and_zero_effects(self):

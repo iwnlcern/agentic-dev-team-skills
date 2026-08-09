@@ -293,6 +293,21 @@ class TestAdmission(LedgerFixture):
                 clock=lambda: WALL + 5)
         self.assertEqual(envelope_mismatch.exception.code, "E-ENVELOPE")
 
+    def test_identical_body_distinct_envelope(self):
+        first = self.submit("same-body-1", clock=lambda: WALL)
+        second = self.submit(
+            "same-body-2", admits_against=first.rendered_path,
+            clock=lambda: WALL + 1)
+        rows = self.ledger.execute(
+            "SELECT seq,body,body_sha256,content_hash,admits_against_seq "
+            "FROM relays ORDER BY seq").fetchall()
+        self.assertEqual([row[0] for row in rows], [first.seq, second.seq])
+        self.assertEqual(rows[0][1], rows[1][1])
+        self.assertEqual(rows[0][2], rows[1][2])
+        self.assertNotEqual(rows[0][3], rows[1][3])
+        self.assertEqual(rows[0][4], None)
+        self.assertEqual(rows[1][4], first.seq)
+
     def test_hand_rows_can_share_stamp(self):
         stamp = "20260808-115959"
         for number in range(3):
