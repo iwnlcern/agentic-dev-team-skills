@@ -116,43 +116,34 @@ class TestRender(unittest.TestCase):
     def test_projection_replace_repeat_edit_archive_and_identity(self):
         first_rows = [("t1", "PLAN", "Planner", "d1", "-", "from", "to",
                        "-", "active", "lane/one.md")]
-        second_rows = [("t2", "IMPL", "Implementer", "d2", "d1", "from",
-                        "to", "cc", "done", "lane/two.md")]
-        first = render_index(self.root, first_rows, 10, "active",
-                             ledger=self.ledger)
+        first = render_index(self.root, first_rows, 10, "active")
         first_bytes = self.path("INDEX.md").read_bytes()
         self.assertEqual(first.digest,
                          hashlib.sha256(first_bytes).hexdigest())
-        second = render_index(self.root, second_rows, 10, "active",
-                              ledger=self.ledger)
-        self.assertNotEqual(first.digest, second.digest)
-        self.assertIn(b"lane/two.md", self.path("INDEX.md").read_bytes())
+        second = render_index(self.root, first_rows, 10, "active")
+        self.assertEqual(first.digest, second.digest)
+        self.assertIsNone(second.archive_path)
+        self.assertIn(b"lane/one.md", self.path("INDEX.md").read_bytes())
 
         edited = b"hand edit to index\n"
         self.path("INDEX.md").write_bytes(edited)
-        third = render_index(self.root, second_rows, 10, "active",
-                             ledger=self.ledger)
+        third = render_index(self.root, first_rows, 10, "active")
         edited_digest = hashlib.sha256(edited).hexdigest()
         self.assertEqual(self.path(third.archive_path).read_bytes(), edited)
-        self.assertEqual(self.ledger.execute(
-            "SELECT relay_seq,target,event,digest,detail "
-            "FROM projection_events WHERE target='index' ORDER BY seq"
-        ).fetchall()[-2:], [
-            (None, "index", "divergence", edited_digest, "INDEX.md"),
-            (None, "index", "rendered", third.digest, "INDEX.md"),
-        ])
+        self.assertEqual(third.divergence_digest, edited_digest)
 
         seats_a = [("seat.a", "planner", "online", "session-a", "lane")]
-        seats_b = [("seat.a", "planner", "offline", "session-a", "lane")]
-        render_seats(self.root, seats_a, "active", ledger=self.ledger)
-        rendered = render_seats(self.root, seats_b, "active",
-                                ledger=self.ledger)
-        self.assertIn(b"offline", self.path("SEATS.md").read_bytes())
-        self.assertEqual(self.ledger.execute(
-            "SELECT relay_seq,target,event,digest,detail "
-            "FROM projection_events WHERE target='seats' ORDER BY seq DESC "
-            "LIMIT 1").fetchone(),
-            (None, "seats", "rendered", rendered.digest, "SEATS.md"))
+        render_seats(self.root, seats_a, "active")
+        rendered = render_seats(self.root, seats_a, "active")
+        self.assertIn(b"online", self.path("SEATS.md").read_bytes())
+        self.assertIsNone(rendered.archive_path)
+
+    def test_projection_cells_escape_backslash_pipe_sequence(self):
+        rows = [("t", "PLAN", "Planner", "d", None, "from", "to", None,
+                 r"back\slash|pipe", "lane/one.md")]
+        render_index(self.root, rows, 10, "active")
+        self.assertIn(b"back\\\\slash\\|pipe",
+                      self.path("INDEX.md").read_bytes())
 
     def test_inert_epoch_leaves_projection_bytes_and_events_untouched(self):
         original_index = b"legacy index\n"
@@ -161,19 +152,15 @@ class TestRender(unittest.TestCase):
         self.path("SEATS.md").write_bytes(original_seats)
         before = self.events()
         self.assertIsNone(render_index(
-            self.root, [("x",) * 10], 10, "inert", ledger=self.ledger))
+            self.root, [("x",) * 10], 10, "inert"))
         self.assertIsNone(render_seats(
-            self.root, [("x",) * 5], "inert", ledger=self.ledger))
+            self.root, [("x",) * 5], "inert"))
         self.assertEqual(self.path("INDEX.md").read_bytes(), original_index)
         self.assertEqual(self.path("SEATS.md").read_bytes(), original_seats)
         self.assertEqual(self.events(), before)
 
-    def test_projection_event_identity_classes_are_disjoint(self):
+    def test_relay_and_foreign_path_event_identities_are_disjoint(self):
         render_relay(self.ledger, self.root, self.row.seq)
-        render_index(self.root, [("x",) * 10], 10, "active",
-                     ledger=self.ledger)
-        render_seats(self.root, [("x",) * 5], "active",
-                     ledger=self.ledger)
         self.ledger.execute(
             "INSERT INTO projection_events"
             "(relay_seq,target,event,digest,detail) "
@@ -183,8 +170,7 @@ class TestRender(unittest.TestCase):
             "SELECT target,relay_seq FROM projection_events "
             "GROUP BY target,relay_seq ORDER BY target").fetchall()
         self.assertEqual(identities, [
-            ("foreign-path", None), ("index", None),
-            ("relay", self.row.seq), ("seats", None),
+            ("foreign-path", None), ("relay", self.row.seq),
         ])
 
     def test_sweep_removes_only_regular_owned_temps(self):

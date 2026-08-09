@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 import re
 import stat
@@ -17,7 +18,8 @@ _INDEX_HEADERS = {
     10: ("time", "phase", "role", "dispatch", "parent", "from", "to",
          "cc", "status", "file"),
 }
-_SEATS_HEADERS = ("seat", "role skill", "status", "session", "model/lane")
+_SEATS_HEADERS = ("seat", "role skill", "occupancy", "occupant",
+                  "last submission (activity)")
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,22 @@ class RenderResult:
     digest: str
     archive_path: str | None = None
     divergence_digest: str | None = None
+
+
+class ProjectionRows:
+    def __init__(self, ledger, rows, preamble=b""):
+        self.ledger = ledger
+        self._rows = tuple(tuple(row) for row in rows)
+        self.preamble = preamble
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self):
+        return len(self._rows)
+
+    def __getitem__(self, index):
+        return self._rows[index]
 
 
 def _digest(data):
@@ -175,7 +193,8 @@ def _last_projection_digest(ledger, target):
 def _cell(value):
     if value is None:
         return "—"
-    return str(value).replace("|", r"\|").replace("\n", " ")
+    return (str(value).replace("\\", r"\\").replace("|", r"\|")
+            .replace("\n", " "))
 
 
 def _table(headers, rows):
@@ -190,12 +209,120 @@ def _table(headers, rows):
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def _render_projection(root, rel, data, epoch, ledger):
+def detect_arity(existing_index_text):
+    if isinstance(existing_index_text, bytes):
+        try:
+            existing_index_text = existing_index_text.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("INDEX text is not UTF-8") from exc
+    if not isinstance(existing_index_text, str):
+        raise TypeError("INDEX text required")
+    for line in existing_index_text.splitlines():
+        if not line.startswith("|") or not line.endswith("|"):
+            continue
+        cells = re.split(r"(?<!\\)\|", line)[1:-1]
+        cells = [cell.strip() for cell in cells]
+        if cells and cells[0] == "time":
+            if len(cells) not in _INDEX_HEADERS:
+                raise ValueError("INDEX arity must be eight or ten")
+            return len(cells)
+    raise ValueError("INDEX header row is missing")
+
+
+def _run_preamble(ledger, projection):
+    row = ledger.execute(
+        "SELECT value FROM meta WHERE key='run_id'").fetchone()
+    run_id = None if row is None else row[0]
+    heading = "# %s" % projection
+    if run_id is not None:
+        heading += " — " + run_id
+    lines = [heading]
+    if projection == "INDEX" and run_id is not None:
+        commissioned = ledger.execute(
+            "SELECT commissioned_by FROM runs WHERE run_id=?",
+            (run_id,)).fetchone()
+        if commissioned is not None:
+            lines.append("COMMISSIONED_BY: " + commissioned[0])
+    return ("\n".join(lines) + "\n\n").encode("utf-8")
+
+
+def _seat_list(encoded):
+    values = json.loads(encoded)
+    if not isinstance(values, list) or not all(
+            isinstance(value, str) for value in values):
+        raise ValueError("stored seat list mismatch")
+    return ", ".join(values) if values else None
+
+
+def index_rows(ledger):
+    arity_row = ledger.execute(
+        "SELECT value FROM meta WHERE key='index_arity'").fetchone()
+    arity = 10 if arity_row is None else int(arity_row[0])
+    if arity not in _INDEX_HEADERS:
+        raise ValueError("stored INDEX arity must be eight or ten")
+    rows = []
+    query = (
+        "SELECT r.seq,r.stamp,r.phase,r.role,r.dispatch_id,"
+        "r.parent_dispatch_id,r.from_seat,r.to_seats,r.cc_seats,r.status,"
+        "r.rendered_path,EXISTS(SELECT 1 FROM supersession_edges s "
+        "WHERE s.target_seq=r.seq AND s.applied=1) "
+        "FROM relays r ORDER BY r.seq")
+    for row in ledger.execute(query):
+        (seq, stamp, phase, role, dispatch, parent, sender, recipients,
+         copied, status, path, superseded) = row
+        del seq
+        status = "superseded" if superseded else status
+        recipients = _seat_list(recipients)
+        copied = _seat_list(copied)
+        if arity == 10:
+            cells = (stamp, phase, role, dispatch, parent, sender,
+                     recipients, copied, status, path)
+        else:
+            cells = (stamp, phase, role, dispatch, recipients, sender,
+                     status, path)
+        rows.append(cells)
+    return ProjectionRows(ledger, rows, _run_preamble(ledger, "INDEX"))
+
+
+def _role_skill(address):
+    if address.endswith(".orchestrator-planner"):
+        return "orchestrator-planner"
+    if address.endswith(".orchestrator-reviewer"):
+        return "orchestrator-reviewer"
+    if address.endswith(".planner"):
+        return "agent-pair-planner"
+    if address.endswith(".implementer"):
+        return "agent-pair-implementer"
+    return None
+
+
+def seats_rows(ledger):
+    latest = ledger.execute(
+        "SELECT e.address,e.event,e.occupant_id FROM seat_events e "
+        "JOIN (SELECT address,MAX(seq) seq FROM seat_events GROUP BY address) x "
+        "ON x.address=e.address AND x.seq=e.seq ORDER BY e.address"
+    ).fetchall()
+    rows = []
+    for address, event, occupant in latest:
+        activity = ledger.execute(
+            "SELECT stamp,rendered_path FROM relays WHERE from_seat=? "
+            "ORDER BY seq DESC LIMIT 1", (address,)).fetchone()
+        activity_cell = (None if activity is None else
+                         "%s %s" % (activity[0], activity[1]))
+        rows.append((address, _role_skill(address), event, occupant,
+                     activity_cell))
+    preamble = _run_preamble(ledger, "SEATS")
+    preamble += ("%d seats\n\n" % len(rows)).encode("utf-8")
+    return ProjectionRows(ledger, rows, preamble)
+
+
+def _render_projection(root, rel, data, epoch, ledger, literal_digest):
     if epoch != "active":
         return None
     target = _PROJECTIONS[rel]
     result = atomic_replace(
-        root, rel, data, _last_projection_digest(ledger, target))
+        root, rel, data, (_last_projection_digest(ledger, target)
+                          if ledger is not None else literal_digest))
     if ledger is not None:
         entries = []
         if result.divergence_digest is not None:
@@ -206,16 +333,22 @@ def _render_projection(root, rel, data, epoch, ledger):
     return result
 
 
-def render_index(root, rows, arity, epoch, ledger=None):
+def render_index(root, rows, arity, epoch):
     if arity not in _INDEX_HEADERS:
         raise ValueError("INDEX arity must be eight or ten")
-    data = _table(_INDEX_HEADERS[arity], rows)
-    return _render_projection(root, "INDEX.md", data, epoch, ledger)
+    ledger = getattr(rows, "ledger", None)
+    preamble = getattr(rows, "preamble", b"")
+    data = preamble + _table(_INDEX_HEADERS[arity], rows)
+    return _render_projection(root, "INDEX.md", data, epoch, ledger,
+                              _digest(data))
 
 
-def render_seats(root, rows, epoch, ledger=None):
-    data = _table(_SEATS_HEADERS, rows)
-    return _render_projection(root, "SEATS.md", data, epoch, ledger)
+def render_seats(root, rows, epoch):
+    ledger = getattr(rows, "ledger", None)
+    preamble = getattr(rows, "preamble", b"")
+    data = preamble + _table(_SEATS_HEADERS, rows)
+    return _render_projection(root, "SEATS.md", data, epoch, ledger,
+                              _digest(data))
 
 
 def _sweep_dir(fd):
