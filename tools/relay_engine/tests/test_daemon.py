@@ -334,7 +334,8 @@ class TestRuntime(unittest.TestCase):
                 target=daemon.start,
                 args=(root_name,),
                 kwargs={"ready_fd": write_fd, "trace": trace,
-                        "socket_override": socket_name})
+                        "socket_override": socket_name,
+                        "run_id": "daemon-test"})
             thread.start()
             self.assertEqual(os.read(read_fd, 1), b"R")
             os.close(read_fd)
@@ -350,7 +351,7 @@ class TestRuntime(unittest.TestCase):
             self.assertEqual(trace, [
                 "open-root", "ensure-engine", "flock", "starting-record",
                 "log-bound", "writer-started", "schema-init",
-                "run-identity:absent", "top-seat:present", "recovery:absent",
+                "run-identity:present", "top-seat:present", "recovery:absent",
                 "socket-bound", "ready-record", "ready-byte",
                 "ready-pipe-closed",
             ])
@@ -417,7 +418,8 @@ class TestRuntime(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root_name:
             socket_name = os.path.join(root_name, "socket-dir", "s")
             self.assertTrue(daemon.launch(
-                root_name, socket_override=socket_name, timeout=5))
+                root_name, socket_override=socket_name, timeout=5,
+                run_id="daemon-test"))
             with Root(root_name) as root:
                 with self.assertRaises(BlockingIOError):
                     acquire_lease(root)
@@ -442,7 +444,8 @@ class TestRuntime(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root_name:
             socket_name = os.path.join(root_name, "socket-dir", "s")
             self.assertTrue(daemon.launch(
-                root_name, socket_override=socket_name, timeout=5))
+                root_name, socket_override=socket_name, timeout=5,
+                run_id="daemon-test"))
             state_path = Path(root_name, ".engine/daemon.json")
             pid = json.loads(state_path.read_bytes())["pid"]
             os.kill(pid, signal.SIGSTOP)
@@ -478,7 +481,8 @@ class TestRuntime(unittest.TestCase):
             daemon._pid_start_time = lambda pid: "current-process-token"
             try:
                 self.assertTrue(daemon.launch(
-                    root_name, socket_override=socket_name, timeout=5))
+                    root_name, socket_override=socket_name, timeout=5,
+                    run_id="daemon-test"))
                 self.assertTrue(self.roundtrip(
                     socket_name, self.request("daemon.stop"))["ok"])
                 deadline = time.monotonic() + 5

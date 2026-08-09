@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import stat
 import sys
 
 from relay_engine import client, daemon, errors, strings
@@ -26,9 +27,13 @@ def _command_root(args, fresh=False):
 
 def _cmd_daemon_start(args):
     root = _command_root(args, fresh=True)
+    commissioning_record = (None if args.commissioned_by is None else
+                            _read_carrier(args.commissioned_by))
     if not daemon.launch(root, socket_override=args.socket,
                          timeout=args.timeout, top_seat=args.seat,
-                         top_role=args.role, top_dispatch=args.dispatch):
+                         top_role=args.role, top_dispatch=args.dispatch,
+                         run_id=args.run_id,
+                         commissioning_record=commissioning_record):
         strings.emit("stderr", "daemon-start-failed")
         return 1
     return 0
@@ -84,6 +89,44 @@ def _cmd_roster(args):
         _command_root(args), "roster", {}, timeout=args.timeout))
 
 
+def _read_carrier(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("regular carrier required")
+        data = os.read(fd, info.st_size + 1)
+        if len(data) != info.st_size:
+            raise OSError("carrier changed during read")
+        return data
+    finally:
+        os.close(fd)
+
+
+def _cmd_commission(args):
+    return _emit_result(client.commission_run(
+        _command_root(args), args.dispatch_relay_path, args.child_run,
+        timeout=args.timeout))
+
+
+def _cmd_adopt_commission(args):
+    return _emit_result(client.adopt_commission(
+        _command_root(args), _read_carrier(args.record),
+        timeout=args.timeout))
+
+
+def _cmd_export_ruling(args):
+    return _emit_result(client.export_ruling(
+        _command_root(args), args.ruling_path, args.for_child,
+        timeout=args.timeout))
+
+
+def _cmd_adopt_ruling(args):
+    return _emit_result(client.adopt_ruling(
+        _command_root(args), _read_carrier(args.bundle),
+        timeout=args.timeout))
+
+
 def _root_option(parser):
     parser.add_argument("--root")
 
@@ -110,6 +153,8 @@ def build_parser():
     daemon_start.add_argument("--seat")
     daemon_start.add_argument("--role", default="Orchestrator Planner")
     daemon_start.add_argument("--dispatch")
+    daemon_start.add_argument("--run-id")
+    daemon_start.add_argument("--commissioned-by")
     daemon_start.set_defaults(handler=_cmd_daemon_start)
     daemon_stop = daemon_commands.add_parser("stop")
     _root_option(daemon_stop)
@@ -154,6 +199,32 @@ def build_parser():
     _root_option(roster)
     _timeout_option(roster)
     roster.set_defaults(handler=_cmd_roster)
+
+    commission_command = commands.add_parser("commission")
+    commission_command.add_argument("dispatch_relay_path")
+    commission_command.add_argument("--child-run", required=True)
+    _root_option(commission_command)
+    _timeout_option(commission_command)
+    commission_command.set_defaults(handler=_cmd_commission)
+
+    adopt_commission = commands.add_parser("adopt-commission")
+    adopt_commission.add_argument("record")
+    _root_option(adopt_commission)
+    _timeout_option(adopt_commission)
+    adopt_commission.set_defaults(handler=_cmd_adopt_commission)
+
+    export_ruling = commands.add_parser("export-ruling")
+    export_ruling.add_argument("ruling_path")
+    export_ruling.add_argument("--for-child", required=True)
+    _root_option(export_ruling)
+    _timeout_option(export_ruling)
+    export_ruling.set_defaults(handler=_cmd_export_ruling)
+
+    adopt_ruling = commands.add_parser("adopt-ruling")
+    adopt_ruling.add_argument("bundle")
+    _root_option(adopt_ruling)
+    _timeout_option(adopt_ruling)
+    adopt_ruling.set_defaults(handler=_cmd_adopt_ruling)
     return parser
 
 

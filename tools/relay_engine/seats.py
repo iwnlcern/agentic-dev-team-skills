@@ -93,8 +93,11 @@ def _remove_issued_key(root, path):
         os.close(parent)
 
 
-def _boot_bytes(address, role_word, run_id, dispatch_ref, occupant_id):
-    return ("## relay\n\n"
+def _boot_bytes(address, role_word, run_id, dispatch_ref, occupant_id,
+                commissioned_by=None):
+    commissioned_line = ("" if commissioned_by is None else
+                         "COMMISSIONED_BY: %s\n" % commissioned_by)
+    return (("## relay\n\n"
             "ROLE: %s\n"
             "PHASE: BOOT\n"
             "AUTHORITY: seat-registration\n"
@@ -105,11 +108,13 @@ def _boot_bytes(address, role_word, run_id, dispatch_ref, occupant_id):
             "HUMAN_GATE_REQUIRED: no\n"
             "FROM: %s\n"
             "TO: %s\n"
-            "SUBJECT: seat boot %s\n\n"
+            "SUBJECT: seat boot %s\n"
+            "%s\n"
             "occupant %s\n"
             "commissioning %s\n" % (
                 role_word, dispatch_ref, run_id, address, address,
-                occupant_id, occupant_id, dispatch_ref)).encode("utf-8")
+                occupant_id, commissioned_line, occupant_id,
+                dispatch_ref))).encode("utf-8")
 
 
 def _event(address, event, occupant_id, key_id, **extra):
@@ -150,8 +155,12 @@ def register(ledger, root, address, role_word, dispatch_ref=None, *,
                 cause_seq=(None if current is None else current[0]))])
             boot_path = None
         else:
-            body = _boot_bytes(address, role_word, run_id, dispatch,
-                               occupant_id)
+            commissioned = ledger.execute(
+                "SELECT commissioned_by FROM runs WHERE run_id=?",
+                (run_id,)).fetchone()
+            body = _boot_bytes(
+                address, role_word, run_id, dispatch, occupant_id,
+                None if commissioned is None else commissioned[0])
             envelope = parse_draft(body.decode("utf-8"))
             admission = admit(
                 ledger, root, envelope, body, occupant_id,
@@ -160,8 +169,8 @@ def register(ledger, root, address, role_word, dispatch_ref=None, *,
                     boot_relay_seq="current-relay",
                     cause_seq=(None if current is None else current[0]))])
             render_relay(ledger, root, admission.seq)
-            render_index(root, index_rows(ledger), 10, epoch_state(ledger))
             boot_path = admission.rendered_path
+        render_index(root, index_rows(ledger), 10, epoch_state(ledger))
         render_seats(root, seats_rows(ledger), epoch_state(ledger))
     except BaseException:
         _remove_issued_key(root, key_path)

@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 
-from relay_engine import errors, seats, strings
+from relay_engine import commission, cycles, errors, seats, strings, supersede
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -32,7 +32,8 @@ _diag_clock = time.time
 _diag_lock = threading.Lock()
 _log_fd = None
 _PROCESS_STARTED = str(time.time_ns())
-_STARTUP_STAGES = {"top-seat": seats.startup_top_seat}
+_STARTUP_STAGES = {"run-identity": commission.startup_run_identity,
+                   "top-seat": seats.startup_top_seat}
 
 
 class WireFault(Exception):
@@ -265,13 +266,14 @@ def _log_diagnostic(exc):
 
 def start(root_path=None, ready_fd=None, handlers=None, trace=None,
           socket_override=None, top_seat=None, top_role=None,
-          top_dispatch=None):
+          top_dispatch=None, run_id=None, commissioning_record=None):
     """Bind diagnostics, or run a complete daemon when a root is supplied."""
     strings.set_diagnostic_sink(_log_diagnostic)
     if root_path is None:
         return None
     return _run_daemon(root_path, ready_fd, handlers or {}, trace,
-                       socket_override, top_seat, top_role, top_dispatch)
+                       socket_override, top_seat, top_role, top_dispatch,
+                       run_id, commissioning_record)
 
 
 @dataclass
@@ -537,11 +539,20 @@ def _submit_handler(ledger, root, args):
     if not seats.tag_is_current(
             ledger, root, envelope.from_seat, args["tag"]):
         raise errors.error_for("E-KEY-MISMATCH")
+    cycle_events, cycle_advisories = cycles.prepare(
+        ledger, envelope, args.get("admits_against"))
+    supersession_edges, supersession_advisories = supersede.prepare(
+        ledger, envelope)
     admission = admit(
         ledger, root, envelope, body, args["submission_id"],
         claimed_body_sha256=args["body_sha256"],
         claimed_content_hash=args["content_hash"],
-        admits_against=args.get("admits_against"))
+        admits_against=args.get("admits_against"),
+        prechecks=(cycles.callback(),),
+        cycle_events=cycle_events,
+        supersession_edges=supersession_edges,
+        advisories=tuple(cycle_advisories) + tuple(
+            supersession_advisories))
     rendered = render_relay(ledger, root, admission.seq)
     render_index(root, index_rows(ledger), 10, epoch_state(ledger))
     advisory_row = ledger.execute(
@@ -572,6 +583,28 @@ def _default_handler(ledger, root, state, handlers, request):
         return seats.show(ledger, request["args"]["address"])
     if op == "roster":
         return seats.roster(ledger, root)
+    if op == "commission":
+        args = request["args"]
+        return commission.commission(
+            ledger, root, args["dispatch_relay_path"], args["child_run_id"])
+    if op == "adopt_commission":
+        try:
+            record = base64.b64decode(
+                request["args"]["record_b64"], validate=True)
+        except ValueError as exc:
+            raise errors.error_for("E-ENVELOPE") from exc
+        return commission.adopt(ledger, record)
+    if op == "export_ruling":
+        args = request["args"]
+        return supersede.export_ruling(
+            ledger, args["ruling_path"], args["for_child"])
+    if op == "adopt_ruling":
+        try:
+            bundle = base64.b64decode(
+                request["args"]["bundle_b64"], validate=True)
+        except ValueError as exc:
+            raise errors.error_for("E-ENVELOPE") from exc
+        return supersede.adopt_ruling(ledger, root, bundle)
     if op == "daemon.stop":
         return {"ok": True}
     if op == "status":
@@ -581,7 +614,8 @@ def _default_handler(ledger, root, state, handlers, request):
 
 
 def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
-                top_seat, top_role, top_dispatch):
+                top_seat, top_role, top_dispatch, run_id,
+                commissioning_record):
     global _log_fd
     root = None
     lease = None
@@ -592,6 +626,8 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
     socket_name = None
     socket_owned = False
     ready_stream = None
+    writer = None
+    fresh_ledger = False
     try:
         root = Root(root_path)
         _trace(trace, "open-root")
@@ -622,19 +658,37 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
                     follow_symlinks=False)
         except FileNotFoundError:
             ledger = init_schema(lease.engine_dirfd, root.path)
+            fresh_ledger = True
         else:
             ledger = open_ledger(lease.engine_dirfd)
         holder["ledger"] = ledger
         _trace(trace, "schema-init")
         context = {"root": root, "lease": lease, "ledger": ledger,
                    "state": state, "top_seat": top_seat,
-                   "top_role": top_role, "top_dispatch": top_dispatch}
+                   "top_role": top_role, "top_dispatch": top_dispatch,
+                   "run_id": run_id,
+                   "commissioning_record": commissioning_record}
         for stage in ("run-identity", "top-seat", "recovery"):
             callback = _STARTUP_STAGES.get(stage)
             if callback is None:
                 _trace(trace, stage + ":absent")
             else:
-                callback(context)
+                try:
+                    callback(context)
+                except BaseException:
+                    if stage == "run-identity" and fresh_ledger:
+                        writer.begin_stop()
+                        writer.join(5)
+                        ledger.close()
+                        ledger = None
+                        for name in ("ledger.db-wal", "ledger.db-shm",
+                                     "ledger.db"):
+                            try:
+                                os.unlink(name, dir_fd=lease.engine_dirfd)
+                            except FileNotFoundError:
+                                pass
+                        os.fsync(lease.engine_dirfd)
+                    raise
                 _trace(trace, stage + ":present")
         listener = _prepare_runtime_socket(socket_name, cleanup_allowed)
         socket_owned = True
@@ -660,6 +714,9 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
         _write_state(root, state)
         return 0
     finally:
+        if writer is not None:
+            writer.begin_stop()
+            writer.join(5)
         if ready_stream is not None:
             ready_stream.close()
         elif ready_fd is not None:
@@ -705,7 +762,8 @@ def _close_inherited(keep):
 
 
 def launch(root_path, handlers=None, socket_override=None, timeout=10.0,
-           top_seat=None, top_role=None, top_dispatch=None):
+           top_seat=None, top_role=None, top_dispatch=None, run_id=None,
+           commissioning_record=None):
     read_fd, write_fd = os.pipe()
     first = os.fork()
     if first == 0:
@@ -720,7 +778,9 @@ def launch(root_path, handlers=None, socket_override=None, timeout=10.0,
             try:
                 start(root_path, ready_fd=write_fd, handlers=handlers,
                       socket_override=socket_override, top_seat=top_seat,
-                      top_role=top_role, top_dispatch=top_dispatch)
+                      top_role=top_role, top_dispatch=top_dispatch,
+                      run_id=run_id,
+                      commissioning_record=commissioning_record)
             except BaseException:
                 os._exit(1)
             os._exit(0)

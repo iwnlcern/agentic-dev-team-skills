@@ -243,6 +243,12 @@ def establish_run_identity(ledger, run_id, commissioning=None, fault=None):
                 "SELECT commissioned_by FROM runs WHERE run_id=?",
                 (established,)).fetchone()
             if prior is None:
+                if ledger.execute(
+                        "SELECT 1 FROM seat_events LIMIT 1").fetchone() is not None:
+                    raise errors.error_for("commission-late")
+                if ledger.execute(
+                        "SELECT 1 FROM relays LIMIT 1").fetchone() is not None:
+                    raise errors.error_for("commission-late")
                 ledger.execute(
                     "INSERT INTO runs(run_id,commissioned_by) VALUES(?,?)",
                     (established, persisted))
@@ -393,24 +399,32 @@ def _insert_projection_divergences(ledger, foreign):
             (_next_seq(ledger, "projection_events"), digest, path))
 
 
-def _insert_cycle_events(ledger, entries):
+def _insert_cycle_events(ledger, entries, relay_seq=None):
     for entry in entries:
+        commissioning_seq = entry.get("commissioning_seq")
+        cause_seq = entry.get("cause_seq")
+        if commissioning_seq == "current-relay":
+            commissioning_seq = relay_seq
+        if cause_seq == "current-relay":
+            cause_seq = relay_seq
         ledger.execute(
             "INSERT INTO cycle_events"
             "(seq,dispatch_id,event,commissioning_seq,cause_seq) "
             "VALUES(?,?,?,?,?)",
             (_next_seq(ledger, "cycle_events"), entry["dispatch_id"],
-             entry["event"], entry.get("commissioning_seq"),
-             entry.get("cause_seq")))
+             entry["event"], commissioning_seq, cause_seq))
 
 
-def _insert_supersession_edges(ledger, entries):
+def _insert_supersession_edges(ledger, entries, relay_seq=None):
     for entry in entries:
+        ruling_seq = entry["ruling_seq"]
+        if ruling_seq == "current-relay":
+            ruling_seq = relay_seq
         ledger.execute(
             "INSERT INTO supersession_edges"
             "(seq,target_seq,ruling_seq,source,applied) VALUES(?,?,?,?,?)",
             (_next_seq(ledger, "supersession_edges"), entry["target_seq"],
-             entry["ruling_seq"], entry["source"], entry["applied"]))
+             ruling_seq, entry["source"], entry["applied"]))
 
 
 def _insert_seat_events(ledger, entries, relay_seq=None):
@@ -509,9 +523,9 @@ def admit(ledger, root, envelope, body, submission_id, *,
                  occupancy_ref, advisory_json))
             _hit(fault, "after-relay-insert")
             _insert_projection_divergences(ledger, foreign)
-            _insert_cycle_events(ledger, cycle_events)
+            _insert_cycle_events(ledger, cycle_events, seq)
             _hit(fault, "after-cycle-events")
-            _insert_supersession_edges(ledger, supersession_edges)
+            _insert_supersession_edges(ledger, supersession_edges, seq)
             _hit(fault, "after-supersession-edges")
             _insert_seat_events(ledger, seat_events, seq)
             _hit(fault, "after-seat-events")

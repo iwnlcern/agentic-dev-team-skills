@@ -147,3 +147,32 @@ def seat_stand_down(root_name, address, timeout=10.0):
 def seat_show(root_name, address, timeout=10.0):
     return request(root_name, "seat.show", {"address": address},
                    timeout=timeout)
+
+
+def commission_run(root_name, dispatch_path, child_run_id, timeout=10.0):
+    return request(root_name, "commission", {
+        "dispatch_relay_path": dispatch_path,
+        "child_run_id": child_run_id,
+    }, timeout=timeout)
+
+
+def adopt_commission(root_name, record, timeout=10.0):
+    if not isinstance(record, bytes):
+        raise TypeError("record bytes required")
+    return request(root_name, "adopt_commission", {
+        "record_b64": base64.b64encode(record).decode("ascii"),
+    }, timeout=timeout)
+
+
+def export_ruling(root_name, ruling_path, child_run_id, timeout=10.0):
+    return request(root_name, "export_ruling", {
+        "ruling_path": ruling_path, "for_child": child_run_id,
+    }, timeout=timeout)
+
+
+def adopt_ruling(root_name, bundle, timeout=10.0):
+    if not isinstance(bundle, bytes):
+        raise TypeError("bundle bytes required")
+    return request(root_name, "adopt_ruling", {
+        "bundle_b64": base64.b64encode(bundle).decode("ascii"),
+    }, timeout=timeout)
