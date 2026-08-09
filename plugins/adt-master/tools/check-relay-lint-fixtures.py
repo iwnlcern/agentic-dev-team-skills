@@ -7,14 +7,208 @@ harness noise; it does not call any LLM, network, subprocess, or git command.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LINT = ROOT / "tools" / "relay-lint.py"
 FIXTURES = ROOT / "tools" / "relay-lint-fixtures"
 
-EXPECTED = [
+A5_EXPECTED = [
+    ("root", "lockdigest/AH1-float-forward/.relays/v29", 0),
+    ("root", "lockdigest/AH2-rollback/.relays/v29", 1),
+    ("root", "lockdigest/AH3a-later-malformed/.relays/v29", 1),
+    ("root", "lockdigest/AH3b-later-conflicted/.relays/v29", 1),
+    ("root", "lockdigest/AH4-two-groups/.relays/v29", 1),
+    ("root", "lockdigest/AH5a-samebase-distinct/.relays/v29", 1),
+    ("root", "lockdigest/AH5b-samebase-identical/.relays/v29", 0),
+    ("root", "lockdigest/AH5c-cogovernor-mismatch/.relays/v29", 1),
+    ("root", "lockdigest/AH6a-diffbase-distinct/.relays/v29", 1),
+    ("root", "lockdigest/AH6b-diffbase-identical/.relays/v29", 0),
+    ("root", "lockdigest/AH7-three-carrier-AAB/.relays/v29", 1),
+    ("root", "lockdigest/FB1-longer-closer/.relays/v29", 1),
+    ("file", "lockdigest/FB2-indented-nonopener.md", 1),
+    ("file", "lockdigest/FB3-pseudo-closer-suffix.md", 0),
+    ("file", "lockdigest/FB4-unclosed-eof.md", 0),
+    ("root", "lockdigest/FB5-three-space-composite/.relays/v29", 1),
+    ("file", "lockdigest/FB6a-info-opener.md", 0),
+    ("file", "lockdigest/FB6b-backtick-info-nonopener.md", 1),
+    ("file", "lockdigest/FB7-nbsp-pseudo-closer.md", 0),
+    ("file", "lockdigest/FB8-u2028-pseudo-closer.md", 0),
+    ("file", "lockdigest/FLD01-valid-shape.md", 0),
+    ("file", "lockdigest/FLD04-digest-no-locator.md", 1),
+    ("file", "lockdigest/FLD05-digest-short.md", 1),
+    ("file", "lockdigest/FLD06-digest-nonhex.md", 1),
+    ("file", "lockdigest/FLD07-digest-upper.md", 1),
+    ("file", "lockdigest/FLD08-stem-pathsep.md", 1),
+    ("file", "lockdigest/FLD09-stem-atsign.md", 1),
+    ("file", "lockdigest/FLD10-stem-mdsuffix.md", 1),
+    ("file", "lockdigest/FLD11-badstem-no-digest.md", 0),
+    ("file", "lockdigest/FLD12-locator-conflict-no-digest.md", 1),
+    ("file", "lockdigest/FLD13-identical-locator-repeat.md", 0),
+    ("file", "lockdigest/FLD14-identical-digest-repeat.md", 0),
+    ("file", "lockdigest/FLD15-digest-conflict.md", 1),
+    ("file", "lockdigest/FLD16-locator-conflict.md", 1),
+    ("file", "lockdigest/FLD17-locconflict-plus-baddigest.md", 1),
+    ("file", "lockdigest/FLD18-missing-locator-baddigest.md", 1),
+    ("file", "lockdigest/FLD19-both-conflict.md", 1),
+    ("file", "lockdigest/FLD20-badlocator-digestconflict.md", 1),
+    ("file", "lockdigest/FLD21-digestconflict-all-malformed.md", 1),
+    ("file", "lockdigest/FLD22-locconflict-all-malformed.md", 1),
+    ("file", "lockdigest/FLD23-missing-locator-digestconflict.md", 1),
+    ("file", "lockdigest/FLD24-u2028-field-decoy.md", 0),
+    ("file", "lockdigest/LDM1-missing/01-plan-20260801-130000.md", 0),
+    ("root", "lockdigest/LDM1-missing", 1),
+    ("file", "lockdigest/LDM2-mismatch/.relays/v29/01-plan-20260801-130000.md", 0),
+    ("root", "lockdigest/LDM2-mismatch/.relays/v29", 1),
+    ("file", "lockdigest/MFa-tilde-holds-backtick.md", 0),
+    ("file", "lockdigest/MFb-backtick-holds-tilde.md", 0),
+    ("root", "lockdigest/RLD1-valid-match/.relays/v29", 0),
+    ("root", "lockdigest/RLD2-production-topology/.relays/v29", 0),
+    ("root", "lockdigest/RLD5-directory-candidate", 1),
+    ("root", "lockdigest/RLD6-every-instance-match/.relays/v29", 0),
+    ("root", "lockdigest/RLD7-later-mismatch/.relays/v29", 1),
+    ("root", "lockdigest/RLD8-mixed-partition/.relays/v29", 1),
+    ("root", "lockdigest/RLD9-read-seam/.relays/v29", 1),
+    ("root", "lockdigest/STAMP-impossible-later/.relays/v29", 1),
+    ("root", "lockdigest/STAMP2-nonhyphen-governs/.relays/v29", 0),
+    ("file", "lockdigest/TF1-tilde-file-shape.md", 0),
+    ("root", "lockdigest/TG1-tilde-governance/.relays/v29", 0),
+    ("template", "lockdigest/TM1-placeholder.md", 0),
+    ("template", "lockdigest/TM2-ordinary-malformed.md", 0),
+    ("template", "lockdigest/TM3-conflicting-duplicates.md", 0),
+    ("root", "lockdigest/UNSTAMPED-ineligible-control/.relays/v29", 0),
+    ("index", "rootres/XR1-marked-resolving", 0),
+    ("index", "rootres/XR10-no-relay-cell", 0),
+    ("index-rel", "rootres/XR11-near-miss-cell", 1),
+    ("index", "rootres/XR12-spaced-root", 0),
+    ("index-rel", "rootres/XR13-norows-duplicate-markers", 1),
+    ("index-rel", "rootres/XR14-norows-bad-root", 1),
+    ("index", "rootres/XR16-u2028-marker-decoy", 0),
+    ("index-rel", "rootres/XR2-marked-missing-file", 1),
+    ("index", "rootres/XR3-unmarked-unresolvable", 0),
+    ("index", "rootres/XR4-duplicate-markers", 1),
+    ("index", "rootres/XR5-marker-nonexistent-dir", 1),
+    ("index", "rootres/XR6-marker-existing-file", 1),
+    ("index-rel", "rootres/XR7-cell-directory", 1),
+    ("index", "rootres/XR8-decoys-one-live", 0),
+    ("index", "rootres/XR9-deployment/idxhome", 0),
+]
+A5_ERRORS = {
+    "lockdigest/AH1-float-forward/.relays/v29": [],
+    "lockdigest/AH2-rollback/.relays/v29": ["02-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7 does not match the declared 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111"],
+    "lockdigest/AH3a-later-malformed/.relays/v29": ["01-plan-20260801-100000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7", "02-plan-20260801-130000.md: PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/AH3b-later-conflicted/.relays/v29": ["01-plan-20260801-100000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7", "02-plan-20260801-130000.md: PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/AH4-two-groups/.relays/v29": ["03-plan-20260801-110000.md: PLAN_SHA256: ../plans/other-plan.md digest 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7"],
+    "lockdigest/AH5a-samebase-distinct/.relays/v29": ["x/01-plan-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses", "y/01-plan-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses"],
+    "lockdigest/AH5b-samebase-identical/.relays/v29": [],
+    "lockdigest/AH5c-cogovernor-mismatch/.relays/v29": ["x/01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7 does not match the declared 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111", "y/01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7 does not match the declared 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111"],
+    "lockdigest/AH6a-diffbase-distinct/.relays/v29": ["01-design-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses", "02-plan-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses"],
+    "lockdigest/AH6b-diffbase-identical/.relays/v29": [],
+    "lockdigest/AH7-three-carrier-AAB/.relays/v29": ["01-plan-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses", "02-plan-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses", "03-plan-20260801-130000.md: PLAN_SHA256: stem 'fixture-plan' carries 2 indistinguishable latest declarations; verification refuses"],
+    "lockdigest/FB1-longer-closer/.relays/v29": ["01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7 does not match the declared 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111"],
+    "lockdigest/FB2-indented-nonopener.md": ["PLAN_ARTIFACT value 'plans/fixture-plan' is not a bare filename stem", "PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FB3-pseudo-closer-suffix.md": [],
+    "lockdigest/FB4-unclosed-eof.md": [],
+    "lockdigest/FB5-three-space-composite/.relays/v29": ["02-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7 does not match the declared 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111"],
+    "lockdigest/FB6a-info-opener.md": [],
+    "lockdigest/FB6b-backtick-info-nonopener.md": ["PLAN_ARTIFACT value 'plans/fixture-plan' is not a bare filename stem", "PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FB7-nbsp-pseudo-closer.md": [],
+    "lockdigest/FB8-u2028-pseudo-closer.md": [],
+    "lockdigest/FLD01-valid-shape.md": [],
+    "lockdigest/FLD04-digest-no-locator.md": ["PLAN_SHA256 declared with no PLAN_ARTIFACT to locate the artifact"],
+    "lockdigest/FLD05-digest-short.md": ["PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FLD06-digest-nonhex.md": ["PLAN_SHA256 value 'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FLD07-digest-upper.md": ["PLAN_SHA256 value 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FLD08-stem-pathsep.md": ["PLAN_ARTIFACT value 'plans/fixture-plan' is not a bare filename stem"],
+    "lockdigest/FLD09-stem-atsign.md": ["PLAN_ARTIFACT value 'fixture-plan @ sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a bare filename stem"],
+    "lockdigest/FLD10-stem-mdsuffix.md": ["PLAN_ARTIFACT value 'fixture-plan.md' is not a bare filename stem"],
+    "lockdigest/FLD11-badstem-no-digest.md": [],
+    "lockdigest/FLD12-locator-conflict-no-digest.md": ["PLAN_ARTIFACT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD13-identical-locator-repeat.md": [],
+    "lockdigest/FLD14-identical-digest-repeat.md": [],
+    "lockdigest/FLD15-digest-conflict.md": ["PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD16-locator-conflict.md": ["PLAN_ARTIFACT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD17-locconflict-plus-baddigest.md": ["PLAN_ARTIFACT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present", "PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FLD18-missing-locator-baddigest.md": ["PLAN_SHA256 declared with no PLAN_ARTIFACT to locate the artifact", "PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
+    "lockdigest/FLD19-both-conflict.md": ["PLAN_ARTIFACT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present", "PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD20-badlocator-digestconflict.md": ["PLAN_ARTIFACT value 'plans/fixture-plan' is not a bare filename stem", "PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD21-digestconflict-all-malformed.md": ["PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD22-locconflict-all-malformed.md": ["PLAN_ARTIFACT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
+    "lockdigest/FLD23-missing-locator-digestconflict.md": ["PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present", "PLAN_SHA256 declared with no PLAN_ARTIFACT to locate the artifact"],
+    "lockdigest/FLD24-u2028-field-decoy.md": [],
+    "lockdigest/LDM1-missing/01-plan-20260801-130000.md": [],
+    "lockdigest/LDM1-missing": ["01-plan-20260801-130000.md: PLAN_SHA256: no artifact resolves for stem 'no-such-stem' under plans/ at any probe root"],
+    "lockdigest/LDM2-mismatch/.relays/v29/01-plan-20260801-130000.md": [],
+    "lockdigest/LDM2-mismatch/.relays/v29": ["01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7"],
+    "lockdigest/MFa-tilde-holds-backtick.md": [],
+    "lockdigest/MFb-backtick-holds-tilde.md": [],
+    "lockdigest/RLD1-valid-match/.relays/v29": [],
+    "lockdigest/RLD2-production-topology/.relays/v29": [],
+    "lockdigest/RLD5-directory-candidate": ["01-plan-20260801-130000.md: PLAN_SHA256: plans/fixture-plan.md is not a readable regular file"],
+    "lockdigest/RLD6-every-instance-match/.relays/v29": [],
+    "lockdigest/RLD7-later-mismatch/.relays/v29": ["01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest d27decce1299fb1f1409f6c4a521f905406d036dadb6b5c89ea30e1efcdec539 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7", "01-plan-20260801-130000.md: PLAN_SHA256: ./plans/fixture-plan.md digest 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7"],
+    "lockdigest/RLD8-mixed-partition/.relays/v29": ["01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md digest 996f094b9288d88a28922d21057a66a4d050326cc05148ae393c2d92add5f111 does not match the declared 12e0a66d054eefc9b230fb78f18e7238796f0e70340290a2e580bb42404958f7", "01-plan-20260801-130000.md: PLAN_SHA256: ./plans/fixture-plan.md is not a readable regular file", "01-plan-20260801-130000.md: PLAN_SHA256: plans/fixture-plan.md is not a readable regular file"],
+    "lockdigest/RLD9-read-seam/.relays/v29": ["01-plan-20260801-130000.md: PLAN_SHA256: ../plans/fixture-plan.md is not a readable regular file"],
+    "lockdigest/STAMP-impossible-later/.relays/v29": ["02-plan-20260231-120000.md: filename timestamp 20260231-120000 is not a real date/time"],
+    "lockdigest/STAMP2-nonhyphen-governs/.relays/v29": [],
+    "lockdigest/TF1-tilde-file-shape.md": [],
+    "lockdigest/TG1-tilde-governance/.relays/v29": [],
+    "lockdigest/TM1-placeholder.md": [],
+    "lockdigest/TM2-ordinary-malformed.md": [],
+    "lockdigest/TM3-conflicting-duplicates.md": [],
+    "lockdigest/UNSTAMPED-ineligible-control/.relays/v29": [],
+    "rootres/XR1-marked-resolving": [],
+    "rootres/XR10-no-relay-cell": [],
+    "rootres/XR11-near-miss-cell": ["line 3: file cell '(no relay cut — D-1.4; acks)' does not resolve under the declared root ."],
+    "rootres/XR12-spaced-root": [],
+    "rootres/XR13-norows-duplicate-markers": ["INDEX declares 2 root markers; at most one is permitted", "no index rows found in INDEX.md"],
+    "rootres/XR14-norows-bad-root": ["no index rows found in INDEX.md", "root marker value 'no-such-dir' does not resolve to a directory"],
+    "rootres/XR16-u2028-marker-decoy": [],
+    "rootres/XR2-marked-missing-file": ["line 3: file cell 'AUDIT-planner-20260801-130000.md' does not resolve under the declared root ."],
+    "rootres/XR3-unmarked-unresolvable": [],
+    "rootres/XR4-duplicate-markers": ["INDEX declares 2 root markers; at most one is permitted"],
+    "rootres/XR5-marker-nonexistent-dir": ["root marker value 'no-such-dir' does not resolve to a directory"],
+    "rootres/XR6-marker-existing-file": ["root marker value 'AUDIT-planner-20260801-130000.md' does not resolve to a directory"],
+    "rootres/XR7-cell-directory": ["line 3: file cell 'somedir' does not resolve under the declared root ."],
+    "rootres/XR8-decoys-one-live": [],
+    "rootres/XR9-deployment/idxhome": [],
+}
+A5_CWD = {
+    "lockdigest/AH1-float-forward/.relays/v29": "lockdigest/AH1-float-forward/cwd",
+    "lockdigest/AH2-rollback/.relays/v29": "lockdigest/AH2-rollback/cwd",
+    "lockdigest/AH3a-later-malformed/.relays/v29": "lockdigest/AH3a-later-malformed/cwd",
+    "lockdigest/AH3b-later-conflicted/.relays/v29": "lockdigest/AH3b-later-conflicted/cwd",
+    "lockdigest/AH4-two-groups/.relays/v29": "lockdigest/AH4-two-groups/cwd",
+    "lockdigest/AH5c-cogovernor-mismatch/.relays/v29": "lockdigest/AH5c-cogovernor-mismatch/cwd",
+    "lockdigest/FB1-longer-closer/.relays/v29": "lockdigest/FB1-longer-closer/cwd",
+    "lockdigest/FB5-three-space-composite/.relays/v29": "lockdigest/FB5-three-space-composite/cwd",
+    "lockdigest/LDM2-mismatch/.relays/v29": "lockdigest/LDM2-mismatch/cwd",
+    "lockdigest/RLD6-every-instance-match/.relays/v29": "lockdigest/RLD6-every-instance-match/cwd",
+    "lockdigest/RLD7-later-mismatch/.relays/v29": "lockdigest/RLD7-later-mismatch/cwd",
+    "lockdigest/RLD8-mixed-partition/.relays/v29": "lockdigest/RLD8-mixed-partition/cwd",
+    "lockdigest/RLD9-read-seam/.relays/v29": "lockdigest/RLD9-read-seam/cwd",
+    "lockdigest/STAMP-impossible-later/.relays/v29": "lockdigest/STAMP-impossible-later/cwd",
+    "lockdigest/TG1-tilde-governance/.relays/v29": "lockdigest/TG1-tilde-governance/cwd",
+    "rootres/XR11-near-miss-cell": "rootres/XR11-near-miss-cell",
+    "rootres/XR13-norows-duplicate-markers": "rootres/XR13-norows-duplicate-markers",
+    "rootres/XR14-norows-bad-root": "rootres/XR14-norows-bad-root",
+    "rootres/XR2-marked-missing-file": "rootres/XR2-marked-missing-file",
+    "rootres/XR7-cell-directory": "rootres/XR7-cell-directory",
+    "rootres/XR9-deployment/idxhome": "rootres/XR9-deployment/cwd",
+}
+A5_SEAM = {
+    "lockdigest/RLD8-mixed-partition/.relays/v29": "lockdigest/RLD8-mixed-partition/cwd/plans/fixture-plan.md",
+    "lockdigest/RLD9-read-seam/.relays/v29": "lockdigest/RLD9-read-seam/plans/fixture-plan.md",
+}
+
+EXPECTED = A5_EXPECTED + [
+    ("root", "kr8a/KR8A1-carrier-exempt", 0),
+    ("root", "kr8a/KR8A2-nocarrier-control", 1),
+    ("root", "kr8a/KR8A3-implementer-token-control", 1),
+    ("root", "kr8a/KR8A4-fenced-token-control", 1),
     ("file", "rolevocab/RV1a-pair-planner.md", 0),
     ("file", "rolevocab/RV1b-pair-implementer.md", 0),
     ("file", "rolevocab/RV2a-master-planner.md", 0),
@@ -26,6 +220,17 @@ EXPECTED = [
     ("file", "rolevocab/RV6-pair-implementer-from-implementer.md", 0),
     ("file", "rolevocab/RV7a-master-dispatch-failclosed.md", 1),
     ("file", "rolevocab/RV7b-domain-direct-override.md", 1),
+    ("file", "rolevocab/RV7e-domain-designlock-kind.md", 1),
+    ("file", "rolevocab/RV7e2-domain-designlock-id-only.md", 1),
+    ("file", "rolevocab/RV7f-master-delegated-authority.md", 1),
+    ("file", "rolevocab/RV7h-delegated-bypass-order.md", 1),
+    ("file", "rolevocab/RV7i-lock-empty-first.md", 1),
+    ("file", "rolevocab/RV7j-override-then-conflict.md", 1),
+    ("file", "rolevocab/RV7k-samevalue-duplicate.md", 1),
+    ("file", "rolevocab/RV7l-override-plus-lock-conflict.md", 1),
+    ("file", "rolevocab/RV7m-kind-conflict-plus-lock.md", 1),
+    ("file", "rolevocab/RV7n-delegated-replacement.md", 1),
+    ("file", "rolevocab/RV7o-lock-replacement.md", 1),
     ("root", "rolevocab/RV5-new-vocab-chain", 0),
     ("root", "rolevocab/RV5d-newvocab-designdoc-chain", 0),
     ("root", "rolevocab/RV5dneg-designdoc-no-approve", 1),
@@ -33,12 +238,40 @@ EXPECTED = [
     ("root", "rolevocab/RV6i-mixed-dispatch-implreport", 0),
     ("root", "rolevocab/RV7a-master-dispatch-failclosed", 1),
     ("root", "rolevocab/RV7b-domain-direct-override", 1),
+    ("root", "rolevocab/RV7e-domain-designlock-kind", 1),
+    ("root", "rolevocab/RV7e2-domain-designlock-id-only", 1),
+    ("root", "rolevocab/RV7f-master-delegated-authority", 1),
+    ("root", "rolevocab/RV7g-malformed-address-hardening", 1),
+    ("root", "rolevocab/RV7h-delegated-bypass-order", 1),
+    ("root", "rolevocab/RV7i-lock-empty-first", 1),
+    ("root", "rolevocab/RV7j-override-then-conflict", 1),
+    ("root", "rolevocab/RV7k-samevalue-duplicate", 1),
+    ("root", "rolevocab/RV7l-override-plus-lock-conflict", 1),
+    ("root", "rolevocab/RV7m-kind-conflict-plus-lock", 1),
+    ("root", "rolevocab/RV7n-delegated-replacement", 1),
+    ("root", "rolevocab/RV7o-lock-replacement", 1),
+    ("root", "rolevocab/AMB4-multiholder-malformed", 1),
     ("root", "rolevocab/RV7c-master-merge-grant", 1),
     ("root", "rolevocab/RV7d-master-broadset-no-fire", 0),
     ("root", "rolevocab/RVn1-cross-owner-review", 1),
     ("root", "rolevocab/RVn2-wrong-to", 1),
     ("root", "rolevocab/RVn3-non-addressee-implreport", 1),
     ("root", "rolevocab/RVn4-cross-role-implreport", 1),
+    ("root", "rolevocab/AMB5-singleton-retrospective", 1),
+    ("root", "rolevocab/AMB6-alias-retrospective", 1),
+    ("root", "rolevocab/AMB7-dispatch-late-review", 1),
+    ("root", "rolevocab/AMB8-review-late-plan", 1),
+    ("root", "rolevocab/AMB9-late-tokenless", 1),
+    ("root", "rolevocab/AMB10-late-wrong-owner", 1),
+    ("root", "rolevocab/AMB11-late-malformed-pair", 1),
+    ("root", "rolevocab/AMB12-late-cross-role", 1),
+    ("root", "rolevocab/AMB13-late-two-from", 1),
+    ("root", "rolevocab/AMB14-late-two-to", 1),
+    ("root", "rolevocab/KR4A-direct-issuer-prose", 0),
+    ("root", "rolevocab/KR4B-planner-prose-nofield", 1),
+    ("index", "indexmarker/IDX1-below-floor", 1),
+    ("index", "indexmarker/IDX2-first-marker-floor", 1),
+    ("index", "indexmarker/IDX3-above-floor", 0),
     ("file", "claude/A1-valid-audit.md", 0),
     ("file", "claude/A2-valid-downgrade.md", 0),
     ("file", "claude/B2-why-before-scan.md", 1),
@@ -192,14 +425,69 @@ EXPECTED = [
     ("root", "orch-review/EX4-reconcile", 0),
     ("root", "orch-review/EX5-proceed-nodeleg", 0),
     ("root", "orch-review/EX6-boot-to-reviewer", 0),
+    ("root", "lockpath/LP1-old-form/.relays/v29", 0),
+    ("root", "lockpath/LP2-new-form", 0),
+    ("root", "lockpath/LP3-missing", 1),
+    ("root", "lockpath/LP4-bare-id", 0),
 ]
 
 EXPECTED_ERROR_SET = {
+    "kr8a/KR8A1-carrier-exempt": [],
+    "kr8a/KR8A2-nocarrier-control": [
+        "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "kr8a/KR8A3-implementer-token-control": [
+        "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "kr8a/KR8A4-fenced-token-control": [
+        "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "lockpath/LP1-old-form/.relays/v29": [],
+    "lockpath/LP2-new-form": [],
+    "lockpath/LP3-missing": [
+        "01-plan.md: PLAN_LOCK_ID references missing file no-such-file.md",
+    ],
+    "lockpath/LP4-bare-id": [],
     "rolevocab/RV7a-master-dispatch-failclosed.md": [
         "authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed pending the orchestrator ruling",
     ],
     "rolevocab/RV7b-domain-direct-override.md": [
         "authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e-domain-designlock-kind.md": [
+        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e2-domain-designlock-id-only.md": [
+        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7f-master-delegated-authority.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7h-delegated-bypass-order.md": [
+        "DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7i-lock-empty-first.md": [
+        "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7j-override-then-conflict.md": [
+        "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7k-samevalue-duplicate.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7l-override-plus-lock-conflict.md": [
+        "authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7m-kind-conflict-plus-lock.md": [
+        "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+        "authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7n-delegated-replacement.md": [
+        "DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7o-lock-replacement.md": [
+        "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
     ],
     "rolevocab/RV5dneg-designdoc-no-approve": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
@@ -209,6 +497,53 @@ EXPECTED_ERROR_SET = {
     ],
     "rolevocab/RV7b-domain-direct-override": [
         "RV7b-domain-direct-override.md: authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e-domain-designlock-kind": [
+        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7e2-domain-designlock-id-only": [
+        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7f-master-delegated-authority": [
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7g-malformed-address-hardening": [
+        "01-dispatch.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "01-dispatch.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+        "02-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-impl-report.md: IMPL report FROM 'qi.grand-vizier' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/RV7h-delegated-bypass-order": [
+        "01-plan.md: DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7i-lock-empty-first": [
+        "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7j-override-then-conflict": [
+        "01-plan.md: DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7k-samevalue-duplicate": [
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7l-override-plus-lock-conflict": [
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7m-kind-conflict-plus-lock": [
+        "01-plan.md: DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+    ],
+    "rolevocab/RV7n-delegated-replacement": [
+        "01-plan.md: DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/RV7o-lock-replacement": [
+        "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ],
+    "rolevocab/AMB4-multiholder-malformed": [
+        "02-dispatch-malformed-to.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-dispatch-malformed-to.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+        "03-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "03-impl-report.md: IMPL report parent 'amb4' is held by 2 relays (01-noise.md, 02-dispatch-malformed-to.md); none is an earlier DISPATCH IMPL relay addressed to qi.grand-vizier",
     ],
     "rolevocab/RV7c-master-merge-grant": [
         "02-impl-report.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
@@ -225,6 +560,51 @@ EXPECTED_ERROR_SET = {
     "rolevocab/RVn4-cross-role-implreport": [
         "02-impl-report.md: IMPL report FROM 'qi.pair-planner' is not the addressee of the parent DISPATCH IMPL relay",
     ],
+    "rolevocab/AMB5-singleton-retrospective": [
+        "01-impl-report.md: IMPL report parent 'amb5' is held by 1 relays (02-dispatch.md); none is an earlier DISPATCH IMPL relay addressed to qi.implementer",
+    ],
+    "rolevocab/AMB6-alias-retrospective": [
+        "01-impl-report.md: IMPL report parent 'amb6' is held by 1 relays (02-dispatch.md); none is an earlier DISPATCH IMPL relay addressed to qi.pair-implementer",
+    ],
+    "rolevocab/AMB7-dispatch-late-review": [
+        "02-dispatch.md: DISPATCH IMPL parent 'amb7rev' is not earlier than the dispatch relay",
+    ],
+    "rolevocab/AMB8-review-late-plan": [
+        "03-dispatch.md: pair-Planner PLAN parent is not earlier than the PLAN-REVIEW relay",
+    ],
+    "rolevocab/AMB9-late-tokenless": [
+        "01-impl-report.md: IMPL report parent must be a DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB10-late-wrong-owner": [
+        "01-impl-report.md: IMPL report FROM 'qi.implementer' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB11-late-malformed-pair": [
+        "01-impl-report.md: FROM has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-dispatch.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+        "02-dispatch.md: DISPATCH IMPL requires TO to be exactly one implementer-role address",
+        "01-impl-report.md: IMPL report FROM 'qi.grand-vizier' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB12-late-cross-role": [
+        "01-impl-report.md: IMPL report FROM 'qi.pair-planner' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rolevocab/AMB13-late-two-from": [
+        "01-impl-report.md: FROM must contain exactly one address",
+    ],
+    "rolevocab/AMB14-late-two-to": [
+        "02-dispatch.md: DISPATCH IMPL requires exactly one TO addressee",
+    ],
+    "rolevocab/KR4A-direct-issuer-prose": [],
+    "rolevocab/KR4B-planner-prose-nofield": [
+        "03-dispatch.md: delegated DISPATCH IMPL missing SCOPE_DIFF",
+        "03-dispatch.md: delegated DISPATCH IMPL missing SCOPE_DIFF_RESULT",
+    ],
+    "indexmarker/IDX1-below-floor": [
+        "line 4: index time 20260801-110000 predates the monotonic-from boundary 20260801-120000",
+    ],
+    "indexmarker/IDX2-first-marker-floor": [
+        "line 5: index time 20260801-110000 predates the monotonic-from boundary 20260801-120000",
+    ],
+    "indexmarker/IDX3-above-floor": [],
     "design-review/DR15-verdict-human-decision": [
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
     ],
@@ -382,6 +762,9 @@ EXPECTED_ERROR_SET = {
 }
 
 EXPECTED_WARN_SET: dict[str, list[str]] = {
+    "kr8a/KR8A4-fenced-token-control": [
+        "02-report.md: DISPATCH IMPL appears inside fenced code on line 16; quoted/fenced tokens are inert",
+    ],
     "ambiguity/AMB3-latest-wins": [
         "04-dispatch.md: 2 relays under 'amb3' qualify as the PLAN-REVIEW parent; selected latest 03-review-mustrevise.md; candidates: 02-review-approve.md",
     ],
@@ -398,15 +781,48 @@ def load_linter():
     return module
 
 
+EXPECTED_ERROR_SET.update(A5_ERRORS)
+
+
 def main() -> int:
+    if "--neutral-cwd" in sys.argv[1:]:
+        # CWD-independence control (v29-detection-lp2-cwd-repair): run the
+        # whole suite from a fresh empty directory so no expectation can
+        # lean on the invoker's CWD. LP2's environment-dependent positive
+        # control is the class this catches.
+        os.chdir(tempfile.mkdtemp(prefix="relay-fixtures-neutral."))
     lint = load_linter()
     failed = False
     for kind, rel, expected in EXPECTED:
         target = FIXTURES / rel
-        if kind == "file":
-            result = lint.lint_file(target)
-        else:
-            result = lint.lint_relay_root(target)
+        cwd_rel = A5_CWD.get(rel)
+        seam_rel = A5_SEAM.get(rel)
+        old_cwd = os.getcwd()
+        if cwd_rel:
+            os.chdir(FIXTURES / cwd_rel)
+        if seam_rel:
+            os.chmod(FIXTURES / seam_rel, 0)
+            if os.access(FIXTURES / seam_rel, os.R_OK):
+                os.chmod(FIXTURES / seam_rel, 0o644)
+                os.chdir(old_cwd)
+                print(f"{rel}: read seam ineffective in this environment (root?) FAIL")
+                failed = True
+                continue
+        try:
+            if kind == "file":
+                result = lint.lint_file(target)
+            elif kind == "template":
+                result = lint.lint_file(target, template_mode=True)
+            elif kind == "index":
+                result = lint.lint_relay_index(target / "INDEX.md")
+            elif kind == "index-rel":
+                result = lint.lint_relay_index(Path("INDEX.md"))
+            else:
+                result = lint.lint_relay_root(target)
+        finally:
+            if seam_rel:
+                os.chmod(FIXTURES / seam_rel, 0o644)
+            os.chdir(old_cwd)
         observed = 0 if result.ok else 1
         expected_errors = EXPECTED_ERROR_SET.get(rel)
         if expected_errors is not None:
@@ -419,7 +835,7 @@ def main() -> int:
         if expected_warns is not None:
             ok = ok and sorted(result.warnings) == sorted(expected_warns)
         failed = failed or not ok
-        label = f"--relay-root {rel}" if kind == "root" else rel
+        label = f"--relay-root {rel}" if kind == "root" else f"--index {rel}" if kind == "index" else rel
         print(f"{label}: expected={expected} observed={observed} {'PASS' if ok else 'FAIL'}")
         if expected_errors is not None:
             print(f"  expected_errors={len(expected_errors)} observed_errors={len(result.errors)}")

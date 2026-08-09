@@ -540,8 +540,42 @@ def addr_is(address: str | None, owner: str | None, role: str) -> bool:
     return address_owner(address) == owner and canonical_role(address_role(address)) == role
 
 
+def dispatch_is_delegated(fields: Dict[str, str], clean: str) -> bool:
+    """KR-4 (D26): the prose operand applies only to seats that can act on
+    borrowed authority. Operator/orchestrator/orchestrator-planner-issued
+    dispatches carry their own authorization, so prose mentioning delegation
+    never reclassifies them; the structural field always counts."""
+    if fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() in {"yes", "true"}:
+        return True
+    from_addrs = split_addresses(fields.get("FROM"))
+    from_role_val = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
+    if from_role_val in LINEAGE_DIRECT_FROM_ROLES:
+        return False
+    return re.search(r"delegated", clean, flags=re.IGNORECASE) is not None
+
+
 def is_implementer_address(address: str) -> bool:
     return canonical_role(address_role(address)) == "implementer"
+
+
+def impl_dispatch_parent_qualifies(actor_from: List[str], item) -> bool:
+    """rev19 shared structural predicate: item qualifies as the IMPL report's
+    DISPATCH IMPL parent for actor_from iff it carries a live own-line token
+    and is addressed, one-to-one, to the same owner and canonical role with
+    both roles parseable. Consumed by BOTH multi-holder qualification and the
+    singleton order-eligibility branch; design rev19 forbids any second copy."""
+    if len(actor_from) != 1:
+        return False
+    if not own_line_dispatch_present(item[4]):
+        return False
+    t = split_addresses(item[3].get("TO"))
+    return (
+        len(t) == 1
+        and address_role(t[0]) is not None
+        and address_role(actor_from[0]) is not None
+        and address_owner(t[0]) == address_owner(actor_from[0])
+        and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0]))
+    )
 
 
 def validate_address_fields(result: LintResult, fields: Dict[str, str], *, template_mode: bool) -> Dict[str, List[str]]:
@@ -683,15 +717,48 @@ def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
     role = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
     if role not in UNRULED_AUTHORITY_ROLES:
         return errors
+    authority_keys = (
+        "DELEGATED_DISPATCH_AUTHORITY",
+        "DESIGN_LOCK_ID",
+        "DESIGN_RECORD_KIND",
+    )
+    occurrences: Dict[str, List[str]] = {key: [] for key in authority_keys}
+    for line in sanitized_text(text).splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
+        if match and match.group(1) in occurrences:
+            occurrences[match.group(1)].append(match.group(2).strip())
+
+    resolved: Dict[str, str] = {}
+    for key in authority_keys:
+        values = occurrences[key]
+        distinct_values = set(values)
+        if len(distinct_values) > 1:
+            errors.append(
+                f"{key} carries {len(distinct_values)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present"
+            )
+        elif values:
+            resolved[key] = values[0]
+
     if own_line_dispatch_present(text):
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
             "a dispatch token from this seat is fail-closed pending the orchestrator ruling"
         )
-    if fields.get("DESIGN_RECORD_KIND") == "direct-override":
+    if resolved.get("DESIGN_RECORD_KIND") == "direct-override":
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
             "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling"
+        )
+    elif resolved.get("DESIGN_LOCK_ID") or resolved.get("DESIGN_RECORD_KIND"):
+        errors.append(
+            f"authority semantics for FROM role {role!r} are unruled; "
+            "a design-lock claim from this seat is fail-closed pending the orchestrator ruling"
+        )
+    if resolved.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() == "yes":
+        errors.append(
+            f"authority semantics for FROM role {role!r} are unruled; "
+            "a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling"
         )
     return errors
 
@@ -962,6 +1029,10 @@ def lint_file(
     result = LintResult()
     fields = header_fields(text)
 
+    if not template_mode:
+        for _a5e in lock_digest_shape_errors(text):
+            result.error(_a5e)
+
     check_filename_timestamp(
         result, path, freshness=freshness,
         max_drift_minutes=max_drift_minutes, template_mode=template_mode,
@@ -1134,7 +1205,7 @@ def lint_file(
 
     # Delegated dispatch requires substantive SCOPE_DIFF.
     has_dispatch = own_line_dispatch_present(text)
-    delegated = re.search(r"delegated", clean, flags=re.IGNORECASE) is not None or fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() in {"yes", "true"}
+    delegated = dispatch_is_delegated(fields, clean)
     if has_dispatch and delegated:
         if "SCOPE_DIFF" not in fields:
             result.error("delegated DISPATCH IMPL missing SCOPE_DIFF")
@@ -1324,6 +1395,173 @@ def split_index_cells(stripped: str) -> list[str]:
     return cells
 
 
+A5_LOCK_PAIRS = (
+    ("DESIGN_SHA256", "DESIGN_ARTIFACT", "designs"),
+    ("PLAN_SHA256", "PLAN_ARTIFACT", "plans"),
+)
+
+A5_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+A5_INDEX_ROOT_MARKER_RE = re.compile(r"root:\s+(\S.*)")
+A5_NO_RELAY_CELL_RE = re.compile(r"none \u2014 \S.*")
+
+
+A5_FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+A5_LINE_SPLIT_RE = re.compile(r"\r\n|\r|\n")
+
+
+def a5_split_lines(text: str) -> List[str]:
+    """A5-owned line splitter (a5-plan r5 R3): CommonMark line endings ONLY
+    (CRLF, CR, LF). Python's splitlines() also splits on Unicode separators
+    such as U+2028/U+0085, which would turn a forbidden closer suffix into a
+    bare closer and let embedded decoys become own-line declarations."""
+    return A5_LINE_SPLIT_RE.split(text)
+
+
+def a5_sanitized_text(text: str) -> str:
+    """A5-owned fence sanitizer (design rev32, CommonMark 0.31.2 SS4.5 at line
+    level): 0-3 space indentation; opener info strings, the backtick family's
+    containing no backtick; closers of the SAME family with run length >= the
+    opener's and whitespace-only suffix; opposite families never close;
+    shorter runs, suffix-bearing pseudo-closers, and 4+-space fence-like
+    lines are content; unclosed regions strip through EOF; every line inside
+    a region strips. Container-block contexts deliberately unmodeled."""
+    out: List[str] = []
+    open_char = ""
+    open_len = 0
+    for line in a5_split_lines(text):
+        m = A5_FENCE_RE.match(line)
+        if open_char:
+            out.append("")
+            if (m and m.group(2)[0] == open_char and len(m.group(2)) >= open_len
+                    and m.group(3).strip(" \t") == ""):
+                open_char = ""
+                open_len = 0
+            continue
+        if m:
+            fam = m.group(2)[0]
+            if fam == "`" and "`" in m.group(3):
+                out.append(line)
+                continue
+            open_char = fam
+            open_len = len(m.group(2))
+            out.append("")
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def a5_field_occurrences(text: str) -> Dict[str, List[str]]:
+    """Every occurrence of the four A5 fields, in file order per key (A4's
+    distinct-VALUE semantics consume these; header_fields stays untouched)."""
+    keys = ("DESIGN_SHA256", "PLAN_SHA256", "DESIGN_ARTIFACT", "PLAN_ARTIFACT")
+    occ: Dict[str, List[str]] = {k: [] for k in keys}
+    for line in a5_split_lines(a5_sanitized_text(text)):
+        m = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
+        if m and m.group(1) in occ:
+            occ[m.group(1)].append(m.group(2).strip())
+    return occ
+
+
+def a5_stem_is_bare(stem: str) -> bool:
+    return bool(stem) and "/" not in stem and "\\" not in stem and " @ " not in stem and not stem.endswith(".md")
+
+
+def a5_filename_stamp(f: Path):
+    """Eligibility stamp: the LINTER'S OWN filename parser must accept it
+    (design rev28; a5-plan r2 R1 — `filename_timestamp` owns the accepted
+    grammar including the T-separator, no-hyphen, and Z forms, so eligibility
+    never narrows it; a digit-shaped impossible calendar stamp is ineligible)."""
+    _status, _dt, _raw, _utc = filename_timestamp(f.name)
+    return _dt if _status == "ok" else None
+
+
+def lock_digest_shape_errors(text: str) -> List[str]:
+    """A5 check 1, shape half (both modes, authored relays only — the caller
+    gates on template_mode; design rev28 rules 2/4/5).
+
+    Shape preconditions are gated on digest OCCURRENCE; conflicting-duplicate
+    refusals are unconditional from birth; a conflicted field's own shape
+    validation is REPLACED by its refusal (A4 precedent)."""
+    errors: List[str] = []
+    occ = a5_field_occurrences(text)
+    conflicted = set()
+    for key, values in occ.items():
+        distinct = set(values)
+        if len(distinct) > 1:
+            conflicted.add(key)
+            errors.append(
+                f"{key} carries {len(distinct)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present"
+            )
+    for dkey, akey, _sub in A5_LOCK_PAIRS:
+        if not occ[dkey]:
+            continue
+        if dkey not in conflicted:
+            dval = occ[dkey][0]
+            if A5_SHA256_RE.fullmatch(dval) is None:
+                errors.append(f"{dkey} value {dval!r} is not a 64-hex lowercase sha256 digest")
+        if not occ[akey]:
+            errors.append(f"{dkey} declared with no {akey} to locate the artifact")
+        elif akey not in conflicted:
+            aval = occ[akey][0]
+            if not a5_stem_is_bare(aval):
+                errors.append(f"{akey} value {aval!r} is not a bare filename stem")
+    return errors
+
+
+def a5_eligible_declaration(f: Path, text: str, dkey: str, akey: str):
+    """A relay's eligible declaration for one pair, or None (design rev28:
+    parse-valid filename stamp, shape-valid, single-distinct both fields)."""
+    stamp = a5_filename_stamp(f)
+    if stamp is None:
+        return None
+    occ = a5_field_occurrences(text)
+    dvals, avals = set(occ[dkey]), set(occ[akey])
+    if len(dvals) != 1 or len(avals) != 1:
+        return None
+    declared, stem = next(iter(dvals)), next(iter(avals))
+    if A5_SHA256_RE.fullmatch(declared) is None or not a5_stem_is_bare(stem):
+        return None
+    return (stamp, stem, declared)
+
+
+def a5_resolve_and_compare(path: Path, dkey: str, stem: str, sub: str, declared: str) -> List[str]:
+    """Candidate partition for the GOVERNING declaration (design rev28 rule 3):
+    no candidate -> generic missing; invalid/unreadable candidates -> one
+    per-path finding each, generic EXCLUDED; readable regular candidates ->
+    comparison, additive."""
+    import hashlib as _a5_hashlib
+    import os as _a5_os
+
+    def disp(p: Path, cwd_probe: bool = False) -> str:
+        if cwd_probe:
+            return "./" + str(p)
+        try:
+            return str(p.relative_to(path))
+        except ValueError:
+            return _a5_os.path.relpath(p)
+
+    errors: List[str] = []
+    rel = f"{sub}/{stem}.md"
+    probes = [(path / rel, False), (Path(rel), True), (path.parent.parent / rel, False)]
+    candidates = [(p, c) for p, c in probes if p.exists()]
+    if not candidates:
+        return [f"{dkey}: no artifact resolves for stem {stem!r} under {sub}/ at any probe root"]
+    for p, c in candidates:
+        if not p.is_file():
+            errors.append(f"{dkey}: {disp(p, c)} is not a readable regular file")
+            continue
+        try:
+            data = p.read_bytes()
+        except OSError:
+            errors.append(f"{dkey}: {disp(p, c)} is not a readable regular file")
+            continue
+        actual = _a5_hashlib.sha256(data).hexdigest()
+        if actual != declared:
+            errors.append(f"{dkey}: {disp(p, c)} digest {actual} does not match the declared {declared}")
+    return errors
+
+
 def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     """Check an append-only relay INDEX for timestamp truth and monotonicity.
 
@@ -1340,7 +1578,8 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
 
     marker_line = 0
     marker_dt: Optional[datetime.datetime] = None
-    m = INDEX_MONOTONIC_MARKER_RE.search(text)
+    _markers = list(INDEX_MONOTONIC_MARKER_RE.finditer(text))
+    m = _markers[-1] if _markers else None
     if m:
         for i, line in enumerate(lines, 1):
             if INDEX_MONOTONIC_MARKER_RE.search(line):
@@ -1378,6 +1617,37 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
 
     if header_arity is None:
         result.warn("no header row; arity not checked")
+
+    # A5 check 2: marker-gated file-cell resolution (forms lock M07).
+    # Placed BEFORE the no-rows early return (a5-plan r2 R3): a header-only
+    # or marker-only INDEX still gets duplicate-marker and root validation;
+    # the row loop is naturally empty when there are no rows.
+    # Own-line anchored recognition over fence-sanitized lines; no marker, no
+    # check; exactly one or none; the root must be a directory; a file cell
+    # either resolves as a file under the root or carries the explicit
+    # no-relay form; {root} renders the resolved base the join used.
+    a5_markers = []
+    for _a5line in a5_split_lines(a5_sanitized_text(text)):
+        _a5m = A5_INDEX_ROOT_MARKER_RE.fullmatch(_a5line.strip())
+        if _a5m:
+            a5_markers.append(_a5m.group(1))
+    if len(a5_markers) > 1:
+        result.error(f"INDEX declares {len(a5_markers)} root markers; at most one is permitted")
+    elif len(a5_markers) == 1:
+        _a5val = a5_markers[0]
+        _a5root = Path(_a5val) if Path(_a5val).is_absolute() else path.parent / _a5val
+        if not _a5root.is_dir():
+            result.error(f"root marker value {_a5val!r} does not resolve to a directory")
+        else:
+            import os as _a5_os
+            _a5disp = str(_a5root) if Path(_a5val).is_absolute() else _a5_os.path.relpath(_a5root)
+            for _a5ln, _a5raw, _a5dt, _a5cell in rows:
+                if A5_NO_RELAY_CELL_RE.fullmatch(_a5cell):
+                    continue
+                if not (_a5root / _a5cell).is_file():
+                    result.error(
+                        f"line {_a5ln}: file cell {_a5cell!r} does not resolve under the declared root {_a5disp}"
+                    )
 
     if not rows:
         result.error(f"no index rows found in {path}")
@@ -1731,6 +2001,14 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             continue
         if not implementation_work_claimed(text, fields):
             continue
+        if from_is_direct_authority(fields) and own_line_dispatch_present(text):
+            # KR-8 Class A (D26): a relay issued by a direct-authority seat
+            # (operator/orchestrator/orchestrator-planner) that itself carries
+            # the live own-line token IS the dispatch, not a report owing a
+            # parent edge. Seat-scoped deliberately: any other FROM -- an
+            # implementer embedding a live token to dodge the trap -- still
+            # falls through and is caught below.
+            continue
         if not fields.get("PARENT_DISPATCH_ID"):
             result.error(f"{f.relative_to(path)}: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay")
             continue
@@ -1740,13 +2018,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             by_id,
             did,
             order,
-            lambda it: len(actor_from) == 1
-            and own_line_dispatch_present(it[4])
-            and (lambda t: len(t) == 1
-                 and address_owner(t[0]) == address_owner(actor_from[0])
-                 and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0])))(
-                split_addresses(it[3].get("TO"))
-            ),
+            lambda it: impl_dispatch_parent_qualifies(actor_from, it),
         )
         if parent is None:
             if holders:
@@ -1758,6 +2030,12 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
                 )
             else:
                 result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} does not resolve to a relay in this lineage")
+            continue
+        if len(holders) == 1 and impl_dispatch_parent_qualifies(actor_from, parent) and parent[1] >= order:
+            result.error(
+                f"{f.relative_to(path)}: IMPL report parent {did!r} is held by 1 relays "
+                f"({parent[0].name}); none is an earlier DISPATCH IMPL relay addressed to {actor_from[0]}"
+            )
             continue
         if extra_qualifying:
             result.warn(
@@ -1771,7 +2049,9 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
             continue
         parent_to = split_addresses(pfields.get("TO"))
         if len(actor_from) == 1 and len(parent_to) == 1 and not (
-            address_owner(actor_from[0]) == address_owner(parent_to[0])
+            address_role(actor_from[0]) is not None
+            and address_role(parent_to[0]) is not None
+            and address_owner(actor_from[0]) == address_owner(parent_to[0])
             and canonical_role(address_role(actor_from[0])) == canonical_role(address_role(parent_to[0]))
         ):
             result.error(f"{f.relative_to(path)}: IMPL report FROM {actor_from[0]!r} is not the addressee of the parent DISPATCH IMPL relay")
@@ -1821,10 +2101,47 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         fields = header_fields(read(f))
         for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
             val = fields.get(key)
-            if val and ("/" in val or val.endswith(".md")):
-                ref = (path / val).resolve() if not Path(val).is_absolute() else Path(val)
-                if not ref.exists():
-                    result.error(f"{f.relative_to(path)}: {key} references missing file {val}")
+            bare = val.split(" @ ", 1)[0] if val else ""
+            if bare and ("/" in bare or bare.endswith(".md")):
+                if Path(bare).is_absolute():
+                    found = Path(bare).exists()
+                else:
+                    found = (
+                        (path / bare).exists()
+                        or Path(bare).exists()
+                        or (path.parent.parent / bare).exists()
+                    )
+                if not found:
+                    result.error(f"{f.relative_to(path)}: {key} references missing file {bare}")
+
+    # A5 check 1 (root mode): the GOVERNING declaration per (key, stem) —
+    # latest parse-valid stamp; distinct values at an indistinguishable
+    # latest timestamp refuse; identical values co-govern; earlier
+    # declarations are acknowledged history (design rev28 rule 3).
+    a5_decls: Dict[Tuple[str, str], List[Tuple[object, Path, str]]] = {}
+    for f, _ in per_file:
+        _a5text = read(f)
+        for _a5dkey, _a5akey, _a5sub in A5_LOCK_PAIRS:
+            _a5d = a5_eligible_declaration(f, _a5text, _a5dkey, _a5akey)
+            if _a5d is not None:
+                a5_decls.setdefault((_a5dkey, _a5d[1]), []).append((_a5d[0], f, _a5d[2]))
+    for (_a5dkey, _a5stem), _a5list in sorted(a5_decls.items()):
+        _a5latest = max(item[0] for item in _a5list)
+        _a5stratum = sorted((item for item in _a5list if item[0] == _a5latest), key=lambda item: str(item[1]))
+        _a5values = {item[2] for item in _a5stratum}
+        if len(_a5values) > 1:
+            for _stamp, _a5f, _v in _a5stratum:
+                result.error(
+                    f"{_a5f.relative_to(path)}: {_a5dkey}: stem {_a5stem!r} carries {len(_a5values)} "
+                    "indistinguishable latest declarations; verification refuses"
+                )
+            continue
+        _a5declared = next(iter(_a5values))
+        _a5sub = dict((k, s) for k, _a, s in A5_LOCK_PAIRS)[_a5dkey]
+        _a5errs = a5_resolve_and_compare(path, _a5dkey, _a5stem, _a5sub, _a5declared)
+        for _stamp, _a5f, _v in _a5stratum:
+            for _a5e in _a5errs:
+                result.error(f"{_a5f.relative_to(path)}: {_a5e}")
 
     return result
 
