@@ -187,6 +187,34 @@ class TestGate(unittest.TestCase):
         self.assertEqual(refs, [os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "cli.py")])
 
+    def test_diagnostic_sink_binding_site_is_unique(self):
+        bindings = []
+        for path in self.production_paths():
+            module = os.path.splitext(os.path.basename(path))[0]
+            with open(path, encoding="utf-8") as source:
+                tree = ast.parse(source.read(), filename=path)
+            parents = {}
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    parents[child] = node
+
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and
+                        isinstance(node.func, ast.Attribute) and
+                        node.func.attr == "set_diagnostic_sink" and
+                        node.args and isinstance(node.args[0], ast.Name) and
+                        node.args[0].id == "_log_diagnostic"):
+                    continue
+                owner = node
+                while owner in parents:
+                    owner = parents[owner]
+                    if isinstance(owner, (ast.FunctionDef,
+                                          ast.AsyncFunctionDef)):
+                        break
+                bindings.append((module, owner.name, node.lineno))
+        self.assertEqual([(module, owner) for module, owner, _ in bindings],
+                         [("daemon", "start")])
+
 
 if __name__ == "__main__":
     unittest.main()

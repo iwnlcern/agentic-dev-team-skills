@@ -10,8 +10,10 @@ import socket
 import tempfile
 import threading
 import time
+import types
 import unittest
 import uuid
+from unittest import mock
 
 from relay_engine import daemon, errors, strings
 from relay_engine.daemon import (FrameDecoder, SerialWriter, WireFault,
@@ -76,6 +78,48 @@ class TestWire(unittest.TestCase):
             self.assertEqual(response["error"]["cls"], "wire")
             serialized = json.dumps(response, sort_keys=True)
             self.assertNotIn(forbidden, serialized)
+
+    def test_rejected_value_escaped_equivalents_and_types(self):
+        request_id = "00000000-0000-0000-0000-000000000001"
+        cases = [
+            ("string", b'"snowman \xe2\x98\x83"', "3fce572b141a", 13),
+            ("number", b"2", "d4735e3a265e", 1),
+            ("boolean", b"true", "b5bea41b6c62", 4),
+            ("null", b"null", "74234e98afe7", 4),
+            ("array", b'["x",2]', "9ca894e6afee", 7),
+            ("object", b'{"a":1,"b":"x"}', "ecf9e98ec064", 15),
+            ("escaped-literal", b'"a"', "ac8d8342bbb2", 3),
+            ("escaped-unicode", b'"\\u0061"', "ac8d8342bbb2", 3),
+        ]
+        suffix = (b',"id":"' + request_id.encode("ascii") +
+                  b'","op":"status","args":{}}')
+        for label, version_bytes, digest, length in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(WireFault) as caught:
+                    decode_request(b'{"v":' + version_bytes + suffix)
+                response = error_response(request_id, caught.exception.error)
+                cause = ("unsupported protocol version unrecognized-input "
+                         "(sha256:%s, length %d)" % (digest, length))
+                expected = {
+                    "v": 1,
+                    "id": request_id,
+                    "ok": False,
+                    "error": {
+                        "code": "E-WIRE-VERSION",
+                        "cause": cause,
+                        "remedy": "send v:1",
+                        "cls": "wire",
+                    },
+                }
+                self.assertEqual(response, expected)
+                expected_json = (
+                    '{"error":{"cause":"%s","cls":"wire",'
+                    '"code":"E-WIRE-VERSION","remedy":"send v:1"},'
+                    '"id":"%s","ok":false,"v":1}' %
+                    (cause, request_id)).encode("utf-8")
+                frame = encode_frame(response)
+                self.assertEqual(frame[:4], len(expected_json).to_bytes(4, "big"))
+                self.assertEqual(frame[4:], expected_json)
 
     def test_pre_id_framing_response_uses_null_id_and_exact_error(self):
         fault = WireFault(errors.error_for("E-FRAMING", reason="not-json"))
@@ -276,6 +320,33 @@ class TestOwnership(unittest.TestCase):
                     daemon.open_log(lease.engine_dirfd)
             finally:
                 os.close(reader)
+        finally:
+            lease.close()
+
+    def test_log_symlink_and_owner_mismatch_refusal(self):
+        engine = Path(self.temp.name, ".engine")
+        lease = acquire_lease(self.root)
+        target = engine / "outside-log-target"
+        target.write_bytes(b"preserve-me")
+        target.chmod(0o600)
+        (engine / "daemon.log").symlink_to(target.name)
+        try:
+            with self.assertRaises(OSError):
+                daemon.open_log(lease.engine_dirfd)
+            self.assertEqual(target.read_bytes(), b"preserve-me")
+
+            (engine / "daemon.log").unlink()
+            real_fstat = os.fstat
+
+            def wrong_owner(fd):
+                info = real_fstat(fd)
+                return types.SimpleNamespace(st_mode=info.st_mode,
+                                             st_uid=info.st_uid + 1)
+
+            with mock.patch.object(daemon.os, "fstat", side_effect=wrong_owner):
+                with self.assertRaises(OSError) as caught:
+                    daemon.open_log(lease.engine_dirfd)
+            self.assertEqual(caught.exception.errno, errno.EPERM)
         finally:
             lease.close()
 

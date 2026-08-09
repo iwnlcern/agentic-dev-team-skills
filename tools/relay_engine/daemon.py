@@ -170,7 +170,7 @@ def decode_request(body):
     except (AttributeError, TypeError, ValueError) as exc:
         raise WireFault(errors.error_for(
             "E-FRAMING", reason="not-json")) from exc
-    if request["v"] != 1:
+    if type(request["v"]) is not int or request["v"] != 1:
         raise WireFault(errors.error_for(
             "E-WIRE-VERSION", rejected_version=_rejected(request["v"])))
     op = request["op"]
@@ -662,7 +662,6 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
         _trace(trace, "starting-record")
         log_fd = open_log(lease.engine_dirfd)
         _log_fd = log_fd
-        strings.set_diagnostic_sink(_log_diagnostic)
         _trace(trace, "log-bound")
         holder = {}
         writer = SerialWriter(lambda request: _default_handler(
