@@ -27,7 +27,8 @@ def _command_root(args, fresh=False):
 def _cmd_daemon_start(args):
     root = _command_root(args, fresh=True)
     if not daemon.launch(root, socket_override=args.socket,
-                         timeout=args.timeout):
+                         timeout=args.timeout, top_seat=args.seat,
+                         top_role=args.role, top_dispatch=args.dispatch):
         strings.emit("stderr", "daemon-start-failed")
         return 1
     return 0
@@ -56,6 +57,33 @@ def _cmd_status(args):
     return 0
 
 
+def _emit_result(result):
+    strings.emit("stdout", "command-result",
+                 result=strings.machine_result(result))
+    return 0
+
+
+def _cmd_seat_register(args):
+    return _emit_result(client.seat_register(
+        _command_root(args), args.address, args.role, args.dispatch,
+        replace=args.seat_command == "replace", timeout=args.timeout))
+
+
+def _cmd_seat_stand_down(args):
+    return _emit_result(client.seat_stand_down(
+        _command_root(args), args.address, timeout=args.timeout))
+
+
+def _cmd_seat_show(args):
+    return _emit_result(client.seat_show(
+        _command_root(args), args.address, timeout=args.timeout))
+
+
+def _cmd_roster(args):
+    return _emit_result(client.request(
+        _command_root(args), "roster", {}, timeout=args.timeout))
+
+
 def _root_option(parser):
     parser.add_argument("--root")
 
@@ -79,6 +107,9 @@ def build_parser():
     _root_option(daemon_start)
     _timeout_option(daemon_start)
     daemon_start.add_argument("--socket")
+    daemon_start.add_argument("--seat")
+    daemon_start.add_argument("--role", default="Orchestrator Planner")
+    daemon_start.add_argument("--dispatch")
     daemon_start.set_defaults(handler=_cmd_daemon_start)
     daemon_stop = daemon_commands.add_parser("stop")
     _root_option(daemon_stop)
@@ -97,6 +128,32 @@ def build_parser():
     _root_option(status)
     _timeout_option(status)
     status.set_defaults(handler=_cmd_status)
+
+    seat = commands.add_parser("seat")
+    seat_commands = seat.add_subparsers(dest="seat_command", required=True)
+    for name in ("register", "replace"):
+        command = seat_commands.add_parser(name)
+        command.add_argument("address")
+        command.add_argument("--role", required=True)
+        command.add_argument("--dispatch")
+        _root_option(command)
+        _timeout_option(command)
+        command.set_defaults(handler=_cmd_seat_register)
+    stand_down = seat_commands.add_parser("stand-down")
+    stand_down.add_argument("address")
+    _root_option(stand_down)
+    _timeout_option(stand_down)
+    stand_down.set_defaults(handler=_cmd_seat_stand_down)
+    show = seat_commands.add_parser("show")
+    show.add_argument("address")
+    _root_option(show)
+    _timeout_option(show)
+    show.set_defaults(handler=_cmd_seat_show)
+
+    roster = commands.add_parser("roster")
+    _root_option(roster)
+    _timeout_option(roster)
+    roster.set_defaults(handler=_cmd_roster)
     return parser
 
 

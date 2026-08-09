@@ -256,7 +256,7 @@ def establish_run_identity(ledger, run_id, commissioning=None, fault=None):
 
 def _next_seq(ledger, table):
     if table not in {
-            "relays", "cycle_events", "supersession_edges",
+            "relays", "seat_events", "cycle_events", "supersession_edges",
             "projection_events"}:
         raise ValueError("sequence table is not registered")
     return ledger.execute(
@@ -413,11 +413,34 @@ def _insert_supersession_edges(ledger, entries):
              entry["ruling_seq"], entry["source"], entry["applied"]))
 
 
+def _insert_seat_events(ledger, entries, relay_seq=None):
+    for entry in entries:
+        boot_relay_seq = entry.get("boot_relay_seq")
+        if boot_relay_seq == "current-relay":
+            if relay_seq is None:
+                raise ValueError("current relay is unavailable")
+            boot_relay_seq = relay_seq
+        ledger.execute(
+            "INSERT INTO seat_events("
+            "seq,address,event,occupant_id,key_id,boot_relay_seq,cause_seq,detail"
+            ") VALUES(?,?,?,?,?,?,?,?)",
+            (_next_seq(ledger, "seat_events"), entry["address"],
+             entry["event"], entry.get("occupant_id"), entry.get("key_id"),
+             boot_relay_seq, entry.get("cause_seq"), entry.get("detail")))
+
+
+def append_seat_events(ledger, entries):
+    """Append a group of seat transitions in one transaction."""
+    with _transaction(ledger):
+        _insert_seat_events(ledger, entries)
+
+
 def admit(ledger, root, envelope, body, submission_id, *,
           claimed_body_sha256=None, claimed_content_hash=None,
           admits_against=None, origin="daemon", stamp=None,
           rendered_path=None, occupancy_ref=None, advisories=(),
           cycle_events=(), supersession_edges=(), prechecks=(),
+          seat_events=(),
           clock=time.time, fault=None):
     """Admit one relay and every derived effect in a single transaction."""
     if isinstance(envelope, str):
@@ -490,6 +513,8 @@ def admit(ledger, root, envelope, body, submission_id, *,
             _hit(fault, "after-cycle-events")
             _insert_supersession_edges(ledger, supersession_edges)
             _hit(fault, "after-supersession-edges")
+            _insert_seat_events(ledger, seat_events, seq)
+            _hit(fault, "after-seat-events")
             _hit(fault, "pre-commit")
             answer = Admission(seq, allocated_stamp, allocated_path, False)
     _hit(fault, "post-commit-pre-response", committed=True)

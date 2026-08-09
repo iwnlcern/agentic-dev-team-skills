@@ -9,6 +9,8 @@ from contextlib import redirect_stderr, redirect_stdout
 
 from relay_engine import cli, client, daemon, errors
 from relay_engine.client import discover_root, submit
+from relay_engine.ledger import init_schema
+from relay_engine.paths import Root, ensure_engine_dir
 
 
 DRAFT = """## relay
@@ -34,12 +36,25 @@ class TestSubmitE2E(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root_name = self.temp.name
         Path(self.root_name, ".engine/drafts/v29-a.planner").mkdir(parents=True)
-        Path(self.root_name, ".engine/seats/v29-a.planner/occ").mkdir(
+        Path(self.root_name, ".engine/seats/v29-a.planner").mkdir(
             parents=True)
         self.draft_rel = ".engine/drafts/v29-a.planner/one.md"
-        self.key_rel = ".engine/seats/v29-a.planner/occ/tag.key"
+        self.key_rel = ".engine/seats/v29-a.planner/occ.key"
         Path(self.root_name, self.draft_rel).write_text(DRAFT)
         Path(self.root_name, self.key_rel).write_text("tag-value\n")
+        with Root(self.root_name) as root:
+            engine_fd = ensure_engine_dir(root.dirfd)
+            try:
+                ledger = init_schema(engine_fd, root.path)
+                ledger.execute(
+                    "INSERT INTO meta(key,value) VALUES('run_id','v29')")
+                ledger.execute(
+                    "INSERT INTO seat_events("
+                    "address,event,occupant_id,key_id,boot_relay_seq) "
+                    "VALUES('v29-a.planner','occupied','occ','key',NULL)")
+                ledger.close()
+            finally:
+                os.close(engine_fd)
         self.socket_name = os.path.join(self.root_name, "socket-dir", "s")
         self.read_fd, write_fd = os.pipe()
         self.thread = threading.Thread(

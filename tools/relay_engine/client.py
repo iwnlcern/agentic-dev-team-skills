@@ -126,3 +126,24 @@ def submit(root_name, draft, key_path=None, admits_against=None,
     with Root(root_name) as root:
         clear_sid(root, draft_rel)
     return result
+
+
+def seat_register(root_name, address, role_word, dispatch_ref=None,
+                  replace=False, timeout=10.0):
+    args = {"address": address, "role_word": role_word}
+    if dispatch_ref is not None:
+        args["dispatch_ref"] = dispatch_ref
+    if replace:
+        args["replace"] = True
+    op = "seat.replace" if replace else "seat.register"
+    return request(root_name, op, args, timeout=timeout)
+
+
+def seat_stand_down(root_name, address, timeout=10.0):
+    return request(root_name, "seat.stand_down", {"address": address},
+                   timeout=timeout)
+
+
+def seat_show(root_name, address, timeout=10.0):
+    return request(root_name, "seat.show", {"address": address},
+                   timeout=timeout)

@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 
-from relay_engine import errors, strings
+from relay_engine import errors, seats, strings
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -32,7 +32,7 @@ _diag_clock = time.time
 _diag_lock = threading.Lock()
 _log_fd = None
 _PROCESS_STARTED = str(time.time_ns())
-_STARTUP_STAGES = {}
+_STARTUP_STAGES = {"top-seat": seats.startup_top_seat}
 
 
 class WireFault(Exception):
@@ -264,13 +264,14 @@ def _log_diagnostic(exc):
 
 
 def start(root_path=None, ready_fd=None, handlers=None, trace=None,
-          socket_override=None):
+          socket_override=None, top_seat=None, top_role=None,
+          top_dispatch=None):
     """Bind diagnostics, or run a complete daemon when a root is supplied."""
     strings.set_diagnostic_sink(_log_diagnostic)
     if root_path is None:
         return None
     return _run_daemon(root_path, ready_fd, handlers or {}, trace,
-                       socket_override)
+                       socket_override, top_seat, top_role, top_dispatch)
 
 
 @dataclass
@@ -525,44 +526,6 @@ class _SocketService:
             thread.join(2.5)
 
 
-def _tag_is_current(root, envelope, tag):
-    directory = ".engine/seats/%s" % envelope.from_seat
-    try:
-        path = root.resolve_inside(directory)
-    except (OSError, ValueError):
-        return False
-    try:
-        names = os.listdir(path)
-    except OSError:
-        return False
-    candidates = []
-    for name in names:
-        if name.endswith(".key"):
-            candidates.append(directory + "/" + name)
-            continue
-        occupant_dir = os.path.join(path, name)
-        try:
-            info = os.lstat(occupant_dir)
-        except OSError:
-            continue
-        if not stat.S_ISDIR(info.st_mode):
-            continue
-        try:
-            candidates.extend(directory + "/" + name + "/" + child
-                              for child in os.listdir(occupant_dir)
-                              if child.endswith(".key"))
-        except OSError:
-            continue
-    for candidate in candidates:
-        try:
-            value = root.open_read(candidate).decode("utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            continue
-        if value == tag:
-            return True
-    return False
-
-
 def _submit_handler(ledger, root, args):
     try:
         body = base64.b64decode(args["body_b64"], validate=True)
@@ -571,7 +534,8 @@ def _submit_handler(ledger, root, args):
         raise errors.error_for("E-ENVELOPE") from exc
     if args["envelope"] != envelope.headers:
         raise errors.error_for("E-ENVELOPE")
-    if not _tag_is_current(root, envelope, args["tag"]):
+    if not seats.tag_is_current(
+            ledger, root, envelope.from_seat, args["tag"]):
         raise errors.error_for("E-KEY-MISMATCH")
     admission = admit(
         ledger, root, envelope, body, args["submission_id"],
@@ -596,6 +560,18 @@ def _default_handler(ledger, root, state, handlers, request):
         return handlers[op](request["args"])
     if op == "submit":
         return _submit_handler(ledger, root, request["args"])
+    if op in {"seat.register", "seat.replace"}:
+        args = request["args"]
+        replacing = op == "seat.replace" or args.get("replace", False)
+        return seats.register(
+            ledger, root, args["address"], args["role_word"],
+            args.get("dispatch_ref"), replace=replacing)
+    if op == "seat.stand_down":
+        return seats.stand_down(ledger, root, request["args"]["address"])
+    if op == "seat.show":
+        return seats.show(ledger, request["args"]["address"])
+    if op == "roster":
+        return seats.roster(ledger, root)
     if op == "daemon.stop":
         return {"ok": True}
     if op == "status":
@@ -604,7 +580,8 @@ def _default_handler(ledger, root, state, handlers, request):
     raise _args_fault(op, "op:unavailable").error
 
 
-def _run_daemon(root_path, ready_fd, handlers, trace, socket_override):
+def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
+                top_seat, top_role, top_dispatch):
     global _log_fd
     root = None
     lease = None
@@ -650,7 +627,8 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override):
         holder["ledger"] = ledger
         _trace(trace, "schema-init")
         context = {"root": root, "lease": lease, "ledger": ledger,
-                   "state": state}
+                   "state": state, "top_seat": top_seat,
+                   "top_role": top_role, "top_dispatch": top_dispatch}
         for stage in ("run-identity", "top-seat", "recovery"):
             callback = _STARTUP_STAGES.get(stage)
             if callback is None:
@@ -726,7 +704,8 @@ def _close_inherited(keep):
                 pass
 
 
-def launch(root_path, handlers=None, socket_override=None, timeout=10.0):
+def launch(root_path, handlers=None, socket_override=None, timeout=10.0,
+           top_seat=None, top_role=None, top_dispatch=None):
     read_fd, write_fd = os.pipe()
     first = os.fork()
     if first == 0:
@@ -740,7 +719,8 @@ def launch(root_path, handlers=None, socket_override=None, timeout=10.0):
             _close_inherited({write_fd})
             try:
                 start(root_path, ready_fd=write_fd, handlers=handlers,
-                      socket_override=socket_override)
+                      socket_override=socket_override, top_seat=top_seat,
+                      top_role=top_role, top_dispatch=top_dispatch)
             except BaseException:
                 os._exit(1)
             os._exit(0)
