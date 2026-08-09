@@ -6,6 +6,7 @@ import sys
 import unittest
 
 from relay_engine import errors, strings
+from relay_engine.jcs import jcs_encode
 
 
 POLICY_CODES = {
@@ -110,6 +111,39 @@ class TestWireTemplates(unittest.TestCase):
                 rejected_op=strings.rejected_value(digest, len(value)),
             ).as_dict()["cause"]
             self.assertNotIn(value.lower(), rendered.lower())
+
+
+class TestRedactionOracle(unittest.TestCase):
+    def test_escaped_equivalents_one_digest(self):
+        import hashlib
+        first = jcs_encode(__import__("json").loads('"a"'))
+        second = jcs_encode(__import__("json").loads('"\\u0061"'))
+        self.assertEqual(first, b'"a"')
+        self.assertEqual(second, b'"a"')
+        self.assertEqual(hashlib.sha256(first).hexdigest()[:12],
+                         "ac8d8342bbb2")
+
+    def test_cross_type_rendering_byte_exact(self):
+        import hashlib
+        cases = (
+            ("a", b'"a"', "ac8d8342bbb2"),
+            (1, b"1", "6b86b273ff34"),
+            (True, b"true", "b5bea41b6c62"),
+            (None, b"null", "74234e98afe7"),
+            ([1, "a"], b'[1,"a"]', "2010945388e2"),
+            ({"a": 1}, b'{"a":1}', "015abd7f5cc5"),
+        )
+        for value, encoded, digest in cases:
+            with self.subTest(value=value):
+                actual = jcs_encode(value)
+                self.assertEqual(actual, encoded)
+                self.assertEqual(hashlib.sha256(actual).hexdigest()[:12],
+                                 digest)
+                self.assertEqual(
+                    str(strings.rejected_value(digest, len(encoded))),
+                    "unrecognized-input (sha256:%s, length %d)" %
+                    (digest, len(encoded)),
+                )
 
 
 class TestDiagnosticAndEmission(unittest.TestCase):

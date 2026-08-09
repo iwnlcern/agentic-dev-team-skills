@@ -1,6 +1,7 @@
 """Structured relay-engine refusal registry."""
 
 from dataclasses import dataclass
+import re
 
 from relay_engine import strings
 
@@ -65,7 +66,7 @@ strings.register_inventory(
         ("error-wire-version-cause", "rejected_version"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-op-cause", "rejected_op"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-args-cause", "op"): lambda v: v in strings.OPS,
-        ("error-wire-args-cause", "detail"): lambda v: (isinstance(v, str) and __import__("re").fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}:[A-Za-z0-9_-]{1,32}", v) is not None),
+        ("error-wire-args-cause", "detail"): lambda v: (isinstance(v, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}:[A-Za-z0-9_-]{1,32}", v) is not None),
     },
 )
 
