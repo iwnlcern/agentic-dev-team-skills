@@ -207,6 +207,8 @@ A5_SEAM = {
 }
 
 EXPECTED = A5_EXPECTED + [
+    ("file", "hardening/HG32a-operator-valid.md", 0),
+    ("file", "hardening/HG32b-operator-mismatch.md", 1),
     ("index", "hardening/XRF1-fresh-index", 0),
     ("index-rel", "hardening/XRF2-header-only", 1),
     ("index-rel", "hardening/XRF3-marker-only", 1),
@@ -445,6 +447,10 @@ EXPECTED = A5_EXPECTED + [
 ]
 
 EXPECTED_ERROR_SET = {
+    "hardening/HG32a-operator-valid.md": [],
+    "hardening/HG32b-operator-mismatch.md": [
+        "ROLE/FROM mismatch: ROLE='Operator' but FROM='qi.planner'; do not proxy-author another seat's relay",
+    ],
     "hardening/XRF1-fresh-index": [],
     "hardening/XRF2-header-only": [
         "no index rows found in INDEX.md",

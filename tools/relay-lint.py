@@ -43,6 +43,7 @@ ROLE_VALUES = {
     "Downstream Agent Pair", "Downstream Implementer",
     "Master Planner", "Master Reviewer", "Domain Planner", "Domain Reviewer",
     "Pair Planner", "Pair Implementer",
+    "Operator",
 }
 PHASE_VALUES = {
     "AUDIT", "DESIGN", "DESIGN-REVIEW", "PLAN", "PLAN-REVIEW", "IMPL", "REVIEW-FOLD",
@@ -87,6 +88,10 @@ ROLE_TO_ADDRESS_ROLE = {
     "Domain Reviewer": "domain-reviewer",
     "Pair Planner": "pair-planner",
     "Pair Implementer": "pair-implementer",
+    # H32 (192606 ruling): ROLE is author-truth; where a special address
+    # authors, the enum grows rather than borrowing a seat fiction. Operator
+    # classes to the operator special address.
+    "Operator": "operator",
 }
 # D3: the pair tier gains a prefix; bare legacy forms stay valid permanently.
 # Gates compare canonical roles so pair-planner/planner are one seat-role.
