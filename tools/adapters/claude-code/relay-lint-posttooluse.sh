@@ -13,11 +13,21 @@ case "$file_path" in
 esac
 skills_root="${RELAY_LINT_SKILLS_ROOT:-$HOME/.claude/skills}"
 rc=0
+# Edit-tolerant freshness posture (H30): RELAY_LINT_MAX_DRIFT_MINUTES widens
+# the authoring-drift tolerance; RELAY_LINT_NO_FRESHNESS=1 skips it entirely
+# (editing an older relay is not authoring a new one). Defaults unchanged.
+extra_args=()
+if [ -n "${RELAY_LINT_MAX_DRIFT_MINUTES:-}" ]; then
+  extra_args+=(--max-drift-minutes "$RELAY_LINT_MAX_DRIFT_MINUTES")
+fi
+if [ "${RELAY_LINT_NO_FRESHNESS:-0}" = "1" ]; then
+  extra_args+=(--no-freshness)
+fi
 run_lint() {
   if [ "$mode" = "--index" ]; then
     out="$("$@" --index "$file_path" 2>&1)" || rc=$?
   else
-    out="$("$@" "$file_path" 2>&1)" || rc=$?
+    out="$("$@" "$file_path" ${extra_args+"${extra_args[@]}"} 2>&1)" || rc=$?
   fi
 }
 if [ -f "$skills_root/tools/relay-lint.py" ]; then

@@ -541,17 +541,13 @@ def addr_is(address: str | None, owner: str | None, role: str) -> bool:
 
 
 def dispatch_is_delegated(fields: Dict[str, str], clean: str) -> bool:
-    """KR-4 (D26): the prose operand applies only to seats that can act on
-    borrowed authority. Operator/orchestrator/orchestrator-planner-issued
-    dispatches carry their own authorization, so prose mentioning delegation
-    never reclassifies them; the structural field always counts."""
+    """Delegation is structural (H28): only the DELEGATED_DISPATCH_AUTHORITY
+    field marks a dispatch as delegated. The former bare-word prose operand was
+    negation-blind and misfired on placeholder prose mentioning delegation.
+    Direct-authority FROM seats carry their own authorization regardless."""
     if fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() in {"yes", "true"}:
         return True
-    from_addrs = split_addresses(fields.get("FROM"))
-    from_role_val = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
-    if from_role_val in LINEAGE_DIRECT_FROM_ROLES:
-        return False
-    return re.search(r"delegated", clean, flags=re.IGNORECASE) is not None
+    return False
 
 
 def is_implementer_address(address: str) -> bool:
@@ -711,7 +707,7 @@ def own_line_merge_present(text: str) -> bool:
 
 
 def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
-    """Fail-closed surfaces for role words whose authority semantics await the orchestrator ruling."""
+    """Fail-closed surfaces for role words whose authority semantics have no shipped ruling."""
     errors: List[str] = []
     from_addrs = split_addresses(fields.get("FROM"))
     role = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
@@ -743,22 +739,22 @@ def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
     if own_line_dispatch_present(text):
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
-            "a dispatch token from this seat is fail-closed pending the orchestrator ruling"
+            "a dispatch token from this seat is fail-closed; no shipped ruling defines this seat's authority"
         )
     if resolved.get("DESIGN_RECORD_KIND") == "direct-override":
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
-            "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling"
+            "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed; no shipped ruling defines this seat's authority"
         )
     elif resolved.get("DESIGN_LOCK_ID") or resolved.get("DESIGN_RECORD_KIND"):
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
-            "a design-lock claim from this seat is fail-closed pending the orchestrator ruling"
+            "a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority"
         )
     if resolved.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() == "yes":
         errors.append(
             f"authority semantics for FROM role {role!r} are unruled; "
-            "a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling"
+            "a delegated-dispatch-authority claim from this seat is fail-closed; no shipped ruling defines this seat's authority"
         )
     return errors
 
@@ -956,8 +952,8 @@ def filename_timestamp(name: str) -> Tuple[str, Optional[datetime.datetime], str
 
     Returns (status, dt, raw, is_utc) where status is "absent" (no stamp-shaped
     text), "invalid" (stamp-shaped but not a real date/time, e.g. minute 62), or
-    "ok". A stamp-shaped-but-invalid name is a defect in every mode: it can never
-    be ordered and no real clock ever produced it.
+    "ok". A stamp-shaped-but-invalid name can never be ordered and no real clock
+    ever produced it; template mode skips stamp checks entirely.
     """
     stem = Path(name).stem
     m = FILENAME_TS_RE.search(stem)
@@ -1129,7 +1125,13 @@ def lint_file(
         result.warn(f"DISPATCH MERGE appears inside fenced code on line {line_no}; quoted/fenced tokens are inert")
 
     # Downgrade ordering and scan shape.
-    has_downgrade = any(k in fields for k in ("CEREMONY_DOWNGRADE", "WHY_DOWNGRADE_IS_SAFE", "OPERATOR_WAIVER", "ESCALATION_SCAN", "ESCALATION_SCAN_RESULT"))
+    # H29: CEREMONY_DOWNGRADE gates on an actual downgrade value; `none` is a
+    # declaration of no downgrade, not a trigger. The other keys stay
+    # presence-triggered: a scan or waiver that exists must validate.
+    _cd_val = fields.get("CEREMONY_DOWNGRADE", "").strip().lower()
+    has_downgrade = ("CEREMONY_DOWNGRADE" in fields and _cd_val not in {"", "none"}) or any(
+        k in fields for k in ("WHY_DOWNGRADE_IS_SAFE", "OPERATOR_WAIVER", "ESCALATION_SCAN", "ESCALATION_SCAN_RESULT")
+    )
     if has_downgrade:
         scan_line = find_line(text, "ESCALATION_SCAN")
         result_line = find_line(text, "ESCALATION_SCAN_RESULT")
@@ -1640,7 +1642,7 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
             result.error(f"root marker value {_a5val!r} does not resolve to a directory")
         else:
             import os as _a5_os
-            _a5disp = str(_a5root) if Path(_a5val).is_absolute() else _a5_os.path.relpath(_a5root)
+            _a5disp = str(_a5root) if Path(_a5val).is_absolute() else _a5_os.path.relpath(_a5root, path.parent)
             for _a5ln, _a5raw, _a5dt, _a5cell in rows:
                 if A5_NO_RELAY_CELL_RE.fullmatch(_a5cell):
                     continue
@@ -1650,7 +1652,12 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
                     )
 
     if not rows:
-        result.error(f"no index rows found in {path}")
+        # H26: a freshly seeded INDEX -- the boot shape with BOTH the header
+        # row AND a root marker present, zero data rows -- is a valid
+        # pre-first-row state, not a defect. Either component alone is still
+        # an error: the grant covers exactly the marker+header boot state.
+        if header_arity is None or not a5_markers:
+            result.error(f"no index rows found in {path}")
         return result
 
     scoped = [r for r in rows if r[0] > marker_line]

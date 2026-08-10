@@ -164,8 +164,8 @@ A5_ERRORS = {
     "rootres/XR10-no-relay-cell": [],
     "rootres/XR11-near-miss-cell": ["line 3: file cell '(no relay cut — D-1.4; acks)' does not resolve under the declared root ."],
     "rootres/XR12-spaced-root": [],
-    "rootres/XR13-norows-duplicate-markers": ["INDEX declares 2 root markers; at most one is permitted", "no index rows found in INDEX.md"],
-    "rootres/XR14-norows-bad-root": ["no index rows found in INDEX.md", "root marker value 'no-such-dir' does not resolve to a directory"],
+    "rootres/XR13-norows-duplicate-markers": ["INDEX declares 2 root markers; at most one is permitted"],
+    "rootres/XR14-norows-bad-root": ["root marker value 'no-such-dir' does not resolve to a directory"],
     "rootres/XR16-u2028-marker-decoy": [],
     "rootres/XR2-marked-missing-file": ["line 3: file cell 'AUDIT-planner-20260801-130000.md' does not resolve under the declared root ."],
     "rootres/XR3-unmarked-unresolvable": [],
@@ -177,6 +177,8 @@ A5_ERRORS = {
     "rootres/XR9-deployment/idxhome": [],
 }
 A5_CWD = {
+    "hardening/XRF2-header-only": "hardening/XRF2-header-only",
+    "hardening/XRF3-marker-only": "hardening/XRF3-marker-only",
     "lockdigest/AH1-float-forward/.relays/v29": "lockdigest/AH1-float-forward/cwd",
     "lockdigest/AH2-rollback/.relays/v29": "lockdigest/AH2-rollback/cwd",
     "lockdigest/AH3a-later-malformed/.relays/v29": "lockdigest/AH3a-later-malformed/cwd",
@@ -205,6 +207,17 @@ A5_SEAM = {
 }
 
 EXPECTED = A5_EXPECTED + [
+    ("index", "hardening/XRF1-fresh-index", 0),
+    ("index-rel", "hardening/XRF2-header-only", 1),
+    ("index-rel", "hardening/XRF3-marker-only", 1),
+    ("index", "hardening/XRF4-root-display", 1),
+    ("file", "hardening/FTE1-prose-not-delegated.md", 0),
+    ("file", "hardening/FTE2-structural-no-scopediff.md", 1),
+    ("file", "hardening/CD1-downgrade-none.md", 0),
+    ("file", "hardening/CD2-downgrade-real.md", 1),
+    ("file", "hardening/DTRc3-detached-after-blank.md", 1),
+    ("file", "hardening/DTRc4-detached-after-result.md", 1),
+    ("file", "hardening/FTAD1-filled-dispatch-conformant.md", 0),
     ("root", "kr8a/KR8A1-carrier-exempt", 0),
     ("root", "kr8a/KR8A2-nocarrier-control", 1),
     ("root", "kr8a/KR8A3-implementer-token-control", 1),
@@ -268,7 +281,7 @@ EXPECTED = A5_EXPECTED + [
     ("root", "rolevocab/AMB13-late-two-from", 1),
     ("root", "rolevocab/AMB14-late-two-to", 1),
     ("root", "rolevocab/KR4A-direct-issuer-prose", 0),
-    ("root", "rolevocab/KR4B-planner-prose-nofield", 1),
+    ("root", "rolevocab/KR4B-planner-prose-nofield", 0),
     ("index", "indexmarker/IDX1-below-floor", 1),
     ("index", "indexmarker/IDX2-first-marker-floor", 1),
     ("index", "indexmarker/IDX3-above-floor", 0),
@@ -432,6 +445,42 @@ EXPECTED = A5_EXPECTED + [
 ]
 
 EXPECTED_ERROR_SET = {
+    "hardening/XRF1-fresh-index": [],
+    "hardening/XRF2-header-only": [
+        "no index rows found in INDEX.md",
+    ],
+    "hardening/XRF3-marker-only": [
+        "no index rows found in INDEX.md",
+    ],
+    "hardening/XRF4-root-display": [
+        "line 3: file cell 'PLAN-planner-20260101-120000.md' does not resolve under the declared root .",
+    ],
+    "hardening/FTE1-prose-not-delegated.md": [],
+    "hardening/FTE2-structural-no-scopediff.md": [
+        'delegated DISPATCH IMPL missing SCOPE_DIFF',
+        'delegated DISPATCH IMPL missing SCOPE_DIFF_RESULT',
+    ],
+    "hardening/CD1-downgrade-none.md": [],
+    "hardening/CD2-downgrade-real.md": [
+        'downgrade/waiver present but ESCALATION_SCAN is missing',
+        'downgrade/waiver present but ESCALATION_SCAN_RESULT is missing',
+        'missing canonical ESCALATION_SCAN row: AI-or-automation-acts-downstream',
+        'missing canonical ESCALATION_SCAN row: authz/tenant/RLS/permissions/secrets',
+        'missing canonical ESCALATION_SCAN row: broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip',
+        'missing canonical ESCALATION_SCAN row: cross-repo/service-contract/generated-schema/shared-API-event',
+        'missing canonical ESCALATION_SCAN row: migration/backfill/destructive-write/canonical-data-repair',
+        'missing canonical ESCALATION_SCAN row: money/inventory/orders/planning/accounting/trust-critical-state',
+        'missing canonical ESCALATION_SCAN row: test-runtime-role-mismatch',
+        'missing canonical ESCALATION_SCAN row: user-visible-control-with-materializer/downstream-consumer',
+        'missing canonical ESCALATION_SCAN row: worker/scheduler/queue/retry/async-side-effect',
+    ],
+    "hardening/DTRc3-detached-after-blank.md": [
+        "row-shaped line outside the SCOPE_DIFF block: '- src/extra.ts -> in'; rows must sit contiguously under their header",
+    ],
+    "hardening/DTRc4-detached-after-result.md": [
+        "row-shaped line outside the SCOPE_DIFF block: '- src/late.ts -> OUT'; rows must sit contiguously under their header",
+    ],
+    "hardening/FTAD1-filled-dispatch-conformant.md": [],
     "kr8a/KR8A1-carrier-exempt": [],
     "kr8a/KR8A2-nocarrier-control": [
         "02-report.md: IMPL report parent must be a DISPATCH IMPL relay",
@@ -449,19 +498,19 @@ EXPECTED_ERROR_SET = {
     ],
     "lockpath/LP4-bare-id": [],
     "rolevocab/RV7a-master-dispatch-failclosed.md": [
-        "authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7b-domain-direct-override.md": [
-        "authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7e-domain-designlock-kind.md": [
-        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7e2-domain-designlock-id-only.md": [
-        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7f-master-delegated-authority.md": [
-        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7h-delegated-bypass-order.md": [
         "DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
@@ -473,15 +522,15 @@ EXPECTED_ERROR_SET = {
         "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
     ],
     "rolevocab/RV7k-samevalue-duplicate.md": [
-        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7l-override-plus-lock-conflict.md": [
-        "authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed; no shipped ruling defines this seat's authority",
         "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
     ],
     "rolevocab/RV7m-kind-conflict-plus-lock.md": [
         "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
-        "authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+        "authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7n-delegated-replacement.md": [
         "DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
@@ -493,19 +542,19 @@ EXPECTED_ERROR_SET = {
         "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
     ],
     "rolevocab/RV7a-master-dispatch-failclosed": [
-        "RV7a-master-dispatch-failclosed.md: authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed pending the orchestrator ruling",
+        "RV7a-master-dispatch-failclosed.md: authority semantics for FROM role 'master-planner' are unruled; a dispatch token from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7b-domain-direct-override": [
-        "RV7b-domain-direct-override.md: authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "RV7b-domain-direct-override.md: authority semantics for FROM role 'domain-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7e-domain-designlock-kind": [
-        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7e2-domain-designlock-id-only": [
-        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: authority semantics for FROM role 'domain-planner' are unruled; a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7f-master-delegated-authority": [
-        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7g-malformed-address-hardening": [
         "01-dispatch.md: TO has invalid address 'qi.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
@@ -523,15 +572,15 @@ EXPECTED_ERROR_SET = {
         "01-plan.md: DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
     ],
     "rolevocab/RV7k-samevalue-duplicate": [
-        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a delegated-dispatch-authority claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7l-override-plus-lock-conflict": [
-        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; DESIGN_RECORD_KIND: direct-override from this seat is fail-closed; no shipped ruling defines this seat's authority",
         "01-plan.md: DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
     ],
     "rolevocab/RV7m-kind-conflict-plus-lock": [
         "01-plan.md: DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
-        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed pending the orchestrator ruling",
+        "01-plan.md: authority semantics for FROM role 'master-planner' are unruled; a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority",
     ],
     "rolevocab/RV7n-delegated-replacement": [
         "01-plan.md: DELEGATED_DISPATCH_AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
@@ -594,10 +643,7 @@ EXPECTED_ERROR_SET = {
         "02-dispatch.md: DISPATCH IMPL requires exactly one TO addressee",
     ],
     "rolevocab/KR4A-direct-issuer-prose": [],
-    "rolevocab/KR4B-planner-prose-nofield": [
-        "03-dispatch.md: delegated DISPATCH IMPL missing SCOPE_DIFF",
-        "03-dispatch.md: delegated DISPATCH IMPL missing SCOPE_DIFF_RESULT",
-    ],
+    "rolevocab/KR4B-planner-prose-nofield": [],
     "indexmarker/IDX1-below-floor": [
         "line 4: index time 20260801-110000 predates the monotonic-from boundary 20260801-120000",
     ],
