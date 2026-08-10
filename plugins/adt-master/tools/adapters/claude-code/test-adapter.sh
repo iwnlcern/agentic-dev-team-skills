@@ -315,4 +315,35 @@ else
   echo "PASS l1-ladder-byte-identity"
 fi
 
+# k1-k3 pin the H30 edit-tolerant freshness knobs on the write-time hook: the
+# strict default still rejects an old authoring stamp, and each supported knob
+# lets an edit of an older relay pass without weakening anything else.
+knob_relay="$tmp/work/.relays/run1/clean-20200101-000000.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$knob_relay"
+run_hook_env() {
+  local file="$1" skills="$2"; shift 2
+  printf '{"tool_input":{"file_path":"%s"}}' "$file" | env "$@" RELAY_LINT_SKILLS_ROOT="$skills" HOME="$tmp/home" PATH="$PATH_NORMAL" "$BASH_BIN" "$HOOK" 2>"$tmp/stderr"
+}
+run_hook_env "$knob_relay" "$skills_root"
+rc=$?
+if [ "$rc" -ne 2 ] || ! grep -Fq "in the past" "$tmp/stderr"; then
+  echo "FAIL k1-strict-default-rejects-old-stamp: expected exit 2 with drift error, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS k1-strict-default-rejects-old-stamp"
+fi
+run_hook_env "$knob_relay" "$skills_root" RELAY_LINT_NO_FRESHNESS=1
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL k2-no-freshness-knob-passes-old-stamp: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS k2-no-freshness-knob-passes-old-stamp"
+fi
+run_hook_env "$knob_relay" "$skills_root" RELAY_LINT_MAX_DRIFT_MINUTES=99999999
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL k3-max-drift-knob-passes-old-stamp: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS k3-max-drift-knob-passes-old-stamp"
+fi
+
 exit "$fail"

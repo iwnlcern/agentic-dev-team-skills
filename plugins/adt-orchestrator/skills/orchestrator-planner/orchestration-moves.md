@@ -22,13 +22,7 @@ Use all available Agent Pairs. Do not stack unrelated work on one pair when othe
 
 ## Dispatch IDs and lineage
 
-Use stable dispatch IDs for every relay:
-
-```text
-<team>-<bundle>-<phase>-<YYYYMMDD>-<seq>
-```
-
-`<YYYYMMDD>` is the real calendar date on which you open the dispatch, read from the clock — not carried over from a sibling dispatch id and not advanced to keep a tidy sequence. `<seq>` is the only counter. The same rule governs relay filename stamps and index rows; see the timestamp policy in `protocol.md`.
+Use the single cycle-id and authority-chain `DISPATCH_ID` definitions in `protocol.md`; those definitions take precedence here. Calendar dates and relay/index timestamps are read from the real clock at authoring time — never carried over from a sibling id or advanced to keep a tidy sequence; see the timestamp policy in `protocol.md`.
 
 Record:
 
@@ -111,7 +105,7 @@ When a broader slice is real but not necessary for current acceptance criteria:
 3. Add a stop condition.
 4. Do not bury it in prose.
 
-If a ceremony downgrade is selected, record why it is safe:
+If a ceremony downgrade is selected and the escalation scan is trigger-free, record why it is safe:
 
 ```text
 CEREMONY_DOWNGRADE: skipped <step> because <reason>. Residual risk: <risk or none>.

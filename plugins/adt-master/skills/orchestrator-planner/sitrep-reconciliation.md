@@ -13,10 +13,14 @@ Ask teams to emit sitreps in this format:
 ```text
 ROLE: <Planner | Implementer | Orchestrator Planner | Orchestrator Reviewer>
 PHASE: SITREP
-AUTHORITY: <read-only | plan-only | implementation | review-only | merge-gated | live-verify>
+AUTHORITY: <report-only | read-only>
 TASK_ID: <id or none>
 DISPATCH_ID: <current dispatch id>
 PARENT_DISPATCH_ID: <parent id or none>
+EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
+FROM: <sender owner.role | orchestrator | operator>
+TO: <recipient owner.role | orchestrator | operator>
+CC: <boundary-adjacent owner.role | none>
 BUNDLE_ID: <bundle/lane id>
 OWNER: <team/pair/agent>
 BASE: <repo>@<branch>@<sha or unknown>
@@ -26,6 +30,7 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 LIVE_VERIFY_REQUIRED: <yes/no + reason>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 CEREMONY_DOWNGRADE: <none | skipped steps + why safe>
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 Current artifact:
 <plan / PR / branch / commit / none>
@@ -61,7 +66,7 @@ Next requested action:
 
 If a team sends a free-form sitrep, extract these fields and ask them to use the standard format next time.
 
-`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed. Standing downstream gates are named only after `downstream:` or in prose, never in the enum value. The field is a predicate re-evaluated at each relay, not a latch.
+`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
 
 ## Claim-evidence ladder
 
@@ -233,7 +238,7 @@ A team may skip audit, review, or live verification because the task felt small.
 Response pattern:
 
 ```text
-Correction: ceremony downgrade is undocumented. State why <skipped step> is safe, or restore the default gate. Hard escalation triggers present: <none/list>.
+Correction: a ceremony downgrade occurred without a rationale. If the escalation scan is trigger-free, state why <skipped step> is safe; if any row is yes or unknown, use only the operator-waiver path or restore the default gate. Hard escalation triggers present: <none/list>.
 ```
 
 ### Untracked local docs/plans
@@ -267,6 +272,10 @@ AUTHORITY: read-only
 TASK_ID: <id>
 DISPATCH_ID: <reconcile-dispatch-id>
 PARENT_DISPATCH_ID: <incoming sitrep dispatch id>
+EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
+FROM: <run>.orchestrator-planner
+TO: <team>.planner | <team>.implementer | operator
+CC: <run>.orchestrator-reviewer, <boundary-adjacent owner.role | none>
 BUNDLE_ID: <bundle>
 OWNER: <team/pair>
 BASE: <repo>@<branch>@<sha or unknown>
@@ -276,6 +285,7 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: merge requires 
 LIVE_VERIFY_REQUIRED: <yes/no + reason>
 CEREMONY_TIER: <tier>
 CEREMONY_DOWNGRADE: <none or rationale>
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 ## Reconciled state
 - <fact> — evidence level <E0-E4> — source: <source>
