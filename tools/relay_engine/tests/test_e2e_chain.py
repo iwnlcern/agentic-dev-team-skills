@@ -36,10 +36,15 @@ def _subparsers(parser):
 
 
 def help_population(parser):
-    found = []
+    found = [("<root>", parser.format_help())]
 
     def visit(current, prefix):
-        for name, child in sorted(_subparsers(current).choices.items()):
+        action = next((candidate for candidate in current._actions
+                       if isinstance(candidate,
+                                     argparse._SubParsersAction)), None)
+        if action is None:
+            return
+        for name, child in sorted(action.choices.items()):
             command = prefix + (name,)
             found.append((" ".join(command), child.format_help()))
             if any(isinstance(action, argparse._SubParsersAction)
@@ -356,6 +361,23 @@ class TestE2EChain(unittest.TestCase):
 
 
 class TestCensus(unittest.TestCase):
+    def test_help_population_includes_root_surface(self):
+        parser = cli.build_parser()
+        subparsers = _subparsers(parser)
+        subparsers.add_parser(
+            "synthetic-root-census-probe",
+            help="sQlItE root census sentinel")
+        self.assertIn("sQlItE root census sentinel", parser.format_help())
+        self.assertEqual(
+            _occurrences(r"sqlite", help_population(parser)),
+            [("<root>", "sQlItE")])
+
+        root_only = argparse.ArgumentParser(
+            description="LeDgEr root-only census sentinel")
+        self.assertEqual(
+            _occurrences(r"ledger", help_population(root_only)),
+            [("<root>", "LeDgEr")])
+
     def test_shipped_text_sweep(self):
         _, values = write_census_artifact()
         for name in ("registration", "d25", "overclaim"):

@@ -24,16 +24,20 @@ def storage_term_matches(readme_text=None, inventory=None, parser=None):
         inventory = strings.INVENTORY
     if parser is None:
         parser = cli.build_parser()
-    surface = [("README", readme_text)]
+    surface = [("README", readme_text),
+               ("help:<root>", parser.format_help())]
     surface.extend(("inventory:" + key, value)
                    for key, value in sorted(inventory.items()))
 
     def subparsers(parser):
-        return next(action for action in parser._actions
-                    if isinstance(action, argparse._SubParsersAction))
+        return next((action for action in parser._actions
+                     if isinstance(action, argparse._SubParsersAction)), None)
 
     def visit(parser, prefix=()):
-        for name, child in sorted(subparsers(parser).choices.items()):
+        action = subparsers(parser)
+        if action is None:
+            return
+        for name, child in sorted(action.choices.items()):
             command = prefix + (name,)
             surface.append(("help:" + " ".join(command),
                             child.format_help()))
@@ -182,6 +186,26 @@ class TestGate(unittest.TestCase):
         self.assertEqual(
             storage_term_matches(readme_text="", inventory={}, parser=parser),
             [("help:synthetic-storage-probe", "LeDgEr")])
+
+    def test_storage_terms_in_root_help_are_detected(self):
+        parser = cli.build_parser()
+        subparsers = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction))
+        subparsers.add_parser(
+            "synthetic-root-storage-probe",
+            help="sQlItE root sentinel")
+        self.assertIn("sQlItE root sentinel", parser.format_help())
+        self.assertEqual(
+            storage_term_matches(readme_text="", inventory={}, parser=parser),
+            [("help:<root>", "sQlItE")])
+
+        root_only = argparse.ArgumentParser(
+            epilog="DaTaBaSe root-only sentinel")
+        self.assertEqual(
+            storage_term_matches(
+                readme_text="", inventory={}, parser=root_only),
+            [("help:<root>", "DaTaBaSe")])
 
     def check_bad(self, source, needle):
         with tempfile.TemporaryDirectory() as root:
