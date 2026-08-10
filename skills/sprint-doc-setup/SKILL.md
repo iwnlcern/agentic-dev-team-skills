@@ -102,7 +102,7 @@ SUBJECT:
 
 `SUBJECT` is local/display-only, placed after `CC`, and never a gate input.
 
-Identity, location, and integrity are separate: `DESIGN_LOCK_ID` / `PLAN_LOCK_ID` carry logical identity only; optional `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` fields carry filename-stem locators; optional `DESIGN_SHA256` / `PLAN_SHA256` fields carry lowercase-hex sha256 values for the referenced bytes. Never combine them. A present digest requires its paired locator under the routed fail-closed check; a locator without a digest is permitted. New artifact stems use `designs/DD-<cycle>-<YYYYMMDD>.md` and `plans/PL-<cycle>-<YYYYMMDD>.md`, with `-erratum-N`, `-supplement-N`, or `-amendment-N` suffixes for amendments and errata.
+Identity, location, and integrity are separate: `DESIGN_LOCK_ID` / `PLAN_LOCK_ID` carry a lock value — a logical identity or repo-relative path, optionally annotated ` @ sha256 <hex>` (equality on the unannotated value); optional `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` fields carry filename-stem locators; optional `DESIGN_SHA256` / `PLAN_SHA256` fields carry lowercase-hex sha256 values for the referenced bytes. Beyond that annotation, never combine them. A present digest requires its paired locator under the routed fail-closed check; a locator without a digest is permitted. New artifact stems use `designs/DD-<cycle>-<YYYYMMDD>.md` and `plans/PL-<cycle>-<YYYYMMDD>.md`, with `-erratum-N`, `-supplement-N`, or `-amendment-N` suffixes for amendments and errata.
 
 ## Naming conventions
 
