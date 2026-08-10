@@ -54,7 +54,7 @@ Return one of:
 
 ```text
 approve
-revise
+must-revise
 reroute
 reject-or-defer
 human-decision-required

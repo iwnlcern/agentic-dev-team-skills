@@ -42,7 +42,7 @@ Read-only/review-only. Review the pair Planner's design doc, not a CC'd sibling/
 
 ### PLAN-REVIEW
 
-Review your pair Planner's written plan before implementation. A CC'd orchestrator PLAN is context only and is not yours to approve. Check locked design, scope, acceptance criteria, tests, boundary contract, out-of-scope lines, and hard escalation triggers. Return `approve`, `must revise`, `reject/narrow`, or `human decision required`.
+Review your pair Planner's written plan before implementation. A CC'd orchestrator PLAN is context only and is not yours to approve. Check locked design, scope, acceptance criteria, tests, boundary contract, out-of-scope lines, and hard escalation triggers. Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
 
 ### IMPL
 

@@ -112,6 +112,11 @@ Manual installs migrate via the S7 rename SITREPs (skill-dir names now equal rol
 
 ## Usage
 
+Operator quickstart: open one session per seat and load its role skill. For a standalone pair, boot the
+Planner and Implementer sessions directly. For a multi-pair run, boot the Orchestrator Planner and
+trigger `init`; then carry each returned file-first hand-off pointer to its exact `TO` seat and treat
+`CC` as context only.
+
 The smallest unit is one pair-tier team: two agent sessions, one loaded with `pair-planner` and the
 other with `pair-implementer`. The Pair Planner audits, designs, writes the locked plan, and reviews
 implementation evidence. The Pair Implementer independently audits, reviews the plan, executes only
@@ -121,11 +126,11 @@ sessions.
 
 A typical run:
 
-1. Run `sprint-doc-setup` once to scaffold the sprint tree — `docs/sprints/YYYY-MM-DD-<topic>/` with
+1. Run `sprint-doc-setup` once to scaffold the sprint tree — `docs/sprints/active/YYYY-MM-DD-<topic>/` with
    a `.relays/` substrate for operational traffic.
 2. Boot each session into its role: load the role skill, apply `protocol.md`, and act only within the
    seat and phase addressed to it.
-3. Work moves phase by phase — AUDIT → DESIGN (optionally `design-grill`) → PLAN → plan review →
+3. Work moves phase by phase — AUDIT → DESIGN (optionally `design-grill`) → DESIGN-REVIEW → PLAN → plan review →
    dispatch → implementation → adversarial review → merge gate — with each handoff a lint-clean
    relay file.
 4. Lint relays before handing them off:

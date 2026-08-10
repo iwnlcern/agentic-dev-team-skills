@@ -1,6 +1,6 @@
 ---
 name: design-grill
-description: "Use during the DESIGN phase only when an addressed DESIGN dispatch carries GRILL_REQUIRED: yes. Stress-test the dispatched decision before DESIGN_LOCK_ID; when the field is absent and trigger conditions apply, the pair Planner stops and asks the orchestrator whether to amend the dispatch instead of invoking this skill."
+description: "Use during the DESIGN phase only when an addressed DESIGN dispatch carries GRILL_REQUIRED: yes. Stress-test the dispatched decision before DESIGN_LOCK_ID; when the field is absent and trigger conditions apply, the pair Planner asks the orchestrator (or the operator in a standalone run) whether to amend the dispatch instead of invoking this skill."
 ---
 
 # Design Grill
@@ -17,7 +17,7 @@ it does not substitute for any mechanical artifact.
 
 ## When to run it
 
-Record one line in the design record:
+Record one line in the addressed DESIGN dispatch (the binding carrier); mirror it in the design record:
 
 ```text
 GRILL_REQUIRED: <yes | no>
@@ -31,7 +31,7 @@ GRILL_REQUIRED: <yes | no>
 - a hard-to-reverse data / API / model decision;
 - multiple downstream decisions depend on one unsettled choice.
 
-Absent the field, when these trigger conditions hold, the pair Planner stops and asks the orchestrator whether to amend the dispatch rather than deciding alone.
+Absent the field, when these trigger conditions hold, the pair Planner stops and asks the orchestrator (or the operator in a standalone run) whether to amend the dispatch rather than deciding alone.
 `no` means the trigger was evaluated and did not apply, or was already satisfied by a cited existing lock.
 The grill step itself remains optional by default and adds no mechanical gate; what binds is the addressed dispatch field, not the skill's existence. Without a binding `yes`, do not grill tiny/small fixes or `already-closed`/promote-existing work.
 

@@ -1,11 +1,11 @@
 ---
 name: sprint-doc-setup
-description: Use when setting up or maintaining the working document tree for an orchestrator-team sprint. Requires Superpowers.
+description: Use when setting up or maintaining the working document tree for a sprint at any tier — standalone pair, orchestrator team, or master. Requires Superpowers.
 ---
 
 # Sprint Doc Setup
 
-Use this skill to create or maintain the file substrate for one orchestrator-team sprint. This skill owns **where sprint documents and relays live**, their naming conventions, and lint-clean relay formatting. It does not define relay semantics; use the role skills' adjacent `protocol.md` for authority, dispatch, merge, scope, and evidence rules.
+Use this skill to create or maintain the file substrate for one sprint at any tier. This skill owns **where sprint documents and relays live**, their naming conventions, and lint-clean relay formatting. It does not define relay semantics; use the role skills' adjacent `protocol.md` for authority, dispatch, merge, scope, and evidence rules.
 
 ## Mandatory prerequisites
 
@@ -43,7 +43,7 @@ Whether the relay substrate is tracked or gitignored is operator discretion with
 .relays/<RUN_ID>/<cycle-id>/<PHASE>-<ROLE>-<YYYYMMDD-HHMMSS>.md
 ```
 
-The relay root is literal `.relays` (a rule, not a default) anchored beside the sprint or lane documents it serves, with exactly one run level `.relays/<RUN_ID>/` for orchestrator teams. The effective root of a run is recorded once by the INDEX `root:` marker; a `RELAY_ROOT` override or operator-directed divergence is valid only when so recorded. A divergent directory without a recorded override is nonconformance, not a second compliant reading.
+The relay root is literal `.relays` (a rule, not a default) anchored beside the sprint or lane documents it serves, with exactly one run level `.relays/<RUN_ID>/`. The effective root of a run is recorded once by the INDEX `root:` marker; a `RELAY_ROOT` override or operator-directed divergence is valid only when so recorded. A divergent directory without a recorded override is nonconformance, not a second compliant reading.
 
 The `boot/` subtree exists only in orchestrator-tier (and above) runs, for orchestrator-planner `init` relays. Boot relays use the existing relay schema (`PHASE: SITREP`, `AUTHORITY: report-only`) and grant no work authority; they bring operator-relayed seats online.
 
@@ -53,13 +53,16 @@ Every new INDEX carries exactly one own-line `root: <path>` marker in its header
 
 ```text
 independent .relays/<run>/INDEX.md declaring .relays/   -> root: ..
+standalone pair .relays/<run>/INDEX.md declaring .relays/ -> root: ..
 subservient run-local INDEX declaring its run directory -> root: .
 master master/relays/INDEX.md declaring master/         -> root: ..
 ```
 
+Create the INDEX and append the first boot row in one step; do not leave a newly seeded INDEX parked between those operations. Immediately before the first row, the expected state is a root marker plus the schema header with zero rows; native acceptance of that transient state is H26, the faults-owned half.
+
 The canonical marker value is a POSIX-separator path relative to the directory containing the INDEX (`.` and `..` permitted). A tracked absolute marker is a reviewer-detected conformance violation; untracked machine-local indexes may use absolute values. An existing index opts in by appending its first and only marker at end-of-file. A second recognized marker is a duplicate refusal, never an update mechanism. An index without a marker receives no resolution semantics or resolution check — there is no repo-root default or implied base.
 
-`INDEX.md` is append-oriented. The INDEX is exempt from relay-lint's relay checks and subject to its `--index` checks. It uses exactly this schema:
+`INDEX.md` is append-oriented. The INDEX is exempt from relay-lint's per-relay checks; its own checks run in `--index` mode, which a per-file invocation must request explicitly. It uses exactly this schema:
 
 ```text
 | time | phase | role | dispatch | parent | from | to | cc | status | file |
@@ -73,7 +76,7 @@ Do not assume `.relays/` is shared across worktrees or sessions. If a receiver c
 
 ## Standalone pair runs
 
-For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree. Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise. The daemon is optional, but the artifacts are not: the D7 ceremony floor still files relays, maintains an `INDEX.md`, and produces the full auditable trail.
+For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree. Operator quickstart: open one session per seat and load its role skill; boot the standalone Planner and Implementer sessions directly, or for an orchestrator-team run boot the Orchestrator Planner and trigger `init`. Carry each returned file-first hand-off pointer to its exact `TO` seat, and treat `CC` as context only. Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise. The daemon is optional, but the artifacts are not; the daemon is not yet adopted, so the D7 ceremony floor still files relays, maintains an `INDEX.md`, and produces the full auditable trail.
 
 ## Header convention
 
@@ -104,7 +107,7 @@ Identity, location, and integrity are separate: `DESIGN_LOCK_ID` / `PLAN_LOCK_ID
 ## Naming conventions
 
 - `RUN_ID`: short dotted or hyphenated run id, e.g. `site-qi-2026-06-19`.
-- `DISPATCH_ID`: authority-chain relays — PLAN, PLAN-REVIEW, IMPL, and the merge grant/claim pair — carry handoff-scoped ids, and each `PARENT_DISPATCH_ID` names its immediate predecessor; every other relay in the cycle carries the cycle id; one directory per cycle. PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id; non-authority-chain status relays carry the cycle id, never a handoff id. The directory is named by the cycle id; an authority-chain relay follows its parent lineage to that id and stays in the same directory rather than opening one named by its handoff id.
+- `DISPATCH_ID`: authority-chain relays — PLAN, PLAN-REVIEW, IMPL, and the merge grant/claim pair — carry handoff-scoped ids, and each `PARENT_DISPATCH_ID` names its immediate predecessor; every other relay in the cycle carries the cycle id; one directory per cycle. PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id; non-authority-chain status relays carry the cycle id, never a handoff id. The directory is named by the cycle id; an authority-chain relay follows its parent lineage to that id and stays in the same directory rather than opening one named by its handoff id; the gated design-doc PLAN's parent edge names the approving DESIGN-REVIEW.
 - Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted. Spell the owner segment exactly once, the same way as in the address.
 - Addresses: dotted lowercase owner-role form, e.g. `qi-a.planner`, `qi-a.implementer`, `site-qi.orchestrator-planner`.
 - Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC. Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence. `relay-lint` fails an impossible or drifted stamp, and `relay-lint --index` fails an index whose `time` column decreases or disagrees with the filename it points at.
