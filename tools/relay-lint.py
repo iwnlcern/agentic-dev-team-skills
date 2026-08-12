@@ -1781,6 +1781,13 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
 
 
 H27_LOCK_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 1)"
+H27_COMMISSION_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3)"
+H27_COMMISSION_AUTH_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3a)"
+H27_COMMISSION_CHARTER_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3b)"
+H27_COMMISSION_GRANT_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3c)"
+H27_COMMISSION_RECEIPT_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3d)"
+H27_COMMISSION_SURFACE = ("COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID")
+H27_COMMISSION_CARRIERS = ("COMMISSION_AUTHORIZATION",) + H27_COMMISSION_SURFACE
 
 
 def h27_resolved_discriminator(text: str, key: str) -> Tuple[str | None, bool]:
@@ -1876,6 +1883,136 @@ def h27_group_and_route(origins, consumer_text: str) -> Tuple[str, str | None, L
 def h27_same_position_latest(items):
     latest_order = max(item[1] for item in items)
     return [item for item in items if item[1] == latest_order]
+
+
+def h27_commission_surface(text: str) -> Tuple[str | None, ...]:
+    """Resolve the four byte-equality operands without first-value collapse."""
+    return tuple(h27_resolved_discriminator(text, key)[0] for key in H27_COMMISSION_SURFACE)
+
+
+def h27_commission_surface_complete(text: str) -> bool:
+    """A stage surface is complete only when all four sole values are non-empty."""
+    return all(value not in {None, ""} for value in h27_commission_surface(text))
+
+
+def h27_pair_planner_address(raw: str | None) -> bool:
+    """Accept legacy planner and explicit pair-planner, never special/tier/reviewer/multiple."""
+    addresses = split_addresses(raw)
+    return len(addresses) == 1 and canonical_role(from_role(addresses[0])) == "planner"
+
+
+def h27_direct_commission_grantor(address: str | None) -> bool:
+    return from_role(address) in {"operator", "orchestrator", "orchestrator-planner"}
+
+
+def h27_any_role_occurrence(text: str, roles: set[str]) -> bool:
+    return any(
+        from_role(address) in roles
+        for raw in h27_occurrences(text, "FROM")
+        for address in split_addresses(raw)
+    )
+
+
+def h27_commission_auth_shape_ok(item) -> bool:
+    """Task 9.5a stage-(a) carrier parsing and local shape, conflict-first."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "TO", "COMMISSION_AUTHORIZATION",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    from_addr = h27_single_from(text)
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    authority, _ = h27_resolved_discriminator(text, "AUTHORITY")
+    carrier, _ = h27_resolved_discriminator(text, "COMMISSION_AUTHORIZATION")
+    to_raw, _ = h27_resolved_discriminator(text, "TO")
+    commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+    to_addrs = split_addresses(to_raw)
+    return (
+        h27_direct_commission_grantor(from_addr)
+        and phase == "PLAN"
+        and authority == "plan-only"
+        and carrier == "yes"
+        and len(to_addrs) == 1
+        and from_role(to_addrs[0]) == "master-planner"
+        and h27_commission_surface_complete(text)
+        and h27_pair_planner_address(commission_to)
+    )
+
+
+def h27_commission_charter_shape_ok(item) -> bool:
+    """Task 9.5a charter-local shape; parent resolution deliberately belongs to 9.5b."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "DESIGN_DOC_ID", "DESIGN_RECORD_KIND",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    from_addr = h27_single_from(text)
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    authority, _ = h27_resolved_discriminator(text, "AUTHORITY")
+    design_doc_id, _ = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
+    kind, _ = h27_resolved_discriminator(text, "DESIGN_RECORD_KIND")
+    charter_doc_id, _ = h27_resolved_discriminator(text, "CHARTER_DOC_ID")
+    return (
+        from_role(from_addr) == "master-planner"
+        and phase == "DESIGN"
+        and authority == "design-only"
+        and design_doc_id not in {None, ""}
+        and design_doc_id == charter_doc_id
+        and kind == "design-doc"
+        and h27_commission_surface_complete(text)
+    )
+
+
+def h27_commission_approval_shape_ok(item) -> bool:
+    """Task 9.5a approval-local shape; edge and same-owner checks belong to 9.5b."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "DESIGN_DOC_ID", "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    kind, _ = h27_resolved_discriminator(text, "DESIGN_RECORD_KIND")
+    verdict, _ = h27_resolved_discriminator(text, "DESIGN_REVIEW_VERDICT")
+    return (
+        phase == "DESIGN-REVIEW"
+        and kind == "design-doc"
+        and verdict in DESIGN_REVIEW_VERDICT_VALUES
+        and h27_commission_surface_complete(text)
+    )
+
+
+def h27_commission_grant_shape_ok(item) -> bool:
+    """Task 9.5a grant-local shape, including literal marker and pair target."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "TO", "DELEGATED_DISPATCH_AUTHORITY",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    from_addr = h27_single_from(text)
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    authority, _ = h27_resolved_discriminator(text, "AUTHORITY")
+    marker, _ = h27_resolved_discriminator(text, "DELEGATED_DISPATCH_AUTHORITY")
+    to_raw, _ = h27_resolved_discriminator(text, "TO")
+    commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+    to_addrs = split_addresses(to_raw)
+    return (
+        from_role(from_addr) == "master-planner"
+        and phase == "PLAN"
+        and authority == "plan-only"
+        and marker == "yes"
+        and h27_pair_planner_address(commission_to)
+        and len(to_addrs) == 1
+        and normalized_addr(to_addrs[0]) == normalized_addr(commission_to)
+        and h27_commission_surface_complete(text)
+    )
 
 
 def h27_foreign_lock_errors(
@@ -2064,6 +2201,336 @@ def h27_lock_lifecycle_precompute(root: Path, phases):
     return routes, errors
 
 
+def h27_commission_precompute(root: Path, phases) -> List[str]:
+    """Validate Task 9.5a's commission carriers, universes, surfaces, and stages.
+
+    This slice deliberately does not resolve PARENT_DISPATCH_ID edges.  Task
+    9.5b owns exact ancestry, reviewer ownership, and authorization reselection.
+    """
+    errors: List[str] = []
+
+    def relname(item) -> str:
+        return str(item[0].relative_to(root))
+
+    def marker_universe(marker: str, commission_id: str, before_order):
+        return sorted(
+            (
+                item for item in phases
+                if item[1] < before_order
+                and h27_occurrences(item[4], marker)
+                and commission_id in h27_occurrences(item[4], "COMMISSION_ID")
+            ),
+            key=lambda item: item[1],
+        )
+
+    def latest_at_one_position(items):
+        if not items:
+            return None, 0
+        latest = h27_same_position_latest(items)
+        return (latest[0] if len(latest) == 1 else None), len(latest)
+
+    def selected_conflict(item, keys) -> str | None:
+        for key in keys:
+            if h27_resolved_discriminator(item[4], key)[1]:
+                return key
+        return None
+
+    def authorization_for(consumer, commission_id: str, site_rule: str):
+        candidates = marker_universe("COMMISSION_AUTHORIZATION", commission_id, consumer[1])
+        selected, tied = latest_at_one_position(candidates)
+        if not candidates:
+            errors.append(
+                f"{relname(consumer)}: commission {commission_id!r} has no earlier authorization-universe member{site_rule}"
+            )
+            return None
+        if selected is None:
+            errors.append(
+                f"{relname(consumer)}: commission {commission_id!r} has {tied} authorization-universe candidates "
+                f"at the latest order position; ambiguity fails closed{H27_COMMISSION_AUTH_RULE}"
+            )
+            return None
+        conflict = selected_conflict(
+            selected,
+            ("FROM", "PHASE", "AUTHORITY", "TO", "COMMISSION_AUTHORIZATION") + H27_COMMISSION_SURFACE,
+        )
+        if conflict:
+            errors.append(
+                f"{relname(consumer)}: selected authorization-universe member {relname(selected)} has conflicting "
+                f"{conflict} occurrences; universe selection refuses first-value resolution{H27_COMMISSION_AUTH_RULE}"
+            )
+            return None
+        if not h27_commission_auth_shape_ok(selected):
+            errors.append(
+                f"{relname(consumer)}: latest authorization-universe member {relname(selected)} fails stage-(a) "
+                f"shape; marker-bearing malformed authorization shadows and fails{H27_COMMISSION_AUTH_RULE}"
+            )
+            return None
+        return selected
+
+    def latest_charter(charter_doc_id: str, commission_id: str, before_order):
+        candidates = [
+            item for item in phases
+            if item[1] < before_order
+            and (
+                charter_doc_id in h27_occurrences(item[4], "DESIGN_DOC_ID")
+                or commission_id in h27_occurrences(item[4], "COMMISSION_ID")
+            )
+            and "DESIGN" in h27_occurrences(item[4], "PHASE")
+            and h27_any_role_occurrence(item[4], {"master-planner"})
+        ]
+        return latest_at_one_position(candidates)[0]
+
+    def latest_approval(charter_doc_id: str, commission_id: str, before_order):
+        candidates = [
+            item for item in phases
+            if item[1] < before_order
+            and (
+                charter_doc_id in h27_occurrences(item[4], "DESIGN_DOC_ID")
+                or commission_id in h27_occurrences(item[4], "COMMISSION_ID")
+            )
+            and "DESIGN-REVIEW" in h27_occurrences(item[4], "PHASE")
+            and h27_any_role_occurrence(item[4], {"master-reviewer"})
+        ]
+        return latest_at_one_position(candidates)[0]
+
+    def add_nonmaster_conflicts(item) -> bool:
+        """File-mode H27 already reports master-seat conflicts; cover special/pair stages here."""
+        from_addr = h27_single_from(item[4])
+        is_master = from_role(from_addr) in MASTER_TIER_ROLES
+        conflicted = False
+        for key in H27_CONFLICT_FIELDS:
+            conflict = h27_conflict_message(item[4], key)
+            if conflict:
+                conflicted = True
+                if not is_master:
+                    errors.append(f"{relname(item)}: {conflict}")
+        return conflicted
+
+    for item in phases:
+        _path, order, _phase, _fields, text = item
+        carrier_presence = {key for key in H27_COMMISSION_CARRIERS if h27_occurrences(text, key)}
+        dda_presence = bool(h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY"))
+        master_grant_marker = dda_presence and h27_any_role_occurrence(text, {"master-planner"})
+        if not carrier_presence and not master_grant_marker:
+            continue
+
+        commission_id, commission_id_conflict = h27_resolved_discriminator(text, "COMMISSION_ID")
+        if (
+            carrier_presence == {"COMMISSION_ID"}
+            and not dda_presence
+            and not commission_id_conflict
+            and commission_id not in {None, ""}
+        ):
+            # A non-empty ID alone is an inert reference. Empty ID is engaged.
+            continue
+
+        from_addr = h27_single_from(text)
+        from_role_value = from_role(from_addr)
+        phase, _ = h27_resolved_discriminator(text, "PHASE")
+        auth_marker = bool(h27_occurrences(text, "COMMISSION_AUTHORIZATION"))
+
+        # Stage (a) is marker-defined. Both markers intentionally do not exit
+        # here; they fall through to delegation-stage classification.
+        if auth_marker and not dda_presence:
+            if add_nonmaster_conflicts(item):
+                continue
+            if not h27_commission_auth_shape_ok(item):
+                errors.append(
+                    f"{relname(item)}: relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape "
+                    "(literal yes, direct-authority FROM, PHASE PLAN, AUTHORITY plan-only, TO exactly one "
+                    "master-planner, complete equality surface, pair-planner COMMISSION_TO)"
+                    f"{H27_COMMISSION_AUTH_RULE}"
+                )
+            continue
+
+        is_receipt = phase == "PLAN" and canonical_role(from_role_value) == "planner"
+        if is_receipt and not h27_commission_surface_complete(text):
+            if add_nonmaster_conflicts(item):
+                continue
+            errors.append(f"{relname(item)}: commissioned pair receipt has incomplete equality surface{H27_COMMISSION_RECEIPT_RULE}")
+            continue
+
+        if add_nonmaster_conflicts(item):
+            continue
+        if commission_id in {None, ""}:
+            errors.append(
+                f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
+                f"{H27_COMMISSION_RULE}"
+            )
+            continue
+
+        charter_doc_id, _ = h27_resolved_discriminator(text, "CHARTER_DOC_ID")
+
+        # Charter stage. Selection is chronological and marker-universe based;
+        # the charter parent edge is deliberately untouched until Task 9.5b.
+        design_doc_id, _ = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
+        if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id == charter_doc_id:
+            if not h27_commission_charter_shape_ok(item):
+                errors.append(
+                    f"{relname(item)}: charter fails stage-(b) shape; requires master-planner PHASE DESIGN, "
+                    "AUTHORITY design-only, matching document identity, and DESIGN_RECORD_KIND design-doc"
+                    f"{H27_COMMISSION_CHARTER_RULE}"
+                )
+                continue
+            authorization = authorization_for(item, commission_id, H27_COMMISSION_CHARTER_RULE)
+            if authorization is None:
+                continue
+            auth_to, _ = h27_resolved_discriminator(authorization[4], "TO")
+            auth_to_addrs = split_addresses(auth_to)
+            if len(auth_to_addrs) != 1 or normalized_addr(auth_to_addrs[0]) != normalized_addr(from_addr):
+                errors.append(
+                    f"{relname(item)}: charter FROM must equal the master-planner address selected authorization TO"
+                    f"{H27_COMMISSION_CHARTER_RULE}"
+                )
+                continue
+            if h27_commission_surface(text) != h27_commission_surface(authorization[4]):
+                errors.append(
+                    f"{relname(item)}: charter equality surface is not byte-equal to the selected authorization"
+                    f"{H27_COMMISSION_CHARTER_RULE}"
+                )
+            continue
+
+        # Approval local shape and equality. Parent resolution and same-owner
+        # reviewer enforcement remain Task 9.5b work.
+        if phase == "DESIGN-REVIEW" and from_role_value == "master-reviewer" and design_doc_id not in {None, ""}:
+            if not h27_commission_approval_shape_ok(item):
+                errors.append(
+                    f"{relname(item)}: charter approval requires DESIGN_RECORD_KIND: design-doc and a "
+                    f"grammatical DESIGN_REVIEW_VERDICT{H27_COMMISSION_CHARTER_RULE}"
+                )
+                continue
+            charter = latest_charter(charter_doc_id, commission_id, order)
+            if charter is None:
+                errors.append(f"{relname(item)}: charter approval has no earlier charter revision{H27_COMMISSION_CHARTER_RULE}")
+                continue
+            charter_id, conflict = h27_resolved_discriminator(charter[4], "COMMISSION_ID")
+            if conflict or charter_id in {None, ""}:
+                errors.append(f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_CHARTER_RULE}")
+                continue
+            authorization = authorization_for(charter, charter_id, H27_COMMISSION_CHARTER_RULE)
+            if authorization is None:
+                continue
+            surfaces = {
+                h27_commission_surface(text),
+                h27_commission_surface(charter[4]),
+                h27_commission_surface(authorization[4]),
+            }
+            if len(surfaces) != 1:
+                errors.append(
+                    f"{relname(item)}: approval equality surface is not byte-equal to the selected authorization "
+                    f"and charter revision{H27_COMMISSION_CHARTER_RULE}"
+                )
+            continue
+
+        # Grant local shape and four-way equality. The literal marker is
+        # checked separately so YES/true remain universe members but fail.
+        if dda_presence and from_role_value == "master-planner":
+            marker, _ = h27_resolved_discriminator(text, "DELEGATED_DISPATCH_AUTHORITY")
+            if marker != "yes":
+                errors.append(
+                    f"{relname(item)}: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; "
+                    f"got {marker!r}{H27_COMMISSION_GRANT_RULE}"
+                )
+                continue
+            commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+            if not h27_pair_planner_address(commission_to):
+                errors.append(
+                    f"{relname(item)}: COMMISSION_TO {commission_to!r} is not exactly one non-special "
+                    f"pair-planner address{H27_COMMISSION_GRANT_RULE}"
+                )
+                continue
+            to_raw, _ = h27_resolved_discriminator(text, "TO")
+            to_addrs = split_addresses(to_raw)
+            if len(to_addrs) != 1 or normalized_addr(to_addrs[0]) != normalized_addr(commission_to):
+                errors.append(f"{relname(item)}: grant TO must be exactly the COMMISSION_TO address{H27_COMMISSION_GRANT_RULE}")
+                continue
+            if not h27_commission_grant_shape_ok(item):
+                errors.append(f"{relname(item)}: master-planner grant fails stage-(c) shape{H27_COMMISSION_GRANT_RULE}")
+                continue
+            charter = latest_charter(charter_doc_id, commission_id, order)
+            approval = latest_approval(charter_doc_id, commission_id, order)
+            if charter is None or approval is None:
+                errors.append(f"{relname(item)}: grant lacks an earlier charter revision or approval{H27_COMMISSION_GRANT_RULE}")
+                continue
+            charter_id, conflict = h27_resolved_discriminator(charter[4], "COMMISSION_ID")
+            if conflict or charter_id in {None, ""}:
+                errors.append(f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_GRANT_RULE}")
+                continue
+            authorization = authorization_for(charter, charter_id, H27_COMMISSION_GRANT_RULE)
+            if authorization is None:
+                continue
+            auth_to, _ = h27_resolved_discriminator(authorization[4], "TO")
+            auth_to_addrs = split_addresses(auth_to)
+            if len(auth_to_addrs) != 1 or normalized_addr(auth_to_addrs[0]) != normalized_addr(from_addr):
+                errors.append(
+                    f"{relname(item)}: grant FROM must equal the master-planner address selected authorization TO"
+                    f"{H27_COMMISSION_GRANT_RULE}"
+                )
+                continue
+            surfaces = {
+                h27_commission_surface(text), h27_commission_surface(approval[4]),
+                h27_commission_surface(charter[4]), h27_commission_surface(authorization[4]),
+            }
+            if len(surfaces) != 1:
+                errors.append(
+                    f"{relname(item)}: grant equality surface is not byte-equal across selected authorization, "
+                    f"charter revision, approval, and grant{H27_COMMISSION_GRANT_RULE}"
+                )
+            continue
+
+        # Pair receipt: target first, then latest grant-universe selection.
+        if is_receipt:
+            commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+            if normalized_addr(from_addr) != normalized_addr(commission_to):
+                errors.append(
+                    f"{relname(item)}: commissioned pair receipt FROM {from_addr!r} does not equal "
+                    f"COMMISSION_TO {commission_to!r}{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            candidates = marker_universe("DELEGATED_DISPATCH_AUTHORITY", commission_id, order)
+            selected, tied = latest_at_one_position(candidates)
+            if not candidates:
+                errors.append(
+                    f"{relname(item)}: commission {commission_id!r} has no earlier grant-universe member"
+                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            if selected is None:
+                errors.append(
+                    f"{relname(item)}: commission {commission_id!r} has {tied} grant-universe candidates at the "
+                    f"latest order position; ambiguity fails closed{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            conflict = selected_conflict(
+                selected,
+                ("FROM", "PHASE", "AUTHORITY", "TO", "DELEGATED_DISPATCH_AUTHORITY") + H27_COMMISSION_SURFACE,
+            )
+            if conflict:
+                errors.append(
+                    f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting {conflict} "
+                    f"occurrences; universe selection refuses first-value resolution{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            if not h27_commission_grant_shape_ok(selected):
+                errors.append(
+                    f"{relname(item)}: latest grant-universe member {relname(selected)} fails stage-(c) shape; "
+                    f"marker-bearing malformed grant shadows and fails{H27_COMMISSION_GRANT_RULE}"
+                )
+                continue
+            if h27_commission_surface(text) != h27_commission_surface(selected[4]):
+                errors.append(
+                    f"{relname(item)}: latest grant-universe member is not targeted to this pair planner with a "
+                    f"byte-equal surface{H27_COMMISSION_RECEIPT_RULE}"
+                )
+            continue
+
+        errors.append(
+            f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
+            f"{H27_COMMISSION_RULE}"
+        )
+    return errors
+
+
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     result = LintResult()
     all_md = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
@@ -2145,6 +2612,9 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     lock_routes, lock_lifecycle_errors = h27_lock_lifecycle_precompute(path, phases)
     for lock_lifecycle_error in lock_lifecycle_errors:
         result.error(lock_lifecycle_error)
+
+    for commission_error in h27_commission_precompute(path, phases):
+        result.error(commission_error)
 
     # Design-review lineage gate. A pair-Planner PLAN that locks a
     # design-doc-backed design must parent to an approving Implementer

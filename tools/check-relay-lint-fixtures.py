@@ -262,7 +262,72 @@ LIFECYCLE_EXPECTED = [
     ("root", "mastertier/MT76-origin-from-conflict", 1),
 ]
 
-EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + [
+COMMISSION_PASS = {
+    "CM77-valid-chain",
+    "CM85-id-reference-inert",
+    "CM92-unmarked-same-id-control",
+    "CM110-unmarked-grant-control",
+    "CM115-auth-reissue-pass",
+    "CM116-later-auth-inert",
+    "CM117-unmarked-review-excluded",
+    "CM118-grant-reissue-pass",
+    "CM119-later-grant-inert",
+    "CM120-unmarked-review-grant-excluded",
+    "CM121-prior-receipt-excluded",
+    "CM125-charter-owner-mixedcase-pass",
+    "CM127-grant-owner-mixedcase-pass",
+    "CM131-approval-local-shape",
+    "CM145-auth-target-legacy-pass",
+    "CM146-auth-target-explicit-pass",
+    "CM151-grant-target-pass",
+    "CM152-grant-target-pass",
+}
+COMMISSION_MEMBERS = (
+    "CM77-valid-chain", "CM78-auth-uppercase", "CM79-auth-wrong-phase",
+    "CM80-auth-wrong-authority", "CM81-auth-wrong-grantor", "CM82-auth-wrong-to",
+    "CM83-auth-nonpair-commission-to", "CM84-both-markers-delegation",
+    "CM85-id-reference-inert", "CM86-partial-correct-seat", "CM87-empty-correct-seat",
+    "CM88-wrong-seat-receipt", "CM89-charter-wrong-authority", "CM90-charter-missing-kind",
+    "CM91-auth-shadow-no", "CM92-unmarked-same-id-control",
+    "CM93-auth-membership-conflict-match-first", "CM94-auth-membership-conflict-match-last",
+    "CM95-auth-same-position", "CM96-charter-equality-commission-scope",
+    "CM97-charter-equality-commission-to", "CM98-charter-equality-charter-doc-id",
+    "CM99-approval-equality-commission-id", "CM100-approval-equality-commission-scope",
+    "CM101-approval-equality-commission-to", "CM102-approval-equality-charter-doc-id",
+    "CM103-grant-equality-commission-id", "CM104-grant-equality-commission-scope",
+    "CM105-grant-equality-commission-to", "CM106-grant-equality-charter-doc-id",
+    "CM107-grant-nonpair-target", "CM108-grant-to-mismatch",
+    "CM109-malformed-grant-shadow", "CM110-unmarked-grant-control",
+    "CM111-grant-membership-conflict-match-first", "CM112-grant-membership-conflict-match-last",
+    "CM113-grant-same-position", "CM114-half-carrier", "CM115-auth-reissue-pass",
+    "CM116-later-auth-inert", "CM117-unmarked-review-excluded", "CM118-grant-reissue-pass",
+    "CM119-later-grant-inert", "CM120-unmarked-review-grant-excluded",
+    "CM121-prior-receipt-excluded", "CM122-grant-marker-yes", "CM123-grant-marker-true",
+    "CM124-charter-owner-mismatch", "CM125-charter-owner-mixedcase-pass",
+    "CM126-grant-owner-mismatch", "CM127-grant-owner-mixedcase-pass",
+    "CM128-approval-local-shape", "CM129-approval-local-shape",
+    "CM130-approval-local-shape", "CM131-approval-local-shape",
+    "CM132-approval-local-shape", "CM133-wrong-seat-missing-commission-id",
+    "CM134-wrong-seat-missing-commission-scope", "CM135-wrong-seat-missing-commission-to",
+    "CM136-wrong-seat-missing-charter-doc-id", "CM137-wrong-seat-empty-commission-id",
+    "CM138-wrong-seat-empty-commission-scope", "CM139-wrong-seat-empty-commission-to",
+    "CM140-wrong-seat-empty-charter-doc-id", "CM141-auth-target-special",
+    "CM142-auth-target-master", "CM143-auth-target-reviewer", "CM144-auth-target-multiple",
+    "CM145-auth-target-legacy-pass", "CM146-auth-target-explicit-pass",
+    "CM147-grant-target-special", "CM148-grant-target-master",
+    "CM149-grant-target-reviewer", "CM150-grant-target-multiple",
+    "CM151-grant-target-pass", "CM152-grant-target-pass",
+    "CM153-byte-exact-address-surface", "CM154-empty-carrier-engages",
+    "CM155-empty-carrier-engages", "CM156-empty-carrier-engages",
+    "CM157-empty-carrier-engages", "CM158-charter-equality-commission-id",
+    "CM159-empty-commission-id-engages",
+)
+COMMISSION_EXPECTED = [
+    ("root", f"mastertier/{name}", 0 if name in COMMISSION_PASS else 1)
+    for name in COMMISSION_MEMBERS
+]
+
+EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "mastertier/MT0-generator-smoke.md", 0),
     ("file", "mastertier/MT21-dispatch-impl-master-planner.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-master-reviewer.md", 1),
@@ -368,12 +433,12 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + [
     ("root", "rolevocab/RV7b-domain-direct-override", 1),
     ("root", "rolevocab/RV7e-domain-designlock-kind", 0),
     ("root", "rolevocab/RV7e2-domain-designlock-id-only", 1),
-    ("root", "rolevocab/RV7f-master-delegated-authority", 0),
+    ("root", "rolevocab/RV7f-master-delegated-authority", 1),
     ("root", "rolevocab/RV7g-malformed-address-hardening", 1),
     ("root", "rolevocab/RV7h-delegated-bypass-order", 1),
     ("root", "rolevocab/RV7i-lock-empty-first", 1),
     ("root", "rolevocab/RV7j-override-then-conflict", 1),
-    ("root", "rolevocab/RV7k-samevalue-duplicate", 0),
+    ("root", "rolevocab/RV7k-samevalue-duplicate", 1),
     ("root", "rolevocab/RV7l-override-plus-lock-conflict", 1),
     ("root", "rolevocab/RV7m-kind-conflict-plus-lock", 1),
     ("root", "rolevocab/RV7n-delegated-replacement", 1),
@@ -994,8 +1059,12 @@ EXPECTED_ERROR_SET.update({
     "rolevocab/RV7e2-domain-designlock-id-only": [
         "01-plan.md: master/domain-seat consumer DESIGN_LOCK_ID 'rv7e2-doc' has no resolvable earlier master/domain origin" + _lock_rule,
     ],
-    "rolevocab/RV7f-master-delegated-authority": [],
-    "rolevocab/RV7k-samevalue-duplicate": [],
+    "rolevocab/RV7f-master-delegated-authority": [
+        "01-plan.md: commission machine engaged but relay is not consumed by any Task 9.5a stage (DD-v29-master-authority-20260809 cross-seat rule 3)",
+    ],
+    "rolevocab/RV7k-samevalue-duplicate": [
+        "01-plan.md: commission machine engaged but relay is not consumed by any Task 9.5a stage (DD-v29-master-authority-20260809 cross-seat rule 3)",
+    ],
     "rolevocab/RV7l-override-plus-lock-conflict": [f"01-plan.md: {_a4_lock}", f"01-plan.md: {_h27_master_override}"],
     "rolevocab/RV7m-kind-conflict-plus-lock": [f"01-plan.md: {_a4_kind}"],
 })
@@ -1154,6 +1223,159 @@ for _seat in ("pair-planner", "pair-implementer", "master-planner", "master-revi
     EXPECTED_ERROR_SET[f"mastertier/MT68-all-seat-missing-review-{_seat}"] = [
         f"02-consumer.md: foreign DESIGN_LOCK_ID 'lock-{_case}' has no earlier DESIGN-REVIEW parented to latest origin 01-origin.md" + _lock_rule,
     ]
+
+_commission_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3)"
+_commission_auth_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3a)"
+_commission_charter_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3b)"
+_commission_grant_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3c)"
+_commission_receipt_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3d)"
+_auth_shape = (
+    "relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape (literal yes, direct-authority FROM, "
+    "PHASE PLAN, AUTHORITY plan-only, TO exactly one master-planner, complete equality surface, pair-planner "
+    "COMMISSION_TO)" + _commission_auth_rule
+)
+_unconsumed = "commission machine engaged but relay is not consumed by any Task 9.5a stage" + _commission_rule
+_incomplete_receipt = "commissioned pair receipt has incomplete equality surface" + _commission_receipt_rule
+for _name in COMMISSION_PASS:
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = []
+for _name in (
+    "CM78-auth-uppercase", "CM79-auth-wrong-phase", "CM80-auth-wrong-authority",
+    "CM81-auth-wrong-grantor", "CM82-auth-wrong-to", "CM83-auth-nonpair-commission-to",
+    "CM141-auth-target-special", "CM142-auth-target-master", "CM143-auth-target-reviewer",
+    "CM144-auth-target-multiple",
+):
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = ["01-auth.md: " + _auth_shape]
+EXPECTED_ERROR_SET.update({
+    "mastertier/CM84-both-markers-delegation": ["01-relay.md: " + _unconsumed],
+    "mastertier/CM86-partial-correct-seat": ["01-receipt.md: " + _incomplete_receipt],
+    "mastertier/CM87-empty-correct-seat": ["01-receipt.md: " + _incomplete_receipt],
+    "mastertier/CM88-wrong-seat-receipt": [
+        "01-receipt.md: commissioned pair receipt FROM 'gamma.pair-planner' does not equal COMMISSION_TO 'beta.pair-planner'" + _commission_receipt_rule,
+    ],
+    "mastertier/CM89-charter-wrong-authority": [
+        "02-charter.md: charter fails stage-(b) shape; requires master-planner PHASE DESIGN, AUTHORITY design-only, matching document identity, and DESIGN_RECORD_KIND design-doc" + _commission_charter_rule,
+    ],
+    "mastertier/CM90-charter-missing-kind": [
+        "02-charter.md: charter fails stage-(b) shape; requires master-planner PHASE DESIGN, AUTHORITY design-only, matching document identity, and DESIGN_RECORD_KIND design-doc" + _commission_charter_rule,
+    ],
+    "mastertier/CM91-auth-shadow-no": [
+        "02-auth-no.md: " + _auth_shape,
+        "03-charter.md: latest authorization-universe member 02-auth-no.md fails stage-(a) shape; marker-bearing malformed authorization shadows and fails" + _commission_auth_rule,
+    ],
+})
+# The selected-universe conflicts must expose both the relay-local rule-5 refusal
+# and the downstream candidate-selection refusal in both occurrence orders.
+_cid_conflict = "COMMISSION_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_commission_surface_fields = ("COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID")
+for _number, _order in ((93, "match-first"), (94, "match-last")):
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-auth-membership-conflict-{_order}"] = [
+        "01-auth.md: " + _cid_conflict,
+        "02-charter.md: selected authorization-universe member 01-auth.md has conflicting COMMISSION_ID occurrences; universe selection refuses first-value resolution" + _commission_auth_rule,
+    ]
+EXPECTED_ERROR_SET.update({
+    "mastertier/CM95-auth-same-position": [
+        "02-charter.md: commission 'cm95' has 2 authorization-universe candidates at the latest order position; ambiguity fails closed" + _commission_auth_rule,
+    ],
+    "mastertier/CM96-charter-equality-commission-scope": [
+        "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
+    ],
+    "mastertier/CM97-charter-equality-commission-to": [
+        "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
+    ],
+    "mastertier/CM98-charter-equality-charter-doc-id": [
+        "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
+    ],
+})
+for _number in range(99, 103):
+    _field = _commission_surface_fields[_number - 99]
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-approval-equality-{_field.lower().replace('_', '-')}"] = [
+        "03-approval.md: approval equality surface is not byte-equal to the selected authorization and charter revision" + _commission_charter_rule,
+    ]
+for _number in range(103, 107):
+    _field = _commission_surface_fields[_number - 103]
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-equality-{_field.lower().replace('_', '-')}"] = [
+        "04-grant.md: grant equality surface is not byte-equal across selected authorization, charter revision, approval, and grant" + _commission_grant_rule,
+    ]
+EXPECTED_ERROR_SET.update({
+    "mastertier/CM107-grant-nonpair-target": [
+        "04-grant.md: COMMISSION_TO 'beta.pair-implementer' is not exactly one non-special pair-planner address" + _commission_grant_rule,
+    ],
+    "mastertier/CM108-grant-to-mismatch": [
+        "04-grant.md: grant TO must be exactly the COMMISSION_TO address" + _commission_grant_rule,
+    ],
+    "mastertier/CM109-malformed-grant-shadow": [
+        "05-grant-no.md: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; got 'no'" + _commission_grant_rule,
+        "06-receipt.md: latest grant-universe member 05-grant-no.md fails stage-(c) shape; marker-bearing malformed grant shadows and fails" + _commission_grant_rule,
+    ],
+})
+for _number, _order in ((111, "match-first"), (112, "match-last")):
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-membership-conflict-{_order}"] = [
+        "05-grant-conflict.md: " + _cid_conflict,
+        "06-receipt.md: selected grant-universe member 05-grant-conflict.md has conflicting COMMISSION_ID occurrences; universe selection refuses first-value resolution" + _commission_receipt_rule,
+    ]
+EXPECTED_ERROR_SET.update({
+    "mastertier/CM113-grant-same-position": [
+        "06-receipt.md: commission 'cm113' has 2 grant-universe candidates at the latest order position; ambiguity fails closed" + _commission_receipt_rule,
+    ],
+    "mastertier/CM114-half-carrier": ["01-relay.md: " + _unconsumed],
+    "mastertier/CM122-grant-marker-yes": [
+        "05-grant-malformed.md: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; got 'YES'" + _commission_grant_rule,
+        "06-receipt.md: latest grant-universe member 05-grant-malformed.md fails stage-(c) shape; marker-bearing malformed grant shadows and fails" + _commission_grant_rule,
+    ],
+    "mastertier/CM123-grant-marker-true": [
+        "05-grant-malformed.md: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; got 'true'" + _commission_grant_rule,
+        "06-receipt.md: latest grant-universe member 05-grant-malformed.md fails stage-(c) shape; marker-bearing malformed grant shadows and fails" + _commission_grant_rule,
+    ],
+    "mastertier/CM124-charter-owner-mismatch": [
+        "02-charter.md: charter FROM must equal the master-planner address selected authorization TO" + _commission_charter_rule,
+    ],
+    "mastertier/CM126-grant-owner-mismatch": [
+        "04-grant.md: grant FROM must equal the master-planner address selected authorization TO" + _commission_grant_rule,
+    ],
+    "mastertier/CM128-approval-local-shape": [
+        "03-approval.md: charter approval requires DESIGN_RECORD_KIND: design-doc and a grammatical DESIGN_REVIEW_VERDICT" + _commission_charter_rule,
+    ],
+    "mastertier/CM129-approval-local-shape": [
+        "03-approval.md: charter approval requires DESIGN_RECORD_KIND: design-doc and a grammatical DESIGN_REVIEW_VERDICT" + _commission_charter_rule,
+    ],
+    "mastertier/CM130-approval-local-shape": [
+        "03-approval.md: charter approval requires DESIGN_RECORD_KIND: design-doc and a grammatical DESIGN_REVIEW_VERDICT" + _commission_charter_rule,
+    ],
+    "mastertier/CM132-approval-local-shape": [
+        "03-approval.md: DESIGN_REVIEW_VERDICT has non-canonical value: 'banana'",
+        "03-approval.md: charter approval requires DESIGN_RECORD_KIND: design-doc and a grammatical DESIGN_REVIEW_VERDICT" + _commission_charter_rule,
+    ],
+})
+EXPECTED_ERROR_SET["mastertier/CM79-auth-wrong-phase"] = [
+    "01-auth.md: phase/authority inconsistent: PHASE=SITREP, AUTHORITY='plan-only'",
+    "01-auth.md: " + _auth_shape,
+]
+for _number in range(133, 141):
+    _mode = "missing" if _number < 137 else "empty"
+    _field = _commission_surface_fields[(_number - 133) % 4]
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-wrong-seat-{_mode}-{_field.lower().replace('_', '-')}"] = [
+        "01-receipt.md: " + _incomplete_receipt,
+    ]
+for _number, (_label, _target) in enumerate(
+    (("special", "operator"), ("master", "beta.master-planner"), ("reviewer", "beta.reviewer"),
+     ("multiple", "beta.pair-planner, gamma.pair-planner")), start=147,
+):
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-target-{_label}"] = [
+        f"04-grant.md: COMMISSION_TO {_target!r} is not exactly one non-special pair-planner address" + _commission_grant_rule,
+    ]
+EXPECTED_ERROR_SET.update({
+    "mastertier/CM153-byte-exact-address-surface": [
+        "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
+    ],
+    "mastertier/CM154-empty-carrier-engages": ["01-relay.md: " + _auth_shape],
+    "mastertier/CM155-empty-carrier-engages": ["01-relay.md: " + _unconsumed],
+    "mastertier/CM156-empty-carrier-engages": ["01-relay.md: " + _unconsumed],
+    "mastertier/CM157-empty-carrier-engages": ["01-relay.md: " + _unconsumed],
+    "mastertier/CM158-charter-equality-commission-id": [
+        "02-charter.md: commission 'other' has no earlier authorization-universe member" + _commission_charter_rule,
+    ],
+    "mastertier/CM159-empty-commission-id-engages": ["01-relay.md: " + _unconsumed],
+})
 
 
 def main() -> int:

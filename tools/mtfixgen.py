@@ -56,6 +56,10 @@ H27_A4_CONFLICTS = (
     ("DESIGN_RECORD_KIND", "design-doc", "audit-record"),
 )
 
+COMMISSION_SURFACE_FIELDS = (
+    "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+)
+
 
 def conflict_member_name(prefix: str, family: str, key: str) -> str:
     return f"{prefix}{family}-{key.lower().replace('_', '-')}.md"
@@ -145,7 +149,7 @@ def lifecycle_relay(
     *, role: str, phase: str, authority: str, dispatch_id: str,
     from_addr: str, to_addr: str, fields: tuple[tuple[str, str], ...] = (),
 ) -> str:
-    extra = "".join(f"{key}: {value}\n" for key, value in fields)
+    extra = "".join(f"{key}:{' ' + value if value else ''}\n" for key, value in fields)
     return f"""ROLE: {role}
 PHASE: {phase}
 AUTHORITY: {authority}
@@ -239,6 +243,402 @@ def add_chain(
     members[f"{name}/{len(reviews or (review_relay(fixture_case),)) + 2:02d}-consumer.md"] = (
         consumer or consumer_relay(fixture_case)
     )
+
+
+def commission_surface(
+    case: str, *, overrides: dict[str, str] | None = None,
+    omit: tuple[str, ...] = (), extra: tuple[tuple[str, str], ...] = (),
+) -> tuple[tuple[str, str], ...]:
+    values = {
+        "COMMISSION_ID": case,
+        "COMMISSION_SCOPE": f"scope-{case}",
+        "COMMISSION_TO": "beta.pair-planner",
+        "CHARTER_DOC_ID": f"CH-{case}",
+    }
+    values.update(overrides or {})
+    fields = [(key, values[key]) for key in COMMISSION_SURFACE_FIELDS if key not in omit]
+    fields.extend(extra)
+    return tuple(fields)
+
+
+def commission_authorization(
+    case: str, *, value: str = "yes", role: str = "Operator", from_addr: str = "operator",
+    to_addr: str = "alpha.master-planner", phase: str = "PLAN", authority: str = "plan-only",
+    dispatch_id: str | None = None, surface: tuple[tuple[str, str], ...] | None = None,
+    extra_fields: tuple[tuple[str, str], ...] = (),
+) -> str:
+    return lifecycle_relay(
+        role=role, phase=phase, authority=authority,
+        dispatch_id=dispatch_id or f"{case}-auth", from_addr=from_addr, to_addr=to_addr,
+        fields=(("COMMISSION_AUTHORIZATION", value),) + (
+            surface if surface is not None else commission_surface(case)
+        ) + extra_fields,
+    )
+
+
+def commission_charter(
+    case: str, *, authority: str = "design-only", kind: str | None = "design-doc",
+    parent: str | None = None,
+    design_doc_id: str | None = None,
+    dispatch_id: str | None = None, surface: tuple[tuple[str, str], ...] | None = None,
+) -> str:
+    fields = [("PARENT_DISPATCH_ID", parent or f"{case}-auth"), ("DESIGN_DOC_ID", design_doc_id or f"CH-{case}")]
+    if kind is not None:
+        fields.append(("DESIGN_RECORD_KIND", kind))
+    fields.extend(surface if surface is not None else commission_surface(case))
+    return lifecycle_relay(
+        role="Master Planner", phase="DESIGN", authority=authority,
+        dispatch_id=dispatch_id or f"{case}-charter", from_addr="alpha.master-planner",
+        to_addr="alpha.master-reviewer", fields=tuple(fields),
+    )
+
+
+def commission_approval(
+    case: str, *, kind: str | None = "design-doc", verdict: str | None = "approve",
+    surface: tuple[tuple[str, str], ...] | None = None,
+) -> str:
+    fields = [
+        ("PARENT_DISPATCH_ID", f"{case}-charter"),
+        ("DESIGN_DOC_ID", f"CH-{case}"),
+    ]
+    if kind is not None:
+        fields.append(("DESIGN_RECORD_KIND", kind))
+    if verdict is not None:
+        fields.append(("DESIGN_REVIEW_VERDICT", verdict))
+    fields.extend(surface if surface is not None else commission_surface(case))
+    return lifecycle_relay(
+        role="Master Reviewer", phase="DESIGN-REVIEW", authority="review-only",
+        dispatch_id=f"{case}-approval", from_addr="alpha.master-reviewer",
+        to_addr="alpha.master-planner",
+        fields=tuple(fields),
+    )
+
+
+def commission_grant(
+    case: str, *, value: str = "yes", to_addr: str = "beta.pair-planner",
+    role: str = "Master Planner", from_addr: str = "alpha.master-planner",
+    dispatch_id: str | None = None, surface: tuple[tuple[str, str], ...] | None = None,
+    extra_fields: tuple[tuple[str, str], ...] = (),
+) -> str:
+    return lifecycle_relay(
+        role=role, phase="PLAN", authority="plan-only",
+        dispatch_id=dispatch_id or f"{case}-grant", from_addr=from_addr, to_addr=to_addr,
+        fields=(
+            ("PARENT_DISPATCH_ID", f"{case}-approval"),
+            ("DELEGATED_DISPATCH_AUTHORITY", value),
+        ) + (surface if surface is not None else commission_surface(case)) + extra_fields,
+    )
+
+
+def commission_receipt(
+    case: str, *, from_addr: str = "beta.pair-planner",
+    surface: tuple[tuple[str, str], ...] | None = None,
+) -> str:
+    return lifecycle_relay(
+        role="Pair Planner", phase="PLAN", authority="plan-only",
+        dispatch_id=f"{case}-receipt", from_addr=from_addr, to_addr="beta.pair-implementer",
+        fields=surface if surface is not None else commission_surface(case),
+    )
+
+
+def add_commission_chain(
+    members: dict[str, str], name: str, case: str, *,
+    auth: str | None = None, charter: str | None = None, approval: str | None = None,
+    grant: str | None = None, receipt: str | None = None,
+) -> None:
+    members[f"{name}/01-auth.md"] = auth or commission_authorization(case)
+    members[f"{name}/02-charter.md"] = charter or commission_charter(case)
+    members[f"{name}/03-approval.md"] = approval or commission_approval(case)
+    members[f"{name}/04-grant.md"] = grant or commission_grant(case)
+    members[f"{name}/05-receipt.md"] = receipt or commission_receipt(case)
+
+
+def commission_members() -> dict[str, str]:
+    members: dict[str, str] = {}
+    add_commission_chain(members, "CM77-valid-chain", "cm77")
+
+    members["CM78-auth-uppercase/01-auth.md"] = commission_authorization("cm78", value="YES")
+    members["CM79-auth-wrong-phase/01-auth.md"] = commission_authorization("cm79", phase="SITREP")
+    members["CM80-auth-wrong-authority/01-auth.md"] = commission_authorization("cm80", authority="read-only")
+    members["CM81-auth-wrong-grantor/01-auth.md"] = commission_authorization(
+        "cm81", role="Master Reviewer", from_addr="alpha.master-reviewer",
+    )
+    members["CM82-auth-wrong-to/01-auth.md"] = commission_authorization("cm82", to_addr="alpha.master-reviewer")
+    members["CM83-auth-nonpair-commission-to/01-auth.md"] = commission_authorization(
+        "cm83", surface=commission_surface("cm83", overrides={"COMMISSION_TO": "beta.pair-implementer"}),
+    )
+    members["CM84-both-markers-delegation/01-relay.md"] = commission_authorization(
+        "cm84", extra_fields=(("DELEGATED_DISPATCH_AUTHORITY", "yes"),),
+    )
+
+    members["CM85-id-reference-inert/01-status.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm85-status",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_ID", "cm85"),),
+    )
+    members["CM86-partial-correct-seat/01-receipt.md"] = commission_receipt(
+        "cm86", surface=commission_surface("cm86", omit=("COMMISSION_SCOPE",)),
+    )
+    members["CM87-empty-correct-seat/01-receipt.md"] = commission_receipt(
+        "cm87", surface=commission_surface("cm87", overrides={"COMMISSION_SCOPE": ""}),
+    )
+    members["CM88-wrong-seat-receipt/01-receipt.md"] = commission_receipt("cm88", from_addr="gamma.pair-planner")
+
+    members["CM89-charter-wrong-authority/01-auth.md"] = commission_authorization("cm89")
+    members["CM89-charter-wrong-authority/02-charter.md"] = commission_charter("cm89", authority="plan-only")
+    members["CM90-charter-missing-kind/01-auth.md"] = commission_authorization("cm90")
+    members["CM90-charter-missing-kind/02-charter.md"] = commission_charter("cm90", kind=None)
+
+    members["CM91-auth-shadow-no/01-auth-valid.md"] = commission_authorization("cm91", dispatch_id="cm91-auth-valid")
+    members["CM91-auth-shadow-no/02-auth-no.md"] = commission_authorization("cm91", value="no", dispatch_id="cm91-auth-no")
+    members["CM91-auth-shadow-no/03-charter.md"] = commission_charter("cm91")
+    members["CM92-unmarked-same-id-control/01-auth.md"] = commission_authorization("cm92")
+    members["CM92-unmarked-same-id-control/02-status.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm92-status",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_ID", "cm92"),),
+    )
+    members["CM92-unmarked-same-id-control/03-charter.md"] = commission_charter("cm92")
+    for number, order in ((93, "match-first"), (94, "match-last")):
+        case = f"cm{number}"
+        ids = (("COMMISSION_ID", case), ("COMMISSION_ID", "other"))
+        if order == "match-last":
+            ids = tuple(reversed(ids))
+        surface = commission_surface(case, omit=("COMMISSION_ID",), extra=ids)
+        members[f"CM{number}-auth-membership-conflict-{order}/01-auth.md"] = commission_authorization(case, surface=surface)
+        members[f"CM{number}-auth-membership-conflict-{order}/02-charter.md"] = commission_charter(case)
+    members["CM95-auth-same-position/a/01-auth.md"] = commission_authorization("cm95", dispatch_id="cm95-auth-a")
+    members["CM95-auth-same-position/b/01-auth.md"] = commission_authorization("cm95", dispatch_id="cm95-auth-b")
+    members["CM95-auth-same-position/02-charter.md"] = commission_charter("cm95")
+
+    for number, field in ((96, "COMMISSION_SCOPE"), (97, "COMMISSION_TO"), (98, "CHARTER_DOC_ID")):
+        case = f"cm{number}"
+        override = {
+            "COMMISSION_SCOPE": "scope-other",
+            "COMMISSION_TO": "gamma.pair-planner",
+            "CHARTER_DOC_ID": f"CH-{case}-other",
+        }[field]
+        members[f"CM{number}-charter-equality-{field.lower().replace('_', '-')}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-charter-equality-{field.lower().replace('_', '-')}/02-charter.md"] = commission_charter(
+            case, design_doc_id=(override if field == "CHARTER_DOC_ID" else None),
+            surface=commission_surface(case, overrides={field: override}),
+        )
+
+    equality_fields = ("COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID")
+    for number, field in enumerate(equality_fields, start=99):
+        case = f"cm{number}"
+        override = "other" if field == "COMMISSION_ID" else (
+            "scope-other" if field == "COMMISSION_SCOPE" else (
+                "gamma.pair-planner" if field == "COMMISSION_TO" else f"CH-{case}-other"
+            )
+        )
+        members[f"CM{number}-approval-equality-{field.lower().replace('_', '-')}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-approval-equality-{field.lower().replace('_', '-')}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-approval-equality-{field.lower().replace('_', '-')}/03-approval.md"] = commission_approval(
+            case, surface=commission_surface(case, overrides={field: override}),
+        )
+    for number, field in enumerate(equality_fields, start=103):
+        case = f"cm{number}"
+        override = "other" if field == "COMMISSION_ID" else (
+            "scope-other" if field == "COMMISSION_SCOPE" else (
+                "gamma.pair-planner" if field == "COMMISSION_TO" else f"CH-{case}-other"
+            )
+        )
+        members[f"CM{number}-grant-equality-{field.lower().replace('_', '-')}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-grant-equality-{field.lower().replace('_', '-')}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-grant-equality-{field.lower().replace('_', '-')}/03-approval.md"] = commission_approval(case)
+        members[f"CM{number}-grant-equality-{field.lower().replace('_', '-')}/04-grant.md"] = commission_grant(
+            case, to_addr=(override if field == "COMMISSION_TO" else "beta.pair-planner"),
+            surface=commission_surface(case, overrides={field: override}),
+        )
+
+    add_commission_chain(
+        members, "CM107-grant-nonpair-target", "cm107",
+        grant=commission_grant("cm107", to_addr="beta.pair-implementer", surface=commission_surface("cm107", overrides={"COMMISSION_TO": "beta.pair-implementer"})),
+    )
+    members.pop("CM107-grant-nonpair-target/05-receipt.md")
+    add_commission_chain(members, "CM108-grant-to-mismatch", "cm108")
+    members.pop("CM108-grant-to-mismatch/05-receipt.md")
+    members["CM108-grant-to-mismatch/04-grant.md"] = commission_grant("cm108", to_addr="gamma.pair-planner")
+    add_commission_chain(members, "CM109-malformed-grant-shadow", "cm109")
+    members["CM109-malformed-grant-shadow/05-grant-no.md"] = commission_grant(
+        "cm109", value="no", dispatch_id="cm109-grant-no",
+    )
+    members.pop("CM109-malformed-grant-shadow/05-receipt.md")
+    members["CM109-malformed-grant-shadow/06-receipt.md"] = commission_receipt("cm109")
+    add_commission_chain(members, "CM110-unmarked-grant-control", "cm110")
+    members["CM110-unmarked-grant-control/05-status.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm110-status",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_ID", "cm110"),),
+    )
+    members["CM110-unmarked-grant-control/06-receipt.md"] = commission_receipt("cm110")
+    for number, order in ((111, "match-first"), (112, "match-last")):
+        case = f"cm{number}"
+        add_commission_chain(members, f"CM{number}-grant-membership-conflict-{order}", case)
+        ids = (("COMMISSION_ID", case), ("COMMISSION_ID", "other"))
+        if order == "match-last":
+            ids = tuple(reversed(ids))
+        members[f"CM{number}-grant-membership-conflict-{order}/05-grant-conflict.md"] = commission_grant(
+            case, dispatch_id=f"{case}-grant-conflict",
+            surface=commission_surface(case, omit=("COMMISSION_ID",), extra=ids),
+        )
+        members.pop(f"CM{number}-grant-membership-conflict-{order}/05-receipt.md")
+        members[f"CM{number}-grant-membership-conflict-{order}/06-receipt.md"] = commission_receipt(case)
+    add_commission_chain(members, "CM113-grant-same-position", "cm113")
+    members["CM113-grant-same-position/a/05-grant.md"] = commission_grant("cm113", dispatch_id="cm113-grant-a")
+    members["CM113-grant-same-position/b/05-grant.md"] = commission_grant("cm113", dispatch_id="cm113-grant-b")
+    members.pop("CM113-grant-same-position/05-receipt.md")
+    members["CM113-grant-same-position/06-receipt.md"] = commission_receipt("cm113")
+    members["CM114-half-carrier/01-relay.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm114-relay",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_SCOPE", "scope-cm114"),),
+    )
+
+    members["CM115-auth-reissue-pass/01-auth-v1.md"] = commission_authorization("cm115", dispatch_id="cm115-auth-v1")
+    members["CM115-auth-reissue-pass/02-auth-v2.md"] = commission_authorization("cm115", dispatch_id="cm115-auth-v2")
+    members["CM115-auth-reissue-pass/03-charter.md"] = commission_charter("cm115", parent="cm115-auth-v2")
+    members["CM116-later-auth-inert/01-auth.md"] = commission_authorization("cm116")
+    members["CM116-later-auth-inert/02-charter.md"] = commission_charter("cm116")
+    members["CM116-later-auth-inert/03-auth-later.md"] = commission_authorization("cm116", dispatch_id="cm116-auth-later")
+    members["CM117-unmarked-review-excluded/01-auth.md"] = commission_authorization("cm117")
+    members["CM117-unmarked-review-excluded/02-review.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm117-review",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm117"),),
+    )
+    members["CM117-unmarked-review-excluded/03-charter.md"] = commission_charter("cm117")
+
+    add_commission_chain(members, "CM118-grant-reissue-pass", "cm118")
+    members["CM118-grant-reissue-pass/05-grant-v2.md"] = commission_grant("cm118", dispatch_id="cm118-grant-v2")
+    members.pop("CM118-grant-reissue-pass/05-receipt.md")
+    members["CM118-grant-reissue-pass/06-receipt.md"] = commission_receipt("cm118")
+    add_commission_chain(members, "CM119-later-grant-inert", "cm119")
+    members["CM119-later-grant-inert/06-grant-later.md"] = commission_grant("cm119", dispatch_id="cm119-grant-later")
+    add_commission_chain(members, "CM120-unmarked-review-grant-excluded", "cm120")
+    members["CM120-unmarked-review-grant-excluded/05-review-status.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm120-status",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm120"),),
+    )
+    members["CM120-unmarked-review-grant-excluded/06-receipt.md"] = commission_receipt("cm120")
+    add_commission_chain(members, "CM121-prior-receipt-excluded", "cm121")
+    members["CM121-prior-receipt-excluded/06-receipt.md"] = commission_receipt("cm121")
+    members["CM121-prior-receipt-excluded/07-receipt.md"] = lifecycle_relay(
+        role="Pair Planner", phase="PLAN", authority="plan-only", dispatch_id="cm121-receipt-2",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer", fields=commission_surface("cm121"),
+    )
+    for number, value in ((122, "YES"), (123, "true")):
+        case = f"cm{number}"
+        add_commission_chain(members, f"CM{number}-grant-marker-{value.lower()}", case)
+        members[f"CM{number}-grant-marker-{value.lower()}/05-grant-malformed.md"] = commission_grant(
+            case, value=value, dispatch_id=f"{case}-grant-malformed",
+        )
+        members.pop(f"CM{number}-grant-marker-{value.lower()}/05-receipt.md")
+        members[f"CM{number}-grant-marker-{value.lower()}/06-receipt.md"] = commission_receipt(case)
+
+    members["CM124-charter-owner-mismatch/01-auth.md"] = commission_authorization(
+        "cm124", to_addr="other.master-planner",
+    )
+    members["CM124-charter-owner-mismatch/02-charter.md"] = commission_charter("cm124")
+    members["CM125-charter-owner-mixedcase-pass/01-auth.md"] = commission_authorization(
+        "cm125", to_addr="Alpha.Master-Planner",
+    )
+    members["CM125-charter-owner-mixedcase-pass/02-charter.md"] = commission_charter("cm125")
+    members["CM126-grant-owner-mismatch/01-auth.md"] = commission_authorization("cm126")
+    members["CM126-grant-owner-mismatch/02-charter.md"] = commission_charter("cm126")
+    members["CM126-grant-owner-mismatch/03-approval.md"] = commission_approval("cm126")
+    members["CM126-grant-owner-mismatch/04-grant.md"] = commission_grant(
+        "cm126", from_addr="other.master-planner",
+    )
+    members["CM127-grant-owner-mixedcase-pass/01-auth.md"] = commission_authorization("cm127")
+    members["CM127-grant-owner-mixedcase-pass/02-charter.md"] = commission_charter("cm127")
+    members["CM127-grant-owner-mixedcase-pass/03-approval.md"] = commission_approval("cm127")
+    members["CM127-grant-owner-mixedcase-pass/04-grant.md"] = commission_grant(
+        "cm127", from_addr="Alpha.Master-Planner",
+    )
+
+    for number, kind, verdict in (
+        (128, None, "approve"),
+        (129, "audit-record", "approve"),
+        (130, "design-doc", None),
+        (131, "design-doc", "must-revise"),
+        (132, "design-doc", "banana"),
+    ):
+        case = f"cm{number}"
+        members[f"CM{number}-approval-local-shape/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-approval-local-shape/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-approval-local-shape/03-approval.md"] = commission_approval(
+            case, kind=kind, verdict=verdict,
+        )
+
+    for number, field in enumerate(COMMISSION_SURFACE_FIELDS, start=133):
+        case = f"cm{number}"
+        members[f"CM{number}-wrong-seat-missing-{field.lower().replace('_', '-')}/01-receipt.md"] = commission_receipt(
+            case, from_addr="gamma.pair-planner", surface=commission_surface(case, omit=(field,)),
+        )
+    for number, field in enumerate(COMMISSION_SURFACE_FIELDS, start=137):
+        case = f"cm{number}"
+        members[f"CM{number}-wrong-seat-empty-{field.lower().replace('_', '-')}/01-receipt.md"] = commission_receipt(
+            case, from_addr="gamma.pair-planner", surface=commission_surface(case, overrides={field: ""}),
+        )
+
+    target_values = (
+        ("special", "operator"),
+        ("master", "beta.master-planner"),
+        ("reviewer", "beta.reviewer"),
+        ("multiple", "beta.pair-planner, gamma.pair-planner"),
+    )
+    for number, (label, target) in enumerate(target_values, start=141):
+        case = f"cm{number}"
+        members[f"CM{number}-auth-target-{label}/01-auth.md"] = commission_authorization(
+            case, surface=commission_surface(case, overrides={"COMMISSION_TO": target}),
+        )
+    members["CM145-auth-target-legacy-pass/01-auth.md"] = commission_authorization(
+        "cm145", surface=commission_surface("cm145", overrides={"COMMISSION_TO": "beta.planner"}),
+    )
+    members["CM146-auth-target-explicit-pass/01-auth.md"] = commission_authorization("cm146")
+
+    for number, (label, target) in enumerate(target_values, start=147):
+        case = f"cm{number}"
+        members[f"CM{number}-grant-target-{label}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-grant-target-{label}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-grant-target-{label}/03-approval.md"] = commission_approval(case)
+        members[f"CM{number}-grant-target-{label}/04-grant.md"] = commission_grant(
+            case, to_addr=target, surface=commission_surface(case, overrides={"COMMISSION_TO": target}),
+        )
+    for number, target in ((151, "beta.planner"), (152, "beta.pair-planner")):
+        case = f"cm{number}"
+        surface = commission_surface(case, overrides={"COMMISSION_TO": target})
+        members[f"CM{number}-grant-target-pass/01-auth.md"] = commission_authorization(case, surface=surface)
+        members[f"CM{number}-grant-target-pass/02-charter.md"] = commission_charter(case, surface=surface)
+        members[f"CM{number}-grant-target-pass/03-approval.md"] = commission_approval(case, surface=surface)
+        members[f"CM{number}-grant-target-pass/04-grant.md"] = commission_grant(case, to_addr=target, surface=surface)
+
+    members["CM153-byte-exact-address-surface/01-auth.md"] = commission_authorization("cm153")
+    members["CM153-byte-exact-address-surface/02-charter.md"] = commission_charter(
+        "cm153", surface=commission_surface("cm153", overrides={"COMMISSION_TO": "Beta.Pair-Planner"}),
+    )
+    for number, field in enumerate(
+        ("COMMISSION_AUTHORIZATION", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID"), start=154,
+    ):
+        case = f"cm{number}"
+        fields = ((field, ""),)
+        members[f"CM{number}-empty-carrier-engages/01-relay.md"] = lifecycle_relay(
+            role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id=f"{case}-relay",
+            from_addr="beta.pair-planner", to_addr="beta.pair-implementer", fields=fields,
+        )
+    members["CM158-charter-equality-commission-id/01-auth.md"] = commission_authorization("cm158")
+    members["CM158-charter-equality-commission-id/02-charter.md"] = commission_charter(
+        "cm158", surface=commission_surface("cm158", overrides={"COMMISSION_ID": "other"}),
+    )
+    members["CM159-empty-commission-id-engages/01-relay.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm159-relay",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_ID", ""),),
+    )
+    return members
 
 
 def lifecycle_members() -> dict[str, str]:
@@ -569,6 +969,7 @@ def generated_members() -> dict[str, str]:
             master_first=master_first, template_mode=True, template_owner=template_owner,
         )
     members.update(lifecycle_members())
+    members.update(commission_members())
     return members
 
 
