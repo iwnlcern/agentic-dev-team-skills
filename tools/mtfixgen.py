@@ -429,6 +429,93 @@ def lifecycle_members() -> dict[str, str]:
         members[f"MT68-all-seat-missing-review-{seat}/02-consumer.md"] = consumer_relay(
             case, role=role, from_addr=from_addr, to_addr=to_addr, phase=phase, authority=authority,
         )
+
+    for number, order in ((69, "parent-first"), (70, "other-first")):
+        case = f"c8-review-parent-{order}"
+        members[f"MT{number}-later-review-parent-conflict-{order}/01-origin.md"] = origin_relay(case)
+        members[f"MT{number}-later-review-parent-conflict-{order}/02-review-approve.md"] = review_relay(
+            case, dispatch_id=f"{case}-approve",
+        )
+        parent = f"{case}-origin" if order == "parent-first" else f"{case}-other-parent"
+        other_parent = f"{case}-other-parent" if order == "parent-first" else f"{case}-origin"
+        members[f"MT{number}-later-review-parent-conflict-{order}/03-review-must-revise.md"] = review_relay(
+            case,
+            verdict="must-revise",
+            parent=parent,
+            dispatch_id=f"{case}-must-revise",
+            extra_fields=(("PARENT_DISPATCH_ID", other_parent),),
+        )
+        members[f"MT{number}-later-review-parent-conflict-{order}/04-consumer.md"] = consumer_relay(case)
+
+    doc_lock_first = "c8-origin-doc-lock-first"
+    add_chain(
+        members,
+        "MT71-origin-doc-conflict-lock-first",
+        case=doc_lock_first,
+        origin=origin_relay(doc_lock_first, extra_fields=(("DESIGN_DOC_ID", "lock-other"),)),
+    )
+    doc_other_first = "c8-origin-doc-other-first"
+    add_chain(
+        members,
+        "MT72-origin-doc-conflict-other-first",
+        case=doc_other_first,
+        origin=lifecycle_relay(
+            role="Master Planner",
+            phase="DESIGN",
+            authority="design-only",
+            dispatch_id=f"{doc_other_first}-origin",
+            from_addr="alpha.master-planner",
+            to_addr="alpha.master-reviewer",
+            fields=(
+                ("DESIGN_DOC_ID", "lock-other"),
+                ("DESIGN_DOC_ID", f"lock-{doc_other_first}"),
+                ("DESIGN_RECORD_KIND", "design-doc"),
+            ),
+        ),
+    )
+
+    phase_design_first = "c8-origin-phase-design-first"
+    add_chain(
+        members,
+        "MT73-origin-phase-conflict-design-first",
+        case=phase_design_first,
+        origin=origin_relay(phase_design_first, extra_fields=(("PHASE", "AUDIT"),)),
+    )
+    phase_audit_first = "c8-origin-phase-audit-first"
+    add_chain(
+        members,
+        "MT74-origin-phase-conflict-audit-first",
+        case=phase_audit_first,
+        origin=origin_relay(
+            phase_audit_first,
+            phase="AUDIT",
+            authority="report-only",
+            extra_fields=(("PHASE", "DESIGN"),),
+        ),
+    )
+
+    collision = "c8-conflicted-collision"
+    members["MT75-pair-conflicted-foreign-collision/01-pair-origin.md"] = lifecycle_relay(
+        role="Planner",
+        phase="DESIGN",
+        authority="design-only",
+        dispatch_id=f"{collision}-pair-origin",
+        from_addr="beta.planner",
+        to_addr="beta.implementer",
+        fields=(("DESIGN_DOC_ID", f"lock-{collision}"),),
+    )
+    members["MT75-pair-conflicted-foreign-collision/02-foreign-origin.md"] = origin_relay(
+        collision, extra_fields=(("DESIGN_DOC_ID", "lock-other"),),
+    )
+    members["MT75-pair-conflicted-foreign-collision/03-consumer.md"] = consumer_relay(collision)
+
+    from_conflict = "c8-origin-from-conflict"
+    add_chain(
+        members,
+        "MT76-origin-from-conflict",
+        case=from_conflict,
+        origin=origin_relay(from_conflict, extra_fields=(("FROM", "alpha.planner"),)),
+    )
     return members
 
 

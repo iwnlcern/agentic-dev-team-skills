@@ -252,6 +252,14 @@ LIFECYCLE_EXPECTED = [
     ("root", "mastertier/MT68-all-seat-missing-review-master-reviewer", 1),
     ("root", "mastertier/MT68-all-seat-missing-review-domain-planner", 1),
     ("root", "mastertier/MT68-all-seat-missing-review-domain-reviewer", 1),
+    ("root", "mastertier/MT69-later-review-parent-conflict-parent-first", 1),
+    ("root", "mastertier/MT70-later-review-parent-conflict-other-first", 1),
+    ("root", "mastertier/MT71-origin-doc-conflict-lock-first", 1),
+    ("root", "mastertier/MT72-origin-doc-conflict-other-first", 1),
+    ("root", "mastertier/MT73-origin-phase-conflict-design-first", 1),
+    ("root", "mastertier/MT74-origin-phase-conflict-audit-first", 1),
+    ("root", "mastertier/MT75-pair-conflicted-foreign-collision", 1),
+    ("root", "mastertier/MT76-origin-from-conflict", 1),
 ]
 
 EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + [
@@ -1019,6 +1027,9 @@ _lock_conflict = "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences;
 _kind_conflict = "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
 _authority_conflict = "AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
 _verdict_conflict = "DESIGN_REVIEW_VERDICT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_parent_conflict = "PARENT_DISPATCH_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_doc_conflict = "DESIGN_DOC_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_phase_conflict = "PHASE carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
 for _rel in (
     "MT34-foreign-design-kind-present", "MT35-foreign-design-kind-omitted",
     "MT36-foreign-audit-pair", "MT37-pair-route-control", "MT41-pair-no-origin-control",
@@ -1104,6 +1115,38 @@ EXPECTED_ERROR_SET.update({
     ],
     "mastertier/MT67-pair-invented-design-doc": [
         "01-consumer.md: DESIGN_LOCK_ID 'lock-c5-pair-invented' has no earlier same-owner DESIGN relay carrying matching DESIGN_DOC_ID",
+    ],
+    "mastertier/MT69-later-review-parent-conflict-parent-first": [
+        "03-review-must-revise.md: " + _parent_conflict,
+        "04-consumer.md: foreign approval 03-review-must-revise.md has conflicting PARENT_DISPATCH_ID occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT70-later-review-parent-conflict-other-first": [
+        "03-review-must-revise.md: " + _parent_conflict,
+        "04-consumer.md: foreign approval 03-review-must-revise.md has conflicting PARENT_DISPATCH_ID occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT71-origin-doc-conflict-lock-first": [
+        "01-origin.md: " + _doc_conflict,
+        "03-consumer.md: foreign origin 01-origin.md has conflicting DESIGN_DOC_ID occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT72-origin-doc-conflict-other-first": [
+        "01-origin.md: " + _doc_conflict,
+        "03-consumer.md: foreign origin 01-origin.md has conflicting DESIGN_DOC_ID occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT73-origin-phase-conflict-design-first": [
+        "01-origin.md: " + _phase_conflict,
+        "03-consumer.md: foreign origin 01-origin.md has conflicting PHASE occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT74-origin-phase-conflict-audit-first": [
+        "01-origin.md: " + _phase_conflict,
+        "03-consumer.md: foreign origin 01-origin.md has conflicting PHASE occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT75-pair-conflicted-foreign-collision": [
+        "02-foreign-origin.md: " + _doc_conflict,
+        "03-consumer.md: DESIGN_LOCK_ID 'lock-c8-conflicted-collision' resolves to both pair and master/domain origin groups; lock routing fails closed" + _lock_rule,
+    ],
+    "mastertier/MT76-origin-from-conflict": [
+        "01-origin.md: " + _h27_from_conflict,
+        "03-consumer.md: foreign origin 01-origin.md has conflicting FROM occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
     ],
 })
 for _seat in ("pair-planner", "pair-implementer", "master-planner", "master-reviewer", "domain-planner", "domain-reviewer"):

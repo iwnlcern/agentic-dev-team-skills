@@ -1837,11 +1837,9 @@ def h27_select_origins(phases, lock_id: str, before_order):
         _path, order, _phase, _fields, text = item
         if order >= before_order:
             continue
-        design_doc_id, doc_conflict = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
-        phase, phase_conflict = h27_resolved_discriminator(text, "PHASE")
-        if doc_conflict or phase_conflict:
-            continue
-        if design_doc_id != lock_id or phase not in {"DESIGN", "AUDIT"}:
+        design_doc_ids = h27_occurrences(text, "DESIGN_DOC_ID")
+        phases_seen = h27_occurrences(text, "PHASE")
+        if lock_id not in design_doc_ids or not any(phase in {"DESIGN", "AUDIT"} for phase in phases_seen):
             continue
         selected.append(item)
     return selected
@@ -1941,14 +1939,12 @@ def h27_foreign_lock_errors(
         _review_path, review_order, _review_phase, _review_fields, review_text = item
         if review_order >= consumer_order:
             continue
-        review_phase, phase_conflict = h27_resolved_discriminator(review_text, "PHASE")
-        review_doc, doc_conflict = h27_resolved_discriminator(review_text, "DESIGN_DOC_ID")
-        review_parent, parent_conflict = h27_resolved_discriminator(review_text, "PARENT_DISPATCH_ID")
-        if phase_conflict or doc_conflict or parent_conflict:
+        review_phases = h27_occurrences(review_text, "PHASE")
+        review_docs = h27_occurrences(review_text, "DESIGN_DOC_ID")
+        review_parents = h27_occurrences(review_text, "PARENT_DISPATCH_ID")
+        if "DESIGN-REVIEW" not in review_phases or lock_id not in review_docs:
             continue
-        if review_phase != "DESIGN-REVIEW" or review_doc != lock_id:
-            continue
-        if review_parent != origin_id:
+        if origin_id not in review_parents:
             continue
         review_candidates.append(item)
     if not review_candidates:
@@ -2052,6 +2048,16 @@ def h27_lock_lifecycle_precompute(root: Path, phases):
             errors.append(
                 f"{consumer_name}: master/domain-seat consumer DESIGN_LOCK_ID {lock_id!r} has no resolvable "
                 f"earlier master/domain origin{H27_LOCK_RULE}"
+            )
+        elif refusal == "origin-conflict":
+            conflicted_origin = next(
+                item for item in origins if h27_resolved_discriminator(item[4], "FROM")[1]
+            )
+            origin_name = conflicted_origin[0].relative_to(root)
+            origin_label = "foreign origin" if h27_has_foreign_from_occurrence(conflicted_origin[4]) else "origin"
+            errors.append(
+                f"{consumer_name}: {origin_label} {origin_name} has conflicting FROM occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}"
             )
         elif route == "foreign":
             errors.extend(h27_foreign_lock_errors(root, consumer, lock_id, owner, foreign_origins, phases))
