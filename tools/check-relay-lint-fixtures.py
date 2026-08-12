@@ -208,6 +208,36 @@ A5_SEAM = {
 
 EXPECTED = A5_EXPECTED + [
     ("file", "mastertier/MT0-generator-smoke.md", 0),
+    ("file", "mastertier/MT21-dispatch-impl-master-planner.md", 1),
+    ("file", "mastertier/MT21-dispatch-impl-master-reviewer.md", 1),
+    ("file", "mastertier/MT21-dispatch-impl-domain-planner.md", 1),
+    ("file", "mastertier/MT21-dispatch-impl-domain-reviewer.md", 1),
+    ("file", "mastertier/MT21-dispatch-impl-control.md", 0),
+    ("file", "mastertier/MT22-dispatch-merge-master-planner.md", 1),
+    ("file", "mastertier/MT22-dispatch-merge-master-reviewer.md", 1),
+    ("file", "mastertier/MT22-dispatch-merge-domain-planner.md", 1),
+    ("file", "mastertier/MT22-dispatch-merge-domain-reviewer.md", 1),
+    ("file", "mastertier/MT22-dispatch-merge-control.md", 0),
+    ("file", "mastertier/MT23-direct-override-master-planner.md", 1),
+    ("file", "mastertier/MT23-direct-override-master-reviewer.md", 1),
+    ("file", "mastertier/MT23-direct-override-domain-planner.md", 1),
+    ("file", "mastertier/MT23-direct-override-domain-reviewer.md", 1),
+    ("file", "mastertier/MT23-direct-override-control.md", 0),
+    ("template", "mastertier/MTT21-dispatch-impl-master-planner.md", 1),
+    ("template", "mastertier/MTT21-dispatch-impl-master-reviewer.md", 1),
+    ("template", "mastertier/MTT21-dispatch-impl-domain-planner.md", 1),
+    ("template", "mastertier/MTT21-dispatch-impl-domain-reviewer.md", 1),
+    ("template", "mastertier/MTT21-dispatch-impl-control.md", 0),
+    ("template", "mastertier/MTT22-dispatch-merge-master-planner.md", 1),
+    ("template", "mastertier/MTT22-dispatch-merge-master-reviewer.md", 1),
+    ("template", "mastertier/MTT22-dispatch-merge-domain-planner.md", 1),
+    ("template", "mastertier/MTT22-dispatch-merge-domain-reviewer.md", 1),
+    ("template", "mastertier/MTT22-dispatch-merge-control.md", 0),
+    ("template", "mastertier/MTT23-direct-override-master-planner.md", 1),
+    ("template", "mastertier/MTT23-direct-override-master-reviewer.md", 1),
+    ("template", "mastertier/MTT23-direct-override-domain-planner.md", 1),
+    ("template", "mastertier/MTT23-direct-override-domain-reviewer.md", 1),
+    ("template", "mastertier/MTT23-direct-override-control.md", 0),
     ("file", "hardening/HG32a-operator-valid.md", 0),
     ("file", "hardening/HG32b-operator-mismatch.md", 1),
     ("index", "hardening/XRF1-fresh-index", 0),
@@ -236,13 +266,13 @@ EXPECTED = A5_EXPECTED + [
     ("file", "rolevocab/RV6-pair-implementer-from-implementer.md", 0),
     ("file", "rolevocab/RV7a-master-dispatch-failclosed.md", 1),
     ("file", "rolevocab/RV7b-domain-direct-override.md", 1),
-    ("file", "rolevocab/RV7e-domain-designlock-kind.md", 1),
-    ("file", "rolevocab/RV7e2-domain-designlock-id-only.md", 1),
-    ("file", "rolevocab/RV7f-master-delegated-authority.md", 1),
+    ("file", "rolevocab/RV7e-domain-designlock-kind.md", 0),
+    ("file", "rolevocab/RV7e2-domain-designlock-id-only.md", 0),
+    ("file", "rolevocab/RV7f-master-delegated-authority.md", 0),
     ("file", "rolevocab/RV7h-delegated-bypass-order.md", 1),
     ("file", "rolevocab/RV7i-lock-empty-first.md", 1),
     ("file", "rolevocab/RV7j-override-then-conflict.md", 1),
-    ("file", "rolevocab/RV7k-samevalue-duplicate.md", 1),
+    ("file", "rolevocab/RV7k-samevalue-duplicate.md", 0),
     ("file", "rolevocab/RV7l-override-plus-lock-conflict.md", 1),
     ("file", "rolevocab/RV7m-kind-conflict-plus-lock.md", 1),
     ("file", "rolevocab/RV7n-delegated-replacement.md", 1),
@@ -254,14 +284,14 @@ EXPECTED = A5_EXPECTED + [
     ("root", "rolevocab/RV6i-mixed-dispatch-implreport", 0),
     ("root", "rolevocab/RV7a-master-dispatch-failclosed", 1),
     ("root", "rolevocab/RV7b-domain-direct-override", 1),
-    ("root", "rolevocab/RV7e-domain-designlock-kind", 1),
-    ("root", "rolevocab/RV7e2-domain-designlock-id-only", 1),
-    ("root", "rolevocab/RV7f-master-delegated-authority", 1),
+    ("root", "rolevocab/RV7e-domain-designlock-kind", 0),
+    ("root", "rolevocab/RV7e2-domain-designlock-id-only", 0),
+    ("root", "rolevocab/RV7f-master-delegated-authority", 0),
     ("root", "rolevocab/RV7g-malformed-address-hardening", 1),
     ("root", "rolevocab/RV7h-delegated-bypass-order", 1),
     ("root", "rolevocab/RV7i-lock-empty-first", 1),
     ("root", "rolevocab/RV7j-override-then-conflict", 1),
-    ("root", "rolevocab/RV7k-samevalue-duplicate", 1),
+    ("root", "rolevocab/RV7k-samevalue-duplicate", 0),
     ("root", "rolevocab/RV7l-override-plus-lock-conflict", 1),
     ("root", "rolevocab/RV7m-kind-conflict-plus-lock", 1),
     ("root", "rolevocab/RV7n-delegated-replacement", 1),
@@ -835,6 +865,52 @@ def load_linter():
 
 
 EXPECTED_ERROR_SET.update(A5_ERRORS)
+
+
+MASTER_TIER_FIXTURE_ROLES = (
+    ("master-planner", "Master Planner"),
+    ("master-reviewer", "Master Reviewer"),
+    ("domain-planner", "Domain Planner"),
+    ("domain-reviewer", "Domain Reviewer"),
+)
+for _prefix in ("MT2", "MTT2"):
+    for _seat, _role in MASTER_TIER_FIXTURE_ROLES:
+        EXPECTED_ERROR_SET[f"mastertier/{_prefix}1-dispatch-impl-{_seat}.md"] = [
+            f"master-tier seat {_seat!r} may not carry DISPATCH IMPL: execution authority never enters the master tier (DD-v29-master-authority-20260809: token prohibition)",
+        ]
+        _merge_errors = [
+            f"master-tier seat {_seat!r} may not carry DISPATCH MERGE: execution authority never enters the master tier (DD-v29-master-authority-20260809: token prohibition)",
+        ]
+        if _prefix == "MT2":
+            _merge_errors.insert(0, "DISPATCH MERGE FROM must be operator, orchestrator, or an orchestrator-planner-role address")
+        EXPECTED_ERROR_SET[f"mastertier/{_prefix}2-dispatch-merge-{_seat}.md"] = _merge_errors
+        EXPECTED_ERROR_SET[f"mastertier/{_prefix}3-direct-override-{_seat}.md"] = [
+            f"master-tier seat {_seat!r} may not use DESIGN_RECORD_KIND: direct-override: that record kind stays on the operator/orchestrator chain (DD-v29-master-authority-20260809 cross-seat rule 2)",
+        ]
+
+_h27_dispatch = "master-tier seat 'master-planner' may not carry DISPATCH IMPL: execution authority never enters the master tier (DD-v29-master-authority-20260809: token prohibition)"
+_h27_override = "master-tier seat 'domain-planner' may not use DESIGN_RECORD_KIND: direct-override: that record kind stays on the operator/orchestrator chain (DD-v29-master-authority-20260809 cross-seat rule 2)"
+_h27_master_override = "master-tier seat 'master-planner' may not use DESIGN_RECORD_KIND: direct-override: that record kind stays on the operator/orchestrator chain (DD-v29-master-authority-20260809 cross-seat rule 2)"
+_a4_lock = "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"
+_a4_kind = "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"
+EXPECTED_ERROR_SET.update({
+    "rolevocab/RV7a-master-dispatch-failclosed.md": [_h27_dispatch],
+    "rolevocab/RV7b-domain-direct-override.md": [_h27_override],
+    "rolevocab/RV7e-domain-designlock-kind.md": [],
+    "rolevocab/RV7e2-domain-designlock-id-only.md": [],
+    "rolevocab/RV7f-master-delegated-authority.md": [],
+    "rolevocab/RV7k-samevalue-duplicate.md": [],
+    "rolevocab/RV7l-override-plus-lock-conflict.md": [_a4_lock, _h27_master_override],
+    "rolevocab/RV7m-kind-conflict-plus-lock.md": [_a4_kind],
+    "rolevocab/RV7a-master-dispatch-failclosed": [f"RV7a-master-dispatch-failclosed.md: {_h27_dispatch}"],
+    "rolevocab/RV7b-domain-direct-override": [f"RV7b-domain-direct-override.md: {_h27_override}"],
+    "rolevocab/RV7e-domain-designlock-kind": [],
+    "rolevocab/RV7e2-domain-designlock-id-only": [],
+    "rolevocab/RV7f-master-delegated-authority": [],
+    "rolevocab/RV7k-samevalue-duplicate": [],
+    "rolevocab/RV7l-override-plus-lock-conflict": [f"01-plan.md: {_a4_lock}", f"01-plan.md: {_h27_master_override}"],
+    "rolevocab/RV7m-kind-conflict-plus-lock": [f"01-plan.md: {_a4_kind}"],
+})
 
 
 def main() -> int:

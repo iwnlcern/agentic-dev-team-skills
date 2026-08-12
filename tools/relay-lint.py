@@ -103,7 +103,7 @@ def canonical_role(role: str | None) -> str | None:
 
 
 LINEAGE_DIRECT_FROM_ROLES = {"operator", "orchestrator", "orchestrator-planner"}
-UNRULED_AUTHORITY_ROLES = {"master-planner", "master-reviewer", "domain-planner", "domain-reviewer"}
+MASTER_TIER_ROLES = {"master-planner", "master-reviewer", "domain-planner", "domain-reviewer"}
 
 CANONICAL_SCAN_ROWS = [
     "authz/tenant/RLS/permissions/secrets",
@@ -722,12 +722,12 @@ def own_line_merge_present(text: str) -> bool:
     return re.search(r"^DISPATCH MERGE\s*$", operational_token_text(text), flags=re.MULTILINE) is not None
 
 
-def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
-    """Fail-closed surfaces for role words whose authority semantics have no shipped ruling."""
+def h27_master_seat_errors(text: str, fields: Dict[str, str]) -> List[str]:
+    """Ruled file/template arms for the four master-tier seats (H27 rules 1-2)."""
     errors: List[str] = []
     from_addrs = split_addresses(fields.get("FROM"))
     role = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
-    if role not in UNRULED_AUTHORITY_ROLES:
+    if role not in MASTER_TIER_ROLES:
         return errors
     authority_keys = (
         "DELEGATED_DISPATCH_AUTHORITY",
@@ -754,23 +754,18 @@ def unruled_authority_errors(text: str, fields: Dict[str, str]) -> List[str]:
 
     if own_line_dispatch_present(text):
         errors.append(
-            f"authority semantics for FROM role {role!r} are unruled; "
-            "a dispatch token from this seat is fail-closed; no shipped ruling defines this seat's authority"
+            f"master-tier seat {role!r} may not carry DISPATCH IMPL: execution authority never enters the master tier "
+            "(DD-v29-master-authority-20260809: token prohibition)"
+        )
+    if own_line_merge_present(text):
+        errors.append(
+            f"master-tier seat {role!r} may not carry DISPATCH MERGE: execution authority never enters the master tier "
+            "(DD-v29-master-authority-20260809: token prohibition)"
         )
     if resolved.get("DESIGN_RECORD_KIND") == "direct-override":
         errors.append(
-            f"authority semantics for FROM role {role!r} are unruled; "
-            "DESIGN_RECORD_KIND: direct-override from this seat is fail-closed; no shipped ruling defines this seat's authority"
-        )
-    elif resolved.get("DESIGN_LOCK_ID") or resolved.get("DESIGN_RECORD_KIND"):
-        errors.append(
-            f"authority semantics for FROM role {role!r} are unruled; "
-            "a design-lock claim from this seat is fail-closed; no shipped ruling defines this seat's authority"
-        )
-    if resolved.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() == "yes":
-        errors.append(
-            f"authority semantics for FROM role {role!r} are unruled; "
-            "a delegated-dispatch-authority claim from this seat is fail-closed; no shipped ruling defines this seat's authority"
+            f"master-tier seat {role!r} may not use DESIGN_RECORD_KIND: direct-override: that record kind stays on the "
+            "operator/orchestrator chain (DD-v29-master-authority-20260809 cross-seat rule 2)"
         )
     return errors
 
@@ -1093,9 +1088,8 @@ def lint_file(
         elif not is_implementer_address(to_addrs[0]):
             result.error("DISPATCH IMPL requires TO to be exactly one implementer-role address")
 
-    if not template_mode:
-        for err in unruled_authority_errors(text, fields):
-            result.error(err)
+    for err in h27_master_seat_errors(text, fields):
+        result.error(err)
 
     has_merge_dispatch = own_line_merge_present(text)
     if has_merge_dispatch and not template_mode:
