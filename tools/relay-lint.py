@@ -356,6 +356,17 @@ def sanitized_text(text: str) -> str:
     return strip_fenced_blocks(text)
 
 
+def h27_occurrences(text: str, key: str) -> List[str]:
+    """Every own-line occurrence of key over fence-sanitized lines."""
+    out: List[str] = []
+    pat = re.compile(r"^" + re.escape(key) + r":\s*(.*)$")
+    for line in sanitized_text(text).splitlines():
+        m = pat.match(line.rstrip())
+        if m:
+            out.append(m.group(1).strip())
+    return out
+
+
 def extract_named_block(text: str, header: str) -> str:
     """Return a contiguous FIELD: block.
 
