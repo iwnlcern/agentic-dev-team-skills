@@ -321,6 +321,10 @@ COMMISSION_MEMBERS = (
     "CM155-empty-carrier-engages", "CM156-empty-carrier-engages",
     "CM157-empty-carrier-engages", "CM158-charter-equality-commission-id",
     "CM159-empty-commission-id-engages",
+    "CM160-auth-target-operator-legacy", "CM161-auth-target-operator-explicit",
+    "CM162-auth-target-orchestrator-legacy", "CM163-auth-target-orchestrator-explicit",
+    "CM164-grant-target-operator-legacy", "CM165-grant-target-operator-explicit",
+    "CM166-grant-target-orchestrator-legacy", "CM167-grant-target-orchestrator-explicit",
 )
 COMMISSION_EXPECTED = [
     ("root", f"mastertier/{name}", 0 if name in COMMISSION_PASS else 1)
@@ -1242,7 +1246,9 @@ for _name in (
     "CM78-auth-uppercase", "CM79-auth-wrong-phase", "CM80-auth-wrong-authority",
     "CM81-auth-wrong-grantor", "CM82-auth-wrong-to", "CM83-auth-nonpair-commission-to",
     "CM141-auth-target-special", "CM142-auth-target-master", "CM143-auth-target-reviewer",
-    "CM144-auth-target-multiple",
+    "CM144-auth-target-multiple", "CM160-auth-target-operator-legacy",
+    "CM161-auth-target-operator-explicit", "CM162-auth-target-orchestrator-legacy",
+    "CM163-auth-target-orchestrator-explicit",
 ):
     EXPECTED_ERROR_SET[f"mastertier/{_name}"] = ["01-auth.md: " + _auth_shape]
 EXPECTED_ERROR_SET.update({
@@ -1376,6 +1382,14 @@ EXPECTED_ERROR_SET.update({
     ],
     "mastertier/CM159-empty-commission-id-engages": ["01-relay.md: " + _unconsumed],
 })
+for _number, (_label, _target) in enumerate(
+    (("operator-legacy", "operator.planner"), ("operator-explicit", "operator.pair-planner"),
+     ("orchestrator-legacy", "orchestrator.planner"),
+     ("orchestrator-explicit", "orchestrator.pair-planner")), start=164,
+):
+    EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-target-{_label}"] = [
+        f"04-grant.md: COMMISSION_TO {_target!r} is not exactly one non-special pair-planner address" + _commission_grant_rule,
+    ]
 
 
 def main() -> int:

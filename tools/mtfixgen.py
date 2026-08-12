@@ -638,6 +638,25 @@ def commission_members() -> dict[str, str]:
         from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
         fields=(("COMMISSION_ID", ""),),
     )
+    reserved_targets = (
+        ("operator-legacy", "operator.planner"),
+        ("operator-explicit", "operator.pair-planner"),
+        ("orchestrator-legacy", "orchestrator.planner"),
+        ("orchestrator-explicit", "orchestrator.pair-planner"),
+    )
+    for number, (label, target) in enumerate(reserved_targets, start=160):
+        case = f"cm{number}"
+        members[f"CM{number}-auth-target-{label}/01-auth.md"] = commission_authorization(
+            case, surface=commission_surface(case, overrides={"COMMISSION_TO": target}),
+        )
+    for number, (label, target) in enumerate(reserved_targets, start=164):
+        case = f"cm{number}"
+        members[f"CM{number}-grant-target-{label}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-grant-target-{label}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-grant-target-{label}/03-approval.md"] = commission_approval(case)
+        members[f"CM{number}-grant-target-{label}/04-grant.md"] = commission_grant(
+            case, to_addr=target, surface=commission_surface(case, overrides={"COMMISSION_TO": target}),
+        )
     return members
 
 

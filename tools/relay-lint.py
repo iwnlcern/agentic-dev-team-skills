@@ -1898,7 +1898,10 @@ def h27_commission_surface_complete(text: str) -> bool:
 def h27_pair_planner_address(raw: str | None) -> bool:
     """Accept legacy planner and explicit pair-planner, never special/tier/reviewer/multiple."""
     addresses = split_addresses(raw)
-    return len(addresses) == 1 and canonical_role(from_role(addresses[0])) == "planner"
+    if len(addresses) != 1 or canonical_role(from_role(addresses[0])) != "planner":
+        return False
+    owner = from_owner(addresses[0])
+    return owner is not None and normalized_addr(owner) not in SPECIAL_ADDRESS_VALUES
 
 
 def h27_direct_commission_grantor(address: str | None) -> bool:

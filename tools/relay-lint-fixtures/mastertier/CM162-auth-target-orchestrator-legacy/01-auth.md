@@ -1,0 +1,15 @@
+ROLE: Operator
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: cm162-auth
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: yes
+FROM: operator
+TO: alpha.master-planner
+COMMISSION_AUTHORIZATION: yes
+COMMISSION_ID: cm162
+COMMISSION_SCOPE: scope-cm162
+COMMISSION_TO: orchestrator.planner
+CHARTER_DOC_ID: CH-cm162
+FINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture
