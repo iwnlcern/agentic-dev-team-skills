@@ -1780,6 +1780,284 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     return result
 
 
+H27_LOCK_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 1)"
+
+
+def h27_resolved_discriminator(text: str, key: str) -> Tuple[str | None, bool]:
+    """Return the sole distinct value and whether conflicting values exist."""
+    values = h27_occurrences(text, key)
+    distinct = set(values)
+    if len(distinct) > 1:
+        return None, True
+    return (values[0] if values else None), False
+
+
+def h27_single_from(text: str) -> str | None:
+    """Resolve exactly one FROM address without first-value parsing."""
+    raw, conflict = h27_resolved_discriminator(text, "FROM")
+    if conflict or raw is None:
+        return None
+    addresses = split_addresses(raw)
+    return addresses[0] if len(addresses) == 1 else None
+
+
+def h27_tier_classification(address: str | None) -> str:
+    """Classify an origin address as foreign, direct, or pair tier."""
+    role = from_role(address)
+    if role in MASTER_TIER_ROLES:
+        return "foreign"
+    if normalized_addr(address) in SPECIAL_ADDRESS_VALUES or role in {"orchestrator-planner", "orchestrator-reviewer"}:
+        return "direct"
+    return "pair"
+
+
+def h27_has_foreign_from_occurrence(text: str) -> bool:
+    for raw in h27_occurrences(text, "FROM"):
+        if any(h27_tier_classification(address) == "foreign" for address in split_addresses(raw)):
+            return True
+    return False
+
+
+def h27_conflict_message(text: str, key: str) -> str | None:
+    values = h27_occurrences(text, key)
+    distinct = set(values)
+    if len(distinct) <= 1:
+        return None
+    return (
+        f"{key} carries {len(distinct)} distinct values across {len(values)} occurrences; "
+        "an authority-critical field is fail-closed unless exactly one distinct value is present "
+        "(DD-v29-master-authority-20260809 rule 5)"
+    )
+
+
+def h27_select_origins(phases, lock_id: str, before_order):
+    """Select the consumer-relative origin universe for one lock identity."""
+    selected = []
+    for item in phases:
+        _path, order, _phase, _fields, text = item
+        if order >= before_order:
+            continue
+        design_doc_id, doc_conflict = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
+        phase, phase_conflict = h27_resolved_discriminator(text, "PHASE")
+        if doc_conflict or phase_conflict:
+            continue
+        if design_doc_id != lock_id or phase not in {"DESIGN", "AUDIT"}:
+            continue
+        selected.append(item)
+    return selected
+
+
+def h27_group_and_route(origins, consumer_text: str) -> Tuple[str, str | None, List[object], str | None]:
+    """Owner-group selected origins and implement the lock routing table."""
+    foreign_groups: Dict[str | None, List[object]] = {}
+    pair_group = False
+    for item in origins:
+        origin_text = item[4]
+        address, from_conflict = h27_resolved_discriminator(origin_text, "FROM")
+        if from_conflict:
+            return "refuse", None, [], "origin-conflict"
+        address = h27_single_from(origin_text)
+        tier = h27_tier_classification(address)
+        if tier == "foreign":
+            foreign_groups.setdefault(from_owner(address), []).append(item)
+        elif tier == "pair":
+            pair_group = True
+    if foreign_groups and pair_group:
+        return "refuse", None, [], "collision"
+    if len(foreign_groups) > 1:
+        return "refuse", None, [], "multiple-foreign"
+    if foreign_groups:
+        owner, items = next(iter(foreign_groups.items()))
+        return "foreign", owner, items, None
+    consumer_address = h27_single_from(consumer_text)
+    if h27_tier_classification(consumer_address) == "foreign":
+        return "refuse", from_owner(consumer_address), [], "master-no-origin"
+    return "pair", None, [], None
+
+
+def h27_same_position_latest(items):
+    latest_order = max(item[1] for item in items)
+    return [item for item in items if item[1] == latest_order]
+
+
+def h27_foreign_lock_errors(
+    root: Path, consumer, lock_id: str, owner: str | None, origins, phases,
+) -> List[str]:
+    """Validate the foreign lock origin/review/consumer lifecycle branch."""
+    consumer_path, consumer_order, _consumer_phase, _consumer_fields, consumer_text = consumer
+    consumer_name = consumer_path.relative_to(root)
+    latest_origins = h27_same_position_latest(origins)
+    if len(latest_origins) != 1:
+        return [
+            f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} has {len(latest_origins)} same-position latest origins "
+            f"for owner {owner}; lock resolution fails closed{H27_LOCK_RULE}"
+        ]
+    origin = latest_origins[0]
+    origin_path, _origin_order, _origin_phase, _origin_fields, origin_text = origin
+    origin_name = origin_path.relative_to(root)
+    for key in ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "DESIGN_DOC_ID", "DESIGN_RECORD_KIND"):
+        _value, conflict = h27_resolved_discriminator(origin_text, key)
+        if conflict:
+            return [
+                f"{consumer_name}: foreign origin {origin_name} has conflicting {key} occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}"
+            ]
+
+    origin_from = h27_single_from(origin_text)
+    origin_role = from_role(origin_from)
+    origin_phase, _ = h27_resolved_discriminator(origin_text, "PHASE")
+    origin_authority, _ = h27_resolved_discriminator(origin_text, "AUTHORITY")
+    origin_id, _ = h27_resolved_discriminator(origin_text, "DISPATCH_ID")
+    origin_doc, _ = h27_resolved_discriminator(origin_text, "DESIGN_DOC_ID")
+    origin_kind, _ = h27_resolved_discriminator(origin_text, "DESIGN_RECORD_KIND")
+    if origin_kind is None:
+        return [f"{consumer_name}: foreign origin {origin_name} requires DESIGN_RECORD_KIND{H27_LOCK_RULE}"]
+    if origin_role in {"master-reviewer", "domain-reviewer"}:
+        return [
+            f"{consumer_name}: foreign {origin_kind} may not originate from reviewer seat {origin_role!r} "
+            f"in PHASE {origin_phase}{H27_LOCK_RULE}"
+        ]
+    if origin_kind == "design-doc" and not (
+        origin_role in {"master-planner", "domain-planner"}
+        and origin_phase == "DESIGN" and origin_authority == "design-only"
+    ):
+        return [
+            f"{consumer_name}: foreign design-doc origin {origin_name} must be planner-seat PHASE DESIGN "
+            f"with AUTHORITY: design-only{H27_LOCK_RULE}"
+        ]
+    if origin_kind == "audit-record" and not (
+        origin_role in {"master-planner", "domain-planner"}
+        and origin_phase == "AUDIT" and origin_authority in {"review-only", "report-only"}
+    ):
+        return [
+            f"{consumer_name}: foreign audit-record origin {origin_name} must be planner-seat PHASE AUDIT "
+            f"with AUTHORITY: review-only or report-only{H27_LOCK_RULE}"
+        ]
+    if origin_kind not in {"design-doc", "audit-record"} or origin_doc != lock_id or not origin_id:
+        return [f"{consumer_name}: foreign origin {origin_name} does not resolve lock identity {lock_id!r}{H27_LOCK_RULE}"]
+
+    review_candidates = []
+    for item in phases:
+        _review_path, review_order, _review_phase, _review_fields, review_text = item
+        if review_order >= consumer_order:
+            continue
+        review_phase, phase_conflict = h27_resolved_discriminator(review_text, "PHASE")
+        review_doc, doc_conflict = h27_resolved_discriminator(review_text, "DESIGN_DOC_ID")
+        review_parent, parent_conflict = h27_resolved_discriminator(review_text, "PARENT_DISPATCH_ID")
+        if phase_conflict or doc_conflict or parent_conflict:
+            continue
+        if review_phase != "DESIGN-REVIEW" or review_doc != lock_id:
+            continue
+        if review_parent != origin_id:
+            continue
+        review_candidates.append(item)
+    if not review_candidates:
+        return [
+            f"{consumer_name}: foreign DESIGN_LOCK_ID {lock_id!r} has no earlier DESIGN-REVIEW parented "
+            f"to latest origin {origin_name}{H27_LOCK_RULE}"
+        ]
+    latest_reviews = h27_same_position_latest(review_candidates)
+    if len(latest_reviews) != 1:
+        return [
+            f"{consumer_name}: latest origin {origin_name} has {len(latest_reviews)} same-position latest "
+            f"DESIGN-REVIEW candidates; lock resolution fails closed{H27_LOCK_RULE}"
+        ]
+    review = latest_reviews[0]
+    review_path, _review_order, _review_phase, _review_fields, review_text = review
+    review_name = review_path.relative_to(root)
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+        "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT",
+    ):
+        _value, conflict = h27_resolved_discriminator(review_text, key)
+        if conflict:
+            return [
+                f"{consumer_name}: foreign approval {review_name} has conflicting {key} occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}"
+            ]
+
+    review_from = h27_single_from(review_text)
+    expected_review_role = "master-reviewer" if origin_role == "master-planner" else "domain-reviewer"
+    expected_review_from = same_owner_addr(owner, expected_review_role)
+    if normalized_addr(review_from) != expected_review_from:
+        return [
+            f"{consumer_name}: foreign approval {review_name} must be FROM {expected_review_from}, "
+            f"the same-owner tier reviewer{H27_LOCK_RULE}"
+        ]
+    review_kind, _ = h27_resolved_discriminator(review_text, "DESIGN_RECORD_KIND")
+    if review_kind is None:
+        return [
+            f"{consumer_name}: foreign approval {review_name} requires DESIGN_RECORD_KIND equal to "
+            f"origin kind {origin_kind!r}{H27_LOCK_RULE}"
+        ]
+    if review_kind != origin_kind:
+        return [
+            f"{consumer_name}: foreign approval {review_name} DESIGN_RECORD_KIND {review_kind!r} does not "
+            f"equal origin kind {origin_kind!r}{H27_LOCK_RULE}"
+        ]
+    review_verdict, _ = h27_resolved_discriminator(review_text, "DESIGN_REVIEW_VERDICT")
+    if review_verdict != "approve":
+        return [
+            f"{consumer_name}: latest foreign approval {review_name} requires DESIGN_REVIEW_VERDICT: approve; "
+            f"got {review_verdict!r}{H27_LOCK_RULE}"
+        ]
+    consumer_kind, _ = h27_resolved_discriminator(consumer_text, "DESIGN_RECORD_KIND")
+    if consumer_kind is not None and consumer_kind != origin_kind:
+        return [
+            f"{consumer_name}: consumer DESIGN_RECORD_KIND {consumer_kind!r} does not equal foreign origin "
+            f"kind {origin_kind!r}{H27_LOCK_RULE}"
+        ]
+    return []
+
+
+def h27_lock_lifecycle_precompute(root: Path, phases):
+    """Precompute every consumer route and all foreign-branch diagnostics."""
+    routes: Dict[Path, str] = {}
+    errors: List[str] = []
+    for consumer in phases:
+        consumer_path, consumer_order, _phase, _fields, consumer_text = consumer
+        lock_values = h27_occurrences(consumer_text, "DESIGN_LOCK_ID")
+        if not lock_values:
+            continue
+        consumer_name = consumer_path.relative_to(root)
+        consumer_conflict = False
+        for key in ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND", "FROM"):
+            conflict = h27_conflict_message(consumer_text, key)
+            if conflict:
+                consumer_conflict = True
+                if not h27_has_foreign_from_occurrence(consumer_text):
+                    errors.append(f"{consumer_name}: {conflict}")
+        if consumer_conflict:
+            routes[consumer_path] = "refuse"
+            continue
+        lock_id, _ = h27_resolved_discriminator(consumer_text, "DESIGN_LOCK_ID")
+        if not lock_id:
+            routes[consumer_path] = "refuse"
+            continue
+        origins = h27_select_origins(phases, lock_id, consumer_order)
+        route, owner, foreign_origins, refusal = h27_group_and_route(origins, consumer_text)
+        routes[consumer_path] = route
+        if refusal == "collision":
+            errors.append(
+                f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to both pair and master/domain origin "
+                f"groups; lock routing fails closed{H27_LOCK_RULE}"
+            )
+        elif refusal == "multiple-foreign":
+            owner_count = len({from_owner(h27_single_from(item[4])) for item in origins if h27_tier_classification(h27_single_from(item[4])) == "foreign"})
+            errors.append(
+                f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to {owner_count} master/domain owner "
+                f"groups; lock routing fails closed{H27_LOCK_RULE}"
+            )
+        elif refusal == "master-no-origin":
+            errors.append(
+                f"{consumer_name}: master/domain-seat consumer DESIGN_LOCK_ID {lock_id!r} has no resolvable "
+                f"earlier master/domain origin{H27_LOCK_RULE}"
+            )
+        elif route == "foreign":
+            errors.extend(h27_foreign_lock_errors(root, consumer, lock_id, owner, foreign_origins, phases))
+    return routes, errors
+
+
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     result = LintResult()
     all_md = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
@@ -1858,11 +2136,16 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
                 owned.append(item)
         return sorted(owned, key=lambda item: item[1])[-1] if owned else None
 
+    lock_routes, lock_lifecycle_errors = h27_lock_lifecycle_precompute(path, phases)
+    for lock_lifecycle_error in lock_lifecycle_errors:
+        result.error(lock_lifecycle_error)
+
     # Design-review lineage gate. A pair-Planner PLAN that locks a
     # design-doc-backed design must parent to an approving Implementer
     # DESIGN-REVIEW relay, and that review must parent to the DESIGN relay that
     # introduced the matching DESIGN_DOC_ID.
     for f, order, phase, fields, text in phases:
+        if lock_routes.get(f, "pair") != "pair": continue
         if phase != "PLAN" or not fields.get("DESIGN_LOCK_ID"):
             continue
         from_addrs = split_addresses(fields.get("FROM"))

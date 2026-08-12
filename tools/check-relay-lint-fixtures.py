@@ -206,7 +206,55 @@ A5_SEAM = {
     "lockdigest/RLD9-read-seam/.relays/v29": "lockdigest/RLD9-read-seam/plans/fixture-plan.md",
 }
 
-EXPECTED = A5_EXPECTED + [
+LIFECYCLE_EXPECTED = [
+    ("root", "mastertier/MT34-foreign-design-kind-present", 0),
+    ("root", "mastertier/MT35-foreign-design-kind-omitted", 0),
+    ("root", "mastertier/MT36-foreign-audit-pair", 0),
+    ("root", "mastertier/MT37-pair-route-control", 0),
+    ("root", "mastertier/MT38-pair-foreign-collision", 1),
+    ("root", "mastertier/MT39-two-foreign-owners", 1),
+    ("root", "mastertier/MT40-master-no-origin", 1),
+    ("root", "mastertier/MT41-pair-no-origin-control", 0),
+    ("root", "mastertier/MT42-later-origin-control", 0),
+    ("root", "mastertier/MT43-same-owner-revisions", 0),
+    ("root", "mastertier/MT44-same-position-origin-ambiguity", 1),
+    ("root", "mastertier/MT45-reviewer-design-origin", 1),
+    ("root", "mastertier/MT46-reviewer-audit-origin", 1),
+    ("root", "mastertier/MT47-origin-kind-missing", 1),
+    ("root", "mastertier/MT48-approval-kind-missing", 1),
+    ("root", "mastertier/MT49-approval-kind-mismatch", 1),
+    ("root", "mastertier/MT50-consumer-kind-mismatch", 1),
+    ("root", "mastertier/MT51-cross-owner-reviewer", 1),
+    ("root", "mastertier/MT52-latest-origin-unreviewed", 1),
+    ("root", "mastertier/MT53-latest-origin-must-revise", 1),
+    ("root", "mastertier/MT54-latest-review-no-prefilter", 1),
+    ("root", "mastertier/MT55-review-must-parent-latest-revision", 1),
+    ("root", "mastertier/MT56-later-approval-refused", 1),
+    ("root", "mastertier/MT57-invented-reviewer-lock", 1),
+    ("root", "mastertier/MT58-same-position-review-ambiguity", 1),
+    ("root", "mastertier/MT59-all-seat-pair-planner", 0),
+    ("root", "mastertier/MT59-all-seat-pair-implementer", 0),
+    ("root", "mastertier/MT59-all-seat-master-planner", 0),
+    ("root", "mastertier/MT59-all-seat-master-reviewer", 0),
+    ("root", "mastertier/MT59-all-seat-domain-planner", 0),
+    ("root", "mastertier/MT59-all-seat-domain-reviewer", 0),
+    ("root", "mastertier/MT60-consumer-lock-conflict", 1),
+    ("root", "mastertier/MT61-consumer-kind-conflict", 1),
+    ("root", "mastertier/MT62-origin-authority-conflict", 1),
+    ("root", "mastertier/MT63-review-verdict-conflict", 1),
+    ("root", "mastertier/MT64-direct-origin-pair-control", 0),
+    ("root", "mastertier/MT65-design-kind-wrong-origin-shape", 1),
+    ("root", "mastertier/MT66-audit-kind-wrong-origin-shape", 1),
+    ("root", "mastertier/MT67-pair-invented-design-doc", 1),
+    ("root", "mastertier/MT68-all-seat-missing-review-pair-planner", 1),
+    ("root", "mastertier/MT68-all-seat-missing-review-pair-implementer", 1),
+    ("root", "mastertier/MT68-all-seat-missing-review-master-planner", 1),
+    ("root", "mastertier/MT68-all-seat-missing-review-master-reviewer", 1),
+    ("root", "mastertier/MT68-all-seat-missing-review-domain-planner", 1),
+    ("root", "mastertier/MT68-all-seat-missing-review-domain-reviewer", 1),
+]
+
+EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + [
     ("file", "mastertier/MT0-generator-smoke.md", 0),
     ("file", "mastertier/MT21-dispatch-impl-master-planner.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-master-reviewer.md", 1),
@@ -311,7 +359,7 @@ EXPECTED = A5_EXPECTED + [
     ("root", "rolevocab/RV7a-master-dispatch-failclosed", 1),
     ("root", "rolevocab/RV7b-domain-direct-override", 1),
     ("root", "rolevocab/RV7e-domain-designlock-kind", 0),
-    ("root", "rolevocab/RV7e2-domain-designlock-id-only", 0),
+    ("root", "rolevocab/RV7e2-domain-designlock-id-only", 1),
     ("root", "rolevocab/RV7f-master-delegated-authority", 0),
     ("root", "rolevocab/RV7g-malformed-address-hardening", 1),
     ("root", "rolevocab/RV7h-delegated-bypass-order", 1),
@@ -919,6 +967,7 @@ _h27_override = "master-tier seat 'domain-planner' may not use DESIGN_RECORD_KIN
 _h27_master_override = "master-tier seat 'master-planner' may not use DESIGN_RECORD_KIND: direct-override: that record kind stays on the operator/orchestrator chain (DD-v29-master-authority-20260809 cross-seat rule 2)"
 _a4_lock = "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"
 _a4_kind = "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"
+_lock_rule = " (DD-v29-master-authority-20260809 cross-seat rule 1)"
 EXPECTED_ERROR_SET.update({
     "rolevocab/RV7a-master-dispatch-failclosed.md": [_h27_dispatch],
     "rolevocab/RV7b-domain-direct-override.md": [_h27_override],
@@ -929,9 +978,14 @@ EXPECTED_ERROR_SET.update({
     "rolevocab/RV7l-override-plus-lock-conflict.md": [_a4_lock, _h27_master_override],
     "rolevocab/RV7m-kind-conflict-plus-lock.md": [_a4_kind],
     "rolevocab/RV7a-master-dispatch-failclosed": [f"RV7a-master-dispatch-failclosed.md: {_h27_dispatch}"],
-    "rolevocab/RV7b-domain-direct-override": [f"RV7b-domain-direct-override.md: {_h27_override}"],
+    "rolevocab/RV7b-domain-direct-override": [
+        f"RV7b-domain-direct-override.md: {_h27_override}",
+        "RV7b-domain-direct-override.md: master/domain-seat consumer DESIGN_LOCK_ID 'rv7b-doc' has no resolvable earlier master/domain origin" + _lock_rule,
+    ],
     "rolevocab/RV7e-domain-designlock-kind": [],
-    "rolevocab/RV7e2-domain-designlock-id-only": [],
+    "rolevocab/RV7e2-domain-designlock-id-only": [
+        "01-plan.md: master/domain-seat consumer DESIGN_LOCK_ID 'rv7e2-doc' has no resolvable earlier master/domain origin" + _lock_rule,
+    ],
     "rolevocab/RV7f-master-delegated-authority": [],
     "rolevocab/RV7k-samevalue-duplicate": [],
     "rolevocab/RV7l-override-plus-lock-conflict": [f"01-plan.md: {_a4_lock}", f"01-plan.md: {_h27_master_override}"],
@@ -960,6 +1014,103 @@ for _prefix in ("MT2", "MTT2"):
     EXPECTED_ERROR_SET[f"mastertier/{_prefix}9-from-launder-master-last.md"] = [_h27_from_conflict]
 for _number, _order in ((30, "master-first"), (31, "master-last"), (32, "master-first"), (33, "master-last")):
     EXPECTED_ERROR_SET[f"mastertier/MTT{_number}-from-launder-{_order}.md"] = [_h27_from_conflict]
+
+_lock_conflict = "DESIGN_LOCK_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_kind_conflict = "DESIGN_RECORD_KIND carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_authority_conflict = "AUTHORITY carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+_verdict_conflict = "DESIGN_REVIEW_VERDICT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+for _rel in (
+    "MT34-foreign-design-kind-present", "MT35-foreign-design-kind-omitted",
+    "MT36-foreign-audit-pair", "MT37-pair-route-control", "MT41-pair-no-origin-control",
+    "MT42-later-origin-control", "MT43-same-owner-revisions", "MT64-direct-origin-pair-control",
+):
+    EXPECTED_ERROR_SET[f"mastertier/{_rel}"] = []
+for _seat in ("pair-planner", "pair-implementer", "master-planner", "master-reviewer", "domain-planner", "domain-reviewer"):
+    EXPECTED_ERROR_SET[f"mastertier/MT59-all-seat-{_seat}"] = []
+EXPECTED_ERROR_SET.update({
+    "mastertier/MT38-pair-foreign-collision": [
+        "03-consumer.md: DESIGN_LOCK_ID 'lock-c4-collision' resolves to both pair and master/domain origin groups; lock routing fails closed" + _lock_rule,
+    ],
+    "mastertier/MT39-two-foreign-owners": [
+        "03-consumer.md: DESIGN_LOCK_ID 'lock-c4-multiple' resolves to 2 master/domain owner groups; lock routing fails closed" + _lock_rule,
+    ],
+    "mastertier/MT40-master-no-origin": [
+        "01-consumer.md: master/domain-seat consumer DESIGN_LOCK_ID 'lock-c4-master-none' has no resolvable earlier master/domain origin" + _lock_rule,
+    ],
+    "mastertier/MT44-same-position-origin-ambiguity": [
+        "02-consumer.md: DESIGN_LOCK_ID 'lock-c4-origin-tie' has 2 same-position latest origins for owner alpha; lock resolution fails closed" + _lock_rule,
+    ],
+    "mastertier/MT45-reviewer-design-origin": [
+        "03-consumer.md: foreign design-doc may not originate from reviewer seat 'master-reviewer' in PHASE DESIGN" + _lock_rule,
+    ],
+    "mastertier/MT46-reviewer-audit-origin": [
+        "03-consumer.md: foreign audit-record may not originate from reviewer seat 'domain-reviewer' in PHASE AUDIT" + _lock_rule,
+    ],
+    "mastertier/MT47-origin-kind-missing": [
+        "03-consumer.md: foreign origin 01-origin.md requires DESIGN_RECORD_KIND" + _lock_rule,
+    ],
+    "mastertier/MT48-approval-kind-missing": [
+        "03-consumer.md: foreign approval 02-review.md requires DESIGN_RECORD_KIND equal to origin kind 'design-doc'" + _lock_rule,
+    ],
+    "mastertier/MT49-approval-kind-mismatch": [
+        "03-consumer.md: foreign approval 02-review.md DESIGN_RECORD_KIND 'audit-record' does not equal origin kind 'design-doc'" + _lock_rule,
+    ],
+    "mastertier/MT50-consumer-kind-mismatch": [
+        "03-consumer.md: consumer DESIGN_RECORD_KIND 'audit-record' does not equal foreign origin kind 'design-doc'" + _lock_rule,
+    ],
+    "mastertier/MT51-cross-owner-reviewer": [
+        "03-consumer.md: foreign approval 02-review.md must be FROM alpha.master-reviewer, the same-owner tier reviewer" + _lock_rule,
+    ],
+    "mastertier/MT52-latest-origin-unreviewed": [
+        "04-consumer.md: foreign DESIGN_LOCK_ID 'lock-c5-unreviewed-v2' has no earlier DESIGN-REVIEW parented to latest origin 03-origin-v2.md" + _lock_rule,
+    ],
+    "mastertier/MT53-latest-origin-must-revise": [
+        "04-consumer.md: latest foreign approval 03-review-v2.md requires DESIGN_REVIEW_VERDICT: approve; got 'must-revise'" + _lock_rule,
+    ],
+    "mastertier/MT54-latest-review-no-prefilter": [
+        "04-consumer.md: latest foreign approval 03-review-must-revise.md requires DESIGN_REVIEW_VERDICT: approve; got 'must-revise'" + _lock_rule,
+    ],
+    "mastertier/MT55-review-must-parent-latest-revision": [
+        "04-consumer.md: foreign DESIGN_LOCK_ID 'lock-c5-stale-review' has no earlier DESIGN-REVIEW parented to latest origin 03-origin-v2.md" + _lock_rule,
+    ],
+    "mastertier/MT56-later-approval-refused": [
+        "02-consumer.md: foreign DESIGN_LOCK_ID 'lock-c5-later-review' has no earlier DESIGN-REVIEW parented to latest origin 01-origin.md" + _lock_rule,
+    ],
+    "mastertier/MT57-invented-reviewer-lock": [
+        "01-consumer.md: master/domain-seat consumer DESIGN_LOCK_ID 'lock-c5-invented-reviewer' has no resolvable earlier master/domain origin" + _lock_rule,
+    ],
+    "mastertier/MT58-same-position-review-ambiguity": [
+        "03-consumer.md: latest origin 01-origin.md has 2 same-position latest DESIGN-REVIEW candidates; lock resolution fails closed" + _lock_rule,
+    ],
+    "mastertier/MT60-consumer-lock-conflict": [
+        "03-consumer.md: " + _lock_conflict,
+    ],
+    "mastertier/MT61-consumer-kind-conflict": [
+        "03-consumer.md: " + _kind_conflict,
+    ],
+    "mastertier/MT62-origin-authority-conflict": [
+        "01-origin.md: " + _authority_conflict,
+        "03-consumer.md: foreign origin 01-origin.md has conflicting AUTHORITY occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT63-review-verdict-conflict": [
+        "02-review.md: " + _verdict_conflict,
+        "03-consumer.md: foreign approval 02-review.md has conflicting DESIGN_REVIEW_VERDICT occurrences; lock lifecycle refuses first-value resolution" + _lock_rule,
+    ],
+    "mastertier/MT65-design-kind-wrong-origin-shape": [
+        "03-consumer.md: foreign design-doc origin 01-origin.md must be planner-seat PHASE DESIGN with AUTHORITY: design-only" + _lock_rule,
+    ],
+    "mastertier/MT66-audit-kind-wrong-origin-shape": [
+        "03-consumer.md: foreign audit-record origin 01-origin.md must be planner-seat PHASE AUDIT with AUTHORITY: review-only or report-only" + _lock_rule,
+    ],
+    "mastertier/MT67-pair-invented-design-doc": [
+        "01-consumer.md: DESIGN_LOCK_ID 'lock-c5-pair-invented' has no earlier same-owner DESIGN relay carrying matching DESIGN_DOC_ID",
+    ],
+})
+for _seat in ("pair-planner", "pair-implementer", "master-planner", "master-reviewer", "domain-planner", "domain-reviewer"):
+    _case = f"c5-missing-review-{_seat}"
+    EXPECTED_ERROR_SET[f"mastertier/MT68-all-seat-missing-review-{_seat}"] = [
+        f"02-consumer.md: foreign DESIGN_LOCK_ID 'lock-{_case}' has no earlier DESIGN-REVIEW parented to latest origin 01-origin.md" + _lock_rule,
+    ]
 
 
 def main() -> int:
