@@ -110,6 +110,9 @@ H27_CONFLICT_FIELDS = (
     "DISPATCH_ID", "PARENT_DISPATCH_ID", "COMMISSION_AUTHORIZATION", "COMMISSION_ID",
     "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
 )
+H27_TEMPLATE_MASTER_TIER_FROM_RE = re.compile(
+    r"^<owner>\.(master-planner|master-reviewer|domain-planner|domain-reviewer)$"
+)
 
 CANONICAL_SCAN_ROWS = [
     "authz/tenant/RLS/permissions/secrets",
@@ -728,15 +731,20 @@ def own_line_merge_present(text: str) -> bool:
     return re.search(r"^DISPATCH MERGE\s*$", operational_token_text(text), flags=re.MULTILINE) is not None
 
 
-def h27_master_seat_errors(text: str, fields: Dict[str, str]) -> List[str]:
+def h27_master_seat_errors(text: str, fields: Dict[str, str], *, template_mode: bool) -> List[str]:
     """Ruled file/template arms for the four master-tier seats (H27 rules 1-2)."""
     errors: List[str] = []
-    master_roles = [
-        from_role(addr)
-        for raw in h27_occurrences(text, "FROM")
-        for addr in split_addresses(raw)
-        if from_role(addr) in MASTER_TIER_ROLES
-    ]
+    master_roles: List[str] = []
+    for raw in h27_occurrences(text, "FROM"):
+        for addr in split_addresses(raw):
+            role = from_role(addr)
+            if role in MASTER_TIER_ROLES:
+                master_roles.append(role)
+        if template_mode:
+            for alternative in raw.split("|"):
+                match = H27_TEMPLATE_MASTER_TIER_FROM_RE.fullmatch(alternative.strip())
+                if match:
+                    master_roles.append(match.group(1))
     if not master_roles:
         return errors
     role = master_roles[0]
@@ -1111,7 +1119,7 @@ def lint_file(
         elif not is_implementer_address(to_addrs[0]):
             result.error("DISPATCH IMPL requires TO to be exactly one implementer-role address")
 
-    for err in h27_master_seat_errors(text, fields):
+    for err in h27_master_seat_errors(text, fields, template_mode=template_mode):
         result.error(err)
 
     has_merge_dispatch = own_line_merge_present(text)

@@ -81,12 +81,19 @@ FINAL_GIT_STATUS_SHORT: none — fixture, clean tree
 """
 
 
-def h27_launder_content(*, master_first: bool) -> str:
-    first, second = (
-        ("qi.master-planner", "qi.planner") if master_first
-        else ("qi.planner", "qi.master-planner")
-    )
-    role = "Master Planner" if master_first else "Planner"
+def h27_launder_content(*, master_first: bool, template_mode: bool) -> str:
+    if template_mode:
+        first, second = (
+            ("<owner>.master-planner | <owner>.planner", "<owner>.planner") if master_first
+            else ("<owner>.planner", "<owner>.planner | <owner>.master-planner")
+        )
+        role = "<role>"
+    else:
+        first, second = (
+            ("qi.master-planner", "qi.planner") if master_first
+            else ("qi.planner", "qi.master-planner")
+        )
+        role = "Master Planner" if master_first else "Planner"
     return f"""ROLE: {role}
 PHASE: SITREP
 AUTHORITY: read-only
@@ -158,9 +165,13 @@ def generated_members() -> dict[str, str]:
     members["MT27-repeat-delegated-dispatch-authority.md"] = h27_conflict_content(
         key="DELEGATED_DISPATCH_AUTHORITY", first="yes", second="yes",
     )
-    for prefix in ("MT2", "MTT2"):
-        members[f"{prefix}8-from-launder-master-first.md"] = h27_launder_content(master_first=True)
-        members[f"{prefix}9-from-launder-master-last.md"] = h27_launder_content(master_first=False)
+    for prefix, template_mode in (("MT2", False), ("MTT2", True)):
+        members[f"{prefix}8-from-launder-master-first.md"] = h27_launder_content(
+            master_first=True, template_mode=template_mode,
+        )
+        members[f"{prefix}9-from-launder-master-last.md"] = h27_launder_content(
+            master_first=False, template_mode=template_mode,
+        )
     return members
 
 

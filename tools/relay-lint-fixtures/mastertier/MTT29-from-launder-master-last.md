@@ -1,13 +1,13 @@
-ROLE: Planner
+ROLE: <role>
 PHASE: SITREP
 AUTHORITY: read-only
 DISPATCH_ID: mt-h27-from-launder
 CEREMONY_TIER: small
 EVIDENCE_TARGET: E1
 HUMAN_GATE_REQUIRED: no
-FROM: qi.planner
+FROM: <owner>.planner
 TO: qi.implementer
-FROM: qi.master-planner
+FROM: <owner>.planner | <owner>.master-planner
 
 Generated H27 FROM-launder fixture.
 
