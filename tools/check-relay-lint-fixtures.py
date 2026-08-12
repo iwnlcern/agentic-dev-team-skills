@@ -281,6 +281,10 @@ COMMISSION_PASS = {
     "CM146-auth-target-explicit-pass",
     "CM151-grant-target-pass",
     "CM152-grant-target-pass",
+    "CM179-charter-reissue-pass",
+    "CM181-later-charter-inert",
+    "CM190-unmarked-universe-controls",
+    "CM210-review-reissue-pass",
 }
 COMMISSION_MEMBERS = (
     "CM77-valid-chain", "CM78-auth-uppercase", "CM79-auth-wrong-phase",
@@ -325,6 +329,29 @@ COMMISSION_MEMBERS = (
     "CM162-auth-target-orchestrator-legacy", "CM163-auth-target-orchestrator-explicit",
     "CM164-grant-target-operator-legacy", "CM165-grant-target-operator-explicit",
     "CM166-grant-target-orchestrator-legacy", "CM167-grant-target-orchestrator-explicit",
+    "CM168-s1a-charter-parent-absent", "CM169-s1b-charter-parent-wrong",
+    "CM170-s1c-charter-parent-ambiguous", "CM171-s1d-charter-parent-nonstage",
+    "CM172-auth-reselection-approval", "CM173-auth-reselection-grant",
+    "CM174-auth-reselection-receipt", "CM175-approval-parent-absent",
+    "CM176-approval-parent-wrong", "CM177-approval-parent-ambiguous",
+    "CM178-approval-parent-nonstage", "CM179-charter-reissue-pass",
+    "CM180-charter-same-position", "CM181-later-charter-inert",
+    "CM182-wrong-owner-reviewer", "CM183-later-must-revise-shadow",
+    "CM184-grant-parent-absent", "CM185-grant-parent-wrong",
+    "CM186-grant-parent-ambiguous", "CM187-grant-parent-nonstage",
+    "CM188-later-approval-inert", "CM189-receipt-missing-grant",
+    "CM190-unmarked-universe-controls", "CM191-charter-parent-conflict-parent-first",
+    "CM192-charter-parent-conflict-other-first", "CM193-approval-parent-conflict-parent-first",
+    "CM194-approval-parent-conflict-other-first", "CM195-grant-parent-conflict-parent-first",
+    "CM196-grant-parent-conflict-other-first", "CM197-approval-id-conflict-id-first",
+    "CM198-approval-id-conflict-other-first",
+    "CM199-grant-wrong-owner-reviewer", "CM200-receipt-wrong-owner-reviewer",
+    "CM201-receipt-grant-parent-absent", "CM202-receipt-grant-parent-wrong",
+    "CM203-receipt-grant-parent-ambiguous", "CM204-receipt-grant-parent-nonstage",
+    "CM205-receipt-approval-parent-absent", "CM206-receipt-approval-parent-wrong",
+    "CM207-receipt-approval-parent-ambiguous", "CM208-receipt-approval-parent-nonstage",
+    "CM209-receipt-later-grant-inert", "CM210-review-reissue-pass",
+    "CM211-review-same-position",
 )
 COMMISSION_EXPECTED = [
     ("root", f"mastertier/{name}", 0 if name in COMMISSION_PASS else 1)
@@ -1369,6 +1396,150 @@ for _number, (_label, _target) in enumerate(
     EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-target-{_label}"] = [
         f"04-grant.md: COMMISSION_TO {_target!r} is not exactly one non-special pair-planner address" + _commission_grant_rule,
     ]
+
+_auth_no_shape = (
+    "relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape (literal yes, direct-authority FROM, "
+    "PHASE PLAN, AUTHORITY plan-only, TO exactly one master-planner, complete equality surface, pair-planner "
+    "COMMISSION_TO)" + _commission_auth_rule
+)
+_parent_conflict = (
+    "PARENT_DISPATCH_ID carries 2 distinct values across 2 occurrences; an authority-critical field is "
+    "fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+)
+_dispatch_conflict = (
+    "DISPATCH_ID carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed "
+    "unless exactly one distinct value is present" + _h27_rule5_suffix
+)
+EXPECTED_ERROR_SET.update({
+    "mastertier/CM168-s1a-charter-parent-absent": [
+        "02-charter.md: charter PARENT_DISPATCH_ID is mandatory and must resolve the selected authorization" + _commission_charter_rule,
+    ],
+    "mastertier/CM169-s1b-charter-parent-wrong": [
+        "03-charter.md: charter parent 'cm169-auth-v1' does not equal selected authorization 'cm169-auth-v2'" + _commission_charter_rule,
+    ],
+    "mastertier/CM170-s1c-charter-parent-ambiguous": [
+        "02-charter.md: charter parent 'cm170-auth' has 2 same-position latest holders; ambiguity fails closed" + _commission_charter_rule,
+    ],
+    "mastertier/CM171-s1d-charter-parent-nonstage": [
+        "03-charter.md: charter parent 'cm171-auth' resolves to 02-decoy.md, which is not the selected stage-(a) authorization" + _commission_charter_rule,
+    ],
+    "mastertier/CM172-auth-reselection-approval": [
+        "03-auth-no.md: " + _auth_no_shape,
+        "04-approval.md: latest authorization-universe member 03-auth-no.md fails stage-(a) shape; marker-bearing malformed authorization shadows and fails" + _commission_auth_rule,
+    ],
+    "mastertier/CM173-auth-reselection-grant": [
+        "04-auth-no.md: " + _auth_no_shape,
+        "05-grant.md: latest authorization-universe member 04-auth-no.md fails stage-(a) shape; marker-bearing malformed authorization shadows and fails" + _commission_auth_rule,
+    ],
+    "mastertier/CM174-auth-reselection-receipt": [
+        "05-auth-no.md: " + _auth_no_shape,
+        "06-receipt.md: latest authorization-universe member 05-auth-no.md fails stage-(a) shape; marker-bearing malformed authorization shadows and fails" + _commission_auth_rule,
+    ],
+    "mastertier/CM175-approval-parent-absent": [
+        "03-approval.md: charter approval PARENT_DISPATCH_ID is mandatory and must resolve the latest charter revision" + _commission_charter_rule,
+    ],
+    "mastertier/CM176-approval-parent-wrong": [
+        "04-approval.md: charter approval parent 'cm176-status' resolves to 03-status.md, which is not the latest charter revision" + _commission_charter_rule,
+    ],
+    "mastertier/CM177-approval-parent-ambiguous": [
+        "03-approval.md: charter approval parent 'cm177-charter' has 2 same-position latest holders; ambiguity fails closed" + _commission_charter_rule,
+    ],
+    "mastertier/CM178-approval-parent-nonstage": [
+        "04-approval.md: charter approval parent 'cm178-charter' resolves to 03-decoy.md, which is not the latest charter revision" + _commission_charter_rule,
+    ],
+    "mastertier/CM180-charter-same-position": [
+        "03-approval.md: commission 'cm180' has 2 charter revisions at the latest order position; ambiguity fails closed" + _commission_charter_rule,
+    ],
+    "mastertier/CM182-wrong-owner-reviewer": [
+        "03-approval.md: charter approval must be FROM alpha.master-reviewer, the charter owner's tier reviewer" + _commission_charter_rule,
+    ],
+    "mastertier/CM183-later-must-revise-shadow": [
+        "05-grant.md: latest charter review 04-review.md requires DESIGN_REVIEW_VERDICT: approve; got 'must-revise'" + _commission_grant_rule,
+    ],
+    "mastertier/CM184-grant-parent-absent": [
+        "04-grant.md: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving review" + _commission_grant_rule,
+    ],
+    "mastertier/CM185-grant-parent-wrong": [
+        "05-grant.md: grant parent 'cm185-status' resolves to 04-status.md, which is not the latest charter review" + _commission_grant_rule,
+    ],
+    "mastertier/CM186-grant-parent-ambiguous": [
+        "04-grant.md: grant parent 'cm186-approval' has 2 same-position latest holders; ambiguity fails closed" + _commission_grant_rule,
+    ],
+    "mastertier/CM187-grant-parent-nonstage": [
+        "05-grant.md: grant parent 'cm187-approval' resolves to 04-decoy.md, which is not the latest charter review" + _commission_grant_rule,
+    ],
+    "mastertier/CM188-later-approval-inert": [
+        "03-grant.md: grant has no earlier charter review for the latest charter revision" + _commission_grant_rule,
+    ],
+    "mastertier/CM189-receipt-missing-grant": [
+        "04-receipt.md: commission 'cm189' has no earlier grant-universe member" + _commission_receipt_rule,
+    ],
+    "mastertier/CM191-charter-parent-conflict-parent-first": ["02-charter.md: " + _parent_conflict],
+    "mastertier/CM192-charter-parent-conflict-other-first": ["02-charter.md: " + _parent_conflict],
+    "mastertier/CM193-approval-parent-conflict-parent-first": ["03-approval.md: " + _parent_conflict],
+    "mastertier/CM194-approval-parent-conflict-other-first": ["03-approval.md: " + _parent_conflict],
+    "mastertier/CM195-grant-parent-conflict-parent-first": ["04-grant.md: " + _parent_conflict],
+    "mastertier/CM196-grant-parent-conflict-other-first": ["04-grant.md: " + _parent_conflict],
+    "mastertier/CM197-approval-id-conflict-id-first": [
+        "03-approval.md: " + _dispatch_conflict,
+        "04-grant.md: selected grant parent relay 03-approval.md has conflicting DISPATCH_ID occurrences; ancestry resolution refuses first-value resolution" + _commission_grant_rule,
+    ],
+    "mastertier/CM198-approval-id-conflict-other-first": [
+        "03-approval.md: " + _dispatch_conflict,
+        "04-grant.md: selected grant parent relay 03-approval.md has conflicting DISPATCH_ID occurrences; ancestry resolution refuses first-value resolution" + _commission_grant_rule,
+    ],
+    "mastertier/CM199-grant-wrong-owner-reviewer": [
+        "03-approval.md: charter approval must be FROM alpha.master-reviewer, the charter owner's tier reviewer" + _commission_charter_rule,
+        "04-grant.md: charter review must be FROM alpha.master-reviewer, the charter owner's tier reviewer" + _commission_grant_rule,
+    ],
+    "mastertier/CM200-receipt-wrong-owner-reviewer": [
+        "03-approval.md: charter approval must be FROM alpha.master-reviewer, the charter owner's tier reviewer" + _commission_charter_rule,
+        "04-grant.md: charter review must be FROM alpha.master-reviewer, the charter owner's tier reviewer" + _commission_grant_rule,
+        "05-receipt.md: charter review must be FROM alpha.master-reviewer, the charter owner's tier reviewer" + _commission_receipt_rule,
+    ],
+    "mastertier/CM201-receipt-grant-parent-absent": [
+        "04-grant.md: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving review" + _commission_grant_rule,
+        "05-receipt.md: grant PARENT_DISPATCH_ID is mandatory and must resolve an approving review" + _commission_receipt_rule,
+    ],
+    "mastertier/CM202-receipt-grant-parent-wrong": [
+        "04-grant.md: grant parent 'cm202-auth' resolves to 01-auth.md, which is not the latest charter review" + _commission_grant_rule,
+        "05-receipt.md: grant parent 'cm202-auth' resolves to 01-auth.md, which is not an approving charter review" + _commission_receipt_rule,
+    ],
+    "mastertier/CM203-receipt-grant-parent-ambiguous": [
+        "04-grant.md: grant parent 'cm203-approval' has 2 same-position latest holders; ambiguity fails closed" + _commission_grant_rule,
+        "05-receipt.md: grant parent 'cm203-approval' has 2 same-position latest holders; ambiguity fails closed" + _commission_receipt_rule,
+    ],
+    "mastertier/CM204-receipt-grant-parent-nonstage": [
+        "05-grant.md: grant parent 'cm204-approval' resolves to 04-decoy.md, which is not the latest charter review" + _commission_grant_rule,
+        "06-receipt.md: grant parent 'cm204-approval' resolves to 04-decoy.md, which is not an approving charter review" + _commission_receipt_rule,
+    ],
+    "mastertier/CM205-receipt-approval-parent-absent": [
+        "03-approval.md: charter approval PARENT_DISPATCH_ID is mandatory and must resolve the latest charter revision" + _commission_charter_rule,
+        "04-grant.md: grant has no earlier charter review for the latest charter revision" + _commission_grant_rule,
+        "05-receipt.md: selected charter review 03-approval.md lacks a usable PARENT_DISPATCH_ID" + _commission_receipt_rule,
+    ],
+    "mastertier/CM206-receipt-approval-parent-wrong": [
+        "03-approval.md: charter approval parent 'cm206-auth' resolves to 01-auth.md, which is not the latest charter revision" + _commission_charter_rule,
+        "04-grant.md: grant has no earlier charter review for the latest charter revision" + _commission_grant_rule,
+        "05-receipt.md: approval parent 'cm206-auth' resolves to 01-auth.md, which is not the charter revision" + _commission_receipt_rule,
+    ],
+    "mastertier/CM207-receipt-approval-parent-ambiguous": [
+        "03-approval.md: charter approval parent 'cm207-charter' has 2 same-position latest holders; ambiguity fails closed" + _commission_charter_rule,
+        "04-grant.md: approval parent 'cm207-charter' has 2 same-position latest holders; ambiguity fails closed" + _commission_grant_rule,
+        "05-receipt.md: approval parent 'cm207-charter' has 2 same-position latest holders; ambiguity fails closed" + _commission_receipt_rule,
+    ],
+    "mastertier/CM208-receipt-approval-parent-nonstage": [
+        "04-approval.md: charter approval parent 'cm208-charter' resolves to 03-decoy.md, which is not the latest charter revision" + _commission_charter_rule,
+        "05-grant.md: approval parent 'cm208-charter' resolves to 03-decoy.md, which is not the charter revision" + _commission_grant_rule,
+        "06-receipt.md: approval parent 'cm208-charter' resolves to 03-decoy.md, which is not the charter revision" + _commission_receipt_rule,
+    ],
+    "mastertier/CM209-receipt-later-grant-inert": [
+        "04-receipt.md: commission 'cm209' has no earlier grant-universe member" + _commission_receipt_rule,
+    ],
+    "mastertier/CM211-review-same-position": [
+        "04-grant.md: commission 'cm211' has 2 charter reviews at the latest order position; ambiguity fails closed" + _commission_grant_rule,
+    ],
+})
 EXPECTED_ERROR_SET.update({
     "mastertier/CM153-byte-exact-address-surface": [
         "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,

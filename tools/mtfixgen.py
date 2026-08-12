@@ -279,13 +279,19 @@ def commission_authorization(
 def commission_charter(
     case: str, *, authority: str = "design-only", kind: str | None = "design-doc",
     parent: str | None = None,
+    include_parent: bool = True,
     design_doc_id: str | None = None,
     dispatch_id: str | None = None, surface: tuple[tuple[str, str], ...] | None = None,
+    extra_fields: tuple[tuple[str, str], ...] = (),
 ) -> str:
-    fields = [("PARENT_DISPATCH_ID", parent or f"{case}-auth"), ("DESIGN_DOC_ID", design_doc_id or f"CH-{case}")]
+    fields = []
+    if include_parent:
+        fields.append(("PARENT_DISPATCH_ID", parent or f"{case}-auth"))
+    fields.append(("DESIGN_DOC_ID", design_doc_id or f"CH-{case}"))
     if kind is not None:
         fields.append(("DESIGN_RECORD_KIND", kind))
     fields.extend(surface if surface is not None else commission_surface(case))
+    fields.extend(extra_fields)
     return lifecycle_relay(
         role="Master Planner", phase="DESIGN", authority=authority,
         dispatch_id=dispatch_id or f"{case}-charter", from_addr="alpha.master-planner",
@@ -295,20 +301,25 @@ def commission_charter(
 
 def commission_approval(
     case: str, *, kind: str | None = "design-doc", verdict: str | None = "approve",
+    parent: str | None = None, include_parent: bool = True,
+    dispatch_id: str | None = None, role: str = "Master Reviewer",
+    from_addr: str = "alpha.master-reviewer",
     surface: tuple[tuple[str, str], ...] | None = None,
+    extra_fields: tuple[tuple[str, str], ...] = (),
 ) -> str:
-    fields = [
-        ("PARENT_DISPATCH_ID", f"{case}-charter"),
-        ("DESIGN_DOC_ID", f"CH-{case}"),
-    ]
+    fields = []
+    if include_parent:
+        fields.append(("PARENT_DISPATCH_ID", parent or f"{case}-charter"))
+    fields.append(("DESIGN_DOC_ID", f"CH-{case}"))
     if kind is not None:
         fields.append(("DESIGN_RECORD_KIND", kind))
     if verdict is not None:
         fields.append(("DESIGN_REVIEW_VERDICT", verdict))
     fields.extend(surface if surface is not None else commission_surface(case))
+    fields.extend(extra_fields)
     return lifecycle_relay(
-        role="Master Reviewer", phase="DESIGN-REVIEW", authority="review-only",
-        dispatch_id=f"{case}-approval", from_addr="alpha.master-reviewer",
+        role=role, phase="DESIGN-REVIEW", authority="review-only",
+        dispatch_id=dispatch_id or f"{case}-approval", from_addr=from_addr,
         to_addr="alpha.master-planner",
         fields=tuple(fields),
     )
@@ -317,16 +328,16 @@ def commission_approval(
 def commission_grant(
     case: str, *, value: str = "yes", to_addr: str = "beta.pair-planner",
     role: str = "Master Planner", from_addr: str = "alpha.master-planner",
-    dispatch_id: str | None = None, surface: tuple[tuple[str, str], ...] | None = None,
+    dispatch_id: str | None = None, parent: str | None = None, include_parent: bool = True,
+    surface: tuple[tuple[str, str], ...] | None = None,
     extra_fields: tuple[tuple[str, str], ...] = (),
 ) -> str:
     return lifecycle_relay(
         role=role, phase="PLAN", authority="plan-only",
         dispatch_id=dispatch_id or f"{case}-grant", from_addr=from_addr, to_addr=to_addr,
-        fields=(
-            ("PARENT_DISPATCH_ID", f"{case}-approval"),
-            ("DELEGATED_DISPATCH_AUTHORITY", value),
-        ) + (surface if surface is not None else commission_surface(case)) + extra_fields,
+        fields=(((("PARENT_DISPATCH_ID", parent or f"{case}-approval"),) if include_parent else ()) +
+                (("DELEGATED_DISPATCH_AUTHORITY", value),) +
+                (surface if surface is not None else commission_surface(case)) + extra_fields),
     )
 
 
@@ -657,6 +668,356 @@ def commission_members() -> dict[str, str]:
         members[f"CM{number}-grant-target-{label}/04-grant.md"] = commission_grant(
             case, to_addr=target, surface=commission_surface(case, overrides={"COMMISSION_TO": target}),
         )
+
+    # Task 9.5b: exact commission ancestry and authorization lifetime.
+    members["CM168-s1a-charter-parent-absent/01-auth.md"] = commission_authorization("cm168")
+    members["CM168-s1a-charter-parent-absent/02-charter.md"] = commission_charter(
+        "cm168", include_parent=False,
+    )
+
+    members["CM169-s1b-charter-parent-wrong/01-auth-v1.md"] = commission_authorization(
+        "cm169", dispatch_id="cm169-auth-v1",
+    )
+    members["CM169-s1b-charter-parent-wrong/02-auth-v2.md"] = commission_authorization(
+        "cm169", dispatch_id="cm169-auth-v2",
+    )
+    members["CM169-s1b-charter-parent-wrong/03-charter.md"] = commission_charter(
+        "cm169", parent="cm169-auth-v1",
+    )
+
+    members["CM170-s1c-charter-parent-ambiguous/a/01-auth.md"] = commission_authorization(
+        "cm170", dispatch_id="cm170-auth",
+    )
+    members["CM170-s1c-charter-parent-ambiguous/b/01-decoy.md"] = lifecycle_relay(
+        role="Operator", phase="SITREP", authority="report-only", dispatch_id="cm170-auth",
+        from_addr="operator", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm170"),),
+    )
+    members["CM170-s1c-charter-parent-ambiguous/02-charter.md"] = commission_charter("cm170")
+
+    members["CM171-s1d-charter-parent-nonstage/01-auth.md"] = commission_authorization("cm171")
+    members["CM171-s1d-charter-parent-nonstage/02-decoy.md"] = lifecycle_relay(
+        role="Operator", phase="SITREP", authority="report-only", dispatch_id="cm171-auth",
+        from_addr="operator", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm171"),),
+    )
+    members["CM171-s1d-charter-parent-nonstage/03-charter.md"] = commission_charter("cm171")
+
+    for number, timing in ((172, "approval"), (173, "grant"), (174, "receipt")):
+        case = f"cm{number}"
+        members[f"CM{number}-auth-reselection-{timing}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-auth-reselection-{timing}/02-charter.md"] = commission_charter(case)
+        if timing != "approval":
+            members[f"CM{number}-auth-reselection-{timing}/03-approval.md"] = commission_approval(case)
+        revision_position = "03" if timing == "approval" else ("04" if timing == "grant" else "05")
+        members[f"CM{number}-auth-reselection-{timing}/{revision_position}-auth-no.md"] = commission_authorization(
+            case, value="no", dispatch_id=f"{case}-auth-no",
+        )
+        if timing == "approval":
+            members[f"CM{number}-auth-reselection-{timing}/04-approval.md"] = commission_approval(case)
+        elif timing == "grant":
+            members[f"CM{number}-auth-reselection-{timing}/05-grant.md"] = commission_grant(case)
+        else:
+            members[f"CM{number}-auth-reselection-{timing}/04-grant.md"] = commission_grant(case)
+            members[f"CM{number}-auth-reselection-{timing}/06-receipt.md"] = commission_receipt(case)
+
+    members["CM175-approval-parent-absent/01-auth.md"] = commission_authorization("cm175")
+    members["CM175-approval-parent-absent/02-charter.md"] = commission_charter("cm175")
+    members["CM175-approval-parent-absent/03-approval.md"] = commission_approval("cm175", include_parent=False)
+
+    members["CM176-approval-parent-wrong/01-auth.md"] = commission_authorization("cm176")
+    members["CM176-approval-parent-wrong/02-charter.md"] = commission_charter("cm176")
+    members["CM176-approval-parent-wrong/03-status.md"] = lifecycle_relay(
+        role="Master Planner", phase="SITREP", authority="report-only", dispatch_id="cm176-status",
+        from_addr="alpha.master-planner", to_addr="alpha.master-reviewer",
+        fields=(("COMMISSION_ID", "cm176"),),
+    )
+    members["CM176-approval-parent-wrong/04-approval.md"] = commission_approval("cm176", parent="cm176-status")
+
+    members["CM177-approval-parent-ambiguous/01-auth.md"] = commission_authorization("cm177")
+    members["CM177-approval-parent-ambiguous/a/02-charter.md"] = commission_charter("cm177")
+    members["CM177-approval-parent-ambiguous/b/02-decoy.md"] = lifecycle_relay(
+        role="Master Planner", phase="SITREP", authority="report-only", dispatch_id="cm177-charter",
+        from_addr="alpha.master-planner", to_addr="alpha.master-reviewer",
+        fields=(("COMMISSION_ID", "cm177"),),
+    )
+    members["CM177-approval-parent-ambiguous/03-approval.md"] = commission_approval("cm177")
+
+    members["CM178-approval-parent-nonstage/01-auth.md"] = commission_authorization("cm178")
+    members["CM178-approval-parent-nonstage/02-charter.md"] = commission_charter("cm178")
+    members["CM178-approval-parent-nonstage/03-decoy.md"] = lifecycle_relay(
+        role="Master Planner", phase="SITREP", authority="report-only", dispatch_id="cm178-charter",
+        from_addr="alpha.master-planner", to_addr="alpha.master-reviewer",
+        fields=(("COMMISSION_ID", "cm178"),),
+    )
+    members["CM178-approval-parent-nonstage/04-approval.md"] = commission_approval("cm178")
+
+    members["CM179-charter-reissue-pass/01-auth.md"] = commission_authorization("cm179")
+    members["CM179-charter-reissue-pass/02-charter-v1.md"] = commission_charter(
+        "cm179", dispatch_id="cm179-charter-v1",
+    )
+    members["CM179-charter-reissue-pass/03-charter-v2.md"] = commission_charter(
+        "cm179", dispatch_id="cm179-charter-v2",
+    )
+    members["CM179-charter-reissue-pass/04-approval.md"] = commission_approval(
+        "cm179", parent="cm179-charter-v2",
+    )
+
+    members["CM180-charter-same-position/01-auth.md"] = commission_authorization("cm180")
+    members["CM180-charter-same-position/a/02-charter.md"] = commission_charter(
+        "cm180", dispatch_id="cm180-charter-a",
+    )
+    members["CM180-charter-same-position/b/02-charter.md"] = commission_charter(
+        "cm180", dispatch_id="cm180-charter-b",
+    )
+    members["CM180-charter-same-position/03-approval.md"] = commission_approval(
+        "cm180", parent="cm180-charter-a",
+    )
+
+    members["CM181-later-charter-inert/01-auth.md"] = commission_authorization("cm181")
+    members["CM181-later-charter-inert/02-charter-v1.md"] = commission_charter(
+        "cm181", dispatch_id="cm181-charter-v1",
+    )
+    members["CM181-later-charter-inert/03-approval.md"] = commission_approval(
+        "cm181", parent="cm181-charter-v1",
+    )
+    members["CM181-later-charter-inert/04-charter-v2.md"] = commission_charter(
+        "cm181", dispatch_id="cm181-charter-v2",
+    )
+
+    members["CM182-wrong-owner-reviewer/01-auth.md"] = commission_authorization("cm182")
+    members["CM182-wrong-owner-reviewer/02-charter.md"] = commission_charter("cm182")
+    members["CM182-wrong-owner-reviewer/03-approval.md"] = commission_approval(
+        "cm182", from_addr="gamma.master-reviewer",
+    )
+
+    members["CM183-later-must-revise-shadow/01-auth.md"] = commission_authorization("cm183")
+    members["CM183-later-must-revise-shadow/02-charter.md"] = commission_charter("cm183")
+    members["CM183-later-must-revise-shadow/03-approval.md"] = commission_approval(
+        "cm183", dispatch_id="cm183-approval-ok",
+    )
+    members["CM183-later-must-revise-shadow/04-review.md"] = commission_approval(
+        "cm183", verdict="must-revise", dispatch_id="cm183-approval-no",
+    )
+    members["CM183-later-must-revise-shadow/05-grant.md"] = commission_grant(
+        "cm183", parent="cm183-approval-no",
+    )
+
+    members["CM184-grant-parent-absent/01-auth.md"] = commission_authorization("cm184")
+    members["CM184-grant-parent-absent/02-charter.md"] = commission_charter("cm184")
+    members["CM184-grant-parent-absent/03-approval.md"] = commission_approval("cm184")
+    members["CM184-grant-parent-absent/04-grant.md"] = commission_grant("cm184", include_parent=False)
+
+    members["CM185-grant-parent-wrong/01-auth.md"] = commission_authorization("cm185")
+    members["CM185-grant-parent-wrong/02-charter.md"] = commission_charter("cm185")
+    members["CM185-grant-parent-wrong/03-approval.md"] = commission_approval("cm185")
+    members["CM185-grant-parent-wrong/04-status.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm185-status",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm185"),),
+    )
+    members["CM185-grant-parent-wrong/05-grant.md"] = commission_grant("cm185", parent="cm185-status")
+
+    members["CM186-grant-parent-ambiguous/01-auth.md"] = commission_authorization("cm186")
+    members["CM186-grant-parent-ambiguous/02-charter.md"] = commission_charter("cm186")
+    members["CM186-grant-parent-ambiguous/a/03-approval.md"] = commission_approval("cm186")
+    members["CM186-grant-parent-ambiguous/b/03-decoy.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm186-approval",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm186"),),
+    )
+    members["CM186-grant-parent-ambiguous/04-grant.md"] = commission_grant("cm186")
+
+    members["CM187-grant-parent-nonstage/01-auth.md"] = commission_authorization("cm187")
+    members["CM187-grant-parent-nonstage/02-charter.md"] = commission_charter("cm187")
+    members["CM187-grant-parent-nonstage/03-approval.md"] = commission_approval("cm187")
+    members["CM187-grant-parent-nonstage/04-decoy.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm187-approval",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm187"),),
+    )
+    members["CM187-grant-parent-nonstage/05-grant.md"] = commission_grant("cm187")
+
+    members["CM188-later-approval-inert/01-auth.md"] = commission_authorization("cm188")
+    members["CM188-later-approval-inert/02-charter.md"] = commission_charter("cm188")
+    members["CM188-later-approval-inert/03-grant.md"] = commission_grant("cm188")
+    members["CM188-later-approval-inert/04-approval.md"] = commission_approval("cm188")
+
+    members["CM189-receipt-missing-grant/01-auth.md"] = commission_authorization("cm189")
+    members["CM189-receipt-missing-grant/02-charter.md"] = commission_charter("cm189")
+    members["CM189-receipt-missing-grant/03-approval.md"] = commission_approval("cm189")
+    members["CM189-receipt-missing-grant/04-receipt.md"] = commission_receipt("cm189")
+
+    members["CM190-unmarked-universe-controls/01-auth.md"] = commission_authorization("cm190")
+    members["CM190-unmarked-universe-controls/02-status.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm190-status",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_ID", "cm190"),),
+    )
+    members["CM190-unmarked-universe-controls/03-charter.md"] = commission_charter("cm190")
+    members["CM190-unmarked-universe-controls/04-approval.md"] = commission_approval("cm190")
+    members["CM190-unmarked-universe-controls/05-grant.md"] = commission_grant("cm190")
+    members["CM190-unmarked-universe-controls/06-status.md"] = lifecycle_relay(
+        role="Pair Planner", phase="SITREP", authority="report-only", dispatch_id="cm190-status-two",
+        from_addr="beta.pair-planner", to_addr="beta.pair-implementer",
+        fields=(("COMMISSION_ID", "cm190"),),
+    )
+    members["CM190-unmarked-universe-controls/07-receipt.md"] = commission_receipt("cm190")
+
+    for number, order in ((191, "parent-first"), (192, "other-first")):
+        case = f"cm{number}"
+        parents = (("PARENT_DISPATCH_ID", f"{case}-auth"), ("PARENT_DISPATCH_ID", "other"))
+        if order == "other-first":
+            parents = tuple(reversed(parents))
+        members[f"CM{number}-charter-parent-conflict-{order}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-charter-parent-conflict-{order}/02-charter.md"] = commission_charter(
+            case, include_parent=False, extra_fields=parents,
+        )
+
+    for number, order in ((193, "parent-first"), (194, "other-first")):
+        case = f"cm{number}"
+        parents = (("PARENT_DISPATCH_ID", f"{case}-charter"), ("PARENT_DISPATCH_ID", "other"))
+        if order == "other-first":
+            parents = tuple(reversed(parents))
+        members[f"CM{number}-approval-parent-conflict-{order}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-approval-parent-conflict-{order}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-approval-parent-conflict-{order}/03-approval.md"] = commission_approval(
+            case, include_parent=False, extra_fields=parents,
+        )
+
+    for number, order in ((195, "parent-first"), (196, "other-first")):
+        case = f"cm{number}"
+        parents = (("PARENT_DISPATCH_ID", f"{case}-approval"), ("PARENT_DISPATCH_ID", "other"))
+        if order == "other-first":
+            parents = tuple(reversed(parents))
+        members[f"CM{number}-grant-parent-conflict-{order}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-grant-parent-conflict-{order}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-grant-parent-conflict-{order}/03-approval.md"] = commission_approval(case)
+        members[f"CM{number}-grant-parent-conflict-{order}/04-grant.md"] = commission_grant(
+            case, include_parent=False, extra_fields=parents,
+        )
+
+    for number, order in ((197, "id-first"), (198, "other-first")):
+        case = f"cm{number}"
+        ids = (("DISPATCH_ID", f"{case}-approval"), ("DISPATCH_ID", "other"))
+        if order == "other-first":
+            ids = tuple(reversed(ids))
+        members[f"CM{number}-approval-id-conflict-{order}/01-auth.md"] = commission_authorization(case)
+        members[f"CM{number}-approval-id-conflict-{order}/02-charter.md"] = commission_charter(case)
+        members[f"CM{number}-approval-id-conflict-{order}/03-approval.md"] = commission_approval(
+            case, dispatch_id="placeholder", extra_fields=ids,
+        ).replace("DISPATCH_ID: placeholder\n", "", 1)
+        members[f"CM{number}-approval-id-conflict-{order}/04-grant.md"] = commission_grant(case)
+
+    members["CM199-grant-wrong-owner-reviewer/01-auth.md"] = commission_authorization("cm199")
+    members["CM199-grant-wrong-owner-reviewer/02-charter.md"] = commission_charter("cm199")
+    members["CM199-grant-wrong-owner-reviewer/03-approval.md"] = commission_approval(
+        "cm199", from_addr="gamma.master-reviewer",
+    )
+    members["CM199-grant-wrong-owner-reviewer/04-grant.md"] = commission_grant("cm199")
+
+    members["CM200-receipt-wrong-owner-reviewer/01-auth.md"] = commission_authorization("cm200")
+    members["CM200-receipt-wrong-owner-reviewer/02-charter.md"] = commission_charter("cm200")
+    members["CM200-receipt-wrong-owner-reviewer/03-approval.md"] = commission_approval(
+        "cm200", from_addr="gamma.master-reviewer",
+    )
+    members["CM200-receipt-wrong-owner-reviewer/04-grant.md"] = commission_grant("cm200")
+    members["CM200-receipt-wrong-owner-reviewer/05-receipt.md"] = commission_receipt("cm200")
+
+    members["CM201-receipt-grant-parent-absent/01-auth.md"] = commission_authorization("cm201")
+    members["CM201-receipt-grant-parent-absent/02-charter.md"] = commission_charter("cm201")
+    members["CM201-receipt-grant-parent-absent/03-approval.md"] = commission_approval("cm201")
+    members["CM201-receipt-grant-parent-absent/04-grant.md"] = commission_grant("cm201", include_parent=False)
+    members["CM201-receipt-grant-parent-absent/05-receipt.md"] = commission_receipt("cm201")
+
+    members["CM202-receipt-grant-parent-wrong/01-auth.md"] = commission_authorization("cm202")
+    members["CM202-receipt-grant-parent-wrong/02-charter.md"] = commission_charter("cm202")
+    members["CM202-receipt-grant-parent-wrong/03-approval.md"] = commission_approval("cm202")
+    members["CM202-receipt-grant-parent-wrong/04-grant.md"] = commission_grant("cm202", parent="cm202-auth")
+    members["CM202-receipt-grant-parent-wrong/05-receipt.md"] = commission_receipt("cm202")
+
+    members["CM203-receipt-grant-parent-ambiguous/01-auth.md"] = commission_authorization("cm203")
+    members["CM203-receipt-grant-parent-ambiguous/02-charter.md"] = commission_charter("cm203")
+    members["CM203-receipt-grant-parent-ambiguous/a/03-approval.md"] = commission_approval("cm203")
+    members["CM203-receipt-grant-parent-ambiguous/b/03-decoy.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm203-approval",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm203"),),
+    )
+    members["CM203-receipt-grant-parent-ambiguous/04-grant.md"] = commission_grant("cm203")
+    members["CM203-receipt-grant-parent-ambiguous/05-receipt.md"] = commission_receipt("cm203")
+
+    members["CM204-receipt-grant-parent-nonstage/01-auth.md"] = commission_authorization("cm204")
+    members["CM204-receipt-grant-parent-nonstage/02-charter.md"] = commission_charter("cm204")
+    members["CM204-receipt-grant-parent-nonstage/03-approval.md"] = commission_approval("cm204")
+    members["CM204-receipt-grant-parent-nonstage/04-decoy.md"] = lifecycle_relay(
+        role="Master Reviewer", phase="SITREP", authority="report-only", dispatch_id="cm204-approval",
+        from_addr="alpha.master-reviewer", to_addr="alpha.master-planner",
+        fields=(("COMMISSION_ID", "cm204"),),
+    )
+    members["CM204-receipt-grant-parent-nonstage/05-grant.md"] = commission_grant("cm204")
+    members["CM204-receipt-grant-parent-nonstage/06-receipt.md"] = commission_receipt("cm204")
+
+    members["CM205-receipt-approval-parent-absent/01-auth.md"] = commission_authorization("cm205")
+    members["CM205-receipt-approval-parent-absent/02-charter.md"] = commission_charter("cm205")
+    members["CM205-receipt-approval-parent-absent/03-approval.md"] = commission_approval("cm205", include_parent=False)
+    members["CM205-receipt-approval-parent-absent/04-grant.md"] = commission_grant("cm205")
+    members["CM205-receipt-approval-parent-absent/05-receipt.md"] = commission_receipt("cm205")
+
+    members["CM206-receipt-approval-parent-wrong/01-auth.md"] = commission_authorization("cm206")
+    members["CM206-receipt-approval-parent-wrong/02-charter.md"] = commission_charter("cm206")
+    members["CM206-receipt-approval-parent-wrong/03-approval.md"] = commission_approval("cm206", parent="cm206-auth")
+    members["CM206-receipt-approval-parent-wrong/04-grant.md"] = commission_grant("cm206")
+    members["CM206-receipt-approval-parent-wrong/05-receipt.md"] = commission_receipt("cm206")
+
+    members["CM207-receipt-approval-parent-ambiguous/01-auth.md"] = commission_authorization("cm207")
+    members["CM207-receipt-approval-parent-ambiguous/a/02-charter.md"] = commission_charter("cm207")
+    members["CM207-receipt-approval-parent-ambiguous/b/02-decoy.md"] = lifecycle_relay(
+        role="Master Planner", phase="SITREP", authority="report-only", dispatch_id="cm207-charter",
+        from_addr="alpha.master-planner", to_addr="alpha.master-reviewer",
+        fields=(("COMMISSION_ID", "cm207"),),
+    )
+    members["CM207-receipt-approval-parent-ambiguous/03-approval.md"] = commission_approval("cm207")
+    members["CM207-receipt-approval-parent-ambiguous/04-grant.md"] = commission_grant("cm207")
+    members["CM207-receipt-approval-parent-ambiguous/05-receipt.md"] = commission_receipt("cm207")
+
+    members["CM208-receipt-approval-parent-nonstage/01-auth.md"] = commission_authorization("cm208")
+    members["CM208-receipt-approval-parent-nonstage/02-charter.md"] = commission_charter("cm208")
+    members["CM208-receipt-approval-parent-nonstage/03-decoy.md"] = lifecycle_relay(
+        role="Master Planner", phase="SITREP", authority="report-only", dispatch_id="cm208-charter",
+        from_addr="alpha.master-planner", to_addr="alpha.master-reviewer",
+        fields=(("COMMISSION_ID", "cm208"),),
+    )
+    members["CM208-receipt-approval-parent-nonstage/04-approval.md"] = commission_approval("cm208")
+    members["CM208-receipt-approval-parent-nonstage/05-grant.md"] = commission_grant("cm208")
+    members["CM208-receipt-approval-parent-nonstage/06-receipt.md"] = commission_receipt("cm208")
+
+    members["CM209-receipt-later-grant-inert/01-auth.md"] = commission_authorization("cm209")
+    members["CM209-receipt-later-grant-inert/02-charter.md"] = commission_charter("cm209")
+    members["CM209-receipt-later-grant-inert/03-approval.md"] = commission_approval("cm209")
+    members["CM209-receipt-later-grant-inert/04-receipt.md"] = commission_receipt("cm209")
+    members["CM209-receipt-later-grant-inert/05-grant.md"] = commission_grant("cm209")
+
+    members["CM210-review-reissue-pass/01-auth.md"] = commission_authorization("cm210")
+    members["CM210-review-reissue-pass/02-charter.md"] = commission_charter("cm210")
+    members["CM210-review-reissue-pass/03-review-v1.md"] = commission_approval(
+        "cm210", dispatch_id="cm210-review-v1",
+    )
+    members["CM210-review-reissue-pass/04-review-v2.md"] = commission_approval(
+        "cm210", dispatch_id="cm210-review-v2",
+    )
+    members["CM210-review-reissue-pass/05-grant.md"] = commission_grant("cm210", parent="cm210-review-v2")
+
+    members["CM211-review-same-position/01-auth.md"] = commission_authorization("cm211")
+    members["CM211-review-same-position/02-charter.md"] = commission_charter("cm211")
+    members["CM211-review-same-position/a/03-review.md"] = commission_approval(
+        "cm211", dispatch_id="cm211-review-a",
+    )
+    members["CM211-review-same-position/b/03-review.md"] = commission_approval(
+        "cm211", dispatch_id="cm211-review-b",
+    )
+    members["CM211-review-same-position/04-grant.md"] = commission_grant("cm211", parent="cm211-review-a")
+
     return members
 
 

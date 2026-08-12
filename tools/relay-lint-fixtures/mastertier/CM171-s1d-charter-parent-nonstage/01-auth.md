@@ -1,0 +1,15 @@
+ROLE: Operator
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: cm171-auth
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: yes
+FROM: operator
+TO: alpha.master-planner
+COMMISSION_AUTHORIZATION: yes
+COMMISSION_ID: cm171
+COMMISSION_SCOPE: scope-cm171
+COMMISSION_TO: beta.pair-planner
+CHARTER_DOC_ID: CH-cm171
+FINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture
