@@ -81,11 +81,11 @@ FINAL_GIT_STATUS_SHORT: none — fixture, clean tree
 """
 
 
-def h27_launder_content(*, master_first: bool, template_mode: bool) -> str:
+def h27_launder_content(*, master_first: bool, template_mode: bool, template_owner: str = "<owner>") -> str:
     if template_mode:
         first, second = (
-            ("<owner>.master-planner | <owner>.planner", "<owner>.planner") if master_first
-            else ("<owner>.planner", "<owner>.planner | <owner>.master-planner")
+            (f"{template_owner}.master-planner | {template_owner}.planner", f"{template_owner}.planner") if master_first
+            else (f"{template_owner}.planner", f"{template_owner}.planner | {template_owner}.master-planner")
         )
         role = "<role>"
     else:
@@ -171,6 +171,16 @@ def generated_members() -> dict[str, str]:
         )
         members[f"{prefix}9-from-launder-master-last.md"] = h27_launder_content(
             master_first=False, template_mode=template_mode,
+        )
+    for number, template_owner, master_first in (
+        (30, "qi", True),
+        (31, "qi", False),
+        (32, "<team>", True),
+        (33, "<team>", False),
+    ):
+        order = "master-first" if master_first else "master-last"
+        members[f"MTT{number}-from-launder-{order}.md"] = h27_launder_content(
+            master_first=master_first, template_mode=True, template_owner=template_owner,
         )
     return members
 

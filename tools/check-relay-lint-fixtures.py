@@ -260,6 +260,10 @@ EXPECTED = A5_EXPECTED + [
     ("file", "mastertier/MT29-from-launder-master-last.md", 1),
     ("template", "mastertier/MTT28-from-launder-master-first.md", 1),
     ("template", "mastertier/MTT29-from-launder-master-last.md", 1),
+    ("template", "mastertier/MTT30-from-launder-master-first.md", 1),
+    ("template", "mastertier/MTT31-from-launder-master-last.md", 1),
+    ("template", "mastertier/MTT32-from-launder-master-first.md", 1),
+    ("template", "mastertier/MTT33-from-launder-master-last.md", 1),
     ("file", "hardening/HG32a-operator-valid.md", 0),
     ("file", "hardening/HG32b-operator-mismatch.md", 1),
     ("index", "hardening/XRF1-fresh-index", 0),
@@ -954,6 +958,8 @@ _h27_from_conflict = "FROM carries 2 distinct values across 2 occurrences; an au
 for _prefix in ("MT2", "MTT2"):
     EXPECTED_ERROR_SET[f"mastertier/{_prefix}8-from-launder-master-first.md"] = [_h27_from_conflict]
     EXPECTED_ERROR_SET[f"mastertier/{_prefix}9-from-launder-master-last.md"] = [_h27_from_conflict]
+for _number, _order in ((30, "master-first"), (31, "master-last"), (32, "master-first"), (33, "master-last")):
+    EXPECTED_ERROR_SET[f"mastertier/MTT{_number}-from-launder-{_order}.md"] = [_h27_from_conflict]
 
 
 def main() -> int:

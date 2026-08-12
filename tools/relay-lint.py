@@ -111,7 +111,7 @@ H27_CONFLICT_FIELDS = (
     "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
 )
 H27_TEMPLATE_MASTER_TIER_FROM_RE = re.compile(
-    r"^<owner>\.(master-planner|master-reviewer|domain-planner|domain-reviewer)$"
+    r"^<[A-Za-z][A-Za-z0-9_-]*>\.(master-planner|master-reviewer|domain-planner|domain-reviewer)$"
 )
 
 CANONICAL_SCAN_ROWS = [
@@ -736,13 +736,15 @@ def h27_master_seat_errors(text: str, fields: Dict[str, str], *, template_mode: 
     errors: List[str] = []
     master_roles: List[str] = []
     for raw in h27_occurrences(text, "FROM"):
-        for addr in split_addresses(raw):
-            role = from_role(addr)
+        segments = raw.split("|") if template_mode else split_addresses(raw)
+        for segment in segments:
+            candidate = segment.strip()
+            role = from_role(candidate)
             if role in MASTER_TIER_ROLES:
                 master_roles.append(role)
-        if template_mode:
-            for alternative in raw.split("|"):
-                match = H27_TEMPLATE_MASTER_TIER_FROM_RE.fullmatch(alternative.strip())
+                continue
+            if template_mode:
+                match = H27_TEMPLATE_MASTER_TIER_FROM_RE.fullmatch(candidate)
                 if match:
                     master_roles.append(match.group(1))
     if not master_roles:
