@@ -104,6 +104,12 @@ def canonical_role(role: str | None) -> str | None:
 
 LINEAGE_DIRECT_FROM_ROLES = {"operator", "orchestrator", "orchestrator-planner"}
 MASTER_TIER_ROLES = {"master-planner", "master-reviewer", "domain-planner", "domain-reviewer"}
+H27_CONFLICT_FIELDS = (
+    "AUTHORITY", "PHASE", "FROM", "TO", "DESIGN_DOC_ID", "DESIGN_LOCK_ID",
+    "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT", "DELEGATED_DISPATCH_AUTHORITY",
+    "DISPATCH_ID", "PARENT_DISPATCH_ID", "COMMISSION_AUTHORIZATION", "COMMISSION_ID",
+    "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+)
 
 CANONICAL_SCAN_ROWS = [
     "authz/tenant/RLS/permissions/secrets",
@@ -725,10 +731,15 @@ def own_line_merge_present(text: str) -> bool:
 def h27_master_seat_errors(text: str, fields: Dict[str, str]) -> List[str]:
     """Ruled file/template arms for the four master-tier seats (H27 rules 1-2)."""
     errors: List[str] = []
-    from_addrs = split_addresses(fields.get("FROM"))
-    role = from_role(from_addrs[0]) if len(from_addrs) == 1 else None
-    if role not in MASTER_TIER_ROLES:
+    master_roles = [
+        from_role(addr)
+        for raw in h27_occurrences(text, "FROM")
+        for addr in split_addresses(raw)
+        if from_role(addr) in MASTER_TIER_ROLES
+    ]
+    if not master_roles:
         return errors
+    role = master_roles[0]
     authority_keys = (
         "DELEGATED_DISPATCH_AUTHORITY",
         "DESIGN_LOCK_ID",
@@ -751,6 +762,18 @@ def h27_master_seat_errors(text: str, fields: Dict[str, str]) -> List[str]:
             )
         elif values:
             resolved[key] = values[0]
+
+    for key in H27_CONFLICT_FIELDS:
+        if key in authority_keys:
+            continue
+        values = h27_occurrences(text, key)
+        distinct_values = set(values)
+        if len(distinct_values) > 1:
+            errors.append(
+                f"{key} carries {len(distinct_values)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present "
+                "(DD-v29-master-authority-20260809 rule 5)"
+            )
 
     if own_line_dispatch_present(text):
         errors.append(

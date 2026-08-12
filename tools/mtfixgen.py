@@ -27,6 +27,81 @@ MASTER_TIER_SEATS = (
     ("domain-planner", "Domain Planner"),
     ("domain-reviewer", "Domain Reviewer"),
 )
+H27_NON_A4_CONFLICTS = (
+    ("AUTHORITY", "report-only", "read-only"),
+    ("PHASE", "SITREP", "PLAN"),
+    ("FROM", "qi.master-planner", "qi.master-reviewer"),
+    ("TO", "qi.implementer", "qi.pair-implementer"),
+    ("DESIGN_DOC_ID", "dd-one", "dd-two"),
+    ("DESIGN_REVIEW_VERDICT", "approve", "must-revise"),
+    ("DISPATCH_ID", "mt-conflict-one", "mt-conflict-two"),
+    ("PARENT_DISPATCH_ID", "mt-parent-one", "mt-parent-two"),
+    ("COMMISSION_AUTHORIZATION", "yes", "no"),
+    ("COMMISSION_ID", "commission-one", "commission-two"),
+    ("COMMISSION_SCOPE", "scope-one", "scope-two"),
+    ("COMMISSION_TO", "qi.pair-planner", "zz.pair-planner"),
+    ("CHARTER_DOC_ID", "charter-one", "charter-two"),
+)
+H27_A4_CONFLICTS = (
+    ("DELEGATED_DISPATCH_AUTHORITY", "yes", "no"),
+    ("DESIGN_LOCK_ID", "lock-one", "lock-two"),
+    ("DESIGN_RECORD_KIND", "design-doc", "audit-record"),
+)
+
+
+def conflict_member_name(prefix: str, family: str, key: str) -> str:
+    return f"{prefix}{family}-{key.lower().replace('_', '-')}.md"
+
+
+def h27_conflict_content(*, key: str, first: str, second: str) -> str:
+    role = "Master Planner"
+    fields = {
+        "PHASE": "SITREP",
+        "AUTHORITY": "read-only",
+        "DISPATCH_ID": "mt-h27-conflict",
+        "FROM": "qi.master-planner",
+        "TO": "qi.implementer",
+    }
+    fields[key] = first
+    extra_first = "" if key in {"PHASE", "AUTHORITY", "DISPATCH_ID", "FROM", "TO"} else f"{key}: {first}\n"
+    return f"""ROLE: {role}
+PHASE: {fields['PHASE']}
+AUTHORITY: {fields['AUTHORITY']}
+DISPATCH_ID: {fields['DISPATCH_ID']}
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+FROM: {fields['FROM']}
+TO: {fields['TO']}
+{extra_first}{key}: {second}
+
+Generated H27 distinct-value fixture.
+
+FINAL_GIT_STATUS_SHORT: none — fixture, clean tree
+"""
+
+
+def h27_launder_content(*, master_first: bool) -> str:
+    first, second = (
+        ("qi.master-planner", "qi.planner") if master_first
+        else ("qi.planner", "qi.master-planner")
+    )
+    role = "Master Planner" if master_first else "Planner"
+    return f"""ROLE: {role}
+PHASE: SITREP
+AUTHORITY: read-only
+DISPATCH_ID: mt-h27-from-launder
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+FROM: {first}
+TO: qi.implementer
+FROM: {second}
+
+Generated H27 FROM-launder fixture.
+
+FINAL_GIT_STATUS_SHORT: none — fixture, clean tree
+"""
 
 
 def fixture_content(*, role: str, from_addr: str, prohibition: str) -> str:
@@ -69,6 +144,23 @@ def generated_members() -> dict[str, str]:
             members[f"{prefix}{number}-{prohibition}-control.md"] = fixture_content(
                 role=control_role, from_addr=control_from, prohibition=prohibition,
             )
+    for key, first, second in H27_NON_A4_CONFLICTS:
+        members[conflict_member_name("MT2", "4-conflict", key)] = h27_conflict_content(
+            key=key, first=first, second=second,
+        )
+    for key, first, second in H27_A4_CONFLICTS:
+        members[conflict_member_name("MT2", "5-a4-conflict", key)] = h27_conflict_content(
+            key=key, first=first, second=second,
+        )
+    members["MT26-repeat-authority.md"] = h27_conflict_content(
+        key="AUTHORITY", first="read-only", second="read-only",
+    )
+    members["MT27-repeat-delegated-dispatch-authority.md"] = h27_conflict_content(
+        key="DELEGATED_DISPATCH_AUTHORITY", first="yes", second="yes",
+    )
+    for prefix in ("MT2", "MTT2"):
+        members[f"{prefix}8-from-launder-master-first.md"] = h27_launder_content(master_first=True)
+        members[f"{prefix}9-from-launder-master-last.md"] = h27_launder_content(master_first=False)
     return members
 
 

@@ -238,6 +238,28 @@ EXPECTED = A5_EXPECTED + [
     ("template", "mastertier/MTT23-direct-override-domain-planner.md", 1),
     ("template", "mastertier/MTT23-direct-override-domain-reviewer.md", 1),
     ("template", "mastertier/MTT23-direct-override-control.md", 0),
+    ("file", "mastertier/MT24-conflict-authority.md", 1),
+    ("file", "mastertier/MT24-conflict-phase.md", 1),
+    ("file", "mastertier/MT24-conflict-from.md", 1),
+    ("file", "mastertier/MT24-conflict-to.md", 1),
+    ("file", "mastertier/MT24-conflict-design-doc-id.md", 1),
+    ("file", "mastertier/MT24-conflict-design-review-verdict.md", 1),
+    ("file", "mastertier/MT24-conflict-dispatch-id.md", 1),
+    ("file", "mastertier/MT24-conflict-parent-dispatch-id.md", 1),
+    ("file", "mastertier/MT24-conflict-commission-authorization.md", 1),
+    ("file", "mastertier/MT24-conflict-commission-id.md", 1),
+    ("file", "mastertier/MT24-conflict-commission-scope.md", 1),
+    ("file", "mastertier/MT24-conflict-commission-to.md", 1),
+    ("file", "mastertier/MT24-conflict-charter-doc-id.md", 1),
+    ("file", "mastertier/MT25-a4-conflict-delegated-dispatch-authority.md", 1),
+    ("file", "mastertier/MT25-a4-conflict-design-lock-id.md", 1),
+    ("file", "mastertier/MT25-a4-conflict-design-record-kind.md", 1),
+    ("file", "mastertier/MT26-repeat-authority.md", 0),
+    ("file", "mastertier/MT27-repeat-delegated-dispatch-authority.md", 0),
+    ("file", "mastertier/MT28-from-launder-master-first.md", 1),
+    ("file", "mastertier/MT29-from-launder-master-last.md", 1),
+    ("template", "mastertier/MTT28-from-launder-master-first.md", 1),
+    ("template", "mastertier/MTT29-from-launder-master-last.md", 1),
     ("file", "hardening/HG32a-operator-valid.md", 0),
     ("file", "hardening/HG32b-operator-mismatch.md", 1),
     ("index", "hardening/XRF1-fresh-index", 0),
@@ -911,6 +933,27 @@ EXPECTED_ERROR_SET.update({
     "rolevocab/RV7l-override-plus-lock-conflict": [f"01-plan.md: {_a4_lock}", f"01-plan.md: {_h27_master_override}"],
     "rolevocab/RV7m-kind-conflict-plus-lock": [f"01-plan.md: {_a4_kind}"],
 })
+
+_h27_conflict_fields = (
+    "AUTHORITY", "PHASE", "FROM", "TO", "DESIGN_DOC_ID", "DESIGN_REVIEW_VERDICT",
+    "DISPATCH_ID", "PARENT_DISPATCH_ID", "COMMISSION_AUTHORIZATION", "COMMISSION_ID",
+    "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+)
+_h27_rule5_suffix = " (DD-v29-master-authority-20260809 rule 5)"
+for _field in _h27_conflict_fields:
+    _name = _field.lower().replace("_", "-")
+    EXPECTED_ERROR_SET[f"mastertier/MT24-conflict-{_name}.md"] = [
+        f"{_field} carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present{_h27_rule5_suffix}",
+    ]
+for _field in ("DELEGATED_DISPATCH_AUTHORITY", "DESIGN_LOCK_ID", "DESIGN_RECORD_KIND"):
+    _name = _field.lower().replace("_", "-")
+    EXPECTED_ERROR_SET[f"mastertier/MT25-a4-conflict-{_name}.md"] = [
+        f"{_field} carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present",
+    ]
+_h27_from_conflict = "FROM carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+for _prefix in ("MT2", "MTT2"):
+    EXPECTED_ERROR_SET[f"mastertier/{_prefix}8-from-launder-master-first.md"] = [_h27_from_conflict]
+    EXPECTED_ERROR_SET[f"mastertier/{_prefix}9-from-launder-master-last.md"] = [_h27_from_conflict]
 
 
 def main() -> int:
