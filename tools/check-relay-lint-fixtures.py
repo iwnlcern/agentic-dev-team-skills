@@ -207,6 +207,7 @@ A5_SEAM = {
 }
 
 EXPECTED = A5_EXPECTED + [
+    ("file", "mastertier/MT0-generator-smoke.md", 0),
     ("file", "hardening/HG32a-operator-valid.md", 0),
     ("file", "hardening/HG32b-operator-mismatch.md", 1),
     ("index", "hardening/XRF1-fresh-index", 0),
