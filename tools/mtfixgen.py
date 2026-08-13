@@ -1242,6 +1242,31 @@ def commission_members() -> dict[str, str]:
                 ("TO", "alpha.master-planner")),
     )
 
+    # Composite selected-ancestor conflicts prove that each consuming gate
+    # reports every conflicted object it reads. The conflicted fields preserve
+    # universe membership and ancestry selection.
+    for number, gate in ((267, "approval"), (268, "grant"), (269, "receipt")):
+        case = f"cm{number}"
+        name = f"CM{number}-composite-conflicts-{gate}"
+        members[f"{name}/01-auth.md"] = commission_authorization(
+            case, extra_fields=(("COMMISSION_AUTHORIZATION", "no"),),
+        )
+        members[f"{name}/02-charter.md"] = commission_charter(
+            case, extra_fields=(("AUTHORITY", "plan-only"),),
+        )
+        if gate == "approval":
+            members[f"{name}/03-approval.md"] = commission_approval(case)
+            continue
+        members[f"{name}/03-approval.md"] = commission_approval(
+            case, extra_fields=(("DESIGN_REVIEW_VERDICT", "must-revise"),),
+        )
+        members[f"{name}/04-grant.md"] = commission_grant(
+            case,
+            extra_fields=(("TO", "gamma.pair-planner"),) if gate == "receipt" else (),
+        )
+        if gate == "receipt":
+            members[f"{name}/05-receipt.md"] = commission_receipt(case)
+
     return members
 
 

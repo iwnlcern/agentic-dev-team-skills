@@ -2422,6 +2422,20 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             return False
         return True
 
+    def selected_authorization_conflict(selected, consumer) -> bool:
+        conflict = selected_conflict(
+            selected,
+            ("FROM", "PHASE", "AUTHORITY", "TO", "DISPATCH_ID", "COMMISSION_AUTHORIZATION")
+            + H27_COMMISSION_SURFACE,
+        )
+        if conflict:
+            errors.append(
+                f"{relname(consumer)}: selected authorization-universe member {relname(selected)} has conflicting "
+                f"{conflict} occurrences; universe selection refuses first-value resolution{H27_COMMISSION_AUTH_RULE}"
+            )
+            return True
+        return False
+
     def authorization_for(consumer, commission_id: str, site_rule: str):
         candidates = marker_universe("COMMISSION_AUTHORIZATION", commission_id, consumer[1])
         selected, tied = latest_at_one_position(candidates)
@@ -2436,16 +2450,7 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 f"at the latest order position; ambiguity fails closed{H27_COMMISSION_AUTH_RULE}"
             )
             return None
-        conflict = selected_conflict(
-            selected,
-            ("FROM", "PHASE", "AUTHORITY", "TO", "DISPATCH_ID", "COMMISSION_AUTHORIZATION")
-            + H27_COMMISSION_SURFACE,
-        )
-        if conflict:
-            errors.append(
-                f"{relname(consumer)}: selected authorization-universe member {relname(selected)} has conflicting "
-                f"{conflict} occurrences; universe selection refuses first-value resolution{H27_COMMISSION_AUTH_RULE}"
-            )
+        if selected_authorization_conflict(selected, consumer):
             return None
         if not h27_commission_auth_shape_ok(selected):
             errors.append(
@@ -2454,6 +2459,15 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             )
             return None
         return selected
+
+    def authorization_conflict_for(consumer, commission_id: str) -> bool:
+        """Report only a uniquely selected authorization's conflict, without trusting its shape."""
+        selected, _tied = latest_at_one_position(
+            marker_universe("COMMISSION_AUTHORIZATION", commission_id, consumer[1])
+        )
+        if selected is None:
+            return False
+        return selected_authorization_conflict(selected, consumer)
 
     def add_nonmaster_conflicts(item) -> bool:
         """File-mode H27 already reports master-seat conflicts; cover special/pair stages here."""
@@ -2660,12 +2674,14 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                         f"which is not the latest charter revision{H27_COMMISSION_CHARTER_RULE}"
                     )
                 continue
-            if stage_conflict(
+            charter_conflicted = stage_conflict(
                 charter,
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
                  "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
                 item, "charter revision", H27_COMMISSION_CHARTER_RULE,
-            ):
+            )
+            if charter_conflicted:
+                authorization_conflict_for(item, commission_id)
                 continue
             if not h27_commission_charter_shape_ok(charter):
                 errors.append(
@@ -2735,12 +2751,24 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             if charter is None:
                 errors.append(f"{relname(item)}: grant lacks an earlier charter revision{H27_COMMISSION_GRANT_RULE}")
                 continue
-            if stage_conflict(
+            charter_conflicted = stage_conflict(
                 charter,
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
                  "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
                 item, "latest charter revision", H27_COMMISSION_GRANT_RULE,
-            ):
+            )
+            if charter_conflicted:
+                eager_approval, _tied = latest_at_one_position(
+                    review_candidates(charter, charter_doc_id, commission_id, order)
+                )
+                if eager_approval is not None:
+                    stage_conflict(
+                        eager_approval,
+                        ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                         "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                        item, "charter review", H27_COMMISSION_GRANT_RULE,
+                    )
+                authorization_conflict_for(item, commission_id)
                 continue
             if not h27_commission_charter_shape_ok(charter):
                 errors.append(
@@ -2760,12 +2788,14 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{H27_COMMISSION_GRANT_RULE}"
                 )
                 continue
-            if stage_conflict(
+            approval_conflicted = stage_conflict(
                 approval,
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
                  "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
                 item, "charter review", H27_COMMISSION_GRANT_RULE,
-            ):
+            )
+            if approval_conflicted:
+                authorization_conflict_for(item, commission_id)
                 continue
             verdict, _ = h27_resolved_discriminator(approval[4], "DESIGN_REVIEW_VERDICT")
             if not h27_commission_approval_shape_ok(approval) or verdict != "approve":
@@ -2891,6 +2921,27 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting {conflict} "
                     f"occurrences; universe selection refuses first-value resolution{H27_COMMISSION_RECEIPT_RULE}"
                 )
+                eager_charter, _tied = latest_at_one_position(
+                    charter_candidates(charter_doc_id, commission_id, selected[1])
+                )
+                if eager_charter is not None:
+                    stage_conflict(
+                        eager_charter,
+                        ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                         "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                        item, "latest charter revision", H27_COMMISSION_RECEIPT_RULE,
+                    )
+                    eager_approval, _tied = latest_at_one_position(
+                        review_candidates(eager_charter, charter_doc_id, commission_id, selected[1])
+                    )
+                    if eager_approval is not None:
+                        stage_conflict(
+                            eager_approval,
+                            ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                             "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                            item, "charter review", H27_COMMISSION_RECEIPT_RULE,
+                        )
+                authorization_conflict_for(item, commission_id)
                 continue
             if not h27_commission_grant_shape_ok(selected):
                 errors.append(
@@ -2932,12 +2983,24 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
-            if stage_conflict(
+            charter_conflicted = stage_conflict(
                 charter,
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
                  "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
                 item, "latest charter revision", H27_COMMISSION_RECEIPT_RULE,
-            ):
+            )
+            if charter_conflicted:
+                eager_approval, _tied = latest_at_one_position(
+                    review_candidates(charter, charter_doc_id, commission_id, selected[1])
+                )
+                if eager_approval is not None:
+                    stage_conflict(
+                        eager_approval,
+                        ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                         "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                        item, "charter review", H27_COMMISSION_RECEIPT_RULE,
+                    )
+                authorization_conflict_for(item, commission_id)
                 continue
             if not h27_commission_charter_shape_ok(charter):
                 errors.append(
@@ -2957,12 +3020,14 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
-            if stage_conflict(
+            approval_conflicted = stage_conflict(
                 approval,
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
                  "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
                 item, "charter review", H27_COMMISSION_RECEIPT_RULE,
-            ):
+            )
+            if approval_conflicted:
+                authorization_conflict_for(item, commission_id)
                 continue
             if not h27_commission_approval_shape_ok(approval):
                 errors.append(

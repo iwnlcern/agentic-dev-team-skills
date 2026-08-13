@@ -394,6 +394,8 @@ COMMISSION_MEMBERS = (
     "CM261-display-present", "CM262-display-malformed",
     "CM263-display-repeated", "CM264-display-conflicting",
     "CM265-receiving-mixed-list", "CM266-receiving-identical-repeats",
+    "CM267-composite-conflicts-approval", "CM268-composite-conflicts-grant",
+    "CM269-composite-conflicts-receipt",
 )
 COMMISSION_EXPECTED = [
     ("root", f"mastertier/{name}", 0 if name in COMMISSION_PASS else 1)
@@ -1740,6 +1742,66 @@ for _name in ("CM265-receiving-mixed-list", "CM266-receiving-identical-repeats")
     EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
         "01-grant.md: " + _receiving.format(target="alpha.master-planner"),
     ]
+
+_composite_intrinsic = {
+    "auth": (
+        "01-auth.md: COMMISSION_AUTHORIZATION carries 2 distinct values across 2 occurrences; "
+        "an authority-critical field is fail-closed unless exactly one distinct value is present"
+        + _h27_rule5_suffix
+    ),
+    "charter": "02-charter.md: " + _authority_conflict,
+    "review": "03-approval.md: " + _verdict_conflict,
+    "grant": (
+        "04-grant.md: TO carries 2 distinct values across 2 occurrences; an authority-critical field is "
+        "fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix
+    ),
+}
+_composite_gate_error = {
+    "auth": _auth_ancestor,
+    "charter-approval": (
+        "selected charter revision 02-charter.md has conflicting AUTHORITY occurrences; "
+        "ancestry resolution refuses first-value resolution" + _commission_charter_rule
+    ),
+    "charter-grant": (
+        "selected latest charter revision 02-charter.md has conflicting AUTHORITY occurrences; "
+        "ancestry resolution refuses first-value resolution" + _commission_grant_rule
+    ),
+    "charter-receipt": (
+        "selected latest charter revision 02-charter.md has conflicting AUTHORITY occurrences; "
+        "ancestry resolution refuses first-value resolution" + _commission_receipt_rule
+    ),
+    "review-grant": (
+        "selected charter review 03-approval.md has conflicting DESIGN_REVIEW_VERDICT occurrences; "
+        "ancestry resolution refuses first-value resolution" + _commission_grant_rule
+    ),
+    "review-receipt": (
+        "selected charter review 03-approval.md has conflicting DESIGN_REVIEW_VERDICT occurrences; "
+        "ancestry resolution refuses first-value resolution" + _commission_receipt_rule
+    ),
+    "grant-receipt": (
+        "selected grant-universe member 04-grant.md has conflicting TO occurrences; "
+        "universe selection refuses first-value resolution" + _commission_receipt_rule
+    ),
+}
+EXPECTED_ERROR_SET["mastertier/CM267-composite-conflicts-approval"] = [
+    _composite_intrinsic["auth"], _composite_intrinsic["charter"],
+    "03-approval.md: " + _composite_gate_error["auth"],
+    "03-approval.md: " + _composite_gate_error["charter-approval"],
+]
+EXPECTED_ERROR_SET["mastertier/CM268-composite-conflicts-grant"] = [
+    _composite_intrinsic["auth"], _composite_intrinsic["charter"], _composite_intrinsic["review"],
+    "04-grant.md: " + _composite_gate_error["auth"],
+    "04-grant.md: " + _composite_gate_error["charter-grant"],
+    "04-grant.md: " + _composite_gate_error["review-grant"],
+]
+EXPECTED_ERROR_SET["mastertier/CM269-composite-conflicts-receipt"] = [
+    _composite_intrinsic["auth"], _composite_intrinsic["charter"],
+    _composite_intrinsic["review"], _composite_intrinsic["grant"],
+    "05-receipt.md: " + _composite_gate_error["auth"],
+    "05-receipt.md: " + _composite_gate_error["charter-receipt"],
+    "05-receipt.md: " + _composite_gate_error["review-receipt"],
+    "05-receipt.md: " + _composite_gate_error["grant-receipt"],
+]
 EXPECTED_ERROR_SET.update({
     "mastertier/CM153-byte-exact-address-surface": [
         "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
