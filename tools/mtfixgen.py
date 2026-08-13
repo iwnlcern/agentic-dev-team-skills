@@ -280,6 +280,7 @@ def commission_charter(
     case: str, *, authority: str = "design-only", kind: str | None = "design-doc",
     parent: str | None = None,
     include_parent: bool = True,
+    phase: str = "DESIGN",
     design_doc_id: str | None = None,
     dispatch_id: str | None = None, surface: tuple[tuple[str, str], ...] | None = None,
     extra_fields: tuple[tuple[str, str], ...] = (),
@@ -293,7 +294,7 @@ def commission_charter(
     fields.extend(surface if surface is not None else commission_surface(case))
     fields.extend(extra_fields)
     return lifecycle_relay(
-        role="Master Planner", phase="DESIGN", authority=authority,
+        role="Master Planner", phase=phase, authority=authority,
         dispatch_id=dispatch_id or f"{case}-charter", from_addr="alpha.master-planner",
         to_addr="alpha.master-reviewer", fields=tuple(fields),
     )
@@ -800,7 +801,7 @@ def commission_members() -> dict[str, str]:
         "cm183", verdict="must-revise", dispatch_id="cm183-approval-no",
     )
     members["CM183-later-must-revise-shadow/05-grant.md"] = commission_grant(
-        "cm183", parent="cm183-approval-no",
+        "cm183", parent="cm183-approval-ok",
     )
 
     members["CM184-grant-parent-absent/01-auth.md"] = commission_authorization("cm184")
@@ -1017,6 +1018,46 @@ def commission_members() -> dict[str, str]:
         "cm211", dispatch_id="cm211-review-b",
     )
     members["CM211-review-same-position/04-grant.md"] = commission_grant("cm211", parent="cm211-review-a")
+
+    members["CM212-auth-charter-same-position/a/01-auth.md"] = commission_authorization("cm212")
+    members["CM212-auth-charter-same-position/b/01-charter.md"] = commission_charter("cm212")
+
+    members["CM213-charter-approval-same-position/01-auth.md"] = commission_authorization("cm213")
+    members["CM213-charter-approval-same-position/a/02-charter.md"] = commission_charter("cm213")
+    members["CM213-charter-approval-same-position/b/02-approval.md"] = commission_approval("cm213")
+
+    members["CM214-approval-grant-same-position/01-auth.md"] = commission_authorization("cm214")
+    members["CM214-approval-grant-same-position/02-charter.md"] = commission_charter("cm214")
+    members["CM214-approval-grant-same-position/a/03-approval.md"] = commission_approval("cm214")
+    members["CM214-approval-grant-same-position/b/03-grant.md"] = commission_grant("cm214")
+
+    members["CM215-grant-receipt-same-position/01-auth.md"] = commission_authorization("cm215")
+    members["CM215-grant-receipt-same-position/02-charter.md"] = commission_charter("cm215")
+    members["CM215-grant-receipt-same-position/03-approval.md"] = commission_approval("cm215")
+    members["CM215-grant-receipt-same-position/a/04-grant.md"] = commission_grant("cm215")
+    members["CM215-grant-receipt-same-position/b/04-receipt.md"] = commission_receipt("cm215")
+
+    members["CM216-malformed-latest-charter/01-auth.md"] = commission_authorization("cm216")
+    members["CM216-malformed-latest-charter/02-charter.md"] = commission_charter("cm216")
+    members["CM216-malformed-latest-charter/03-charter-malformed.md"] = commission_charter(
+        "cm216", phase="SITREP", authority="report-only", dispatch_id="cm216-charter-bad",
+    )
+    members["CM216-malformed-latest-charter/04-approval.md"] = commission_approval("cm216")
+    members["CM216-malformed-latest-charter/05-grant.md"] = commission_grant("cm216")
+    members["CM216-malformed-latest-charter/06-receipt.md"] = commission_receipt("cm216")
+
+    members["CM217-wrong-parent-review-shadow/01-auth.md"] = commission_authorization("cm217")
+    members["CM217-wrong-parent-review-shadow/02-charter.md"] = commission_charter("cm217")
+    members["CM217-wrong-parent-review-shadow/03-approval.md"] = commission_approval(
+        "cm217", dispatch_id="cm217-review-ok",
+    )
+    members["CM217-wrong-parent-review-shadow/04-review-wrong.md"] = commission_approval(
+        "cm217", parent="cm217-auth", dispatch_id="cm217-review-wrong",
+    )
+    members["CM217-wrong-parent-review-shadow/05-grant.md"] = commission_grant(
+        "cm217", parent="cm217-review-ok",
+    )
+    members["CM217-wrong-parent-review-shadow/06-receipt.md"] = commission_receipt("cm217")
 
     return members
 

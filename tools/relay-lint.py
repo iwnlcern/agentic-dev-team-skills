@@ -1886,6 +1886,16 @@ def h27_same_position_latest(items):
     return [item for item in items if item[1][:2] == latest_position]
 
 
+def h27_chronological_position(order):
+    """The ordering position without a filename/path tie-breaker."""
+    return order[:2]
+
+
+def h27_is_earlier(order, before_order) -> bool:
+    """Strict chronology: a filename never makes a same-position relay earlier."""
+    return h27_chronological_position(order) < h27_chronological_position(before_order)
+
+
 def h27_commission_surface(text: str) -> Tuple[str | None, ...]:
     """Resolve the four byte-equality operands without first-value collapse."""
     return tuple(h27_resolved_discriminator(text, key)[0] for key in H27_COMMISSION_SURFACE)
@@ -2221,7 +2231,7 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         return sorted(
             (
                 item for item in phases
-                if item[1] < before_order
+                if h27_is_earlier(item[1], before_order)
                 and h27_occurrences(item[4], marker)
                 and commission_id in h27_occurrences(item[4], "COMMISSION_ID")
             ),
@@ -2245,7 +2255,7 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         if parent_id in {None, ""}:
             return None
         candidates = sorted(
-            (item for item in dispatch_holders.get(parent_id, []) if item[1] < before_order),
+            (item for item in dispatch_holders.get(parent_id, []) if h27_is_earlier(item[1], before_order)),
             key=lambda item: item[1],
         )
         if not candidates:
@@ -2285,12 +2295,13 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
     def charter_candidates(charter_doc_id: str, commission_id: str, before_order):
         return [
             item for item in phases
-            if item[1] < before_order
-            and "DESIGN" in h27_occurrences(item[4], "PHASE")
+            if h27_is_earlier(item[1], before_order)
             and (
                 charter_doc_id in h27_occurrences(item[4], "DESIGN_DOC_ID")
                 or commission_id in h27_occurrences(item[4], "COMMISSION_ID")
             )
+            and h27_occurrences(item[4], "DESIGN_DOC_ID")
+            and h27_any_role_occurrence(item[4], {"master-planner"})
         ]
 
     def review_candidates(charter, charter_doc_id: str, commission_id: str, before_order):
@@ -2299,13 +2310,13 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             return []
         return [
             item for item in phases
-            if item[1] < before_order
-            and "DESIGN-REVIEW" in h27_occurrences(item[4], "PHASE")
+            if h27_is_earlier(item[1], before_order)
             and (
                 charter_doc_id in h27_occurrences(item[4], "DESIGN_DOC_ID")
                 or commission_id in h27_occurrences(item[4], "COMMISSION_ID")
             )
-            and charter_id in h27_occurrences(item[4], "PARENT_DISPATCH_ID")
+            and h27_occurrences(item[4], "DESIGN_DOC_ID")
+            and h27_any_role_occurrence(item[4], {"master-reviewer"})
         ]
 
     def stage_conflict(item, keys, consumer, label: str, site_rule: str) -> bool:
@@ -2613,6 +2624,19 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             if charter is None:
                 errors.append(f"{relname(item)}: grant lacks an earlier charter revision{H27_COMMISSION_GRANT_RULE}")
                 continue
+            if stage_conflict(
+                charter,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                item, "latest charter revision", H27_COMMISSION_GRANT_RULE,
+            ):
+                continue
+            if not h27_commission_charter_shape_ok(charter):
+                errors.append(
+                    f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
+                    f"{H27_COMMISSION_GRANT_RULE}"
+                )
+                continue
             approval = latest_stage(
                 review_candidates(charter, charter_doc_id, commission_id, order), item,
                 "charter reviews", H27_COMMISSION_GRANT_RULE,
@@ -2624,29 +2648,6 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{relname(item)}: grant has no earlier charter review for the latest charter revision"
                     f"{H27_COMMISSION_GRANT_RULE}"
                 )
-                continue
-            parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
-            if parent_id in {None, ""}:
-                errors.append(
-                    f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving "
-                    f"review{H27_COMMISSION_GRANT_RULE}"
-                )
-                continue
-            parent = resolve_ancestry(parent_id, order, item, "grant parent", H27_COMMISSION_GRANT_RULE)
-            if parent is None:
-                continue
-            if parent is not approval:
-                approval_id, _ = h27_resolved_discriminator(approval[4], "DISPATCH_ID")
-                if h27_commission_approval_shape_ok(parent):
-                    errors.append(
-                        f"{relname(item)}: grant parent {parent_id!r} does not equal latest charter review "
-                        f"{approval_id!r}{H27_COMMISSION_GRANT_RULE}"
-                    )
-                else:
-                    errors.append(
-                        f"{relname(item)}: grant parent {parent_id!r} resolves to {relname(parent)}, which is not "
-                        f"the latest charter review{H27_COMMISSION_GRANT_RULE}"
-                    )
                 continue
             if stage_conflict(
                 approval,
@@ -2671,6 +2672,29 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
                     f"the charter owner's tier reviewer{H27_COMMISSION_GRANT_RULE}"
                 )
+                continue
+            parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
+            if parent_id in {None, ""}:
+                errors.append(
+                    f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving "
+                    f"review{H27_COMMISSION_GRANT_RULE}"
+                )
+                continue
+            parent = resolve_ancestry(parent_id, order, item, "grant parent", H27_COMMISSION_GRANT_RULE)
+            if parent is None:
+                continue
+            if parent is not approval:
+                approval_id, _ = h27_resolved_discriminator(approval[4], "DISPATCH_ID")
+                if h27_commission_approval_shape_ok(parent):
+                    errors.append(
+                        f"{relname(item)}: grant parent {parent_id!r} does not equal latest charter review "
+                        f"{approval_id!r}{H27_COMMISSION_GRANT_RULE}"
+                    )
+                else:
+                    errors.append(
+                        f"{relname(item)}: grant parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                        f"the latest charter review{H27_COMMISSION_GRANT_RULE}"
+                    )
                 continue
             approval_parent_id, _ = h27_resolved_discriminator(approval[4], "PARENT_DISPATCH_ID")
             if approval_parent_id in {None, ""}:
@@ -2779,10 +2803,37 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
-            approval = resolve_ancestry(
-                grant_parent_id, selected[1], item, "grant parent", H27_COMMISSION_RECEIPT_RULE,
+            charter = latest_stage(
+                charter_candidates(charter_doc_id, commission_id, selected[1]), item,
+                "charter revisions", H27_COMMISSION_RECEIPT_RULE,
             )
+            if charter is False:
+                continue
+            if stage_conflict(
+                charter,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                item, "latest charter revision", H27_COMMISSION_RECEIPT_RULE,
+            ):
+                continue
+            if charter is None or not h27_commission_charter_shape_ok(charter):
+                errors.append(
+                    f"{relname(item)}: selected latest charter revision "
+                    f"{relname(charter) if charter is not None else '<none>'} fails stage-(b) shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            approval = latest_stage(
+                review_candidates(charter, charter_doc_id, commission_id, selected[1]), item,
+                "charter reviews", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if approval is False:
+                continue
             if approval is None:
+                errors.append(
+                    f"{relname(item)}: selected grant has no earlier charter review"
+                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                )
                 continue
             if stage_conflict(
                 approval,
@@ -2791,13 +2842,10 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 item, "charter review", H27_COMMISSION_RECEIPT_RULE,
             ):
                 continue
-            approval_parent_id, approval_parent_conflict = h27_resolved_discriminator(
-                approval[4], "PARENT_DISPATCH_ID",
-            )
             if not h27_commission_approval_shape_ok(approval):
                 errors.append(
-                    f"{relname(item)}: grant parent {grant_parent_id!r} resolves to {relname(approval)}, which is "
-                    f"not an approving charter review{H27_COMMISSION_RECEIPT_RULE}"
+                    f"{relname(item)}: selected charter review {relname(approval)} fails stage-(b) review shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
             approval_verdict, _ = h27_resolved_discriminator(approval[4], "DESIGN_REVIEW_VERDICT")
@@ -2807,6 +2855,27 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"DESIGN_REVIEW_VERDICT: approve; got {approval_verdict!r}{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
+            if not same_owner_reviewer(approval, charter):
+                charter_owner = from_owner(h27_single_from(charter[4]))
+                errors.append(
+                    f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            grant_parent = resolve_ancestry(
+                grant_parent_id, selected[1], item, "grant parent", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if grant_parent is None:
+                continue
+            if grant_parent is not approval:
+                errors.append(
+                    f"{relname(item)}: selected grant does not parent to the latest charter review before the grant"
+                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
+            approval_parent_id, approval_parent_conflict = h27_resolved_discriminator(
+                approval[4], "PARENT_DISPATCH_ID",
+            )
             if approval_parent_conflict:
                 errors.append(
                     f"{relname(item)}: selected charter review {relname(approval)} has conflicting "
@@ -2820,53 +2889,16 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                     f"PARENT_DISPATCH_ID{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
-            charter = resolve_ancestry(
+            approval_parent = resolve_ancestry(
                 approval_parent_id, approval[1], item, "approval parent", H27_COMMISSION_RECEIPT_RULE,
             )
-            if charter is None:
+            if approval_parent is None:
                 continue
-            if stage_conflict(
-                charter,
-                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
-                 "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
-                item, "charter revision", H27_COMMISSION_RECEIPT_RULE,
-            ):
-                continue
-            if not h27_commission_charter_shape_ok(charter):
+            if approval_parent is not charter:
                 errors.append(
-                    f"{relname(item)}: approval parent {approval_parent_id!r} resolves to {relname(charter)}, "
-                    f"which is not the charter revision{H27_COMMISSION_RECEIPT_RULE}"
-                )
-                continue
-            latest_charter = latest_stage(
-                charter_candidates(charter_doc_id, commission_id, approval[1]), item,
-                "charter revisions", H27_COMMISSION_RECEIPT_RULE,
-            )
-            if latest_charter is False:
-                continue
-            if latest_charter is None or latest_charter is not charter:
-                errors.append(
-                    f"{relname(item)}: selected grant ancestry does not reach the latest charter revision before "
-                    f"its review{H27_COMMISSION_RECEIPT_RULE}"
-                )
-                continue
-            latest_review = latest_stage(
-                review_candidates(charter, charter_doc_id, commission_id, selected[1]), item,
-                "charter reviews", H27_COMMISSION_RECEIPT_RULE,
-            )
-            if latest_review is False:
-                continue
-            if latest_review is None or latest_review is not approval:
-                errors.append(
-                    f"{relname(item)}: selected grant does not parent to the latest charter review before the grant"
+                    f"{relname(item)}: approval parent {approval_parent_id!r} does not resolve to the latest "
+                    f"charter revision before the review"
                     f"{H27_COMMISSION_RECEIPT_RULE}"
-                )
-                continue
-            if not same_owner_reviewer(approval, charter):
-                charter_owner = from_owner(h27_single_from(charter[4]))
-                errors.append(
-                    f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
-                    f"the charter owner's tier reviewer{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue
             authorization = authorization_for(item, commission_id, H27_COMMISSION_RECEIPT_RULE)
