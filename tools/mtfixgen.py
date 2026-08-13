@@ -245,6 +245,37 @@ def add_chain(
     )
 
 
+def c13_dispatch_index_subtree() -> dict[str, str]:
+    """Pair-lineage topology whose second DISPATCH_ID changes one diagnostic."""
+    return {
+        "01-plan.md": lifecycle_relay(
+            role="Planner", phase="PLAN", authority="plan-only",
+            dispatch_id="c13-plan", from_addr="alpha.planner", to_addr="alpha.implementer",
+        ),
+        "02-plan-review.md": lifecycle_relay(
+            role="Implementer", phase="PLAN-REVIEW", authority="review-only",
+            dispatch_id="c13-decoy", from_addr="alpha.implementer", to_addr="alpha.planner",
+            fields=(
+                ("DISPATCH_ID", "c13-review"),
+                ("PARENT_DISPATCH_ID", "c13-plan"),
+            ),
+        ),
+        "03-dispatch.md": lifecycle_relay(
+            role="Planner", phase="PLAN", authority="plan-only",
+            dispatch_id="c13-dispatch", from_addr="alpha.planner", to_addr="alpha.implementer",
+            fields=(
+                ("PARENT_DISPATCH_ID", "c13-review"),
+                ("DELEGATED_DISPATCH_AUTHORITY", "yes"),
+                ("SCOPE_DIFF", "\n- src/fix.ts -> in"),
+                ("SCOPE_DIFF_RESULT", "all-in"),
+            ),
+        ).replace(
+            "FINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture\n",
+            "\nDISPATCH IMPL\n\nFINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture\n",
+        ).replace("SCOPE_DIFF: \n", "SCOPE_DIFF:\n"),
+    }
+
+
 def commission_surface(
     case: str, *, overrides: dict[str, str] | None = None,
     omit: tuple[str, ...] = (), extra: tuple[tuple[str, str], ...] = (),
@@ -1616,6 +1647,10 @@ def generated_members() -> dict[str, str]:
         )
     members.update(lifecycle_members())
     members.update(commission_members())
+    c13_subtree = c13_dispatch_index_subtree()
+    for member_name in ("C13-CM79-dispatch-index", "C13-CM79c-dispatch-index-control"):
+        for relative_name, content in c13_subtree.items():
+            members[f"{member_name}/{relative_name}"] = content
     return members
 
 

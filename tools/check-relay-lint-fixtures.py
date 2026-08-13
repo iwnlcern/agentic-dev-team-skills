@@ -402,7 +402,12 @@ COMMISSION_EXPECTED = [
     for name in COMMISSION_MEMBERS
 ]
 
+C13_CM79 = "mastertier/C13-CM79-dispatch-index"
+C13_CM79C = "mastertier/C13-CM79c-dispatch-index-control"
+
 EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
+    ("root", C13_CM79, 1),
+    ("root", C13_CM79C, 1),
     ("file", "mastertier/MT0-generator-smoke.md", 0),
     ("file", "mastertier/H33a-orchestrator-borrows-operator.md", 1),
     ("file", "mastertier/H33b-operator-borrows-orchestrator.md", 1),
@@ -1095,6 +1100,10 @@ EXPECTED_ERROR_SET = {
         "INDEX.md: line 4: index time 20260601-110000 precedes the previous row 20260601-120000; an append-only index must be non-decreasing",
     ],
 }
+EXPECTED_ERROR_SET[C13_CM79] = [
+    "03-dispatch.md: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve",
+]
+EXPECTED_ERROR_COUNT = {C13_CM79C: 1}
 
 EXPECTED_WARN_SET: dict[str, list[str]] = {
     "kr8a/KR8A4-fenced-token-control": [
@@ -1904,6 +1913,17 @@ def main() -> int:
         os.chdir(tempfile.mkdtemp(prefix="relay-fixtures-neutral."))
     lint = load_linter()
     failed = False
+    cm79_bytes = {
+        member.relative_to(FIXTURES / C13_CM79).as_posix(): member.read_bytes()
+        for member in sorted((FIXTURES / C13_CM79).rglob("*")) if member.is_file()
+    }
+    cm79c_bytes = {
+        member.relative_to(FIXTURES / C13_CM79C).as_posix(): member.read_bytes()
+        for member in sorted((FIXTURES / C13_CM79C).rglob("*")) if member.is_file()
+    }
+    subtree_equal = cm79_bytes == cm79c_bytes
+    print(f"C13 CM79/CM79c normalized subtree bytes: subtree_equal={'yes' if subtree_equal else 'no'}")
+    failed = failed or not subtree_equal
     for kind, rel, expected in EXPECTED:
         target = FIXTURES / rel
         cwd_rel = A5_CWD.get(rel)
@@ -1942,6 +1962,9 @@ def main() -> int:
             ok = observed == expected and observed_errors == expected_sorted
         else:
             ok = observed == expected
+        expected_error_count = EXPECTED_ERROR_COUNT.get(rel)
+        if expected_error_count is not None:
+            ok = ok and len(result.errors) == expected_error_count
         expected_warns = EXPECTED_WARN_SET.get(rel)
         if expected_warns is not None:
             ok = ok and sorted(result.warnings) == sorted(expected_warns)
@@ -1950,6 +1973,8 @@ def main() -> int:
         print(f"{label}: expected={expected} observed={observed} {'PASS' if ok else 'FAIL'}")
         if expected_errors is not None:
             print(f"  expected_errors={len(expected_errors)} observed_errors={len(result.errors)}")
+        elif expected_error_count is not None:
+            print(f"  expected_error_count={expected_error_count} observed_errors={len(result.errors)}")
         if not ok:
             for err in result.errors:
                 print(f"  ERROR {err}")

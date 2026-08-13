@@ -10,7 +10,9 @@ from pathlib import Path
 
 
 DEFAULT_SUITE = (sys.executable, "tools/check-relay-lint-fixtures.py")
-RESULT_LINE = re.compile(r"\b(PASS|FAIL)\s*$")
+# A fixture result has the harness's fixed outcome fields.  Other status lines
+# may legitimately end in PASS/FAIL and must not enter the battery denominator.
+RESULT_LINE = re.compile(r"^(?:--relay-root |--index )?.+: expected=[01] observed=[01] (PASS|FAIL)$")
 
 
 def parse_results(output: str) -> tuple[int, int]:

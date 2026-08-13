@@ -719,8 +719,7 @@ def row_evidence_errors(text: str, row_header: str, evidence_header: str) -> Lis
 def dispatch_id_map(phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]) -> Dict[str, List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]]:
     out: Dict[str, List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]] = {}
     for item in phases:
-        did = item[3].get("DISPATCH_ID")
-        if did:
+        for did in set(h27_occurrences(item[4], "DISPATCH_ID")):
             out.setdefault(did, []).append(item)
     return out
 
