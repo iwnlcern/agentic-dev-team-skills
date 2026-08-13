@@ -2809,6 +2809,12 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             )
             if charter is False:
                 continue
+            if charter is None:
+                errors.append(
+                    f"{relname(item)}: selected latest charter revision <none> fails stage-(b) shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
             if stage_conflict(
                 charter,
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
@@ -2816,10 +2822,9 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 item, "latest charter revision", H27_COMMISSION_RECEIPT_RULE,
             ):
                 continue
-            if charter is None or not h27_commission_charter_shape_ok(charter):
+            if not h27_commission_charter_shape_ok(charter):
                 errors.append(
-                    f"{relname(item)}: selected latest charter revision "
-                    f"{relname(charter) if charter is not None else '<none>'} fails stage-(b) shape"
+                    f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
                     f"{H27_COMMISSION_RECEIPT_RULE}"
                 )
                 continue

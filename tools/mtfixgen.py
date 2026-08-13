@@ -1059,6 +1059,10 @@ def commission_members() -> dict[str, str]:
     )
     members["CM217-wrong-parent-review-shadow/06-receipt.md"] = commission_receipt("cm217")
 
+    members["CM218-receipt-missing-charter/01-auth.md"] = commission_authorization("cm218")
+    members["CM218-receipt-missing-charter/02-grant.md"] = commission_grant("cm218")
+    members["CM218-receipt-missing-charter/03-receipt.md"] = commission_receipt("cm218")
+
     return members
 
 

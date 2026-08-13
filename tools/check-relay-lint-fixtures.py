@@ -355,6 +355,7 @@ COMMISSION_MEMBERS = (
     "CM212-auth-charter-same-position", "CM213-charter-approval-same-position",
     "CM214-approval-grant-same-position", "CM215-grant-receipt-same-position",
     "CM216-malformed-latest-charter", "CM217-wrong-parent-review-shadow",
+    "CM218-receipt-missing-charter",
 )
 COMMISSION_EXPECTED = [
     ("root", f"mastertier/{name}", 0 if name in COMMISSION_PASS else 1)
@@ -1564,6 +1565,10 @@ EXPECTED_ERROR_SET.update({
         "04-review-wrong.md: charter approval parent 'cm217-auth' resolves to 01-auth.md, which is not the latest charter revision" + _commission_charter_rule,
         "05-grant.md: grant parent 'cm217-review-ok' does not equal latest charter review 'cm217-review-wrong'" + _commission_grant_rule,
         "06-receipt.md: selected grant does not parent to the latest charter review before the grant" + _commission_receipt_rule,
+    ],
+    "mastertier/CM218-receipt-missing-charter": [
+        "02-grant.md: grant lacks an earlier charter revision" + _commission_grant_rule,
+        "03-receipt.md: selected latest charter revision <none> fails stage-(b) shape" + _commission_receipt_rule,
     ],
 })
 EXPECTED_ERROR_SET.update({
