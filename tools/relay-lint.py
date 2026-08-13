@@ -1126,8 +1126,12 @@ def lint_file(
         elif not is_implementer_address(to_addrs[0]):
             result.error("DISPATCH IMPL requires TO to be exactly one implementer-role address")
 
-    for err in h27_master_seat_errors(text, fields, template_mode=template_mode):
+    master_errors = h27_master_seat_errors(text, fields, template_mode=template_mode)
+    for err in master_errors:
         result.error(err)
+    dispatch_id_conflict = h27_conflict_message(text, "DISPATCH_ID")
+    if dispatch_id_conflict and dispatch_id_conflict not in master_errors:
+        result.error(dispatch_id_conflict)
 
     has_merge_dispatch = own_line_merge_present(text)
     if has_merge_dispatch and not template_mode:

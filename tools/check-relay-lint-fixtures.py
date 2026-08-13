@@ -408,6 +408,8 @@ C13_CM79C = "mastertier/C13-CM79c-dispatch-index-control"
 EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("root", C13_CM79, 1),
     ("root", C13_CM79C, 1),
+    ("file", "mastertier/DI1a-dispatch-id-conflict.md", 1),
+    ("template", "mastertier/DI1c-dispatch-id-conflict-template.md", 1),
     ("file", "mastertier/MT0-generator-smoke.md", 0),
     ("file", "mastertier/H33a-orchestrator-borrows-operator.md", 1),
     ("file", "mastertier/H33b-operator-borrows-orchestrator.md", 1),
@@ -1100,10 +1102,17 @@ EXPECTED_ERROR_SET = {
         "INDEX.md: line 4: index time 20260601-110000 precedes the previous row 20260601-120000; an append-only index must be non-decreasing",
     ],
 }
+_dispatch_id_conflict = (
+    "DISPATCH_ID carries 2 distinct values across 2 occurrences; an authority-critical field is "
+    "fail-closed unless exactly one distinct value is present (DD-v29-master-authority-20260809 rule 5)"
+)
 EXPECTED_ERROR_SET[C13_CM79] = [
+    "02-plan-review.md: " + _dispatch_id_conflict,
     "03-dispatch.md: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve",
 ]
-EXPECTED_ERROR_COUNT = {C13_CM79C: 1}
+EXPECTED_ERROR_COUNT = {C13_CM79C: 2}
+EXPECTED_ERROR_SET["mastertier/DI1a-dispatch-id-conflict.md"] = [_dispatch_id_conflict]
+EXPECTED_ERROR_SET["mastertier/DI1c-dispatch-id-conflict-template.md"] = [_dispatch_id_conflict]
 
 EXPECTED_WARN_SET: dict[str, list[str]] = {
     "kr8a/KR8A4-fenced-token-control": [

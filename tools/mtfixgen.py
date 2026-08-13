@@ -93,6 +93,19 @@ FINAL_GIT_STATUS_SHORT: none — fixture, clean tree
 """
 
 
+def dispatch_id_conflict_content() -> str:
+    """Pair-tier relay with two distinct DISPATCH_ID values for C14."""
+    return lifecycle_relay(
+        role="Planner",
+        phase="SITREP",
+        authority="report-only",
+        dispatch_id="di1-first",
+        from_addr="qi.planner",
+        to_addr="qi.implementer",
+        fields=(("DISPATCH_ID", "di1-second"),),
+    )
+
+
 def h27_launder_content(*, master_first: bool, template_mode: bool, template_owner: str = "<owner>") -> str:
     if template_mode:
         first, second = (
@@ -1628,6 +1641,8 @@ def generated_members() -> dict[str, str]:
     members["MT27-repeat-delegated-dispatch-authority.md"] = h27_conflict_content(
         key="DELEGATED_DISPATCH_AUTHORITY", first="yes", second="yes",
     )
+    members["DI1a-dispatch-id-conflict.md"] = dispatch_id_conflict_content()
+    members["DI1c-dispatch-id-conflict-template.md"] = dispatch_id_conflict_content()
     for prefix, template_mode in (("MT2", False), ("MTT2", True)):
         members[f"{prefix}8-from-launder-master-first.md"] = h27_launder_content(
             master_first=True, template_mode=template_mode,
