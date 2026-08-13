@@ -1555,6 +1555,9 @@ def generated_members() -> dict[str, str]:
         ("H33b-operator-borrows-orchestrator.md", "Orchestrator Planner", "operator"),
         ("H33c-orchestrator-truthful.md", "Orchestrator Planner", "orchestrator"),
         ("H33d-operator-truthful.md", "Operator", "operator"),
+        ("H33e-operator-borrows-planner.md", "Planner", "operator"),
+        ("H33f-operator-borrows-reviewer.md", "Reviewer", "operator"),
+        ("H33g-orchestrator-borrows-planner.md", "Planner", "orchestrator"),
     ):
         members[name] = lifecycle_relay(
             role=role,

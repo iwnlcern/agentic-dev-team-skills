@@ -677,7 +677,7 @@ def role_from_consistency_error(fields: Dict[str, str]) -> str | None:
             "orchestrator": "orchestrator-planner",
             "operator": "operator",
         }[actual]
-        if expected in {"orchestrator-planner", "operator"} and expected != special_expected:
+        if canonical_role(expected) != special_expected:
             return f"ROLE/FROM mismatch: ROLE={role!r} but FROM={from_addrs[0]!r}; do not proxy-author another seat's relay"
         return None
     if actual and canonical_role(actual) != canonical_role(expected):

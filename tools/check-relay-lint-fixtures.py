@@ -408,6 +408,9 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "mastertier/H33b-operator-borrows-orchestrator.md", 1),
     ("file", "mastertier/H33c-orchestrator-truthful.md", 0),
     ("file", "mastertier/H33d-operator-truthful.md", 0),
+    ("file", "mastertier/H33e-operator-borrows-planner.md", 1),
+    ("file", "mastertier/H33f-operator-borrows-reviewer.md", 1),
+    ("file", "mastertier/H33g-orchestrator-borrows-planner.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-master-planner.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-master-reviewer.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-domain-planner.md", 1),
@@ -507,7 +510,7 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("root", "rolevocab/RV5d-newvocab-designdoc-chain", 0),
     ("root", "rolevocab/RV5dneg-designdoc-no-approve", 1),
     ("root", "rolevocab/RV6-mixed-vocab-chain", 0),
-    ("root", "rolevocab/RV6i-mixed-dispatch-implreport", 0),
+    ("root", "rolevocab/RV6i-mixed-dispatch-implreport", 1),
     ("root", "rolevocab/RV7a-master-dispatch-failclosed", 1),
     ("root", "rolevocab/RV7b-domain-direct-override", 1),
     ("root", "rolevocab/RV7e-domain-designlock-kind", 0),
@@ -578,7 +581,7 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "addressing/T8-cc-trap-structurally-valid.md", 0),
     ("root", "addressing/G1-casefold-lineage", 0),
     ("root", "merge/M1-merge-claim-no-auth", 1),
-    ("root", "merge/M2-merge-claim-with-auth", 0),
+    ("root", "merge/M2-merge-claim-with-auth", 1),
     ("root", "merge/M3-honest-not-merged", 0),
     ("root", "merge/M4-canonical-claim-no-auth", 1),
     ("root", "merge/M5-self-auth-forgery", 1),
@@ -641,7 +644,7 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("root", "lineage/LI7-edgeless-non-addressee-report", 1),
     ("root", "ambiguity/AMB1a-shared-id-dispatch", 0),
     ("root", "ambiguity/AMB1b-shared-id-planhop", 0),
-    ("root", "ambiguity/AMB1c-shared-id-implreport", 0),
+    ("root", "ambiguity/AMB1c-shared-id-implreport", 1),
     ("root", "ambiguity/AMB2-none-qualify", 1),
     ("root", "ambiguity/AMB3-latest-wins", 1),
     ("file", "rowtruth/RT1-valid-fold-evidence.md", 0),
@@ -653,7 +656,7 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "p9/P9b-claim-after-scan-blank-line.md", 1),
     ("root", "design-review/DR1-valid-design-doc-chain", 0),
     ("root", "design-review/DR2-edge-less-no-review", 1),
-    ("root", "design-review/DR3-direct-override", 0),
+    ("root", "design-review/DR3-direct-override", 1),
     ("root", "design-review/DR4-self-override", 1),
     ("root", "design-review/DR5-tiny-no-lock", 0),
     ("root", "design-review/DR6-genuine-audit-record", 0),
@@ -688,10 +691,10 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("root", "orch-review/OR11-merge-gate-no-reviewer", 1),
     ("root", "orch-review/OR12-review-fold-no-reviewer", 1),
     ("root", "orch-review/A1-no-reviewer-no-waiver", 1),
-    ("root", "orch-review/A2-operator-waiver", 0),
+    ("root", "orch-review/A2-operator-waiver", 1),
     ("root", "orch-review/A3-self-waiver", 1),
     ("root", "orch-review/A4-solo-no-orchestrator-relay", 0),
-    ("root", "orch-review/EX1-operator-authority", 0),
+    ("root", "orch-review/EX1-operator-authority", 1),
     ("root", "orch-review/EX2-pairplanner-impl", 0),
     ("root", "orch-review/EX3-reviewer-boot", 0),
     ("root", "orch-review/EX4-reconcile", 0),
@@ -712,6 +715,15 @@ EXPECTED_ERROR_SET = {
     ],
     "mastertier/H33c-orchestrator-truthful.md": [],
     "mastertier/H33d-operator-truthful.md": [],
+    "mastertier/H33e-operator-borrows-planner.md": [
+        "ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "mastertier/H33f-operator-borrows-reviewer.md": [
+        "ROLE/FROM mismatch: ROLE='Reviewer' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "mastertier/H33g-orchestrator-borrows-planner.md": [
+        "ROLE/FROM mismatch: ROLE='Planner' but FROM='orchestrator'; do not proxy-author another seat's relay",
+    ],
     "hardening/HG32a-operator-valid.md": [],
     "hardening/HG32b-operator-mismatch.md": [
         "ROLE/FROM mismatch: ROLE='Operator' but FROM='qi.planner'; do not proxy-author another seat's relay",
@@ -1841,6 +1853,46 @@ for _number, (_label, _target) in enumerate(
     EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-target-{_label}"] = [
         f"04-grant.md: COMMISSION_TO {_target!r} is not exactly one non-special pair-planner address" + _commission_grant_rule,
     ]
+
+# H33 fix round 1: global special-author truth repins the complete inherited
+# registered corpus without rewriting the stale fixture bytes themselves.
+EXPECTED_ERROR_SET.update({
+    "rolevocab/RV6i-mixed-dispatch-implreport": [
+        "01-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "merge/M2-merge-claim-with-auth": [
+        "MERGE-GATE-20260610-105000.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "ambiguity/AMB1c-shared-id-implreport": [
+        "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "design-review/DR3-direct-override": [
+        "01-plan.md: ROLE/FROM mismatch: ROLE='Reviewer' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "orch-review/A2-operator-waiver": [
+        "00-waiver.md: ROLE/FROM mismatch: ROLE='Reviewer' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "orch-review/EX1-operator-authority": [
+        "01-merge.md: ROLE/FROM mismatch: ROLE='Reviewer' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+})
+for _rel, _error in {
+    "rolevocab/RV7g-malformed-address-hardening": "01-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB4-multiholder-malformed": "02-dispatch-malformed-to.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/RVn3-non-addressee-implreport": "01-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/RVn4-cross-role-implreport": "01-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB5-singleton-retrospective": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB6-alias-retrospective": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB9-late-tokenless": "02-notoken.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB10-late-wrong-owner": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB11-late-malformed-pair": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB12-late-cross-role": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB13-late-two-from": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "rolevocab/AMB14-late-two-to": "02-dispatch.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    "merge/organic-m2-unauthorized-merge": "IMPL-dispatch-20260610-120000.md: ROLE/FROM mismatch: ROLE='Planner' but FROM='orchestrator'; do not proxy-author another seat's relay",
+    "merge-token/MT9-cross-dispatch-runroot": "d2/MERGE-GATE-20260611-110000.md: ROLE/FROM mismatch: ROLE='Orchestrator Reviewer' but FROM='operator'; do not proxy-author another seat's relay",
+}.items():
+    EXPECTED_ERROR_SET[_rel].append(_error)
 
 
 def main() -> int:
