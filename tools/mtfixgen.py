@@ -353,6 +353,19 @@ def commission_receipt(
     )
 
 
+def direct_delegation(
+    case: str, *, from_addr: str = "operator", role: str = "Operator",
+    to_addr: str = "beta.pair-planner",
+    extra_fields: tuple[tuple[str, str], ...] = (),
+) -> str:
+    """A settled direct grant used to prove commission-carrier insulation."""
+    return lifecycle_relay(
+        role=role, phase="PLAN", authority="plan-only",
+        dispatch_id=f"{case}-direct", from_addr=from_addr, to_addr=to_addr,
+        fields=(("DELEGATED_DISPATCH_AUTHORITY", "yes"),) + extra_fields,
+    )
+
+
 def add_commission_chain(
     members: dict[str, str], name: str, case: str, *,
     auth: str | None = None, charter: str | None = None, approval: str | None = None,
@@ -1062,6 +1075,172 @@ def commission_members() -> dict[str, str]:
     members["CM218-receipt-missing-charter/01-auth.md"] = commission_authorization("cm218")
     members["CM218-receipt-missing-charter/02-grant.md"] = commission_grant("cm218")
     members["CM218-receipt-missing-charter/03-receipt.md"] = commission_receipt("cm218")
+
+    # Task 9.5c: direct grants with no commission carrier remain insulated;
+    # each of the five carriers (the authorization carrier necessarily making
+    # the both-markers shape) engages the full commission machine.
+    members["CM219-direct-operator-control/01-grant.md"] = direct_delegation("cm219")
+    members["CM220-direct-orchestrator-control/01-grant.md"] = direct_delegation(
+        "cm220", from_addr="orchestrator", role="Orchestrator Planner",
+        extra_fields=(("CC", "v29.orchestrator-reviewer"),),
+    )
+    for number, field, value in (
+        (221, "COMMISSION_AUTHORIZATION", "yes"),
+        (222, "COMMISSION_ID", "cm222"),
+        (223, "COMMISSION_SCOPE", "scope-cm223"),
+        (224, "COMMISSION_TO", "beta.pair-planner"),
+        (225, "CHARTER_DOC_ID", "CH-cm225"),
+    ):
+        label = field.lower().replace("_", "-")
+        members[f"CM{number}-direct-half-{label}/01-grant.md"] = direct_delegation(
+            f"cm{number}", extra_fields=((field, value),),
+        )
+
+    # The complete chain is valid until the pair receipt attempts to carry its
+    # own delegation grant. That self-grant must be refused independently.
+    add_commission_chain(members, "CM226-pair-receipt-self-grant", "cm226")
+    members["CM226-pair-receipt-self-grant/05-receipt.md"] = lifecycle_relay(
+        role="Pair Planner", phase="PLAN", authority="plan-only",
+        dispatch_id="cm226-receipt", from_addr="beta.pair-planner",
+        to_addr="beta.pair-implementer",
+        fields=(("DELEGATED_DISPATCH_AUTHORITY", "yes"),) + commission_surface("cm226"),
+    )
+
+    # Rule 3(e): all four receiving roles, then conflict-first occurrence
+    # handling in both orders for both discriminators.
+    for number, target in (
+        (227, "alpha.master-planner"),
+        (228, "alpha.master-reviewer"),
+        (229, "alpha.domain-planner"),
+        (230, "alpha.domain-reviewer"),
+    ):
+        role_label = target.split(".", 1)[1]
+        members[f"CM{number}-receiving-{role_label}/01-grant.md"] = direct_delegation(
+            f"cm{number}", to_addr=target,
+        )
+    for number, values, order_label in (
+        (231, ("yes", "no"), "yes-first"),
+        (232, ("no", "yes"), "yes-last"),
+    ):
+        members[f"CM{number}-receiving-dda-conflict-{order_label}/01-grant.md"] = lifecycle_relay(
+            role="Operator", phase="PLAN", authority="plan-only",
+            dispatch_id=f"cm{number}-direct", from_addr="operator",
+            to_addr="alpha.master-planner",
+            fields=tuple(("DELEGATED_DISPATCH_AUTHORITY", value) for value in values),
+        )
+    for number, values, order_label in (
+        (233, ("alpha.master-planner", "beta.pair-planner"), "master-first"),
+        (234, ("beta.pair-planner", "alpha.master-planner"), "master-last"),
+    ):
+        members[f"CM{number}-receiving-to-conflict-{order_label}/01-grant.md"] = lifecycle_relay(
+            role="Operator", phase="PLAN", authority="plan-only",
+            dispatch_id=f"cm{number}-direct", from_addr="operator",
+            to_addr=values[0],
+            fields=(("DELEGATED_DISPATCH_AUTHORITY", "yes"), ("TO", values[1])),
+        )
+
+    # S3's ten-cell triangle. Each ancestor class conflicts one discriminator
+    # that every named downstream gate actually consumes.
+    for number, gate in enumerate(("charter", "approval", "grant", "receipt"), start=235):
+        case = f"cm{number}"
+        name = f"CM{number}-conflict-authorization-at-{gate}"
+        members[f"{name}/01-auth.md"] = commission_authorization(
+            case, extra_fields=(("COMMISSION_AUTHORIZATION", "no"),),
+        )
+        members[f"{name}/02-charter.md"] = commission_charter(case)
+        if gate in {"approval", "grant", "receipt"}:
+            members[f"{name}/03-approval.md"] = commission_approval(case)
+        if gate in {"grant", "receipt"}:
+            members[f"{name}/04-grant.md"] = commission_grant(case)
+        if gate == "receipt":
+            members[f"{name}/05-receipt.md"] = commission_receipt(case)
+    for number, gate in enumerate(("approval", "grant", "receipt"), start=239):
+        case = f"cm{number}"
+        name = f"CM{number}-conflict-charter-at-{gate}"
+        members[f"{name}/01-auth.md"] = commission_authorization(case)
+        members[f"{name}/02-charter.md"] = commission_charter(
+            case, extra_fields=(("AUTHORITY", "plan-only"),),
+        )
+        members[f"{name}/03-approval.md"] = commission_approval(case)
+        if gate in {"grant", "receipt"}:
+            members[f"{name}/04-grant.md"] = commission_grant(case)
+        if gate == "receipt":
+            members[f"{name}/05-receipt.md"] = commission_receipt(case)
+    for number, gate in enumerate(("grant", "receipt"), start=242):
+        case = f"cm{number}"
+        name = f"CM{number}-conflict-review-at-{gate}"
+        members[f"{name}/01-auth.md"] = commission_authorization(case)
+        members[f"{name}/02-charter.md"] = commission_charter(case)
+        members[f"{name}/03-approval.md"] = commission_approval(
+            case, extra_fields=(("DESIGN_REVIEW_VERDICT", "must-revise"),),
+        )
+        members[f"{name}/04-grant.md"] = commission_grant(case)
+        if gate == "receipt":
+            members[f"{name}/05-receipt.md"] = commission_receipt(case)
+    members["CM244-conflict-grant-at-receipt/01-auth.md"] = commission_authorization("cm244")
+    members["CM244-conflict-grant-at-receipt/02-charter.md"] = commission_charter("cm244")
+    members["CM244-conflict-grant-at-receipt/03-approval.md"] = commission_approval("cm244")
+    members["CM244-conflict-grant-at-receipt/04-grant.md"] = commission_grant(
+        "cm244", extra_fields=(("TO", "gamma.pair-planner"),),
+    )
+    members["CM244-conflict-grant-at-receipt/05-receipt.md"] = commission_receipt("cm244")
+
+    # Exact grammar boundaries: these are complete valid chains so a stricter
+    # kebab interpretation cannot hide behind a malformed-stage refusal.
+    grammar_positives = ("7", "7a", "a", "a--b", "a-", "a1", "71", "a-1")
+    for number, commission_id in enumerate(grammar_positives, start=245):
+        members[f"CM{number}-grammar-positive-{number - 244}/01-auth.md"] = (
+            commission_authorization(commission_id, dispatch_id=f"cm{number}-auth")
+        )
+    for number, commission_id, label in (
+        (253, "-a", "leading-hyphen"),
+        (254, "A1", "leading-uppercase"),
+        (255, "a-B", "tail-uppercase"),
+        (256, "a_b", "underscore"),
+        (257, "", "empty"),
+    ):
+        members[f"CM{number}-grammar-negative-{label}/01-auth.md"] = commission_authorization(
+            commission_id, dispatch_id=f"cm{number}-auth",
+            surface=commission_surface(commission_id),
+        )
+
+    members["CM258-identity-wrong-ch-form/01-auth.md"] = commission_authorization(
+        "cm258", surface=commission_surface("cm258", overrides={"CHARTER_DOC_ID": "charter-cm258"}),
+    )
+    members["CM259-identity-charter-design-mismatch/01-auth.md"] = commission_authorization("cm259")
+    members["CM259-identity-charter-design-mismatch/02-charter.md"] = commission_charter(
+        "cm259", design_doc_id="CH-other",
+    )
+    members["CM260-identity-composition-spelling/01-auth.md"] = commission_authorization(
+        "a--b", dispatch_id="cm260-auth",
+        surface=commission_surface("a--b", overrides={"CHARTER_DOC_ID": "CH-a-b"}),
+    )
+
+    # Display fields are deliberately present on settled direct grants. Every
+    # form includes both fields so consuming either one kills all four controls.
+    for number, label, display_fields in (
+        (261, "present", (("CHARTER_ARTIFACT", "charters/cm261.md"), ("CHARTER_SHA256", "abc123"))),
+        (262, "malformed", (("CHARTER_ARTIFACT", ":::"), ("CHARTER_SHA256", "not-hex"))),
+        (263, "repeated", (("CHARTER_ARTIFACT", "same"), ("CHARTER_ARTIFACT", "same"),
+                            ("CHARTER_SHA256", "same"), ("CHARTER_SHA256", "same"))),
+        (264, "conflicting", (("CHARTER_ARTIFACT", "one"), ("CHARTER_ARTIFACT", "two"),
+                               ("CHARTER_SHA256", "aaa"), ("CHARTER_SHA256", "bbb"))),
+    ):
+        members[f"CM{number}-display-{label}/01-grant.md"] = direct_delegation(
+            f"cm{number}", extra_fields=display_fields,
+        )
+
+    members["CM265-receiving-mixed-list/01-grant.md"] = direct_delegation(
+        "cm265", to_addr="beta.pair-planner, alpha.master-planner",
+    )
+    members["CM266-receiving-identical-repeats/01-grant.md"] = lifecycle_relay(
+        role="Operator", phase="PLAN", authority="plan-only",
+        dispatch_id="cm266-direct", from_addr="operator",
+        to_addr="alpha.master-planner",
+        fields=(("DELEGATED_DISPATCH_AUTHORITY", "yes"),
+                ("DELEGATED_DISPATCH_AUTHORITY", "yes"),
+                ("TO", "alpha.master-planner")),
+    )
 
     return members
 

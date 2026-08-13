@@ -1788,6 +1788,7 @@ H27_COMMISSION_GRANT_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 
 H27_COMMISSION_RECEIPT_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3d)"
 H27_COMMISSION_SURFACE = ("COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID")
 H27_COMMISSION_CARRIERS = ("COMMISSION_AUTHORIZATION",) + H27_COMMISSION_SURFACE
+H27_COMMISSION_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
 def h27_resolved_discriminator(text: str, key: str) -> Tuple[str | None, bool]:
@@ -1904,6 +1905,71 @@ def h27_commission_surface(text: str) -> Tuple[str | None, ...]:
 def h27_commission_surface_complete(text: str) -> bool:
     """A stage surface is complete only when all four sole values are non-empty."""
     return all(value not in {None, ""} for value in h27_commission_surface(text))
+
+
+def h27_commission_id_grammatical(value: str | None) -> bool:
+    """The design grammar permits digits and hyphens throughout the tail."""
+    return value is not None and H27_COMMISSION_ID_RE.fullmatch(value) is not None
+
+
+def h27_direct_path_has_commission_carrier(
+    from_role_value: str | None, dda_presence: bool, carrier_presence: set[str],
+) -> bool:
+    """Direct grants are insulated iff all five commission carriers are absent."""
+    return bool(
+        dda_presence
+        and from_role_value in {"operator", "orchestrator", "orchestrator-planner"}
+        and carrier_presence
+    )
+
+
+def h27_receipt_self_grants(text: str, is_receipt: bool) -> bool:
+    """A commissioned pair receipt may consume a grant but never author one."""
+    return is_receipt and "yes" in h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY")
+
+
+def h27_receiving_seat_errors(root: Path, phases) -> List[str]:
+    """Rule 3(e): conflict-first, every-occurrence receiving-seat refusal."""
+    errors: List[str] = []
+    for item in phases:
+        relname = item[0].relative_to(root)
+        text = item[4]
+        dda_occurrences = h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY")
+        if not dda_occurrences:
+            continue
+        to_occurrences = h27_occurrences(text, "TO")
+        targets = [target for raw in to_occurrences for target in split_addresses(raw)]
+        if not any(from_role(target) in MASTER_TIER_ROLES for target in targets):
+            continue
+        conflicts = []
+        for key, values in (
+            ("DELEGATED_DISPATCH_AUTHORITY", dda_occurrences),
+            ("TO", to_occurrences),
+        ):
+            if len(set(values)) > 1:
+                conflicts.append(key)
+                errors.append(
+                    f"{relname}: rule 3e gate: {key} carries {len(set(values))} distinct values across "
+                    f"{len(values)} occurrences; a conflicting discriminator contributes no passing operand "
+                    "(DD-v29-master-authority-20260809 rule 5)"
+                )
+        if conflicts:
+            continue
+        if "yes" not in dda_occurrences:
+            continue
+        seen_targets = set()
+        for raw in to_occurrences:
+            for target in split_addresses(raw):
+                normalized = normalized_addr(target)
+                if from_role(target) not in MASTER_TIER_ROLES or normalized in seen_targets:
+                    continue
+                seen_targets.add(normalized)
+                errors.append(
+                    f"{relname}: DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat {target!r}; "
+                    "the tier never receives delegated dispatch authority "
+                    "(DD-v29-master-authority-20260809 cross-seat rule 3e)"
+                )
+    return errors
 
 
 def h27_pair_planner_address(raw: str | None) -> bool:
@@ -2425,6 +2491,46 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         phase, _ = h27_resolved_discriminator(text, "PHASE")
         auth_marker = bool(h27_occurrences(text, "COMMISSION_AUTHORIZATION"))
 
+        # A direct grant is insulated only when it carries none of the five
+        # commission carriers. Any one carrier engages the full machine; the
+        # authorization carrier produces the both-markers case.
+        if h27_direct_path_has_commission_carrier(from_role_value, dda_presence, carrier_presence):
+            errors.append(
+                f"{relname(item)}: a direct delegation grant carries commission gating carriers; "
+                "direct path must carry none of the five"
+                f"{H27_COMMISSION_RULE}"
+            )
+            continue
+
+        if (
+            auth_marker
+            and not dda_presence
+            and h27_occurrences(text, "COMMISSION_ID")
+            and not commission_id_conflict
+            and not h27_commission_id_grammatical(commission_id)
+        ):
+            errors.append(
+                f"{relname(item)}: commission machine engaged with non-grammatical COMMISSION_ID "
+                f"{commission_id!r}; expected [a-z0-9][a-z0-9-]*{H27_COMMISSION_RULE}"
+            )
+            continue
+
+        # Logical CH identity is validated at the authorization trust root.
+        # Charter-local DESIGN_DOC_ID equality is checked at its own stage;
+        # later equality-surface diagnostics remain unchanged.
+        charter_doc_id, _ = h27_resolved_discriminator(text, "CHARTER_DOC_ID")
+        if (
+            auth_marker
+            and not commission_id_conflict
+            and h27_commission_id_grammatical(commission_id)
+            and charter_doc_id not in {None, f"CH-{commission_id}"}
+        ):
+            errors.append(
+                f"{relname(item)}: CHARTER_DOC_ID {charter_doc_id!r} must equal "
+                f"{'CH-' + commission_id!r}{H27_COMMISSION_RULE}"
+            )
+            continue
+
         # Stage (a) is marker-defined. Both markers intentionally do not exit
         # here; they fall through to delegation-stage classification.
         if auth_marker and not dda_presence:
@@ -2455,11 +2561,15 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             )
             continue
 
-        charter_doc_id, _ = h27_resolved_discriminator(text, "CHARTER_DOC_ID")
-
         # Charter stage: select the marker-universe authorization, then resolve
         # the mandatory parent generically across every earlier DISPATCH_ID holder.
         design_doc_id, _ = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
+        if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id != charter_doc_id:
+            errors.append(
+                f"{relname(item)}: charter DESIGN_DOC_ID {design_doc_id!r} must equal "
+                f"CHARTER_DOC_ID {charter_doc_id!r}{H27_COMMISSION_CHARTER_RULE}"
+            )
+            continue
         if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id == charter_doc_id:
             if not h27_commission_charter_shape_ok(item):
                 errors.append(
@@ -2555,12 +2665,13 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
                  "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
                 item, "charter revision", H27_COMMISSION_CHARTER_RULE,
-            ) or not h27_commission_charter_shape_ok(charter):
-                if not h27_commission_charter_shape_ok(charter):
-                    errors.append(
-                        f"{relname(item)}: charter approval parent is not a valid stage-(b) charter revision"
-                        f"{H27_COMMISSION_CHARTER_RULE}"
-                    )
+            ):
+                continue
+            if not h27_commission_charter_shape_ok(charter):
+                errors.append(
+                    f"{relname(item)}: charter approval parent is not a valid stage-(b) charter revision"
+                    f"{H27_COMMISSION_CHARTER_RULE}"
+                )
                 continue
             if not same_owner_reviewer(item, charter):
                 charter_owner = from_owner(h27_single_from(charter[4]))
@@ -2744,6 +2855,12 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
 
         # Pair receipt: target first, then latest grant-universe selection.
         if is_receipt:
+            if h27_receipt_self_grants(text, is_receipt):
+                errors.append(
+                    f"{relname(item)}: commissioned pair receipt carries DELEGATED_DISPATCH_AUTHORITY: yes; "
+                    f"self-grant is prohibited{H27_COMMISSION_RECEIPT_RULE}"
+                )
+                continue
             commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
             if normalized_addr(from_addr) != normalized_addr(commission_to):
                 errors.append(
@@ -3003,6 +3120,9 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     lock_routes, lock_lifecycle_errors = h27_lock_lifecycle_precompute(path, phases)
     for lock_lifecycle_error in lock_lifecycle_errors:
         result.error(lock_lifecycle_error)
+
+    for receiving_seat_error in h27_receiving_seat_errors(path, phases):
+        result.error(receiving_seat_error)
 
     for commission_error in h27_commission_precompute(path, phases):
         result.error(commission_error)

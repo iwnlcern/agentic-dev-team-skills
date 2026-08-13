@@ -285,6 +285,20 @@ COMMISSION_PASS = {
     "CM181-later-charter-inert",
     "CM190-unmarked-universe-controls",
     "CM210-review-reissue-pass",
+    "CM219-direct-operator-control",
+    "CM220-direct-orchestrator-control",
+    "CM245-grammar-positive-1",
+    "CM246-grammar-positive-2",
+    "CM247-grammar-positive-3",
+    "CM248-grammar-positive-4",
+    "CM249-grammar-positive-5",
+    "CM250-grammar-positive-6",
+    "CM251-grammar-positive-7",
+    "CM252-grammar-positive-8",
+    "CM261-display-present",
+    "CM262-display-malformed",
+    "CM263-display-repeated",
+    "CM264-display-conflicting",
 }
 COMMISSION_MEMBERS = (
     "CM77-valid-chain", "CM78-auth-uppercase", "CM79-auth-wrong-phase",
@@ -356,6 +370,30 @@ COMMISSION_MEMBERS = (
     "CM214-approval-grant-same-position", "CM215-grant-receipt-same-position",
     "CM216-malformed-latest-charter", "CM217-wrong-parent-review-shadow",
     "CM218-receipt-missing-charter",
+    "CM219-direct-operator-control", "CM220-direct-orchestrator-control",
+    "CM221-direct-half-commission-authorization", "CM222-direct-half-commission-id",
+    "CM223-direct-half-commission-scope", "CM224-direct-half-commission-to",
+    "CM225-direct-half-charter-doc-id", "CM226-pair-receipt-self-grant",
+    "CM227-receiving-master-planner", "CM228-receiving-master-reviewer",
+    "CM229-receiving-domain-planner", "CM230-receiving-domain-reviewer",
+    "CM231-receiving-dda-conflict-yes-first", "CM232-receiving-dda-conflict-yes-last",
+    "CM233-receiving-to-conflict-master-first", "CM234-receiving-to-conflict-master-last",
+    "CM235-conflict-authorization-at-charter", "CM236-conflict-authorization-at-approval",
+    "CM237-conflict-authorization-at-grant", "CM238-conflict-authorization-at-receipt",
+    "CM239-conflict-charter-at-approval", "CM240-conflict-charter-at-grant",
+    "CM241-conflict-charter-at-receipt", "CM242-conflict-review-at-grant",
+    "CM243-conflict-review-at-receipt", "CM244-conflict-grant-at-receipt",
+    "CM245-grammar-positive-1", "CM246-grammar-positive-2",
+    "CM247-grammar-positive-3", "CM248-grammar-positive-4",
+    "CM249-grammar-positive-5", "CM250-grammar-positive-6",
+    "CM251-grammar-positive-7", "CM252-grammar-positive-8",
+    "CM253-grammar-negative-leading-hyphen", "CM254-grammar-negative-leading-uppercase",
+    "CM255-grammar-negative-tail-uppercase", "CM256-grammar-negative-underscore",
+    "CM257-grammar-negative-empty", "CM258-identity-wrong-ch-form",
+    "CM259-identity-charter-design-mismatch", "CM260-identity-composition-spelling",
+    "CM261-display-present", "CM262-display-malformed",
+    "CM263-display-repeated", "CM264-display-conflicting",
+    "CM265-receiving-mixed-list", "CM266-receiving-identical-repeats",
 )
 COMMISSION_EXPECTED = [
     ("root", f"mastertier/{name}", 0 if name in COMMISSION_PASS else 1)
@@ -1264,6 +1302,7 @@ _commission_auth_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3a)"
 _commission_charter_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3b)"
 _commission_grant_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3c)"
 _commission_receipt_rule = " (DD-v29-master-authority-20260809 cross-seat rule 3d)"
+_rule3e = " (DD-v29-master-authority-20260809 cross-seat rule 3e)"
 _auth_shape = (
     "relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape (literal yes, direct-authority FROM, "
     "PHASE PLAN, AUTHORITY plan-only, TO exactly one master-planner, complete equality surface, pair-planner "
@@ -1283,7 +1322,13 @@ for _name in (
 ):
     EXPECTED_ERROR_SET[f"mastertier/{_name}"] = ["01-auth.md: " + _auth_shape]
 EXPECTED_ERROR_SET.update({
-    "mastertier/CM84-both-markers-delegation": ["01-relay.md: " + _unconsumed],
+    "mastertier/CM84-both-markers-delegation": [
+        "01-relay.md: a direct delegation grant carries commission gating carriers; "
+        "direct path must carry none of the five" + _commission_rule,
+        "01-relay.md: DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat "
+        "'alpha.master-planner'; the tier never receives delegated dispatch authority"
+        + _rule3e,
+    ],
     "mastertier/CM86-partial-correct-seat": ["01-receipt.md: " + _incomplete_receipt],
     "mastertier/CM87-empty-correct-seat": ["01-receipt.md: " + _incomplete_receipt],
     "mastertier/CM88-wrong-seat-receipt": [
@@ -1400,6 +1445,10 @@ for _number, (_label, _target) in enumerate(
     EXPECTED_ERROR_SET[f"mastertier/CM{_number}-grant-target-{_label}"] = [
         f"04-grant.md: COMMISSION_TO {_target!r} is not exactly one non-special pair-planner address" + _commission_grant_rule,
     ]
+EXPECTED_ERROR_SET["mastertier/CM148-grant-target-master"].append(
+    "04-grant.md: DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat "
+    "'beta.master-planner'; the tier never receives delegated dispatch authority" + _rule3e
+)
 
 _auth_no_shape = (
     "relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape (literal yes, direct-authority FROM, "
@@ -1571,6 +1620,126 @@ EXPECTED_ERROR_SET.update({
         "03-receipt.md: selected latest charter revision <none> fails stage-(b) shape" + _commission_receipt_rule,
     ],
 })
+
+_direct_insulation = (
+    "a direct delegation grant carries commission gating carriers; direct path must carry none of the five"
+    + _commission_rule
+)
+for _number in range(221, 226):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = ["01-grant.md: " + _direct_insulation]
+
+_receiving = (
+    "DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat {target!r}; "
+    "the tier never receives delegated dispatch authority" + _rule3e
+)
+EXPECTED_ERROR_SET["mastertier/CM226-pair-receipt-self-grant"] = [
+    "05-receipt.md: commissioned pair receipt carries DELEGATED_DISPATCH_AUTHORITY: yes; "
+    "self-grant is prohibited" + _commission_receipt_rule,
+]
+for _number, _target in (
+    (227, "alpha.master-planner"), (228, "alpha.master-reviewer"),
+    (229, "alpha.domain-planner"), (230, "alpha.domain-reviewer"),
+):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "01-grant.md: " + _receiving.format(target=_target),
+    ]
+
+_rule3e_conflict = (
+    "rule 3e gate: {field} carries 2 distinct values across 2 occurrences; "
+    "a conflicting discriminator contributes no passing operand" + _h27_rule5_suffix
+)
+for _number in (231, 232):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "01-grant.md: " + _rule3e_conflict.format(field="DELEGATED_DISPATCH_AUTHORITY"),
+    ]
+for _number in (233, 234):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "01-grant.md: " + _rule3e_conflict.format(field="TO"),
+    ]
+
+_auth_ancestor = (
+    "selected authorization-universe member 01-auth.md has conflicting COMMISSION_AUTHORIZATION occurrences; "
+    "universe selection refuses first-value resolution" + _commission_auth_rule
+)
+_gate_files = ("02-charter.md", "03-approval.md", "04-grant.md", "05-receipt.md")
+for _number, _last in enumerate(range(1, 5), start=235):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "01-auth.md: COMMISSION_AUTHORIZATION carries 2 distinct values across 2 occurrences; "
+        "an authority-critical field is fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix,
+        *[f"{_gate}: {_auth_ancestor}" for _gate in _gate_files[:_last]],
+    ]
+
+_charter_gate_labels = (
+    ("03-approval.md", "charter revision"),
+    ("04-grant.md", "latest charter revision"),
+    ("05-receipt.md", "latest charter revision"),
+)
+for _number, _last in enumerate(range(1, 4), start=239):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "02-charter.md: " + _authority_conflict,
+        *[
+            f"{_gate}: selected {_label} 02-charter.md has conflicting AUTHORITY occurrences; "
+            "ancestry resolution refuses first-value resolution" + (
+                _commission_charter_rule if _gate.startswith("03-") else
+                _commission_grant_rule if _gate.startswith("04-") else
+                _commission_receipt_rule
+            )
+            for _gate, _label in _charter_gate_labels[:_last]
+        ],
+    ]
+
+for _number, _last in ((242, 1), (243, 2)):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    _errors = ["03-approval.md: " + _verdict_conflict]
+    if _last >= 1:
+        _errors.append(
+            "04-grant.md: selected charter review 03-approval.md has conflicting "
+            "DESIGN_REVIEW_VERDICT occurrences; ancestry resolution refuses first-value resolution"
+            + _commission_grant_rule
+        )
+    if _last == 2:
+        _errors.append(
+            "05-receipt.md: selected charter review 03-approval.md has conflicting "
+            "DESIGN_REVIEW_VERDICT occurrences; ancestry resolution refuses first-value resolution"
+            + _commission_receipt_rule
+        )
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = _errors
+EXPECTED_ERROR_SET["mastertier/CM244-conflict-grant-at-receipt"] = [
+    "04-grant.md: TO carries 2 distinct values across 2 occurrences; an authority-critical field is "
+    "fail-closed unless exactly one distinct value is present" + _h27_rule5_suffix,
+    "05-receipt.md: selected grant-universe member 04-grant.md has conflicting TO occurrences; "
+    "universe selection refuses first-value resolution" + _commission_receipt_rule,
+]
+
+_grammar_error = (
+    "commission machine engaged with non-grammatical COMMISSION_ID {value!r}; "
+    "expected [a-z0-9][a-z0-9-]*" + _commission_rule
+)
+for _number, _value in ((253, "-a"), (254, "A1"), (255, "a-B"), (256, "a_b"), (257, "")):
+    _name = COMMISSION_MEMBERS[_number - 77]
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "01-auth.md: " + _grammar_error.format(value=_value),
+    ]
+EXPECTED_ERROR_SET["mastertier/CM258-identity-wrong-ch-form"] = [
+    "01-auth.md: CHARTER_DOC_ID 'charter-cm258' must equal 'CH-cm258'" + _commission_rule,
+]
+EXPECTED_ERROR_SET["mastertier/CM259-identity-charter-design-mismatch"] = [
+    "02-charter.md: charter DESIGN_DOC_ID 'CH-other' must equal CHARTER_DOC_ID 'CH-cm259'"
+    + _commission_charter_rule,
+]
+EXPECTED_ERROR_SET["mastertier/CM260-identity-composition-spelling"] = [
+    "01-auth.md: CHARTER_DOC_ID 'CH-a-b' must equal 'CH-a--b'" + _commission_rule,
+]
+for _name in ("CM265-receiving-mixed-list", "CM266-receiving-identical-repeats"):
+    EXPECTED_ERROR_SET[f"mastertier/{_name}"] = [
+        "01-grant.md: " + _receiving.format(target="alpha.master-planner"),
+    ]
 EXPECTED_ERROR_SET.update({
     "mastertier/CM153-byte-exact-address-surface": [
         "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
