@@ -1550,6 +1550,20 @@ def lifecycle_members() -> dict[str, str]:
 
 def generated_members() -> dict[str, str]:
     members = {"MT0-generator-smoke.md": SMOKE_CONTENT}
+    for name, role, from_addr in (
+        ("H33a-orchestrator-borrows-operator.md", "Operator", "orchestrator"),
+        ("H33b-operator-borrows-orchestrator.md", "Orchestrator Planner", "operator"),
+        ("H33c-orchestrator-truthful.md", "Orchestrator Planner", "orchestrator"),
+        ("H33d-operator-truthful.md", "Operator", "operator"),
+    ):
+        members[name] = lifecycle_relay(
+            role=role,
+            phase="SITREP",
+            authority="report-only",
+            dispatch_id=name.removesuffix(".md").lower(),
+            from_addr=from_addr,
+            to_addr="qi.implementer",
+        )
     for mode in ("file", "template"):
         prefix = "MT2" if mode == "file" else "MTT2"
         for number, prohibition in enumerate(("dispatch-impl", "dispatch-merge", "direct-override"), start=1):

@@ -404,6 +404,10 @@ COMMISSION_EXPECTED = [
 
 EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "mastertier/MT0-generator-smoke.md", 0),
+    ("file", "mastertier/H33a-orchestrator-borrows-operator.md", 1),
+    ("file", "mastertier/H33b-operator-borrows-orchestrator.md", 1),
+    ("file", "mastertier/H33c-orchestrator-truthful.md", 0),
+    ("file", "mastertier/H33d-operator-truthful.md", 0),
     ("file", "mastertier/MT21-dispatch-impl-master-planner.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-master-reviewer.md", 1),
     ("file", "mastertier/MT21-dispatch-impl-domain-planner.md", 1),
@@ -586,7 +590,7 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("root", "merge/GC-2blank-ambiguous-canonical", 1),
     ("root", "merge/GD-quoted-canonical-inert", 0),
     ("root", "merge/organic-m2-unauthorized-merge", 1),
-    ("root", "merge-token/MT1-valid-token-grant", 0),
+    ("root", "merge-token/MT1-valid-token-grant", 1),
     ("root", "merge-token/MT2-backticked-token-inert", 1),
     ("file", "merge-token/MT3-self-granted-token.md", 1),
     ("file", "merge-token/MT4-multi-to-grant.md", 1),
@@ -700,6 +704,14 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
 ]
 
 EXPECTED_ERROR_SET = {
+    "mastertier/H33a-orchestrator-borrows-operator.md": [
+        "ROLE/FROM mismatch: ROLE='Operator' but FROM='orchestrator'; do not proxy-author another seat's relay",
+    ],
+    "mastertier/H33b-operator-borrows-orchestrator.md": [
+        "ROLE/FROM mismatch: ROLE='Orchestrator Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
+    "mastertier/H33c-orchestrator-truthful.md": [],
+    "mastertier/H33d-operator-truthful.md": [],
     "hardening/HG32a-operator-valid.md": [],
     "hardening/HG32b-operator-mismatch.md": [
         "ROLE/FROM mismatch: ROLE='Operator' but FROM='qi.planner'; do not proxy-author another seat's relay",
@@ -944,16 +956,22 @@ EXPECTED_ERROR_SET = {
         "IMPL-report-20260610-121000.md: missing required header field HUMAN_GATE_REQUIRED",
         "IMPL-report-20260610-121000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
     ],
+    "merge-token/MT1-valid-token-grant": [
+        "MERGE-GATE-20260610-130000.md: ROLE/FROM mismatch: ROLE='Orchestrator Planner' but FROM='operator'; do not proxy-author another seat's relay",
+    ],
     "merge-token/MT2-backticked-token-inert": [
+        "MERGE-GATE-20260610-130000.md: ROLE/FROM mismatch: ROLE='Orchestrator Planner' but FROM='operator'; do not proxy-author another seat's relay",
         "IMPL-report-20260610-131000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
     ],
     "merge-token/MT3-self-granted-token.md": [
         "DISPATCH MERGE FROM must be operator, orchestrator, or an orchestrator-planner-role address",
     ],
     "merge-token/MT4-multi-to-grant.md": [
+        "ROLE/FROM mismatch: ROLE='Orchestrator Planner' but FROM='operator'; do not proxy-author another seat's relay",
         "DISPATCH MERGE requires exactly one TO addressee",
     ],
     "merge-token/MT5-wrong-phase-token.md": [
+        "ROLE/FROM mismatch: ROLE='Orchestrator Planner' but FROM='operator'; do not proxy-author another seat's relay",
         "DISPATCH MERGE is valid only in PHASE: MERGE-GATE relay files",
     ],
     "merge-token/MT6-token-outside-root": [
