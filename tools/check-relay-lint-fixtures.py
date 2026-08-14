@@ -1101,6 +1101,202 @@ EXPECTED_ERROR_SET = {
     "rootindex/R-IDX2-decreasing": [
         "INDEX.md: line 4: index time 20260601-110000 precedes the previous row 20260601-120000; an append-only index must be non-decreasing",
     ],
+    "rolevocab/RV4-invalid-role.md": [
+        "ROLE has non-canonical value: 'Grand Vizier'",
+        "FROM has invalid address 'qi-a.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+    ],
+    "claude/B2-why-before-scan.md": [
+        "WHY_DOWNGRADE_IS_SAFE appears before completed ESCALATION_SCAN + ESCALATION_SCAN_RESULT",
+    ],
+    "claude/B3-yes-row-why.md": [
+        "missing canonical ESCALATION_SCAN row: money/inventory/orders/planning/accounting/trust-critical-state",
+        "missing canonical ESCALATION_SCAN row: AI-or-automation-acts-downstream",
+        "missing canonical ESCALATION_SCAN row: worker/scheduler/queue/retry/async-side-effect",
+        "missing canonical ESCALATION_SCAN row: cross-repo/service-contract/generated-schema/shared-API-event",
+        "missing canonical ESCALATION_SCAN row: user-visible-control-with-materializer/downstream-consumer",
+        "missing canonical ESCALATION_SCAN row: test-runtime-role-mismatch",
+        "missing canonical ESCALATION_SCAN row: broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip",
+        "WHY_DOWNGRADE_IS_SAFE forbidden when any ESCALATION_SCAN row is yes/unknown",
+        "OPERATOR_WAIVER required when any ESCALATION_SCAN row is yes/unknown",
+    ],
+    "claude/B5-audit-no-final.md": [
+        "AUDIT report missing FINAL_GIT_STATUS_SHORT or explicit unavailable reason",
+    ],
+    "claude/B6-audit-impl-authority.md": [
+        "phase/authority inconsistent: PHASE=AUDIT, AUTHORITY='implementation'",
+    ],
+    "claude/B7-delegated-no-scopediff.md": [
+        "DISPATCH IMPL requires a TO address",
+    ],
+    "claude/B8-deviation-dispatch.md": [
+        "DISPATCH IMPL requires a TO address",
+    ],
+    "claude/B9-bad-enum.md": [
+        "CEREMONY_TIER has non-canonical value: 'urgent'",
+    ],
+    "claude/C1-evasive-rows.md": [
+        "ESCALATION_SCAN row 'authz/tenant/RLS/permissions/secrets' has non-canonical value: 'n/a — not assessed'",
+        "ESCALATION_SCAN row 'migration/backfill/destructive-write/canonical-data-repair' has non-canonical value: 'probably fine'",
+        "ESCALATION_SCAN row 'money/inventory/orders/planning/accounting/trust-critical-state' has non-canonical value: 'none'",
+        "missing canonical ESCALATION_SCAN row: authz/tenant/RLS/permissions/secrets",
+        "missing canonical ESCALATION_SCAN row: migration/backfill/destructive-write/canonical-data-repair",
+        "missing canonical ESCALATION_SCAN row: money/inventory/orders/planning/accounting/trust-critical-state",
+        "missing canonical ESCALATION_SCAN row: AI-or-automation-acts-downstream",
+        "missing canonical ESCALATION_SCAN row: worker/scheduler/queue/retry/async-side-effect",
+        "missing canonical ESCALATION_SCAN row: cross-repo/service-contract/generated-schema/shared-API-event",
+        "missing canonical ESCALATION_SCAN row: user-visible-control-with-materializer/downstream-consumer",
+        "missing canonical ESCALATION_SCAN row: test-runtime-role-mismatch",
+        "missing canonical ESCALATION_SCAN row: broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip",
+    ],
+    "claude/C2-enum-bypass.md": [
+        "CEREMONY_TIER has non-canonical value: 'tiny | operator-waived'",
+    ],
+    "lint-test/bad1.md": [
+        "missing canonical ESCALATION_SCAN row: authz/tenant/RLS/permissions/secrets",
+        "missing canonical ESCALATION_SCAN row: AI-or-automation-acts-downstream",
+        "missing canonical ESCALATION_SCAN row: worker/scheduler/queue/retry/async-side-effect",
+        "missing canonical ESCALATION_SCAN row: cross-repo/service-contract/generated-schema/shared-API-event",
+        "missing canonical ESCALATION_SCAN row: user-visible-control-with-materializer/downstream-consumer",
+        "missing canonical ESCALATION_SCAN row: test-runtime-role-mismatch",
+        "missing canonical ESCALATION_SCAN row: broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip",
+        "WHY_DOWNGRADE_IS_SAFE forbidden when any ESCALATION_SCAN row is yes/unknown",
+        "OPERATOR_WAIVER required when any ESCALATION_SCAN row is yes/unknown",
+        "PLAN report missing FINAL_GIT_STATUS_SHORT or explicit unavailable reason",
+    ],
+    "lint-test/bad2.md": [
+        "phase/authority inconsistent: PHASE=AUDIT, AUTHORITY='implementation'",
+    ],
+    "lint-test/bad3.md": [
+        "DISPATCH IMPL appears inline on line 8; dispatch token is valid only bare/unfenced/un-backticked and alone on its own line",
+        "PLAN report missing FINAL_GIT_STATUS_SHORT or explicit unavailable reason",
+    ],
+    "lint-test/bad3b.md": [
+        "DISPATCH IMPL requires a TO address",
+        "PLAN report missing FINAL_GIT_STATUS_SHORT or explicit unavailable reason",
+    ],
+    "lint-test/bad4.md": [
+        "CEREMONY_TIER has non-canonical value: 'normal'",
+        "PLAN report missing FINAL_GIT_STATUS_SHORT or explicit unavailable reason",
+    ],
+    "claude/L3": [
+        "03-PLAN-dispatch.md: DISPATCH IMPL requires a TO address",
+    ],
+    "probes/N4-scan-result-mismatch.md": [
+        "ESCALATION_SCAN_RESULT='trigger-present' inconsistent with rows; expected 'all-no'",
+    ],
+    "probes/N5-missing-scan-row.md": [
+        "missing canonical ESCALATION_SCAN row: broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip",
+    ],
+    "addressing/T2-token-no-to.md": [
+        "DISPATCH IMPL requires a TO address",
+    ],
+    "addressing/T3-token-to-planner.md": [
+        "DISPATCH IMPL requires TO to be exactly one implementer-role address",
+    ],
+    "addressing/T4-token-two-implementers.md": [
+        "ROLE/FROM mismatch: ROLE='Planner' but FROM='orchestrator'; do not proxy-author another seat's relay",
+        "DISPATCH IMPL requires exactly one TO addressee",
+    ],
+    "addressing/T5-bad-address.md": [
+        "FROM has invalid address 'pair planner'; expected operator, orchestrator, or <owner>.<role>",
+    ],
+    "merge/M1-merge-claim-no-auth": [
+        "IMPL-report-20260610-110000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "merge/M4-canonical-claim-no-auth": [
+        "IMPL-report-20260610-112000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "merge/M5-self-auth-forgery": [
+        "IMPL-report-20260610-113000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "merge/M7-continuation-prose-claim-no-auth": [
+        "IMPL-report-20260610-114000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "merge/M8-continuation-canonical-claim-no-auth": [
+        "IMPL-report-20260610-114500.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "content/E1-empty-final-git-status.md": [
+        "FINAL_GIT_STATUS_SHORT is empty; provide content or 'unavailable — <reason>' / 'none — <reason>'",
+    ],
+    "content/E2-empty-actions-git-ref.md": [
+        "FINAL_GIT_STATUS_SHORT carries a placeholder, not content; placeholders are valid only in --templates mode",
+        "ACTIONS_GIT_REF is empty; provide content or 'unavailable — <reason>' / 'none — <reason>'",
+    ],
+    "identity/S4a-proxy-from.md": [
+        "ROLE/FROM mismatch: ROLE='Planner' but FROM='pair-1.implementer'; do not proxy-author another seat's relay",
+    ],
+    "lineage/LI2-cc-orchestrator-plan-trap": [
+        "03-dispatch.md: PLAN-REVIEW must review the pair Planner's PLAN, not a CC'd orchestrator dispatch",
+        "03-dispatch.md: pair-Planner PLAN must address the Implementer in TO for review",
+    ],
+    "lineage/LI3-no-plan-review-parent": [
+        "02-dispatch.md: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve",
+        "02-dispatch.md: PLAN-REVIEW parent must be FROM pair-1.implementer",
+        "02-dispatch.md: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent",
+    ],
+    "lineage/LI4-non-addressee-impl-report": [
+        "04-report.md: IMPL report FROM 'pair-2.implementer' is not the addressee of the parent DISPATCH IMPL relay",
+    ],
+    "rowtruth/RT2-missing-fold-evidence.md": [
+        "FOLD_SCOPE has IN rows but missing FOLD_SCOPE_EVIDENCE; verify row truth against file/scope evidence, not row shape",
+    ],
+    "rowtruth/RT4-missing-scope-evidence.md": [
+        "SCOPE_DIFF has IN rows but missing SCOPE_ROW_EVIDENCE; verify row truth against file/scope evidence, not row shape",
+    ],
+    "rowtruth/RT5-two-relay-out-in-flip": [
+        "02-second.md: FOLD_SCOPE flips 'src/bait.ts' from OUT in 01-first.md to IN without a reconciliation evidence override",
+    ],
+    "design-review/DR2-edge-less-no-review": [
+        "02-plan.md: design-doc PLAN requires PARENT_DISPATCH_ID to the approving DESIGN-REVIEW relay",
+    ],
+    "design-review/DR4-self-override": [
+        "01-plan.md: pair Planner cannot use DESIGN_RECORD_KIND: direct-override; only operator/orchestrator/orchestrator-planner authority may override design review",
+    ],
+    "design-review/DR7b-audit-record-design-doc-visible": [
+        "02-plan.md: DESIGN_RECORD_KIND: audit-record conflicts with observable same-owner DESIGN relay carrying DESIGN_DOC_ID",
+    ],
+    "design-review/DR8-review-not-from-implementer": [
+        "03-plan.md: design-doc PLAN parent 'dr8-review' does not resolve to a relay in this lineage",
+    ],
+    "design-review/DR9-verdict-not-approve": [
+        "03-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
+    ],
+    "design-review/DR10-review-parent-not-design": [
+        "04-plan.md: DESIGN-REVIEW parent lacks a resolvable DESIGN parent",
+    ],
+    "design-review/DR11a-stale-review-parent": [
+        "05-plan.md: design-doc PLAN parent 'dr11a-review-v1' does not resolve to a relay in this lineage",
+    ],
+    "design-review/DR11b-locks-must-revise-v1": [
+        "05-plan.md: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve",
+    ],
+    "design-review/DR13-omit-record-kind": [
+        "02-plan.md: DESIGN_LOCK_ID present with design-review context but DESIGN_RECORD_KIND is missing",
+    ],
+    "orch-review/OR7-audit-no-reviewer": [
+        "01-audit.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/OR8-design-no-reviewer": [
+        "01-design.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/OR9-plan-delegated-no-reviewer": [
+        "01-plan.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/OR10-override-impl-no-reviewer": [
+        "01-impl.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/OR11-merge-gate-no-reviewer": [
+        "01-merge.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/OR12-review-fold-no-reviewer": [
+        "01-review-fold.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/A1-no-reviewer-no-waiver": [
+        "01-merge.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
+    "orch-review/A3-self-waiver": [
+        "01-merge.md: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)",
+    ],
 }
 _dispatch_id_conflict = (
     "DISPATCH_ID carries 2 distinct values across 2 occurrences; an authority-critical field is "
