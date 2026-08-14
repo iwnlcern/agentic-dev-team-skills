@@ -433,6 +433,9 @@ def commission_members() -> dict[str, str]:
         "cm81", role="Master Reviewer", from_addr="alpha.master-reviewer",
     )
     members["CM82-auth-wrong-to/01-auth.md"] = commission_authorization("cm82", to_addr="alpha.master-reviewer")
+    members["CM270-auth-to-multiple/01-auth.md"] = commission_authorization(
+        "cm270", to_addr="alpha.master-planner, gamma.master-planner",
+    )
     members["CM83-auth-nonpair-commission-to/01-auth.md"] = commission_authorization(
         "cm83", surface=commission_surface("cm83", overrides={"COMMISSION_TO": "beta.pair-implementer"}),
     )

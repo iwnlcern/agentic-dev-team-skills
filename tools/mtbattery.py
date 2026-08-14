@@ -60,11 +60,35 @@ ROW_SELECTORS = {
         ("h27_foreign_lock_errors", "Call", "h27_same_position_latest(review_candidates)"),
         ("h27_foreign_lock_errors", "Compare", "review_verdict != 'approve'"),
     },
-    "C7": ("h27_commission_auth_shape_ok", "Compare", "carrier == 'yes'"),
-    "C8": ("h27_commission_surface_complete", "Call", "all((value not in {None, ''} for value in h27_commission_surface(text)))"),
-    "C8a": ("h27_pair_planner_address", "BoolOp", "len(addresses) != 1 or canonical_role(from_role(addresses[0])) != 'planner'"),
+    "C7": {
+        ("h27_commission_auth_shape_ok", "Compare", "carrier == 'yes'"),
+        ("h27_commission_auth_shape_ok", "Call", "h27_direct_commission_grantor(from_addr)"),
+        ("h27_commission_auth_shape_ok", "Compare", "phase == 'PLAN'"),
+        ("h27_commission_auth_shape_ok", "Compare", "authority == 'plan-only'"),
+        ("h27_commission_auth_shape_ok", "Compare", "len(to_addrs) == 1"),
+        ("h27_commission_auth_shape_ok", "Compare", "from_role(to_addrs[0]) == 'master-planner'"),
+    },
+    "C8": {
+        ("h27_commission_surface_complete", "Call", "all((value not in {None, ''} for value in h27_commission_surface(text)))"),
+        ("h27_commission_precompute", "BoolOp", "carrier_presence == {'COMMISSION_ID'} and (not dda_presence) and (not commission_id_conflict) and (commission_id not in {None, ''})"),
+        ("h27_commission_precompute", "Compare", "h27_commission_surface(text) != h27_commission_surface(authorization[4])"),
+        ("h27_commission_precompute", "Set", "{h27_commission_surface(text), h27_commission_surface(charter[4]), h27_commission_surface(authorization[4])}"),
+        ("h27_commission_precompute", "Set", "{h27_commission_surface(text), h27_commission_surface(approval[4]), h27_commission_surface(charter[4]), h27_commission_surface(authorization[4])}"),
+    },
+    "C8a": {
+        ("h27_pair_planner_address", "BoolOp", "len(addresses) != 1 or canonical_role(from_role(addresses[0])) != 'planner'"),
+        ("h27_commission_precompute", "Call", "h27_occurrences(item[4], marker)"),
+        ("h27_commission_precompute", "Compare", "commission_id in h27_occurrences(item[4], 'COMMISSION_ID')"),
+        ("h27_commission_precompute", "Compare", "len(latest) == 1"),
+    },
     "C8b": ("h27_commission_charter_shape_ok", "Compare", "authority == 'design-only'"),
-    "C8c": ("h27_commission_id_grammatical", "BoolOp", "value is not None and H27_COMMISSION_ID_RE.fullmatch(value) is not None"),
+    "C8c": {
+        ("h27_commission_id_grammatical", "BoolOp", "value is not None and H27_COMMISSION_ID_RE.fullmatch(value) is not None"),
+        ("h27_commission_id_grammatical", "Call", "H27_COMMISSION_ID_RE.fullmatch(value)"),
+        ("h27_commission_precompute", "Compare", "charter_doc_id not in {None, f'CH-{commission_id}'}"),
+        ("h27_commission_precompute", "Compare", "design_doc_id != charter_doc_id"),
+        ("h27_commission_precompute", "SetComp", "{key for key in H27_COMMISSION_CARRIERS if h27_occurrences(text, key)}"),
+    },
     "C9": ("charter_parent_authorization", "Compare", "parent is None"),
     "C9a": ("charter_parent_authorization", "Compare", "parent_id in {None, ''}"),
     "C10": ("resolve_ancestry", "Compare", "parent_id in {None, ''}"),
@@ -136,8 +160,22 @@ def mutation_span(source: str, arm: dict[str, object]) -> tuple[int, int]:
     wanted_type = getattr(ast, str(arm["node"]), None)
     if not isinstance(wanted_type, type) or not issubclass(wanted_type, ast.AST):
         raise RuntimeError(f"{arm['name']}: unknown AST node {arm['node']!r}")
+    search_root: ast.AST = functions[0]
+    context_node = arm.get("context_node")
+    context_original = arm.get("context_original")
+    if context_node is not None or context_original is not None:
+        wanted_context_type = getattr(ast, str(context_node), None)
+        if not isinstance(wanted_context_type, type) or not issubclass(wanted_context_type, ast.AST):
+            raise RuntimeError(f"{arm['name']}: unknown context AST node {context_node!r}")
+        contexts = [
+            node for node in ast.walk(search_root)
+            if isinstance(node, wanted_context_type) and ast.unparse(node) == context_original
+        ]
+        if len(contexts) != 1:
+            raise RuntimeError(f"{arm['name']}: context AST anchor count={len(contexts)}")
+        search_root = contexts[0]
     matches = [
-        node for node in ast.walk(functions[0])
+        node for node in ast.walk(search_root)
         if isinstance(node, wanted_type) and ast.unparse(node) == arm["original"]
     ]
     if len(matches) != 1:
