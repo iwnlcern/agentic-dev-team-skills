@@ -245,6 +245,7 @@ LIFECYCLE_EXPECTED = [
     ("root", "mastertier/MT64-direct-origin-pair-control", 0),
     ("root", "mastertier/MT65-design-kind-wrong-origin-shape", 1),
     ("root", "mastertier/MT66-audit-kind-wrong-origin-shape", 1),
+    ("root", "mastertier/MT77-unsupported-origin-kind", 1),
     ("root", "mastertier/MT67-pair-invented-design-doc", 1),
     ("root", "mastertier/MT68-all-seat-missing-review-pair-planner", 1),
     ("root", "mastertier/MT68-all-seat-missing-review-pair-implementer", 1),
@@ -1500,6 +1501,12 @@ EXPECTED_ERROR_SET.update({
     ],
     "mastertier/MT66-audit-kind-wrong-origin-shape": [
         "03-consumer.md: foreign audit-record origin 01-origin.md must be planner-seat PHASE AUDIT with AUTHORITY: review-only or report-only" + _lock_rule,
+    ],
+    "mastertier/MT77-unsupported-origin-kind": [
+        "01-origin.md: DESIGN_RECORD_KIND has non-canonical value: 'unsupported-record'",
+        "02-review.md: DESIGN_RECORD_KIND has non-canonical value: 'unsupported-record'",
+        "03-consumer.md: DESIGN_RECORD_KIND has non-canonical value: 'unsupported-record'",
+        "03-consumer.md: foreign origin 01-origin.md does not resolve lock identity 'lock-c5-unsupported-kind'" + _lock_rule,
     ],
     "mastertier/MT67-pair-invented-design-doc": [
         "01-consumer.md: DESIGN_LOCK_ID 'lock-c5-pair-invented' has no earlier same-owner DESIGN relay carrying matching DESIGN_DOC_ID",

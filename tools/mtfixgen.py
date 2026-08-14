@@ -1495,6 +1495,12 @@ def lifecycle_members() -> dict[str, str]:
         reviews=(review_relay("c5-audit-shape", kind="audit-record"),),
         consumer=consumer_relay("c5-audit-shape", kind="audit-record"),
     )
+    add_chain(
+        members, "MT77-unsupported-origin-kind", case="c5-unsupported-kind",
+        origin=origin_relay("c5-unsupported-kind", kind="unsupported-record"),
+        reviews=(review_relay("c5-unsupported-kind", kind="unsupported-record"),),
+        consumer=consumer_relay("c5-unsupported-kind", kind="unsupported-record"),
+    )
     members["MT67-pair-invented-design-doc/01-consumer.md"] = consumer_relay("c5-pair-invented")
     for seat, role, from_addr, to_addr, phase, authority in LIFECYCLE_CONSUMERS:
         case = f"c5-missing-review-{seat}"

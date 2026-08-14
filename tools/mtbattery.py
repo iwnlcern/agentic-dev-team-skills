@@ -28,17 +28,38 @@ RESULT_DETAIL = re.compile(r"^(?P<label>(?:--relay-root |--index )?.+): expected
 # arm table: it makes a claimed ledger-row/anchor pairing independently
 # checkable.  Several rows share a function, but no row may borrow another
 # row's predicate merely by changing its label.
-ROW_SELECTOR = {
+ROW_SELECTORS = {
     "C1": ("h27_master_seat_errors", "Call", "own_line_dispatch_present(text)"),
     "C2": ("h27_master_seat_errors", "Call", "own_line_merge_present(text)"),
     "C3": ("h27_master_seat_errors", "Compare", "resolved.get('DESIGN_RECORD_KIND') == 'direct-override'"),
-    "C4": ("h27_group_and_route", "BoolOp", "foreign_groups and pair_group"),
-    "C5": ("h27_foreign_lock_errors", "BoolOp", "origin_kind not in {'design-doc', 'audit-record'} or origin_doc != lock_id or (not origin_id)"),
-    "C5a": ("h27_foreign_lock_errors", "Compare", "origin_role in {'master-reviewer', 'domain-reviewer'}"),
+    "C4": {
+        ("h27_group_and_route", "BoolOp", "foreign_groups and pair_group"),
+        ("h27_select_origins", "Compare", "order >= before_order"),
+        ("h27_group_and_route", "Compare", "tier == 'foreign'"),
+        ("h27_group_and_route", "Compare", "len(foreign_groups) > 1"),
+        ("h27_group_and_route", "Compare", "h27_tier_classification(consumer_address) == 'foreign'"),
+        ("h27_foreign_lock_errors", "Call", "h27_same_position_latest(origins)"),
+    },
+    "C5": {
+        ("h27_foreign_lock_errors", "Compare", "origin_role in {'master-reviewer', 'domain-reviewer'}"),
+        ("h27_foreign_lock_errors", "BoolOp", "origin_role in {'master-planner', 'domain-planner'} and origin_phase == 'DESIGN' and (origin_authority == 'design-only')"),
+        ("h27_foreign_lock_errors", "BoolOp", "origin_role in {'master-planner', 'domain-planner'} and origin_phase == 'AUDIT' and (origin_authority in {'review-only', 'report-only'})"),
+        ("h27_foreign_lock_errors", "Compare", "origin_kind is None"),
+        ("h27_foreign_lock_errors", "BoolOp", "origin_kind not in {'design-doc', 'audit-record'} or origin_doc != lock_id or (not origin_id)"),
+    },
+    "C5a": {
+        ("h27_lock_lifecycle_precompute", "Compare", "route == 'foreign'"),
+    },
     "C5b": ("h27_foreign_lock_errors", "Compare", "review_kind != origin_kind"),
     "C5c": ("h27_foreign_lock_errors", "BoolOp", "consumer_kind is not None and consumer_kind != origin_kind"),
     "C5d": ("h27_foreign_lock_errors", "Compare", "normalized_addr(review_from) != expected_review_from"),
-    "C6": ("h27_foreign_lock_errors", "Compare", "review_verdict != 'approve'"),
+    "C6": {
+        ("h27_foreign_lock_errors", "Call", "h27_same_position_latest(origins)"),
+        ("h27_foreign_lock_errors", "Compare", "review_order >= consumer_order"),
+        ("h27_foreign_lock_errors", "Compare", "origin_id not in review_parents"),
+        ("h27_foreign_lock_errors", "Call", "h27_same_position_latest(review_candidates)"),
+        ("h27_foreign_lock_errors", "Compare", "review_verdict != 'approve'"),
+    },
     "C7": ("h27_commission_auth_shape_ok", "Compare", "carrier == 'yes'"),
     "C8": ("h27_commission_surface_complete", "Call", "all((value not in {None, ''} for value in h27_commission_surface(text)))"),
     "C8a": ("h27_pair_planner_address", "BoolOp", "len(addresses) != 1 or canonical_role(from_role(addresses[0])) != 'planner'"),
@@ -55,6 +76,13 @@ ROW_SELECTOR = {
     "C15": ("role_from_consistency_error", "Compare", "canonical_role(expected) != special_expected"),
     "C16": ("a5_sanitized_text", "Call", "a5_split_lines(text)"),
 }
+
+# Keep rows with a single reviewed selector equally explicit.  The inventory
+# shape above is needed where one row owns several independently reviewed
+# predicates; every selector in every inventory must be carried by an arm.
+for _row, _selector in tuple(ROW_SELECTORS.items()):
+    if isinstance(_selector, tuple):
+        ROW_SELECTORS[_row] = {_selector}
 
 
 def parse_results(output: str) -> tuple[int, int]:
@@ -283,22 +311,56 @@ def generated_and_registered_by_kind() -> tuple[dict[str, set[str]], dict[str, s
 def validate_spec(spec: ModuleType, selected: list[dict[str, object]], full_run: bool) -> list[str]:
     errors: list[str] = []
     rows = set(spec.LEDGER_ROWS)
-    arm_rows = [str(arm.get("row")) for arm in spec.ARMS]
+    def covered_rows(arm: dict[str, object]) -> tuple[str, ...]:
+        covered = arm.get("rows", (arm.get("row"),))
+        if not isinstance(covered, tuple) or not covered:
+            return ()
+        return tuple(str(row) for row in covered)
+
+    arm_rows = [row for arm in spec.ARMS for row in covered_rows(arm)]
     counts = Counter(arm_rows)
     if full_run and set(arm_rows) != rows:
         errors.append(f"O1 uncovered={sorted(rows - set(arm_rows))} unknown={sorted(set(arm_rows) - rows)}")
-    if full_run and counts != Counter({row: 2 for row in rows}):
-        errors.append(f"O1 exact-two-arms-per-row={sorted(counts.items())}")
-    if len(arm_rows) != len(set(arm.get("name") for arm in spec.ARMS)):
+    if full_run and any(counts[row] < 1 for row in rows):
+        errors.append(f"O1 empty-row-coverage={sorted(row for row in rows if counts[row] < 1)}")
+    if len(spec.ARMS) != len(set(arm.get("name") for arm in spec.ARMS)):
         errors.append("O1 duplicate arm name")
+
+    source = (TOOLS / "relay-lint.py").read_text(encoding="utf-8")
+    mutants: dict[str, str] = {}
     for arm in selected:
         actual_selector = (arm.get("function"), arm.get("node"), arm.get("original"))
-        expected_selector = ROW_SELECTOR.get(str(arm.get("row")))
-        if expected_selector != actual_selector:
-            errors.append(
-                f"O1 {arm.get('name')}: row={arm.get('row')} anchor-selector="
-                f"{actual_selector!r} expected={expected_selector!r}"
-            )
+        for row in covered_rows(arm):
+            expected_selectors = ROW_SELECTORS.get(row, set())
+            if actual_selector not in expected_selectors:
+                errors.append(
+                    f"O1 {arm.get('name')}: row={row} anchor-selector="
+                    f"{actual_selector!r} expected-one-of={sorted(expected_selectors)!r}"
+                )
+        try:
+            start, end = mutation_span(source, arm)
+        except Exception as exc:
+            errors.append(f"O1 {arm.get('name')}: cannot resolve mutant bytes: {exc}")
+            continue
+        mutant = source[:start] + str(arm.get("replacement")) + source[end:]
+        earlier = mutants.get(mutant)
+        if earlier is not None:
+            errors.append(f"O1 duplicate-mutant-bytes={earlier},{arm.get('name')}")
+        else:
+            mutants[mutant] = str(arm.get("name"))
+
+    if full_run:
+        represented = {
+            str(row): {
+                (arm.get("function"), arm.get("node"), arm.get("original"))
+                for arm in spec.ARMS if str(row) in covered_rows(arm)
+            }
+            for row in rows
+        }
+        for row, inventory in ROW_SELECTORS.items():
+            missing = inventory - represented.get(row, set())
+            if missing:
+                errors.append(f"O1 row={row} unrepresented-reviewed-selectors={sorted(missing)!r}")
     return errors
 
 
@@ -344,7 +406,10 @@ def main(argv: list[str]) -> int:
     sys.dont_write_bytecode = True
     spec = load_module("mtbattery_spec", args.spec)
     command = tuple(args.command) or DEFAULT_SUITE
-    selected = [arm for arm in spec.ARMS if not args.only or arm["row"] in set(args.only)]
+    selected = [
+        arm for arm in spec.ARMS
+        if not args.only or set(str(row) for row in arm.get("rows", (arm["row"],))) & set(args.only)
+    ]
     errors = validate_spec(spec, selected, not args.only)
     harness = load_module("mtbattery_denominator", TOOLS / "check-relay-lint-fixtures.py")
     count_controls, control_errors = validate_count_controls(spec, harness)
