@@ -95,9 +95,16 @@ ROW_SELECTORS = {
         ("h27_commission_precompute", "Call", "authorization_for(item, charter_id, H27_COMMISSION_GRANT_RULE)"),
         ("h27_commission_precompute", "Call", "authorization_for(item, commission_id, H27_COMMISSION_RECEIPT_RULE)"),
     },
-    "C11": ("h27_receipt_self_grants", "BoolOp", "is_receipt and 'yes' in h27_occurrences(text, 'DELEGATED_DISPATCH_AUTHORITY')"),
+    "C11": {
+        ("h27_receipt_self_grants", "BoolOp", "is_receipt and 'yes' in h27_occurrences(text, 'DELEGATED_DISPATCH_AUTHORITY')"),
+        ("h27_direct_path_has_commission_carrier", "Name", "carrier_presence"),
+    },
     "C12": ("h27_receiving_seat_errors", "Call", "any((from_role(target) in MASTER_TIER_ROLES for target in targets))"),
-    "C12a": ("stage_conflict", "Call", "selected_conflict(item, keys)"),
+    "C12a": {
+        ("selected_authorization_conflict", "Call", "selected_conflict(selected, ('FROM', 'PHASE', 'AUTHORITY', 'TO', 'DISPATCH_ID', 'COMMISSION_AUTHORIZATION') + H27_COMMISSION_SURFACE)"),
+        ("stage_conflict", "Call", "selected_conflict(item, keys)"),
+        ("h27_commission_precompute", "Call", "selected_conflict(selected, ('FROM', 'PHASE', 'AUTHORITY', 'TO', 'DELEGATED_DISPATCH_AUTHORITY') + H27_COMMISSION_SURFACE)"),
+    },
     "C13": ("dispatch_id_map", "Call", "set(h27_occurrences(item[4], 'DISPATCH_ID'))"),
     "C14": ("h27_conflict_message", "Compare", "len(distinct) <= 1"),
     "C15": ("role_from_consistency_error", "Compare", "canonical_role(expected) != special_expected"),

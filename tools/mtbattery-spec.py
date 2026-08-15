@@ -70,8 +70,12 @@ ARMS = (
     {"name": "grant-auth-reselection-bypass", "row": "C10", "function": "h27_commission_precompute", "node": "Call", "original": "authorization_for(item, charter_id, H27_COMMISSION_GRANT_RULE)", "replacement": "resolve_ancestry(h27_resolved_discriminator(charter[4], 'PARENT_DISPATCH_ID')[0], charter[1], item, 'charter parent', H27_COMMISSION_GRANT_RULE)", "kills": ()},
     {"name": "receipt-auth-reselection-bypass", "row": "C10", "function": "h27_commission_precompute", "node": "Call", "original": "authorization_for(item, commission_id, H27_COMMISSION_RECEIPT_RULE)", "replacement": "resolve_ancestry(h27_resolved_discriminator(charter[4], 'PARENT_DISPATCH_ID')[0], charter[1], item, 'charter parent', H27_COMMISSION_RECEIPT_RULE)", "kills": ()},
     *pair("C11", "receipt-self-grant", "h27_receipt_self_grants", "BoolOp", "is_receipt and 'yes' in h27_occurrences(text, 'DELEGATED_DISPATCH_AUTHORITY')"),
+    {"name": "direct-carrier-insulation-bypass", "row": "C11", "function": "h27_direct_path_has_commission_carrier", "node": "Name", "original": "carrier_presence", "replacement": "False", "kills": ()},
     *pair("C12", "receiving-master", "h27_receiving_seat_errors", "Call", "any((from_role(target) in MASTER_TIER_ROLES for target in targets))"),
-    *pair("C12a", "selected-conflict", "stage_conflict", "Call", "selected_conflict(item, keys)"),
+    {"name": "authorization-conflict-bypass", "row": "C12a", "function": "selected_authorization_conflict", "node": "Call", "original": "selected_conflict(selected, ('FROM', 'PHASE', 'AUTHORITY', 'TO', 'DISPATCH_ID', 'COMMISSION_AUTHORIZATION') + H27_COMMISSION_SURFACE)", "replacement": "None", "kills": ()},
+    {"name": "charter-conflict-bypass", "row": "C12a", "function": "stage_conflict", "node": "Call", "original": "selected_conflict(item, keys)", "replacement": "selected_conflict(item, keys) if label not in {'charter revision', 'latest charter revision'} else None", "kills": ()},
+    {"name": "review-conflict-bypass", "row": "C12a", "function": "stage_conflict", "node": "Call", "original": "selected_conflict(item, keys)", "replacement": "selected_conflict(item, keys) if label != 'charter review' else None", "kills": ()},
+    {"name": "receipt-grant-conflict-bypass", "row": "C12a", "function": "h27_commission_precompute", "node": "Call", "original": "selected_conflict(selected, ('FROM', 'PHASE', 'AUTHORITY', 'TO', 'DELEGATED_DISPATCH_AUTHORITY') + H27_COMMISSION_SURFACE)", "replacement": "None", "kills": ()},
     *pair("C13", "dispatch-map", "dispatch_id_map", "Call", "set(h27_occurrences(item[4], 'DISPATCH_ID'))", "set()", "set(h27_occurrences(item[4], 'DISPATCH_ID')[:1])"),
     *pair("C14", "dispatch-id-conflict", "h27_conflict_message", "Compare", "len(distinct) <= 1"),
     *pair("C15", "special-role", "role_from_consistency_error", "Compare", "canonical_role(expected) != special_expected"),
@@ -141,6 +145,58 @@ KILLS.update({
     "receipt-auth-reselection-bypass": [
         "mastertier/CM174-auth-reselection-receipt",
         "mastertier/CM238-conflict-authorization-at-receipt",
+    ],
+})
+
+# Task 4 replaces the generic stage-conflict truth pair with direct carrier
+# insulation and four named ancestor-class bypasses.  Empty declarations are
+# intentional until the focused RED run records each complete observed set.
+for _obsolete_arm in (
+    "selected-conflict-false",
+    "selected-conflict-true",
+):
+    KILLS.pop(_obsolete_arm, None)
+KILLS.update({
+    "direct-carrier-insulation-bypass": [
+        "mastertier/CM221-direct-half-commission-authorization",
+        "mastertier/CM222-direct-half-commission-id",
+        "mastertier/CM223-direct-half-commission-scope",
+        "mastertier/CM224-direct-half-commission-to",
+        "mastertier/CM225-direct-half-charter-doc-id",
+        "mastertier/CM84-both-markers-delegation",
+    ],
+    "authorization-conflict-bypass": [
+        "mastertier/CM235-conflict-authorization-at-charter",
+        "mastertier/CM236-conflict-authorization-at-approval",
+        "mastertier/CM237-conflict-authorization-at-grant",
+        "mastertier/CM238-conflict-authorization-at-receipt",
+        "mastertier/CM267-composite-conflicts-approval",
+        "mastertier/CM268-composite-conflicts-grant",
+        "mastertier/CM269-composite-conflicts-receipt",
+        "mastertier/CM93-auth-membership-conflict-match-first",
+        "mastertier/CM94-auth-membership-conflict-match-last",
+    ],
+    "charter-conflict-bypass": [
+        "mastertier/CM239-conflict-charter-at-approval",
+        "mastertier/CM240-conflict-charter-at-grant",
+        "mastertier/CM241-conflict-charter-at-receipt",
+        "mastertier/CM267-composite-conflicts-approval",
+        "mastertier/CM268-composite-conflicts-grant",
+        "mastertier/CM269-composite-conflicts-receipt",
+    ],
+    "review-conflict-bypass": [
+        "mastertier/CM197-approval-id-conflict-id-first",
+        "mastertier/CM198-approval-id-conflict-other-first",
+        "mastertier/CM242-conflict-review-at-grant",
+        "mastertier/CM243-conflict-review-at-receipt",
+        "mastertier/CM268-composite-conflicts-grant",
+        "mastertier/CM269-composite-conflicts-receipt",
+    ],
+    "receipt-grant-conflict-bypass": [
+        "mastertier/CM111-grant-membership-conflict-match-first",
+        "mastertier/CM112-grant-membership-conflict-match-last",
+        "mastertier/CM244-conflict-grant-at-receipt",
+        "mastertier/CM269-composite-conflicts-receipt",
     ],
 })
 
