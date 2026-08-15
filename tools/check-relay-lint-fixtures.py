@@ -2056,16 +2056,6 @@ EXPECTED_ERROR_SET["mastertier/CM269-composite-conflicts-receipt"] = [
     "05-receipt.md: " + _composite_gate_error["grant-receipt"],
 ]
 EXPECTED_ERROR_SET.update({
-    "mastertier/CM243-conflict-review-at-receipt": [
-        "03-approval.md: DESIGN_REVIEW_VERDICT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present (DD-v29-master-authority-20260809 rule 5)",
-        "04-grant.md: selected charter review 03-approval.md has conflicting DESIGN_REVIEW_VERDICT occurrences; ancestry resolution refuses first-value resolution" + _commission_grant_rule,
-        "05-receipt.md: selected charter review 03-approval.md has conflicting DESIGN_REVIEW_VERDICT occurrences; ancestry resolution refuses first-value resolution" + _commission_receipt_rule,
-    ],
-    "mastertier/CM257-grammar-negative-empty": [
-        "01-auth.md: commission machine engaged with non-grammatical COMMISSION_ID ''; expected [a-z0-9][a-z0-9-]*" + _commission_rule,
-    ],
-})
-EXPECTED_ERROR_SET.update({
     "mastertier/CM153-byte-exact-address-surface": [
         "02-charter.md: charter equality surface is not byte-equal to the selected authorization" + _commission_charter_rule,
     ],
