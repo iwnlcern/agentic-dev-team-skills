@@ -1709,7 +1709,7 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
         # pre-first-row state, not a defect. Either component alone is still
         # an error: the grant covers exactly the marker+header boot state.
         if header_arity is None or not a5_markers:
-            result.error(f"no index rows found in {path}")
+            result.error(f"no index rows found in {path.name}")
         return result
 
     scoped = [r for r in rows if r[0] > marker_line]
