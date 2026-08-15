@@ -20,3 +20,5 @@ Adversarially review the domain's spec and amendments. Check scope, internal con
 Perform consumer review of adjacent specs at locked seams.
 
 Do not build or implement. Review decisions against the adjacent `master-tier-boundary.md`.
+
+**Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; it may cite locks; never issues them. It never grants or receives delegation, and `direct-override` is never allowed. Consumer review of adjacent specs at locked seams is citation-only by construction.

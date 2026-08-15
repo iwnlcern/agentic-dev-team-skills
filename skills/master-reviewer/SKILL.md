@@ -20,3 +20,5 @@ Adversarially review the Master Planner's decomposition, routing, commissioning,
 Treat a child run's lineage claim and its deliverable claims as E0 until reconciled; nesting is declared, not verified.
 
 Do not build or implement. Review decisions against the adjacent `master-tier-boundary.md`.
+
+**Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; it may cite locks; never issues them. It never grants or receives delegation, and `direct-override` is never allowed.
