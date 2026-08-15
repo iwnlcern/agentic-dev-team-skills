@@ -39,7 +39,7 @@ addressing/T7-valid-cc-context.md                                      pass
 addressing/T8-cc-trap-structurally-valid.md                            pass
 --relay-root addressing/G1-casefold-lineage                            pass
 --relay-root merge/M1-merge-claim-no-auth                              fail
---relay-root merge/M2-merge-claim-with-auth                            pass
+--relay-root merge/M2-merge-claim-with-auth                            fail
 --relay-root merge/M3-honest-not-merged                                pass
 --relay-root merge/M4-canonical-claim-no-auth                          fail
 --relay-root merge/M5-self-auth-forgery                                fail
@@ -51,7 +51,7 @@ addressing/T8-cc-trap-structurally-valid.md                            pass
 --relay-root merge/GC-2blank-ambiguous-canonical                       fail
 --relay-root merge/GD-quoted-canonical-inert                           pass
 --relay-root merge/organic-m2-unauthorized-merge                       fail
---relay-root merge-token/MT1-valid-token-grant                         pass
+--relay-root merge-token/MT1-valid-token-grant                         fail
 --relay-root merge-token/MT2-backticked-token-inert                    fail
 merge-token/MT3-self-granted-token.md                                  fail
 merge-token/MT4-multi-to-grant.md                                      fail
@@ -133,14 +133,14 @@ These row-bearing FOLD_SCOPE, detached-row, and duplicate row-bearing block regr
 
 Merge-token fixtures MT1-MT6:
 
-- MT1 proves a live `DISPATCH MERGE` grant from an authorized grantor to exactly one implementer authorizes a later merge claim.
+- MT1 currently fails before the token-grant assertion: its operator-authored MERGE-GATE declares `ROLE: Orchestrator Planner`, so the ROLE/FROM anti-proxy check rejects it. Its bytes therefore do not currently demonstrate a valid token grant.
 - MT2 proves a backticked token is inert; the later merge claim remains unauthorized.
 - MT3 proves implementer self-grants are structural errors.
 - MT4 proves multi-implementer `TO` grants are invalid.
 - MT5 proves a bare token outside `PHASE: MERGE-GATE` is a structural error.
 - MT6 proves a token-bearing file outside the active relay root does not authorize an in-root merge claim.
 
-M2 remains the layered field-form positive: field-form merge grants still authorize without the token.
+M2 currently fails before the layered field-form assertion: its operator-authored MERGE-GATE declares `ROLE: Planner`, so the ROLE/FROM anti-proxy check rejects it. Its bytes therefore do not currently demonstrate that field-form grants authorize without the token.
 
 ## Merge-authorization and lineage-scope fixtures
 
@@ -178,7 +178,7 @@ The design-review fixture matrix is DR1-DR11 plus DR13-DR15. DR12 is intentional
 ```text
 --relay-root design-review/DR1-valid-design-doc-chain             pass
 --relay-root design-review/DR2-edge-less-no-review                fail
---relay-root design-review/DR3-direct-override                    pass
+--relay-root design-review/DR3-direct-override                    fail
 --relay-root design-review/DR4-self-override                      fail
 --relay-root design-review/DR5-tiny-no-lock                       pass
 --relay-root design-review/DR6-genuine-audit-record               pass
@@ -211,6 +211,18 @@ Seven design-review lineage fixtures for shared-thread `DISPATCH_ID` resolver pr
 --relay-root design-review/DR22-F-c-cross-owner-design         fail
 ```
 
+## Ambiguity fixtures
+
+The AMB1 trio exercises resolver precision when unrelated relays reuse an identifier.
+
+```text
+--relay-root ambiguity/AMB1a-shared-id-dispatch       pass
+--relay-root ambiguity/AMB1b-shared-id-planhop        pass
+--relay-root ambiguity/AMB1c-shared-id-implreport     fail
+```
+
+AMB1a and AMB1b are valid shared-ID controls. AMB1c currently fails before the IMPL-report parent-resolution assertion: its operator-authored dispatch declares `ROLE: Planner`, so the ROLE/FROM anti-proxy check rejects that dispatch.
+
 
 
 
@@ -232,10 +244,10 @@ The orchestrator-review visibility gate fixtures under `orch-review/`. They prov
 --relay-root orch-review/OR11-merge-gate-no-reviewer  fail
 --relay-root orch-review/OR12-review-fold-no-reviewer fail
 --relay-root orch-review/A1-no-reviewer-no-waiver     fail
---relay-root orch-review/A2-operator-waiver           pass
+--relay-root orch-review/A2-operator-waiver           fail
 --relay-root orch-review/A3-self-waiver               fail
 --relay-root orch-review/A4-solo-no-orchestrator-relay pass
---relay-root orch-review/EX1-operator-authority       pass
+--relay-root orch-review/EX1-operator-authority       fail
 --relay-root orch-review/EX2-pairplanner-impl         pass
 --relay-root orch-review/EX3-reviewer-boot            pass
 --relay-root orch-review/EX4-reconcile                pass
@@ -243,4 +255,5 @@ The orchestrator-review visibility gate fixtures under `orch-review/`. They prov
 --relay-root orch-review/EX6-boot-to-reviewer         pass
 ```
 
+A2 and EX1 currently fail before their waiver/operator-authority assertions: the operator-authored relay in each fixture declares `ROLE: Reviewer`, so the ROLE/FROM anti-proxy check rejects it. Their fixture bytes therefore do not currently demonstrate those positive paths.
 
