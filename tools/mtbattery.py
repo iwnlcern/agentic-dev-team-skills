@@ -108,7 +108,10 @@ ROW_SELECTORS = {
     "C13": ("dispatch_id_map", "Call", "set(h27_occurrences(item[4], 'DISPATCH_ID'))"),
     "C14": ("h27_conflict_message", "Compare", "len(distinct) <= 1"),
     "C15": ("role_from_consistency_error", "Compare", "canonical_role(expected) != special_expected"),
-    "C16": ("a5_sanitized_text", "Call", "a5_split_lines(text)"),
+    "C16": {
+        ("h27_master_seat_errors", "Compare", "match.group(1) in occurrences"),
+        ("lint_relay_root", "Compare", "rfields.get('DESIGN_REVIEW_VERDICT') != 'approve'"),
+    },
 }
 
 # Keep rows with a single reviewed selector equally explicit.  The inventory
