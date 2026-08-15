@@ -1836,6 +1836,8 @@ def h27_has_foreign_from_occurrence(text: str) -> bool:
 
 
 def h27_conflict_message(text: str, key: str) -> str | None:
+    """C14 fails closed in every lint mode; the cited master-authority ruling
+    supplies cross-seat framing, not a seat- or tree-mode limit."""
     values = h27_occurrences(text, key)
     distinct = set(values)
     if len(distinct) <= 1:
