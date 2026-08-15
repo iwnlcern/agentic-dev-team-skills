@@ -175,6 +175,10 @@ Edge-less observed-shape fixtures for the parent-lineage gate:
 
 The design-review fixture matrix is DR1-DR11 plus DR13-DR15. DR12 is intentionally held out for the non-builder lane.
 
+DR3 currently fails before the direct-override assertion: its operator-authored
+PLAN declares `ROLE: Reviewer`, so the ROLE/FROM anti-proxy check rejects it.
+Its bytes therefore do not currently demonstrate a valid direct override.
+
 ```text
 --relay-root design-review/DR1-valid-design-doc-chain             pass
 --relay-root design-review/DR2-edge-less-no-review                fail
@@ -213,7 +217,8 @@ Seven design-review lineage fixtures for shared-thread `DISPATCH_ID` resolver pr
 
 ## Ambiguity fixtures
 
-The AMB1 trio exercises resolver precision when unrelated relays reuse an identifier.
+AMB1a and AMB1b exercise resolver precision when unrelated relays reuse an
+identifier. AMB1c is currently a stale, pre-resolution ROLE/FROM failure case.
 
 ```text
 --relay-root ambiguity/AMB1a-shared-id-dispatch       pass
@@ -256,4 +261,3 @@ The orchestrator-review visibility gate fixtures under `orch-review/`. They prov
 ```
 
 A2 and EX1 currently fail before their waiver/operator-authority assertions: the operator-authored relay in each fixture declares `ROLE: Reviewer`, so the ROLE/FROM anti-proxy check rejects it. Their fixture bytes therefore do not currently demonstrate those positive paths.
-
