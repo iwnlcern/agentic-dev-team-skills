@@ -233,7 +233,7 @@ AMB1a and AMB1b are valid shared-ID controls. AMB1c currently fails before the I
 
 ## Orchestrator-review visibility fixtures
 
-The orchestrator-review visibility gate fixtures under `orch-review/`. They prove the broad SET, the operator-authored waiver path, the self-waiver rejection, the pair-Planner exemption, boot/SITREP exemption, operator exemption, and reviewer-boot shape. The gate is a visibility/addressing check only; it does not add an approval verdict or lineage walk.
+The orchestrator-review visibility gate fixtures under `orch-review/` cover the broad SET, self-waiver rejection, pair-Planner exemption, boot/SITREP exemption, and reviewer-boot shape. A2 and EX1 are intended to cover the operator-authored waiver and operator exemption, but their current bytes fail the earlier ROLE/FROM anti-proxy check as detailed below. The gate is a visibility/addressing check only; it does not add an approval verdict or lineage walk.
 
 ```text
 --relay-root orch-review/OR1-audit-cc                 pass
