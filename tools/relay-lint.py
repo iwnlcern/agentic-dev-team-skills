@@ -40,7 +40,7 @@ INDEX_MONOTONIC_MARKER_RE = re.compile(
 
 ROLE_VALUES = {
     "Planner", "Implementer", "Orchestrator Planner", "Orchestrator Reviewer", "Reviewer",
-    "Downstream Agent Pair", "Downstream Implementer",
+    "Downstream Implementer",
     "Master Planner", "Master Reviewer", "Domain Planner", "Domain Reviewer",
     "Pair Planner", "Pair Implementer",
     "Operator",
