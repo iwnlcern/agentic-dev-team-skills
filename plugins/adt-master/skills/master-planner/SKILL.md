@@ -38,3 +38,5 @@ Maintain these records:
 Boot relays point; they never paraphrase. Mark them report-only and non-authorizing.
 
 Do not implement. Apply escalation decisions through the adjacent `master-tier-boundary.md`.
+
+**Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; commissioned work is executed by the commissioned pair under the settled pair gate, whose pair planner issues the token. It may issue reviewer-gated design locks only for governance artifacts—cross-domain decomposition records and sub-team charters—as record kind `design-doc` or `audit-record`; a lock becomes citable only after a master-reviewer `DESIGN-REVIEW` approval parented to the exact originating `DESIGN` or planner `AUDIT` relay. It may grant delegation but never receive it; only a commissioning `PLAN` dispatch, under the equality-bound commissioning machine, may carry a grant, addressed to the chartered pair planner and citing the operator-authorized scope and charter, never to itself, any master/domain seat, or outside a commission. `direct-override` is never allowed.

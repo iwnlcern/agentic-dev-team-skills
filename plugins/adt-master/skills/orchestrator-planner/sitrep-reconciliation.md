@@ -20,7 +20,7 @@ PARENT_DISPATCH_ID: <parent id or none>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 FROM: <sender owner.role | orchestrator | operator>
 TO: <recipient owner.role | orchestrator | operator>
-CC: <boundary-adjacent owner.role | none>
+CC: <boundary-adjacent owner.role; omit the line when none>
 BUNDLE_ID: <bundle/lane id>
 OWNER: <team/pair/agent>
 BASE: <repo>@<branch>@<sha or unknown>

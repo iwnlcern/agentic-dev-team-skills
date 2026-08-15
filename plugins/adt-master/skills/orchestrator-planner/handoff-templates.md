@@ -640,7 +640,7 @@ EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <sender owner.role | orchestrator | operator>
 TO: <recipient owner.role | orchestrator | operator>
-CC: <boundary-adjacent owner.role | none>
+CC: <boundary-adjacent owner.role; omit the line when none>
 PARENT_DISPATCH_ID:
 DESIGN_LOCK_ID: <logical design id | none>
 DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
