@@ -65,9 +65,10 @@ ARMS = (
     {"name": "commission-charter-identity", "row": "C8c", "function": "h27_commission_precompute", "node": "Compare", "original": "charter_doc_id not in {None, f'CH-{commission_id}'}", "replacement": "False", "kills": ()},
     {"name": "commission-design-identity", "row": "C8c", "function": "h27_commission_precompute", "node": "Compare", "original": "design_doc_id != charter_doc_id", "replacement": "False", "kills": ()},
     {"name": "commission-display-consumption", "row": "C8c", "function": "h27_commission_precompute", "node": "SetComp", "original": "{key for key in H27_COMMISSION_CARRIERS if h27_occurrences(text, key)}", "replacement": "{key for key in H27_COMMISSION_CARRIERS + ('CHARTER_ARTIFACT', 'CHARTER_SHA256') if h27_occurrences(text, key)}", "kills": ()},
-    *pair("C9", "approval-parent", "charter_parent_authorization", "Compare", "parent is None", "True", "True"),
-    *pair("C9a", "charter-parent-id", "charter_parent_authorization", "Compare", "parent_id in {None, ''}", "True", "True"),
-    *pair("C10", "grant-parent", "resolve_ancestry", "Compare", "parent_id in {None, ''}", "True", "True"),
+    {"name": "approval-auth-reselection-bypass", "row": "C9", "function": "h27_commission_precompute", "node": "Call", "original": "authorization_for(item, charter_id, H27_COMMISSION_CHARTER_RULE)", "replacement": "resolve_ancestry(h27_resolved_discriminator(charter[4], 'PARENT_DISPATCH_ID')[0], charter[1], item, 'charter parent', H27_COMMISSION_CHARTER_RULE)", "kills": ()},
+    {"name": "charter-auth-resolver-bypass", "row": "C9a", "function": "h27_commission_precompute", "node": "Call", "original": "resolve_ancestry(parent_id, order, item, 'charter parent', H27_COMMISSION_CHARTER_RULE)", "replacement": "next((holder for holder in dispatch_holders[parent_id] if h27_is_earlier(holder[1], order)), None)", "kills": ()},
+    {"name": "grant-auth-reselection-bypass", "row": "C10", "function": "h27_commission_precompute", "node": "Call", "original": "authorization_for(item, charter_id, H27_COMMISSION_GRANT_RULE)", "replacement": "resolve_ancestry(h27_resolved_discriminator(charter[4], 'PARENT_DISPATCH_ID')[0], charter[1], item, 'charter parent', H27_COMMISSION_GRANT_RULE)", "kills": ()},
+    {"name": "receipt-auth-reselection-bypass", "row": "C10", "function": "h27_commission_precompute", "node": "Call", "original": "authorization_for(item, commission_id, H27_COMMISSION_RECEIPT_RULE)", "replacement": "resolve_ancestry(h27_resolved_discriminator(charter[4], 'PARENT_DISPATCH_ID')[0], charter[1], item, 'charter parent', H27_COMMISSION_RECEIPT_RULE)", "kills": ()},
     *pair("C11", "receipt-self-grant", "h27_receipt_self_grants", "BoolOp", "is_receipt and 'yes' in h27_occurrences(text, 'DELEGATED_DISPATCH_AUTHORITY')"),
     *pair("C12", "receiving-master", "h27_receiving_seat_errors", "Call", "any((from_role(target) in MASTER_TIER_ROLES for target in targets))"),
     *pair("C12a", "selected-conflict", "stage_conflict", "Call", "selected_conflict(item, keys)"),
@@ -108,6 +109,40 @@ KILLS["dispatch-id-conflict-false"].append("mastertier/CM270-auth-to-multiple")
 KILLS["dispatch-id-conflict-false"].sort()
 KILLS["special-role-true"].append("mastertier/CM270-auth-to-multiple")
 KILLS["special-role-true"].sort()
+
+# Task 3 replaces duplicated truth-value pairs with one timing-specific arm
+# per independent authorization-reselection behavior.  They intentionally
+# begin empty so the focused RED run binds the complete observed kill sets.
+for _obsolete_arm in (
+    "approval-parent-false",
+    "approval-parent-true",
+    "charter-parent-id-false",
+    "charter-parent-id-true",
+    "grant-parent-false",
+    "grant-parent-true",
+):
+    KILLS.pop(_obsolete_arm, None)
+KILLS.update({
+    "approval-auth-reselection-bypass": [
+        "mastertier/CM172-auth-reselection-approval",
+        "mastertier/CM236-conflict-authorization-at-approval",
+        "mastertier/CM237-conflict-authorization-at-grant",
+        "mastertier/CM238-conflict-authorization-at-receipt",
+    ],
+    "charter-auth-resolver-bypass": [
+        "mastertier/CM170-s1c-charter-parent-ambiguous",
+        "mastertier/CM171-s1d-charter-parent-nonstage",
+    ],
+    "grant-auth-reselection-bypass": [
+        "mastertier/CM173-auth-reselection-grant",
+        "mastertier/CM237-conflict-authorization-at-grant",
+        "mastertier/CM238-conflict-authorization-at-receipt",
+    ],
+    "receipt-auth-reselection-bypass": [
+        "mastertier/CM174-auth-reselection-receipt",
+        "mastertier/CM238-conflict-authorization-at-receipt",
+    ],
+})
 
 # Task 1's MT77 fixture is legitimately rejected by these established guards.
 for _carry_forward_arm in (
