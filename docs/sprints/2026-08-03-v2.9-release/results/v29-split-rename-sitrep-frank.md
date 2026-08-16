@@ -34,8 +34,8 @@ live-roster assertion:
 
 Evidence sources (read-only):
 
-- `/Users/jack/Programming/harness/ROADMAP.md`
-- `/Users/jack/Programming/harness/master/RECONCILE.md`
+- `<target-repo>/ROADMAP.md`
+- `<target-repo>/master/RECONCILE.md`
 
 If a rename is later separately authorized, its first step is for the top session to
 inventory which of these or later seats are actually live. Historical names in those
