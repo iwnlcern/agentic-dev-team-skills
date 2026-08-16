@@ -9,22 +9,29 @@ Copy the entire `tools/` directory to the shared skills root before enabling ada
 ```bash
 cp -R tools "$HOME/.claude/skills/tools"
 # or for Codex-host installs:
-cp -R tools "$HOME/.codex/skills/tools"
+cp -R tools "$HOME/.agents/skills/tools"
 ```
 
-`<skills-root>` means the directory containing the four role skill folders, not an individual role directory. The Claude Code hook resolves relay-lint in this order: `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py`, `$HOME/.codex/skills/tools/relay-lint.py`, then `relay-lint` on `PATH`.
+`~/.codex/skills` remains a working deprecated fallback destination; new installs use `~/.agents/skills`, matching Codex's own back-compat posture.
 
-## Shipped adapter: Claude Code relay-lint PostToolUse hook
+`<skills-root>` means the skills root the installed skill tree was resolved from — each generated plugin tree ships its own `tools/`. Both hooks resolve relay-lint in this order: `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py` — and when `RELAY_LINT_SKILLS_ROOT` is unset that probe defaults to `$HOME/.claude/skills/tools/relay-lint.py`, which therefore wins ahead of everything below on a standard Claude Code install — then `$HOME/.agents/skills/tools/relay-lint.py`, `$HOME/.codex/skills/tools/relay-lint.py` (deprecated), then `relay-lint` on `PATH`. The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-drift tolerance) and `RELAY_LINT_NO_FRESHNESS=1` (skip the freshness check when editing an existing older relay); both default to the strict posture.
+
+## Shipped adapter: Claude Code relay-write hooks
 
 Files:
 
 ```text
 tools/adapters/claude-code/relay-lint-posttooluse.sh
+tools/adapters/claude-code/bash-relay-guard.sh
 tools/adapters/claude-code/settings-snippet.json
 tools/adapters/claude-code/test-adapter.sh
 ```
 
-Merge the JSON from `settings-snippet.json` into `~/.claude/settings.json` after installing `tools/` to the shared skills root. The snippet invokes the hook as `bash <script>`, so it does not depend on the script's execute bit surviving the copy/extract — a `cp -R` or `unzip` that drops the `+x` mode no longer breaks the hook. The hook watches Write/Edit outputs. It lints relay `*.md` files under a `.relays/` path, skips non-relay and non-md writes, and explicitly skips `.relays/**/INDEX.md` because INDEX.md is bookkeeping rather than a single relay. It returns exit 2 feedback when lint fails or the linter is unavailable. It distinguishes relay-lint failures from linter execution failures such as a broken Python tool or traceback. It does not hard-block; protocol gates remain authoritative.
+Merge the JSON from `settings-snippet.json` into `~/.claude/settings.json` after installing `tools/` to the shared skills root. The snippet invokes each hook as `bash <script>`, so it does not depend on a script's execute bit surviving the copy/extract — a `cp -R` or `unzip` that drops the `+x` mode no longer breaks the hooks.
+
+The Write/Edit hook lints relay `*.md` files under a `.relays/` or visible `relays/` path and skips non-relay and non-md writes. It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
+
+The Bash guard is registered under both `PostToolUse` and `PostToolUseFailure`. It recognizes literal relay-root writes using redirection, `tee`, `cp`, or `mv`. When exactly one existing relay Markdown target can be resolved, the guard lints it with the same linter-location chain as the Write/Edit hook. Multiple, unresolved, or backgrounded targets receive a generic manual-lint advisory without a filename lint claim. Both hooks return exit 2 feedback when advisory attention is needed, distinguish relay-lint failures from linter execution failures, and never hard-block; protocol gates remain authoritative.
 
 Run the hermetic test before enabling:
 
@@ -32,7 +39,7 @@ Run the hermetic test before enabling:
 bash tools/adapters/claude-code/test-adapter.sh
 ```
 
-The test builds a temporary skills root from this candidate's `tools/`, covers clean relay, dirty relay, dirty tripwire relay, non-relay path, non-md relay-root file, INDEX.md skip, missing-linter degradation, and broken-linter attribution.
+The test builds a temporary skills root from this candidate's `tools/`. It preserves coverage for clean relay, dirty relay, dirty tripwire relay, non-relay path, non-md relay-root file, explicit INDEX mode, missing-linter degradation, and broken-linter attribution. It also covers literal Bash relay writes, non-relay writes, heredoc INDEX routing, unresolved move destinations, interpreter residuals, backgrounded writes, write-then-fail delivery, multiple relay targets, exact-basename file routing, and the shipped Bash registration under both host events.
 
 ## Adapter family design
 
@@ -42,7 +49,11 @@ Evidence: transport-compliant relays with freelanced bookkeeping repeatedly reac
 
 ### Adapter residuals — known limits
 
-The Claude Code PostToolUse hook watches Write/Edit file outputs only. Relay files written through Bash/heredoc redirection, notebook tooling, rename-into-place, or another host channel may bypass the hook; protocol gates and explicit relay-lint runs remain authoritative. The hook also matches `*.md` under `.relays/` by convention; `.markdown` files under `.relays/` are skipped. `.relays/**/INDEX.md` is skipped because it fails single-relay lint by design and is only run bookkeeping.
+The Bash advisory guard recognizes literal paths only; variable/`cd`-relative paths, interpreter one-liners, `sed -i`, `git apply`/`checkout`, symlinked roots, and backgrounded-command final state are not verified; advisory coverage, not containment.
+
+Any `.md` under a directory named `relays/` may draw a non-blocking advisory even when it is not a relay; this is bounded by the hooks' exit-2 feedback posture.
+
+Notebook tooling and other host channels remain outside these hooks. The Write/Edit hook matches `*.md` under `.relays/` or `relays/` by convention, so `.markdown` files are skipped. Protocol gates and explicit relay-lint runs remain authoritative.
 
 
 ### Git-state enforcement against silent merges — designed, deferred

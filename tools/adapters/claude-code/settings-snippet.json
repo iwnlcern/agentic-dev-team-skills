@@ -9,6 +9,26 @@
             "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""
+          }
+        ]
       }
     ]
   }

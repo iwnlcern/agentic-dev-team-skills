@@ -1,0 +1,16 @@
+## RV5d design review
+
+ROLE: Pair Implementer
+PHASE: DESIGN-REVIEW
+AUTHORITY: review-only
+DISPATCH_ID: rv5d-review
+PARENT_DISPATCH_ID: rv5d-design
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+FROM: qi.pair-implementer
+TO: qi.pair-planner
+DESIGN_DOC_ID: rv5d-doc
+DESIGN_REVIEW_VERDICT: approve
+
+FINAL_GIT_STATUS_SHORT: none — clean tree

@@ -5,19 +5,40 @@
 # the protocol's own gates stay authoritative.
 set -u
 file_path="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("file_path", ""))')"
+mode="file"
 case "$file_path" in
-  */.relays/INDEX.md|*/.relays/*/INDEX.md) exit 0 ;;
-  */.relays/*.md) ;;
+  */.relays/INDEX.md|*/.relays/*/INDEX.md|*/relays/INDEX.md|*/relays/*/INDEX.md) mode="--index" ;;
+  */.relays/*.md|*/relays/*.md) mode="file" ;;
   *) exit 0 ;;
 esac
 skills_root="${RELAY_LINT_SKILLS_ROOT:-$HOME/.claude/skills}"
 rc=0
+# Edit-tolerant freshness posture (H30): RELAY_LINT_MAX_DRIFT_MINUTES widens
+# the authoring-drift tolerance; RELAY_LINT_NO_FRESHNESS=1 skips it entirely
+# (editing an older relay is not authoring a new one). Defaults unchanged.
+extra_args=()
+if [ -n "${RELAY_LINT_MAX_DRIFT_MINUTES:-}" ]; then
+  extra_args+=(--max-drift-minutes "$RELAY_LINT_MAX_DRIFT_MINUTES")
+fi
+if [ "${RELAY_LINT_NO_FRESHNESS:-0}" = "1" ]; then
+  extra_args+=(--no-freshness)
+fi
+run_lint() {
+  if [ "$mode" = "--index" ]; then
+    out="$("$@" --index "$file_path" 2>&1)" || rc=$?
+  else
+    out="$("$@" "$file_path" ${extra_args+"${extra_args[@]}"} 2>&1)" || rc=$?
+  fi
+}
 if [ -f "$skills_root/tools/relay-lint.py" ]; then
-  out="$(python3 "$skills_root/tools/relay-lint.py" "$file_path" 2>&1)" || rc=$?
+  run_lint python3 "$skills_root/tools/relay-lint.py"
+elif [ -f "$HOME/.agents/skills/tools/relay-lint.py" ]; then
+  run_lint python3 "$HOME/.agents/skills/tools/relay-lint.py"
 elif [ -f "$HOME/.codex/skills/tools/relay-lint.py" ]; then
-  out="$(python3 "$HOME/.codex/skills/tools/relay-lint.py" "$file_path" 2>&1)" || rc=$?
+  # deprecated Codex root, retained for back-compat
+  run_lint python3 "$HOME/.codex/skills/tools/relay-lint.py"
 elif command -v relay-lint >/dev/null 2>&1; then
-  out="$(relay-lint "$file_path" 2>&1)" || rc=$?
+  run_lint relay-lint
 else
   echo "relay-lint-hook: linter not found at any installed location; relay $file_path UNLINTED" >&2
   exit 2
