@@ -479,8 +479,8 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "hardening/HG32a-operator-valid.md", 0),
     ("file", "hardening/HG32b-operator-mismatch.md", 1),
     ("index", "hardening/XRF1-fresh-index", 0),
-    ("index-rel", "hardening/XRF2-header-only", 1),
-    ("index-rel", "hardening/XRF3-marker-only", 1),
+    ("index", "hardening/XRF2-header-only", 1),
+    ("index", "hardening/XRF3-marker-only", 1),
     ("index", "hardening/XRF4-root-display", 1),
     ("file", "hardening/FTE1-prose-not-delegated.md", 0),
     ("file", "hardening/FTE2-structural-no-scopediff.md", 1),
@@ -500,6 +500,7 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("file", "rolevocab/RV3a-domain-planner.md", 0),
     ("file", "rolevocab/RV3b-domain-reviewer.md", 0),
     ("file", "rolevocab/RV4-invalid-role.md", 1),
+    ("file", "rolevocab/RV4a-downstream-agent-pair-leftover.md", 1),
     ("file", "rolevocab/RV5-planner-from-pair-planner.md", 0),
     ("file", "rolevocab/RV6-pair-implementer-from-implementer.md", 0),
     ("file", "rolevocab/RV7a-master-dispatch-failclosed.md", 1),
@@ -1106,6 +1107,9 @@ EXPECTED_ERROR_SET = {
     "rolevocab/RV4-invalid-role.md": [
         "ROLE has non-canonical value: 'Grand Vizier'",
         "FROM has invalid address 'qi-a.grand-vizier'; expected operator, orchestrator, or <owner>.<role>",
+    ],
+    "rolevocab/RV4a-downstream-agent-pair-leftover.md": [
+        "ROLE has non-canonical value: 'Downstream Agent Pair'",
     ],
     "claude/B2-why-before-scan.md": [
         "WHY_DOWNGRADE_IS_SAFE appears before completed ESCALATION_SCAN + ESCALATION_SCAN_RESULT",

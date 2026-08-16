@@ -40,7 +40,7 @@ INDEX_MONOTONIC_MARKER_RE = re.compile(
 
 ROLE_VALUES = {
     "Planner", "Implementer", "Orchestrator Planner", "Orchestrator Reviewer", "Reviewer",
-    "Downstream Agent Pair", "Downstream Implementer",
+    "Downstream Implementer",
     "Master Planner", "Master Reviewer", "Domain Planner", "Domain Reviewer",
     "Pair Planner", "Pair Implementer",
     "Operator",
@@ -1709,7 +1709,7 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
         # pre-first-row state, not a defect. Either component alone is still
         # an error: the grant covers exactly the marker+header boot state.
         if header_arity is None or not a5_markers:
-            result.error(f"no index rows found in {path}")
+            result.error(f"no index rows found in {path.name}")
         return result
 
     scoped = [r for r in rows if r[0] > marker_line]
@@ -1836,6 +1836,8 @@ def h27_has_foreign_from_occurrence(text: str) -> bool:
 
 
 def h27_conflict_message(text: str, key: str) -> str | None:
+    """C14 fails closed in every lint mode; the cited master-authority ruling
+    supplies cross-seat framing, not a seat- or tree-mode limit."""
     values = h27_occurrences(text, key)
     distinct = set(values)
     if len(distinct) <= 1:

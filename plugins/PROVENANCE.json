@@ -8,7 +8,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/LICENSE",
-    "sha256": "f550bee6cda0d13c627e1b2b0ae743228fe857914d0971851007fdaab2786f70",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "source": "LICENSE"
   },
   {
@@ -44,7 +44,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/domain-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -68,7 +68,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/domain-reviewer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -98,7 +98,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/master-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -122,7 +122,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/master-reviewer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -158,7 +158,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -194,7 +194,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -212,7 +212,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-implementer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -236,7 +236,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -290,7 +290,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/check-relay-lint-fixtures.py",
-    "sha256": "d40080be4c00a10c68c0cf3d6bc7c6aa7f789730f046ad8c3b13c239ffc7c4cb",
+    "sha256": "b2074f79c5b37092c42d9eeb42769fcfe72f14080785e2e5d11c92cc48f6fcab",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -302,7 +302,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint-fixtures/README.md",
-    "sha256": "cf59ac31570d95f0a02fb5f1cb5cecf6bf5b464d0c4b4de3cf7c63d80a49ecfc",
+    "sha256": "fecba95b410f89195736a4ff4ddc1b8b285cb0a11c714cf23eca29a1156c6ec6",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -7723,6 +7723,12 @@
   },
   {
     "kit_version": "2.9.0",
+    "path": "adt-master/tools/relay-lint-fixtures/rolevocab/RV4a-downstream-agent-pair-leftover.md",
+    "sha256": "3c2731be95f5dd92e6b54fff88c693ee549faacaa7401b4395b76e856a759dc2",
+    "source": "tools/relay-lint-fixtures/rolevocab/RV4a-downstream-agent-pair-leftover.md"
+  },
+  {
+    "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint-fixtures/rolevocab/RV5-new-vocab-chain/01-plan.md",
     "sha256": "15d08e84eb7d946782edcb0969d82e8b7917e33431c59aa6582bc7d69b102d0a",
     "source": "tools/relay-lint-fixtures/rolevocab/RV5-new-vocab-chain/01-plan.md"
@@ -10124,7 +10130,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint.py",
-    "sha256": "641a7d6a0388c3bc5862cec22de18fada5fef1bf22b5ba89d7d91d80ed6be6f0",
+    "sha256": "eef1d2be8294b67e5478c37f9c0bbae99a3c980bbcded4c2cc6c5f5aca87dfa3",
     "source": "tools/relay-lint.py"
   },
   {
@@ -10142,7 +10148,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/LICENSE",
-    "sha256": "f550bee6cda0d13c627e1b2b0ae743228fe857914d0971851007fdaab2786f70",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "source": "LICENSE"
   },
   {
@@ -10190,7 +10196,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -10226,7 +10232,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -10244,7 +10250,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-implementer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -10268,7 +10274,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -10322,7 +10328,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/check-relay-lint-fixtures.py",
-    "sha256": "d40080be4c00a10c68c0cf3d6bc7c6aa7f789730f046ad8c3b13c239ffc7c4cb",
+    "sha256": "b2074f79c5b37092c42d9eeb42769fcfe72f14080785e2e5d11c92cc48f6fcab",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -10334,7 +10340,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/README.md",
-    "sha256": "cf59ac31570d95f0a02fb5f1cb5cecf6bf5b464d0c4b4de3cf7c63d80a49ecfc",
+    "sha256": "fecba95b410f89195736a4ff4ddc1b8b285cb0a11c714cf23eca29a1156c6ec6",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -17755,6 +17761,12 @@
   },
   {
     "kit_version": "2.9.0",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/rolevocab/RV4a-downstream-agent-pair-leftover.md",
+    "sha256": "3c2731be95f5dd92e6b54fff88c693ee549faacaa7401b4395b76e856a759dc2",
+    "source": "tools/relay-lint-fixtures/rolevocab/RV4a-downstream-agent-pair-leftover.md"
+  },
+  {
+    "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/rolevocab/RV5-new-vocab-chain/01-plan.md",
     "sha256": "15d08e84eb7d946782edcb0969d82e8b7917e33431c59aa6582bc7d69b102d0a",
     "source": "tools/relay-lint-fixtures/rolevocab/RV5-new-vocab-chain/01-plan.md"
@@ -20156,7 +20168,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint.py",
-    "sha256": "641a7d6a0388c3bc5862cec22de18fada5fef1bf22b5ba89d7d91d80ed6be6f0",
+    "sha256": "eef1d2be8294b67e5478c37f9c0bbae99a3c980bbcded4c2cc6c5f5aca87dfa3",
     "source": "tools/relay-lint.py"
   },
   {
@@ -20174,7 +20186,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/LICENSE",
-    "sha256": "f550bee6cda0d13c627e1b2b0ae743228fe857914d0971851007fdaab2786f70",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "source": "LICENSE"
   },
   {
@@ -20204,7 +20216,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-implementer/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -20228,7 +20240,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-planner/protocol.md",
-    "sha256": "a392b3cbb27ac9d7f2c4745a9f2f292c4d4a817513127d770754b95284d31c75",
+    "sha256": "c2396bce44f511e98d70310625cd112b2ee6f80889a0edb9558f4e560b56d52a",
     "source": "shared/protocol.md"
   },
   {
@@ -20282,7 +20294,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/check-relay-lint-fixtures.py",
-    "sha256": "d40080be4c00a10c68c0cf3d6bc7c6aa7f789730f046ad8c3b13c239ffc7c4cb",
+    "sha256": "b2074f79c5b37092c42d9eeb42769fcfe72f14080785e2e5d11c92cc48f6fcab",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -20294,7 +20306,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint-fixtures/README.md",
-    "sha256": "cf59ac31570d95f0a02fb5f1cb5cecf6bf5b464d0c4b4de3cf7c63d80a49ecfc",
+    "sha256": "fecba95b410f89195736a4ff4ddc1b8b285cb0a11c714cf23eca29a1156c6ec6",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -27715,6 +27727,12 @@
   },
   {
     "kit_version": "2.9.0",
+    "path": "adt-pair/tools/relay-lint-fixtures/rolevocab/RV4a-downstream-agent-pair-leftover.md",
+    "sha256": "3c2731be95f5dd92e6b54fff88c693ee549faacaa7401b4395b76e856a759dc2",
+    "source": "tools/relay-lint-fixtures/rolevocab/RV4a-downstream-agent-pair-leftover.md"
+  },
+  {
+    "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint-fixtures/rolevocab/RV5-new-vocab-chain/01-plan.md",
     "sha256": "15d08e84eb7d946782edcb0969d82e8b7917e33431c59aa6582bc7d69b102d0a",
     "source": "tools/relay-lint-fixtures/rolevocab/RV5-new-vocab-chain/01-plan.md"
@@ -30116,7 +30134,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint.py",
-    "sha256": "641a7d6a0388c3bc5862cec22de18fada5fef1bf22b5ba89d7d91d80ed6be6f0",
+    "sha256": "eef1d2be8294b67e5478c37f9c0bbae99a3c980bbcded4c2cc6c5f5aca87dfa3",
     "source": "tools/relay-lint.py"
   },
   {
