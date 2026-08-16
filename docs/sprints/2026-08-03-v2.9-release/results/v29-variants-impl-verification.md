@@ -521,3 +521,11 @@ Classification of every Part B hit (11):
 Counts: Part A = 6 hits (4 deprecated production fallback, 2 documentation); Part B = 11 hits (4 deprecated production fallback, 2 documentation, 5 intentional test-fixture).
 
 No adapter/generator mismatch was observed and no local source file was edited.
+
+## Correction — 2026-08-16
+
+The identities pinned above are unreachable from shipped history: five settled-stack restacks and the fix pass rebased this branch, orphaning the original commits.
+Orphaned pins of the original run: BASE_SHA 77e45871eba6da432a7adf8a3ea647438288e60a; TESTED_SHA c8b90d20b636259247fcb9f1370e25a04723a3d5; REPORT_SHA 6b6f9e9cba6b69a1291db5e35be34d1aff55a8a1.
+The content survived byte-for-byte: whole-branch stable patch-id e40ecb4c0df6b1af99c6ca7b0b8312e3c36dcecb across every restack.
+Successor heads of record: d5531208a8cebdf5b4733ffdd069be6a2d0126b5 (review-fold head) → 775028955685c41b9ca70fd3ecb7a1edd8bcd235 → a036697118666d543a231ba01fbe7437b36a6c53 → 121673a822c57b5d502768b83301247948059d4d → 00245f0eed542f4905b4173eb01c22b7aef78362 → 79ed2e7c613485a6839701865f7fafb889b6597a (sixth restack) → 24ea3d6b6c591c6d4fd7af6a960978d4690bdb7e (AGENTS.md and .gitignore fix commit).
+This correction commit's own SHA is recorded in the fix-pass implementation report, not here.
