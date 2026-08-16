@@ -1,0 +1,16 @@
+{
+  "author": {
+    "name": "Jack Li"
+  },
+  "description": "Nested pair and orchestration skills for governed software work.",
+  "keywords": [
+    "agents",
+    "orchestration",
+    "planning",
+    "review",
+    "relays"
+  ],
+  "license": "Apache-2.0",
+  "name": "adt-orchestrator",
+  "version": "2.9.0"
+}

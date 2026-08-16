@@ -1,0 +1,1 @@
+t11-closure: review relay: PLAN_LOCK_ID occurs 2 times in operational text; required exactly 1

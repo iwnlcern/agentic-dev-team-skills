@@ -1,0 +1,30 @@
+# Codex harness notes
+
+Read this when your harness is OpenAI Codex (CLI, IDE extension, or cloud).
+Claude Code is this kit's default harness and has no such file.
+
+## Skill loading
+
+- Codex discovers skills from `.agents/skills` (project) or `~/.agents/skills` (user); `~/.codex/skills` still resolves but is deprecated.
+- There is no Skill tool on this host; invoke a skill explicitly with `$<skill-name>` or by reading its `SKILL.md` directly.
+- Frontmatter beyond `name` and `description` is inert on this host: `allowed-tools` and skill-local hook metadata are not enforced here, so every gate they would back binds behaviorally instead.
+
+## Subagents and review panels
+
+- Current Codex releases enable subagent workflows by default; the control is `agents.enabled` in `~/.codex/config.toml`, default `true`.
+- When delegation is disabled or unavailable on this host, run review panels inline and sequentially, one lens at a time.
+
+## Git and sandbox realities
+
+- A workspace-write Codex sandbox can block `.git` writes; when that happens `git status --short` cannot run and the protocol's `unavailable — <reason>` form applies.
+- Sandboxed wrapper tooling on this host can mask byte diffs; prefer `/usr/bin/git`, `cmp`, `sha256sum`, or direct file reads for evidence-grade comparison.
+- Detached HEAD in a managed Codex sandbox means branch/push/PR are unavailable; commit the work and report, so the operator can finish through the host's own controls.
+
+## relay-lint
+
+- This kit ships no Codex relay-write adapter (the shipped adapter is Claude Code-only), so run the linter manually before every handoff: `python3 <skills-root>/tools/relay-lint.py <relay>`, where `<skills-root>` is the directory your skills were installed into.
+- Codex itself supports host-config hooks (`.codex/hooks.json`, partial `PostToolUse` support); a Codex lint adapter on that surface is out of scope for v2.9.
+
+## Instructions files
+
+- `AGENTS.md` is this host's default project-instructions file, concatenated root-downward with closer files refining earlier ones; `CLAUDE.md` is not read unless configured via `project_doc_fallback_filenames`.

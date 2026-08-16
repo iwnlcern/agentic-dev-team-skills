@@ -1,0 +1,10 @@
+ROLE: Implementer
+PHASE: AUDIT
+AUTHORITY: implementation
+DISPATCH_ID: d-x
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+
+FINAL_GIT_STATUS_SHORT:
+none — clean tree

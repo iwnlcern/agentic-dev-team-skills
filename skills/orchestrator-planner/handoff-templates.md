@@ -2,16 +2,17 @@
 
 The orchestrator-review visibility gate requires orchestrator-planner authority relays in the broad SET to CC `<run>.orchestrator-reviewer` unless the run has an operator-authored `ORCH_REVIEW_WAIVER`. This is visibility, not approval.
 
-Use these relay-ready templates. Always write the routing relay; do not replace a non-PR routing relay with a review panel. Panels are for code/PR review or explicitly requested adversarial review of a written relay. Write full relays to the file-first transport described in `protocol.md`, preferably `.relays/<RUN_ID>/<DISPATCH_ID>/<PHASE>-<ROLE>-<timestamp>.md` (the `<timestamp>` is the real clock time at authoring — see the timestamp policy in `protocol.md`), then print only a compact pointer, the relay routing lines (`FROM`, `TO`, and `CC` when present), plus a 3–6 line summary. If the receiver cannot access the path, relay or attach the file contents.
+Use these relay-ready templates. Always write the routing relay; do not replace a non-PR routing relay with a review panel. Panels are for code/PR review or explicitly requested adversarial review of a written relay. Write full relays to the file-first transport described in `protocol.md`, preferably `.relays/<RUN_ID>/<cycle-id>/<PHASE>-<ROLE>-<timestamp>.md` (the `<timestamp>` is the real clock time at authoring — see the timestamp policy in `protocol.md`), then print the pointer context — `FROM` and a 3–6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. If the receiver cannot access the path, relay or attach the file contents.
 
 Canonical inline pointer shape:
 
 ```text
-RELAY: .relays/<RUN_ID>/<DISPATCH_ID>/PLAN-planner-<ts>.md
 FROM: pair-1.planner
+<3-6 line summary>
+
+RELAY: .relays/<RUN_ID>/<cycle-id>/PLAN-planner-<ts>.md
 TO: pair-1.implementer
 CC: orchestrator, <run>.orchestrator-reviewer
-<3-6 line summary>
 ```
 
 Orchestrator never implements. Downstream pairs follow role contracts:
@@ -21,11 +22,15 @@ Orchestrator never implements. Downstream pairs follow role contracts:
 
 Use minimal headers by default, including `FROM` / `TO` / `CC` for orchestrator-tier or multi-pair relays. Add `PARENT_DISPATCH_ID` for pair-Planner implementation dispatches, substantive IMPL action reports, and every relay that participates in a lineage gate; `IN_REPLY_TO` is local/display-only and never a gate input. Add tier/risk-dependent fields when they affect lineage, routing, merge, or verification. When `relay-lint` is available, lint substantive relay files before delegated dispatch, merge, or adapter/CI consumption.
 
+`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
+
+`DESIGN_LOCK_ID` and `PLAN_LOCK_ID` carry a lock value — a logical identity or repo-relative path, optionally annotated ` @ sha256 <hex>`; equality compares the unannotated value. Optional `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` fields carry filename-stem locators, and optional `DESIGN_SHA256` / `PLAN_SHA256` fields carry lowercase-hex sha256 byte-integrity values. Prefer the separate fields; the lock value itself admits only the optional ` @ sha256 <hex>` annotation, never a filename stem.
+
 
 Operator no-reviewer waiver, only when the run genuinely has no Orchestrator Reviewer:
 
 ```text
-ROLE: Reviewer
+ROLE: Operator
 PHASE: SITREP
 AUTHORITY: report-only
 DISPATCH_ID: <run>-orch-review-waiver
@@ -46,13 +51,13 @@ An orchestrator-authored `ORCH_REVIEW_WAIVER` is invalid.
 ```text
 ## Team <id> — <bundle> (AUDIT)
 
-ROLE: Downstream Agent Pair
+ROLE: Orchestrator Planner
 PHASE: AUDIT
 AUTHORITY: read-only
 DISPATCH_ID: <id>
 CEREMONY_TIER: <small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + for what>
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: orchestrator
 TO: <team>.planner, <team>.implementer
 CC: <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
@@ -63,6 +68,7 @@ OWNER: <team/agent pair>
 REPO: <repo/path>
 BASE: <branch@sha | unknown>
 TARGET_BRANCH: <branch | unknown>
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 Implementer phase scope — AUDIT.
 Current scope: read-only code inspection, safe read-only commands, independent audit, questions, and findings.
@@ -127,23 +133,27 @@ Use for new-feature / `still-open` work at medium tier or above after audit reco
 ```text
 ## Team <id> — <bundle>: PROCEED TO DESIGN
 
-ROLE: Downstream Agent Pair
+ROLE: Orchestrator Planner
 PHASE: DESIGN
 AUTHORITY: design-only for Planner; read-only challenge/answers for Implementer
 DISPATCH_ID: <id>
 CEREMONY_TIER: <medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + product/design decisions>
+HUMAN_GATE_REQUIRED: <yes — product/design decision | no | no — downstream: standing gate>
+GRILL_REQUIRED: <yes|no>
 FROM: orchestrator
 TO: <team>.planner
 CC: <team>.implementer, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <audit/reconcile dispatch id>
-DESIGN_DOC_ID: <design id/title to create>
+DESIGN_DOC_ID: <logical design id to create>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 REPO: <repo/path>
 BASE: <branch@sha | unknown>
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 Phase scope — DESIGN.
 Current scope: Planner uses Superpowers brainstorming; Implementer answers design questions, challenges alternatives with evidence, and flags product-semantics decisions.
@@ -193,13 +203,15 @@ AUTHORITY: review-only
 DISPATCH_ID: <id>
 CEREMONY_TIER: <medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + for what>
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <team>.implementer
 TO: <team>.planner
 CC: <operator | orchestrator | boundary-adjacent owner.role | none>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <DESIGN relay dispatch id>
-DESIGN_DOC_ID: <design id/title/hash>
+DESIGN_DOC_ID: <logical design id>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
 DESIGN_REVIEW_VERDICT: <approve | must-revise | reject-narrow | human-decision-required>
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
@@ -212,48 +224,7 @@ FINAL_GIT_STATUS_SHORT: <paste output or unavailable — reason>
 
 ## Template I — DESIGN request from pair Planner to pair Implementer
 
-Use this after a pair Planner has produced a real design doc and needs the pair Implementer to perform the required read-only DESIGN-REVIEW. This is the Planner request. Template C is the Implementer response.
-
-```text
-## Team <id> — <bundle>: DESIGN-REVIEW REQUEST
-
-ROLE: Planner
-PHASE: DESIGN
-AUTHORITY: design-only
-DISPATCH_ID: <design request id>
-CEREMONY_TIER: <medium | large | production-risk>
-EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + for what>
-FROM: <team>.planner
-TO: <team>.implementer
-CC: <orchestrator | operator | boundary-adjacent owner.role | none>
-RUN_ID: <run id>
-PARENT_DISPATCH_ID: <DESIGN relay dispatch id from orchestrator/operator>
-DESIGN_DOC_ID: <design id/title/hash>
-DESIGN_RECORD_KIND: design-doc
-BUNDLE_ID: <bundle>
-OWNER: <team/agent pair>
-REPO: <repo/path>
-
-Current scope for the `TO` addressee: read-only DESIGN-REVIEW. No source/test edits, no implementation branches, no commits, no PRs.
-
-Anti-pattern: `TO: orchestrator` with `<team>.implementer` only on `CC` is not a DESIGN-REVIEW request. CC is context only; it grants no phase authority and creates no review obligation. If this relay is misaddressed, reissue it with `TO: <team>.implementer`.
-
-Design doc to review:
-- DESIGN_DOC_ID: <design id/title/hash>
-- Location / relay pointer: <path or attachment>
-- Selected option:
-- Rejected alternatives:
-- Boundary contract:
-- Acceptance criteria draft:
-- Operator decisions/defaults:
-- Open questions:
-
-Requested response:
-Use Template C (`PHASE: DESIGN-REVIEW`, `FROM: <team>.implementer`, `TO: <team>.planner`, `PARENT_DISPATCH_ID: <this dispatch id>`, same `DESIGN_DOC_ID`) and return `DESIGN_REVIEW_VERDICT: approve | must-revise | reject-narrow | human-decision-required`.
-
-FINAL_GIT_STATUS_SHORT: <paste output or unavailable — reason>
-```
+This template is the shared asset `design-request-template.md`, shipped adjacent to this skill and to the pair-planner skill. Use the copy in this skill directory; the canonical source lives in the repo's `shared/`.
 
 ## DESIGN-completion SITREP — pair Planner reports approved design to orchestrator
 
@@ -268,13 +239,15 @@ AUTHORITY: report-only
 DISPATCH_ID: <design-complete id>
 CEREMONY_TIER: <medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + remaining operator decisions>
+HUMAN_GATE_REQUIRED: <yes — remaining operator decision | no | no — downstream: standing gate>
 FROM: <team>.planner
 TO: orchestrator
 CC: <team>.implementer, <operator | boundary-adjacent owner.role | none>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <approving DESIGN-REVIEW dispatch id>
-DESIGN_DOC_ID: <approved design id/title/hash>
+DESIGN_DOC_ID: <approved logical design id>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
 DESIGN_REVIEW_VERDICT: approve
 APPROVING_DESIGN_REVIEW_DISPATCH_ID: <approving DESIGN-REVIEW dispatch id>
 BUNDLE_ID: <bundle>
@@ -297,21 +270,25 @@ FINAL_GIT_STATUS_SHORT: <paste output or unavailable — reason>
 ```text
 ## Team <id> — <bundle>: PROCEED TO PLAN
 
-ROLE: Downstream Agent Pair
+ROLE: Orchestrator Planner
 PHASE: PLAN
 AUTHORITY: plan-only
 DISPATCH_ID: <id>
 CEREMONY_TIER: <small | medium | large | production-risk>
 EVIDENCE_TARGET: <E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + for what>
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: orchestrator
 TO: <team>.planner
 CC: <team>.implementer, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <design-completion SITREP/report id for design-doc path; otherwise audit/design dispatch id>
-APPROVED_DESIGN_DOC_ID: <approved design doc id/hash | none>
+APPROVED_DESIGN_DOC_ID: <approved logical design id | none>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
 APPROVING_DESIGN_REVIEW_DISPATCH_ID: <approving DESIGN-REVIEW dispatch id | none>
-PLAN_LOCK_ID: <plan id/title to create>
+PLAN_LOCK_ID: <logical plan id to create>
+PLAN_ARTIFACT: <plan artifact filename stem; omit line when absent>
+PLAN_SHA256: <lowercase-hex sha256; omit line when absent>
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 REPO: <repo/path>
@@ -319,6 +296,7 @@ BASE: <branch@sha | unknown>
 TARGET_BRANCH: <branch>
 DELEGATED_DISPATCH_AUTHORITY: <yes/no>
 DELEGATED_DISPATCH_CONDITIONS: Implementer plan review = approve; pair-Planner dispatch PARENT_DISPATCH_ID points to that approve relay; that review parents to this pair-Planner PLAN; SCOPE_DIFF_RESULT = all-in; no hard trigger; no boundary-contract deviation; no cross-bundle collision.
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 Implementer phase scope — PLAN-REVIEW after plan is drafted.
 Current scope: answer design questions, review Planner's plan, findings inline.
@@ -329,6 +307,7 @@ Approved design context:
 <the decided fork, with APPROVED_DESIGN_DOC_ID and approving DESIGN-REVIEW reference when available>.
 
 This `PROCEED-TO-PLAN` relay is sequencing only. It does not carry the gated design-doc lock. The pair Planner emits the gated PLAN from `FROM: <team>.planner` with `DESIGN_LOCK_ID`, `DESIGN_RECORD_KIND: design-doc`, and `PARENT_DISPATCH_ID` pointing to the approving DESIGN-REVIEW relay.
+PROCEED-TO-PLAN is a subject-line and body designation, not a phase, an authority, or a filename token; the filename follows the normal grammar. There is no PROCEED-TO-DESIGN or PROCEED-TO-IMPL phase either — proceeds are sequencing messages, not phases.
 
 LOCKED scope:
 1. <item + file/dir + evidence>
@@ -383,29 +362,37 @@ Written plan via Superpowers writing-plans + Implementer plan review + SCOPE_DIF
 
 ## Template E — IMPL dispatch
 
-Use this for operator/orchestrator-issued implementation dispatch, or when delegation is disabled. When delegation is enabled and conditions are met, the pair Planner may issue the exact token as a bare, unfenced, un-backticked own line after SCOPE_DIFF all-in and Implementer approve.
+Use this for operator/orchestrator-issued implementation dispatch, or when delegation is disabled. When delegation is enabled and conditions are met, the pair Planner may issue the exact token as a bare, unfenced, un-backticked own line after SCOPE_DIFF all-in and Implementer approve. Retain and fill the delegated-authority field block only for the delegated pair-Planner path; direct operator/orchestrator dispatches omit that block.
 
 ```text
 ## Team <id> — <bundle>: implementation dispatch
 
-ROLE: Downstream Implementer
+ROLE: <Orchestrator Planner | Operator | Planner>
 PHASE: IMPL
 AUTHORITY: implementation
 DISPATCH_ID: <id>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: merge requires human/operator gate
-FROM: <orchestrator | operator | team.planner>
+HUMAN_GATE_REQUIRED: no — downstream: merge requires human/operator gate
+FROM: orchestrator | operator | <team>.planner
 TO: <team>.implementer
 CC: <team>.planner, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
 PARENT_DISPATCH_ID: <approving PLAN-REVIEW dispatch id for pair-Planner delegated dispatch; plan/parent id for direct operator/orchestrator dispatch>
-DESIGN_LOCK_ID: <design id/title/hash | none>
-PLAN_LOCK_ID: <locked plan id/title/hash>
+DESIGN_LOCK_ID: <logical design id | none>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
+PLAN_LOCK_ID: <logical plan id>
+PLAN_ARTIFACT: <plan artifact filename stem; omit line when absent>
+PLAN_SHA256: <lowercase-hex sha256; omit line when absent>
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 REPO: <repo/path>
 BASE: <branch@sha>
 TARGET_BRANCH: <branch>
+DELEGATED_DISPATCH_AUTHORITY: <yes/no>
+SCOPE_DIFF:
+- <each file/dir in the locked plan> -> <in | OUT vs the dispatch scope>
+SCOPE_DIFF_RESULT: <all-in | deviation-present>
 
 DISPATCH IMPL
 
@@ -438,24 +425,30 @@ Deliverable:
 PR + implementation summary + tests/verification + evidence levels + remaining risks + ACTIONS_GIT_REF for claimed edits/commits/PRs + standardized SITREP.
 ```
 
-## Template E — REVIEW-FOLD handoff
+The REVIEW-FOLD template is relettered **Template J** — the first unoccupied label under the shipped heading census — and every reference to it is updated in the same batch. Every template label in this file resolves to exactly one heading.
+
+## Template J — REVIEW-FOLD handoff
 
 ```text
 ## Team <id> — <bundle>: REVIEW-FOLD
 
-ROLE: Downstream Implementer
+ROLE: <Planner | Orchestrator Planner | Operator>
 PHASE: REVIEW-FOLD
-AUTHORITY: fold-in-only on existing PR branch
+AUTHORITY: fold-in-only
 DISPATCH_ID: <id>
 CEREMONY_TIER: <small | medium | large | production-risk>
 EVIDENCE_TARGET: <E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: merge requires human/operator gate
-FROM: <planner | orchestrator | operator>
+HUMAN_GATE_REQUIRED: no — downstream: merge requires human/operator gate
+FROM: <team>.planner | orchestrator | operator
 TO: <team>.implementer
 CC: <team>.planner, <run>.orchestrator-reviewer, <operator | none>
 PARENT_DISPATCH_ID: <impl dispatch id>
-DESIGN_LOCK_ID: <design id/title/hash | none>
-PLAN_LOCK_ID: <locked plan id/title/hash>
+DESIGN_LOCK_ID: <logical design id | none>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
+PLAN_LOCK_ID: <logical plan id>
+PLAN_ARTIFACT: <plan artifact filename stem; omit line when absent>
+PLAN_SHA256: <lowercase-hex sha256; omit line when absent>
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 REPO: <repo/path>
@@ -491,23 +484,28 @@ FOLD_SCOPE_EVIDENCE: <required when ROW_TRUTH_CHECK is enabled>
 Fold-in summary: Fixed / Not folded + why / Tests / Boundary proof / Remaining risk / ACTIONS_GIT_REF / FINAL_GIT_STATUS_SHORT / Ready for Planner quick check yes-no.
 ```
 
-## Template F — MERGE/LIVE-VERIFY gate
+## Template F1 — MERGE-GATE handoff
 
 ```text
-## Team <id> — <bundle>: MERGE/LIVE-VERIFY GATE
+## Team <id> — <bundle>: MERGE GATE
 
-ROLE: <Planner | Orchestrator Planner | Implementer as assigned>
-PHASE: MERGE-GATE -> LIVE-VERIFY
-AUTHORITY: merge-gated; live-verify
+ROLE: Planner
+PHASE: MERGE-GATE
+AUTHORITY: merge-gated
 DISPATCH_ID: <id>
+PARENT_DISPATCH_ID: <implementation report or REVIEW-FOLD dispatch id>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: yes — merge/deploy/live-verification judgment
 FROM: <team>.planner
-TO: operator
+TO: <orchestrator | operator>
 CC: <team>.implementer, <run>.orchestrator-reviewer, <orchestrator | none>
-DESIGN_LOCK_ID: <design id/title/hash | none>
-PLAN_LOCK_ID: <locked plan id/title/hash>
+DESIGN_LOCK_ID: <logical design id | none>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
+PLAN_LOCK_ID: <logical plan id>
+PLAN_ARTIFACT: <plan artifact filename stem; omit line when absent>
+PLAN_SHA256: <lowercase-hex sha256; omit line when absent>
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 REPO: <repo/path>
@@ -521,10 +519,35 @@ Required before merge:
 - Scope check: matches locked PLAN_LOCK_ID <id>
 - Boundary contract check: <satisfied/not satisfied + evidence>
 - Human merge authorization: required; valid IMPL dispatch + green tests is not merge authority
-- Merge-authorization relay: <relay id/path or pending>
-- If this relay authorizes the Implementer to merge, route it as `FROM: operator|orchestrator|<orchestrator-planner>` and `TO: <team>.implementer`, then include the operative token as a bare, unfenced, un-backticked own line:
+- Merge-authorization relay: <Template K relay id/path or pending>
 
-DISPATCH MERGE
+Recommendation:
+<merge-ready | merge-blocked | human-decision-required>
+```
+
+## Template F2 — LIVE-VERIFY handoff
+
+```text
+## Team <id> — <bundle>: LIVE VERIFY
+
+ROLE: Implementer
+PHASE: LIVE-VERIFY
+AUTHORITY: live-verify
+DISPATCH_ID: <id>
+PARENT_DISPATCH_ID: <merge claim or merge-gate dispatch id>
+CEREMONY_TIER: <tiny | small | medium | large | production-risk>
+EVIDENCE_TARGET: <E3 | E4>
+HUMAN_GATE_REQUIRED: <yes|no — reason>
+FROM: <team>.implementer
+TO: <team>.planner
+CC: <run>.orchestrator-reviewer, <orchestrator | operator | none>
+DESIGN_LOCK_ID: <logical design id | none>
+PLAN_LOCK_ID: <logical plan id>
+BUNDLE_ID: <bundle>
+OWNER: <team/agent pair>
+REPO: <repo/path>
+TARGET_BRANCH: <branch>
+PR: <repo#number>
 
 After merge:
 - Record merge commit:
@@ -539,20 +562,46 @@ Live verification checklist:
 5. <observability/log/event proof>
 
 Completion verdict:
-<complete | merge-blocked | merged-not-deployed | deployed-not-live-verified | failed-live-verification | human-decision-required>
+<complete | merged-not-deployed | deployed-not-live-verified | failed-live-verification | human-decision-required>
+```
+
+## Template K — merge grant
+
+Use this only after the merge-gate record exists. The operator or orchestrator authors the grant and addresses exactly one Implementer.
+
+```text
+## Team <id> — <bundle>: MERGE GRANT
+
+ROLE: <Operator | Orchestrator Planner>
+PHASE: MERGE-GATE
+AUTHORITY: merge-gated
+DISPATCH_ID: <merge-handoff id>
+PARENT_DISPATCH_ID: <merge-gate record dispatch id>
+CEREMONY_TIER: <tiny | small | medium | large | production-risk>
+EVIDENCE_TARGET: <E2 | E3 | E4>
+HUMAN_GATE_REQUIRED: <yes|no — reason>
+FROM: operator | orchestrator | <run>.orchestrator-planner
+TO: <team>.implementer
+CC: <run>.orchestrator-reviewer
+
+DISPATCH MERGE
+
+This bare own-line token grants merge authority only to the named `TO` Implementer for the parented gate record. Record the resulting merge claim under the same merge-handoff id.
 ```
 
 ## Template G — BOOT relay for `init`
 
 Use this only during the orchestrator-planner `init` directive, after `sprint-doc-setup` has prepared the sprint tree and `.relays/<RUN_ID>/` substrate. Emit one relay per downstream seat and print the file pointer for the operator to hand-relay. This is an onboarding relay, not work authorization.
 
+Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the target address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted. Render the segment one way in the id, `TO`, heading, and `SUBJECT`.
+
 ```text
-## BOOT — initialize <seat> for RUN_ID <run>
+## BOOT — initialize <owner>.<role> for RUN_ID <run>
 
 ROLE: Orchestrator Planner
 PHASE: SITREP
 AUTHORITY: report-only
-DISPATCH_ID: <run>-boot-<seat>
+DISPATCH_ID: <run>-boot-<owner>-<role>
 PARENT_DISPATCH_ID: <run>-boot
 RUN_ID: <run>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
@@ -561,10 +610,10 @@ HUMAN_GATE_REQUIRED: no
 FROM: <run>.orchestrator-planner
 TO: <pair>.<planner|implementer> | <run>.orchestrator-reviewer
 CC: operator
-SUBJECT: BOOT — initialize <seat> for RUN_ID <run>
+SUBJECT: BOOT — initialize <owner>.<role> for RUN_ID <run>
 
 You are <pair>.<role> or <run>.orchestrator-reviewer for RUN_ID <run>.
-Load <agent-pair-planner | agent-pair-implementer | orchestrator-reviewer>.
+Load <pair-planner | pair-implementer | orchestrator-reviewer>.
 Sprint root: <repo-relative sprint doc root>
 Relay root: .relays/<RUN_ID>/
 INDEX: .relays/<RUN_ID>/INDEX.md
@@ -581,18 +630,22 @@ Boot relays deliberately reuse `PHASE: SITREP` so the reviewer-boot relay remain
 ## SITREP — <team/orchestrator> / <bundle>
 
 ROLE: <Orchestrator Planner | Orchestrator Reviewer | Planner | Implementer>
-PHASE: <AUDIT | DESIGN | DESIGN-REVIEW | PLAN | PLAN-REVIEW | IMPL | REVIEW-FOLD | MERGE-GATE | LIVE-VERIFY | SITREP | RECONCILE>
+PHASE: <AUDIT | MERGE-GATE | LIVE-VERIFY | SITREP | RECONCILE>
 AUTHORITY: report-only
 DISPATCH_ID: <id>
 CEREMONY_TIER: <tier>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
-HUMAN_GATE_REQUIRED: <yes/no + for what>
+HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <sender owner.role | orchestrator | operator>
 TO: <recipient owner.role | orchestrator | operator>
-CC: <boundary-adjacent owner.role | none>
+CC: <boundary-adjacent owner.role; omit the line when none>
 PARENT_DISPATCH_ID:
-DESIGN_LOCK_ID:
-PLAN_LOCK_ID:
+DESIGN_LOCK_ID: <logical design id | none>
+DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
+DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
+PLAN_LOCK_ID: <logical plan id | none>
+PLAN_ARTIFACT: <plan artifact filename stem; omit line when absent>
+PLAN_SHA256: <lowercase-hex sha256; omit line when absent>
 OWNER:
 REPO:
 PR:

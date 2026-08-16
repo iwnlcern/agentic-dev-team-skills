@@ -1,0 +1,16 @@
+{
+  "author": {
+    "name": "Jack Li"
+  },
+  "description": "Pair-tier planning and implementation skills for governed software work.",
+  "keywords": [
+    "agents",
+    "pair",
+    "planning",
+    "review",
+    "relays"
+  ],
+  "license": "Apache-2.0",
+  "name": "adt-pair",
+  "version": "2.9.0"
+}

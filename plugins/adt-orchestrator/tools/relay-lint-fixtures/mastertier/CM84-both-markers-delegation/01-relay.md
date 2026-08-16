@@ -1,0 +1,16 @@
+ROLE: Operator
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: cm84-auth
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: yes
+FROM: operator
+TO: alpha.master-planner
+COMMISSION_AUTHORIZATION: yes
+COMMISSION_ID: cm84
+COMMISSION_SCOPE: scope-cm84
+COMMISSION_TO: beta.pair-planner
+CHARTER_DOC_ID: CH-cm84
+DELEGATED_DISPATCH_AUTHORITY: yes
+FINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture

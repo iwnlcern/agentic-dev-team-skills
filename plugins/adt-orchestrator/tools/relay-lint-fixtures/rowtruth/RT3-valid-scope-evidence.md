@@ -1,0 +1,18 @@
+ROLE: Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: rt3
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no
+FROM: pair-1.planner
+TO: pair-1.implementer
+ROW_TRUTH_CHECK: required
+DELEGATED_DISPATCH_AUTHORITY: yes
+SCOPE_DIFF:
+- src/a.ts -> in
+SCOPE_DIFF_RESULT: all-in
+SCOPE_ROW_EVIDENCE:
+- src/a.ts -> locked scope item 1 cites src/a.ts
+DISPATCH IMPL
+FINAL_GIT_STATUS_SHORT: none — clean tree

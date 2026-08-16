@@ -1,0 +1,14 @@
+# Master-Tier Boundary
+
+Treat as local anything that fills in the spec's details.
+
+Escalate when you find:
+
+- a mistake in the spec;
+- a better way than the spec's direction; or
+- a standing delegated-dispatch trigger: touching a locked contract, a scope or boundary deviation, a cross-team collision, or any amendment to the spec of record.
+
+Any departure from the spec is a trigger by construction; a sub-team never silently re-designs.
+
+- No master/domain seat ever carries `DISPATCH IMPL` or `DISPATCH MERGE`; execution is routed through commissioned pairs under the settled pair gate.
+- Master/domain locks resolve by the origin-classified lifecycle: master/domain planner `DESIGN` relays originate `design-doc`; master/domain planner `AUDIT` relays originate `audit-record`; the same-owner reviewer must file a parented `DESIGN-REVIEW` with verdict `approve` before the exact origin revision is citable; pair-owned locks remain under the settled pair validator.

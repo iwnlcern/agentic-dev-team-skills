@@ -8,10 +8,25 @@
   },
   "plugins": [
     {
-      "name": "agentic-dev-team-skills",
-      "source": ".",
-      "description": "Paired planner/implementer roles under separated authority, orchestrator coordination, relay-based handoffs, and relay-lint.",
+      "name": "adt-pair",
+      "source": "./plugins/adt-pair",
+      "description": "Pair-tier planning and implementation skills for governed software work.",
+      "category": "orchestration"
+    },
+    {
+      "name": "adt-orchestrator",
+      "source": "./plugins/adt-orchestrator",
+      "description": "Nested pair and orchestration skills for governed software work.",
+      "category": "orchestration"
+    },
+    {
+      "name": "adt-master",
+      "source": "./plugins/adt-master",
+      "description": "Nested pair, orchestration, domain, and master planning skills.",
       "category": "orchestration"
     }
-  ]
+  ],
+  "renames": {
+    "agentic-dev-team-skills": "adt-orchestrator"
+  }
 }

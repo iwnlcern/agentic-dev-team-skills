@@ -1,0 +1,16 @@
+ROLE: Master Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: cm149-grant
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: yes
+FROM: alpha.master-planner
+TO: beta.reviewer
+PARENT_DISPATCH_ID: cm149-approval
+DELEGATED_DISPATCH_AUTHORITY: yes
+COMMISSION_ID: cm149
+COMMISSION_SCOPE: scope-cm149
+COMMISSION_TO: beta.reviewer
+CHARTER_DOC_ID: CH-cm149
+FINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture
