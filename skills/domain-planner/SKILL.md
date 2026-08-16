@@ -9,7 +9,7 @@ description: Use when assigned the Domain Planner role owning a domain spec of r
 
 **Superpowers is mandatory.** Use relevant Superpowers procedures for brainstorming, planning, and review. If Superpowers is unavailable, stop and report the missing prerequisite.
 
-**Caveman is optional.** Use it to reduce tokens, but never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
+Never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply the adjacent `protocol.md` and `master-tier-boundary.md`. In read-only/report-only phases, if claiming no actions or edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
 

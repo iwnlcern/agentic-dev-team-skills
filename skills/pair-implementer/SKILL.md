@@ -11,7 +11,7 @@ Use this skill when you are the **Pair Implementer** in a two-seat pair-tier tea
 
 **Superpowers is mandatory.** Use the appropriate Superpowers review/brainstorming procedure for audit/review, `executing-plans` for implementation, `using-git-worktrees` for branch isolation, and `finishing-a-development-branch` for PR/branch completion. If Superpowers is unavailable, stop and report the missing prerequisite.
 
-**Caveman is optional.** Use it to reduce tokens, but never remove phase scope, evidence, acceptance criteria, or operator-decision flags.
+Never remove phase scope, evidence, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply `protocol.md`. In read-only/report-only phases, if claiming no actions/edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
 

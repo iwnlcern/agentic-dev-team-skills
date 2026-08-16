@@ -13,7 +13,7 @@ Use this skill when you are the **Planner** side of an Orchestrator Pair coordin
 
 **Superpowers is mandatory.** Use relevant Superpowers procedures for brainstorming, planning, and review. Downstream teams also require Superpowers for brainstorming, writing plans, executing plans, worktrees, and finishing branches. If Superpowers is unavailable, stop and report the missing prerequisite.
 
-**Caveman is optional.** Use it to reduce tokens, but do not omit relay scope, evidence level, dispatch IDs, acceptance criteria, or operator-decision flags.
+Do not omit relay scope, evidence level, dispatch IDs, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply `protocol.md`. In read-only/report-only phases, if claiming no actions/edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`. Use `handoff-templates.md` for relays, `sitrep-reconciliation.md` for stale-state checks, and `orchestration-moves.md` for routing patterns.
 

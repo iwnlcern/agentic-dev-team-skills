@@ -84,10 +84,12 @@ Code marketplace, then install the tier you need:
 Manual/drop-in: copy `plugins/adt-<tier>/skills/*` into the host skills root and
 `plugins/adt-<tier>/tools/`, `plugins/adt-<tier>/vendor/`, and
 `plugins/adt-<tier>/LICENSES/` alongside. The generated tree is itself the drop-in bundle.
+For Claude Code the user skills root is `~/.claude/skills/`; the auto-lint hook setup is
+documented in `tools/adapters/README.md`.
 
 - Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
-  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills, audit §5 E1).
-  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills; review finding B5); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
+  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills).
+  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
 
 Do not install the canonical `skills/` dirs directly. They are sources, not install artifacts;
 installing them directly ships broken skills (no adjacent `protocol.md`).
@@ -105,7 +107,7 @@ Clients below that floor must uninstall `agentic-dev-team-skills` and install `a
 manually. For managed or enterprise installations, an administrator must update `enabledPlugins`
 from the old plugin name to `adt-orchestrator`.
 
-Manual installs migrate via the S7 rename SITREPs (skill-dir names now equal role words):
+Manual installs migrate by renaming the skill dirs (skill-dir names now equal role words):
 
 - historical `agent-pair-planner` → `pair-planner`
 - historical `agent-pair-implementer` → `pair-implementer`
@@ -153,20 +155,6 @@ decomposes and routes work across pair-tier teams, and `orchestrator-reviewer` a
 the orchestrator itself — its decomposition, routing, and relays. The domain and master tiers add
 spec-of-record ownership, commissioned sub-teams, and cross-domain arbitration without moving
 implementation into governance seats.
-
-## Built with it
-
-[frank](https://github.com/iwnlcern/frank) — a governed courier for multi-agent teams, written in Go
-— was built end-to-end by agent teams running these skills: six slices, each closed by an adversarial
-merge gate, run by paired planner/implementer teams under a standing orchestrator pair. That repo
-ships its entire working record — the full relay trail (540 relays under `.relays/`), the per-slice
-ledgers and gate evidence (`docs/sprints/`), and the governing team's workspace (`master-docs/`) — so
-if you want to see what these roles, phases, and relays look like under real load, that's the place
-to read.
-
-It is also the natural next layer: these skills are conventions, and a sufficiently confused agent
-can break a convention. frank is the enforcement counterpart — it takes the parts these skills can
-only ask for politely (identity, lineage, gate outcomes) and makes them structural.
 
 ## Requirements
 

@@ -13,7 +13,7 @@ Use this skill when you are the **Pair Planner** in a two-seat pair-tier team. T
 
 **Superpowers is mandatory.** Use Superpowers `brainstorming` for nontrivial audit/design, `writing-plans` for plans, and the available Superpowers review procedure for finished branches. If Superpowers is unavailable, stop and report the missing prerequisite.
 
-**Caveman is optional.** Use it to reduce tokens, but never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
+Never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply `protocol.md`. In read-only/report-only phases, if claiming no actions/edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
 

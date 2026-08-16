@@ -22,7 +22,10 @@ out-of-band escalation instruction emitted by the command.
 1. Run `relay daemon start --root <root> --run-id <run> --seat <top-seat>`.
 2. Register the working seats with `relay seat register` and retain each issued
    registration tag file beneath the root.
-3. Submit a draft with `relay submit <draft> --key <tag-file>`.
+3. Submit a draft with `relay submit <draft> --key <tag-file>`. Author the draft
+   beneath the root (conventionally `.engine/drafts/<seat>/`); the `<draft>`
+   argument resolves relative to the root, not the shell working directory, and
+   an absolute path must lie inside the root.
 4. Inspect the derived views with `relay status`, `relay show`, and
    `relay verify`.
 5. Stop the designated writer with `relay daemon stop --root <root>`.

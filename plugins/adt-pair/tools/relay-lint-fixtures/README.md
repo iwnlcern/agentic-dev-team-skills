@@ -1,108 +1,60 @@
 # relay-lint fixture matrix
 
-These fixtures are the tool-correctness gate for `tools/relay-lint.py`. They cover cooperative/historical shapes, adversarial/evasive shapes, addressing, merge-claim lineage, content/substance checks, and P9 block-boundary regressions.
+These fixtures are the tool-correctness gate for `tools/relay-lint.py`.
+They cover cooperative/historical shapes, adversarial/evasive shapes, addressing, merge-claim lineage, content/substance checks, block-boundary regressions, design-doc and plan lock digests, role-vocabulary enforcement, INDEX root resolution, and the master-tier authority chains.
 
-Expected outcomes:
+## Family census
 
-```text
-claude/A1-valid-audit.md                                               pass
-claude/A2-valid-downgrade.md                                           pass
-claude/B2-why-before-scan.md                                           fail
-claude/B3-yes-row-why.md                                               fail
-claude/B5-audit-no-final.md                                            fail
-claude/B6-audit-impl-authority.md                                      fail
-claude/B7-delegated-no-scopediff.md                                    fail
-claude/B8-deviation-dispatch.md                                        fail
-claude/B9-bad-enum.md                                                  fail
-claude/C1-evasive-rows.md                                              fail
-claude/C2-enum-bypass.md                                               fail
-lint-test/bad1.md                                                      fail
-lint-test/bad2.md                                                      fail
-lint-test/bad3.md                                                      fail
-lint-test/bad3b.md                                                     fail
-lint-test/bad4.md                                                      fail
-lint-test/good5.md                                                     pass
---relay-root claude/L1                                                 pass
---relay-root claude/L2                                                 pass
---relay-root claude/L3                                                 fail
-probes/N2-refusal-code-span.md                                         pass
-probes/N3-fenced-dispatch-inert.md                                     pass
-probes/N4-scan-result-mismatch.md                                      fail
-probes/N5-missing-scan-row.md                                          fail
-addressing/T1-valid-addressed-dispatch.md                              pass
-addressing/T2-token-no-to.md                                           fail
-addressing/T3-token-to-planner.md                                      fail
-addressing/T4-token-two-implementers.md                                fail
-addressing/T5-bad-address.md                                           fail
-addressing/T6-valid-audit-both-to.md                                   pass
-addressing/T7-valid-cc-context.md                                      pass
-addressing/T8-cc-trap-structurally-valid.md                            pass
---relay-root addressing/G1-casefold-lineage                            pass
---relay-root merge/M1-merge-claim-no-auth                              fail
---relay-root merge/M2-merge-claim-with-auth                            fail
---relay-root merge/M3-honest-not-merged                                pass
---relay-root merge/M4-canonical-claim-no-auth                          fail
---relay-root merge/M5-self-auth-forgery                                fail
---relay-root merge/M7-continuation-prose-claim-no-auth                 fail
---relay-root merge/M8-continuation-canonical-claim-no-auth             fail
---relay-root merge/BP5-blank-line-merge-evasion                        fail
---relay-root merge/GA-flushleft-canonical-no-auth                      fail
---relay-root merge/GB-tab-ambiguous-canonical                          fail
---relay-root merge/GC-2blank-ambiguous-canonical                       fail
---relay-root merge/GD-quoted-canonical-inert                           pass
---relay-root merge/organic-m2-unauthorized-merge                       fail
---relay-root merge-token/MT1-valid-token-grant                         fail
---relay-root merge-token/MT2-backticked-token-inert                    fail
-merge-token/MT3-self-granted-token.md                                  fail
-merge-token/MT4-multi-to-grant.md                                      fail
-merge-token/MT5-wrong-phase-token.md                                   fail
---relay-root merge-token/MT6-token-outside-root                        fail
---relay-root merge-token/MT7-duplicate-authorization-decoy              fail
---relay-root merge-token/MT8-denied-only-no-auth                        fail
---relay-root merge-token/MT9-cross-dispatch-runroot                     fail
-content/E1-empty-final-git-status.md                                   fail
-content/E2-empty-actions-git-ref.md                                    fail
-content/E3-empty-scopediff-live-dispatch.md                            fail
-content/E4-structured-unavailable.md                                   pass
-content/E5-clean-tree.md                                               pass
-content/E6-out-row-allin.md                                            fail
-content/E7-valid-scopediff-dispatch.md                                 pass
-content/E8-structured-none-scopediff.md                                fail
-content/E9-unparseable-row.md                                          fail
-content/E10-bare-unavailable.md                                        fail
-content/E11-placeholder-field.md                                       fail
-content/E12-colon-rows-valid.md                                        pass
-content/E13-na-marker.md                                               fail
-content/E13-scopediff-detached-row.md                                  fail
-content/E14-scopediff-row-after-result.md                              fail
-content/E15-dual-scopediff-decoy.md                                    fail
-content/E16-dual-scopediff-contiguous.md                               fail
-fold/FD1-fold-edit-no-foldscope.md                                     fail
-fold/FD2-valid-fold-report.md                                          pass
-fold/FD3-out-row-with-edit.md                                          fail
-fold/FD4-empty-foldscope.md                                            fail
-fold/FD5-deviation-relay-out-rows-no-edit.md                           pass
-fold/FD6-edit-then-waiver-shape.md                                     fail
-fold/FD7-fold-no-deviation-uncommitted.md                              fail
-fold/FD8-scope-after-actions.md                                        fail
-fold/FD9-fold-no-wordlist-verbs.md                                     fail
-fold/FD10-detached-row-foldscope.md                                    fail
-fold/FD11-row-after-result-foldscope.md                                fail
-fold/FD12-absence-prefixed-actions.md                                  fail
-fold/FD13-dual-foldscope-contiguous.md                                 fail
---relay-root p9/P9-blank-line-prose-after-block                        pass
-p9/P9b-claim-after-scan-blank-line.md                                  fail
-```
+The census below is the completeness contract for this corpus.
+It is derived from the harness, not from this file: `tools/check-fixture-readme-census.py` re-runs `tools/check-relay-lint-fixtures.py`, counts the asserted outcomes per family, and fails when this table disagrees with the harness in any family, count, or total.
+Update the table by re-deriving it from the harness output, never by editing rows in place.
 
-The linter must produce exit code 0 for pass fixtures and exit code 1 for fail fixtures. Exit code 2 is reserved for usage/internal errors.
+| Family | Outcomes | What it gates |
+|---|---|---|
+| `addressing/` | 9 | FROM/TO/CC addressing; a live dispatch token must address exactly one implementer |
+| `ambiguity/` | 5 | Resolver precision when unrelated relays reuse an identifier |
+| `claude/` | 14 | Original cooperative/historical shapes plus enum and evasion probes |
+| `content/` | 17 | Substance checks: empty/placeholder fields, SCOPE_DIFF contiguity and duplication |
+| `design-review/` | 24 | DESIGN → DESIGN-REVIEW → gated PLAN lineage, including shared-thread resolver precision |
+| `fold/` | 13 | REVIEW-FOLD scope artifacts: FOLD_SCOPE blocks, OUT rows, ordering |
+| `hardening/` | 13 | Hardened field and block-boundary edges: downgrades, detached rows, filled-template and prose-delegation forms |
+| `identity/` | 1 | ROLE/FROM proxy-authoring tripwire |
+| `indexmarker/` | 3 | INDEX `root:` marker mechanics: placement and duplicate refusal |
+| `kr8a/` | 4 | KR8A carrier exemption: quoted work claims in carriers versus live tokens |
+| `lineage/` | 7 | PARENT_DISPATCH_ID parent chains for pair-Planner dispatch and IMPL reports |
+| `lint-test/` | 6 | Basic pass/fail smoke shapes |
+| `lockdigest/` | 63 | PLAN/DESIGN SHA-256 lock digests: float-forward, rollback, malformed and conflicting digest groups, fence and boundary evasions |
+| `lockpath/` | 4 | PLAN_LOCK_ID grammar: old path form, new form, bare id, missing |
+| `mastertier/` | 316 | Master-tier authority chains: charters, commissions, grants, receipts, seat and parent legitimacy |
+| `merge/` | 13 | Merge claims: authorization, canonical machine forms, continuation and whitespace evasions |
+| `merge-token/` | 9 | Merge-token grants: phase binding, grantor and addressee restrictions, inert quoted forms |
+| `orch-review/` | 22 | Orchestrator-reviewer visibility gate over the broad SET, waivers, and exemptions |
+| `p9/` | 2 | P9 block-boundary regressions |
+| `probes/` | 4 | Adversarial/evasive probes: code spans, fenced tokens, scan-result mismatches |
+| `rolevocab/` | 61 | Role-vocabulary enforcement: v2.9 renames, leftover roles, multiholder and late-binding edges |
+| `rootindex/` | 2 | Root INDEX ordering |
+| `rootres/` | 15 | INDEX root resolution: markers, file cells, duplicates, near-misses |
+| `rowtruth/` | 5 | ROW_TRUTH_CHECK evidence hooks for FOLD_SCOPE and SCOPE_DIFF rows |
 
-Run:
+**632 harness-asserted outcomes** across 24 families.
+
+Two notes on the corpus shape.
+An outcome is one harness assertion, not one file: the lineage-bearing families (`mastertier/`, `design-review/`, `lockdigest/`, and others) stage whole relay-root scenarios — several relay files plus an INDEX per case — because the rules under test judge chains, not single relays.
+The `t11closure/` fixture tree that also lives in this directory is exercised by its own harness, `tools/check-t11-closure.py`, and is deliberately absent from this census.
+
+## Run
 
 ```bash
 python3 tools/check-relay-lint-fixtures.py
 ```
 
-The helper compares observed exit codes to the expected-outcome table. Selected fixtures also assert complete sorted error sets, so fail fixtures must fail for the intended reason. The mapping name is `EXPECTED_ERROR_SET` even when the helper is used for single-file fixtures.
+The linter must produce exit code 0 for pass fixtures and exit code 1 for fail fixtures. Exit code 2 is reserved for usage/internal errors.
+
+The helper compares observed exit codes to its expected-outcome tables. Selected fixtures also assert complete sorted error sets, so fail fixtures must fail for the intended reason. The mapping name is `EXPECTED_ERROR_SET` even when the helper is used for single-file fixtures.
+
+The narrative sections below explain the families whose design needs prose; the remaining families are self-describing through their case names and the harness tables.
+
+## Permanent merge-block fixtures
 
 Additional merge-block fixtures remain permanent:
 
@@ -125,9 +77,6 @@ These row-bearing FOLD_SCOPE, detached-row, and duplicate row-bearing block regr
 - `fold/FD1`-`FD12` exercise REVIEW-FOLD scope artifacts: no scope, valid fold, OUT rows, empty scope, deviation/no-edit pass, edit-then-waiver, uncommitted out-of-scope edit, scope-after-actions ordering, action-record without wordlist verbs, detached FOLD_SCOPE rows, row after `FOLD_SCOPE_RESULT`, and absence-prefixed action records.
 - `fold/FD13-dual-foldscope-contiguous.md` is the FOLD_SCOPE twin of the duplicate-block class.
 - `fold/FD6-edit-then-waiver-shape.md` keeps the organic “fixed …” prose and its gate fires through substantive `ACTIONS_GIT_REF`, not the old wordlist/boilerplate accident.
-
-
-
 
 ## Merge-token fixtures
 
@@ -169,8 +118,6 @@ Edge-less observed-shape fixtures for the parent-lineage gate:
 - `lineage/LI6-edgeless-no-approve` fails when a pair-Planner dispatch has no parent edge and no approving review chain.
 - `lineage/LI7-edgeless-non-addressee-report` fails when an IMPL report claims substantive implementation actions without parenting to the addressed dispatch.
 
-
-
 ## Design-review fixtures
 
 The design-review fixture matrix is DR1-DR11 plus DR13-DR15. DR12 is intentionally held out for the non-builder lane.
@@ -199,8 +146,6 @@ Its bytes therefore do not currently demonstrate a valid direct override.
 --relay-root design-review/DR15-verdict-human-decision          fail
 ```
 
-
-
 ## Shared-thread lineage fixtures
 
 Seven design-review lineage fixtures for shared-thread `DISPATCH_ID` resolver precision. They prove the linter selects same-owner, role/phase/doc-aware DESIGN-REVIEW and DESIGN parents rather than the earliest relay sharing an id.
@@ -227,9 +172,6 @@ identifier. AMB1c is currently a stale, pre-resolution ROLE/FROM failure case.
 ```
 
 AMB1a and AMB1b are valid shared-ID controls. AMB1c currently fails before the IMPL-report parent-resolution assertion: its operator-authored dispatch declares `ROLE: Planner`, so the ROLE/FROM anti-proxy check rejects that dispatch.
-
-
-
 
 ## Orchestrator-review visibility fixtures
 

@@ -66,7 +66,7 @@ Next requested action:
 
 If a team sends a free-form sitrep, extract these fields and ask them to use the standard format next time.
 
-`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
+`HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` leaves its ask unnamed — always annotate. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
 
 ## Claim-evidence ladder
 

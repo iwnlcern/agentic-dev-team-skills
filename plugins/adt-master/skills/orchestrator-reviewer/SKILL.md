@@ -13,7 +13,7 @@ Use this skill when you are the adversarial reviewer for an Orchestrator Pair. T
 
 **Superpowers is mandatory.** Use the closest Superpowers brainstorming/review procedure for independent review. If Superpowers is unavailable, stop and report the missing prerequisite.
 
-**Caveman is optional.** Use it to reduce tokens, but do not remove evidence, gates, acceptance criteria, or operator-decision flags.
+Do not remove evidence, gates, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply `protocol.md`. In read-only/report-only phases, if claiming no actions/edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
 
