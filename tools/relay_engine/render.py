@@ -300,9 +300,9 @@ def _role_skill(address):
     if address.endswith(".orchestrator-reviewer"):
         return "orchestrator-reviewer"
     if address.endswith(".planner"):
-        return "agent-pair-planner"
+        return "pair-planner"
     if address.endswith(".implementer"):
-        return "agent-pair-implementer"
+        return "pair-implementer"
     return None
 
 
