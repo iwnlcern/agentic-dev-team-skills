@@ -18,7 +18,7 @@ Host and model files map protocol mechanics onto a host; they never change the p
 Use the compact header below for substantive outputs. Add tier/risk-dependent fields only when they affect routing, merge, lineage, or verification.
 
 ```text
-ROLE: <Master Planner | Master Reviewer | Domain Planner | Domain Reviewer | Orchestrator Planner | Orchestrator Reviewer | Pair Planner | Pair Implementer | Downstream Agent Pair | Downstream Implementer | Planner | Implementer | Reviewer>
+ROLE: <Master Planner | Master Reviewer | Domain Planner | Domain Reviewer | Orchestrator Planner | Orchestrator Reviewer | Operator | Pair Planner | Pair Implementer | Downstream Implementer | Planner | Implementer | Reviewer>
 PHASE: <AUDIT | DESIGN | DESIGN-REVIEW | PLAN | PLAN-REVIEW | IMPL | REVIEW-FOLD | MERGE-GATE | LIVE-VERIFY | SITREP | RECONCILE>
 AUTHORITY: <read-only | design-only | plan-only | review-only | implementation | fold-in-only | merge-gated | live-verify | report-only>
 DISPATCH_ID: <handoff id for authority-chain relay | cycle id otherwise>
