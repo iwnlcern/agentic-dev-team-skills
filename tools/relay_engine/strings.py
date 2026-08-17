@@ -86,7 +86,8 @@ def _is_count(value):
 
 
 def _is_rejected(value):
-    return isinstance(value, RejectedValue)
+    return (isinstance(value, RejectedValue) and
+            _is_digest12(value.digest) and _is_count(value.length))
 
 
 def _is_machine_result(value):

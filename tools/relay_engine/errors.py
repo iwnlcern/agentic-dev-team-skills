@@ -118,7 +118,14 @@ def _is_not_found_rel(value):
 
 
 def _is_identity_value(value, validator):
-    return isinstance(value, strings.RejectedValue) or validator(value)
+    return strings._is_rejected(value) or validator(value)
+
+
+def _is_version_mismatch_remedy(value):
+    return (isinstance(value, _VersionMismatchRemedy) and
+            value.stale in {"client", "daemon", "both"} and
+            _is_identity_value(value.client_install, strings.valid_install) and
+            _is_identity_value(value.daemon_install, strings.valid_install))
 
 
 strings.register_inventory(
@@ -149,7 +156,7 @@ strings.register_inventory(
         ("error-version-mismatch-cause", "daemon_fp"):
             lambda v: _is_identity_value(v, strings.valid_fp),
         ("error-version-mismatch-remedy", "remedy"):
-            lambda v: isinstance(v, _VersionMismatchRemedy),
+            _is_version_mismatch_remedy,
     },
 )
 

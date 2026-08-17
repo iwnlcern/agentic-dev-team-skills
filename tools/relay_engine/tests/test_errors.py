@@ -257,6 +257,41 @@ class TestVersionMismatch(unittest.TestCase):
             r"/a/\.\./b; then retry$",
         )
 
+    def test_registry_rejects_nested_remedy_values_that_could_echo_raw_identity(self):
+        cases = (
+            errors._VersionMismatchRemedy(
+                "client", "/bad\nRAW-INSTALL", self.DAEMON_INSTALL),
+            errors._VersionMismatchRemedy(
+                "daemon", self.CLIENT_INSTALL, "/bad\nRAW-INSTALL"),
+            errors._VersionMismatchRemedy(
+                "attacker", self.CLIENT_INSTALL, self.DAEMON_INSTALL),
+        )
+        for remedy in cases:
+            with self.subTest(remedy=remedy):
+                with self.assertRaises(ValueError):
+                    strings.render("error-version-mismatch-remedy",
+                                   remedy=remedy)
+
+    def test_registry_rejects_direct_rejected_values_without_digest_invariants(self):
+        common = {
+            "client_install": self.CLIENT_INSTALL,
+            "client_kit": "2.9.1",
+            "client_fp": self.CLIENT_FP,
+            "daemon_install": self.DAEMON_INSTALL,
+            "daemon_kit": "2.9.1",
+            "daemon_fp": self.DAEMON_FP,
+        }
+        cases = (
+            strings.RejectedValue("bad\nRAW-DIGEST", 1),
+            strings.RejectedValue("a" * 12, -1),
+            strings.RejectedValue("a" * 12, True),
+        )
+        for rejected in cases:
+            with self.subTest(rejected=rejected):
+                params = dict(common, client_install=rejected)
+                with self.assertRaises(ValueError):
+                    strings.render("error-version-mismatch-cause", **params)
+
 
 class TestRedactionOracle(unittest.TestCase):
     def test_escaped_equivalents_one_digest(self):
