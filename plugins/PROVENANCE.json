@@ -140,7 +140,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "6a0ec85a9d6acb4143c9aa052151d557a2dad3741b210e1aaec82f330e1e7f80",
+    "sha256": "cc53c27b7de7676c562c962cc5a3ddc2d7d171eb341140435f9dbc7899938d7f",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -170,13 +170,13 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/reviewer-spawn-prompts.md",
-    "sha256": "a9fb4303ff1a3fdb8517246ba86b0dc8207ea0149197c84f2a69a6394db48f61",
+    "sha256": "25d295841c64b231a3535e210fff2848a1c3e3057fd23e229dd8a34579d51a5a",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/sitrep-reconciliation.md",
-    "sha256": "75a78ac1d605c63ef685699e9220e4ad0f9ac5e55eb64d9c200eceeabda77ae8",
+    "sha256": "4de22c907df2dac0494cd97944d1b526b1e4a5cf50f6e5f73bedd29f6a49bbaa",
     "source": "skills/orchestrator-planner/sitrep-reconciliation.md"
   },
   {
@@ -248,7 +248,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-planner/reviewer-spawn-prompts.md",
-    "sha256": "a9fb4303ff1a3fdb8517246ba86b0dc8207ea0149197c84f2a69a6394db48f61",
+    "sha256": "25d295841c64b231a3535e210fff2848a1c3e3057fd23e229dd8a34579d51a5a",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -10202,7 +10202,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "6a0ec85a9d6acb4143c9aa052151d557a2dad3741b210e1aaec82f330e1e7f80",
+    "sha256": "cc53c27b7de7676c562c962cc5a3ddc2d7d171eb341140435f9dbc7899938d7f",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -10232,13 +10232,13 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/reviewer-spawn-prompts.md",
-    "sha256": "a9fb4303ff1a3fdb8517246ba86b0dc8207ea0149197c84f2a69a6394db48f61",
+    "sha256": "25d295841c64b231a3535e210fff2848a1c3e3057fd23e229dd8a34579d51a5a",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/sitrep-reconciliation.md",
-    "sha256": "75a78ac1d605c63ef685699e9220e4ad0f9ac5e55eb64d9c200eceeabda77ae8",
+    "sha256": "4de22c907df2dac0494cd97944d1b526b1e4a5cf50f6e5f73bedd29f6a49bbaa",
     "source": "skills/orchestrator-planner/sitrep-reconciliation.md"
   },
   {
@@ -10310,7 +10310,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-planner/reviewer-spawn-prompts.md",
-    "sha256": "a9fb4303ff1a3fdb8517246ba86b0dc8207ea0149197c84f2a69a6394db48f61",
+    "sha256": "25d295841c64b231a3535e210fff2848a1c3e3057fd23e229dd8a34579d51a5a",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -20300,7 +20300,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-planner/reviewer-spawn-prompts.md",
-    "sha256": "a9fb4303ff1a3fdb8517246ba86b0dc8207ea0149197c84f2a69a6394db48f61",
+    "sha256": "25d295841c64b231a3535e210fff2848a1c3e3057fd23e229dd8a34579d51a5a",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {

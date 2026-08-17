@@ -4,7 +4,7 @@
 
 Copy-paste these for Claude Code-style agent teams, subagents, or equivalent background workers. Reviewers are read-only unless explicitly reassigned.
 
-`HUMAN_GATE_REQUIRED: yes` if and only if the current relay's requested next transition cannot occur without a fresh operator decision. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` leaves its ask unnamed — always annotate. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
+`HUMAN_GATE_REQUIRED: yes` if and only if the current relay's requested next transition cannot occur without a fresh operator decision. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed and relay-lint warns on it; always annotate. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
 
 ## Shared review context
 
