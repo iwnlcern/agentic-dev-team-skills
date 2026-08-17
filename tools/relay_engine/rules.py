@@ -71,6 +71,7 @@ DESIGN_REVIEW_VERDICT_VALUES = {"approve", "must-revise", "reject-narrow", "huma
 PLACEHOLDER_RE = re.compile(r"^<[^<>]+>$")
 ABSENCE_WORD_RE = re.compile(r"^(unavailable|none|e0/unverified|unverified|n/?a|n\.a\.)\b", re.IGNORECASE)
 STRUCTURED_ABSENT_RE = re.compile(r"^(unavailable|none|e0/unverified|unverified|n/?a|n\.a\.)\s*[—–-]+\s*\S", re.IGNORECASE)
+HUMAN_GATE_BARE_YES = re.compile(r"^yes[ \t—–:-]*$")
 SCOPE_DIFF_ROW_RE = re.compile(r"^\s*-\s+(\S.*?)\s*(?:->|:)\s*(in|out)\s*$", re.IGNORECASE)
 READ_ONLY_PHASES = {"AUDIT", "DESIGN", "DESIGN-REVIEW", "PLAN", "PLAN-REVIEW", "RECONCILE", "SITREP"}
 ROW_BEARING_HEADERS = ("SCOPE_DIFF", "SCOPE_DIFF_RESULT", "FOLD_SCOPE", "FOLD_SCOPE_RESULT")
@@ -1095,6 +1096,13 @@ def lint_file(
     enum_field(result, fields, "EVIDENCE_TARGET", EVIDENCE_VALUES, template_mode=template_mode)
     enum_field(result, fields, "DESIGN_RECORD_KIND", DESIGN_RECORD_KIND_VALUES, template_mode=template_mode)
     enum_field(result, fields, "DESIGN_REVIEW_VERDICT", DESIGN_REVIEW_VERDICT_VALUES, template_mode=template_mode)
+
+    hg_value = fields.get("HUMAN_GATE_REQUIRED")
+    if hg_value is not None and HUMAN_GATE_BARE_YES.fullmatch(hg_value.strip()):
+        result.warn(
+            "HUMAN_GATE_REQUIRED: yes carries no annotation naming its ask; "
+            "annotate as 'yes — <the decision>'"
+        )
 
     phase = fields.get("PHASE")
     authority = fields.get("AUTHORITY", "")
