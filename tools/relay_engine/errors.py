@@ -1,6 +1,8 @@
 """Structured relay-engine refusal registry."""
 
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 
 from relay_engine import strings
@@ -21,11 +23,13 @@ _TEXT = {
     "error-key-mismatch-cause": "registration tag does not name the current seat occupancy",
     "error-key-mismatch-remedy": "re-register or run from the occupying session",
     "error-id-collision-cause": "dispatch id is not reusable in this run scope",
-    "error-id-collision-remedy": "use a new id or admit against the current id scope",
+    "error-id-collision-remedy": "use a new id, or rerun with --admits-against <root-relative path of the relay currently holding this id>",
     "error-superseded-cause": "the admission target has an applied supersession",
     "error-superseded-remedy": "re-read the superseding ruling and admit against current authority",
     "error-path-escape-cause": "draft path is outside the canonical root",
     "error-path-escape-remedy": "use the canonical drafts location",
+    "error-not-found-cause": "the {field} path {rel} does not exist beneath the root",
+    "error-not-found-remedy": "author the {field} beneath the root and pass its root-relative path; an absolute path must lie inside the root",
     "error-header-cause": "required relay header missing or invalid: {field}",
     "error-header-remedy": "supply every required submission header",
     "error-envelope-cause": "submitted envelope does not match server-derived bytes",
@@ -67,6 +71,7 @@ _TEXT.update({
     "error-id-collision-explain": "dispatch ids are reusable only inside their current open id scope",
     "error-superseded-explain": "admission cannot target authority replaced by an applied ruling",
     "error-path-escape-explain": "draft reads stay beneath the canonical root without following links",
+    "error-not-found-explain": "submission reads its draft and key beneath the canonical root; a missing file refuses before admission",
     "error-header-explain": "submission requires the complete relay header contract",
     "error-envelope-explain": "the server-derived envelope and submitted envelope must agree",
     "error-replay-explain": "one submission id must always carry one content identity",
@@ -85,6 +90,12 @@ _TEXT.update({
     "error-daemon-stopping-explain": "the stop barrier refuses work arriving after its cutoff",
 })
 
+
+def _is_not_found_rel(value):
+    return (isinstance(value, str) and value and not value.startswith("/") and
+            "\x00" not in value and "\n" not in value and "\r" not in value)
+
+
 strings.register_inventory(
     _TEXT,
     {
@@ -92,6 +103,10 @@ strings.register_inventory(
         ("error-header-cause", "field"): lambda v: (isinstance(v, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", v) is not None),
         ("error-envelope-edge-remedy", "targets"):
             strings.IS_EXISTING_TARGETS,
+        ("error-not-found-cause", "field"): lambda v: v in ("draft", "key"),
+        ("error-not-found-cause", "rel"): lambda v: (
+            isinstance(v, strings.RejectedValue) or _is_not_found_rel(v)),
+        ("error-not-found-remedy", "field"): lambda v: v in ("draft", "key"),
         ("error-wire-version-cause", "rejected_version"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-op-cause", "rejected_op"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-args-cause", "op"): lambda v: v in strings.OPS,
@@ -132,6 +147,8 @@ ERRORS = {
 ERROR_VARIANTS = {
     ("E-ENVELOPE", "edge-resolution"):
         _spec("envelope-edge", "integrity"),
+    ("E-PATH-ESCAPE", "not-found"):
+        _spec("not-found", "policy"),
 }
 
 POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}
@@ -140,6 +157,16 @@ POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}
 def _render_for(key, params):
     fields = strings._placeholders(strings.INVENTORY[key])
     return strings.render(key, **{field: params[field] for field in fields})
+
+
+def _rejected(value):
+    try:
+        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                         sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        raw = type(value).__name__.encode("ascii", "replace")
+    return strings.rejected_value(hashlib.sha256(raw).hexdigest()[:12],
+                                  len(raw))
 
 
 class EngineError(Exception):
@@ -178,6 +205,10 @@ def error_for(code, *, variant=None, **params):
             spec = ERROR_VARIANTS[(code, variant)]
         except KeyError as exc:
             raise KeyError("error variant is not registered") from exc
+    if (code, variant) == ("E-PATH-ESCAPE", "not-found"):
+        rel = params.get("rel")
+        if not _is_not_found_rel(rel):
+            params["rel"] = _rejected(rel)
     return EngineError(code, spec.cause_key, spec.remedy_key, spec.cls,
                        **params)
 

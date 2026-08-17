@@ -50,6 +50,14 @@ def _relative(root, path):
     return canonical[len(prefix):]
 
 
+def _open_required(root, rel, field):
+    try:
+        return root.open_read(rel)
+    except FileNotFoundError as exc:
+        raise errors.error_for("E-PATH-ESCAPE", variant="not-found",
+                               field=field, rel=rel) from exc
+
+
 def _daemon_socket(root_name):
     try:
         with Root(root_name) as root:
@@ -105,10 +113,10 @@ def submit(root_name, draft, key_path=None, admits_against=None,
         if not key_path:
             raise errors.error_for("E-KEY-MISMATCH")
         key_rel = _relative(root, key_path)
-        body = root.open_read(draft_rel)
+        body = _open_required(root, draft_rel, "draft")
         try:
             envelope = parse_draft(body.decode("utf-8"))
-            tag = root.open_read(key_rel).decode("utf-8").strip()
+            tag = _open_required(root, key_rel, "key").decode("utf-8").strip()
         except UnicodeDecodeError as exc:
             raise errors.error_for("E-ENVELOPE") from exc
         submission_id = sid_for(root, draft_rel)

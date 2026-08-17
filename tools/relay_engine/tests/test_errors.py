@@ -3,9 +3,11 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from relay_engine import errors, strings
+from relay_engine import client, errors, strings
+from relay_engine.paths import Root
 from relay_engine.jcs import jcs_encode
 
 
@@ -62,6 +64,34 @@ class TestErrorRegistry(unittest.TestCase):
         with self.assertRaises(KeyError):
             errors.EngineError("E-FRAMING", "raw cause", "raw remedy",
                                "wire", reason="truncated")
+
+    def test_not_found_variant_is_registered_and_renders(self):
+        exc = errors.error_for("E-PATH-ESCAPE", variant="not-found",
+                               field="draft", rel="x/y.md")
+        self.assertEqual(exc.code, "E-PATH-ESCAPE")
+        self.assertEqual(exc.cls, "policy")
+        self.assertIn("draft", exc.cause)
+        self.assertIn("x/y.md", exc.cause)
+        self.assertIn("root-relative", exc.remedy)
+
+    def test_not_found_rel_rejects_line_separators(self):
+        exc = errors.error_for("E-PATH-ESCAPE", variant="not-found",
+                               field="key", rel="a\nb.md")
+        self.assertNotIn("\n", exc.cause)
+        self.assertIn("sha256", exc.cause)
+
+    def test_path_escape_regression_unchanged(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            with Root(root_name) as root:
+                with self.assertRaises(errors.EngineError) as ctx:
+                    client._relative(root, "/outside/abs/path.md")
+        self.assertEqual(ctx.exception.code, "E-PATH-ESCAPE")
+        self.assertNotIn("not-found", ctx.exception.cause)
+
+    def test_id_collision_remedy_names_the_flag_argument(self):
+        exc = errors.error_for("E-ID-COLLISION")
+        self.assertIn("--admits-against", exc.remedy)
+        self.assertIn("root-relative", exc.remedy)
 
 
 class TestWireTemplates(unittest.TestCase):

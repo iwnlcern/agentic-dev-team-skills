@@ -142,6 +142,50 @@ class TestSubmitE2E(unittest.TestCase):
         self.assertFalse(Path(self.root_name,
                               self.draft_rel + ".sid").exists())
 
+    def test_missing_draft_is_typed(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = cli.main([
+                "submit", ".engine/drafts/absent/nope.md",
+                "--root", self.root_name, "--key", self.key_rel,
+            ])
+        self.assertEqual(status, 1)
+        self.assertIn("E-PATH-ESCAPE", stderr.getvalue())
+        self.assertIn("draft", stderr.getvalue())
+        self.assertIn("does not exist beneath the root", stderr.getvalue())
+        self.assertIn("root-relative", stderr.getvalue())
+        self.assertNotIn("unexpected error", stderr.getvalue())
+
+    def test_missing_key_is_typed(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = cli.main([
+                "submit", self.draft_rel,
+                "--root", self.root_name,
+                "--key", "docs/duplicated/cwd-relative.key",
+            ])
+        self.assertEqual(status, 1)
+        self.assertIn("E-PATH-ESCAPE", stderr.getvalue())
+        self.assertIn("key", stderr.getvalue())
+        self.assertIn("does not exist beneath the root", stderr.getvalue())
+        self.assertIn("root-relative", stderr.getvalue())
+
+    def test_undecodable_draft_envelope_refusal_is_unchanged(self):
+        Path(self.root_name, self.draft_rel).write_bytes(b"\xff")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = cli.main([
+                "submit", self.draft_rel,
+                "--root", self.root_name, "--key", self.key_rel,
+            ])
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "E-ENVELOPE\n"
+            "cause: submitted envelope does not match server-derived bytes\n"
+            "remedy: rebuild the envelope from the unchanged draft\n",
+        )
+
     def test_timeout_and_policy_refusal_retain_same_sidecar(self):
         wrong_key = ".engine/drafts/v29-a.planner/wrong.key"
         Path(self.root_name, wrong_key).write_text("wrong-tag\n")
