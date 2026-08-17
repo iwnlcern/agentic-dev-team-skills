@@ -132,7 +132,7 @@ def conforming_plan():
         " <n> <root> <env-basename> <runner-basename> <runner-sha256>"
         " <ref> <sha>` (command 10); `resolve <proof> <runner-sha256>"
         " <sha> <worktree>` (command 14); `self-test <results-root>`"
-        " (command 6) -- twenty-one resolve triples across all seven"
+        " (command 6) -- twenty-three resolve triples across all seven"
         " record classes; the carrier publish is link-based no-replace.",
         "",
         "The census: %s and %s run at every bind."
