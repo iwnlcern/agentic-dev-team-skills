@@ -75,18 +75,26 @@ class TestErrorRegistry(unittest.TestCase):
         self.assertIn("root-relative", exc.remedy)
 
     def test_not_found_rel_rejects_line_separators(self):
-        exc = errors.error_for("E-PATH-ESCAPE", variant="not-found",
-                               field="key", rel="a\nb.md")
-        self.assertNotIn("\n", exc.cause)
-        self.assertIn("sha256", exc.cause)
+        for rel in ("a\nb.md", "a\rb.md"):
+            with self.subTest(rel=repr(rel)):
+                exc = errors.error_for("E-PATH-ESCAPE", variant="not-found",
+                                       field="key", rel=rel)
+                self.assertNotIn("\n", exc.cause)
+                self.assertNotIn("\r", exc.cause)
+                self.assertIn("sha256", exc.cause)
 
     def test_path_escape_regression_unchanged(self):
         with tempfile.TemporaryDirectory() as root_name:
             with Root(root_name) as root:
                 with self.assertRaises(errors.EngineError) as ctx:
                     client._relative(root, "/outside/abs/path.md")
-        self.assertEqual(ctx.exception.code, "E-PATH-ESCAPE")
-        self.assertNotIn("not-found", ctx.exception.cause)
+        self.assertEqual(
+            ctx.exception.as_dict(),
+            {"code": "E-PATH-ESCAPE",
+             "cause": "draft path is outside the canonical root",
+             "remedy": "use the canonical drafts location",
+             "cls": "policy"},
+        )
 
     def test_id_collision_remedy_names_the_flag_argument(self):
         exc = errors.error_for("E-ID-COLLISION")
