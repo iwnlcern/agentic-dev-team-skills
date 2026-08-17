@@ -5,6 +5,7 @@ import json
 import re
 import string as _string
 import sys
+import unicodedata
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ _CODE_VALUES = {
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
     "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN",
+    "E-VERSION-MISMATCH",
     "seat-occupied", "commission-conflict", "commission-late",
     "run-id-mismatch", "run-id-uninitialized", "run-id-invalid",
     "E-FRAMING", "E-WIRE-VERSION", "E-WIRE-OP", "E-WIRE-ARGS",
@@ -107,6 +109,34 @@ def _is_detail(value):
     return (isinstance(value, str) and
             re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}:[A-Za-z0-9_-]{1,32}",
                          value) is not None)
+
+
+def valid_install(value):
+    if not isinstance(value, str) or not value.startswith("/"):
+        return False
+    try:
+        received = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return (len(received) <= 512 and
+            all(unicodedata.category(scalar) not in
+                {"Cc", "Cf", "Cs", "Zl", "Zp"} for scalar in value))
+
+
+def valid_kit(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        received = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return (len(received) <= 32 and re.fullmatch(
+        r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\."
+        r"(0|[1-9][0-9]{0,5})", value) is not None)
+
+
+def valid_fp(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 _VALIDATORS.update({

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ POLICY_CODES = {
     "E-ID-COLLISION",
     "E-SUPERSEDED",
     "E-PATH-ESCAPE",
+    "E-VERSION-MISMATCH",
 }
 
 ALL_CODES = POLICY_CODES | {
@@ -153,6 +155,107 @@ class TestWireTemplates(unittest.TestCase):
                 rejected_op=strings.rejected_value(digest, len(value)),
             ).as_dict()["cause"]
             self.assertNotIn(value.lower(), rendered.lower())
+
+
+class TestIdentityValidators(unittest.TestCase):
+    def test_install_display_grammar_has_named_adversarial_outcomes(self):
+        cases = (
+            ("ASCII control", "/Users/Jane/\x1fskills", False),
+            ("U+0085", "/Users/Jane/\u0085skills", False),
+            ("U+202E", "/Users/Jane/\u202eskills", False),
+            ("non-ASCII letters", "/Users/José/skills", True),
+            ("noncanonical", "/a/../b", True),
+            ("relative", "Users/Jane/skills", False),
+            ("over 512 bytes", "/" + ("a" * 512), False),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(strings.valid_install(value), expected)
+
+    def test_kit_grammar_is_canonical_and_bounded(self):
+        cases = (
+            ("short", "2.9", False),
+            ("prefix", "v2.9.1", False),
+            ("four tuple", "2.9.1.0", False),
+            ("leading zeros", "02.009.0001", False),
+            ("empty", "", False),
+            ("release", "2.9.1", True),
+            ("zero", "0.0.0", True),
+            ("maximum component", "999999.0.1", True),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(strings.valid_kit(value), expected)
+
+    def test_fingerprint_grammar_is_lowercase_64_hex_bytes(self):
+        cases = (
+            ("valid", "a" * 64, True),
+            ("uppercase", "A" * 64, False),
+            ("63 bytes", "a" * 63, False),
+            ("65 bytes", "a" * 65, False),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(strings.valid_fp(value), expected)
+
+
+class TestVersionMismatch(unittest.TestCase):
+    CLIENT_INSTALL = "/Users/José/skills"
+    DAEMON_INSTALL = "/a/../b"
+    CLIENT_FP = "a" * 64
+    DAEMON_FP = "b" * 64
+
+    def mismatch(self, client_kit, daemon_kit, **overrides):
+        params = {
+            "client_install": self.CLIENT_INSTALL,
+            "client_kit": client_kit,
+            "client_fp": self.CLIENT_FP,
+            "daemon_install": self.DAEMON_INSTALL,
+            "daemon_kit": daemon_kit,
+            "daemon_fp": self.DAEMON_FP,
+        }
+        params.update(overrides)
+        return errors.error_for("E-VERSION-MISMATCH", **params)
+
+    def test_remedy_names_the_client_install_when_client_kit_is_lower(self):
+        exc = self.mismatch("2.9.0", "2.9.1")
+        self.assertEqual(
+            exc.remedy,
+            "update the client install at /Users/José/skills, then retry",
+        )
+
+    def test_remedy_names_the_daemon_install_when_daemon_kit_is_lower(self):
+        exc = self.mismatch("2.9.2", "2.9.1")
+        self.assertEqual(
+            exc.remedy,
+            "update the daemon install at /a/../b, then retry",
+        )
+
+    def test_remedy_refreshes_both_installs_when_attribution_is_indeterminate(self):
+        exc = self.mismatch("2.9.1", "2.9.1")
+        self.assertEqual(
+            exc.remedy,
+            "refresh both installs: client at /Users/José/skills; daemon at /a/../b; then retry",
+        )
+
+    def test_malformed_identity_values_render_only_as_rejected_values(self):
+        exc = self.mismatch(
+            "02.009.0001",
+            "2.9.1",
+            client_install="/Users/Jane/\u202eskills",
+            client_fp="A" * 64,
+        )
+        rendered = "\n".join((exc.cause, exc.remedy))
+        self.assertIn("unrecognized-input (sha256:", rendered)
+        self.assertNotIn("02.009.0001", rendered)
+        self.assertNotIn("\u202e", rendered)
+        self.assertNotIn("A" * 64, rendered)
+        self.assertRegex(
+            exc.remedy,
+            r"^refresh both installs: client at unrecognized-input "
+            r"\(sha256:[0-9a-f]{12}, length [0-9]+\); daemon at "
+            r"/a/\.\./b; then retry$",
+        )
 
 
 class TestRedactionOracle(unittest.TestCase):

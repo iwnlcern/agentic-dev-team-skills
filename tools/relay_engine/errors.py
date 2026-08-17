@@ -19,6 +19,23 @@ class ErrorSpec:
     cls: str
 
 
+@dataclass(frozen=True)
+class _VersionMismatchRemedy:
+    stale: str
+    client_install: object
+    daemon_install: object
+
+    def __str__(self):
+        if self.stale == "client":
+            return "update the client install at %s, then retry" % (
+                self.client_install,)
+        if self.stale == "daemon":
+            return "update the daemon install at %s, then retry" % (
+                self.daemon_install,)
+        return "refresh both installs: client at %s; daemon at %s; then retry" % (
+            self.client_install, self.daemon_install)
+
+
 _TEXT = {
     "error-key-mismatch-cause": "registration tag does not name the current seat occupancy",
     "error-key-mismatch-remedy": "re-register or run from the occupying session",
@@ -64,6 +81,9 @@ _TEXT = {
     "error-wire-args-remedy": "match the op's exact args schema",
     "error-daemon-stopping-cause": "daemon is draining its stop barrier",
     "error-daemon-stopping-remedy": "retry after restart; replay semantics make the retry safe",
+    "error-version-mismatch-cause": "client identity (kit {client_kit}, fingerprint {client_fp}, install {client_install}) does not match daemon identity (kit {daemon_kit}, fingerprint {daemon_fp}, install {daemon_install})",
+    "error-version-mismatch-remedy": "{remedy}",
+    "error-version-mismatch-explain-remedy": "update the lower-kit install, or refresh both installs when attribution is indeterminate",
 }
 
 _TEXT.update({
@@ -88,12 +108,17 @@ _TEXT.update({
     "error-wire-op-explain": "wire requests name one operation from the daemon table",
     "error-wire-args-explain": "wire operation arguments must match the operation schema",
     "error-daemon-stopping-explain": "the stop barrier refuses work arriving after its cutoff",
+    "error-version-mismatch-explain": "record operations require matching valid client and daemon identities",
 })
 
 
 def _is_not_found_rel(value):
     return (isinstance(value, str) and value and not value.startswith("/") and
             "\x00" not in value and "\n" not in value and "\r" not in value)
+
+
+def _is_identity_value(value, validator):
+    return isinstance(value, strings.RejectedValue) or validator(value)
 
 
 strings.register_inventory(
@@ -111,6 +136,20 @@ strings.register_inventory(
         ("error-wire-op-cause", "rejected_op"): lambda v: isinstance(v, strings.RejectedValue),
         ("error-wire-args-cause", "op"): lambda v: v in strings.OPS,
         ("error-wire-args-cause", "detail"): lambda v: (isinstance(v, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}:[A-Za-z0-9_-]{1,32}", v) is not None),
+        ("error-version-mismatch-cause", "client_install"):
+            lambda v: _is_identity_value(v, strings.valid_install),
+        ("error-version-mismatch-cause", "client_kit"):
+            lambda v: _is_identity_value(v, strings.valid_kit),
+        ("error-version-mismatch-cause", "client_fp"):
+            lambda v: _is_identity_value(v, strings.valid_fp),
+        ("error-version-mismatch-cause", "daemon_install"):
+            lambda v: _is_identity_value(v, strings.valid_install),
+        ("error-version-mismatch-cause", "daemon_kit"):
+            lambda v: _is_identity_value(v, strings.valid_kit),
+        ("error-version-mismatch-cause", "daemon_fp"):
+            lambda v: _is_identity_value(v, strings.valid_fp),
+        ("error-version-mismatch-remedy", "remedy"):
+            lambda v: isinstance(v, _VersionMismatchRemedy),
     },
 )
 
@@ -142,6 +181,7 @@ ERRORS = {
     "E-WIRE-OP": _spec("wire-op", "wire"),
     "E-WIRE-ARGS": _spec("wire-args", "wire"),
     "E-DAEMON-STOPPING": _spec("daemon-stopping", "wire"),
+    "E-VERSION-MISMATCH": _spec("version-mismatch", "policy"),
 }
 
 ERROR_VARIANTS = {
@@ -167,6 +207,44 @@ def _rejected(value):
         raw = type(value).__name__.encode("ascii", "replace")
     return strings.rejected_value(hashlib.sha256(raw).hexdigest()[:12],
                                   len(raw))
+
+
+def _rejected_identity(value):
+    if isinstance(value, str):
+        raw = value.encode("utf-8", "surrogatepass")
+        return strings.rejected_value(hashlib.sha256(raw).hexdigest()[:12],
+                                      len(raw))
+    if isinstance(value, bytes):
+        return strings.rejected_value(hashlib.sha256(value).hexdigest()[:12],
+                                      len(value))
+    return _rejected(value)
+
+
+def _identity_value(value, validator):
+    if validator(value):
+        return value
+    return _rejected_identity(value)
+
+
+def _kit_tuple(value):
+    if not strings.valid_kit(value):
+        return None
+    return tuple(int(component) for component in value.split("."))
+
+
+def _version_mismatch_remedy(params):
+    client_kit = _kit_tuple(params["client_kit"])
+    daemon_kit = _kit_tuple(params["daemon_kit"])
+    if client_kit is None or daemon_kit is None:
+        stale = "both"
+    elif client_kit < daemon_kit:
+        stale = "client"
+    elif daemon_kit < client_kit:
+        stale = "daemon"
+    else:
+        stale = "both"
+    return _VersionMismatchRemedy(stale, params["client_install"],
+                                   params["daemon_install"])
 
 
 class EngineError(Exception):
@@ -209,6 +287,16 @@ def error_for(code, *, variant=None, **params):
         rel = params.get("rel")
         if not _is_not_found_rel(rel):
             params["rel"] = _rejected(rel)
+    if code == "E-VERSION-MISMATCH":
+        for field, validator in (
+                ("client_install", strings.valid_install),
+                ("client_kit", strings.valid_kit),
+                ("client_fp", strings.valid_fp),
+                ("daemon_install", strings.valid_install),
+                ("daemon_kit", strings.valid_kit),
+                ("daemon_fp", strings.valid_fp)):
+            params[field] = _identity_value(params.get(field), validator)
+        params["remedy"] = _version_mismatch_remedy(params)
     return EngineError(code, spec.cause_key, spec.remedy_key, spec.cls,
                        **params)
 
@@ -217,5 +305,8 @@ def explain_for(code):
     if code not in ERRORS:
         raise KeyError(code)
     spec = ERRORS[code]
+    if code == "E-VERSION-MISMATCH":
+        return (strings.render(spec.explain_key),
+                strings.render("error-version-mismatch-explain-remedy"))
     return (strings.render(spec.explain_key),
             strings.render(spec.remedy_key))
