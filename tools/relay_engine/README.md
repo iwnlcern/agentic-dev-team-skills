@@ -26,6 +26,9 @@ out-of-band escalation instruction emitted by the command.
    beneath the root (conventionally `.engine/drafts/<seat>/`); the `<draft>`
    argument resolves relative to the root, not the shell working directory, and
    an absolute path must lie inside the root.
+The `--key` argument resolves the same way: root-relative, with an absolute path required to lie inside the root.
+A missing draft or key refuses with a typed `E-PATH-ESCAPE` not-found cause before any admission work.
+To file another relay under an already-used dispatch id, pass `--admits-against <root-relative path of the relay currently holding that id>`.
 4. Inspect the derived views with `relay status`, `relay show`, and
    `relay verify`.
 5. Stop the designated writer with `relay daemon stop --root <root>`.
