@@ -438,7 +438,7 @@ def check_r4_readme_content() -> None:
 def check_r5_pdc_pointer() -> None:
     pdc = (
         ROOT
-        / "docs/sprints/2026-08-03-v2.9-release/results/v29-split-rename-sitrep-pdc.md"
+        / "docs/sprints/archive/2026-08-03-v2.9-release/results/v29-split-rename-sitrep-pdc.md"
     ).read_text(encoding="utf-8")
     expect(pdc.count(PDC_CODEX_FORWARD_POINTER) == 1, "R5 pdc template lacks the Codex forward pointer")
 
