@@ -302,7 +302,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint-fixtures/README.md",
-    "sha256": "aa01ef69b188adc16a21ef33691e07ffc55f4b6114e8d2dedc570d7c7a5c2b75",
+    "sha256": "a2386297a23eca031e1b6522195abd5fb222c3419f55aeba1b8cf48efa29f131",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -10364,7 +10364,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/README.md",
-    "sha256": "aa01ef69b188adc16a21ef33691e07ffc55f4b6114e8d2dedc570d7c7a5c2b75",
+    "sha256": "a2386297a23eca031e1b6522195abd5fb222c3419f55aeba1b8cf48efa29f131",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -20354,7 +20354,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint-fixtures/README.md",
-    "sha256": "aa01ef69b188adc16a21ef33691e07ffc55f4b6114e8d2dedc570d7c7a5c2b75",
+    "sha256": "a2386297a23eca031e1b6522195abd5fb222c3419f55aeba1b8cf48efa29f131",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
