@@ -8,7 +8,7 @@ import stat
 import sys
 import time
 
-from relay_engine import client, daemon, errors, migrate, rules, strings
+from relay_engine import client, daemon, errors, migrate, rules, strings, version
 from relay_engine.ledger import open_ledger
 from relay_engine.paths import Root
 
@@ -75,6 +75,24 @@ def _cmd_status(args):
     result = client.request(_command_root(args), "status", {},
                             timeout=args.timeout)
     strings.emit("stdout", "command-result",
+                 result=strings.machine_result(result))
+    return 0
+
+
+def _cmd_version(_args):
+    tools_dir = Path(sys.argv[0]).resolve().parent
+    result = {
+        "install": os.fspath(tools_dir),
+        "kit": version.KIT_VERSION,
+    }
+    try:
+        result["fingerprint"] = version.fingerprint(tools_dir)
+    except version.FingerprintError as error:
+        result["fingerprint_error"] = str(error)
+        strings.emit("stdout", "version-result",
+                     result=strings.machine_result(result))
+        return 1
+    strings.emit("stdout", "version-result",
                  result=strings.machine_result(result))
     return 0
 
@@ -275,6 +293,9 @@ def build_parser():
     _root_option(status)
     _timeout_option(status)
     status.set_defaults(handler=_cmd_status)
+
+    version_command = commands.add_parser("version")
+    version_command.set_defaults(handler=_cmd_version)
 
     seat = commands.add_parser("seat")
     seat_commands = seat.add_subparsers(dest="seat_command", required=True)

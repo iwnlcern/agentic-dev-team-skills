@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -73,6 +74,22 @@ def _invoke_rules(tools_dir):
     environment.pop("PYTHONDONTWRITEBYTECODE", None)
     return subprocess.run(
         [sys.executable, "-c", "import relay_engine.rules"],
+        cwd=tools_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _invoke_version(tools_dir):
+    environment = os.environ.copy()
+    prior = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.fspath(tools_dir)
+    if prior:
+        environment["PYTHONPATH"] += os.pathsep + prior
+    return subprocess.run(
+        [sys.executable, tools_dir / "relay", "version"],
         cwd=tools_dir,
         env=environment,
         capture_output=True,
@@ -228,6 +245,60 @@ class TestVersion(unittest.TestCase):
             _stage_roster(removed)
             (removed / "relay_engine" / "rules.py").unlink()
             self.assert_reason(removed, "missing-member")
+
+    def test_version_subcommand_reports_the_local_install_identity(self):
+        result = _invoke_version(TOOLS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "fingerprint": _independent_fingerprint(TOOLS),
+                "install": os.path.realpath(TOOLS),
+                "kit": "2.9.0",
+            },
+        )
+
+    def test_version_subcommand_reports_every_fingerprint_damage_class(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cases = (
+                ("extra-direct", "extra-member", lambda staged: (
+                    staged / "relay_engine" / "evil.py").write_text("evil\n")),
+                ("extra-nested", "extra-member", lambda staged: (
+                    (staged / "relay_engine" / "sub").mkdir(),
+                    (staged / "relay_engine" / "sub" / "x.py").write_text("x\n"))),
+                ("symlink", "non-regular-member", lambda staged: (
+                    (staged / "relay_engine" / "README.md").unlink(),
+                    (staged / "relay_engine" / "README.md").symlink_to(
+                        "__init__.py"))),
+                ("fifo", "non-regular-member", lambda staged: (
+                    (staged / "relay_engine" / "README.md").unlink(),
+                    os.mkfifo(staged / "relay_engine" / "README.md"))),
+                ("missing", "missing-member", lambda staged: (
+                    staged / "relay_engine" / "README.md").unlink()),
+                ("unreadable", "unreadable-member", lambda staged: (
+                    (staged / "relay_engine" / "README.md").chmod(0))),
+            )
+            for name, reason, damage in cases:
+                with self.subTest(name=name):
+                    staged = root / name
+                    _stage_roster(staged)
+                    damage(staged)
+                    try:
+                        result = _invoke_version(staged)
+                    finally:
+                        unreadable = staged / "relay_engine" / "README.md"
+                        if name == "unreadable":
+                            unreadable.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(
+                        json.loads(result.stdout),
+                        {
+                            "fingerprint_error": reason,
+                            "install": os.path.realpath(staged),
+                            "kit": "2.9.0",
+                        },
+                    )
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ INVENTORY = {
     "unexpected-error": "unexpected error",
     "daemon-start-failed": "daemon start failed",
     "command-result": "{result}",
+    "version-result": "{result}",
     "rejected-value": "unrecognized-input (sha256:{digest}, length {length})",
 }
 
@@ -115,6 +116,7 @@ _VALIDATORS.update({
     ("rejected-value", "digest"): _is_digest12,
     ("rejected-value", "length"): _is_count,
     ("command-result", "result"): _is_machine_result,
+    ("version-result", "result"): _is_machine_result,
 })
 
 
