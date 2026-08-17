@@ -396,7 +396,9 @@ class TestCensus(unittest.TestCase):
     def test_census_artifact_schema(self):
         path, _ = write_census_artifact()
         if path is None:
-            self.skipTest("durable results environment is not set")
+            self.skipTest("durable results environment is not set; export "
+                          "RELAY_ENGINE_RESULTS_ROOT and RELAY_ENGINE_MATRIX_RUN "
+                          "(see the AGENTS.md engine suite entry point)")
         lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines[0],
                          "run " + os.environ["RELAY_ENGINE_MATRIX_RUN"])
