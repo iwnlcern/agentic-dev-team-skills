@@ -2,7 +2,6 @@
 
 import argparse
 import base64
-import hashlib
 import os
 from pathlib import Path
 import stat
@@ -152,10 +151,10 @@ def _cmd_lint(args):
     results = {}
     if args.relay_root is not None:
         relay_root = Path(args.relay_root)
-        projection_verified = _verified_index_projections(relay_root)
+        projection_digests = _index_projection_digests(relay_root)
         result = rules.lint_relay_root(
             relay_root, template_mode=args.templates, engine_root=True,
-            projection_verified=projection_verified)
+            projection_digests=projection_digests)
         results[args.relay_root] = {
             "errors": result.errors, "warnings": result.warnings}
     if args.index is not None:
@@ -174,31 +173,27 @@ def _cmd_lint(args):
     return 1 if any(value["errors"] for value in results.values()) else 0
 
 
-def _verified_index_projections(root: Path) -> set[Path]:
+def _index_projection_digests(root: Path) -> dict[Path, str]:
     try:
         status = client.request(os.fspath(root), "status", {})
     except Exception:
-        return set()
+        return {}
     if not isinstance(status, dict) or status.get("epoch") != "active":
-        return set()
+        return {}
     events = status.get("projection_events")
     if not isinstance(events, list) or not all(
             isinstance(event, dict) for event in events):
-        return set()
+        return {}
     index_events = [event for event in events
                     if event.get("target") == "index"]
     if not index_events:
-        return set()
+        return {}
     latest = index_events[-1]
     if latest.get("event") not in {"rendered", "repaired"} or \
             latest.get("path") != "INDEX.md":
-        return set()
-    index = root / "INDEX.md"
-    try:
-        digest = hashlib.sha256(index.read_bytes()).hexdigest()
-    except OSError:
-        return set()
-    return {index} if latest.get("digest") == digest else set()
+        return {}
+    digest = latest.get("digest")
+    return {root / "INDEX.md": digest} if isinstance(digest, str) else {}
 
 
 def cmd_show(args):

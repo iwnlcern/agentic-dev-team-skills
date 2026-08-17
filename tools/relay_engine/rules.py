@@ -9,6 +9,7 @@ It does not verify whether claims are true.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -1630,7 +1631,9 @@ def a5_resolve_and_compare(path: Path, dkey: str, stem: str, sub: str, declared:
 
 
 def lint_relay_index(path: Path, *, audit: bool = False,
-                     daemon_projection: bool = False) -> LintResult:
+                     daemon_projection: bool = False,
+                     daemon_projection_digest: Optional[str] = None
+                     ) -> LintResult:
     """Check an append-only relay INDEX for timestamp truth and monotonicity.
 
     This is an ORDERING check, not a drift check. Enforced on rows after the
@@ -1640,10 +1643,18 @@ def lint_relay_index(path: Path, *, audit: bool = False,
     future. An index that has not been appended to recently is not a defect. Rows
     before the marker are grandfathered history, reported only under audit.
     A verified daemon projection skips only the final wall-clock ceiling.
+    Digest evidence is checked against the same byte snapshot that is parsed.
     Ordering and filename agreement remain mandatory for projected bytes.
     """
     result = LintResult()
-    text = read(path)
+    snapshot = path.read_bytes()
+    try:
+        text = snapshot.decode("utf-8")
+    except UnicodeDecodeError:
+        text = snapshot.decode("utf-8", errors="replace")
+    projection_is_verified = daemon_projection or (
+        daemon_projection_digest is not None and
+        hashlib.sha256(snapshot).hexdigest() == daemon_projection_digest)
     lines = text.splitlines()
 
     marker_line = 0
@@ -1766,7 +1777,7 @@ def lint_relay_index(path: Path, *, audit: bool = False,
     # is not a defect, so the newest row is checked against a ceiling, not a window:
     # a row cannot claim a time later than the clock that appended it. The tight
     # wall-clock window belongs on the relay filename, which is authored once.
-    if parsed and not daemon_projection:
+    if parsed and not projection_is_verified:
         lineno, raw, dt, file_cell = parsed[-1]
         _s, _d, _r, is_utc = filename_timestamp(file_cell)
         now = clock_now(is_utc)
@@ -3131,7 +3142,7 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
 
 def lint_relay_root(path: Path, *, template_mode: bool = False,
                     engine_root: bool = False,
-                    projection_verified: Optional[set[Path]] = None
+                    projection_digests: Optional[Dict[Path, str]] = None
                     ) -> LintResult:
     result = LintResult()
     all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
@@ -3155,11 +3166,11 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         for w in r.warnings:
             result.warn(f"{f.relative_to(path)}: {w}")
 
-    projection_verified = (
-        set() if projection_verified is None else projection_verified)
+    projection_digests = (
+        {} if projection_digests is None else projection_digests)
     for idx in index_files:
         r = lint_relay_index(
-            idx, daemon_projection=idx in projection_verified)
+            idx, daemon_projection_digest=projection_digests.get(idx))
         for e in r.errors:
             result.error(f"{idx.relative_to(path)}: {e}")
         for w in r.warnings:

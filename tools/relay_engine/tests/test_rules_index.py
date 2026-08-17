@@ -127,6 +127,22 @@ class TestIndexCeilingCli(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("ahead of the", stdout)
 
+    def test_mutation_between_selection_and_lint_reapplies_ceiling(self):
+        status = self._status()
+        lint_relay_root = rules.lint_relay_root
+
+        def mutate_then_lint(*args, **kwargs):
+            self.index.write_text(INDEX_TEXT + "\n")
+            return lint_relay_root(*args, **kwargs)
+
+        with patch.object(
+                cli.rules, "lint_relay_root", side_effect=mutate_then_lint):
+            code, stdout, _stderr = self._run(
+                ["lint", "--relay-root", str(self.root)], status,
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("ahead of the", stdout)
+
     def test_direct_index_never_uses_daemon_evidence(self):
         code, stdout, _stderr = self._run(
             ["lint", "--index", str(self.index)],
