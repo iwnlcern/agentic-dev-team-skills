@@ -14,7 +14,12 @@ cp -R tools "$HOME/.agents/skills/tools"
 
 `~/.codex/skills` remains a working deprecated fallback destination; new installs use `~/.agents/skills`, matching Codex's own back-compat posture.
 
-`<skills-root>` means the skills root the installed skill tree was resolved from — each generated plugin tree ships its own `tools/`. Both hooks resolve relay-lint in this order: `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py` — and when `RELAY_LINT_SKILLS_ROOT` is unset that probe defaults to `$HOME/.claude/skills/tools/relay-lint.py`, which therefore wins ahead of everything below on a standard Claude Code install — then `$HOME/.agents/skills/tools/relay-lint.py`, `$HOME/.codex/skills/tools/relay-lint.py` (deprecated), then `relay-lint` on `PATH`. The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-drift tolerance) and `RELAY_LINT_NO_FRESHNESS=1` (skip the freshness check when editing an existing older relay); both default to the strict posture.
+`<skills-root>` means the skills root the installed skill tree was resolved from — each generated plugin tree ships its own `tools/`.
+Both hooks first resolve the engine when `$RELAY_LINT_SKILLS_ROOT/tools/relay` and `$RELAY_LINT_SKILLS_ROOT/tools/relay_engine/` are present.
+When `RELAY_LINT_SKILLS_ROOT` is unset, that root defaults to `$HOME/.claude/skills`.
+They then resolve `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py`, `$HOME/.agents/skills/tools/relay-lint.py`, and `$HOME/.codex/skills/tools/relay-lint.py` (deprecated), in that order.
+They do not probe `relay-lint` on `PATH`.
+The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-drift tolerance) and `RELAY_LINT_NO_FRESHNESS=1` (skip the freshness check when editing an existing older relay); both default to the strict posture.
 
 ## Shipped adapter: Claude Code relay-write hooks
 

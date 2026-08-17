@@ -50,6 +50,22 @@ assert_case() {
   fi
   echo "PASS $name"
 }
+assert_case_engine_json() {
+  local name="$1" file="$2" skills="$3" home_dir="$4" path_value="$5" expected="$6"
+  run_hook "$file" "$skills" "$home_dir" "$path_value"
+  local rc=$?
+  if [ "$rc" -ne "$expected" ]; then
+    echo "FAIL $name: expected exit $expected got $rc" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if ! grep -q '"errors"' "$tmp/stderr"; then
+    echo "FAIL $name: expected engine JSON errors body" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  echo "PASS $name"
+}
 run_bash_guard() {
   local command="$1" background="$2" event="$3" skills="$4" home_dir="$5" path_value="$6"
   python3 -c 'import json,sys; print(json.dumps({"hook_event_name":sys.argv[1],"tool_input":{"command":sys.argv[2],"run_in_background":sys.argv[3] == "true"}}))' \
@@ -131,6 +147,27 @@ assert_case "b-dirty-fd1" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL"
 assert_case "b2-dirty-e1-tripwire" "$e1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FINAL_GIT_STATUS_SHORT is empty" || fail=1
 assert_case "c-non-relay-path" "$tmp/work/src/note.md" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_case "c2-non-md-relay-root" "$tmp/work/.relays/run1/.keep" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+
+# Engine-capable installs must choose the structured engine command ahead of
+# the standalone compatibility linter; the fallback root intentionally lacks
+# both engine artifacts.
+engine_skills="$tmp/engine-skills"
+mkdir -p "$engine_skills/tools"
+cp "$TOOLS_DIR/relay" "$engine_skills/tools/relay"
+cp -R "$TOOLS_DIR/relay_engine" "$engine_skills/tools/relay_engine"
+cp "$TOOLS_DIR/relay-lint.py" "$engine_skills/tools/relay-lint.py"
+engine_clean="$tmp/work/.relays/run1/engine-clean-$stamp.md"
+engine_dirty="$tmp/work/.relays/run1/engine-dirty-$stamp.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$engine_clean"
+cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$engine_dirty"
+assert_case_engine_json "engine-preferred-dirty" "$engine_dirty" "$engine_skills" "$tmp/home" "$PATH_NORMAL" 2 || fail=1
+assert_case "engine-preferred-clean" "$engine_clean" "$engine_skills" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+assert_case "engine-absent-fallback" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
+engine_draft="$tmp/work/.relays/x/.engine/drafts/seat/DIRTY.md"
+mkdir -p "$(dirname "$engine_draft")"
+cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$engine_draft"
+assert_case "engine-drafts-exempt" "$engine_draft" "$engine_skills" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
+
 assert_case "c3-empty-index-md" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
 printf '%s\n' \
   '| time | phase | role | dispatch | parent | from | to | cc | status | file |' \
@@ -213,12 +250,13 @@ else
 fi
 
 # f0-f4 pin the complete four-step resolution order:
-# configured root -> ~/.agents/skills -> deprecated ~/.codex/skills -> PATH.
+# engine-capable configured root -> standalone configured root -> ~/.agents/skills
+# -> deprecated ~/.codex/skills. PATH is deliberately never a resolver.
 # f0: a live configured root beats a conflicting .agents linter.
 # f1: .agents beats the deprecated root when the configured root is absent.
 # f2: the deprecated root still resolves alone.
 # f3: the deprecated root beats a conflicting PATH linter.
-# f4: PATH resolves when no filesystem root exists.
+# f4: no filesystem resolver emits UNLINTED even when PATH carries a decoy.
 fallback_home="$tmp/home-fallback"
 mkdir -p "$fallback_home/.agents/skills/tools" "$fallback_home/.codex/skills/tools"
 cp "$TOOLS_DIR/relay-lint.py" "$fallback_home/.agents/skills/tools/relay-lint.py"
@@ -287,24 +325,24 @@ empty_home="$tmp/home-empty"
 mkdir -p "$empty_home"
 real_bin="$tmp/real-bin"
 mkdir -p "$real_bin"
-printf '%s\n' '#!/bin/sh' "exec python3 \"$TOOLS_DIR/relay-lint.py\" \"\$@\"" > "$real_bin/relay-lint"
+printf '%s\n' '#!/bin/sh' 'echo "DECOY-PATH-LINTER" >&2' 'exit 1' > "$real_bin/relay-lint"
 chmod +x "$real_bin/relay-lint"
-PATH_WITH_REAL="$real_bin:$PATH_NORMAL"
+PATH_WITH_FAKE="$real_bin:$PATH_NORMAL"
 
-assert_case "f4-write-path-only-resolves" "$fallback_relay" "$absent_root" "$empty_home" "$PATH_WITH_REAL" 0 "" || fail=1
-run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$empty_home" "$PATH_WITH_REAL"
+assert_case "f4-write-path-only-is-unlinted" "$fallback_relay" "$absent_root" "$empty_home" "$PATH_WITH_FAKE" 2 "UNLINTED" || fail=1
+run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$empty_home" "$PATH_WITH_FAKE"
 rc=$?
-if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
-  echo "FAIL f4-bash-path-only-resolves: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+if [ "$rc" -ne 2 ] || ! grep -Fq "UNLINTED" "$tmp/stderr" || grep -Fq "DECOY-PATH-LINTER" "$tmp/stderr"; then
+  echo "FAIL f4-bash-path-only-is-unlinted: expected UNLINTED exit 2 without PATH execution, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
 else
-  echo "PASS f4-bash-path-only-resolves"
+  echo "PASS f4-bash-path-only-is-unlinted"
 fi
 
 # l1 pins D1's byte-identity mandate: the resolution ladder must stay
 # byte-identical across both hook entry points (variants Task 4 Step 2 extraction).
-awk '/^if \[ -f "\$skills_root\/tools\/relay-lint\.py" \]/,/^  run_lint relay-lint$/' \
+awk '/^if \[ -f "\$skills_root\/tools\/relay" \] && \[ -d "\$skills_root\/tools\/relay_engine" \]; then$/,/^else$/' \
   "$SCRIPT_DIR/relay-lint-posttooluse.sh" > "$tmp/ladder-hook"
-awk '/^if \[ -f "\$skills_root\/tools\/relay-lint\.py" \]/,/^  run_lint relay-lint$/' \
+awk '/^if \[ -f "\$skills_root\/tools\/relay" \] && \[ -d "\$skills_root\/tools\/relay_engine" \]; then$/,/^else$/' \
   "$SCRIPT_DIR/bash-relay-guard.sh" > "$tmp/ladder-guard"
 if [ ! -s "$tmp/ladder-hook" ]; then
   echo "FAIL l1-ladder-byte-identity: empty extraction — awk range did not match" >&2; fail=1
