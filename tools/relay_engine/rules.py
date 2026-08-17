@@ -1629,7 +1629,8 @@ def a5_resolve_and_compare(path: Path, dkey: str, stem: str, sub: str, declared:
     return errors
 
 
-def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
+def lint_relay_index(path: Path, *, audit: bool = False,
+                     daemon_projection: bool = False) -> LintResult:
     """Check an append-only relay INDEX for timestamp truth and monotonicity.
 
     This is an ORDERING check, not a drift check. Enforced on rows after the
@@ -1638,6 +1639,8 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     stamp matches its file's own filename stamp, and the newest row is not in the
     future. An index that has not been appended to recently is not a defect. Rows
     before the marker are grandfathered history, reported only under audit.
+    A verified daemon projection skips only the final wall-clock ceiling.
+    Ordering and filename agreement remain mandatory for projected bytes.
     """
     result = LintResult()
     text = read(path)
@@ -1763,7 +1766,7 @@ def lint_relay_index(path: Path, *, audit: bool = False) -> LintResult:
     # is not a defect, so the newest row is checked against a ceiling, not a window:
     # a row cannot claim a time later than the clock that appended it. The tight
     # wall-clock window belongs on the relay filename, which is authored once.
-    if parsed:
+    if parsed and not daemon_projection:
         lineno, raw, dt, file_cell = parsed[-1]
         _s, _d, _r, is_utc = filename_timestamp(file_cell)
         now = clock_now(is_utc)
@@ -3127,7 +3130,9 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
 
 
 def lint_relay_root(path: Path, *, template_mode: bool = False,
-                    engine_root: bool = False) -> LintResult:
+                    engine_root: bool = False,
+                    projection_verified: Optional[set[Path]] = None
+                    ) -> LintResult:
     result = LintResult()
     all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
                     key=lambda p: relay_order_key(p, path))
@@ -3150,8 +3155,11 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         for w in r.warnings:
             result.warn(f"{f.relative_to(path)}: {w}")
 
+    projection_verified = (
+        set() if projection_verified is None else projection_verified)
     for idx in index_files:
-        r = lint_relay_index(idx)
+        r = lint_relay_index(
+            idx, daemon_projection=idx in projection_verified)
         for e in r.errors:
             result.error(f"{idx.relative_to(path)}: {e}")
         for w in r.warnings:
