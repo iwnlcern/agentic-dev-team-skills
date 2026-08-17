@@ -290,7 +290,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/check-relay-lint-fixtures.py",
-    "sha256": "b2074f79c5b37092c42d9eeb42769fcfe72f14080785e2e5d11c92cc48f6fcab",
+    "sha256": "c989246263bb98d4c1b5aa7a7133aa21f871f4f1b17d0ef1cff2b53f144b4cae",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -1294,6 +1294,30 @@
     "path": "adt-master/tools/relay-lint-fixtures/hardening/XRF4-root-display/INDEX.md",
     "sha256": "39295a90e61574b7fb4db3f208925f0941dffccc4087f98f52a983538af28f45",
     "source": "tools/relay-lint-fixtures/hardening/XRF4-root-display/INDEX.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-master/tools/relay-lint-fixtures/humangate/HG1-bare-yes.md",
+    "sha256": "edece0c176ab731293ad320ea989f8c7e84870f041c71c3dfad9c4884c32106b",
+    "source": "tools/relay-lint-fixtures/humangate/HG1-bare-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-master/tools/relay-lint-fixtures/humangate/HG2-annotated-yes.md",
+    "sha256": "1f8df3d962ac6c715c588fe80e710b78b5fcd649003d758bef62e88b46418fd4",
+    "source": "tools/relay-lint-fixtures/humangate/HG2-annotated-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-master/tools/relay-lint-fixtures/humangate/HG3-separator-only-yes.md",
+    "sha256": "badb377ec2b241de3a82ad9e9a031f2277cb693e11b4f6590b68fab112948c7f",
+    "source": "tools/relay-lint-fixtures/humangate/HG3-separator-only-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-master/tools/relay-lint-fixtures/humangate/HG4-bare-no.md",
+    "sha256": "d9b270ea61d471582cc88bdd06d66a8d04a10ba445741e240b84542c21399aef",
+    "source": "tools/relay-lint-fixtures/humangate/HG4-bare-no.md"
   },
   {
     "kit_version": "2.9.0",
@@ -10130,7 +10154,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint.py",
-    "sha256": "eef1d2be8294b67e5478c37f9c0bbae99a3c980bbcded4c2cc6c5f5aca87dfa3",
+    "sha256": "d76c7cd2ceab272eba885cc8c5887f258f687e5dd7fdd728864de880cc287e80",
     "source": "tools/relay-lint.py"
   },
   {
@@ -10328,7 +10352,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/check-relay-lint-fixtures.py",
-    "sha256": "b2074f79c5b37092c42d9eeb42769fcfe72f14080785e2e5d11c92cc48f6fcab",
+    "sha256": "c989246263bb98d4c1b5aa7a7133aa21f871f4f1b17d0ef1cff2b53f144b4cae",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -11332,6 +11356,30 @@
     "path": "adt-orchestrator/tools/relay-lint-fixtures/hardening/XRF4-root-display/INDEX.md",
     "sha256": "39295a90e61574b7fb4db3f208925f0941dffccc4087f98f52a983538af28f45",
     "source": "tools/relay-lint-fixtures/hardening/XRF4-root-display/INDEX.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/humangate/HG1-bare-yes.md",
+    "sha256": "edece0c176ab731293ad320ea989f8c7e84870f041c71c3dfad9c4884c32106b",
+    "source": "tools/relay-lint-fixtures/humangate/HG1-bare-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/humangate/HG2-annotated-yes.md",
+    "sha256": "1f8df3d962ac6c715c588fe80e710b78b5fcd649003d758bef62e88b46418fd4",
+    "source": "tools/relay-lint-fixtures/humangate/HG2-annotated-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/humangate/HG3-separator-only-yes.md",
+    "sha256": "badb377ec2b241de3a82ad9e9a031f2277cb693e11b4f6590b68fab112948c7f",
+    "source": "tools/relay-lint-fixtures/humangate/HG3-separator-only-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/humangate/HG4-bare-no.md",
+    "sha256": "d9b270ea61d471582cc88bdd06d66a8d04a10ba445741e240b84542c21399aef",
+    "source": "tools/relay-lint-fixtures/humangate/HG4-bare-no.md"
   },
   {
     "kit_version": "2.9.0",
@@ -20168,7 +20216,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint.py",
-    "sha256": "eef1d2be8294b67e5478c37f9c0bbae99a3c980bbcded4c2cc6c5f5aca87dfa3",
+    "sha256": "d76c7cd2ceab272eba885cc8c5887f258f687e5dd7fdd728864de880cc287e80",
     "source": "tools/relay-lint.py"
   },
   {
@@ -20294,7 +20342,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/check-relay-lint-fixtures.py",
-    "sha256": "b2074f79c5b37092c42d9eeb42769fcfe72f14080785e2e5d11c92cc48f6fcab",
+    "sha256": "c989246263bb98d4c1b5aa7a7133aa21f871f4f1b17d0ef1cff2b53f144b4cae",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -21298,6 +21346,30 @@
     "path": "adt-pair/tools/relay-lint-fixtures/hardening/XRF4-root-display/INDEX.md",
     "sha256": "39295a90e61574b7fb4db3f208925f0941dffccc4087f98f52a983538af28f45",
     "source": "tools/relay-lint-fixtures/hardening/XRF4-root-display/INDEX.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-pair/tools/relay-lint-fixtures/humangate/HG1-bare-yes.md",
+    "sha256": "edece0c176ab731293ad320ea989f8c7e84870f041c71c3dfad9c4884c32106b",
+    "source": "tools/relay-lint-fixtures/humangate/HG1-bare-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-pair/tools/relay-lint-fixtures/humangate/HG2-annotated-yes.md",
+    "sha256": "1f8df3d962ac6c715c588fe80e710b78b5fcd649003d758bef62e88b46418fd4",
+    "source": "tools/relay-lint-fixtures/humangate/HG2-annotated-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-pair/tools/relay-lint-fixtures/humangate/HG3-separator-only-yes.md",
+    "sha256": "badb377ec2b241de3a82ad9e9a031f2277cb693e11b4f6590b68fab112948c7f",
+    "source": "tools/relay-lint-fixtures/humangate/HG3-separator-only-yes.md"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-pair/tools/relay-lint-fixtures/humangate/HG4-bare-no.md",
+    "sha256": "d9b270ea61d471582cc88bdd06d66a8d04a10ba445741e240b84542c21399aef",
+    "source": "tools/relay-lint-fixtures/humangate/HG4-bare-no.md"
   },
   {
     "kit_version": "2.9.0",
@@ -30134,7 +30206,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint.py",
-    "sha256": "eef1d2be8294b67e5478c37f9c0bbae99a3c980bbcded4c2cc6c5f5aca87dfa3",
+    "sha256": "d76c7cd2ceab272eba885cc8c5887f258f687e5dd7fdd728864de880cc287e80",
     "source": "tools/relay-lint.py"
   },
   {

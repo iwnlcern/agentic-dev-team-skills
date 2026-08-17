@@ -714,6 +714,10 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
     ("root", "lockpath/LP2-new-form", 0),
     ("root", "lockpath/LP3-missing", 1),
     ("root", "lockpath/LP4-bare-id", 0),
+    ("file", "humangate/HG1-bare-yes.md", 0),
+    ("file", "humangate/HG2-annotated-yes.md", 0),
+    ("file", "humangate/HG3-separator-only-yes.md", 0),
+    ("file", "humangate/HG4-bare-no.md", 0),
 ]
 
 EXPECTED_ERROR_SET = {
@@ -1323,6 +1327,14 @@ EXPECTED_WARN_SET: dict[str, list[str]] = {
     "ambiguity/AMB3-latest-wins": [
         "04-dispatch.md: 2 relays under 'amb3' qualify as the PLAN-REVIEW parent; selected latest 03-review-mustrevise.md; candidates: 02-review-approve.md",
     ],
+    "humangate/HG1-bare-yes.md": [
+        "HUMAN_GATE_REQUIRED: yes carries no annotation naming its ask; annotate as 'yes — <the decision>'",
+    ],
+    "humangate/HG2-annotated-yes.md": [],
+    "humangate/HG3-separator-only-yes.md": [
+        "HUMAN_GATE_REQUIRED: yes carries no annotation naming its ask; annotate as 'yes — <the decision>'",
+    ],
+    "humangate/HG4-bare-no.md": [],
 }
 
 
