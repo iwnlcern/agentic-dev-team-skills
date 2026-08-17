@@ -96,7 +96,8 @@ class TestIndexCeilingCli(unittest.TestCase):
             cli.client,
             "request",
             side_effect=status_provider,
-        ) if callable(status_provider) else patch.object(
+        ) if callable(status_provider) or isinstance(
+            status_provider, BaseException) else patch.object(
             cli.client,
             "request",
             return_value=status_provider,
@@ -116,6 +117,24 @@ class TestIndexCeilingCli(unittest.TestCase):
                 )
                 self.assertEqual(code, 0)
                 self.assertNotIn("ahead of the", stdout)
+
+    def test_matching_digest_with_other_path_reapplies_ceiling(self):
+        status = self._status()
+        status["projection_events"][-1]["path"] = "OTHER.md"
+        code, stdout, _stderr = self._run(
+            ["lint", "--relay-root", str(self.root)], status,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("ahead of the", stdout)
+
+    def test_matching_digest_with_other_target_reapplies_ceiling(self):
+        status = self._status()
+        status["projection_events"][-1]["target"] = "seats"
+        code, stdout, _stderr = self._run(
+            ["lint", "--relay-root", str(self.root)], status,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("ahead of the", stdout)
 
     def test_digest_mismatch_reapplies_ceiling(self):
         status = self._status()

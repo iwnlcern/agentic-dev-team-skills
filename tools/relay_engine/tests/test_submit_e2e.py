@@ -151,8 +151,11 @@ class TestSubmitE2E(unittest.TestCase):
             ])
         self.assertEqual(status, 1)
         self.assertIn("E-PATH-ESCAPE", stderr.getvalue())
-        self.assertIn("draft", stderr.getvalue())
-        self.assertIn("does not exist beneath the root", stderr.getvalue())
+        self.assertIn(
+            "cause: the draft path .engine/drafts/absent/nope.md "
+            "does not exist beneath the root\n",
+            stderr.getvalue(),
+        )
         self.assertIn("root-relative", stderr.getvalue())
         self.assertNotIn("unexpected error", stderr.getvalue())
 
@@ -166,9 +169,13 @@ class TestSubmitE2E(unittest.TestCase):
             ])
         self.assertEqual(status, 1)
         self.assertIn("E-PATH-ESCAPE", stderr.getvalue())
-        self.assertIn("key", stderr.getvalue())
-        self.assertIn("does not exist beneath the root", stderr.getvalue())
+        self.assertIn(
+            "cause: the key path docs/duplicated/cwd-relative.key "
+            "does not exist beneath the root\n",
+            stderr.getvalue(),
+        )
         self.assertIn("root-relative", stderr.getvalue())
+        self.assertNotIn("unexpected error", stderr.getvalue())
 
     def test_undecodable_draft_envelope_refusal_is_unchanged(self):
         Path(self.root_name, self.draft_rel).write_bytes(b"\xff")

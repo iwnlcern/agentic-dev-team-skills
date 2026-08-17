@@ -100,6 +100,7 @@ def terminate(path):
         data, torn = drop_torn(read_fd_bytes(fd))
         if torn:
             os.ftruncate(fd, len(data))
+            os.fsync(fd)
     finally:
         os.close(fd)
 

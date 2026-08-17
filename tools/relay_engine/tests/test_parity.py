@@ -98,6 +98,7 @@ class TestParity(unittest.TestCase):
             self.assertFalse(Path(isolated, "relay-lint.py").exists())
             actual = _collect(rules)
         frozen = json.loads(GOLDEN.read_text())
+        self.assertEqual(_digest(SCRIPT), frozen["producer_sha256"])
         self.assertEqual(_digest(MANIFEST), frozen["manifest_sha256"])
         self.assertEqual(actual, frozen["verdicts"])
 
