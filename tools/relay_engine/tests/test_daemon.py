@@ -21,12 +21,16 @@ from relay_engine.daemon import (FrameDecoder, SerialWriter, WireFault,
                                  error_response, prepare_socket,
                                  socket_path)
 from relay_engine.paths import Root
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+CID, DID = cid_did()
 
 
 class TestWire(unittest.TestCase):
     def request(self, **changes):
-        value = {"v": 1, "id": str(uuid.uuid4()), "op": "status",
-                 "args": {}}
+        value = {"v": 2, "id": str(uuid.uuid4()), "op": "status",
+                 "args": {}, "cid": CID}
         value.update(changes)
         return value
 
@@ -71,7 +75,8 @@ class TestWire(unittest.TestCase):
         for request, code in cases:
             with self.subTest(code=code), self.assertRaises(WireFault) as caught:
                 decode_request(json.dumps(request).encode("utf-8"))
-            response = error_response(request["id"], caught.exception.error)
+            response = error_response(
+                request["id"], caught.exception.error, DID)
             self.assertEqual(response["id"], request["id"])
             self.assertEqual(response["error"],
                              caught.exception.error.as_dict())
@@ -83,7 +88,7 @@ class TestWire(unittest.TestCase):
         request_id = "00000000-0000-0000-0000-000000000001"
         cases = [
             ("string", b'"snowman \xe2\x98\x83"', "3fce572b141a", 13),
-            ("number", b"2", "d4735e3a265e", 1),
+            ("number", b"3", "4e07408562be", 1),
             ("boolean", b"true", "b5bea41b6c62", 4),
             ("null", b"null", "74234e98afe7", 4),
             ("array", b'["x",2]', "9ca894e6afee", 7),
@@ -97,36 +102,37 @@ class TestWire(unittest.TestCase):
             with self.subTest(label=label):
                 with self.assertRaises(WireFault) as caught:
                     decode_request(b'{"v":' + version_bytes + suffix)
-                response = error_response(request_id, caught.exception.error)
+                response = error_response(
+                    request_id, caught.exception.error, DID)
                 cause = ("unsupported protocol version unrecognized-input "
                          "(sha256:%s, length %d)" % (digest, length))
                 expected = {
-                    "v": 1,
+                    "v": 2,
                     "id": request_id,
                     "ok": False,
+                    "did": DID,
                     "error": {
                         "code": "E-WIRE-VERSION",
                         "cause": cause,
-                        "remedy": "send v:1",
+                        "remedy": "send v:2",
                         "cls": "wire",
                     },
                 }
                 self.assertEqual(response, expected)
-                expected_json = (
-                    '{"error":{"cause":"%s","cls":"wire",'
-                    '"code":"E-WIRE-VERSION","remedy":"send v:1"},'
-                    '"id":"%s","ok":false,"v":1}' %
-                    (cause, request_id)).encode("utf-8")
+                expected_json = json.dumps(
+                    expected, ensure_ascii=False, separators=(",", ":"),
+                    sort_keys=True).encode("utf-8")
                 frame = encode_frame(response)
                 self.assertEqual(frame[:4], len(expected_json).to_bytes(4, "big"))
                 self.assertEqual(frame[4:], expected_json)
 
     def test_pre_id_framing_response_uses_null_id_and_exact_error(self):
         fault = WireFault(errors.error_for("E-FRAMING", reason="not-json"))
-        response = error_response(None, fault.error)
+        response = error_response(None, fault.error, DID)
         expected = errors.error_for("E-FRAMING", reason="not-json").as_dict()
         self.assertEqual(response,
-            {"v": 1, "id": None, "ok": False, "error": expected})
+            {"v": 2, "id": None, "ok": False, "error": expected,
+             "did": DID})
 
     def test_every_operation_schema_accepts_its_minimal_shape(self):
         args = {
@@ -394,7 +400,8 @@ class TestRuntime(unittest.TestCase):
             client.close()
 
     def request(self, op):
-        return {"v": 1, "id": str(uuid.uuid4()), "op": op, "args": {}}
+        return {"v": 2, "id": str(uuid.uuid4()), "op": op, "args": {},
+                "cid": CID}
 
     def test_startup_trace_ready_serve_stop_and_release(self):
         with tempfile.TemporaryDirectory() as root_name:

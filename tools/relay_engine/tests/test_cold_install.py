@@ -9,6 +9,7 @@ import unittest
 from relay_engine.tests.test_e2e_chain import (
     PYTHON, RelayProcess, ruled_manifest, run_chain,
 )
+from relay_engine.tests.test_identity_matrix import cid_did
 
 
 def _write_log(path, records):
@@ -86,7 +87,8 @@ class TestColdInstall(unittest.TestCase):
             process = RelayProcess(
                 sanitized + [install_root / "relay"], environment,
                 install_root)
-            result = run_chain(process, root)
+            cid, did = cid_did(install_root, install_root)
+            result = run_chain(process, root, cid, did)
             self.assertEqual(result["bypass"]["origin"], "hand")
             self.assertTrue(all(record["status"] == 0
                                 for record in process.log))

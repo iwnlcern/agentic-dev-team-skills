@@ -116,7 +116,7 @@ class TestWireTemplates(unittest.TestCase):
             ("E-WIRE-VERSION", {"rejected_version": rv},
              {"code": "E-WIRE-VERSION",
               "cause": "unsupported protocol version unrecognized-input (sha256:0123456789ab, length 7)",
-              "remedy": "send v:1", "cls": "wire"}),
+              "remedy": "send v:2", "cls": "wire"}),
             ("E-WIRE-OP", {"rejected_op": rv},
              {"code": "E-WIRE-OP",
               "cause": "unknown op unrecognized-input (sha256:0123456789ab, length 7)",
@@ -138,6 +138,11 @@ class TestWireTemplates(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertEqual(errors.error_for(code, **params).as_dict(),
                                  expected)
+
+    def test_wire_version_explain_uses_v2_contract(self):
+        explain, remedy = errors.explain_for("E-WIRE-VERSION")
+        self.assertEqual(explain, "wire requests use protocol version two")
+        self.assertEqual(remedy, "send v:2")
 
     def test_every_template_placeholder_has_one_validator(self):
         expected = set()

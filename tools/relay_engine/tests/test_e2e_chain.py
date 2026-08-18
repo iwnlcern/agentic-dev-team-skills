@@ -11,10 +11,12 @@ import time
 import unittest
 
 from relay_engine import cli, errors, strings
+from relay_engine.tests.test_identity_matrix import cid_did
 
 
 SOURCE_ROOT = Path(__file__).parents[3]
 PYTHON = os.environ.get("PYTHON", os.sys.executable)
+CID, DID = cid_did()
 ALLOWED_SITE_FIELDS = (
     "factory=strings._make_emitter",
     "verbatim_site=cli.cmd_show",
@@ -233,13 +235,25 @@ class RelayProcess:
         return result
 
 
-def run_chain(process, root):
+def run_chain(process, root, cid=None, did=None):
     root = Path(root)
     drafts = root / "drafts"
     drafts.mkdir()
     process.run("daemon", "start", "--root", os.fspath(root),
                 "--run-id", "e2e", "--seat",
                 "e2e.orchestrator-planner")
+    if cid is not None:
+        reported = process.run("version", json_result=True)
+        actual_cid = {
+            "kit": reported["kit"], "fp": reported["fingerprint"],
+            "install": reported["install"],
+        }
+        if actual_cid != cid:
+            raise AssertionError("client identity plumbing mismatch")
+    if did is not None:
+        state = json.loads(Path(root, ".engine/daemon.json").read_text())
+        if state.get("identity") != did:
+            raise AssertionError("daemon identity plumbing mismatch")
     try:
         planner = process.run(
             "seat", "register", "e2e.pair.planner", "--role", "Planner",
@@ -355,7 +369,7 @@ class TestE2EChain(unittest.TestCase):
             process = RelayProcess(
                 [PYTHON, SOURCE_ROOT / "tools/relay"], environment,
                 Path(temporary))
-            result = run_chain(process, root)
+            result = run_chain(process, root, CID, DID)
             self.assertEqual(result["review"]["advisories"], [])
             self.assertEqual(result["bypass"]["origin"], "hand")
 

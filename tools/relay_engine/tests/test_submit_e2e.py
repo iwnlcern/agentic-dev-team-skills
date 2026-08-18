@@ -9,10 +9,19 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
 from relay_engine import cli, client, daemon, errors
-from relay_engine.client import discover_root, submit
+from relay_engine.client import discover_root
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
 from relay_engine.ledger import admit, init_schema, open_ledger
 from relay_engine.paths import Root, ensure_engine_dir
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+CID, DID = cid_did()
+
+
+def submit(*args, **kwargs):
+    kwargs.setdefault("cid", CID)
+    return client.submit(*args, **kwargs)
 
 
 DRAFT = """## relay
@@ -69,7 +78,7 @@ class TestSubmitE2E(unittest.TestCase):
         self.thread = threading.Thread(
             target=daemon.start, args=(self.root_name,),
             kwargs={"ready_fd": write_fd,
-                    "socket_override": self.socket_name})
+                    "socket_override": self.socket_name, "did": DID})
         self.thread.start()
         self.assertEqual(os.read(self.read_fd, 1), b"R")
         os.close(self.read_fd)
@@ -368,7 +377,7 @@ class TestSubmitE2E(unittest.TestCase):
             self.thread = threading.Thread(
                 target=daemon.start, args=(self.root_name,),
                 kwargs={"ready_fd": write_fd,
-                        "socket_override": self.socket_name})
+                        "socket_override": self.socket_name, "did": DID})
             self.thread.start()
             self.assertEqual(os.read(self.read_fd, 1), b"R")
             os.close(self.read_fd)

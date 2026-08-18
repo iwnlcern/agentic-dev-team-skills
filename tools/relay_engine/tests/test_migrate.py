@@ -11,6 +11,10 @@ from relay_engine.jcs import jcs_encode
 from relay_engine.ledger import epoch_state, init_schema
 from relay_engine.paths import Root, ensure_engine_dir
 from relay_engine.tests.check_crash_matrix import matrix_case
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+CID, DID = cid_did()
 
 
 DRAFT = """## relay
@@ -169,16 +173,17 @@ class TestMigrate(unittest.TestCase):
         thread = threading.Thread(
             target=daemon.start, args=(self.temp.name,), kwargs={
                 "ready_fd": write_fd, "socket_override": socket_name,
-                "run_id": "v29"})
+                "run_id": "v29", "did": DID})
         thread.start()
         self.assertEqual(os.read(read_fd, 1), b"R")
         os.close(read_fd)
         try:
-            result = client.request(self.temp.name, "migrate.check", {})
+            result = client.request(
+                self.temp.name, "migrate.check", {}, cid=CID)
             self.assertEqual(result["verdict"], "green")
             with self.assertRaises(BlockingIOError):
                 daemon.acquire_lease(self.root)
-            client.request(self.temp.name, "daemon.stop", {})
+            client.request(self.temp.name, "daemon.stop", {}, cid=CID)
         finally:
             thread.join(5)
         self.assertFalse(thread.is_alive())

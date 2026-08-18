@@ -12,6 +12,10 @@ from relay_engine import cli, client, daemon, errors, seats
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.paths import Root, ensure_engine_dir
 from relay_engine.tests.check_crash_matrix import matrix_case
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+CID, DID = cid_did()
 
 
 class TestSeats(unittest.TestCase):
@@ -96,7 +100,7 @@ class TestSeats(unittest.TestCase):
         thread = threading.Thread(
             target=daemon.start, args=(self.temp.name,),
             kwargs={"ready_fd": write_fd, "socket_override": socket_name,
-                    "top_seat": "v29.orchestrator-planner"})
+                    "top_seat": "v29.orchestrator-planner", "did": DID})
         thread.start()
         self.assertEqual(os.read(read_fd, 1), b"R")
         os.close(read_fd)
@@ -111,17 +115,19 @@ class TestSeats(unittest.TestCase):
             self.assertTrue(Path(self.temp.name,
                                  issued["key_path"]).exists())
             replaced = client.seat_register(
-                self.temp.name, "v29-b.planner", "Planner", replace=True)
+                self.temp.name, "v29-b.planner", "Planner", replace=True,
+                cid=CID)
             self.assertNotEqual(issued["occupant_id"],
                                 replaced["occupant_id"])
             history = client.seat_show(
-                self.temp.name, "v29-b.planner")["history"]
+                self.temp.name, "v29-b.planner", cid=CID)["history"]
             self.assertEqual([row["event"] for row in history],
                              ["occupied", "replaced", "occupied"])
-            roster = client.request(self.temp.name, "roster", {})
+            roster = client.request(self.temp.name, "roster", {}, cid=CID)
             self.assertEqual(roster["count"], 2)
-            client.seat_stand_down(self.temp.name, "v29-b.planner")
-            client.request(self.temp.name, "daemon.stop", {})
+            client.seat_stand_down(
+                self.temp.name, "v29-b.planner", cid=CID)
+            client.request(self.temp.name, "daemon.stop", {}, cid=CID)
         finally:
             thread.join(5)
         self.assertFalse(thread.is_alive())

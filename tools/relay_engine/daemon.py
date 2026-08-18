@@ -17,9 +17,10 @@ import stat
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
-                          rules, seats, strings, supersede)
+                          rules, seats, strings, supersede, version)
 from relay_engine.ledger import init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -36,6 +37,9 @@ _PROCESS_STARTED = str(time.time_ns())
 _STARTUP_STAGES = {"run-identity": commission.startup_run_identity,
                    "top-seat": seats.startup_top_seat,
                    "recovery": reconcile.startup_recovery}
+ADMIN_OPS = {"status", "daemon.stop"}
+_FP_ERRORS = {"missing-member", "extra-member", "non-regular-member",
+              "unreadable-member"}
 
 
 class WireFault(Exception):
@@ -148,7 +152,73 @@ def _validate_args(op, args):
             raise _args_fault(op, "%s:string" % key)
 
 
-def decode_request(body):
+def _local_identity(tools_dir=None):
+    if tools_dir is None:
+        tools_dir = Path(__file__).resolve().parents[1]
+    tools_dir = Path(tools_dir).resolve()
+    identity = {"kit": version.KIT_VERSION, "install": os.fspath(tools_dir)}
+    try:
+        identity["fp"] = version.fingerprint(tools_dir)
+    except version.FingerprintError as error:
+        identity["fp_error"] = str(error)
+    return identity
+
+
+def _valid_identity(value):
+    if not isinstance(value, dict):
+        return False
+    if set(value) == {"kit", "fp", "install"}:
+        fingerprint_valid = strings.valid_fp(value["fp"])
+    elif set(value) == {"kit", "fp_error", "install"}:
+        fingerprint_valid = (isinstance(value["fp_error"], str) and
+                             value["fp_error"] in _FP_ERRORS)
+    else:
+        return False
+    return (strings.valid_kit(value["kit"]) and fingerprint_valid and
+            strings.valid_install(value["install"]))
+
+
+def _matching_identity(cid, did):
+    return (_valid_identity(cid) and _valid_identity(did) and
+            "fp" in cid and "fp" in did and
+            cid["kit"] == did["kit"] and cid["fp"] == did["fp"])
+
+
+def _identity_value(identity, key):
+    return identity.get(key) if isinstance(identity, dict) else None
+
+
+def _version_mismatch(cid, did, *, attribute_damage=True):
+    error = errors.error_for(
+        "E-VERSION-MISMATCH",
+        client_install=_identity_value(cid, "install"),
+        client_kit=_identity_value(cid, "kit"),
+        client_fp=_identity_value(cid, "fp"),
+        daemon_install=_identity_value(did, "install"),
+        daemon_kit=_identity_value(did, "kit"),
+        daemon_fp=_identity_value(did, "fp"),
+    )
+    client_damaged = isinstance(cid, dict) and "fp_error" in cid
+    daemon_damaged = isinstance(did, dict) and "fp_error" in did
+    if attribute_damage and client_damaged != daemon_damaged:
+        stale = "client" if client_damaged else "daemon"
+        remedy = errors._VersionMismatchRemedy(
+            stale, error.params["client_install"],
+            error.params["daemon_install"])
+        error.params["remedy"] = remedy
+        error.remedy = strings.render(
+            "error-version-mismatch-remedy", remedy=remedy)
+    return error
+
+
+def _old_client_mismatch(did):
+    return _version_mismatch({
+        "kit": "0.0.0", "fp": "0" * 64,
+        "install": "/unknown-old-client",
+    }, did, attribute_damage=False)
+
+
+def decode_request(body, did=None):
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -161,7 +231,12 @@ def decode_request(body):
             "E-FRAMING", reason="not-json")) from exc
     if not isinstance(request, dict):
         raise WireFault(errors.error_for("E-FRAMING", reason="not-json"))
-    if set(request) != {"v", "id", "op", "args"}:
+    if request.get("v") == 1 and did is not None:
+        raise WireFault(_old_client_mismatch(did))
+    if type(request.get("v")) is not int or request.get("v") != 2:
+        raise WireFault(errors.error_for(
+            "E-WIRE-VERSION", rejected_version=_rejected(request.get("v"))))
+    if set(request) != {"v", "id", "op", "args", "cid"}:
         raise WireFault(errors.error_for("E-FRAMING", reason="not-json"))
     request_id = request["id"]
     try:
@@ -170,9 +245,6 @@ def decode_request(body):
     except (AttributeError, TypeError, ValueError) as exc:
         raise WireFault(errors.error_for(
             "E-FRAMING", reason="not-json")) from exc
-    if type(request["v"]) is not int or request["v"] != 1:
-        raise WireFault(errors.error_for(
-            "E-WIRE-VERSION", rejected_version=_rejected(request["v"])))
     op = request["op"]
     if op not in _SCHEMAS:
         raise WireFault(errors.error_for(
@@ -181,13 +253,14 @@ def decode_request(body):
     return request
 
 
-def error_response(request_id, error):
-    return {"v": 1, "id": request_id, "ok": False,
-            "error": error.as_dict()}
+def error_response(request_id, error, did):
+    return {"v": 2, "id": request_id, "ok": False,
+            "error": error.as_dict(), "did": did}
 
 
-def success_response(request_id, result):
-    return {"v": 1, "id": request_id, "ok": True, "result": result}
+def success_response(request_id, result, did):
+    return {"v": 2, "id": request_id, "ok": True, "result": result,
+            "did": did}
 
 
 class SerialWriter:
@@ -269,14 +342,14 @@ def _log_diagnostic(exc):
 
 def start(root_path=None, ready_fd=None, handlers=None, trace=None,
           socket_override=None, top_seat=None, top_role=None,
-          top_dispatch=None, run_id=None, commissioning_record=None):
+          top_dispatch=None, run_id=None, commissioning_record=None, did=None):
     """Bind diagnostics, or run a complete daemon when a root is supplied."""
     strings.set_diagnostic_sink(_log_diagnostic)
     if root_path is None:
         return None
     return _run_daemon(root_path, ready_fd, handlers or {}, trace,
                        socket_override, top_seat, top_role, top_dispatch,
-                       run_id, commissioning_record)
+                       run_id, commissioning_record, did)
 
 
 @dataclass
@@ -449,9 +522,10 @@ def _prepare_runtime_socket(path, cleanup_allowed):
 
 
 class _SocketService:
-    def __init__(self, listener, writer):
+    def __init__(self, listener, writer, did):
         self.listener = listener
         self.writer = writer
+        self.did = did
         self.stopping = threading.Event()
         self.connections = []
         self._lock = threading.Lock()
@@ -473,11 +547,12 @@ class _SocketService:
                 try:
                     frames = decoder.feed(data)
                 except WireFault as fault:
-                    self._send(connection, error_response(None, fault.error))
+                    self._send(connection, error_response(
+                        None, fault.error, self.did))
                     return
                 for frame in frames:
                     try:
-                        request = decode_request(frame)
+                        request = decode_request(frame, self.did)
                     except WireFault as fault:
                         request_id = None
                         try:
@@ -487,15 +562,21 @@ class _SocketService:
                         except (UnicodeDecodeError, json.JSONDecodeError):
                             pass
                         self._send(connection, error_response(
-                            request_id, fault.error))
+                            request_id, fault.error, self.did))
                         if fault.error.code == "E-FRAMING":
                             return
+                        continue
+                    if (request["op"] not in ADMIN_OPS and
+                            not _matching_identity(request["cid"], self.did)):
+                        self._send(connection, error_response(
+                            request["id"], _version_mismatch(
+                                request["cid"], self.did), self.did))
                         continue
                     try:
                         future = self.writer.enqueue(request)
                     except errors.EngineError as exc:
                         self._send(connection, error_response(
-                            request["id"], exc))
+                            request["id"], exc, self.did))
                         continue
                     if request["op"] == "daemon.stop":
                         self.writer.begin_stop()
@@ -504,9 +585,11 @@ class _SocketService:
                     try:
                         result = future.result()
                     except errors.EngineError as exc:
-                        response = error_response(request["id"], exc)
+                        response = error_response(
+                            request["id"], exc, self.did)
                     else:
-                        response = success_response(request["id"], result)
+                        response = success_response(
+                            request["id"], result, self.did)
                     self._send(connection, response)
         finally:
             connection.close()
@@ -631,7 +714,7 @@ def _default_handler(ledger, root, state, handlers, request):
 
 def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
                 top_seat, top_role, top_dispatch, run_id,
-                commissioning_record):
+                commissioning_record, did):
     global _log_fd
     root = None
     lease = None
@@ -653,10 +736,15 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
         socket_name = socket_path(root.path, socket_override)
         cleanup_allowed = (not os.path.lexists(socket_name) or
                            _allow_stale_cleanup(root))
+        if did is None:
+            did = _local_identity()
+        else:
+            did = dict(did)
         state = {
             "pid": os.getpid(), "pid_start_time": _pid_start_time(os.getpid()),
             "nonce": str(uuid.uuid4()), "state": "starting",
-            "socket": socket_name, "version": 1, "schema_version": 1,
+            "socket": socket_name, "version": 2, "schema_version": 1,
+            "identity": did,
         }
         _write_state(root, state)
         _trace(trace, "starting-record")
@@ -720,7 +808,7 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
             ready_stream = None
             ready_fd = None
             _trace(trace, "ready-pipe-closed")
-        service = _SocketService(listener, writer)
+        service = _SocketService(listener, writer, did)
         service.serve()
         writer.begin_stop()
         writer.join(5)
@@ -778,7 +866,7 @@ def _close_inherited(keep):
 
 def launch(root_path, handlers=None, socket_override=None, timeout=10.0,
            top_seat=None, top_role=None, top_dispatch=None, run_id=None,
-           commissioning_record=None):
+           commissioning_record=None, did=None):
     read_fd, write_fd = os.pipe()
     first = os.fork()
     if first == 0:
@@ -795,7 +883,7 @@ def launch(root_path, handlers=None, socket_override=None, timeout=10.0,
                       socket_override=socket_override, top_seat=top_seat,
                       top_role=top_role, top_dispatch=top_dispatch,
                       run_id=run_id,
-                      commissioning_record=commissioning_record)
+                      commissioning_record=commissioning_record, did=did)
             except BaseException:
                 os._exit(1)
             os._exit(0)
