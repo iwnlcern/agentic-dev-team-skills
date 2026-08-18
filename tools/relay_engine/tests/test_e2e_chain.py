@@ -12,6 +12,7 @@ import unittest
 
 from relay_engine import cli, errors, strings
 from relay_engine.tests.test_identity_matrix import cid_did
+from relay_engine.version import ROSTER
 
 
 SOURCE_ROOT = Path(__file__).parents[3]
@@ -76,6 +77,9 @@ def ruled_manifest():
     for plugin in ("adt-master", "adt-orchestrator", "adt-pair"):
         prefix = "plugins/" + plugin + "/"
         entries.append((standalone, prefix + "tools/relay-lint.py"))
+        for member in ROSTER:
+            entries.append((SOURCE_ROOT / "tools" / member,
+                            prefix + "tools/" + member))
         for source in installed_markdown:
             entries.append((source, prefix +
                             source.relative_to(SOURCE_ROOT).as_posix()))
@@ -360,6 +364,16 @@ def run_chain(process, root, cid=None, did=None):
 
 
 class TestE2EChain(unittest.TestCase):
+    def test_ruled_manifest_reaches_each_bundle_engine_copy(self):
+        destinations = {destination for _, destination in ruled_manifest()}
+        markdown = {destination for destination, _ in installed_markdown()}
+        for plugin in ("adt-pair", "adt-orchestrator", "adt-master"):
+            with self.subTest(plugin=plugin):
+                prefix = "plugins/%s/tools/" % plugin
+                self.assertTrue({prefix + member for member in ROSTER}
+                                .issubset(destinations))
+                self.assertIn(prefix + "relay_engine/README.md", markdown)
+
     def test_handoff_chain_reconcile_and_lint(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary, "root")

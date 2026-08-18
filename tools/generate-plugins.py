@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import shutil
 import stat
@@ -14,7 +15,32 @@ from pathlib import Path
 from typing import Iterable
 
 
-KIT_VERSION = "2.9.0"
+_version = importlib.import_module("relay_engine.version")
+KIT_VERSION = _version.KIT_VERSION
+ENGINE_SET = tuple(_version.ROSTER)
+assert ENGINE_SET == (
+    "relay",
+    "relay_engine/README.md",
+    "relay_engine/__init__.py",
+    "relay_engine/cli.py",
+    "relay_engine/client.py",
+    "relay_engine/commission.py",
+    "relay_engine/cycles.py",
+    "relay_engine/daemon.py",
+    "relay_engine/envelope.py",
+    "relay_engine/errors.py",
+    "relay_engine/jcs.py",
+    "relay_engine/ledger.py",
+    "relay_engine/migrate.py",
+    "relay_engine/paths.py",
+    "relay_engine/reconcile.py",
+    "relay_engine/render.py",
+    "relay_engine/rules.py",
+    "relay_engine/seats.py",
+    "relay_engine/strings.py",
+    "relay_engine/supersede.py",
+    "relay_engine/version.py",
+)
 MANIFEST_PATH = "PROVENANCE.json"
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_ROOT = ROOT / "plugins"
@@ -87,7 +113,11 @@ TOOLS_SET = (
     "relay-lint-fixtures",
     "adapters",
 )
-VERBATIM_COPY_ROOTS = tuple(f"tools/{path}" for path in TOOLS_SET) + ("vendor",)
+VERBATIM_COPY_ROOTS = (
+    tuple(f"tools/{path}" for path in TOOLS_SET)
+    + tuple(f"tools/{path}" for path in ENGINE_SET)
+    + ("vendor",)
+)
 
 
 def sorted_files(path: Path) -> Iterable[Path]:
@@ -217,6 +247,9 @@ def generate_tree(output: Path) -> None:
                 record_tree(source, destination, output)
             else:
                 record_copy(source, destination, output)
+        for engine_member in ENGINE_SET:
+            record_copy(ROOT / "tools" / engine_member,
+                        plugin_root / "tools" / engine_member, output)
         record_tree(ROOT / "vendor", plugin_root / "vendor", output)
         record_copy(ROOT / "LICENSE", plugin_root / "LICENSE", output)
         record_tree(ROOT / "LICENSES", plugin_root / "LICENSES", output)

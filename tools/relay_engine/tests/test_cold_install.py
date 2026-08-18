@@ -10,6 +10,7 @@ from relay_engine.tests.test_e2e_chain import (
     PYTHON, RelayProcess, ruled_manifest, run_chain,
 )
 from relay_engine.tests.test_identity_matrix import cid_did
+from relay_engine.version import KIT_VERSION, ROSTER, fingerprint
 
 
 def _write_log(path, records):
@@ -49,6 +50,12 @@ class TestColdInstall(unittest.TestCase):
                     os.path.commonpath((install_root.resolve(),
                                         destination.resolve())),
                     os.fspath(install_root.resolve()))
+            self.assertTrue(set(ROSTER).issubset(destinations))
+            self.assertFalse(any(
+                part in {"tests", "fixtures", "__pycache__"}
+                for destination in destinations
+                for part in Path(destination).parts
+            ))
 
             home = outside / "home"
             home.mkdir()
@@ -81,6 +88,21 @@ class TestColdInstall(unittest.TestCase):
                 cwd=install_root, env=environment, stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertEqual(probe.returncode, 0, probe.stderr)
+
+            version = subprocess.run(
+                sanitized + [install_root / "relay", "version"],
+                cwd=install_root, env=environment, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertEqual(version.returncode, 0, version.stderr)
+            self.assertEqual(
+                json.loads(version.stdout),
+                {
+                    "fingerprint": fingerprint(
+                        Path(__file__).parents[2]),
+                    "install": os.path.realpath(install_root),
+                    "kit": KIT_VERSION,
+                },
+            )
 
             root = outside / "relay-root"
             root.mkdir()

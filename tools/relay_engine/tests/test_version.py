@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from relay_engine.version import (
 
 TOOLS = Path(__file__).parents[2]
 REPO = TOOLS.parent
+GENERATOR = REPO / "tools" / "generate-plugins.py"
 EXPECTED_ROSTER = (
     "relay",
     "relay_engine/README.md",
@@ -98,6 +100,14 @@ def _invoke_version(tools_dir):
     )
 
 
+def _load_generator():
+    specification = importlib.util.spec_from_file_location(
+        "generate_plugins_under_test", GENERATOR)
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
 class TestVersion(unittest.TestCase):
     def assert_reason(self, tools_dir, reason):
         with self.assertRaises(FingerprintError) as raised:
@@ -164,6 +174,50 @@ class TestVersion(unittest.TestCase):
                 self.assertEqual(invoked.returncode, 0, invoked.stderr)
                 after.append(fingerprint(copy))
             self.assertEqual(len(set(before + after)), 1)
+
+    def test_generated_bundles_report_the_canonical_version_and_fingerprint(self):
+        generator = _load_generator()
+        canonical_fingerprint = _independent_fingerprint(TOOLS)
+        self.assertEqual(generator.KIT_VERSION, KIT_VERSION)
+        self.assertEqual(generator.ENGINE_SET, EXPECTED_ROSTER)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "plugins"
+            output.mkdir()
+            generator.generate_tree(output)
+            provenance = {
+                entry["path"]: entry
+                for entry in json.loads((output / "PROVENANCE.json").read_text())
+            }
+            for plugin in ("adt-pair", "adt-orchestrator", "adt-master"):
+                with self.subTest(plugin=plugin):
+                    plugin_root = output / plugin
+                    tools_dir = plugin_root / "tools"
+                    manifest = json.loads((plugin_root / ".claude-plugin" /
+                                           "plugin.json").read_text())
+                    self.assertEqual(manifest["version"], KIT_VERSION)
+                    self.assertEqual(fingerprint(tools_dir), canonical_fingerprint)
+                    self.assertFalse((tools_dir / "relay_engine/tests").exists())
+                    self.assertFalse((tools_dir / "relay_engine/fixtures").exists())
+                    self.assertFalse(any(path.name == "__pycache__"
+                                         for path in tools_dir.rglob("__pycache__")))
+                    version = _invoke_version(tools_dir)
+                    self.assertEqual(version.returncode, 0, version.stderr)
+                    self.assertEqual(
+                        json.loads(version.stdout),
+                        {
+                            "fingerprint": canonical_fingerprint,
+                            "install": os.path.realpath(tools_dir),
+                            "kit": KIT_VERSION,
+                        },
+                    )
+                    for member in EXPECTED_ROSTER:
+                        generated = "%s/tools/%s" % (plugin, member)
+                        self.assertEqual(provenance[generated]["source"],
+                                         "tools/" + member)
+                        self.assertEqual(provenance[generated]["kit_version"],
+                                         KIT_VERSION)
+                        self.assertEqual(provenance[generated]["sha256"], hashlib.sha256(
+                            (TOOLS / member).read_bytes()).hexdigest())
 
     def test_extra_direct_and_nested_members_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
