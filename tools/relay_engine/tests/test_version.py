@@ -67,6 +67,20 @@ def _independent_fingerprint(tools_dir):
     return digest.hexdigest()
 
 
+def _tree_state(root):
+    if not root.exists():
+        return None
+    state = []
+    for path in (root, *sorted(root.rglob("*"))):
+        status = path.lstat()
+        content = (hashlib.sha256(path.read_bytes()).hexdigest()
+                   if stat.S_ISREG(status.st_mode) else None)
+        state.append((path.relative_to(root).as_posix(),
+                      stat.S_IFMT(status.st_mode), status.st_size,
+                      status.st_mtime_ns, content))
+    return tuple(state)
+
+
 def _invoke_rules(tools_dir):
     environment = os.environ.copy()
     prior = environment.get("PYTHONPATH")
@@ -145,7 +159,7 @@ class TestVersion(unittest.TestCase):
                 _independent_fingerprint(first),
             )
 
-    def test_copy_oracle_ignores_tests_and_cache_before_and_after_import(self):
+    def test_copy_oracle_ignores_cache_without_polluting_generated_bundles(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shared = root / "shared" / "tools"
@@ -153,15 +167,23 @@ class TestVersion(unittest.TestCase):
             shutil.copytree(TOOLS, shared)
             _stage_roster(bundle)
             generated_copies = []
+            live_generated_caches = []
             for plugin in ("adt-pair", "adt-orchestrator", "adt-master"):
                 generated = REPO / "plugins" / plugin / "tools"
                 if (generated / "relay_engine" / "version.py").is_file():
-                    generated_copies.append(generated)
+                    live_generated_caches.append(
+                        generated / "relay_engine" / "__pycache__")
+                    staged_generated = root / "generated" / plugin / "tools"
+                    shutil.copytree(generated, staged_generated)
+                    generated_copies.append(staged_generated)
             copies = [TOOLS, shared]
             if len(generated_copies) == 3:
                 copies.extend(generated_copies)
             else:
                 copies.append(bundle)
+            live_cache_state = {
+                cache: _tree_state(cache) for cache in live_generated_caches
+            }
 
             before = []
             after = []
@@ -174,6 +196,10 @@ class TestVersion(unittest.TestCase):
                 self.assertEqual(invoked.returncode, 0, invoked.stderr)
                 after.append(fingerprint(copy))
             self.assertEqual(len(set(before + after)), 1)
+            self.assertEqual(
+                {cache: _tree_state(cache) for cache in live_generated_caches},
+                live_cache_state,
+            )
 
     def test_generated_bundles_report_the_canonical_version_and_fingerprint(self):
         generator = _load_generator()
@@ -263,6 +289,35 @@ class TestVersion(unittest.TestCase):
                 self.assert_reason(unreadable, "unreadable-member")
             finally:
                 unreadable_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_symlink_named_pycache_is_rejected_before_exclusion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / "staged"
+            excluded_target = root / "excluded-target"
+            _stage_roster(staged)
+            excluded_target.mkdir()
+            (staged / "relay_engine" / "__pycache__").symlink_to(
+                excluded_target, target_is_directory=True)
+            self.assert_reason(staged, "non-regular-member")
+
+    def test_symlink_named_top_level_tests_is_rejected_before_exclusion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / "staged"
+            excluded_target = root / "excluded-target"
+            _stage_roster(staged)
+            excluded_target.mkdir()
+            (staged / "relay_engine" / "tests").symlink_to(
+                excluded_target, target_is_directory=True)
+            self.assert_reason(staged, "non-regular-member")
+
+    def test_fifo_named_pyc_is_rejected_before_exclusion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary) / "staged"
+            _stage_roster(staged)
+            os.mkfifo(staged / "relay_engine" / "ignored.pyc")
+            self.assert_reason(staged, "non-regular-member")
 
     def test_member_changes_rename_addition_and_removal_are_detected(self):
         with tempfile.TemporaryDirectory() as temporary:

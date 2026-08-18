@@ -96,6 +96,18 @@ def _matching_identity(cid, did):
             cid["kit"] == did["kit"] and cid["fp"] == did["fp"])
 
 
+def _same_identity(first, second):
+    if not _valid_identity(first) or not _valid_identity(second):
+        return False
+    if first["kit"] != second["kit"]:
+        return False
+    if "fp" in first and "fp" in second:
+        return first["fp"] == second["fp"]
+    if "fp_error" in first and "fp_error" in second:
+        return first["fp_error"] == second["fp_error"]
+    return False
+
+
 def _identity_value(identity, key):
     return identity.get(key) if isinstance(identity, dict) else None
 
@@ -176,8 +188,11 @@ def request(root_name, op, args, timeout=10.0, cid=None):
         protocol = 1
     else:
         protocol = 2
+        daemon_identity = record["identity"]
+        if not _valid_identity(cid) or not _valid_identity(daemon_identity):
+            raise _mismatch(cid, daemon_identity)
         if op not in V1_ADMIN_OPS and not _matching_identity(
-                cid, record["identity"]):
+                cid, daemon_identity):
             raise _mismatch(cid, record["identity"])
     request_id = str(uuid.uuid4())
     value = {"v": protocol, "id": request_id, "op": op, "args": args}
@@ -195,8 +210,7 @@ def request(root_name, op, args, timeout=10.0, cid=None):
         raise ValueError("response version mismatch")
     if protocol == 2:
         response_did = response.get("did")
-        if op not in V1_ADMIN_OPS and not _matching_identity(
-                cid, response_did):
+        if not _same_identity(record["identity"], response_did):
             raise _mismatch(cid, response_did)
     if not response.get("ok"):
         raise RemoteError(response["error"])

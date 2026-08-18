@@ -260,7 +260,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "10b8c73e6b0a06e840b4e102eb72e2285e62af2175d0eb26c00298b44c761f0c",
+    "sha256": "e321ee88873cf25f723b76c6713a832e57759b784689691bf36aeaafa5819a84",
     "source": "tools/adapters/README.md"
   },
   {
@@ -284,7 +284,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "0a9aaf818ed7793c985350a59df15aa0bc2b5df5927e28b636a3b448b9ff878b",
+    "sha256": "95a5c794508a9736c4d84b6e748272310a4c363dc017e1ada2358c0e740ee480",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -10166,7 +10166,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay_engine/README.md",
-    "sha256": "d12bf45ac36fe1a934f4773118f02b7f2639da87c721664953e4c55189181029",
+    "sha256": "1b082a121851faa5438976d480d8eb65bf8d110e4ad33748e13475eca0796528",
     "source": "tools/relay_engine/README.md"
   },
   {
@@ -10184,7 +10184,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay_engine/client.py",
-    "sha256": "be8e2916286932e0683af2af49e3f9e40209bc3a3ca881a6bc0b0be6a9be0702",
+    "sha256": "8d8d450972b6cd402a7acb0b995aeb366a2bec099d94dd7a27617b4a4bc75694",
     "source": "tools/relay_engine/client.py"
   },
   {
@@ -10202,7 +10202,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay_engine/daemon.py",
-    "sha256": "53e242a439f70fad9eac0772d631059eaeb9de3607a27bf611ef1ca7d749eefc",
+    "sha256": "e3e85253369977c87d3cb122a50c8f174c8f59a8ce10de3f90820c22285ebf90",
     "source": "tools/relay_engine/daemon.py"
   },
   {
@@ -10280,7 +10280,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "47e073a40281d3446a71fdf3c94e7d9a5514bf8fab4fa3c512edb6f4a6b76455",
+    "sha256": "de1436da6af8b3877a1eff2e820eceec8511ad6cc5fdbf08087bc718ea36949a",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -10448,7 +10448,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "10b8c73e6b0a06e840b4e102eb72e2285e62af2175d0eb26c00298b44c761f0c",
+    "sha256": "e321ee88873cf25f723b76c6713a832e57759b784689691bf36aeaafa5819a84",
     "source": "tools/adapters/README.md"
   },
   {
@@ -10472,7 +10472,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "0a9aaf818ed7793c985350a59df15aa0bc2b5df5927e28b636a3b448b9ff878b",
+    "sha256": "95a5c794508a9736c4d84b6e748272310a4c363dc017e1ada2358c0e740ee480",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -20354,7 +20354,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay_engine/README.md",
-    "sha256": "d12bf45ac36fe1a934f4773118f02b7f2639da87c721664953e4c55189181029",
+    "sha256": "1b082a121851faa5438976d480d8eb65bf8d110e4ad33748e13475eca0796528",
     "source": "tools/relay_engine/README.md"
   },
   {
@@ -20372,7 +20372,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay_engine/client.py",
-    "sha256": "be8e2916286932e0683af2af49e3f9e40209bc3a3ca881a6bc0b0be6a9be0702",
+    "sha256": "8d8d450972b6cd402a7acb0b995aeb366a2bec099d94dd7a27617b4a4bc75694",
     "source": "tools/relay_engine/client.py"
   },
   {
@@ -20390,7 +20390,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay_engine/daemon.py",
-    "sha256": "53e242a439f70fad9eac0772d631059eaeb9de3607a27bf611ef1ca7d749eefc",
+    "sha256": "e3e85253369977c87d3cb122a50c8f174c8f59a8ce10de3f90820c22285ebf90",
     "source": "tools/relay_engine/daemon.py"
   },
   {
@@ -20468,7 +20468,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "47e073a40281d3446a71fdf3c94e7d9a5514bf8fab4fa3c512edb6f4a6b76455",
+    "sha256": "de1436da6af8b3877a1eff2e820eceec8511ad6cc5fdbf08087bc718ea36949a",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -20564,7 +20564,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "10b8c73e6b0a06e840b4e102eb72e2285e62af2175d0eb26c00298b44c761f0c",
+    "sha256": "e321ee88873cf25f723b76c6713a832e57759b784689691bf36aeaafa5819a84",
     "source": "tools/adapters/README.md"
   },
   {
@@ -20588,7 +20588,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "0a9aaf818ed7793c985350a59df15aa0bc2b5df5927e28b636a3b448b9ff878b",
+    "sha256": "95a5c794508a9736c4d84b6e748272310a4c363dc017e1ada2358c0e740ee480",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -30470,7 +30470,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay_engine/README.md",
-    "sha256": "d12bf45ac36fe1a934f4773118f02b7f2639da87c721664953e4c55189181029",
+    "sha256": "1b082a121851faa5438976d480d8eb65bf8d110e4ad33748e13475eca0796528",
     "source": "tools/relay_engine/README.md"
   },
   {
@@ -30488,7 +30488,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay_engine/client.py",
-    "sha256": "be8e2916286932e0683af2af49e3f9e40209bc3a3ca881a6bc0b0be6a9be0702",
+    "sha256": "8d8d450972b6cd402a7acb0b995aeb366a2bec099d94dd7a27617b4a4bc75694",
     "source": "tools/relay_engine/client.py"
   },
   {
@@ -30506,7 +30506,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay_engine/daemon.py",
-    "sha256": "53e242a439f70fad9eac0772d631059eaeb9de3607a27bf611ef1ca7d749eefc",
+    "sha256": "e3e85253369977c87d3cb122a50c8f174c8f59a8ce10de3f90820c22285ebf90",
     "source": "tools/relay_engine/daemon.py"
   },
   {
@@ -30584,7 +30584,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "47e073a40281d3446a71fdf3c94e7d9a5514bf8fab4fa3c512edb6f4a6b76455",
+    "sha256": "de1436da6af8b3877a1eff2e820eceec8511ad6cc5fdbf08087bc718ea36949a",
     "source": "tools/relay_engine/version.py"
   },
   {

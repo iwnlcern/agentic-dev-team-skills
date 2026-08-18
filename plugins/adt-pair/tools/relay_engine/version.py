@@ -67,11 +67,6 @@ def _inventory(tools_dir):
         relative_directory = directory_path.relative_to(tools_dir)
         retained_names = []
         for name in names:
-            if name == "__pycache__":
-                continue
-            if (relative_directory.as_posix() == "relay_engine"
-                    and name == "tests"):
-                continue
             path = directory_path / name
             try:
                 status = path.lstat()
@@ -79,22 +74,28 @@ def _inventory(tools_dir):
                 continue
             except OSError as error:
                 raise FingerprintError("unreadable-member") from error
-            if stat.S_ISDIR(status.st_mode):
-                retained_names.append(name)
-            else:
-                members.add(path.relative_to(tools_dir).as_posix())
+            if not stat.S_ISDIR(status.st_mode):
+                raise FingerprintError("non-regular-member")
+            if name == "__pycache__":
+                continue
+            if (relative_directory.as_posix() == "relay_engine"
+                    and name == "tests"):
+                continue
+            retained_names.append(name)
         names[:] = retained_names
 
         for name in files:
-            if name.endswith(".pyc"):
-                continue
             path = directory_path / name
             try:
-                path.lstat()
+                status = path.lstat()
             except FileNotFoundError:
                 continue
             except OSError as error:
                 raise FingerprintError("unreadable-member") from error
+            if not stat.S_ISREG(status.st_mode):
+                raise FingerprintError("non-regular-member")
+            if name.endswith(".pyc"):
+                continue
             members.add(path.relative_to(tools_dir).as_posix())
     return members
 

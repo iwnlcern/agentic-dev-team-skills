@@ -274,6 +274,168 @@ class TestIdentityMatrix(unittest.TestCase):
         self.assertTrue(_raw_roundtrip(
             self.running[-1].socket_name, raw_admin)["ok"])
 
+    def test_v2_admin_requires_grammar_valid_client_identity(self):
+        did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
+        running = self.start_daemon(did)
+        cases = (
+            ("missing", None),
+            ("null", None),
+            ("not-object", "client"),
+            ("missing-kit", {"fp": FP_B, "install": "/client"}),
+            ("malformed-kit", {"kit": "02.009.0001", "fp": FP_B,
+                               "install": "/client"}),
+        )
+        for offset, (name, malformed_cid) in enumerate(cases, start=1):
+            with self.subTest(name=name):
+                request = {
+                    "v": 2,
+                    "id": "00000000-0000-0000-0000-%012d" % offset,
+                    "op": "status",
+                    "args": {},
+                }
+                if name != "missing":
+                    request["cid"] = malformed_cid
+                response = _raw_roundtrip(running.socket_name, request)
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error"]["code"],
+                                 "E-VERSION-MISMATCH")
+                self.assertEqual(response["did"], did)
+
+    def test_v2_admin_prechecks_malformed_client_identity_without_contact(self):
+        did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
+        Path(self.root_name, ".engine").mkdir()
+        Path(self.root_name, ".engine/daemon.json").write_text(json.dumps({
+            "pid": os.getpid(),
+            "pid_start_time": "new-daemon",
+            "nonce": "new-daemon",
+            "state": "ready",
+            "socket": "/tmp/must-not-contact",
+            "version": 2,
+            "schema_version": 1,
+            "identity": did,
+        }), encoding="utf-8")
+
+        def accepting_daemon(_socket_name, request, _timeout):
+            return {
+                "v": 2,
+                "id": request["id"],
+                "ok": True,
+                "result": {"accepted": True},
+                "did": did,
+            }
+
+        malformed_cids = (
+            {},
+            "client",
+            {"kit": "02.009.0001", "fp": FP_B, "install": "/client"},
+        )
+        for op in ADMIN_OPS:
+            for malformed_cid in malformed_cids:
+                with self.subTest(op=op, cid=malformed_cid), mock.patch.object(
+                        client, "_roundtrip",
+                        side_effect=accepting_daemon) as contacted:
+                    self.assert_mismatch(lambda: client.request(
+                        self.root_name, op, {}, cid=malformed_cid))
+                    contacted.assert_not_called()
+
+    def test_v2_admin_prechecks_malformed_daemon_identity_without_contact(self):
+        cid = {"kit": "2.9.0", "fp": FP_B, "install": "/client"}
+        Path(self.root_name, ".engine").mkdir()
+        state_path = Path(self.root_name, ".engine/daemon.json")
+        base = {
+            "pid": os.getpid(),
+            "pid_start_time": "new-daemon",
+            "nonce": "new-daemon",
+            "state": "ready",
+            "socket": "/tmp/must-not-contact",
+            "version": 2,
+            "schema_version": 1,
+        }
+        malformed_dids = (
+            None,
+            {},
+            {"fp": FP_A, "install": "/daemon"},
+            {"kit": "2.9.0", "fp": "A" * 64, "install": "/daemon"},
+        )
+
+        def accepting_daemon(_socket_name, request, _timeout):
+            return {
+                "v": 2,
+                "id": request["id"],
+                "ok": True,
+                "result": {"accepted": True},
+                "did": {"kit": "2.9.0", "fp": FP_A,
+                        "install": "/daemon"},
+            }
+
+        for op in ADMIN_OPS:
+            for malformed_did in malformed_dids:
+                with self.subTest(op=op, did=malformed_did):
+                    state_path.write_text(json.dumps(
+                        dict(base, identity=malformed_did)), encoding="utf-8")
+                    with mock.patch.object(
+                            client, "_roundtrip",
+                            side_effect=accepting_daemon) as contacted:
+                        self.assert_mismatch(lambda: client.request(
+                            self.root_name, op, {}, cid=cid))
+                        contacted.assert_not_called()
+
+    def test_v2_admin_authenticates_response_daemon_identity(self):
+        cid = {"kit": "2.9.0", "fp": FP_B, "install": "/client"}
+        did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
+        Path(self.root_name, ".engine").mkdir()
+        Path(self.root_name, ".engine/daemon.json").write_text(json.dumps({
+            "pid": os.getpid(),
+            "pid_start_time": "new-daemon",
+            "nonce": "new-daemon",
+            "state": "ready",
+            "socket": "/tmp/fake-daemon",
+            "version": 2,
+            "schema_version": 1,
+            "identity": did,
+        }), encoding="utf-8")
+        absent = object()
+        response_dids = (
+            ("missing", absent),
+            ("null", None),
+            ("malformed", {"kit": "2.9.0", "fp": "A" * 64,
+                           "install": "/daemon"}),
+            ("different", {"kit": "2.9.0", "fp": FP_B,
+                           "install": "/other-daemon"}),
+        )
+        for name, response_did in response_dids:
+            with self.subTest(name=name):
+                def response(_socket_name, request, _timeout):
+                    value = {
+                        "v": 2,
+                        "id": request["id"],
+                        "ok": True,
+                        "result": {"accepted": True},
+                    }
+                    if response_did is not absent:
+                        value["did"] = response_did
+                    return value
+
+                with mock.patch.object(client, "_roundtrip",
+                                       side_effect=response):
+                    self.assert_mismatch(lambda: client.request(
+                        self.root_name, "status", {}, cid=cid))
+
+    def test_v2_valid_mismatched_admin_status_and_stop_remain_usable(self):
+        did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
+        mismatched_cid = {
+            "kit": "2.9.0", "fp": FP_B, "install": "/client",
+        }
+        running = self.start_daemon(did)
+        status = client.request(
+            self.root_name, "status", {}, cid=mismatched_cid)
+        self.assertEqual(status["daemon"]["identity"], did)
+        self.assertEqual(client.request(
+            self.root_name, "daemon.stop", {}, cid=mismatched_cid),
+            {"ok": True})
+        running.thread.join(5)
+        self.assertFalse(running.thread.is_alive())
+
     def test_cell_4_old_client_new_daemon_refuses_v1_then_recovers(self):
         did = {"kit": "2.9.0", "fp": FP_A, "install": "/new-daemon"}
         running = self.start_daemon(did)

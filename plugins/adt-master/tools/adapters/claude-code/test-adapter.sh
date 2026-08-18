@@ -82,6 +82,24 @@ stage_engine_root() {
     "        _e3_trace.write(\"$generation\\n\")" \
     >> "$root/tools/relay_engine/__init__.py"
 }
+refresh_shared_root() (
+  set -eu
+  candidate_tools="$1"
+  skills_root="$2"
+  active_tools="$skills_root/tools"
+  mkdir -p "$skills_root"
+  next_tools="$(mktemp -d "$skills_root/.tools.next.XXXXXX")"
+  backup_tools="$(mktemp -d "$skills_root/.tools.previous.XXXXXX")"
+  rmdir "$next_tools" "$backup_tools"
+  cp -R "$candidate_tools" "$next_tools"
+  if [ -e "$active_tools" ] || [ -L "$active_tools" ]; then
+    mv "$active_tools" "$backup_tools"
+  else
+    backup_tools="none"
+  fi
+  mv "$next_tools" "$active_tools"
+  printf 'active=%s\nbackup=%s\n' "$active_tools" "$backup_tools"
+)
 expected_engine_fingerprint() {
   local tools_dir="$1"
   PYTHONPATH="$TOOLS_DIR" python3 -c \
@@ -468,13 +486,42 @@ stage_engine_root "$e3_shared_root" A
 e3_shared_a_fingerprint="$(expected_engine_fingerprint "$e3_shared_root/tools")"
 assert_case_engine_json_origin "e3-shared-vA-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 A || fail=1
 assert_relay_version "e3-shared-vA-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.0" "$e3_shared_a_fingerprint" || fail=1
-stage_engine_root "$e3_shared_root" B
-e3_shared_b_fingerprint="$(expected_engine_fingerprint "$e3_shared_root/tools")"
+e3_shared_candidate="$tmp/e3-shared-candidate"
+stage_engine_root "$e3_shared_candidate" B
+e3_shared_b_fingerprint="$(expected_engine_fingerprint "$e3_shared_candidate/tools")"
+printf '%s\n' stale > "$e3_shared_root/tools/stale-sentinel"
+e3_shared_refresh="$(refresh_shared_root "$e3_shared_candidate/tools" "$e3_shared_root")"
 if [ "$e3_shared_a_fingerprint" = "$e3_shared_b_fingerprint" ]; then
   echo "FAIL e3-shared-refresh-distinct-fingerprints: vA and vB fingerprints match" >&2
   fail=1
 else
   echo "PASS e3-shared-refresh-distinct-fingerprints"
+fi
+e3_shared_backup="$(printf '%s\n' "$e3_shared_refresh" | sed -n 's/^backup=//p')"
+if [ -z "$e3_shared_backup" ] || [ ! -d "$e3_shared_backup" ]; then
+  echo "FAIL e3-shared-refresh-preserves-backup: previous active tree not retained" >&2
+  fail=1
+else
+  echo "PASS e3-shared-refresh-preserves-backup"
+  if [ ! -e "$e3_shared_backup/stale-sentinel" ]; then
+    echo "FAIL e3-shared-refresh-backup-retains-previous-bytes: backup lost old sentinel" >&2
+    fail=1
+  else
+    echo "PASS e3-shared-refresh-backup-retains-previous-bytes"
+  fi
+  assert_relay_version "e3-shared-backup-version-triad" "$e3_shared_backup/relay" "$e3_shared_backup" "2.9.0" "$e3_shared_a_fingerprint" || fail=1
+fi
+if [ -e "$e3_shared_root/tools/tools" ]; then
+  echo "FAIL e3-shared-refresh-no-nested-tools: active tree contains tools/tools" >&2
+  fail=1
+else
+  echo "PASS e3-shared-refresh-no-nested-tools"
+fi
+if [ -e "$e3_shared_root/tools/stale-sentinel" ]; then
+  echo "FAIL e3-shared-refresh-no-stale-sentinel: old sentinel remains active" >&2
+  fail=1
+else
+  echo "PASS e3-shared-refresh-no-stale-sentinel"
 fi
 assert_case_engine_json_origin "e3-shared-vB-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 B || fail=1
 assert_relay_version "e3-shared-vB-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.0" "$e3_shared_b_fingerprint" || fail=1

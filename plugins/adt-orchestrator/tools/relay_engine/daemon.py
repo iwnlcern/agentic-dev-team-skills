@@ -236,6 +236,8 @@ def decode_request(body, did=None):
     if type(request.get("v")) is not int or request.get("v") != 2:
         raise WireFault(errors.error_for(
             "E-WIRE-VERSION", rejected_version=_rejected(request.get("v"))))
+    if "cid" not in request:
+        raise WireFault(_version_mismatch(None, did))
     if set(request) != {"v", "id", "op", "args", "cid"}:
         raise WireFault(errors.error_for("E-FRAMING", reason="not-json"))
     request_id = request["id"]
@@ -250,6 +252,8 @@ def decode_request(body, did=None):
         raise WireFault(errors.error_for(
             "E-WIRE-OP", rejected_op=_rejected(op)))
     _validate_args(op, request["args"])
+    if not _valid_identity(request["cid"]):
+        raise WireFault(_version_mismatch(request["cid"], did))
     return request
 
 

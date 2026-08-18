@@ -2,17 +2,35 @@
 
 Adapters are optional host hardening. They do not replace the protocol; they make the protocol's mechanical checks run at the right host event.
 
-## Install first
+## Install or refresh the shared root first
 
-Copy the entire `tools/` directory to the shared skills root before enabling adapters:
+Use this staged replacement for an initial install or every refresh of the shared-root `tools/` tree.
+Set `candidate_tools` to an absolute path to the candidate tree.
+For a Codex-host standalone install, set `skills_root` to `$HOME/.agents/skills`; `~/.codex/skills` remains a working deprecated fallback destination.
 
 ```bash
-cp -R tools "$HOME/.claude/skills/tools"
-# or for Codex-host installs:
-cp -R tools "$HOME/.agents/skills/tools"
+(
+set -eu
+candidate_tools="/absolute/path/to/candidate/tools"
+skills_root="$HOME/.claude/skills"
+active_tools="$skills_root/tools"
+mkdir -p "$skills_root"
+next_tools="$(mktemp -d "$skills_root/.tools.next.XXXXXX")"
+backup_tools="$(mktemp -d "$skills_root/.tools.previous.XXXXXX")"
+rmdir "$next_tools" "$backup_tools"
+cp -R "$candidate_tools" "$next_tools"
+if [ -e "$active_tools" ] || [ -L "$active_tools" ]; then
+  mv "$active_tools" "$backup_tools"
+else
+  backup_tools="none"
+fi
+mv "$next_tools" "$active_tools"
+printf 'active=%s\nbackup=%s\n' "$active_tools" "$backup_tools"
+)
 ```
 
-`~/.codex/skills` remains a working deprecated fallback destination; new installs use `~/.agents/skills`, matching Codex's own back-compat posture.
+The candidate is copied to a unique sibling before the active name changes, so the replacement cannot nest `tools/tools` or retain files absent from the candidate.
+When an active tree exists, the printed `.tools.previous.*` path is the recoverable previous tree; restore it by moving the failed active tree aside and renaming that backup to `tools`.
 
 `<skills-root>` means the skills root the installed skill tree was resolved from — each generated plugin tree ships its own `tools/`.
 Both hooks first resolve the engine when `$RELAY_LINT_SKILLS_ROOT/tools/relay` and `$RELAY_LINT_SKILLS_ROOT/tools/relay_engine/` are present.
@@ -25,7 +43,7 @@ The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-dri
 
 Generated plugin bundles distribute the relay engine, but installing or updating a bundle does not activate a hook by itself.
 The shipped relay-write hooks are Claude Code-only and enforce through the root their settings resolve.
-The primary enforcing route is the shared root, so activate it by copying or refreshing `tools/` there and merging the Claude Code settings snippet afterwards.
+The primary enforcing route is the shared root, so activate it with the staged replacement above and merge the Claude Code settings snippet afterwards.
 A marketplace update does not touch the shared-root `tools/` copy, so refresh that copy explicitly after every marketplace update.
 
 For the advanced plugin-root route, plugin caches are version-qualified and have no stable current-version pointer.
