@@ -21,6 +21,35 @@ They then resolve `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py`, `$HOME/.agents/
 They do not probe `relay-lint` on `PATH`.
 The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-drift tolerance) and `RELAY_LINT_NO_FRESHNESS=1` (skip the freshness check when editing an existing older relay); both default to the strict posture.
 
+## Distribution and activation
+
+Generated plugin bundles distribute the relay engine, but installing or updating a bundle does not activate a hook by itself.
+The shipped relay-write hooks are Claude Code-only and enforce through the root their settings resolve.
+The primary enforcing route is the shared root, so activate it by copying or refreshing `tools/` there and merging the Claude Code settings snippet afterwards.
+A marketplace update does not touch the shared-root `tools/` copy, so refresh that copy explicitly after every marketplace update.
+
+For the advanced plugin-root route, plugin caches are version-qualified and have no stable current-version pointer.
+Use update-plus-repoint as one operation: update the plugin and set `RELAY_LINT_SKILLS_ROOT` to the new `<plugin-root>/adt-<tier>/<version>` directory.
+An update without that repoint leaves the hook enforcing from its old configured root.
+A repoint without the update supplies no new engine bytes.
+
+Codex has no shipped relay-write hook in this kit and therefore has no hook activation procedure.
+Codex manual and agent consumers invoke the installed bundle directly as `<plugin-root>/tools/relay`.
+
+Verify a refreshed route with its own executable before use:
+
+```bash
+<plugin-root>/tools/relay version
+# or, for the shared Claude Code route:
+$HOME/.claude/skills/tools/relay version
+```
+
+The command reports the kit, engine fingerprint, and resolved install path.
+If a client and daemon report incompatible kit or fingerprint identities, record operations refuse with `E-VERSION-MISMATCH`.
+For an old client and new daemon, refresh the client and retry while leaving the daemon running.
+For a new client and old daemon, use only legacy `status` or `daemon stop` compatibility to stop the old daemon, then refresh and restart the daemon before retrying.
+The engine README gives the full mixed-generation recovery walk-through.
+
 ## Shipped adapter: Claude Code relay-write hooks
 
 Files:

@@ -17,6 +17,45 @@ does not claim exclusive access to the root. If the daemon is unavailable, the
 root is inoperable until an eligible starter restores it, except for the single
 out-of-band escalation instruction emitted by the command.
 
+## Distribution, activation, and version recovery
+
+Every generated plugin bundle distributes the same engine surface: `tools/relay`, `tools/relay_engine/*.py`, and `tools/relay_engine/README.md`.
+Distribution places those bytes in a bundle, but distribution alone activates no consumer.
+
+Claude Code is the only shipped relay-write hook consumer.
+Its primary enforcing route is the shared root, normally `$HOME/.claude/skills`, where the configured hooks resolve `tools/`.
+Activate or refresh that route by copying the candidate `tools/` directory into the shared root and then use the installed scripts from that refreshed copy.
+A marketplace update does not touch the shared-root `tools/` copy, so re-run the shared-root refresh after updating a marketplace plugin.
+
+An advanced Claude Code route may set `RELAY_LINT_SKILLS_ROOT` to a version-qualified plugin root such as `<plugin-root>/adt-master/2.9.0`.
+Plugin caches have no stable current-version pointer, so updating a plugin creates a new version directory while an existing configured root continues to name the old directory.
+Treat update-plus-repoint as one activation unit: update the plugin and repoint `RELAY_LINT_SKILLS_ROOT` to that new version directory before relying on the new bytes.
+The plugin update alone changes nothing enforcing because the configured root still names the old directory.
+The repoint alone changes nothing enforcing because it does not install the new bundle.
+
+Codex has no shipped relay-write hook in this kit, so there is no Codex hook consumer to activate.
+Codex users and agents run the bundled engine manually as `<plugin-root>/tools/relay`.
+Any Codex hook is separate, orchestrator-authorized work and is outside this distribution.
+
+After refreshing any route, verify the actual installed copy before starting or contacting a daemon:
+
+```bash
+<plugin-root>/tools/relay version
+# or, for the active shared-root route:
+$HOME/.claude/skills/tools/relay version
+```
+
+The JSON result names the installed `kit`, fingerprint, and resolved `install` path.
+The client and daemon may be installed at different paths, but record operations require matching valid kit and fingerprint identities.
+
+If an old client contacts a new daemon, every request refuses with `E-VERSION-MISMATCH` and instructs the operator to update the client install.
+Leave the new daemon running, refresh the client route from the same released engine surface, run `relay version` on that client copy, and retry with the refreshed client.
+
+If a new client contacts an old daemon, record operations refuse with `E-VERSION-MISMATCH` and instruct the operator to update the daemon install.
+For this legacy direction only, `status` and `daemon stop` retain bounded v1 administrative compatibility so the operator can identify and stop the old daemon.
+Use that compatibility only to stop the old daemon, refresh the daemon route from the released engine surface, run `relay version` at both the client and daemon installations, start the refreshed daemon, and retry the record operation.
+Do not use the administrative compatibility as a record-operation downgrade or as evidence that the mixed generation is safe.
+
 ## Typical flow
 
 1. Run `relay daemon start --root <root> --run-id <run> --seat <top-seat>`.

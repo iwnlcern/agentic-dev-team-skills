@@ -260,7 +260,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "36fa034c236998ef4118c4319f37143e70dc73b6d2631c34d86cf40e7b4a82cc",
+    "sha256": "10b8c73e6b0a06e840b4e102eb72e2285e62af2175d0eb26c00298b44c761f0c",
     "source": "tools/adapters/README.md"
   },
   {
@@ -10166,7 +10166,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay_engine/README.md",
-    "sha256": "0c247a2e2bb6553170ba7439ebf3ffb3d15af063aaca927f6420f2978ba6b879",
+    "sha256": "d12bf45ac36fe1a934f4773118f02b7f2639da87c721664953e4c55189181029",
     "source": "tools/relay_engine/README.md"
   },
   {
@@ -10448,7 +10448,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "36fa034c236998ef4118c4319f37143e70dc73b6d2631c34d86cf40e7b4a82cc",
+    "sha256": "10b8c73e6b0a06e840b4e102eb72e2285e62af2175d0eb26c00298b44c761f0c",
     "source": "tools/adapters/README.md"
   },
   {
@@ -20354,7 +20354,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay_engine/README.md",
-    "sha256": "0c247a2e2bb6553170ba7439ebf3ffb3d15af063aaca927f6420f2978ba6b879",
+    "sha256": "d12bf45ac36fe1a934f4773118f02b7f2639da87c721664953e4c55189181029",
     "source": "tools/relay_engine/README.md"
   },
   {
@@ -20564,7 +20564,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "36fa034c236998ef4118c4319f37143e70dc73b6d2631c34d86cf40e7b4a82cc",
+    "sha256": "10b8c73e6b0a06e840b4e102eb72e2285e62af2175d0eb26c00298b44c761f0c",
     "source": "tools/adapters/README.md"
   },
   {
@@ -30470,7 +30470,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay_engine/README.md",
-    "sha256": "0c247a2e2bb6553170ba7439ebf3ffb3d15af063aaca927f6420f2978ba6b879",
+    "sha256": "d12bf45ac36fe1a934f4773118f02b7f2639da87c721664953e4c55189181029",
     "source": "tools/relay_engine/README.md"
   },
   {
