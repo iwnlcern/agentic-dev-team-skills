@@ -106,6 +106,7 @@ PDC_CODEX_FORWARD_POINTER = (
 LOCKED_TOOLS_SET = (
     "relay-lint.py",
     "check-relay-lint-fixtures.py",
+    "xrootfixgen.py",
     "check-timestamp-drift.py",
     "relay-lint-fixtures",
     "adapters",

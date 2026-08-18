@@ -15,6 +15,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LINT = ROOT / "tools" / "relay-lint.py"
 FIXTURES = ROOT / "tools" / "relay-lint-fixtures"
+XROOT_GEN = ROOT / "tools" / "xrootfixgen.py"
+XROOT_AXES = {
+    "declaration",
+    "repository",
+    "commit",
+    "byte",
+    "authority-population",
+    "authority-owner",
+    "authority-parent",
+    "authority-verdict",
+    "identity",
+    "ordering",
+    "ambiguity",
+}
 
 A5_EXPECTED = [
     ("root", "lockdigest/AH1-float-forward/.relays/v29", 0),
@@ -2134,6 +2148,46 @@ for _rel, _error in {
     EXPECTED_ERROR_SET[_rel].append(_error)
 
 
+def load_xroot_generator():
+    """Load the generated-Git xroot fixture materializer."""
+    if not XROOT_GEN.is_file():
+        raise FileNotFoundError(f"missing xroot fixture generator: {XROOT_GEN}")
+    spec = importlib.util.spec_from_file_location("xrootfixgen", XROOT_GEN)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load xroot fixture generator: {XROOT_GEN}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def xroot_generator_contract_errors() -> list[str]:
+    """Return contract failures for the dynamic xroot fixture generator."""
+    try:
+        generator = load_xroot_generator()
+    except (FileNotFoundError, RuntimeError) as exc:
+        return [str(exc)]
+    if not hasattr(generator, "materialize"):
+        return ["xroot fixture generator lacks materialize(dest)"]
+    with tempfile.TemporaryDirectory(prefix="xroot-fixture-contract.") as raw:
+        cases = generator.materialize(Path(raw))
+    if not cases:
+        return ["xroot fixture generator returned no cases"]
+    malformed = [case for case in cases if not isinstance(case, tuple) or len(case) != 4]
+    if malformed:
+        return ["xroot fixture generator cases must be four-tuples"]
+    labels = [case[0] for case in cases]
+    if any(not isinstance(label, str) or not label.startswith("xroot/") for label in labels):
+        return ["xroot fixture generator labels must use the xroot/ family"]
+    if len(labels) != len(set(labels)):
+        return ["xroot fixture generator labels must be unique"]
+    return []
+
+
+def xroot_cases(dest: Path):
+    """Materialize the dynamic XROOT_EXPECTED family under dest."""
+    return load_xroot_generator().materialize(dest)
+
+
 def main() -> int:
     if "--neutral-cwd" in sys.argv[1:]:
         # CWD-independence control (v29-detection-lp2-cwd-repair): run the
@@ -2143,6 +2197,15 @@ def main() -> int:
         os.chdir(tempfile.mkdtemp(prefix="relay-fixtures-neutral."))
     lint = load_linter()
     failed = False
+    xroot_contract_errors = xroot_generator_contract_errors()
+    print(
+        "xroot/generator-contract: "
+        f"errors={len(xroot_contract_errors)} "
+        f"{'PASS' if not xroot_contract_errors else 'FAIL'}"
+    )
+    for error in xroot_contract_errors:
+        print(f"  {error}")
+    failed = failed or bool(xroot_contract_errors)
     cm79_bytes = {
         member.relative_to(FIXTURES / C13_CM79).as_posix(): member.read_bytes()
         for member in sorted((FIXTURES / C13_CM79).rglob("*")) if member.is_file()
@@ -2208,6 +2271,43 @@ def main() -> int:
         if not ok:
             for err in result.errors:
                 print(f"  ERROR {err}")
+    with tempfile.TemporaryDirectory(prefix="relay-xroot-fixtures.") as xroot_raw:
+        for label, relay_root, expected, expected_errors in xroot_cases(Path(xroot_raw)):
+            old_cwd = os.getcwd()
+            old_path = os.environ.get("PATH")
+            with tempfile.TemporaryDirectory(prefix="relay-xroot-neutral.") as neutral_raw:
+                try:
+                    os.chdir(neutral_raw)
+                    if label == "xroot/X0b-no-git-on-path-control":
+                        os.environ["PATH"] = neutral_raw
+                    result = lint.lint_relay_root(relay_root)
+                finally:
+                    os.chdir(old_cwd)
+                    if old_path is None:
+                        os.environ.pop("PATH", None)
+                    else:
+                        os.environ["PATH"] = old_path
+            observed = 0 if result.ok else 1
+            ok = observed == expected
+            if expected_errors is not None:
+                ok = ok and sorted(result.errors) == sorted(expected_errors)
+            xroot_errors = [
+                error for error in result.errors
+                if "declared design edge failed verification: " in error
+            ]
+            for error in xroot_errors:
+                axis_tail = error.split("declared design edge failed verification: ", 1)[1]
+                axis = axis_tail.split(":", 1)[0]
+                if axis not in XROOT_AXES:
+                    ok = False
+                    print(f"  unknown_xroot_axis={axis!r}")
+            failed = failed or not ok
+            print(f"{label}: expected={expected} observed={observed} {'PASS' if ok else 'FAIL'}")
+            if expected_errors is not None:
+                print(f"  expected_errors={len(expected_errors)} observed_errors={len(result.errors)}")
+            if not ok:
+                for err in result.errors:
+                    print(f"  ERROR {err}")
     return 1 if failed else 0
 
 

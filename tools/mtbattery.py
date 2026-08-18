@@ -112,6 +112,25 @@ ROW_SELECTORS = {
         ("h27_master_seat_errors", "Compare", "match.group(1) in occurrences"),
         ("lint_relay_root", "Compare", "rfields.get('DESIGN_REVIEW_VERDICT') != 'approve'"),
     },
+    "XR1": {("xroot_pair_plan_applicable", "Call", "any((h27_occurrences(text, key) for key in XROOT_TRIGGERS))")},
+    "XR2": {("xroot_design_gate", "UnaryOp", "not declaration[key]")},
+    "XR3": {("xroot_field_conflicts", "Compare", "len(values) > 1")},
+    "XR4": {("xroot_paths", "Call", "xroot_valid_relpath(declaration[key])")},
+    "XR5": {("xroot_repository_and_commit", "Compare", "object_type != 'commit'")},
+    "XR6": {("xroot_verify", "Compare", "hashlib.sha256(blob).hexdigest() != declared_digest")},
+    "XR7": {("xroot_validate_selected", "Compare", "relay_owner != owner")},
+    "XR8": {("xroot_authority", "Compare", "verdict != 'approve'")},
+    "XR9": {("xroot_target_ok", "Compare", "expected not in values")},
+    "XR10": {("xroot_design_gate", "BoolOp", "local_fields.get('DESIGN_DOC_ID') == declaration['DESIGN_DOC_ID'] and len(local_from) == 1 and (from_owner(local_from[0]) == declaration['DESIGN_OWNER'])")},
+    "XR11": {("xroot_declaration", "Call", "xroot_pair_plan_applicable(text)")},
+    "XR12": {("xroot_authority", "ListComp", "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id)]")},
+    "XR13": {("xroot_authority", "ListComp", "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN-REVIEW') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and xroot_target_ok(relay, 'PARENT_DISPATCH_ID', origin_dispatch)]")},
+    "XR14": {("xroot_target_ok", "Compare", "expected not in values")},
+    "XR15": {("xroot_authority", "Compare", "review_role not in peer_roles.get(origin_role, set())")},
+    "XR16": {("xroot_authority", "Call", "xroot_relays(repo, root_tree)")},
+    "XR17": {("xroot_plan_gate", "Call", "any((h27_occurrences(text, key) for key in source_keys))")},
+    "XR18": {("xroot_plan_gate", "Call", "xroot_valid_relpath(lock_path)")},
+    "XR19": {("lock_digest_shape_errors", "Call", "xroot_pair_plan_applicable(text)")},
 }
 
 # Keep rows with a single reviewed selector equally explicit.  The inventory
@@ -246,6 +265,12 @@ def exact_error_sets(harness: ModuleType) -> dict[tuple[str, str], frozenset[str
             os.chdir(old_cwd)
         measured[(kind, rel)] = frozenset(result.errors)
     return measured
+
+
+def xroot_registration_count(harness: ModuleType) -> int:
+    """Count runtime-generated xroot registrations once for the denominator."""
+    with tempfile.TemporaryDirectory(prefix="mtbattery-xroot-count.") as raw:
+        return len(harness.xroot_cases(Path(raw)))
 
 
 def normalized_target_tree(target: Path) -> dict[str, bytes]:
@@ -465,11 +490,12 @@ def main(argv: list[str]) -> int:
     harness = load_module("mtbattery_denominator", TOOLS / "check-relay-lint-fixtures.py")
     count_controls, control_errors = validate_count_controls(spec, harness)
     errors.extend(control_errors)
-    registration_denominator = len(harness.EXPECTED)
+    xroot_registrations = xroot_registration_count(harness)
+    registration_denominator = len(harness.EXPECTED) + xroot_registrations
     declared_arm_count = len(spec.ARMS)
     print(f"DENOMINATOR registrations={registration_denominator} declared_arms={declared_arm_count}")
     universal_baseline = exact_error_sets(harness)
-    exact_message_oracles = sum(
+    exact_message_oracles = xroot_registrations + sum(
         rel in harness.EXPECTED_ERROR_SET for _kind, rel, _expected in harness.EXPECTED
     )
     count_or_exit_oracles = registration_denominator - exact_message_oracles
@@ -495,6 +521,12 @@ def main(argv: list[str]) -> int:
             errors.append(f"{arm['name']}: {exc}")
             continue
         completed.append(str(arm["name"]))
+        arm_rows = {str(row) for row in arm.get("rows", (arm["row"],))}
+        if not any(row.startswith("XR") for row in arm_rows):
+            # Increment 9 is a frozen ledger over the committed static matrix.
+            # Runtime-generated xroot registrations belong to Increment 10 and
+            # do not retroactively enlarge historical arm kill declarations.
+            observed = {label for label in observed if not label.startswith("xroot/")}
         declared = set(arm["kills"])
         universal_extra = universal - observed
         for control, twin in count_controls.get(str(arm["name"]), {}).items():

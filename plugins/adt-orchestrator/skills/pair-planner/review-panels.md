@@ -2,6 +2,8 @@
 
 # Adversarial Review Panels
 
+Pair PRs are paneled by the pair Planner; the orchestrator panels only explicitly requested adversarial review or its own-seat review duties.
+
 Use the smallest panel that matches risk. Reviewers are **lenses**, not fixed model identities. If the host supports subagents or agent teams, spawn reviewers; otherwise run lenses sequentially and keep findings separated.
 
 Default panels are baselines, not a prison. Agents may add, remove, merge, or swap reviewer roles when the risk shape calls for it, but must record:

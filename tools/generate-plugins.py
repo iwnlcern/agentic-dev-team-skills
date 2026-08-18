@@ -109,6 +109,7 @@ SHARED_MAP = {
 TOOLS_SET = (
     "relay-lint.py",
     "check-relay-lint-fixtures.py",
+    "xrootfixgen.py",
     "check-timestamp-drift.py",
     "relay-lint-fixtures",
     "adapters",

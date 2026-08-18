@@ -266,6 +266,162 @@ for _carry_forward_arm in (
     KILLS[_carry_forward_arm].append("mastertier/MT77-unsupported-origin-kind")
     KILLS[_carry_forward_arm].sort()
 
+# Increment 10 is an independent ledger beside the frozen Increment 9 rows.
+XROOT_LEDGER_ROWS = frozenset({f"XR{number}" for number in range(1, 20)})
+LEDGER_ROWS = LEDGER_ROWS | XROOT_LEDGER_ROWS
+
+
+def xroot_pair(row, name, function, node, original):
+    return (
+        {"name": f"{name}-false", "row": row, "function": function, "node": node,
+         "original": original, "replacement": "False", "kills": ()},
+        {"name": f"{name}-true", "row": row, "function": function, "node": node,
+         "original": original, "replacement": "True", "kills": ()},
+    )
+
+
+XROOT_ARMS = (
+    {"name": "xroot-engagement-false", "row": "XR1", "function": "xroot_pair_plan_applicable", "node": "Call", "original": "any((h27_occurrences(text, key) for key in XROOT_TRIGGERS))", "replacement": "any(h27_occurrences(text, key) for key in XROOT_TRIGGERS) and bool(h27_occurrences(text, 'DESIGN_SOURCE_COMMIT'))", "kills": ()},
+    {"name": "xroot-engagement-true", "row": "XR1", "function": "xroot_pair_plan_applicable", "node": "Call", "original": "any((h27_occurrences(text, key) for key in XROOT_TRIGGERS))", "replacement": "any(h27_occurrences(text, key) for key in XROOT_TRIGGERS) or fields.get('DISPATCH_ID') == 'xroot-x0a-fields-absent-control'", "kills": ()},
+    {"name": "xroot-completeness-false", "row": "XR2", "function": "xroot_design_gate", "node": "UnaryOp", "original": "not declaration[key]", "replacement": "not declaration[key] and fields.get('DISPATCH_ID') != 'xroot-x1-incomplete-declaration'", "kills": ()},
+    {"name": "xroot-completeness-true", "row": "XR2", "function": "xroot_design_gate", "node": "UnaryOp", "original": "not declaration[key]", "replacement": "not declaration[key] or (key == 'DESIGN_SOURCE_REPO' and fields.get('DISPATCH_ID') == 'xroot-xv-valid-edge')", "kills": ()},
+    {"name": "xroot-conflict-first-false", "row": "XR3", "function": "xroot_field_conflicts", "node": "Compare", "original": "len(values) > 1", "replacement": "len(values) > 1 and key != 'DESIGN_OWNER'", "kills": ()},
+    {"name": "xroot-conflict-first-true", "row": "XR3", "function": "xroot_field_conflicts", "node": "Compare", "original": "len(values) > 1", "replacement": "len(values) > 1 or (key == 'DESIGN_OWNER' and header_fields(text).get('DISPATCH_ID') == 'xroot-xv-valid-edge')", "kills": ()},
+    {"name": "xroot-containment-false", "row": "XR4", "function": "xroot_paths", "node": "Call", "original": "xroot_valid_relpath(declaration[key])", "replacement": "(True if declaration[key] == '../escape.md' else xroot_valid_relpath(declaration[key]))", "kills": ()},
+    {"name": "xroot-containment-true", "row": "XR4", "function": "xroot_paths", "node": "Call", "original": "xroot_valid_relpath(declaration[key])", "replacement": "(False if declaration[key] == 'desi\"gn-é/d1.md' else xroot_valid_relpath(declaration[key]))", "kills": ()},
+    {"name": "xroot-commit-type-false", "row": "XR5", "function": "xroot_repository_and_commit", "node": "Compare", "original": "object_type != 'commit'", "replacement": "object_type not in {'commit', 'tag'}", "kills": ()},
+    {"name": "xroot-commit-type-true", "row": "XR5", "function": "xroot_repository_and_commit", "node": "Compare", "original": "object_type != 'commit'", "replacement": "object_type != 'commit' or 'XV-valid-edge' in str(candidate)", "kills": ()},
+    {"name": "xroot-byte-compare-false", "row": "XR6", "function": "xroot_verify", "node": "Compare", "original": "hashlib.sha256(blob).hexdigest() != declared_digest", "replacement": "False", "kills": ()},
+    {"name": "xroot-byte-compare-true", "row": "XR6", "function": "xroot_verify", "node": "Compare", "original": "hashlib.sha256(blob).hexdigest() != declared_digest", "replacement": "hashlib.sha256(blob).hexdigest() != declared_digest or declaration['DESIGN_SOURCE_PATH'] == 'desi\"gn-é/d1.md'", "kills": ()},
+    {"name": "xroot-owner-false", "row": "XR7", "function": "xroot_validate_selected", "node": "Compare", "original": "relay_owner != owner", "replacement": "False", "kills": ()},
+    {"name": "xroot-owner-true", "row": "XR7", "function": "xroot_validate_selected", "node": "Compare", "original": "relay_owner != owner", "replacement": "relay_owner != owner or owner == 'm-2'", "kills": ()},
+    *xroot_pair("XR8", "xroot-verdict", "xroot_authority", "Compare", "verdict != 'approve'"),
+    {"name": "xroot-identity-false", "row": "XR9", "function": "xroot_target_ok", "node": "Compare", "original": "expected not in values", "replacement": "expected not in values and key != 'DESIGN_DOC_ID'", "kills": ()},
+    {"name": "xroot-identity-true", "row": "XR9", "function": "xroot_target_ok", "node": "Compare", "original": "expected not in values", "replacement": "expected not in values or (key == 'DESIGN_DOC_ID' and len(set(values)) > 1)", "kills": ()},
+    {"name": "xroot-exclusivity-false", "row": "XR10", "function": "xroot_design_gate", "node": "BoolOp", "original": "local_fields.get('DESIGN_DOC_ID') == declaration['DESIGN_DOC_ID'] and len(local_from) == 1 and (from_owner(local_from[0]) == declaration['DESIGN_OWNER'])", "replacement": "False", "kills": ()},
+    {"name": "xroot-exclusivity-true", "row": "XR10", "function": "xroot_design_gate", "node": "BoolOp", "original": "local_fields.get('DESIGN_DOC_ID') == declaration['DESIGN_DOC_ID'] and len(local_from) == 1 and (from_owner(local_from[0]) == declaration['DESIGN_OWNER'])", "replacement": "local_fields.get('DESIGN_DOC_ID') == declaration['DESIGN_DOC_ID'] and len(local_from) == 1 and (from_owner(local_from[0]) == declaration['DESIGN_OWNER']) or header_fields(text).get('DISPATCH_ID') == 'xroot-x5b-local-nonmatching-control'", "kills": ()},
+    {"name": "xroot-local-backcompat-false", "row": "XR11", "function": "xroot_declaration", "node": "Call", "original": "xroot_pair_plan_applicable(text)", "replacement": "(xroot_pair_plan_applicable(text) and fields.get('DISPATCH_ID') != 'xroot-x1-incomplete-declaration')", "kills": ()},
+    {"name": "xroot-local-backcompat-true", "row": "XR11", "function": "xroot_declaration", "node": "Call", "original": "xroot_pair_plan_applicable(text)", "replacement": "(xroot_pair_plan_applicable(text) or fields.get('DISPATCH_ID') == 'xroot-x0b-no-git-on-path-control')", "kills": ()},
+    {"name": "xroot-origin-shape-filter-kind", "row": "XR12", "function": "xroot_authority", "node": "ListComp", "original": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id)]", "replacement": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and relay.fields.get('DESIGN_RECORD_KIND') == 'design-doc']", "kills": ()},
+    {"name": "xroot-origin-shape-filter-role", "row": "XR12", "function": "xroot_authority", "node": "ListComp", "original": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id)]", "replacement": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and relay.fields.get('ROLE')]", "kills": ()},
+    {"name": "xroot-review-shape-filter-kind", "row": "XR13", "function": "xroot_authority", "node": "ListComp", "original": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN-REVIEW') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and xroot_target_ok(relay, 'PARENT_DISPATCH_ID', origin_dispatch)]", "replacement": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN-REVIEW') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and xroot_target_ok(relay, 'PARENT_DISPATCH_ID', origin_dispatch) and relay.fields.get('DESIGN_RECORD_KIND') == 'design-doc']", "kills": ()},
+    {"name": "xroot-review-shape-filter-verdict", "row": "XR13", "function": "xroot_authority", "node": "ListComp", "original": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN-REVIEW') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and xroot_target_ok(relay, 'PARENT_DISPATCH_ID', origin_dispatch)]", "replacement": "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN-REVIEW') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and xroot_target_ok(relay, 'PARENT_DISPATCH_ID', origin_dispatch) and relay.fields.get('DESIGN_REVIEW_VERDICT') == 'approve']", "kills": ()},
+    {"name": "xroot-membership-first-value", "row": "XR14", "function": "xroot_target_ok", "node": "Compare", "original": "expected not in values", "replacement": "expected != relay.fields.get(key)", "kills": ()},
+    {"name": "xroot-membership-last-value", "row": "XR14", "function": "xroot_target_ok", "node": "Compare", "original": "expected not in values", "replacement": "expected != values[-1] if values else True", "kills": ()},
+    *xroot_pair("XR15", "xroot-peer-tier", "xroot_authority", "Compare", "review_role not in peer_roles.get(origin_role, set())"),
+    {"name": "xroot-supersedes-drop-carrier", "row": "XR16", "function": "xroot_authority", "node": "Call", "original": "xroot_relays(repo, root_tree)", "replacement": "[relay for relay in xroot_relays(repo, root_tree) if not h27_occurrences(relay.text, 'SUPERSEDES')]", "kills": ()},
+    {"name": "xroot-supersedes-drop-target", "row": "XR16", "function": "xroot_authority", "node": "Call", "original": "xroot_relays(repo, root_tree)", "replacement": "[relay for relay in xroot_relays(repo, root_tree) if not any(relay.name in h27_occurrences(other.text, 'SUPERSEDES') for other in xroot_relays(repo, root_tree))]", "kills": ()},
+    {"name": "xroot-plan-engagement-false", "row": "XR17", "function": "xroot_plan_gate", "node": "Call", "original": "any((h27_occurrences(text, key) for key in source_keys))", "replacement": "(any(h27_occurrences(text, key) for key in source_keys) and bool(h27_occurrences(text, 'PLAN_SOURCE_COMMIT')))", "kills": ()},
+    {"name": "xroot-plan-engagement-true", "row": "XR17", "function": "xroot_plan_gate", "node": "Call", "original": "any((h27_occurrences(text, key) for key in source_keys))", "replacement": "(any(h27_occurrences(text, key) for key in source_keys) or fields.get('DISPATCH_ID') == 'xroot-xp6-fields-absent-control')", "kills": ()},
+    *xroot_pair("XR18", "xroot-plan-resolution", "xroot_plan_gate", "Call", "xroot_valid_relpath(lock_path)"),
+    {"name": "xroot-pairing-bare-occurrence", "row": "XR19", "function": "lock_digest_shape_errors", "node": "Call", "original": "xroot_pair_plan_applicable(text)", "replacement": "bool(h27_occurrences(text, 'DESIGN_SOURCE_PATH'))", "kills": ()},
+    {"name": "xroot-pairing-disabled", "row": "XR19", "function": "lock_digest_shape_errors", "node": "Call", "original": "xroot_pair_plan_applicable(text)", "replacement": "xroot_pair_plan_applicable(text) and header_fields(text).get('DISPATCH_ID') != 'xroot-xv-valid-edge'", "kills": ()},
+)
+ARMS = ARMS + XROOT_ARMS
+KILLS.update({
+    "xroot-byte-compare-false": ["xroot/X19-digest-mismatch"],
+    "xroot-byte-compare-true": ["xroot/X18b-bytes-preserving-name"],
+    "xroot-commit-type-false": ["xroot/X10-tag-object", "xroot/XP5-tag-commit"],
+    "xroot-commit-type-true": ["xroot/XV-valid-edge"],
+    "xroot-completeness-false": ["xroot/X1-incomplete-declaration"],
+    "xroot-completeness-true": ["xroot/XV-valid-edge"],
+    "xroot-conflict-first-false": ["xroot/X4-conflicting-owner"],
+    "xroot-conflict-first-true": ["xroot/XV-valid-edge"],
+    "xroot-containment-false": ["xroot/X12-dotdot-path"],
+    "xroot-containment-true": ["xroot/X18b-bytes-preserving-name"],
+    "xroot-engagement-false": ["xroot/X1-incomplete-declaration"],
+    "xroot-engagement-true": ["xroot/X0a-fields-absent-control"],
+    "xroot-exclusivity-false": ["xroot/X5-local-foreign-ambiguity"],
+    "xroot-exclusivity-true": ["xroot/X5b-local-nonmatching-control"],
+    "xroot-identity-false": ["xroot/X21b-wrong-doc-identity"],
+    "xroot-identity-true": [
+        "xroot/X33c-conflicting-origin-doc",
+        "xroot/X33d-conflicting-origin-doc",
+        "xroot/X33g-conflicting-review-doc",
+        "xroot/X33h-conflicting-review-doc",
+    ],
+    "xroot-local-backcompat-false": ["xroot/X1-incomplete-declaration"],
+    "xroot-local-backcompat-true": ["xroot/X0b-no-git-on-path-control"],
+    "xroot-membership-first-value": [
+        "xroot/X33b-conflicting-origin-phase",
+        "xroot/X33d-conflicting-origin-doc",
+        "xroot/X33f-conflicting-review-phase",
+        "xroot/X33h-conflicting-review-doc",
+        "xroot/X33j-conflicting-review-parent",
+    ],
+    "xroot-membership-last-value": [
+        "xroot/X33a-conflicting-origin-phase",
+        "xroot/X33c-conflicting-origin-doc",
+        "xroot/X33e-conflicting-review-phase",
+        "xroot/X33g-conflicting-review-doc",
+        "xroot/X33i-conflicting-review-parent",
+    ],
+    "xroot-origin-shape-filter-kind": [
+        "xroot/X27-newer-malformed-origin-absent-kind",
+        "xroot/X27-newer-malformed-origin-wrong-kind",
+        "xroot/X35-10-origin-kind-first",
+    ],
+    "xroot-origin-shape-filter-role": ["xroot/X27-newer-malformed-origin-absent-role"],
+    "xroot-owner-false": ["xroot/X22-owner-mismatch"],
+    "xroot-owner-true": ["xroot/X22b-owner-match-control"],
+    "xroot-pairing-bare-occurrence": ["xroot/X37-boundary-control"],
+    "xroot-pairing-disabled": ["xroot/XV-valid-edge"],
+    "xroot-peer-tier-false": [
+        "xroot/X28-wrong-tier-domain-pair",
+        "xroot/X28-wrong-tier-master-domain",
+        "xroot/X28-wrong-tier-pair-domain",
+    ],
+    "xroot-peer-tier-true": [
+        "xroot/X18b-bytes-preserving-name",
+        "xroot/X22b-owner-match-control",
+        "xroot/X24-verdict-must-revise",
+        "xroot/X25-stale-approval",
+        "xroot/X26-newer-malformed-review-bad-verdict",
+        "xroot/X32-review-before-design",
+        "xroot/X34-supersedes-inert",
+        "xroot/X5b-local-nonmatching-control",
+        "xroot/X6b-relative-repo-positive",
+        "xroot/XV-valid-edge",
+    ],
+    "xroot-plan-engagement-false": ["xroot/XP2-partial-repo-only"],
+    "xroot-plan-engagement-true": ["xroot/XP6-fields-absent-control"],
+    "xroot-plan-resolution-false": [
+        "xroot/XP1-valid",
+        "xroot/XP10-symlink-component",
+        "xroot/XP11-non-blob",
+        "xroot/XP12-annotation-digest-mismatch",
+        "xroot/XP4-missing-blob",
+        "xroot/XP5-tag-commit",
+    ],
+    "xroot-plan-resolution-true": [
+        "xroot/XP13-absolute-path",
+        "xroot/XP8-dotdot-traversal",
+        "xroot/XP9-pathspec-magic",
+    ],
+    "xroot-review-shape-filter-kind": [
+        "xroot/X26-newer-malformed-review-absent-kind",
+        "xroot/X26-newer-malformed-review-wrong-kind",
+        "xroot/X35-22-review-kind-first",
+    ],
+    "xroot-review-shape-filter-verdict": [
+        "xroot/X24-verdict-must-revise",
+        "xroot/X25-stale-approval",
+        "xroot/X26-newer-malformed-review-bad-verdict",
+        "xroot/X35-24-review-verdict-first",
+    ],
+    "xroot-supersedes-drop-carrier": ["xroot/X34-supersedes-inert"],
+    "xroot-supersedes-drop-target": ["xroot/X34-supersedes-inert"],
+    "xroot-verdict-false": ["xroot/X24-verdict-must-revise", "xroot/X25-stale-approval"],
+    "xroot-verdict-true": [
+        "xroot/X18b-bytes-preserving-name",
+        "xroot/X22b-owner-match-control",
+        "xroot/X34-supersedes-inert",
+        "xroot/X5b-local-nonmatching-control",
+        "xroot/X6b-relative-repo-positive",
+        "xroot/XV-valid-edge",
+    ],
+})
+
 _arm_names = {_arm["name"] for _arm in ARMS}
 if set(KILLS) != _arm_names:
     raise ValueError(
