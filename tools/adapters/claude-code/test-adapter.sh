@@ -66,6 +66,82 @@ assert_case_engine_json() {
   fi
   echo "PASS $name"
 }
+stage_engine_root() {
+  local root="$1" generation="$2"
+  rm -rf "$root/tools"
+  mkdir -p "$root/tools"
+  cp "$TOOLS_DIR/relay" "$root/tools/relay"
+  cp -R "$TOOLS_DIR/relay_engine" "$root/tools/relay_engine"
+  # The trace is test-fixture instrumentation in a real roster member: the
+  # hook still executes the bundled CLI and rules, while the selected cache
+  # prefix becomes observable without replacing it with a mock.
+  printf '%s\n' \
+    'import os as _e3_os' \
+    'if _e3_os.environ.get("ADT_E3_ENGINE_TRACE"):' \
+    '    with open(_e3_os.environ["ADT_E3_ENGINE_TRACE"], "a", encoding="utf-8") as _e3_trace:' \
+    "        _e3_trace.write(\"$generation\\n\")" \
+    >> "$root/tools/relay_engine/__init__.py"
+}
+expected_engine_fingerprint() {
+  local tools_dir="$1"
+  PYTHONPATH="$TOOLS_DIR" python3 -c \
+    'from pathlib import Path; import sys; from relay_engine.version import fingerprint; print(fingerprint(Path(sys.argv[1])))' \
+    "$tools_dir"
+}
+assert_relay_version() {
+  local name="$1" relay="$2" install="$3" kit="$4" fingerprint="$5"
+  local output rc
+  output="$("$relay" version 2>"$tmp/stderr")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL $name: expected relay version exit 0, got $rc" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if ! python3 -c '
+import json
+import os
+import sys
+actual = json.loads(sys.stdin.read())
+expected = {"fingerprint": sys.argv[3], "install": os.path.realpath(sys.argv[1]), "kit": sys.argv[2]}
+raise SystemExit(0 if actual == expected else 1)
+' "$install" "$kit" "$fingerprint" <<<"$output"; then
+    echo "FAIL $name: expected exact kit/fingerprint/install triad" >&2
+    echo "expected install=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$install") kit=$kit fingerprint=$fingerprint" >&2
+    echo "actual $output" >&2
+    return 1
+  fi
+  echo "PASS $name"
+}
+assert_case_engine_json_origin() {
+  local name="$1" file="$2" skills="$3" home_dir="$4" path_value="$5" expected="$6" origin="$7"
+  local trace="$tmp/e3-engine-trace"
+  : > "$trace"
+  printf '{"tool_input":{"file_path":"%s"}}' "$file" | ADT_E3_ENGINE_TRACE="$trace" RELAY_LINT_SKILLS_ROOT="$skills" HOME="$home_dir" PATH="$path_value" "$BASH_BIN" "$HOOK" 2>"$tmp/stderr"
+  local rc=$?
+  if [ "$rc" -ne "$expected" ]; then
+    echo "FAIL $name: expected exit $expected got $rc" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if ! grep -q '"errors"' "$tmp/stderr"; then
+    echo "FAIL $name: expected engine JSON errors body" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if [ "$(cat "$trace")" != "$origin" ]; then
+    echo "FAIL $name: expected only configured prefix $origin, got $(tr '\n' ' ' < "$trace")" >&2
+    return 1
+  fi
+  echo "PASS $name"
+}
+stage_unsearched_prefix_decoys() {
+  local home_dir="$1"
+  mkdir -p "$home_dir/.agents/skills/tools" "$home_dir/.codex/skills/tools"
+  printf '%s\n' '#!/bin/sh' 'echo DECOY-UNSEARCHED-PREFIX >&2' 'exit 1' \
+    > "$home_dir/.agents/skills/tools/relay-lint.py"
+  cp "$home_dir/.agents/skills/tools/relay-lint.py" "$home_dir/.codex/skills/tools/relay-lint.py"
+}
 run_bash_guard() {
   local command="$1" background="$2" event="$3" skills="$4" home_dir="$5" path_value="$6"
   python3 -c 'import json,sys; print(json.dumps({"hook_event_name":sys.argv[1],"tool_input":{"command":sys.argv[2],"run_in_background":sys.argv[3] == "true"}}))' \
@@ -383,5 +459,48 @@ if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
 else
   echo "PASS k3-max-drift-knob-passes-old-stamp"
 fi
+
+# E3 activation proves the documented shared-root refresh route with the
+# real bundled engine.  The break this catches is a hook that falls back to
+# standalone lint or a relay executable that reports the wrong install bytes.
+e3_shared_root="$tmp/e3-shared-root"
+stage_engine_root "$e3_shared_root" A
+e3_shared_a_fingerprint="$(expected_engine_fingerprint "$e3_shared_root/tools")"
+assert_case_engine_json_origin "e3-shared-vA-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 A || fail=1
+assert_relay_version "e3-shared-vA-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.0" "$e3_shared_a_fingerprint" || fail=1
+stage_engine_root "$e3_shared_root" B
+e3_shared_b_fingerprint="$(expected_engine_fingerprint "$e3_shared_root/tools")"
+if [ "$e3_shared_a_fingerprint" = "$e3_shared_b_fingerprint" ]; then
+  echo "FAIL e3-shared-refresh-distinct-fingerprints: vA and vB fingerprints match" >&2
+  fail=1
+else
+  echo "PASS e3-shared-refresh-distinct-fingerprints"
+fi
+assert_case_engine_json_origin "e3-shared-vB-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 B || fail=1
+assert_relay_version "e3-shared-vB-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.0" "$e3_shared_b_fingerprint" || fail=1
+
+# E3 activation also proves that a version-qualified plugin cache remains at
+# the configured root after an update and changes only after an explicit
+# repoint.  Decoy fallback roots make any search beyond the configured prefix
+# observable instead of silently succeeding.
+e3_plugin_cache="$tmp/e3-plugin-cache"
+e3_plugin_old="$e3_plugin_cache/adt-master/2.9.0"
+e3_plugin_new="$e3_plugin_cache/adt-master/2.9.1"
+e3_plugin_home="$tmp/e3-plugin-home"
+stage_engine_root "$e3_plugin_old" A
+stage_engine_root "$e3_plugin_new" B
+e3_plugin_old_fingerprint="$(expected_engine_fingerprint "$e3_plugin_old/tools")"
+e3_plugin_new_fingerprint="$(expected_engine_fingerprint "$e3_plugin_new/tools")"
+if [ "$e3_plugin_old_fingerprint" = "$e3_plugin_new_fingerprint" ]; then
+  echo "FAIL e3-plugin-staged-distinct-fingerprints: 2.9.0 and 2.9.1 fingerprints match" >&2
+  fail=1
+else
+  echo "PASS e3-plugin-staged-distinct-fingerprints"
+fi
+stage_unsearched_prefix_decoys "$e3_plugin_home"
+assert_case_engine_json_origin "e3-plugin-update-keeps-old-hook-engine-json" "$engine_dirty" "$e3_plugin_old" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 A || fail=1
+assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/tools/relay" "$e3_plugin_old/tools" "2.9.0" "$e3_plugin_old_fingerprint" || fail=1
+assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine_dirty" "$e3_plugin_new" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 B || fail=1
+assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.0" "$e3_plugin_new_fingerprint" || fail=1
 
 exit "$fail"

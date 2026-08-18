@@ -284,7 +284,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9d45dad7d47d7e37945fd7639bce7e40ca65085e915f365d0af89957de7480d1",
+    "sha256": "0a9aaf818ed7793c985350a59df15aa0bc2b5df5927e28b636a3b448b9ff878b",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -10472,7 +10472,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9d45dad7d47d7e37945fd7639bce7e40ca65085e915f365d0af89957de7480d1",
+    "sha256": "0a9aaf818ed7793c985350a59df15aa0bc2b5df5927e28b636a3b448b9ff878b",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -20588,7 +20588,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9d45dad7d47d7e37945fd7639bce7e40ca65085e915f365d0af89957de7480d1",
+    "sha256": "0a9aaf818ed7793c985350a59df15aa0bc2b5df5927e28b636a3b448b9ff878b",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
