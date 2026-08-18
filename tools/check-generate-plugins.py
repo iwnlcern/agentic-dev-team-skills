@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from relay_engine import version
+
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-plugins.py"
@@ -94,6 +96,29 @@ LOCKED_TOOLS_SET = (
     "check-timestamp-drift.py",
     "relay-lint-fixtures",
     "adapters",
+)
+LOCKED_ENGINE_SET = (
+    "relay",
+    "relay_engine/README.md",
+    "relay_engine/__init__.py",
+    "relay_engine/cli.py",
+    "relay_engine/client.py",
+    "relay_engine/commission.py",
+    "relay_engine/cycles.py",
+    "relay_engine/daemon.py",
+    "relay_engine/envelope.py",
+    "relay_engine/errors.py",
+    "relay_engine/jcs.py",
+    "relay_engine/ledger.py",
+    "relay_engine/migrate.py",
+    "relay_engine/paths.py",
+    "relay_engine/reconcile.py",
+    "relay_engine/render.py",
+    "relay_engine/rules.py",
+    "relay_engine/seats.py",
+    "relay_engine/strings.py",
+    "relay_engine/supersede.py",
+    "relay_engine/version.py",
 )
 EXACT_INVENTORY_SENTINELS = {
     "adt-orchestrator": {
@@ -235,6 +260,8 @@ def canonical_source_map() -> dict[str, str]:
                 record_tree(plugin, source, destination)
             else:
                 record(plugin, source, destination)
+        for engine_member in LOCKED_ENGINE_SET:
+            record(plugin, ROOT / "tools" / engine_member, Path("tools") / engine_member)
         record_tree(plugin, ROOT / "vendor", Path("vendor"))
         record(plugin, ROOT / "LICENSE", Path("LICENSE"))
         record_tree(plugin, ROOT / "LICENSES", Path("LICENSES"))
@@ -255,6 +282,8 @@ def expected_plugin_files(plugin: str) -> set[str]:
             expected.add(f"skills/{skill}/{asset}")
     for tool in LOCKED_TOOLS_SET:
         expected |= canonical_files(ROOT / "tools" / tool, f"tools/{tool}")
+    for engine_member in LOCKED_ENGINE_SET:
+        expected |= canonical_files(ROOT / "tools" / engine_member, f"tools/{engine_member}")
     expected |= canonical_files(ROOT / "vendor" / "mattpocock", "vendor/mattpocock")
     expected |= canonical_files(ROOT / "LICENSE", "LICENSE")
     expected |= canonical_files(ROOT / "LICENSES", "LICENSES")
@@ -443,6 +472,13 @@ def check_r5_pdc_pointer() -> None:
     expect(pdc.count(PDC_CODEX_FORWARD_POINTER) == 1, "R5 pdc template lacks the Codex forward pointer")
 
 
+def check_locked_engine_roster() -> None:
+    expect(
+        LOCKED_ENGINE_SET == version.ROSTER,
+        "LOCKED_ENGINE_SET differs from relay_engine.version.ROSTER",
+    )
+
+
 def validate_provenance(entries: object, plugins_root: Path) -> None:
     expect(isinstance(entries, list), "PROVENANCE.json is not an array")
     expected_sources = canonical_source_map()
@@ -500,6 +536,13 @@ def check_verbatim_copies() -> None:
                 expect(file_map(canonical) == file_map(installed), f"{plugin} tool tree differs byte-for-byte: {tool}")
             else:
                 expect(canonical.read_bytes() == installed.read_bytes(), f"{plugin} tool differs byte-for-byte: {tool}")
+        for engine_member in LOCKED_ENGINE_SET:
+            canonical = ROOT / "tools" / engine_member
+            installed = plugin_root / "tools" / engine_member
+            expect(
+                canonical.read_bytes() == installed.read_bytes(),
+                f"{plugin} engine member differs byte-for-byte: {engine_member}",
+            )
         expect(
             file_map(ROOT / "vendor") == file_map(plugin_root / "vendor"),
             f"{plugin} vendor tree is not copied byte-for-byte",
@@ -606,6 +649,51 @@ def check_cold_install(scratch_base: Path) -> dict[str, Path]:
         empty_cwd = scratch_base / f"empty-cwd-{plugin}"
         empty_cwd.mkdir()
         expect_success(run_linter(linter, fixture, empty_cwd, no_freshness=True), f"{plugin} cold-install linter")
+        tools_dir = scratch / "tools"
+        launcher = tools_dir / "relay"
+        expect(launcher.is_file(), f"{plugin} cold install lacks tools/relay")
+        for engine_member in LOCKED_ENGINE_SET:
+            expect(
+                (tools_dir / engine_member).is_file(),
+                f"{plugin} cold install lacks tools/{engine_member}",
+            )
+        excluded_engine_entries = [
+            path.relative_to(tools_dir).as_posix()
+            for path in (tools_dir / "relay_engine").rglob("*")
+            if path.name in {"tests", "fixtures", "__pycache__"}
+        ]
+        expect(
+            not excluded_engine_entries,
+            f"{plugin} cold install carries excluded engine entries: {sorted(excluded_engine_entries)}",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        relay_version = subprocess.run(
+            [PYTHON, str(launcher), "version"],
+            cwd=empty_cwd,
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+        expect_success(relay_version, f"{plugin} cold-install relay version")
+        expect(
+            json.loads(relay_version.stdout)
+            == {
+                "fingerprint": version.fingerprint(ROOT / "tools"),
+                "install": os.path.realpath(tools_dir),
+                "kit": KIT_VERSION,
+            },
+            f"{plugin} cold-install relay version triad differs: {output(relay_version)}",
+        )
+        excluded_engine_entries = [
+            path.relative_to(tools_dir).as_posix()
+            for path in (tools_dir / "relay_engine").rglob("*")
+            if path.name in {"tests", "fixtures", "__pycache__"}
+        ]
+        expect(
+            not excluded_engine_entries,
+            f"{plugin} cold install creates excluded engine entries: {sorted(excluded_engine_entries)}",
+        )
         self_test = subprocess.run(
             [PYTHON, str(scratch / "tools" / "check-relay-lint-fixtures.py")],
             cwd=empty_cwd,
@@ -707,6 +795,7 @@ def main() -> int:
         ("R3 protocol content", check_r3_protocol_content),
         ("R4 README content", check_r4_readme_content),
         ("R5 pdc forward pointer", check_r5_pdc_pointer),
+        ("locked engine roster", check_locked_engine_roster),
         ("independent provenance", check_provenance),
         ("verbatim detection and vendor copies", check_verbatim_copies),
         ("inventory", check_inventory),
