@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -114,6 +115,19 @@ class TestParity(unittest.TestCase):
                 "producer_sha256": _digest(SCRIPT),
                 "status": "PASS", "verdicts": native,
             }, sort_keys=True, separators=(",", ":")) + "\n")
+
+    def test_live_secondary_comparison_explicit_order_inversion(self):
+        source = TOOLS / "relay-lint-fixtures" / "t11closure" / \
+            "R32-singleton-unstamped-candidate"
+        with tempfile.TemporaryDirectory() as isolated:
+            fixture = Path(isolated, "R32-singleton-unstamped-candidate")
+            shutil.copytree(source, fixture)
+            for stamp, path in enumerate(
+                    sorted(fixture.glob("*.md"), reverse=True), start=1):
+                os.utime(path, ns=(stamp, stamp))
+            native = _verdict(rules.lint_relay_root(fixture))
+            live = _verdict(_standalone().lint_relay_root(fixture))
+        self.assertEqual(native, live)
 
 
 if os.environ.get("RELAY_REGENERATE_PARITY") == "1":

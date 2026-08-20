@@ -964,7 +964,7 @@ def merge_authorized(text: str, fields: Dict[str, str]) -> bool:
     return field_form or merge_token_authorized(text, fields)
 
 
-def relay_order_key(path: Path) -> Tuple[int, object, str]:
+def relay_order_key(path: Path, root: Optional[Path] = None) -> Tuple[int, object, str]:
     stem = path.stem
     # Preferred: timestamp anywhere in protocol-ish filenames.
     m = re.search(r"(\d{8})[-T]?(\d{6})(?:Z)?", stem)
@@ -974,10 +974,15 @@ def relay_order_key(path: Path) -> Tuple[int, object, str]:
     m = re.match(r"^(\d+)", stem)
     if m:
         return (1, int(m.group(1)), path.name)
-    try:
-        return (2, path.stat().st_mtime_ns, path.name)
-    except OSError:
-        return (3, path.name, path.name)
+    # Deterministic fallback: stable path ordering, never filesystem stat.
+    if root is not None:
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+    else:
+        rel = path.as_posix()
+    return (2, rel, path.name)
 
 
 def clock_now(is_utc: bool) -> datetime.datetime:
@@ -3125,7 +3130,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
 
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     result = LintResult()
-    all_md = sorted((p for p in path.rglob("*.md") if p.is_file()), key=relay_order_key)
+    all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
+                    key=lambda p: relay_order_key(p, path))
     index_files = [p for p in all_md if p.name == "INDEX.md"]
     files = [p for p in all_md if p.name != "INDEX.md"]
     if not all_md:
@@ -3154,7 +3160,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     for f, _ in per_file:
         tx = read(f)
         fields = header_fields(tx)
-        phases.append((f, relay_order_key(f), fields.get("PHASE", ""), fields, tx))
+        phases.append((f, relay_order_key(f, path), fields.get("PHASE", ""), fields, tx))
     by_id = dispatch_id_map(phases)
 
     def resolve_parent(by_id, did, before_order, predicate):
