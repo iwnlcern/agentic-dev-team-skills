@@ -184,6 +184,7 @@ def write_plugin_manifest(plugin: str, data: dict[str, object], destination: Pat
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    destination.chmod(0o644)
 
 
 def write_provenance(output: Path) -> None:
@@ -202,10 +203,12 @@ def write_provenance(output: Path) -> None:
                 "kit_version": KIT_VERSION,
             }
         )
-    (output / MANIFEST_PATH).write_text(
+    manifest = output / MANIFEST_PATH
+    manifest.write_text(
         json.dumps(sorted(entries, key=lambda entry: entry["path"]), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    manifest.chmod(0o644)
 
 
 def generated_source(output: Path, generated: Path) -> str:
@@ -258,13 +261,21 @@ def generate_tree(output: Path) -> None:
     write_provenance(output)
 
 
-def file_map(root: Path) -> dict[str, bytes]:
+def file_map(root: Path) -> dict[str, tuple[str, int, bytes]]:
     if not root.exists():
         return {}
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted_files(root)
-    }
+    files = {}
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        if stat.S_ISDIR(status.st_mode):
+            continue
+        relative = path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISREG(status.st_mode):
+            files[relative] = ("regular", mode, path.read_bytes())
+        else:
+            files[relative] = ("non-regular", mode, b"")
+    return files
 
 
 def check_tree(expected: Path, actual: Path) -> int:

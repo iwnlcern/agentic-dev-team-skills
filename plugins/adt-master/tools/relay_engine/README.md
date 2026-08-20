@@ -72,7 +72,7 @@ $HOME/.claude/skills/tools/relay version
 The JSON result names the installed `kit`, fingerprint, and resolved `install` path.
 The client and daemon may be installed at different paths, but record operations require matching valid kit and fingerprint identities.
 
-If an old client contacts a new daemon, every request refuses with `E-VERSION-MISMATCH` and instructs the operator to update the client install.
+If an old client contacts a new daemon, every request refuses with the frozen-client-compatible `E-WIRE-VERSION` code and instructs the operator to update the client install.
 Leave the new daemon running, refresh the client route from the same released engine surface, run `relay version` on that client copy, and retry with the refreshed client.
 
 If a new client contacts an old daemon, record operations refuse with `E-VERSION-MISMATCH` and instruct the operator to update the daemon install.

@@ -16,6 +16,21 @@ from relay_engine.paths import Root, clear_sid, sid_for
 
 class RemoteError(Exception):
     def __init__(self, value):
+        self.rejected = None
+        if (not isinstance(value, dict) or
+                set(value) != {"code", "cause", "remedy", "cls"} or
+                not isinstance(value.get("code"), str) or
+                value["code"] not in errors.ERRORS or
+                value.get("cls") != errors.ERRORS[value.get("code")].cls or
+                not strings._is_text(value.get("cause")) or
+                not strings._is_text(value.get("remedy"))):
+            self.code = None
+            self.cause = None
+            self.remedy = None
+            self.cls = None
+            self.rejected = errors._rejected(value)
+            super().__init__("remote error")
+            return
         self.code = value["code"]
         self.cause = value["cause"]
         self.remedy = value["remedy"]
@@ -114,10 +129,16 @@ def _identity_value(identity, key):
 
 def _mismatch(cid, did, *, old_daemon=False):
     if old_daemon:
-        did = {
-            "kit": "0.0.0", "fp": "0" * 64,
-            "install": _identity_value(did, "socket"),
-        }
+        socket_name = errors._identity_value(
+            _identity_value(did, "socket"), strings.valid_install)
+        return RemoteError({
+            "code": "E-VERSION-MISMATCH",
+            "cause": "wire v1 daemon at socket %s does not expose a daemon identity" %
+                     socket_name,
+            "remedy": "update the daemon install serving socket %s, then retry" %
+                      socket_name,
+            "cls": "policy",
+        })
     error = errors.error_for(
         "E-VERSION-MISMATCH",
         client_install=_identity_value(cid, "install"),

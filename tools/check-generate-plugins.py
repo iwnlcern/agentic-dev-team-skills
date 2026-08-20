@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -184,12 +185,35 @@ def expect_drift(result: subprocess.CompletedProcess[str], path: str) -> None:
     expect(f"different: {path}" in output(result), f"drift for {path} was not reported: {output(result)}")
 
 
-def file_map(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-    }
+def file_map(root: Path) -> dict[str, tuple[str, int, bytes]]:
+    files = {}
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        if stat.S_ISDIR(status.st_mode):
+            continue
+        relative = path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISREG(status.st_mode):
+            files[relative] = ("regular", mode, path.read_bytes())
+        else:
+            files[relative] = ("non-regular", mode, b"")
+    return files
+
+
+def expected_generated_mode(relative: str, source: str) -> int:
+    if relative.endswith("/.claude-plugin/plugin.json"):
+        return 0o644
+    return stat.S_IMODE((ROOT / source).lstat().st_mode)
+
+
+def require_regular_mode(path: Path, expected_mode: int, context: str) -> None:
+    status = path.lstat()
+    expect(stat.S_ISREG(status.st_mode), f"{context} is non-regular: {path}")
+    actual_mode = stat.S_IMODE(status.st_mode)
+    expect(
+        actual_mode == expected_mode,
+        f"{context} mode differs: {path}: expected {expected_mode:o}, got {actual_mode:o}",
+    )
 
 
 def check_retired_m01_compound_placeholders() -> None:
@@ -297,7 +321,7 @@ def assert_exact_plugin_file_inventory(plugin: str, plugin_root: Path) -> None:
     actual = {
         path.relative_to(plugin_root).as_posix()
         for path in plugin_root.rglob("*")
-        if path.is_file()
+        if not stat.S_ISDIR(path.lstat().st_mode)
     }
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
@@ -305,6 +329,19 @@ def assert_exact_plugin_file_inventory(plugin: str, plugin_root: Path) -> None:
         not missing and not extra,
         f"{plugin} exact file inventory differs: missing: {missing}; extra: {extra}",
     )
+
+
+def validate_plugin_metadata(plugin: str, plugin_root: Path) -> None:
+    assert_exact_plugin_file_inventory(plugin, plugin_root)
+    sources = canonical_source_map()
+    for relative in sorted(expected_plugin_files(plugin)):
+        provenance_path = f"{plugin}/{relative}"
+        source = sources[provenance_path]
+        require_regular_mode(
+            plugin_root / relative,
+            expected_generated_mode(provenance_path, source),
+            f"{plugin} shipped path",
+        )
 
 
 def copy_generator_inputs(destination: Path) -> Path:
@@ -349,6 +386,28 @@ def check_manifest_mutation() -> None:
         expect_drift(run_generator(fixture, "--check"), "PROVENANCE.json")
         expect_success(run_generator(fixture), "manifest mutation regeneration")
         expect_success(run_generator(fixture, "--check"), "manifest mutation regenerated --check")
+
+        previous_umask = os.umask(0o077)
+        try:
+            restrictive_check = run_generator(fixture, "--check")
+        finally:
+            os.umask(previous_umask)
+        expect_success(restrictive_check, "restrictive-umask synthesized metadata --check")
+
+        relative = "adt-pair/tools/relay_engine/client.py"
+        generated = fixture / "plugins" / relative
+        same_bytes = fixture / "same-client.py"
+        same_bytes.write_bytes(generated.read_bytes())
+        generated.unlink()
+        generated.symlink_to(same_bytes)
+        expect_drift(run_generator(fixture, "--check"), relative)
+        expect_success(run_generator(fixture), "symlink mutation regeneration")
+
+        original_mode = stat.S_IMODE(generated.lstat().st_mode)
+        generated.chmod(original_mode ^ stat.S_IXUSR)
+        expect_drift(run_generator(fixture, "--check"), relative)
+        expect_success(run_generator(fixture), "mode mutation regeneration")
+        expect_success(run_generator(fixture, "--check"), "metadata mutations regenerated --check")
 
 
 def check_banner_mutation() -> None:
@@ -480,12 +539,15 @@ def check_locked_engine_roster() -> None:
 
 
 def validate_provenance(entries: object, plugins_root: Path) -> None:
+    require_regular_mode(
+        plugins_root / MANIFEST_PATH, 0o644, "provenance manifest")
     expect(isinstance(entries, list), "PROVENANCE.json is not an array")
     expected_sources = canonical_source_map()
     on_disk = {
         path.relative_to(plugins_root).as_posix()
         for path in plugins_root.rglob("*")
-        if path.is_file() and path.relative_to(plugins_root).as_posix() != MANIFEST_PATH
+        if (not stat.S_ISDIR(path.lstat().st_mode) and
+            path.relative_to(plugins_root).as_posix() != MANIFEST_PATH)
     }
     paths: list[str] = []
     for entry in entries:
@@ -502,7 +564,12 @@ def validate_provenance(entries: object, plugins_root: Path) -> None:
         expect(entry["source"] == expected_sources[path], f"provenance source differs for {path}")
         expect(entry["kit_version"] == KIT_VERSION, f"provenance kit version differs for {path}")
         generated = plugins_root / path
-        expect(generated.is_file(), f"provenance path is absent on disk: {path}")
+        expect(generated.exists() or generated.is_symlink(), f"provenance path is absent on disk: {path}")
+        require_regular_mode(
+            generated,
+            expected_generated_mode(path, expected_sources[path]),
+            "provenance path",
+        )
         digest = hashlib.sha256(generated.read_bytes()).hexdigest()
         expect(entry["sha256"] == digest, f"provenance hash differs for {path}")
     expect(len(paths) == len(set(paths)), "PROVENANCE.json contains duplicate paths")
@@ -512,6 +579,7 @@ def validate_provenance(entries: object, plugins_root: Path) -> None:
 
 def check_provenance() -> None:
     manifest = PLUGINS_ROOT / MANIFEST_PATH
+    require_regular_mode(manifest, 0o644, "provenance manifest")
     entries = json.loads(manifest.read_text(encoding="utf-8"))
     validate_provenance(entries, PLUGINS_ROOT)
 
@@ -524,6 +592,75 @@ def check_provenance() -> None:
         expect("provenance hash differs" in str(error), f"hash sabotage failed for the wrong reason: {error}")
     else:
         raise AssertionError("provenance hash sabotage was not rejected")
+
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-provenance-") as temporary:
+        fixture = Path(temporary) / "plugins"
+        shutil.copytree(PLUGINS_ROOT, fixture)
+        relative = "adt-pair/tools/relay_engine/client.py"
+        generated = fixture / relative
+        same_bytes = Path(temporary) / "same-client.py"
+        same_bytes.write_bytes(generated.read_bytes())
+        generated.unlink()
+        generated.symlink_to(same_bytes)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("non-regular" in str(error), f"provenance symlink failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted a same-byte symlink")
+
+        generated.unlink()
+        generated.write_bytes(same_bytes.read_bytes())
+        expected_mode = stat.S_IMODE((ROOT / "tools/relay_engine/client.py").lstat().st_mode)
+        generated.chmod(expected_mode ^ stat.S_IXUSR)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("mode differs" in str(error), f"provenance mode mutation failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted a same-byte mode mutation")
+        generated.chmod(expected_mode)
+
+        manifest = fixture / MANIFEST_PATH
+        same_manifest = Path(temporary) / "same-provenance.json"
+        same_manifest.write_bytes(manifest.read_bytes())
+        manifest.unlink()
+        manifest.symlink_to(same_manifest)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("non-regular" in str(error), f"provenance manifest symlink failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted a same-byte manifest symlink")
+
+        manifest.unlink()
+        manifest.write_bytes(same_manifest.read_bytes())
+        manifest.chmod(0o600)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("mode differs" in str(error), f"provenance manifest mode mutation failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted manifest mode drift")
+
+
+def check_provenance_manifest_preflight() -> None:
+    global PLUGINS_ROOT
+    original_root = PLUGINS_ROOT
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-provenance-preflight-") as temporary:
+        fixture = Path(temporary) / "plugins"
+        fixture.mkdir()
+        (fixture / MANIFEST_PATH).symlink_to(Path(temporary) / "missing.json")
+        PLUGINS_ROOT = fixture
+        try:
+            try:
+                check_provenance()
+            except AssertionError as error:
+                expect("non-regular" in str(error), f"provenance manifest preflight failed for the wrong reason: {error}")
+            else:
+                raise AssertionError("provenance manifest was read before metadata preflight")
+        finally:
+            PLUGINS_ROOT = original_root
 
 
 def check_verbatim_copies() -> None:
@@ -608,12 +745,50 @@ def check_adjacency() -> None:
 def install_tier(plugin: str, scratch_base: Path) -> Path:
     scratch = scratch_base / plugin
     plugin_root = PLUGINS_ROOT / plugin
+    validate_plugin_metadata(plugin, plugin_root)
     shutil.copytree(plugin_root / "skills", scratch / "skills")
     shutil.copytree(plugin_root / "tools", scratch / "tools")
     shutil.copytree(plugin_root / "vendor", scratch / "vendor")
     shutil.copytree(plugin_root / "LICENSES", scratch / "LICENSES")
     shutil.copy2(plugin_root / "LICENSE", scratch / "LICENSE")
     return scratch
+
+
+def check_install_metadata_refusal() -> None:
+    global PLUGINS_ROOT
+    original_root = PLUGINS_ROOT
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-install-metadata-") as temporary:
+        temporary_root = Path(temporary)
+        fixture_root = temporary_root / "plugins"
+        fixture_root.mkdir()
+        shutil.copytree(original_root / "adt-pair", fixture_root / "adt-pair")
+        PLUGINS_ROOT = fixture_root
+        try:
+            relative = "tools/relay_engine/client.py"
+            generated = fixture_root / "adt-pair" / relative
+            same_bytes = temporary_root / "same-client.py"
+            same_bytes.write_bytes(generated.read_bytes())
+            generated.unlink()
+            generated.symlink_to(same_bytes)
+            try:
+                install_tier("adt-pair", temporary_root / "symlink-install")
+            except AssertionError as error:
+                expect("non-regular" in str(error), f"cold install symlink failed for the wrong reason: {error}")
+            else:
+                raise AssertionError("cold install dereferenced a same-byte symlink")
+
+            generated.unlink()
+            generated.write_bytes(same_bytes.read_bytes())
+            expected_mode = stat.S_IMODE((ROOT / "tools/relay_engine/client.py").lstat().st_mode)
+            generated.chmod(expected_mode ^ stat.S_IXUSR)
+            try:
+                install_tier("adt-pair", temporary_root / "mode-install")
+            except AssertionError as error:
+                expect("mode differs" in str(error), f"cold install mode mutation failed for the wrong reason: {error}")
+            else:
+                raise AssertionError("cold install copied a same-byte mode mutation")
+        finally:
+            PLUGINS_ROOT = original_root
 
 
 def run_linter(linter: Path, relay: Path, empty_cwd: Path, *, no_freshness: bool = False) -> subprocess.CompletedProcess[str]:
@@ -797,6 +972,7 @@ def main() -> int:
         ("R5 pdc forward pointer", check_r5_pdc_pointer),
         ("locked engine roster", check_locked_engine_roster),
         ("independent provenance", check_provenance),
+        ("provenance manifest preflight", check_provenance_manifest_preflight),
         ("verbatim detection and vendor copies", check_verbatim_copies),
         ("inventory", check_inventory),
         ("adjacency", check_adjacency),
@@ -807,12 +983,15 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="check-generate-plugins-cold-install-") as temporary:
         scratch_base = Path(temporary)
+        install_metadata_passed, _ = run_check("cold-install metadata refusal", check_install_metadata_refusal)
         cold_install_passed, installations = run_check("cold install", lambda: check_cold_install(scratch_base))
         no_banner_passed, _ = run_check("no banner in comment-free formats", check_no_json_banner)
         validator_passed, _ = run_check("per-plugin Claude validation", check_claude_plugin_validation)
         if not no_banner_passed:
             failures += 1
         if not validator_passed:
+            failures += 1
+        if not install_metadata_passed:
             failures += 1
         if not cold_install_passed:
             failures += 1

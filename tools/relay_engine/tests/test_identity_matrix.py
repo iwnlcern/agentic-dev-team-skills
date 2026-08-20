@@ -28,6 +28,15 @@ RECORD_OPS = {
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
     "migrate.check",
 }
+FROZEN_V1_ERROR_CODES = {
+    "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
+    "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
+    "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN",
+    "seat-occupied", "commission-conflict", "commission-late",
+    "run-id-mismatch", "run-id-uninitialized", "run-id-invalid",
+    "E-FRAMING", "E-WIRE-VERSION", "E-WIRE-OP", "E-WIRE-ARGS",
+    "E-DAEMON-STOPPING",
+}
 DRAFT = """## matrix relay
 
 ROLE: Planner
@@ -92,6 +101,18 @@ def _submit_args(root_name, registration):
     draft.parent.mkdir(parents=True, exist_ok=True)
     draft.write_text(DRAFT, encoding="utf-8")
     return os.fspath(draft), os.fspath(Path(root_name, registration["key_path"]))
+
+
+def _frozen_v1_cli_bytes(error):
+    """Render with the heading/text gates frozen at hygiene base 9ad3734."""
+    if error["code"] not in FROZEN_V1_ERROR_CODES:
+        raise ValueError("invalid inventory parameter")
+    for field in ("cause", "remedy"):
+        if (not isinstance(error[field], str) or not error[field] or
+                "\n" in error[field]):
+            raise ValueError("invalid inventory parameter")
+    return ("%s\ncause: %s\nremedy: %s\n" % (
+        error["code"], error["cause"], error["remedy"])).encode("utf-8")
 
 
 class RunningDaemon:
@@ -244,7 +265,7 @@ class TestIdentityMatrix(unittest.TestCase):
         self.assertEqual(json.loads(Path(
             self.root_name, ".engine/daemon.json").read_text())["identity"], did)
 
-    def test_cells_2_and_3_fingerprint_mismatch_has_independent_paths(self):
+    def test_cells_2_and_3_identity_mismatch_has_independent_paths(self):
         did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
         self.start_daemon(did)
 
@@ -273,6 +294,36 @@ class TestIdentityMatrix(unittest.TestCase):
         raw_admin["id"] = "00000000-0000-0000-0000-000000000003"
         self.assertTrue(_raw_roundtrip(
             self.running[-1].socket_name, raw_admin)["ok"])
+
+        raw_kit_cid = {
+            "kit": "2.9.1", "fp": FP_A, "install": "/raw-kit-client",
+        }
+        raw_kit_record = dict(raw_record, cid=raw_kit_cid)
+        raw_kit_record["id"] = "00000000-0000-0000-0000-000000000004"
+        response = _raw_roundtrip(
+            self.running[-1].socket_name, raw_kit_record)
+        self.assertEqual(response["error"]["code"], "E-VERSION-MISMATCH")
+        self.assertIn("update the daemon install", response["error"]["remedy"])
+
+        Path(self.root_name, ".engine/daemon.json").write_text(json.dumps({
+            "pid": os.getpid(),
+            "pid_start_time": "new-daemon",
+            "nonce": "new-daemon",
+            "state": "ready",
+            "socket": "/tmp/must-not-contact",
+            "version": 2,
+            "schema_version": 1,
+            "identity": dict(did, kit="2.9.1"),
+        }), encoding="utf-8")
+        with mock.patch.object(
+                client, "_roundtrip",
+                side_effect=AssertionError("kit-mismatched client contacted socket")):
+            mismatch = self.assert_mismatch(lambda: client.request(
+                self.root_name, "roster", {}, cid={
+                    "kit": "2.9.0", "fp": FP_A,
+                    "install": "/precheck-kit-client",
+                }))
+        self.assertIn("update the client install", mismatch.remedy)
 
     def test_v2_admin_requires_grammar_valid_client_identity(self):
         did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
@@ -456,9 +507,16 @@ class TestIdentityMatrix(unittest.TestCase):
             with self.subTest(op=request["op"]):
                 response = _raw_roundtrip(running.socket_name, request)
                 self.assertEqual(
-                    response["error"]["code"], "E-VERSION-MISMATCH")
-                self.assertIn("update the client install",
-                              response["error"]["remedy"])
+                    response["error"], {
+                        "code": "E-WIRE-VERSION",
+                        "cause": "wire v1 client did not provide an identity to this wire v2 daemon",
+                        "remedy": "update the client install and retry; leave the daemon running",
+                        "cls": "wire",
+                    })
+                self.assertEqual(
+                    _frozen_v1_cli_bytes(response["error"]),
+                    b"E-WIRE-VERSION\ncause: wire v1 client did not provide an identity to this wire v2 daemon\nremedy: update the client install and retry; leave the daemon running\n",
+                )
         self.assertTrue(running.thread.is_alive())
 
         updated_cid = dict(did, install="/updated-client")
@@ -489,7 +547,17 @@ class TestIdentityMatrix(unittest.TestCase):
 
         mismatch = self.assert_mismatch(lambda: client.request(
             self.root_name, "roster", {}, cid=cid))
-        self.assertIn("update the daemon install", mismatch.remedy)
+        self.assertEqual(
+            (mismatch.code, mismatch.cause, mismatch.remedy, mismatch.cls),
+            (
+                "E-VERSION-MISMATCH",
+                "wire v1 daemon at socket %s does not expose a daemon identity" %
+                stub.socket_name,
+                "update the daemon install serving socket %s, then retry" %
+                stub.socket_name,
+                "policy",
+            ),
+        )
         with mock.patch.object(client.uuid, "uuid4", side_effect=(
                 uuid.UUID(status_id), uuid.UUID(stop_id))):
             self.assertEqual(client.request(
@@ -772,7 +840,7 @@ class TestIdentityMatrix(unittest.TestCase):
                     running.stop(cid)
                     self.running.remove(running)
 
-    def test_cell_9_cli_never_prints_unexpected_error(self):
+    def test_cell_9_cli_renders_registered_errors_and_degrades_remote_shape(self):
         cid, did = cid_did()
         did = dict(did, fp=FP_B)
         self.start_daemon(did)
@@ -783,6 +851,31 @@ class TestIdentityMatrix(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("E-VERSION-MISMATCH", stderr.getvalue())
         self.assertNotIn("unexpected error", stderr.getvalue())
+
+        cases = (
+            ({"code": "E-FUTURE-DAEMON", "cause": "future cause",
+              "remedy": "future remedy", "cls": "wire"},
+             "ae11568440b6", 87),
+            ({}, "44136fa355b3", 2),
+            ({"code": [], "cause": "x", "remedy": "y", "cls": "wire"},
+             "4ca70b667eab", 49),
+            ({"code": "E-KEY-MISMATCH", "cause": "bad\ncause",
+              "remedy": "retry", "cls": "policy"},
+             "2c955f7e1cbf", 78),
+        )
+        for value, digest, length in cases:
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                error = client.RemoteError(value)
+                with redirect_stderr(stderr):
+                    cli._report_command_error(error)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    "unexpected error\nunrecognized-input "
+                    "(sha256:%s, length %d)\n" % (digest, length),
+                )
+                self.assertNotIn("future cause", stderr.getvalue())
+                self.assertNotIn("bad", stderr.getvalue())
 
 
 if __name__ == "__main__":

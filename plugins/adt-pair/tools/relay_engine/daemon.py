@@ -42,9 +42,21 @@ _FP_ERRORS = {"missing-member", "extra-member", "non-regular-member",
               "unreadable-member"}
 
 
+@dataclass(frozen=True)
+class _PreIdentityError:
+    code: str
+    cause: str
+    remedy: str
+    cls: str
+
+    def as_dict(self):
+        return {"code": self.code, "cause": self.cause,
+                "remedy": self.remedy, "cls": self.cls}
+
+
 class WireFault(Exception):
     def __init__(self, error):
-        if not isinstance(error, errors.EngineError):
+        if not isinstance(error, (errors.EngineError, _PreIdentityError)):
             raise TypeError("EngineError required")
         self.error = error
         super().__init__(error.code)
@@ -211,11 +223,13 @@ def _version_mismatch(cid, did, *, attribute_damage=True):
     return error
 
 
-def _old_client_mismatch(did):
-    return _version_mismatch({
-        "kit": "0.0.0", "fp": "0" * 64,
-        "install": "/unknown-old-client",
-    }, did, attribute_damage=False)
+def _old_client_mismatch():
+    return _PreIdentityError(
+        "E-WIRE-VERSION",
+        "wire v1 client did not provide an identity to this wire v2 daemon",
+        "update the client install and retry; leave the daemon running",
+        "wire",
+    )
 
 
 def decode_request(body, did=None):
@@ -232,7 +246,7 @@ def decode_request(body, did=None):
     if not isinstance(request, dict):
         raise WireFault(errors.error_for("E-FRAMING", reason="not-json"))
     if request.get("v") == 1 and did is not None:
-        raise WireFault(_old_client_mismatch(did))
+        raise WireFault(_old_client_mismatch())
     if type(request.get("v")) is not int or request.get("v") != 2:
         raise WireFault(errors.error_for(
             "E-WIRE-VERSION", rejected_version=_rejected(request.get("v"))))

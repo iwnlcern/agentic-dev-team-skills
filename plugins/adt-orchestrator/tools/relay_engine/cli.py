@@ -393,6 +393,12 @@ def build_parser():
 
 
 def _report_command_error(exc):
+    if isinstance(exc, client.RemoteError) and exc.rejected is not None:
+        strings.emit("stderr", "unexpected-error")
+        strings.emit(
+            "stderr", "rejected-value",
+            digest=exc.rejected.digest, length=exc.rejected.length)
+        return
     strings.emit("stderr", "explain-heading", code=exc.code)
     strings.emit("stderr", "explain-cause", cause=exc.cause)
     strings.emit("stderr", "explain-remedy", remedy=exc.remedy)
