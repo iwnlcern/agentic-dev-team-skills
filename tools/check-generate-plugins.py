@@ -82,9 +82,21 @@ Model-specific files (`model-<family>.md`) follow the same pattern and ship empt
 Host and model files map protocol mechanics onto a host; they never change the protocol, and on conflict the protocol wins.
 """
 
-CODEX_INSTALL_TEXT = """- Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
-  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills).
-  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
+CODEX_INSTALL_TEXT = """- Codex: install via the plugin route, same repository, no separate artifact (verified 2026-08-20
+  on codex-cli 0.149.0 for adt-pair, adt-orchestrator, and adt-master):
+
+  ```text
+  codex plugin marketplace add iwnlcern/agentic-dev-team-skills
+  codex plugin add adt-<tier>@agentic-dev-team-skills
+  ```
+
+  Codex discovers `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json` natively, so
+  the Claude Code marketplace layout serves both hosts unchanged, with skill adjacency intact.
+  Fallback (air-gapped installs, or any other `.agents/skills` host): copy
+  `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and
+  `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working
+  deprecated destination. Manual copy needs no manifest (filesystem discovery:
+  https://learn.chatgpt.com/docs/build-skills).
 """
 
 PDC_CODEX_FORWARD_POINTER = (
