@@ -9,14 +9,18 @@ It does not verify whether claims are true.
 from __future__ import annotations
 
 import datetime
+import errno
 import hashlib
 import os
 import re
 import selectors
 import signal
 import time
+import stat
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
+
+from relay_engine import strings
 
 # Relay filename timestamps must name the real authoring time. Wall-clock drift
 # is a fabrication risk, not a cosmetic one: a stamp the author invented makes the
@@ -1079,8 +1083,9 @@ def lint_file(
     template_mode: bool = False,
     freshness: bool = False,
     max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
+    _text: Optional[str] = None,
 ) -> LintResult:
-    text = read(path)
+    text = read(path) if _text is None else _text
     clean = sanitized_text(text)
     result = LintResult()
     fields = header_fields(text)
@@ -3888,33 +3893,281 @@ def xroot_design_gate(
             f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
         )
     return True
+def _engine_record_finding(result: LintResult, cause: str,
+                           path: str) -> None:
+    result.error(strings.render(
+        "engine-root-record-integrity", cause=cause, path=path))
+
+
+def _engine_outside_finding(result: LintResult, cause: str,
+                            path: str) -> None:
+    result.error(strings.render(
+        "engine-root-outside-the-record", cause=cause, path=path))
+
+
+def _safe_engine_finding_path(value: str) -> str:
+    parts = [part for part in value.replace("\\", "/").split("/")
+             if part not in {"", ".", ".."}]
+    candidate = "/".join(parts)
+    try:
+        strings.render("engine-root-outside-the-record",
+                       cause="root escape", path=candidate)
+    except ValueError:
+        encoded = value.encode("utf-8", "surrogatepass")
+        candidate = "entry-%s" % hashlib.sha256(encoded).hexdigest()[:12]
+    return candidate
+
+
+def _canonical_record_path(value: object) -> Optional[str]:
+    if (not isinstance(value, str) or not value or value.startswith("/") or
+            any(part in {"", ".", ".."} for part in value.split("/")) or
+            "\x00" in value or "\n" in value or "\r" in value):
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value
+
+
+def _symlink_escapes(root: Path, parent: str, target: str) -> bool:
+    if os.path.isabs(target):
+        destination = os.path.abspath(target)
+    else:
+        destination = os.path.abspath(os.path.join(
+            os.fspath(root), parent, target))
+    canonical_root = os.path.abspath(root)
+    try:
+        return os.path.commonpath((canonical_root, destination)) != \
+            canonical_root
+    except ValueError:
+        return True
+
+
+def _read_record_candidate(root_fd: int, relative: str
+                           ) -> Tuple[Optional[bytes], Optional[str]]:
+    try:
+        info = os.stat(relative, dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError:
+        return None, "unreadable"
+    if stat.S_ISLNK(info.st_mode):
+        return None, "symlinked"
+    if not stat.S_ISREG(info.st_mode):
+        return None, "non-regular"
+    if stat.S_IMODE(info.st_mode) & 0o444 == 0:
+        return None, "unreadable"
+    descriptor = None
+    try:
+        descriptor = os.open(
+            relative,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=root_fd,
+        )
+        held_info = os.fstat(descriptor)
+        if not stat.S_ISREG(held_info.st_mode):
+            return None, "non-regular"
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), None
+    except PermissionError:
+        return None, "unreadable"
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "symlinked"
+        return None, "unreadable"
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _record_scoped_population(path: Path, context: dict,
+                              result: LintResult
+                              ) -> Tuple[List[Path], Dict[Path, str], set[Path]]:
+    entries = context.get("entries", []) if isinstance(context, dict) else []
+    record_entries: Dict[str, dict] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        received = entry.get("path") if isinstance(entry, dict) else None
+        relative = _canonical_record_path(received)
+        if relative is None:
+            _engine_outside_finding(
+                result, "root escape",
+                _safe_engine_finding_path(
+                    received if isinstance(received, str) else "record-entry"),
+            )
+            continue
+        record_entries[relative] = entry
+
+    allowed_directories = set()
+    for relative in record_entries:
+        parts = relative.split("/")[:-1]
+        for index in range(1, len(parts) + 1):
+            allowed_directories.add("/".join(parts[:index]))
+
+    root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    blocked = set()
+
+    def block_descendants(relative: str) -> None:
+        prefix = relative + "/"
+        blocked.update(record for record in record_entries
+                       if record.startswith(prefix))
+
+    def inventory(directory_fd: int, parent: str = "") -> None:
+        names = sorted(os.listdir(directory_fd), key=os.fsencode)
+        for name in names:
+            relative = name if not parent else parent + "/" + name
+            try:
+                info = os.stat(name, dir_fd=directory_fd,
+                               follow_symlinks=False)
+            except OSError:
+                _engine_outside_finding(
+                    result,
+                    "foreign entry", _safe_engine_finding_path(relative))
+                continue
+            if not parent and name == ".engine" and stat.S_ISDIR(info.st_mode):
+                continue
+            if not parent and name in {"INDEX.md", "SEATS.md"}:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                if relative in record_entries:
+                    continue
+                if relative not in allowed_directories:
+                    _engine_outside_finding(
+                        result,
+                        "unexpected directory", relative)
+                child_fd = None
+                try:
+                    child_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    inventory(child_fd, relative)
+                except OSError:
+                    _engine_outside_finding(
+                        result,
+                        "symlinked component", relative)
+                    block_descendants(relative)
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                if relative in record_entries:
+                    continue
+                if relative in allowed_directories:
+                    _engine_outside_finding(
+                        result,
+                        "symlinked component", relative)
+                    block_descendants(relative)
+                    continue
+                try:
+                    target = os.readlink(name, dir_fd=directory_fd)
+                except OSError:
+                    target = ""
+                cause = ("root escape" if _symlink_escapes(
+                    path, parent, target) else "foreign entry")
+                _engine_outside_finding(
+                    result, cause,
+                    relative)
+                continue
+            if relative in allowed_directories:
+                _engine_outside_finding(
+                    result,
+                    "non-directory ancestor", relative)
+                block_descendants(relative)
+            elif relative not in record_entries:
+                _engine_outside_finding(
+                    result,
+                    "foreign entry", relative)
+
+    try:
+        inventory(root_fd)
+        files = []
+        texts = {}
+        suppressed = set()
+        for relative, entry in sorted(
+                record_entries.items(), key=lambda item: item[0].encode("utf-8")):
+            if relative in blocked:
+                continue
+            body, cause = _read_record_candidate(root_fd, relative)
+            if cause is not None:
+                _engine_record_finding(result, cause, relative)
+                continue
+            file_path = path / relative
+            files.append(file_path)
+            try:
+                text = body.decode("utf-8")
+            except UnicodeDecodeError:
+                text = body.decode(errors="replace")
+            texts[file_path] = text
+            expected = entry.get("body_sha256") if isinstance(entry, dict) \
+                else None
+            if hashlib.sha256(body).hexdigest() == expected:
+                suppressed.add(file_path)
+            else:
+                _engine_record_finding(
+                    result,
+                    "digest-mismatch", relative)
+        return files, texts, suppressed
+    finally:
+        os.close(root_fd)
 
 
 def lint_relay_root(path: Path, *, template_mode: bool = False,
                     engine_root: bool = False,
-                    projection_digests: Optional[Dict[Path, str]] = None
-                    ) -> LintResult:
+                    projection_digests: Optional[Dict[Path, str]] = None,
+                    record_context: Optional[dict] = None,
+                    context_mode: Optional[str] = None) -> LintResult:
     result = LintResult()
-    all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
-                    key=lambda p: relay_order_key(p, path))
-    if engine_root:
+    texts: Dict[Path, str] = {}
+    suppressed: set[Path] = set()
+    if engine_root and record_context is not None:
+        files, texts, suppressed = _record_scoped_population(
+            path, record_context, result)
+        index = path / "INDEX.md"
+        index_files = [index] if index.is_file() else []
+        all_md = files + index_files
+    else:
+        all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
+                        key=lambda p: relay_order_key(p, path))
+        index_files = [p for p in all_md if p.name == "INDEX.md"]
+        files = [p for p in all_md if p.name != "INDEX.md"]
+    if engine_root and record_context is None:
         relay_name = re.compile(
             r"^[A-Z][A-Z-]*-[A-Za-z0-9-]+-\d{8}-\d{6}Z?\.md$")
         all_md = [item for item in all_md if item.name == "INDEX.md" or
                   (item.name not in {"SEATS.md"} and
                    relay_name.fullmatch(item.name) is not None and
                    ".engine" not in item.relative_to(path).parts)]
-    index_files = [p for p in all_md if p.name == "INDEX.md"]
-    files = [p for p in all_md if p.name != "INDEX.md"]
-    if not all_md:
+        index_files = [p for p in all_md if p.name == "INDEX.md"]
+        files = [p for p in all_md if p.name != "INDEX.md"]
+    if not all_md and record_context is None:
         result.error(f"no .md relay files found under {path}")
         return result
-    per_file: List[Tuple[Path, LintResult]] = [(f, lint_file(f, template_mode=template_mode)) for f in files]
+    files = sorted(files, key=lambda item: relay_order_key(item, path))
+    per_file: List[Tuple[Path, LintResult]] = [
+        (f, lint_file(f, template_mode=template_mode,
+                      _text=texts.get(f))) for f in files]
     for f, r in per_file:
+        if f in suppressed:
+            continue
         for e in r.errors:
             result.error(f"{f.relative_to(path)}: {e}")
         for w in r.warnings:
             result.warn(f"{f.relative_to(path)}: {w}")
+
+    if record_context is not None:
+        result.warn(strings.render(
+            "engine-root-sweep-summary", count=len(suppressed),
+            mode=context_mode))
 
     projection_digests = (
         {} if projection_digests is None else projection_digests)
@@ -3933,7 +4186,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
     # are override paths and are exempt from this pair-lineage gate.
     phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]] = []
     for f, _ in per_file:
-        tx = read(f)
+        tx = texts[f] if f in texts else read(f)
         fields = header_fields(tx)
         phases.append((f, relay_order_key(f, path), fields.get("PHASE", ""), fields, tx))
     by_id = dispatch_id_map(phases)
@@ -4296,7 +4549,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
 
     # Lock references that look like paths should exist.
     for f, _ in per_file:
-        lock_text = read(f)
+        lock_text = texts[f] if f in texts else read(f)
         fields = header_fields(lock_text)
         plan_source_engaged = xroot_plan_gate(path, f, fields, lock_text, result)
         for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
@@ -4322,7 +4575,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
     # declarations are acknowledged history (design rev28 rule 3).
     a5_decls: Dict[Tuple[str, str], List[Tuple[object, Path, str]]] = {}
     for f, _ in per_file:
-        _a5text = read(f)
+        _a5text = texts[f] if f in texts else read(f)
         for _a5dkey, _a5akey, _a5sub in A5_LOCK_PAIRS:
             _a5d = a5_eligible_declaration(f, _a5text, _a5dkey, _a5akey)
             if _a5d is not None:

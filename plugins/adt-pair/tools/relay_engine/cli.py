@@ -169,10 +169,12 @@ def _cmd_lint(args):
     results = {}
     if args.relay_root is not None:
         relay_root = Path(args.relay_root)
+        record_context, context_mode = _lint_record_context(relay_root)
         projection_digests = _index_projection_digests(relay_root)
         result = rules.lint_relay_root(
             relay_root, template_mode=args.templates, engine_root=True,
-            projection_digests=projection_digests)
+            projection_digests=projection_digests,
+            record_context=record_context, context_mode=context_mode)
         results[args.relay_root] = {
             "errors": result.errors, "warnings": result.warnings}
     if args.index is not None:
@@ -191,9 +193,30 @@ def _cmd_lint(args):
     return 1 if any(value["errors"] for value in results.values()) else 0
 
 
+def _lint_record_context(root: Path):
+    try:
+        return client.lint_context(os.fspath(root)), "daemon"
+    except (client.RemoteError, errors.EngineError) as exc:
+        if exc.code == "E-VERSION-MISMATCH":
+            raise
+    except Exception:
+        pass
+    try:
+        context = daemon.read_lint_context(os.fspath(root))
+    except Exception:
+        context = None
+    if context is None:
+        return None, None
+    return context, "read-only record"
+
+
 def _index_projection_digests(root: Path) -> dict[Path, str]:
     try:
         status = client.request(os.fspath(root), "status", {})
+    except (client.RemoteError, errors.EngineError) as exc:
+        if exc.code == "E-VERSION-MISMATCH":
+            raise
+        return {}
     except Exception:
         return {}
     if not isinstance(status, dict) or status.get("epoch") != "active":

@@ -241,11 +241,11 @@ class RelayProcess:
 
 def run_chain(process, root, cid=None, did=None):
     root = Path(root)
-    drafts = root / "drafts"
-    drafts.mkdir()
     process.run("daemon", "start", "--root", os.fspath(root),
                 "--run-id", "e2e", "--seat",
                 "e2e.orchestrator-planner")
+    drafts = root / ".engine/drafts"
+    drafts.mkdir()
     if cid is not None:
         reported = process.run("version", json_result=True)
         actual_cid = {
