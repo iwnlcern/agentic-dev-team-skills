@@ -421,6 +421,15 @@ def _readonly_record_uri(record_fd):
     return "file:%s/%d?mode=ro&immutable=1" % (directory, record_fd)
 
 
+def _require_no_record_sidecars(engine_dirfd):
+    for name in ("ledger.db-wal", "ledger.db-shm", "ledger.db-journal"):
+        try:
+            os.stat(name, dir_fd=engine_dirfd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        raise OSError(errno.EBUSY, "record sidecar residue")
+
+
 def _readonly_entry(row):
     path, digest, origin = row
     if (not isinstance(path, str) or not path or path.startswith("/") or
@@ -465,6 +474,7 @@ def read_lint_context(root_name):
             raise OSError(errno.EINVAL, "regular lock file required")
         _readonly_boundary(lock_info, kind="daemon lock", mode=0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _require_no_record_sidecars(engine_dirfd)
 
         record_fd = os.open(
             "ledger.db", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -500,6 +510,7 @@ def read_lint_context(root_name):
             previous = current
         if _record_identity(os.fstat(record_fd)) != identity:
             raise OSError(errno.EIO, "record changed during read")
+        _require_no_record_sidecars(engine_dirfd)
         return {"snapshot": str(snapshot), "entries": entries}
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return None

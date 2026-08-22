@@ -1,6 +1,5 @@
 import fcntl
 import hashlib
-import json
 import os
 from pathlib import Path
 import sqlite3
@@ -11,6 +10,7 @@ from unittest import mock
 
 from relay_engine import client, daemon
 from relay_engine.ledger import open_ledger
+from relay_engine.paths import Root
 from relay_engine.tests.test_identity_matrix import RunningDaemon
 
 
@@ -92,6 +92,42 @@ def _stopped_root(root_name, *, populated=False):
     return live
 
 
+def _crash_with_committed_wal(root_name):
+    ready_read, ready_write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(ready_read)
+            root = Root(root_name)
+            lease = daemon.acquire_lease(root)
+            ledger = open_ledger(lease.engine_dirfd)
+            ledger.execute(
+                "INSERT INTO relays("
+                "seq,submission_id,stamp,rendered_path,phase,role,"
+                "dispatch_id,from_seat,headers_json,body,body_sha256,"
+                "content_hash,origin,advisories_json) "
+                "VALUES(1,'crash-1','20260821-235959','lane/crash.md',"
+                "'IMPL','Pair Implementer','crash-1','crash.implementer',"
+                "'{}',?,?,?,'daemon','[]')",
+                (b"context", HASHES[0], HASHES[1]))
+            wal = os.stat("ledger.db-wal", dir_fd=lease.engine_dirfd,
+                          follow_symlinks=False)
+            if not stat.S_ISREG(wal.st_mode) or wal.st_size == 0:
+                raise AssertionError("committed WAL residue is absent")
+            os.write(ready_write, b"R")
+            os._exit(0)
+        except BaseException:
+            os._exit(2)
+    os.close(ready_write)
+    try:
+        ready = os.read(ready_read, 1)
+    finally:
+        os.close(ready_read)
+    _, status = os.waitpid(pid, 0)
+    if ready != b"R" or os.waitstatus_to_exitcode(status) != 0:
+        raise AssertionError("crash writer did not commit WAL state")
+
+
 class TestLintRecordReadonly(unittest.TestCase):
     def _read(self, root_name):
         reader = getattr(daemon, "read_lint_context", None)
@@ -125,6 +161,58 @@ class TestLintRecordReadonly(unittest.TestCase):
 
             self.assertEqual(stopped, live)
             self.assertEqual(_tree_digest(root_name), before)
+
+    def test_committed_crash_wal_fails_closed_without_stale_success(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            self.assertEqual(_stopped_root(root_name),
+                             {"snapshot": "0", "entries": []})
+            _crash_with_committed_wal(root_name)
+            engine = Path(root_name, ".engine")
+            self.assertGreater((engine / "ledger.db-wal").stat().st_size, 0)
+            self.assertTrue((engine / "ledger.db-shm").exists())
+            lock_fd = os.open(engine / "daemon.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+            before = _tree_digest(root_name)
+
+            stopped = self._read(root_name)
+
+            self.assertIsNone(
+                stopped, "committed WAL state must not yield stale success")
+            self.assertEqual(_tree_digest(root_name), before)
+            logical = sqlite3.connect(
+                "file:%s?mode=ro" % (engine / "ledger.db"), uri=True)
+            try:
+                self.assertEqual(logical.execute(
+                    "SELECT rendered_path,body_sha256,origin FROM relays"
+                ).fetchall(), [("lane/crash.md", HASHES[0], "daemon")])
+            finally:
+                logical.close()
+
+    def test_hostile_or_empty_sidecar_presence_fails_closed_unfollowed(self):
+        def empty_wal(engine):
+            (engine / "ledger.db-wal").write_bytes(b"")
+
+        def directory_shm(engine):
+            (engine / "ledger.db-shm").mkdir()
+
+        def symlink_journal(engine):
+            (engine / "ledger.db-journal").symlink_to("daemon.json")
+
+        cases = {
+            "empty WAL": empty_wal,
+            "directory SHM": directory_shm,
+            "symlink rollback journal": symlink_journal,
+        }
+        for label, create in cases.items():
+            with self.subTest(label=label), \
+                    tempfile.TemporaryDirectory() as root_name:
+                _stopped_root(root_name)
+                create(Path(root_name, ".engine"))
+                self._assert_strict_unchanged(root_name)
 
     def test_absence_never_creates_engine_or_lock(self):
         with tempfile.TemporaryDirectory() as root_name:
