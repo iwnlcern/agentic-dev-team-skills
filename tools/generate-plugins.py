@@ -119,6 +119,7 @@ VERBATIM_COPY_ROOTS = (
     + tuple(f"tools/{path}" for path in ENGINE_SET)
     + ("vendor",)
 )
+HOOKS_SOURCE = ROOT / "tools" / "adapters" / "plugin-hooks.json"
 
 
 def sorted_files(path: Path) -> Iterable[Path]:
@@ -251,6 +252,7 @@ def generate_tree(output: Path) -> None:
                 record_tree(source, destination, output)
             else:
                 record_copy(source, destination, output)
+        record_copy(HOOKS_SOURCE, plugin_root / "hooks" / "hooks.json", output)
         for engine_member in ENGINE_SET:
             record_copy(ROOT / "tools" / engine_member,
                         plugin_root / "tools" / engine_member, output)

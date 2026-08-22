@@ -297,6 +297,7 @@ def canonical_source_map() -> dict[str, str]:
                 record_tree(plugin, source, destination)
             else:
                 record(plugin, source, destination)
+        record(plugin, ROOT / "tools" / "adapters" / "plugin-hooks.json", Path("hooks") / "hooks.json")
         for engine_member in LOCKED_ENGINE_SET:
             record(plugin, ROOT / "tools" / engine_member, Path("tools") / engine_member)
         record_tree(plugin, ROOT / "vendor", Path("vendor"))
@@ -319,6 +320,7 @@ def expected_plugin_files(plugin: str) -> set[str]:
             expected.add(f"skills/{skill}/{asset}")
     for tool in LOCKED_TOOLS_SET:
         expected |= canonical_files(ROOT / "tools" / tool, f"tools/{tool}")
+    expected.add("hooks/hooks.json")
     for engine_member in LOCKED_ENGINE_SET:
         expected |= canonical_files(ROOT / "tools" / engine_member, f"tools/{engine_member}")
     expected |= canonical_files(ROOT / "vendor" / "mattpocock", "vendor/mattpocock")

@@ -19,6 +19,12 @@
   },
   {
     "kit_version": "2.9.0",
+    "path": "adt-master/hooks/hooks.json",
+    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.0",
     "path": "adt-master/skills/design-grill/SKILL.md",
     "sha256": "267d597ccf487aa2e1ab418d7b8803742208dc017fa5d8e4be515e307394b904",
     "source": "skills/design-grill/SKILL.md"
@@ -32,7 +38,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/domain-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -56,7 +62,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/domain-reviewer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -86,7 +92,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/master-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -110,7 +116,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/master-reviewer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -146,7 +152,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -188,7 +194,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-reviewer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -206,7 +212,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-implementer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -230,7 +236,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10321,6 +10327,12 @@
   },
   {
     "kit_version": "2.9.0",
+    "path": "adt-orchestrator/hooks/hooks.json",
+    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/design-grill/SKILL.md",
     "sha256": "267d597ccf487aa2e1ab418d7b8803742208dc017fa5d8e4be515e307394b904",
     "source": "skills/design-grill/SKILL.md"
@@ -10346,7 +10358,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10388,7 +10400,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10406,7 +10418,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-implementer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10430,7 +10442,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -20521,6 +20533,12 @@
   },
   {
     "kit_version": "2.9.0",
+    "path": "adt-pair/hooks/hooks.json",
+    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.0",
     "path": "adt-pair/skills/design-grill/SKILL.md",
     "sha256": "267d597ccf487aa2e1ab418d7b8803742208dc017fa5d8e4be515e307394b904",
     "source": "skills/design-grill/SKILL.md"
@@ -20534,7 +20552,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-implementer/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {
@@ -20558,7 +20576,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-planner/harness-codex.md",
-    "sha256": "2f3dd3f4089f3d1f97dfc1c7e0eae98c75bc6cbcbebaf232a4c2cbe68abe10fa",
+    "sha256": "4195f3f334456b397bd9fafd2aef17cc9c5cf1bac5eddacebdcb5f38a29d848f",
     "source": "shared/harness-codex.md"
   },
   {

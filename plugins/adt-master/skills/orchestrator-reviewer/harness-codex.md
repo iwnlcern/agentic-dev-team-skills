@@ -24,8 +24,8 @@ Claude Code is this kit's default harness and has no such file.
 
 ## relay-lint
 
-- This kit ships no Codex relay-write adapter (the shipped adapter is Claude Code-only), so run the linter manually before every handoff: `python3 <skills-root>/tools/relay-lint.py <relay>`, where `<skills-root>` is the directory your skills were installed into.
-- Codex itself supports host-config hooks (`.codex/hooks.json`, partial `PostToolUse` support); a Codex lint adapter on that surface is out of scope for v2.9.
+- Plugin-route installs ship the relay-write adapter through `hooks/hooks.json`; Codex presents a one-time content-hash trust prompt when the hook or its script bytes are first encountered or change.
+- Manual installs and users who decline that prompt run the linter before every handoff: `python3 <skills-root>/tools/relay-lint.py <relay>`, where `<skills-root>` is the directory the skills were installed into.
 
 ## Instructions files
 
