@@ -199,12 +199,9 @@ def _lint_record_context(root: Path):
     except (client.RemoteError, errors.EngineError) as exc:
         if exc.code == "E-VERSION-MISMATCH":
             raise
-    except Exception:
+    except (TimeoutError, ValueError):
         pass
-    try:
-        context = daemon.read_lint_context(os.fspath(root))
-    except Exception:
-        context = None
+    context = daemon.read_lint_context(os.fspath(root))
     if context is None:
         return None, None
     return context, "read-only record"

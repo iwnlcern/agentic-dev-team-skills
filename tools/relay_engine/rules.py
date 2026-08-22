@@ -3902,7 +3902,8 @@ def _engine_record_finding(result: LintResult, cause: str,
 def _engine_outside_finding(result: LintResult, cause: str,
                             path: str) -> None:
     result.error(strings.render(
-        "engine-root-outside-the-record", cause=cause, path=path))
+        "engine-root-outside-the-record", cause=cause,
+        path=_safe_engine_finding_path(path)))
 
 
 def _safe_engine_finding_path(value: str) -> str:
@@ -3944,48 +3945,98 @@ def _symlink_escapes(root: Path, parent: str, target: str) -> bool:
         return True
 
 
-def _read_record_candidate(root_fd: int, relative: str
-                           ) -> Tuple[Optional[bytes], Optional[str]]:
-    try:
-        info = os.stat(relative, dir_fd=root_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None, "missing"
-    except OSError:
-        return None, "unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return None, "symlinked"
-    if not stat.S_ISREG(info.st_mode):
-        return None, "non-regular"
-    if stat.S_IMODE(info.st_mode) & 0o444 == 0:
-        return None, "unreadable"
+def _read_record_candidate(
+        root_fd: int, relative: str,
+) -> Tuple[Optional[bytes], Optional[str],
+           Optional[Tuple[str, str]]]:
+    parts = relative.split("/")
+    directory_fd = root_fd
+    held_directories = []
     descriptor = None
     try:
+        for index, component in enumerate(parts[:-1], start=1):
+            ancestor = "/".join(parts[:index])
+            try:
+                info = os.stat(
+                    component, dir_fd=directory_fd,
+                    follow_symlinks=False)
+            except FileNotFoundError:
+                return None, "missing", None
+            except OSError:
+                return None, "unreadable", None
+            if stat.S_ISLNK(info.st_mode):
+                return None, None, ("symlinked component", ancestor)
+            if not stat.S_ISDIR(info.st_mode):
+                return None, None, ("non-directory ancestor", ancestor)
+            try:
+                child_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except OSError as exc:
+                try:
+                    changed = os.stat(
+                        component, dir_fd=directory_fd,
+                        follow_symlinks=False)
+                except FileNotFoundError:
+                    return None, "missing", None
+                except OSError:
+                    changed = None
+                if changed is not None and stat.S_ISLNK(changed.st_mode):
+                    return None, None, ("symlinked component", ancestor)
+                if changed is not None and not stat.S_ISDIR(changed.st_mode):
+                    return None, None, ("non-directory ancestor", ancestor)
+                if exc.errno == errno.ELOOP:
+                    return None, None, ("symlinked component", ancestor)
+                if exc.errno == errno.ENOTDIR:
+                    return None, None, ("non-directory ancestor", ancestor)
+                return None, "unreadable", None
+            held_directories.append(child_fd)
+            directory_fd = child_fd
+
+        basename = parts[-1]
+        try:
+            info = os.stat(
+                basename, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None, "missing", None
+        except OSError:
+            return None, "unreadable", None
+        if stat.S_ISLNK(info.st_mode):
+            return None, "symlinked", None
+        if not stat.S_ISREG(info.st_mode):
+            return None, "non-regular", None
+        if stat.S_IMODE(info.st_mode) & 0o444 == 0:
+            return None, "unreadable", None
         descriptor = os.open(
-            relative,
+            basename,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=root_fd,
+            dir_fd=directory_fd,
         )
         held_info = os.fstat(descriptor)
         if not stat.S_ISREG(held_info.st_mode):
-            return None, "non-regular"
+            return None, "non-regular", None
         chunks = []
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
             chunks.append(chunk)
-        return b"".join(chunks), None
+        return b"".join(chunks), None, None
     except PermissionError:
-        return None, "unreadable"
+        return None, "unreadable", None
     except FileNotFoundError:
-        return None, "missing"
+        return None, "missing", None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            return None, "symlinked"
-        return None, "unreadable"
+            return None, "symlinked", None
+        return None, "unreadable", None
     finally:
         if descriptor is not None:
             os.close(descriptor)
+        for held_fd in reversed(held_directories):
+            os.close(held_fd)
 
 
 def _record_scoped_population(path: Path, context: dict,
@@ -4013,6 +4064,7 @@ def _record_scoped_population(path: Path, context: dict,
 
     root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     blocked = set()
+    metadata_denied = set()
 
     def block_descendants(relative: str) -> None:
         prefix = relative + "/"
@@ -4027,9 +4079,12 @@ def _record_scoped_population(path: Path, context: dict,
                 info = os.stat(name, dir_fd=directory_fd,
                                follow_symlinks=False)
             except OSError:
-                _engine_outside_finding(
-                    result,
-                    "foreign entry", _safe_engine_finding_path(relative))
+                if relative in record_entries:
+                    _engine_record_finding(result, "unreadable", relative)
+                    metadata_denied.add(relative)
+                else:
+                    _engine_outside_finding(
+                        result, "foreign entry", relative)
                 continue
             if not parent and name == ".engine" and stat.S_ISDIR(info.st_mode):
                 continue
@@ -4095,9 +4150,14 @@ def _record_scoped_population(path: Path, context: dict,
         suppressed = set()
         for relative, entry in sorted(
                 record_entries.items(), key=lambda item: item[0].encode("utf-8")):
-            if relative in blocked:
+            if relative in blocked or relative in metadata_denied:
                 continue
-            body, cause = _read_record_candidate(root_fd, relative)
+            body, cause, topology = _read_record_candidate(root_fd, relative)
+            if topology is not None:
+                topology_cause, topology_path = topology
+                _engine_outside_finding(
+                    result, topology_cause, topology_path)
+                continue
             if cause is not None:
                 _engine_record_finding(result, cause, relative)
                 continue

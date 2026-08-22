@@ -170,12 +170,13 @@ class TestRecordSuppression(unittest.TestCase):
             root = _copy_fixture(temporary, "suppressed")
             context = _context(root)
             relay_name = context["entries"][0]["path"]
+            relay_basename = Path(relay_name).name
             real_open = os.open
             held = []
 
             def tracking_open(name, flags, *args, **kwargs):
                 descriptor = real_open(name, flags, *args, **kwargs)
-                if name == relay_name:
+                if name == relay_basename and not flags & os.O_DIRECTORY:
                     held.append((descriptor, flags))
                 return descriptor
 
@@ -288,6 +289,45 @@ class TestRecordIntegrityMatrix(unittest.TestCase):
                                      for call in read_file.call_args_list))
                 self.assertNotIn(target_marker, "\n".join(result.errors))
 
+    def test_known_metadata_denial_is_unreadable_without_candidate_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            context = _context(root)
+            relative = context["entries"][0]["path"]
+            basename = Path(relative).name
+            real_stat = os.stat
+            real_open = os.open
+            denied = False
+            candidate_opens = []
+
+            def denying_stat(name, *args, **kwargs):
+                nonlocal denied
+                if (not denied and name == basename and
+                        kwargs.get("follow_symlinks") is False):
+                    denied = True
+                    raise PermissionError("deterministic metadata denial")
+                return real_stat(name, *args, **kwargs)
+
+            def tracking_open(name, flags, *args, **kwargs):
+                if name in {relative, basename} and not flags & os.O_DIRECTORY:
+                    candidate_opens.append(name)
+                return real_open(name, flags, *args, **kwargs)
+
+            with mock.patch.object(rules.os, "stat",
+                                   side_effect=denying_stat), \
+                    mock.patch.object(rules.os, "open",
+                                      side_effect=tracking_open):
+                result = _record_lint(self, root, context)
+
+            self.assertTrue(denied)
+            self.assertEqual(result.errors, [
+                "record-integrity: unreadable: %s" % relative,
+            ])
+            self.assertEqual(candidate_opens, [])
+            self.assertIn(
+                "engine-root sweep: 0 record-known relays not re-judged; "
+                "context source: daemon", result.warnings)
+
 
 class TestRecordTopology(unittest.TestCase):
     def test_record_ancestor_directory_is_allowed(self):
@@ -377,6 +417,95 @@ class TestRecordTopology(unittest.TestCase):
                           result.errors)
             self.assertFalse(any(call.args and call.args[0] == outside
                                  for call in read_file.call_args_list))
+
+    def test_intermediate_directory_swap_never_reads_outside_bytes(self):
+        marker = b"OUTSIDE-BYTES-MUST-NEVER-BE-READ\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            relative = next(root.rglob("*.md")).relative_to(root).as_posix()
+            context = {"snapshot": "1", "entries": [{
+                "path": relative,
+                "body_sha256": _digest(marker),
+                "origin": "daemon",
+            }]}
+            outside = Path(temporary, "outside-lane")
+            outside.mkdir()
+            (outside / Path(relative).name).write_bytes(marker)
+            held = root / "held-lane"
+            real_open = os.open
+            real_read = os.read
+            lane_opens = 0
+            swapped = False
+            read_chunks = []
+
+            def swapping_open(name, flags, *args, **kwargs):
+                nonlocal lane_opens, swapped
+                if name == "lane" and flags & os.O_DIRECTORY:
+                    lane_opens += 1
+                    if lane_opens == 2:
+                        (root / "lane").rename(held)
+                        (root / "lane").symlink_to(outside)
+                        swapped = True
+                elif name == relative and not swapped:
+                    (root / "lane").rename(held)
+                    (root / "lane").symlink_to(outside)
+                    swapped = True
+                return real_open(name, flags, *args, **kwargs)
+
+            def tracking_read(descriptor, count):
+                chunk = real_read(descriptor, count)
+                read_chunks.append(chunk)
+                return chunk
+
+            with mock.patch.object(rules.os, "open",
+                                   side_effect=swapping_open), \
+                    mock.patch.object(rules.os, "read",
+                                      side_effect=tracking_read):
+                result = _record_lint(self, root, context)
+
+            self.assertTrue(swapped)
+            self.assertNotIn(marker, b"".join(read_chunks))
+            self.assertEqual(result.errors, [
+                "outside-the-record: symlinked component: lane",
+            ])
+            self.assertIn(
+                "engine-root sweep: 0 record-known relays not re-judged; "
+                "context source: daemon", result.warnings)
+
+    def test_hostile_filesystem_names_have_bounded_stable_safe_displays(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary, "relay-root")
+            root.mkdir()
+            control_relative = "line\nbreak"
+            (root / control_relative).write_bytes(b"foreign")
+            components = ("a" * 180, "b" * 180, "c" * 180)
+            deep_relative = "/".join(components)
+            (root / deep_relative).mkdir(parents=True)
+            context = {"snapshot": "0", "entries": []}
+
+            first = _record_lint(self, root, context)
+            second = _record_lint(self, root, context)
+
+            control_display = "entry-%s" % hashlib.sha256(
+                control_relative.encode("utf-8")).hexdigest()[:12]
+            deep_display = "entry-%s" % hashlib.sha256(
+                deep_relative.encode("utf-8")).hexdigest()[:12]
+            self.assertEqual(
+                rules._safe_engine_finding_path(control_relative),
+                control_display)
+            self.assertEqual(
+                rules._safe_engine_finding_path(deep_relative), deep_display)
+            self.assertEqual(first.errors, second.errors)
+            self.assertIn(
+                "outside-the-record: foreign entry: %s" % control_display,
+                first.errors)
+            self.assertIn(
+                "outside-the-record: unexpected directory: %s" %
+                deep_display, first.errors)
+            self.assertTrue(first.errors)
+            self.assertTrue(all("\n" not in error and "\r" not in error
+                                for error in first.errors))
+            self.assertNotIn(control_relative, "\n".join(first.errors))
 
     def test_dotdot_context_seam_is_a_root_escape_boundary_injection(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -510,6 +639,50 @@ class TestRecordFallback(unittest.TestCase):
                     tempfile.TemporaryDirectory() as temporary:
                 root = _copy_fixture(temporary, "suppressed")
                 self._assert_strict_cli(root, failure)
+
+    def test_unexpected_live_exception_reaches_top_level_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            with mock.patch.object(
+                    cli.client, "lint_context",
+                    side_effect=AssertionError("live programming fault")), \
+                    mock.patch.object(
+                        cli.daemon, "read_lint_context",
+                        side_effect=AssertionError(
+                            "unexpected live fault entered stopped fallback")) \
+                    as stopped, \
+                    mock.patch.object(
+                        cli.rules, "lint_relay_root",
+                        side_effect=AssertionError(
+                            "unexpected live fault emitted a lint verdict")) \
+                    as lint_root:
+                status, stdout, stderr = _run_cli(
+                    ["lint", "--relay-root", os.fspath(root)])
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout, "")
+            self.assertEqual(stderr, "unexpected error\n")
+            self.assertEqual(stopped.call_count, 0)
+            self.assertEqual(lint_root.call_count, 0)
+
+    def test_unexpected_stopped_exception_reaches_top_level_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            with mock.patch.object(cli.client, "lint_context",
+                                   side_effect=_down_error()), \
+                    mock.patch.object(
+                        cli.daemon, "read_lint_context",
+                        side_effect=AssertionError("stopped programming fault")), \
+                    mock.patch.object(
+                        cli.rules, "lint_relay_root",
+                        side_effect=AssertionError(
+                            "unexpected stopped fault emitted a lint verdict")) \
+                    as lint_root:
+                status, stdout, stderr = _run_cli(
+                    ["lint", "--relay-root", os.fspath(root)])
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout, "")
+            self.assertEqual(stderr, "unexpected error\n")
+            self.assertEqual(lint_root.call_count, 0)
 
     def test_absent_record_selects_strict_without_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
