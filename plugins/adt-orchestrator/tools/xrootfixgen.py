@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+import zlib
 from pathlib import Path
 from typing import TypeAlias
 
@@ -74,6 +75,29 @@ def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
         env=env,
     )
     return completed.stdout.strip() if text else completed.stdout
+
+
+def _literal_object(repo: Path, kind: str, content: bytes) -> str:
+    raw = f"{kind} {len(content)}\0".encode("ascii") + content
+    oid = hashlib.sha1(raw).hexdigest()
+    object_path = repo / ".git" / "objects" / oid[:2] / oid[2:]
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    object_path.write_bytes(zlib.compress(raw))
+    return oid
+
+
+def _tree_entry(mode: bytes, name: bytes, oid: str) -> bytes:
+    return mode + b" " + name + b"\x00" + bytes.fromhex(oid)
+
+
+def _literal_commit(repo: Path, tree_oid: str) -> str:
+    content = (
+        f"tree {tree_oid}\n"
+        "author fixture <fixture@example.invalid> 1786924800 +0000\n"
+        "committer fixture <fixture@example.invalid> 1786924800 +0000\n"
+        "\nfixture: hostile object graph\n"
+    ).encode("ascii")
+    return _literal_object(repo, "commit", content)
 
 
 def _init_repo(repo: Path) -> None:
@@ -270,6 +294,42 @@ def _second_commit_digest(_case_root: Path, foreign: Path, fields: list[tuple[st
     _replace(fields, "DESIGN_SHA256", hashlib.sha256(changed.encode("utf-8")).hexdigest())
 
 
+def _fifo_object(_case_root: Path, foreign: Path, fields: list[tuple[str, str]]) -> None:
+    oid = "a" * 40
+    object_path = foreign / ".git" / "objects" / oid[:2] / oid[2:]
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(object_path)
+    _replace(fields, "DESIGN_SOURCE_COMMIT", oid)
+
+
+def _non_ascii_tree_mode(_case_root: Path, foreign: Path, fields: list[tuple[str, str]]) -> None:
+    child_oid = str(_git(foreign, "rev-parse", "HEAD:relays"))
+    malformed_tree = _literal_object(
+        foreign,
+        "tree",
+        _tree_entry(b"\xff00000", b"relays", child_oid),
+    )
+    _replace(fields, "DESIGN_SOURCE_COMMIT", _literal_commit(foreign, malformed_tree))
+
+
+def _deep_tree(_case_root: Path, foreign: Path, fields: list[tuple[str, str]]) -> None:
+    tree_oid = _literal_object(foreign, "tree", b"")
+    for _ in range(2500):
+        tree_oid = _literal_object(
+            foreign,
+            "tree",
+            _tree_entry(b"40000", b"d", tree_oid),
+        )
+    designs_oid = str(_git(foreign, "rev-parse", "HEAD:designs"))
+    root_tree = _literal_object(
+        foreign,
+        "tree",
+        _tree_entry(b"40000", b"designs", designs_oid)
+        + _tree_entry(b"40000", b"relays", tree_oid),
+    )
+    _replace(fields, "DESIGN_SOURCE_COMMIT", _literal_commit(foreign, root_tree))
+
+
 def _relay(repo: Path, name: str) -> Path:
     return repo / "relays" / name
 
@@ -431,10 +491,14 @@ def _authority_cases(dest: Path) -> list[Case]:
         ("master-domain", "Master Planner", "m-1.master-planner", "Domain Reviewer", "m-1.domain-reviewer"),
     ]
     for suffix, origin_role, origin_from, review_role, review_from in tier_cases:
+        reported_origin_role = {
+            "pair-planner": "planner",
+            "pair-implementer": "implementer",
+        }.get(origin_from.split(".", 1)[1], origin_from.split(".", 1)[1])
         add(
             f"X28-wrong-tier-{suffix}",
             lambda repo, values=(origin_role, origin_from, review_role, review_from): tier(repo, *values),
-            detail=f"selected review {REVIEW_NAME} is not a peer for selected origin role {origin_from.split('.', 1)[1]}",
+            detail=f"selected review {REVIEW_NAME} is not a peer for selected origin role {reported_origin_role}",
         )
 
     add(
@@ -644,7 +708,10 @@ def _plan_source_cases(dest: Path) -> list[Case]:
     )
     add(
         "XP11-non-blob",
-        lambda _c, _r, fields: _replace(fields, "PLAN_LOCK_ID", "designs"),
+        lambda _c, _r, fields: _replace(fields, "PLAN_LOCK_ID", "designs/nested"),
+        mutate_foreign=lambda repo: _write(
+            repo / "designs" / "nested" / "fixture.md", "# Nested fixture\n"
+        ),
         axis="byte",
         detail="PLAN_LOCK_ID path resolves to tree, not blob",
     )
@@ -659,6 +726,49 @@ def _plan_source_cases(dest: Path) -> list[Case]:
         lambda _c, _r, fields: _replace(fields, "PLAN_LOCK_ID", "/etc/passwd"),
         detail="PLAN_LOCK_ID path must be a literal relative path",
     )
+    def design_lock_path(
+        _case_root: Path,
+        _foreign: Path,
+        fields: list[tuple[str, str]],
+        value: str,
+    ) -> None:
+        _replace(fields, "DESIGN_LOCK_ID", value)
+        _replace(fields, "PLAN_LOCK_ID", "opaque-plan-lock")
+        _remove(fields, "DESIGN_RECORD_KIND")
+        _remove(fields, "DESIGN_DOC_ID")
+
+    cases.append(_build_case(
+        dest,
+        "XP14-design-lock-path-valid",
+        prepare=_plan_source_prepare(
+            lambda c, r, fields: design_lock_path(c, r, fields, "designs/d1.md")
+        ),
+        expected_errors=[],
+    ))
+    add(
+        "XP15-design-lock-path-missing",
+        lambda c, r, fields: design_lock_path(c, r, fields, "designs/absent.md"),
+        axis="byte",
+        detail="DESIGN_LOCK_ID path does not exist at pinned commit",
+    )
+    cases.append(_build_case(
+        dest,
+        "XP16-opaque-plan-lock",
+        prepare=_plan_source_prepare(
+            lambda _c, _r, fields: _replace(fields, "PLAN_LOCK_ID", "opaque-plan-lock")
+        ),
+        local_relays=_local_chain(),
+        expected_errors=[],
+    ))
+    cases.append(_build_case(
+        dest,
+        "XP17-absent-plan-lock",
+        prepare=_plan_source_prepare(
+            lambda _c, _r, fields: _remove(fields, "PLAN_LOCK_ID")
+        ),
+        local_relays=_local_chain(),
+        expected_errors=[],
+    ))
     return cases
 
 
@@ -858,6 +968,83 @@ def materialize(dest: Path) -> list[Case]:
             mutate_plan=_wrong_phase_boundary,
             expected_exit=1,
             expected_errors=[f"{PLAN_NAME}: {pairing}"],
+        ),
+        _build_case(
+            dest,
+            "X38-noncanonical-role-engages",
+            mutate_plan=lambda fields: _replace(fields, "ROLE", "Domain Planner"),
+            expected_exit=1,
+            expected_errors=[
+                f"{PLAN_NAME}: ROLE/FROM mismatch: ROLE='Domain Planner' but FROM='s4.pair-planner'; do not proxy-author another seat's relay",
+                _xerror("declaration", "declared edge carrier ROLE must be pair-Planner class"),
+            ],
+        ),
+        _build_case(
+            dest,
+            "X39-two-from-engages",
+            mutate_plan=lambda fields: fields.insert(-1, ("FROM", "s5.pair-planner")),
+            expected_exit=1,
+            expected_errors=[
+                f"{PLAN_NAME}: DESIGN_SHA256 declared with no DESIGN_ARTIFACT to locate the artifact",
+                f"{PLAN_NAME}: FROM carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present (DD-v29-master-authority-20260809 rule 5)",
+                _xerror("declaration", "declared edge carrier FROM must be exactly one pair-Planner-class address"),
+            ],
+        ),
+        _build_case(
+            dest,
+            "X40-non-pair-owner-engages",
+            mutate_plan=lambda fields: (
+                _replace(fields, "ROLE", "Orchestrator Planner"),
+                _replace(fields, "FROM", "v291.orchestrator-planner"),
+            ),
+            expected_exit=1,
+            expected_errors=[
+                f"{PLAN_NAME}: DESIGN_SHA256 declared with no DESIGN_ARTIFACT to locate the artifact",
+                _xerror("declaration", "declared edge carrier ROLE must be pair-Planner class"),
+            ],
+        ),
+        _build_case(
+            dest,
+            "X41-index-excluded",
+            mutate_foreign=lambda repo: _write(
+                repo / "relays" / "INDEX.md",
+                "PHASE: DESIGN\nDESIGN_DOC_ID: d1\n",
+            ),
+            expected_errors=[],
+        ),
+        _build_case(
+            dest,
+            "X42-legacy-alias-chain",
+            mutate_foreign=lambda repo: (
+                _replace_relay_field(repo, ORIGIN_NAME, "ROLE", "Planner"),
+                _replace_relay_field(repo, ORIGIN_NAME, "FROM", "m-1.pair-planner"),
+                _replace_relay_field(repo, REVIEW_NAME, "ROLE", "Implementer"),
+                _replace_relay_field(repo, REVIEW_NAME, "FROM", "m-1.pair-implementer"),
+            ),
+            expected_errors=[],
+        ),
+        _build_case(
+            dest,
+            "X43-fifo-object-timeout",
+            prepare=_fifo_object,
+            expected_exit=1,
+            expected_errors=[_xerror("commit", "Git object query timed out")],
+        ),
+        _build_case(
+            dest,
+            "X44-non-ascii-tree-mode",
+            prepare=_non_ascii_tree_mode,
+            expected_exit=1,
+            expected_errors=[_xerror("repository", "pinned tree object has malformed entry bytes")],
+        ),
+        _build_case(
+            dest,
+            "X45-deep-tree",
+            prepare=_deep_tree,
+            expected_exit=1,
+            expected_errors=[
+                _xerror("repository", "DESIGN_SOURCE_ROOT exceeds maximum tree depth 256")
+            ],
         ),
     ]
     cases.extend(_authority_cases(dest))

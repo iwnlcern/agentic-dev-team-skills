@@ -3147,6 +3147,8 @@ XROOT_TRIGGERS = (
     "DESIGN_OWNER",
 )
 XROOT_REQUIRED = XROOT_TRIGGERS + ("DESIGN_DOC_ID", "DESIGN_SHA256")
+XROOT_GIT_TIMEOUT_SECONDS = 5
+XROOT_MAX_TREE_DEPTH = 256
 
 
 class XrootAxisError(Exception):
@@ -3160,18 +3162,36 @@ def xroot_error(axis: str, detail: str) -> str:
     return f"{XROOT_PREFIX}: {axis}: {detail}"
 
 
-def xroot_pair_plan_applicable(text: str) -> bool:
-    """Whether text is inside the canonical pair-Planner PLAN boundary."""
+def xroot_design_engaged(text: str) -> bool:
+    """Whether a PLAN-phase relay carries any declared-edge trigger."""
     fields = header_fields(text)
-    if (
-        fields.get("PHASE") != "PLAN"
-        or canonical_role(ROLE_TO_ADDRESS_ROLE.get(fields.get("ROLE", ""))) != "planner"
-    ):
+    if fields.get("PHASE") != "PLAN":
         return False
-    from_addrs = split_addresses(fields.get("FROM"))
+    return any(h27_occurrences(text, key) for key in XROOT_TRIGGERS)
+
+
+def xroot_pair_plan_applicable(text: str) -> bool:
+    """Whether text is inside the locked A5 pair-Planner PLAN boundary."""
+    fields = header_fields(text)
+    if fields.get("PHASE") != "PLAN":
+        return False
+    from_values = h27_occurrences(text, "FROM")
+    if len(from_values) != 1:
+        return False
+    from_addrs = split_addresses(from_values[0])
     if len(from_addrs) != 1 or canonical_role(from_role(from_addrs[0])) != "planner":
         return False
     return any(h27_occurrences(text, key) for key in XROOT_TRIGGERS)
+
+
+def xroot_pair_plan_carrier_shape(text: str) -> tuple[bool, bool]:
+    """Return the ROLE and FROM halves of the canonical carrier shape."""
+    fields = header_fields(text)
+    role_ok = canonical_role(ROLE_TO_ADDRESS_ROLE.get(fields.get("ROLE", ""))) == "planner"
+    from_values = h27_occurrences(text, "FROM")
+    from_addrs = split_addresses(from_values[0]) if len(from_values) == 1 else []
+    from_ok = len(from_addrs) == 1 and canonical_role(from_role(from_addrs[0])) == "planner"
+    return role_ok, from_ok
 
 
 def xroot_field_conflicts(text: str, keys: tuple[str, ...]) -> List[str]:
@@ -3184,7 +3204,7 @@ def xroot_field_conflicts(text: str, keys: tuple[str, ...]) -> List[str]:
 
 
 def xroot_declaration(fields: Dict[str, str], text: str) -> Dict[str, str] | None:
-    if not xroot_pair_plan_applicable(text):
+    if not xroot_design_engaged(text):
         return None
     return {
         key: fields.get(key, "").strip()
@@ -3200,9 +3220,12 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=not binary,
+            timeout=XROOT_GIT_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
         raise XrootAxisError("repository", "git executable is unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise XrootAxisError(axis, "Git object query timed out") from exc
     except subprocess.CalledProcessError as exc:
         raise XrootAxisError(axis, "Git object query failed") from exc
     return completed.stdout if binary else completed.stdout.strip()
@@ -3285,8 +3308,17 @@ def xroot_tree_entries(repo: Path, tree_oid: str) -> dict[bytes, tuple[str, str]
         nul = raw.find(b"\x00", space + 1)
         if space < 0 or nul < 0 or nul + 21 > len(raw):
             raise XrootAxisError("repository", "pinned tree object has malformed entry bytes")
-        mode = raw[offset:space].decode("ascii")
+        try:
+            mode = raw[offset:space].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            ) from exc
+        if mode not in {"40000", "040000", "100644", "100755", "120000", "160000"}:
+            raise XrootAxisError("repository", "pinned tree object has malformed entry bytes")
         name = raw[space + 1:nul]
+        if not name:
+            raise XrootAxisError("repository", "pinned tree object has malformed entry bytes")
         oid = raw[nul + 1:nul + 21].hex()
         if mode == "120000":
             kind = "symlink"
@@ -3365,45 +3397,54 @@ class XrootRelay(NamedTuple):
 
 def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
     relays: List[XrootRelay] = []
-
-    def visit(tree_oid: str, prefix: str) -> None:
-        for name_bytes, (kind, oid) in sorted(xroot_tree_entries(repo, tree_oid).items()):
-            try:
-                name = name_bytes.decode("utf-8")
-            except UnicodeDecodeError as exc:
+    stack = [("tree", root_tree, "", b"", 0)]
+    while stack:
+        kind, oid, relname, name_bytes, depth = stack.pop()
+        if kind == "tree":
+            if depth > XROOT_MAX_TREE_DEPTH:
                 raise XrootAxisError(
-                    "authority-population", "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
-                ) from exc
-            relname = f"{prefix}/{name}" if prefix else name
-            if kind == "symlink":
-                raise XrootAxisError(
-                    "authority-population",
-                    f"DESIGN_SOURCE_ROOT contains symlink carrier {relname}",
+                    "repository",
+                    f"DESIGN_SOURCE_ROOT exceeds maximum tree depth {XROOT_MAX_TREE_DEPTH}",
                 )
-            if kind == "tree":
-                visit(oid, relname)
-                continue
-            if not name.endswith(".md"):
-                continue
-            blob = xroot_git(repo, "cat-file", "blob", oid, axis="authority-population", binary=True)
-            try:
-                relay_text = blob.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise XrootAxisError(
-                    "authority-population", f"authority carrier {relname} is not UTF-8"
-                ) from exc
-            status, stamp, raw, _utc = filename_timestamp(name)
-            relays.append(
-                XrootRelay(
-                    relname,
-                    header_fields(relay_text),
-                    relay_text,
-                    stamp if status == "ok" else None,
-                    raw if status == "ok" else None,
-                )
+            entries = sorted(xroot_tree_entries(repo, oid).items(), reverse=True)
+            for child_name, (child_kind, child_oid) in entries:
+                try:
+                    decoded = child_name.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise XrootAxisError(
+                        "authority-population",
+                        "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename",
+                    ) from exc
+                child_relname = f"{relname}/{decoded}" if relname else decoded
+                stack.append((child_kind, child_oid, child_relname, child_name, depth + 1))
+            continue
+        name = name_bytes.decode("utf-8")
+        if name == "INDEX.md":
+            continue
+        if kind == "symlink":
+            raise XrootAxisError(
+                "authority-population",
+                f"DESIGN_SOURCE_ROOT contains symlink carrier {relname}",
             )
-
-    visit(root_tree, "")
+        if not name.endswith(".md"):
+            continue
+        blob = xroot_git(repo, "cat-file", "blob", oid, axis="authority-population", binary=True)
+        try:
+            relay_text = blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise XrootAxisError(
+                "authority-population", f"authority carrier {relname} is not UTF-8"
+            ) from exc
+        status, stamp, raw, _utc = filename_timestamp(name)
+        relays.append(
+            XrootRelay(
+                relname,
+                header_fields(relay_text),
+                relay_text,
+                stamp if status == "ok" else None,
+                raw if status == "ok" else None,
+            )
+        )
     return relays
 
 
@@ -3455,9 +3496,13 @@ def xroot_selected_conflicts(relay: XrootRelay, keys: tuple[str, ...]) -> None:
 def xroot_selected_role(relay: XrootRelay, kind: str) -> tuple[str, str]:
     if not relay.fields.get("ROLE"):
         raise XrootAxisError("authority-population", f"selected {kind} {relay.name} lacks ROLE")
-    role = ROLE_TO_ADDRESS_ROLE.get(relay.fields["ROLE"])
+    role = canonical_role(ROLE_TO_ADDRESS_ROLE.get(relay.fields["ROLE"]))
     from_addrs = split_addresses(relay.fields.get("FROM"))
-    if role is None or len(from_addrs) != 1 or role != from_role(from_addrs[0]):
+    if (
+        role is None
+        or len(from_addrs) != 1
+        or role != canonical_role(from_role(from_addrs[0]))
+    ):
         raise XrootAxisError(
             "authority-population", f"selected {kind} {relay.name} ROLE does not match FROM"
         )
@@ -3594,12 +3639,14 @@ def xroot_plan_gate(
     if missing:
         result.error(f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}")
         return True
-    lock = fields.get("PLAN_LOCK_ID", "")
-    lock_path, separator, annotation = lock.partition(" @ ")
-    if not xroot_valid_relpath(lock_path):
-        result.error(
-            f"{rel}: {xroot_error('declaration', 'PLAN_LOCK_ID path must be a literal relative path')}"
-        )
+    locks = []
+    for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
+        lock = fields.get(key, "")
+        lock_path, separator, annotation = lock.partition(" @ ")
+        if not lock_path or ("/" not in lock_path and not lock_path.endswith(".md")):
+            continue
+        locks.append((key, lock_path, separator, annotation))
+    if not locks:
         return True
     try:
         repo, commit = xroot_repository_and_commit(
@@ -3609,24 +3656,33 @@ def xroot_plan_gate(
             commit_key="PLAN_SOURCE_COMMIT",
         )
         commit_tree = xroot_commit_tree(repo, commit)
-        entry = xroot_walk(repo, commit_tree, lock_path, "PLAN_LOCK_ID")
-        if entry is None:
-            raise XrootAxisError("byte", "PLAN_LOCK_ID path does not exist at pinned commit")
-        kind, blob_oid = entry
-        if kind != "blob":
-            raise XrootAxisError("byte", f"PLAN_LOCK_ID path resolves to {kind}, not blob")
-        blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
-        if separator:
-            if re.fullmatch(r"[0-9a-f]{64}", annotation) is None:
+        for key, lock_path, separator, annotation in locks:
+            if not xroot_valid_relpath(lock_path):
                 raise XrootAxisError(
-                    "byte", "PLAN_LOCK_ID annotation is not a full lowercase 64-hex digest"
+                    "declaration", f"{key} path must be a literal relative path"
                 )
-            if hashlib.sha256(blob).hexdigest() != annotation:
-                raise XrootAxisError(
-                    "byte", "PLAN_LOCK_ID annotation digest does not match pinned blob bytes"
-                )
+            entry = xroot_walk(repo, commit_tree, lock_path, key)
+            if entry is None:
+                raise XrootAxisError("byte", f"{key} path does not exist at pinned commit")
+            kind, blob_oid = entry
+            if kind != "blob":
+                raise XrootAxisError("byte", f"{key} path resolves to {kind}, not blob")
+            blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
+            if separator:
+                if re.fullmatch(r"[0-9a-f]{64}", annotation) is None:
+                    raise XrootAxisError(
+                        "byte", f"{key} annotation is not a full lowercase 64-hex digest"
+                    )
+                if hashlib.sha256(blob).hexdigest() != annotation:
+                    raise XrootAxisError(
+                        "byte", f"{key} annotation digest does not match pinned blob bytes"
+                    )
     except XrootAxisError as exc:
         result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
+    except Exception:
+        result.error(
+            f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
+        )
     return True
 
 
@@ -3654,6 +3710,17 @@ def xroot_design_gate(
     if declaration is None:
         return False
     rel = f.relative_to(path)
+    role_ok, from_ok = xroot_pair_plan_carrier_shape(text)
+    if not role_ok:
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'declared edge carrier ROLE must be pair-Planner class')}"
+        )
+        return True
+    if not from_ok:
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'declared edge carrier FROM must be exactly one pair-Planner-class address')}"
+        )
+        return True
     conflicts = xroot_field_conflicts(
         text, XROOT_REQUIRED + ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND")
     )
@@ -3692,6 +3759,10 @@ def xroot_design_gate(
         xroot_verify(path, declaration)
     except XrootAxisError as exc:
         result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
+    except Exception:
+        result.error(
+            f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
+        )
     return True
 
 
@@ -3789,11 +3860,20 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     # DESIGN-REVIEW relay, and that review must parent to the DESIGN relay that
     # introduced the matching DESIGN_DOC_ID.
     for f, order, phase, fields, text in phases:
-        if lock_routes.get(f, "pair") != "pair": continue
         if phase != "PLAN":
             continue
         if xroot_design_gate(path, f, fields, text, phases, result):
             continue
+        if (
+            any(h27_occurrences(text, key) for key in ("PLAN_SOURCE_REPO", "PLAN_SOURCE_COMMIT"))
+            and fields.get("DESIGN_LOCK_ID")
+            and (
+                "/" in fields["DESIGN_LOCK_ID"].split(" @ ", 1)[0]
+                or fields["DESIGN_LOCK_ID"].split(" @ ", 1)[0].endswith(".md")
+            )
+        ):
+            continue
+        if lock_routes.get(f, "pair") != "pair": continue
         if not fields.get("DESIGN_LOCK_ID"):
             continue
         from_addrs = split_addresses(fields.get("FROM"))
@@ -4083,10 +4163,10 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
         fields = header_fields(lock_text)
         plan_source_engaged = xroot_plan_gate(path, f, fields, lock_text, result)
         for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
-            if key == "PLAN_LOCK_ID" and plan_source_engaged:
-                continue
             val = fields.get(key)
             bare = val.split(" @ ", 1)[0] if val else ""
+            if plan_source_engaged and bare and ("/" in bare or bare.endswith(".md")):
+                continue
             if bare and ("/" in bare or bare.endswith(".md")):
                 if Path(bare).is_absolute():
                     found = Path(bare).exists()

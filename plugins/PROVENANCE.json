@@ -44,7 +44,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/domain-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -68,7 +68,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/domain-reviewer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -98,7 +98,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/master-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -122,7 +122,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/master-reviewer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -158,7 +158,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -194,7 +194,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -212,7 +212,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-implementer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -236,7 +236,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/skills/pair-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -308,7 +308,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint-fixtures/README.md",
-    "sha256": "9d0441d69eb3504c77b255d422ac90c3ec80ab82057ff7582a0a427664809207",
+    "sha256": "7998aa39c37622f0f2e5be3d544250bf0d3d4342dc0f87e2d7734f0ad1bfb54c",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -10160,7 +10160,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/relay-lint.py",
-    "sha256": "48d0e9d94ff22681cee84bfa5fd692cfd1e336ca6c107b7e3cdba9fe97ee6651",
+    "sha256": "caba4f0fa1dfae15c946de9aed589514ccfa4439cfa0a362d9c07930a699f3bb",
     "source": "tools/relay-lint.py"
   },
   {
@@ -10286,7 +10286,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/xrootfixgen.py",
-    "sha256": "9265f81e64ca73c7c6a39f1db8d27457ce86ed7d1025c854d1c4d44aa17ba081",
+    "sha256": "9ba58ed6073282d881897660036cf3906082f32f3bea595dbdf562433752a833",
     "source": "tools/xrootfixgen.py"
   },
   {
@@ -10352,7 +10352,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -10388,7 +10388,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -10406,7 +10406,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-implementer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -10430,7 +10430,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/skills/pair-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -10502,7 +10502,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/README.md",
-    "sha256": "9d0441d69eb3504c77b255d422ac90c3ec80ab82057ff7582a0a427664809207",
+    "sha256": "7998aa39c37622f0f2e5be3d544250bf0d3d4342dc0f87e2d7734f0ad1bfb54c",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -20354,7 +20354,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/relay-lint.py",
-    "sha256": "48d0e9d94ff22681cee84bfa5fd692cfd1e336ca6c107b7e3cdba9fe97ee6651",
+    "sha256": "caba4f0fa1dfae15c946de9aed589514ccfa4439cfa0a362d9c07930a699f3bb",
     "source": "tools/relay-lint.py"
   },
   {
@@ -20480,7 +20480,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/xrootfixgen.py",
-    "sha256": "9265f81e64ca73c7c6a39f1db8d27457ce86ed7d1025c854d1c4d44aa17ba081",
+    "sha256": "9ba58ed6073282d881897660036cf3906082f32f3bea595dbdf562433752a833",
     "source": "tools/xrootfixgen.py"
   },
   {
@@ -20528,7 +20528,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-implementer/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -20552,7 +20552,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/skills/pair-planner/protocol.md",
-    "sha256": "292f62afcdc21bcb85a4bf91b24dfeaf1653b6ac22f9330521866e00196a5a82",
+    "sha256": "5d2eab167062e7cac1ec9f5801e9d325e005bc801d6183e5d09687dc798ad093",
     "source": "shared/protocol.md"
   },
   {
@@ -20624,7 +20624,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint-fixtures/README.md",
-    "sha256": "9d0441d69eb3504c77b255d422ac90c3ec80ab82057ff7582a0a427664809207",
+    "sha256": "7998aa39c37622f0f2e5be3d544250bf0d3d4342dc0f87e2d7734f0ad1bfb54c",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -30476,7 +30476,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/relay-lint.py",
-    "sha256": "48d0e9d94ff22681cee84bfa5fd692cfd1e336ca6c107b7e3cdba9fe97ee6651",
+    "sha256": "caba4f0fa1dfae15c946de9aed589514ccfa4439cfa0a362d9c07930a699f3bb",
     "source": "tools/relay-lint.py"
   },
   {
@@ -30602,7 +30602,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/xrootfixgen.py",
-    "sha256": "9265f81e64ca73c7c6a39f1db8d27457ce86ed7d1025c854d1c4d44aa17ba081",
+    "sha256": "9ba58ed6073282d881897660036cf3906082f32f3bea595dbdf562433752a833",
     "source": "tools/xrootfixgen.py"
   },
   {

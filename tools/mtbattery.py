@@ -112,7 +112,7 @@ ROW_SELECTORS = {
         ("h27_master_seat_errors", "Compare", "match.group(1) in occurrences"),
         ("lint_relay_root", "Compare", "rfields.get('DESIGN_REVIEW_VERDICT') != 'approve'"),
     },
-    "XR1": {("xroot_pair_plan_applicable", "Call", "any((h27_occurrences(text, key) for key in XROOT_TRIGGERS))")},
+    "XR1": {("xroot_design_engaged", "Call", "any((h27_occurrences(text, key) for key in XROOT_TRIGGERS))")},
     "XR2": {("xroot_design_gate", "UnaryOp", "not declaration[key]")},
     "XR3": {("xroot_field_conflicts", "Compare", "len(values) > 1")},
     "XR4": {("xroot_paths", "Call", "xroot_valid_relpath(declaration[key])")},
@@ -122,7 +122,7 @@ ROW_SELECTORS = {
     "XR8": {("xroot_authority", "Compare", "verdict != 'approve'")},
     "XR9": {("xroot_target_ok", "Compare", "expected not in values")},
     "XR10": {("xroot_design_gate", "BoolOp", "local_fields.get('DESIGN_DOC_ID') == declaration['DESIGN_DOC_ID'] and len(local_from) == 1 and (from_owner(local_from[0]) == declaration['DESIGN_OWNER'])")},
-    "XR11": {("xroot_declaration", "Call", "xroot_pair_plan_applicable(text)")},
+    "XR11": {("xroot_declaration", "Call", "xroot_design_engaged(text)")},
     "XR12": {("xroot_authority", "ListComp", "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id)]")},
     "XR13": {("xroot_authority", "ListComp", "[relay for relay in relays if xroot_target_ok(relay, 'PHASE', 'DESIGN-REVIEW') and xroot_target_ok(relay, 'DESIGN_DOC_ID', doc_id) and xroot_target_ok(relay, 'PARENT_DISPATCH_ID', origin_dispatch)]")},
     "XR14": {("xroot_target_ok", "Compare", "expected not in values")},
@@ -131,6 +131,7 @@ ROW_SELECTORS = {
     "XR17": {("xroot_plan_gate", "Call", "any((h27_occurrences(text, key) for key in source_keys))")},
     "XR18": {("xroot_plan_gate", "Call", "xroot_valid_relpath(lock_path)")},
     "XR19": {("lock_digest_shape_errors", "Call", "xroot_pair_plan_applicable(text)")},
+    "XR20": {("xroot_declaration", "Call", "xroot_design_engaged(text)")},
 }
 
 # Keep rows with a single reviewed selector equally explicit.  The inventory
