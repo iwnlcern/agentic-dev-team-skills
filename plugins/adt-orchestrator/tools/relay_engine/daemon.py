@@ -13,6 +13,7 @@ import queue
 import re
 import select
 import socket
+import sqlite3
 import stat
 import threading
 import time
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
                           rules, seats, strings, supersede, version)
-from relay_engine.ledger import init_schema, open_ledger
+from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
 from relay_engine.render import index_rows, render_index, render_relay
@@ -394,6 +395,144 @@ class DaemonLease:
 
     def __exit__(self, exc_type, exc, traceback):
         self.close()
+
+
+def _readonly_boundary(info, *, kind, mode=None):
+    if info.st_uid != os.geteuid():
+        raise OSError(errno.EPERM, "%s owner mismatch" % kind)
+    actual = stat.S_IMODE(info.st_mode)
+    if mode is not None and actual != mode:
+        raise OSError(errno.EPERM, "%s mode mismatch" % kind)
+
+
+def _readonly_record_boundary(info):
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError(errno.EINVAL, "regular record file required")
+    _readonly_boundary(info, kind="record")
+    mode = stat.S_IMODE(info.st_mode)
+    if not mode & stat.S_IRUSR or mode & (stat.S_IWGRP | stat.S_IWOTH |
+                                          stat.S_IXUSR | stat.S_IXGRP |
+                                          stat.S_IXOTH):
+        raise OSError(errno.EPERM, "record mode mismatch")
+
+
+def _readonly_record_uri(record_fd):
+    directory = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
+    return "file:%s/%d?mode=ro&immutable=1" % (directory, record_fd)
+
+
+def _readonly_entry(row):
+    path, digest, origin = row
+    if (not isinstance(path, str) or not path or path.startswith("/") or
+            any(part in ("", ".", "..") for part in path.split("/")) or
+            "\x00" in path or "\n" in path or "\r" in path):
+        raise ValueError("malformed record path")
+    path.encode("utf-8")
+    if (not strings.valid_fp(digest) or
+            origin not in {"daemon", "hand", "adopted"}):
+        raise ValueError("malformed record entry")
+    return {"path": path, "body_sha256": digest, "origin": origin}
+
+
+def _record_identity(info):
+    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+            stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns)
+
+
+def read_lint_context(root_name):
+    """Return stopped-daemon lint context, or None for strict selection."""
+    root = None
+    engine_dirfd = None
+    lock_fd = None
+    record_fd = None
+    record = None
+    try:
+        root = Root(root_name)
+        engine_dirfd = os.open(
+            ".engine", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root.dirfd)
+        engine_info = os.fstat(engine_dirfd)
+        if not stat.S_ISDIR(engine_info.st_mode):
+            raise NotADirectoryError(".engine")
+        _readonly_boundary(engine_info, kind="engine directory", mode=0o700)
+
+        lock_fd = os.open(
+            "daemon.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=engine_dirfd)
+        lock_info = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_info.st_mode):
+            raise OSError(errno.EINVAL, "regular lock file required")
+        _readonly_boundary(lock_info, kind="daemon lock", mode=0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        record_fd = os.open(
+            "ledger.db", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=engine_dirfd)
+        record_info = os.fstat(record_fd)
+        _readonly_record_boundary(record_info)
+        identity = _record_identity(record_info)
+
+        record = sqlite3.connect(
+            _readonly_record_uri(record_fd), uri=True, isolation_level=None)
+        record.execute("PRAGMA query_only=ON")
+        meta = dict(record.execute(
+            "SELECT key,value FROM meta WHERE key IN "
+            "('schema_version','canonical_root')"))
+        if (meta != {"schema_version": SCHEMA_VERSION,
+                     "canonical_root": root.path}):
+            raise ValueError("record schema or root mismatch")
+        snapshot = record.execute(
+            "SELECT COALESCE(MAX(seq),0) FROM relays").fetchone()[0]
+        if (not isinstance(snapshot, int) or isinstance(snapshot, bool) or
+                snapshot < 0):
+            raise ValueError("malformed record snapshot")
+        rows = record.execute(
+            "SELECT rendered_path,body_sha256,origin FROM relays "
+            "WHERE seq<=? ORDER BY CAST(rendered_path AS BLOB)",
+            (snapshot,)).fetchall()
+        entries = [_readonly_entry(row) for row in rows]
+        previous = None
+        for entry in entries:
+            current = entry["path"].encode("utf-8")
+            if previous is not None and current <= previous:
+                raise ValueError("record entries not strictly ordered")
+            previous = current
+        if _record_identity(os.fstat(record_fd)) != identity:
+            raise OSError(errno.EIO, "record changed during read")
+        return {"snapshot": str(snapshot), "entries": entries}
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        if record is not None:
+            try:
+                record.close()
+            except sqlite3.Error:
+                pass
+        if record_fd is not None:
+            try:
+                os.close(record_fd)
+            except OSError:
+                pass
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        if engine_dirfd is not None:
+            try:
+                os.close(engine_dirfd)
+            except OSError:
+                pass
+        if root is not None:
+            try:
+                root.close()
+            except OSError:
+                pass
 
 
 def acquire_lease(root):
