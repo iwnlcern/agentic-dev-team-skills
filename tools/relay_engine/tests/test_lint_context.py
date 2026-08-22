@@ -52,10 +52,12 @@ def _entry(path, *, origin="hand", body_sha256=HASH):
 
 
 class _StubDaemon:
-    def __init__(self, root_name, responses, *, delay_at=None):
+    def __init__(self, root_name, responses, *, delay_at=None,
+                 chunk_delay=None):
         self.root_name = root_name
         self.responses = list(responses)
         self.delay_at = delay_at
+        self.chunk_delay = chunk_delay
         self.socket_name = os.path.join(root_name, "stub", "s")
         Path(self.socket_name).parent.mkdir(parents=True)
         self.listener = socket.socket(socket.AF_UNIX)
@@ -101,7 +103,15 @@ class _StubDaemon:
                         time.sleep(0.2)
                     response = {"v": 2, "id": request["id"], "ok": True,
                                 "result": result, "did": DID}
-                    connection.sendall(encode_frame(response))
+                    frame = encode_frame(response)
+                    if self.chunk_delay is None:
+                        connection.sendall(frame)
+                    else:
+                        connection.sendall(frame[:4])
+                        time.sleep(self.chunk_delay)
+                        connection.sendall(frame[4:8])
+                        time.sleep(self.chunk_delay)
+                        connection.sendall(frame[8:])
                 except BrokenPipeError:
                     pass
                 finally:
@@ -305,9 +315,12 @@ class TestLintContextPagination(ContextDaemonCase):
 
 
 class TestLintContextHostilePages(unittest.TestCase):
-    def _assert_total_abort(self, pages, *, timeout=0.5, delay_at=None):
+    def _assert_total_abort(self, pages, *, timeout=0.5, delay_at=None,
+                            chunk_delay=None):
         with tempfile.TemporaryDirectory() as root_name:
-            stub = _StubDaemon(root_name, pages, delay_at=delay_at).start()
+            stub = _StubDaemon(
+                root_name, pages, delay_at=delay_at,
+                chunk_delay=chunk_delay).start()
             try:
                 with self.assertRaises((ValueError, TimeoutError,
                                         client.RemoteError)):
@@ -352,6 +365,29 @@ class TestLintContextHostilePages(unittest.TestCase):
                  "origin": "hand"},
             ]},
         ])
+
+    def test_explicit_null_cursor_aborts_without_partial_context(self):
+        self._assert_total_abort([
+            {"snapshot": "1", "entries": [_entry("a")], "cursor": None},
+        ])
+
+    def test_terminal_page_after_overall_deadline_aborts(self):
+        terminal = {"snapshot": "1", "entries": [_entry("a")]}
+        with mock.patch.object(
+                client.time, "monotonic",
+                side_effect=(100.0, 100.002, 100.020)), \
+                mock.patch.object(client, "request",
+                                  return_value=terminal) as requested:
+            with self.assertRaises(TimeoutError):
+                client.lint_context(
+                    "/unused", timeout=0.01,
+                    cid=dict(DID, install="/context-client"))
+        self.assertAlmostEqual(requested.call_args.kwargs["timeout"], 0.008)
+
+    def test_framed_response_read_consumes_absolute_remaining_deadline(self):
+        self._assert_total_abort([
+            {"snapshot": "1", "entries": [_entry("a")]},
+        ], timeout=0.08, chunk_delay=0.05)
 
     def test_timeout_aborts_without_partial_context(self):
         self._assert_total_abort([

@@ -177,18 +177,31 @@ def _daemon_record(root_name):
 
 def _roundtrip(socket_name, request_value, timeout=10.0):
     connection = socket.socket(socket.AF_UNIX)
-    connection.settimeout(timeout)
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError("request timed out")
+        return value
+
     try:
+        connection.settimeout(remaining())
         connection.connect(socket_name)
-        connection.sendall(encode_frame(request_value))
+        frame = encode_frame(request_value)
+        connection.settimeout(remaining())
+        connection.sendall(frame)
         decoder = FrameDecoder()
         while True:
+            connection.settimeout(remaining())
             data = connection.recv(65536)
             if not data:
                 raise ConnectionError("daemon closed before response")
             frames = decoder.feed(data)
             if frames:
-                return json.loads(frames[0].decode("utf-8"))
+                response = json.loads(frames[0].decode("utf-8"))
+                remaining()
+                return response
     finally:
         connection.close()
 
@@ -275,8 +288,9 @@ def _context_page(value):
         raise ValueError("malformed context page")
     snapshot = _context_snapshot(value["snapshot"])
     entries = [_context_entry(entry) for entry in value["entries"]]
+    cursor_present = "cursor" in value
     cursor = value.get("cursor")
-    if cursor is not None and not isinstance(cursor, str):
+    if cursor_present and not isinstance(cursor, str):
         raise ValueError("malformed context page")
     return snapshot, entries, cursor
 
@@ -295,6 +309,8 @@ def lint_context(root_name, timeout=10.0, cid=None):
         args = {} if cursor is None else {"cursor": cursor}
         value = request(root_name, "lint.context", args,
                         timeout=remaining, cid=cid)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("context acquisition timed out")
         page_snapshot, page_entries, next_cursor = _context_page(value)
         if snapshot is None:
             snapshot = page_snapshot
