@@ -44,6 +44,9 @@ INVENTORY = {
     "command-result": "{result}",
     "version-result": "{result}",
     "rejected-value": "unrecognized-input (sha256:{digest}, length {length})",
+    "engine-root-sweep-summary": "engine-root sweep: {count} record-known relays not re-judged; context source: {mode}",
+    "engine-root-record-integrity": "record-integrity: {cause}: {path}",
+    "engine-root-outside-the-record": "outside-the-record: {cause}: {path}",
 }
 
 _VALIDATORS = {}
@@ -58,6 +61,7 @@ _CODE_VALUES = {
     "run-id-mismatch", "run-id-uninitialized", "run-id-invalid",
     "E-FRAMING", "E-WIRE-VERSION", "E-WIRE-OP", "E-WIRE-ARGS",
     "E-DAEMON-STOPPING",
+    "E-CONTEXT-BUDGET",
 }
 _OPS = {
     "submit", "seat.register", "seat.replace", "seat.stand_down",
@@ -83,6 +87,19 @@ def _is_digest12(value):
 
 def _is_count(value):
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_root_relative_path(value):
+    if (not isinstance(value, str) or not value or value.startswith("/") or
+            any(part in ("", ".", "..") for part in value.split("/"))):
+        return False
+    try:
+        received = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return (len(received) <= 512 and
+            all(unicodedata.category(scalar) not in
+                {"Cc", "Cf", "Cs", "Zl", "Zp"} for scalar in value))
 
 
 def _is_rejected(value):
@@ -148,6 +165,18 @@ _VALIDATORS.update({
     ("rejected-value", "length"): _is_count,
     ("command-result", "result"): _is_machine_result,
     ("version-result", "result"): _is_machine_result,
+    ("engine-root-sweep-summary", "count"): _is_count,
+    ("engine-root-sweep-summary", "mode"):
+        lambda value: value in {"daemon", "read-only record"},
+    ("engine-root-record-integrity", "cause"):
+        lambda value: value in {"missing", "non-regular", "symlinked",
+                                "unreadable", "digest-mismatch"},
+    ("engine-root-record-integrity", "path"): _is_root_relative_path,
+    ("engine-root-outside-the-record", "cause"):
+        lambda value: value in {"foreign entry", "unexpected directory",
+                                "symlinked component",
+                                "non-directory ancestor", "root escape"},
+    ("engine-root-outside-the-record", "path"): _is_root_relative_path,
 })
 
 

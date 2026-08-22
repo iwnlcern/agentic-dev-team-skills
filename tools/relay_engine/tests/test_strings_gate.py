@@ -297,5 +297,66 @@ class TestGate(unittest.TestCase):
                          [("daemon", "start")])
 
 
+class TestEngineRootOutputInventory(unittest.TestCase):
+    def test_sweep_summary_renders_the_locked_output_contract(self):
+        self.assertEqual(
+            strings.render("engine-root-sweep-summary", count=7,
+                           mode="read-only record"),
+            "engine-root sweep: 7 record-known relays not re-judged; "
+            "context source: read-only record",
+        )
+
+    def test_sweep_summary_rejects_non_digit_count(self):
+        for count in ("7", -1, True):
+            with self.subTest(count=repr(count)):
+                with self.assertRaises(ValueError):
+                    strings.render("engine-root-sweep-summary", count=count,
+                                   mode="daemon")
+
+    def test_sweep_summary_rejects_unknown_context_source(self):
+        with self.assertRaises(ValueError):
+            strings.render("engine-root-sweep-summary", count=0,
+                           mode="direct record")
+
+    def test_record_integrity_findings_render_only_known_causes_and_paths(self):
+        causes = ("missing", "non-regular", "symlinked", "unreadable",
+                  "digest-mismatch")
+        for cause in causes:
+            with self.subTest(cause=cause):
+                self.assertEqual(
+                    strings.render("engine-root-record-integrity",
+                                   cause=cause, path="lane/relay.md"),
+                    "record-integrity: %s: lane/relay.md" % cause,
+                )
+        for cause in ("foreign entry", "modified", ""):
+            with self.subTest(invalid_cause=cause):
+                with self.assertRaises(ValueError):
+                    strings.render("engine-root-record-integrity",
+                                   cause=cause, path="lane/relay.md")
+        with self.assertRaises(ValueError):
+            strings.render("engine-root-record-integrity", cause="missing",
+                           path="../raw-path")
+
+    def test_outside_record_findings_render_only_known_causes_and_paths(self):
+        causes = ("foreign entry", "unexpected directory",
+                  "symlinked component", "non-directory ancestor",
+                  "root escape")
+        for cause in causes:
+            with self.subTest(cause=cause):
+                self.assertEqual(
+                    strings.render("engine-root-outside-the-record",
+                                   cause=cause, path="lane/stray"),
+                    "outside-the-record: %s: lane/stray" % cause,
+                )
+        for cause in ("missing", "directory", ""):
+            with self.subTest(invalid_cause=cause):
+                with self.assertRaises(ValueError):
+                    strings.render("engine-root-outside-the-record",
+                                   cause=cause, path="lane/stray")
+        with self.assertRaises(ValueError):
+            strings.render("engine-root-outside-the-record",
+                           cause="foreign entry", path="/raw-path")
+
+
 if __name__ == "__main__":
     unittest.main()

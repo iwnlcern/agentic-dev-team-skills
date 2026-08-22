@@ -37,6 +37,7 @@ ALL_CODES = POLICY_CODES | {
     "E-WIRE-OP",
     "E-WIRE-ARGS",
     "E-DAEMON-STOPPING",
+    "E-CONTEXT-BUDGET",
 }
 
 
@@ -102,6 +103,15 @@ class TestErrorRegistry(unittest.TestCase):
         exc = errors.error_for("E-ID-COLLISION")
         self.assertIn("--admits-against", exc.remedy)
         self.assertIn("root-relative", exc.remedy)
+
+    def test_context_budget_error_is_a_registered_wire_refusal(self):
+        self.assertEqual(
+            errors.error_for("E-CONTEXT-BUDGET").as_dict(),
+            {"code": "E-CONTEXT-BUDGET",
+             "cause": "context page exceeded the byte budget",
+             "remedy": "a single record entry or accounting disagreement exceeded the per-page byte budget",
+             "cls": "wire"},
+        )
 
 
 class TestWireTemplates(unittest.TestCase):

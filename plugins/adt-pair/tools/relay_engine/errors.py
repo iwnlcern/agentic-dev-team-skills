@@ -81,6 +81,8 @@ _TEXT = {
     "error-wire-args-remedy": "match the op's exact args schema",
     "error-daemon-stopping-cause": "daemon is draining its stop barrier",
     "error-daemon-stopping-remedy": "retry after restart; replay semantics make the retry safe",
+    "error-context-budget-cause": "context page exceeded the byte budget",
+    "error-context-budget-remedy": "a single record entry or accounting disagreement exceeded the per-page byte budget",
     "error-version-mismatch-cause": "client identity (kit {client_kit}, fingerprint {client_fp}, install {client_install}) does not match daemon identity (kit {daemon_kit}, fingerprint {daemon_fp}, install {daemon_install})",
     "error-version-mismatch-remedy": "{remedy}",
     "error-version-mismatch-explain-remedy": "update the lower-kit install, or refresh both installs when attribution is indeterminate",
@@ -108,6 +110,7 @@ _TEXT.update({
     "error-wire-op-explain": "wire requests name one operation from the daemon table",
     "error-wire-args-explain": "wire operation arguments must match the operation schema",
     "error-daemon-stopping-explain": "the stop barrier refuses work arriving after its cutoff",
+    "error-context-budget-explain": "context pagination refuses pages that exceed the byte budget",
     "error-version-mismatch-explain": "record operations require matching valid client and daemon identities",
 })
 
@@ -188,6 +191,7 @@ ERRORS = {
     "E-WIRE-OP": _spec("wire-op", "wire"),
     "E-WIRE-ARGS": _spec("wire-args", "wire"),
     "E-DAEMON-STOPPING": _spec("daemon-stopping", "wire"),
+    "E-CONTEXT-BUDGET": _spec("context-budget", "wire"),
     "E-VERSION-MISMATCH": _spec("version-mismatch", "policy"),
 }
 
