@@ -26,7 +26,7 @@ RECORD_OPS = {
     "submit", "seat.register", "seat.replace", "seat.stand_down",
     "seat.show", "show", "roster", "commission", "adopt_commission",
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
-    "migrate.check",
+    "migrate.check", "lint.context",
 }
 FROZEN_V1_ERROR_CODES = {
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
@@ -324,6 +324,38 @@ class TestIdentityMatrix(unittest.TestCase):
                     "install": "/precheck-kit-client",
                 }))
         self.assertIn("update the client install", mismatch.remedy)
+
+    def test_lint_context_record_identity_refuses_on_both_enforcement_paths(self):
+        did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
+        running = self.start_daemon(did)
+        mismatched_cid = {
+            "kit": "2.9.0", "fp": FP_B, "install": "/raw-client",
+        }
+        raw = _raw_roundtrip(running.socket_name, {
+            "v": 2,
+            "id": "00000000-0000-0000-0000-000000000005",
+            "op": "lint.context",
+            "args": {},
+            "cid": mismatched_cid,
+        })
+        self.assertEqual(raw["error"]["code"], "E-VERSION-MISMATCH")
+        self.assertEqual(raw["did"], did)
+
+        state_path = Path(self.root_name, ".engine/daemon.json")
+        state = json.loads(state_path.read_text())
+        state["identity"] = {
+            "kit": "2.9.0", "fp": FP_B, "install": "/new-daemon",
+        }
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with mock.patch.object(
+                client, "_roundtrip",
+                side_effect=AssertionError("mismatched client contacted socket")):
+            self.assert_mismatch(lambda: client.request(
+                self.root_name, "lint.context", {}, cid={
+                    "kit": "2.9.0", "fp": FP_A,
+                    "install": "/precheck-client",
+                }))
+        self.assertEqual(daemon.ADMIN_OPS, ADMIN_OPS)
 
     def test_v2_admin_requires_grammar_valid_client_identity(self):
         did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}

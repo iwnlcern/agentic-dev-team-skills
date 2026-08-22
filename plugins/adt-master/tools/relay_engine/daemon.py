@@ -63,11 +63,15 @@ class WireFault(Exception):
 
 
 def encode_frame(value):
-    body = json.dumps(value, ensure_ascii=False, separators=(",", ":"),
-                      sort_keys=True).encode("utf-8")
+    body = _encoded_value(value)
     if len(body) > MAX_FRAME:
         raise ValueError("frame exceeds maximum")
     return len(body).to_bytes(4, "big") + body
+
+
+def _encoded_value(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                      sort_keys=True).encode("utf-8")
 
 
 class FrameDecoder:
@@ -137,6 +141,7 @@ _SCHEMAS = {
     "verify": (set(), set()),
     "reconcile": (set(), set()),
     "migrate.check": (set(), set()),
+    "lint.context": (set(), {"cursor"}),
     "daemon.stop": (set(), set()),
 }
 
@@ -669,6 +674,43 @@ def _submit_handler(ledger, root, args):
             "duplicate": admission.replay}
 
 
+def _lint_context_position(ledger, cursor):
+    high_water = ledger.execute(
+        "SELECT COALESCE(MAX(seq),0) FROM relays").fetchone()[0]
+    if cursor is None:
+        return high_water, 0
+    match = re.fullmatch(r"(0|[1-9][0-9]*):(0|[1-9][0-9]*)", cursor)
+    if match is None:
+        raise _args_fault("lint.context", "cursor:string").error
+    snapshot, offset = (int(value) for value in match.groups())
+    if snapshot > high_water:
+        raise _args_fault("lint.context", "cursor:string").error
+    population = ledger.execute(
+        "SELECT COUNT(*) FROM relays WHERE seq<=?", (snapshot,)).fetchone()[0]
+    if offset > population:
+        raise _args_fault("lint.context", "cursor:string").error
+    return snapshot, offset
+
+
+def _lint_context_handler(ledger, args, request_id, did):
+    snapshot, offset = _lint_context_position(ledger, args.get("cursor"))
+    rows = ledger.execute(
+        "SELECT rendered_path,body_sha256,origin FROM relays WHERE seq<=? "
+        "ORDER BY CAST(rendered_path AS BLOB) LIMIT ? OFFSET ?",
+        (snapshot, strings.CONTEXT_ENTRY_CAP + 1, offset)).fetchall()
+    more = len(rows) > strings.CONTEXT_ENTRY_CAP
+    rows = rows[:strings.CONTEXT_ENTRY_CAP]
+    entries = [{"path": row[0], "body_sha256": row[1], "origin": row[2]}
+               for row in rows]
+    page = {"snapshot": str(snapshot), "entries": entries}
+    if more:
+        page["cursor"] = "%d:%d" % (snapshot, offset + len(entries))
+    response = success_response(request_id, page, did)
+    if len(_encoded_value(response)) >= strings.CONTEXT_PAGE_BUDGET:
+        raise errors.error_for("E-CONTEXT-BUDGET")
+    return page
+
+
 def _default_handler(ledger, root, state, handlers, request):
     op = request["op"]
     if op in handlers:
@@ -723,6 +765,9 @@ def _default_handler(ledger, root, state, handlers, request):
         return reconcile.reconcile(ledger, root)
     if op == "migrate.check":
         return migrate.check(ledger, root)
+    if op == "lint.context":
+        return _lint_context_handler(
+            ledger, request["args"], request["id"], state["identity"])
     if op == "daemon.stop":
         return {"ok": True}
     if op == "status":

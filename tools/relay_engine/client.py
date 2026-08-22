@@ -4,8 +4,10 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import stat
+import time
 import uuid
 
 from relay_engine import errors, strings, version
@@ -236,6 +238,84 @@ def request(root_name, op, args, timeout=10.0, cid=None):
     if not response.get("ok"):
         raise RemoteError(response["error"])
     return response["result"]
+
+
+def _context_snapshot(value):
+    if (not isinstance(value, str) or
+            re.fullmatch(r"0|[1-9][0-9]*", value) is None):
+        raise ValueError("malformed context page")
+    return value
+
+
+def _context_entry(value):
+    if not isinstance(value, dict) or set(value) != {
+            "path", "body_sha256", "origin"}:
+        raise ValueError("malformed context page")
+    path = value["path"]
+    if (not isinstance(path, str) or not path or path.startswith("/") or
+            any(part in ("", ".", "..") for part in path.split("/")) or
+            "\x00" in path or "\n" in path or "\r" in path):
+        raise ValueError("malformed context page")
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("malformed context page") from exc
+    if (not strings.valid_fp(value["body_sha256"]) or
+            value["origin"] not in {"daemon", "hand", "adopted"}):
+        raise ValueError("malformed context page")
+    return dict(value)
+
+
+def _context_page(value):
+    if (not isinstance(value, dict) or
+            not {"snapshot", "entries"} <= set(value) or
+            not set(value) <= {"snapshot", "entries", "cursor"} or
+            not isinstance(value["entries"], list) or
+            len(value["entries"]) > strings.CONTEXT_ENTRY_CAP):
+        raise ValueError("malformed context page")
+    snapshot = _context_snapshot(value["snapshot"])
+    entries = [_context_entry(entry) for entry in value["entries"]]
+    cursor = value.get("cursor")
+    if cursor is not None and not isinstance(cursor, str):
+        raise ValueError("malformed context page")
+    return snapshot, entries, cursor
+
+
+def lint_context(root_name, timeout=10.0, cid=None):
+    deadline = time.monotonic() + timeout
+    snapshot = None
+    cursor = None
+    entries = []
+    seen = set()
+    last_path = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("context acquisition timed out")
+        args = {} if cursor is None else {"cursor": cursor}
+        value = request(root_name, "lint.context", args,
+                        timeout=remaining, cid=cid)
+        page_snapshot, page_entries, next_cursor = _context_page(value)
+        if snapshot is None:
+            snapshot = page_snapshot
+        elif page_snapshot != snapshot:
+            raise ValueError("context snapshot changed")
+        if cursor is not None and not page_entries:
+            raise ValueError("truncated context page set")
+        for entry in page_entries:
+            path_bytes = entry["path"].encode("utf-8")
+            if (entry["path"] in seen or
+                    (last_path is not None and path_bytes <= last_path)):
+                raise ValueError("context entries not strictly ordered")
+            seen.add(entry["path"])
+            last_path = path_bytes
+            entries.append(entry)
+        if next_cursor is None:
+            return {"snapshot": snapshot, "entries": entries}
+        expected_cursor = "%s:%d" % (snapshot, len(entries))
+        if not page_entries or next_cursor != expected_cursor:
+            raise ValueError("context page gap")
+        cursor = next_cursor
 
 
 def submit(root_name, draft, key_path=None, admits_against=None,

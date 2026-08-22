@@ -52,6 +52,9 @@ INVENTORY = {
 _VALIDATORS = {}
 _FACTORY_CALLED = False
 LIST_BUDGET = 4096
+CONTEXT_FRAME_MARGIN = 1024 * 1024
+CONTEXT_PAGE_BUDGET = (16 * 1024 * 1024) - CONTEXT_FRAME_MARGIN
+CONTEXT_ENTRY_CAP = 4096
 _CODE_VALUES = {
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
@@ -67,7 +70,7 @@ _OPS = {
     "submit", "seat.register", "seat.replace", "seat.stand_down",
     "seat.show", "show", "status", "roster", "commission", "adopt_commission",
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
-    "migrate.check", "daemon.stop",
+    "migrate.check", "lint.context", "daemon.stop",
 }
 _REASONS = {"length-prefix-invalid", "not-utf8", "not-json",
             "oversize", "truncated"}
