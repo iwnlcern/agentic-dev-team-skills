@@ -196,8 +196,65 @@ assert_guard_case() {
   done
   echo "PASS $name"
 }
+payload_for_file() {
+  python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":sys.argv[1]}}))' "$1"
+}
+payload_for_command() {
+  python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"PostToolUse","tool_name":sys.argv[1],"tool_input":{"command":sys.argv[2],"run_in_background":False},"cwd":sys.argv[3]}))' "$2" "$1" "$3"
+}
+assert_payload_handler() {
+  local name="$1" handler="$2" script="$3" payload="$4" expected_rc="$5" want="$6" spy_rc="$7" expected_count="$8" expected_line="$9"
+  : > "$spy_log"
+  printf '%s' "$payload" \
+    | SPY_LOG="$spy_log" SPY_HANDLER="$handler" SPY_RC="$spy_rc" SPY_STDERR="SPY-LINT-FAIL" \
+      RELAY_LINT_SKILLS_ROOT="$spy_skills" HOME="$tmp/home" PATH="$PATH_NORMAL" \
+      "$BASH_BIN" "$script" 2>"$tmp/stderr"
+  local rc=$?
+  if [ "$rc" -ne "$expected_rc" ]; then
+    echo "FAIL $name: expected exit $expected_rc got $rc" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if [ -n "$want" ] && ! grep -Fq "$want" "$tmp/stderr"; then
+    echo "FAIL $name: expected stderr to contain: $want" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  if [ -z "$want" ] && [ -s "$tmp/stderr" ]; then
+    echo "FAIL $name: expected silent stderr" >&2
+    cat "$tmp/stderr" >&2
+    return 1
+  fi
+  local actual_count
+  actual_count="$(wc -l < "$spy_log" | tr -d ' ')"
+  if [ "$actual_count" -ne "$expected_count" ]; then
+    echo "FAIL $name: expected $expected_count linter invocation(s), got $actual_count" >&2
+    cat "$spy_log" >&2
+    return 1
+  fi
+  if [ -n "$expected_line" ] && ! grep -Fxq "$expected_line" "$spy_log"; then
+    echo "FAIL $name: expected exact linter invocation: $expected_line" >&2
+    cat "$spy_log" >&2
+    return 1
+  fi
+  echo "PASS $name"
+}
 fail=0
 PATH_NORMAL="$PATH"
+spy_skills="$tmp/spy-skills"
+spy_log="$tmp/spy-invocations"
+mkdir -p "$spy_skills/tools"
+cat > "$spy_skills/tools/relay-lint.py" <<'PY'
+import os
+import sys
+
+with open(os.environ["SPY_LOG"], "a", encoding="utf-8") as stream:
+    stream.write("|".join((os.environ["SPY_HANDLER"], *sys.argv[1:])) + "\n")
+message = os.environ.get("SPY_STDERR", "")
+if message:
+    print(message, file=sys.stderr)
+raise SystemExit(int(os.environ.get("SPY_RC", "0")))
+PY
 
 # v1-v5 name the visible-root recognition boundary. Each shape is exercised
 # through both adapter entry points so their routing cannot drift apart.
@@ -334,6 +391,155 @@ assert_guard_case "g8-multiple-relay-targets-are-generic" "cp $tmp/work/a.md $g8
 g9_relay="$tmp/work/.relays/run1/NOTINDEX-$stamp.md"
 cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$g9_relay"
 assert_guard_case "g9-notindex-routes-explicit-file-mode" "printf x > $g9_relay" false PostToolUse 0 "" || fail=1
+
+# p1-p8 exercise payload normalization directly.  The production break caught
+# by these cases is silent lint-nothing for a relay target declared by an
+# apply_patch envelope, including targets that require INDEX mode or a noisy
+# fallback because no lintable on-disk target can be extracted.
+p_clean="$tmp/work/.relays/run1/p-clean-$stamp.md"
+p_dirty="$tmp/work/.relays/run1/p-dirty-$stamp.md"
+p_index="$tmp/work/.relays/run1/INDEX.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$p_clean"
+cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$p_dirty"
+
+payload="$(payload_for_file "$p_clean")"
+assert_payload_handler "p1-write-file-regression" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+
+command="*** Begin Patch
+*** Update File: .relays/run1/$(basename "$p_clean")
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p2-native-patch-relay-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+
+command="*** Begin Patch
+*** Update File: src/note.md
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p3-native-patch-nonrelay-is-silent" normalizer "$HOOK" "$payload" 0 "" 0 0 "" || fail=1
+
+assert_payload_handler "p4-unparseable-payload-is-noisy" normalizer "$HOOK" '{not-json' 2 "UNLINTED" 0 0 "" || fail=1
+
+command="*** Begin Patch
+*** Update File: .relays/run1/$(basename "$p_clean")
+*** Update File: src/note.md
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p5-mixed-target-patch-lints-relay-once" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+
+command="*** Begin Patch
+*** Update File: .relays/run1/INDEX.md
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p6-index-target-uses-index-mode" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|--index|$p_index" || fail=1
+
+command="*** Begin Patch
+*** Delete File: .relays/run1/$(basename "$p_clean")
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p7-delete-only-relay-patch-is-noisy" normalizer "$HOOK" "$payload" 2 "UNLINTED" 0 0 "" || fail=1
+
+command="*** Begin Patch
+# relay target .relays/run1/$(basename "$p_clean")
+*** Update File:
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p8-empty-target-marker-is-noisy" normalizer "$HOOK" "$payload" 2 "UNLINTED" 0 0 "" || fail=1
+
+# r1-r12 drive the same Bash payload through both configured handlers.  The
+# normalizer must cover envelope targets without suppressing the unchanged
+# guard's independently recognized redirect target; clean lints stay silent.
+bare_patch="apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: $p_clean
+*** End Patch
+PATCH"
+payload="$(payload_for_command "$bare_patch" Bash "$tmp/work")"
+assert_payload_handler "r1-bare-patch-normalizer-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+assert_payload_handler "r1-bare-patch-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
+
+dirty_patch="apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: $p_dirty
+*** End Patch
+PATCH"
+payload="$(payload_for_command "$dirty_patch" Bash "$tmp/work")"
+assert_payload_handler "r2-dirty-patch-surfaces-lint-failure" normalizer "$HOOK" "$payload" 2 "SPY-LINT-FAIL" 1 1 "normalizer|$p_dirty" || fail=1
+assert_payload_handler "r2-dirty-patch-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
+
+for form in "env RELAY_CASE=1 apply_patch" "/usr/local/bin/apply_patch"; do
+  command="$form <<'PATCH'
+*** Begin Patch
+*** Update File: $p_clean
+*** End Patch
+PATCH"
+  payload="$(payload_for_command "$command" Bash "$tmp/work")"
+  case "$form" in env*) case_name="env-prefixed" ;; *) case_name="absolute-path" ;; esac
+  assert_payload_handler "r3-$case_name-normalizer-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+  assert_payload_handler "r3-$case_name-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
+done
+
+command="cd /tmp && apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: $p_clean
+*** End Patch
+PATCH"
+payload="$(payload_for_command "$command" Bash "$tmp/work")"
+assert_payload_handler "r4-compound-prefix-normalizer-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+assert_payload_handler "r4-compound-prefix-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
+
+command="printf '%s' patch | apply_patch
+*** Begin Patch
+*** Update File: $p_clean
+*** End Patch"
+payload="$(payload_for_command "$command" Bash "$tmp/work")"
+assert_payload_handler "r5-piped-patch-normalizer-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+assert_payload_handler "r5-piped-patch-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
+
+payload="$(payload_for_command "echo hi > $p_clean" Bash "$tmp/work")"
+assert_payload_handler "r6-nonpatch-relay-write-normalizer-silent" normalizer "$HOOK" "$payload" 0 "" 0 0 "" || fail=1
+assert_payload_handler "r6-nonpatch-relay-write-guard-covers-target" guard "$BASH_GUARD" "$payload" 0 "" 0 1 "guard|$p_clean" || fail=1
+
+payload="$(payload_for_command "echo hi > $tmp/work/src/note.md" Bash "$tmp/work")"
+assert_payload_handler "r7-nonrelay-normalizer-silent" normalizer "$HOOK" "$payload" 0 "" 0 0 "" || fail=1
+assert_payload_handler "r7-nonrelay-guard-silent" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
+
+command="apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: $p_clean
+@@
++value > literal
+*** End Patch
+PATCH"
+payload="$(payload_for_command "$command" Bash "$tmp/work")"
+assert_payload_handler "r8-body-redirect-marker-normalizer-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+assert_payload_handler "r8-body-redirect-marker-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 1 "guard|$p_clean" || fail=1
+
+relay_a="$tmp/work/.relays/run1/relay-a-$stamp.md"
+relay_b="$tmp/work/.relays/run1/relay-b-$stamp.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$relay_a"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$relay_b"
+command="cat > $relay_a <<'EOF'
+*** Begin Patch
+*** Update File: src/note.md
+*** End Patch
+EOF"
+payload="$(payload_for_command "$command" Bash "$tmp/work")"
+assert_payload_handler "r9-marker-data-normalizer-does-not-claim-redirect" normalizer "$HOOK" "$payload" 0 "" 0 0 "" || fail=1
+assert_payload_handler "r9-marker-data-guard-covers-redirect" guard "$BASH_GUARD" "$payload" 0 "" 0 1 "guard|$relay_a" || fail=1
+
+command="apply_patch </dev/null; cat > $relay_a <<'EOF'
+*** Begin Patch
+*** Update File: $relay_b
+*** End Patch
+EOF"
+payload="$(payload_for_command "$command" Bash "$tmp/work")"
+assert_payload_handler "r10-marker-data-suffix-normalizer-additive" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$relay_b" || fail=1
+assert_payload_handler "r10-marker-data-suffix-guard-multi-target-fallback" guard "$BASH_GUARD" "$payload" 2 "relay-guard: a Bash command appears to have written into a relay root and could not be linted; lint manually before handoff" 0 0 "" || fail=1
+
+payload="$(payload_for_file "$p_clean")"
+assert_payload_handler "r11-clean-write-primary-route-silent" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+payload="$(payload_for_command "$bare_patch" Bash "$tmp/work")"
+assert_payload_handler "r12-clean-patch-primary-route-silent" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
 
 # This proves SHIPPED CONFIGURATION, not live host installation.
 if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); expected="bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""; events=("PostToolUse","PostToolUseFailure"); assert all(any(e.get("matcher") == "Bash" and any(h.get("type") == "command" and h.get("command") == expected for h in e.get("hooks", [])) for e in d.get("hooks", {}).get(event, [])) for event in events)' "$SETTINGS"; then
