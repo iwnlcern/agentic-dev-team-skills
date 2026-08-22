@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import os
 import re
+import selectors
+import signal
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 # Relay filename timestamps must name the real authoring time. Wall-clock drift
 # is a fabrication risk, not a cosmetic one: a stamp the author invented makes the
@@ -1568,9 +1572,14 @@ def lock_digest_shape_errors(text: str) -> List[str]:
             dval = occ[dkey][0]
             if A5_SHA256_RE.fullmatch(dval) is None:
                 errors.append(f"{dkey} value {dval!r} is not a 64-hex lowercase sha256 digest")
-        if not occ[akey]:
+        xroot_locator = (
+            dkey == "DESIGN_SHA256"
+            and xroot_pair_plan_applicable(text)
+            and bool(h27_occurrences(text, "DESIGN_SOURCE_PATH"))
+        )
+        if not occ[akey] and not xroot_locator:
             errors.append(f"{dkey} declared with no {akey} to locate the artifact")
-        elif akey not in conflicted:
+        elif occ[akey] and akey not in conflicted:
             aval = occ[akey][0]
             if not a5_stem_is_bare(aval):
                 errors.append(f"{akey} value {aval!r} is not a bare filename stem")
@@ -3140,6 +3149,747 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
     return errors
 
 
+XROOT_PREFIX = "declared design edge failed verification"
+XROOT_TRIGGERS = (
+    "DESIGN_SOURCE_REPO",
+    "DESIGN_SOURCE_COMMIT",
+    "DESIGN_SOURCE_ROOT",
+    "DESIGN_SOURCE_PATH",
+    "DESIGN_OWNER",
+)
+XROOT_REQUIRED = XROOT_TRIGGERS + ("DESIGN_DOC_ID", "DESIGN_SHA256")
+XROOT_GIT_TIMEOUT_SECONDS = 5
+XROOT_MAX_TREE_DEPTH = 256
+
+
+class XrootAxisError(Exception):
+    def __init__(self, axis: str, detail: str) -> None:
+        super().__init__(detail)
+        self.axis = axis
+        self.detail = detail
+
+
+def xroot_error(axis: str, detail: str) -> str:
+    return f"{XROOT_PREFIX}: {axis}: {detail}"
+
+
+def xroot_design_engaged(text: str) -> bool:
+    """Whether a PLAN-phase relay carries any declared-edge trigger."""
+    fields = header_fields(text)
+    if fields.get("PHASE") != "PLAN":
+        return False
+    return any(h27_occurrences(text, key) for key in XROOT_TRIGGERS)
+
+
+def xroot_pair_plan_applicable(text: str) -> bool:
+    """Whether text is inside the locked A5 pair-Planner PLAN boundary."""
+    fields = header_fields(text)
+    if fields.get("PHASE") != "PLAN":
+        return False
+    from_values = h27_occurrences(text, "FROM")
+    if len(from_values) != 1:
+        return False
+    from_addrs = split_addresses(from_values[0])
+    if len(from_addrs) != 1 or canonical_role(from_role(from_addrs[0])) != "planner":
+        return False
+    return any(h27_occurrences(text, key) for key in XROOT_TRIGGERS)
+
+
+def xroot_pair_plan_carrier_shape(text: str) -> tuple[bool, bool]:
+    """Return the ROLE and FROM halves of the canonical carrier shape."""
+    fields = header_fields(text)
+    role_ok = canonical_role(ROLE_TO_ADDRESS_ROLE.get(fields.get("ROLE", ""))) == "planner"
+    from_values = h27_occurrences(text, "FROM")
+    from_addrs = split_addresses(from_values[0]) if len(from_values) == 1 else []
+    from_ok = len(from_addrs) == 1 and canonical_role(from_role(from_addrs[0])) == "planner"
+    return role_ok, from_ok
+
+
+def xroot_field_conflicts(text: str, keys: tuple[str, ...]) -> List[str]:
+    conflicts: List[str] = []
+    for key in keys:
+        values = {value.strip() for value in h27_occurrences(text, key)}
+        if len(values) > 1:
+            conflicts.append(key)
+    return conflicts
+
+
+def xroot_declaration(fields: Dict[str, str], text: str) -> Dict[str, str] | None:
+    if not xroot_design_engaged(text):
+        return None
+    return {
+        key: fields.get(key, "").strip()
+        for key in XROOT_REQUIRED + ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND")
+    }
+
+
+def _xroot_kill_and_reap(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    while True:
+        try:
+            os.waitpid(pid, 0)
+            return
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            return
+
+
+def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = False):
+    argv = ["git", "-C", str(repo), *args]
+    stdout_chunks: List[bytes] = []
+    stderr_chunks: List[bytes] = []
+    open_fds = set()
+    selector = selectors.DefaultSelector()
+    pid = None
+    reaped = False
+    timed_out = False
+    status = None
+    try:
+        stdout_read, stdout_write = os.pipe()
+        open_fds.update((stdout_read, stdout_write))
+        stderr_read, stderr_write = os.pipe()
+        open_fds.update((stderr_read, stderr_write))
+        file_actions = [
+            (os.POSIX_SPAWN_DUP2, stdout_write, 1),
+            (os.POSIX_SPAWN_DUP2, stderr_write, 2),
+            (os.POSIX_SPAWN_CLOSE, stdout_read),
+            (os.POSIX_SPAWN_CLOSE, stderr_read),
+            (os.POSIX_SPAWN_CLOSE, stdout_write),
+            (os.POSIX_SPAWN_CLOSE, stderr_write),
+        ]
+        try:
+            pid = os.posix_spawnp(
+                "git", argv, os.environ, file_actions=file_actions)
+        except FileNotFoundError as exc:
+            raise XrootAxisError(
+                "repository", "git executable is unavailable"
+            ) from exc
+
+        for fd in (stdout_write, stderr_write):
+            os.close(fd)
+            open_fds.remove(fd)
+        for fd, chunks in (
+            (stdout_read, stdout_chunks),
+            (stderr_read, stderr_chunks),
+        ):
+            os.set_blocking(fd, False)
+            selector.register(fd, selectors.EVENT_READ, chunks)
+
+        deadline = time.monotonic() + XROOT_GIT_TIMEOUT_SECONDS
+        while selector.get_map() or status is None:
+            if status is None:
+                waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
+                if waited_pid == pid:
+                    status = waited_status
+                    reaped = True
+            if not selector.get_map() and status is not None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                raise XrootAxisError(axis, "Git object query timed out")
+            if selector.get_map():
+                events = selector.select(remaining)
+                if not events:
+                    timed_out = True
+                    raise XrootAxisError(axis, "Git object query timed out")
+                for key, _mask in events:
+                    fd = key.fd
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if chunk:
+                        key.data.append(chunk)
+                    else:
+                        selector.unregister(fd)
+                        os.close(fd)
+                        open_fds.remove(fd)
+            else:
+                time.sleep(min(0.01, remaining))
+
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise XrootAxisError(axis, "Git object query failed")
+    except BaseException:
+        if pid is not None and not reaped:
+            _xroot_kill_and_reap(pid)
+            reaped = True
+        raise
+    finally:
+        selector.close()
+        for fd in tuple(open_fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if timed_out and pid is not None and not reaped:
+            _xroot_kill_and_reap(pid)
+
+    stdout = b"".join(stdout_chunks)
+    return stdout if binary else stdout.decode("utf-8").strip()
+
+
+def xroot_repository_and_commit(
+    path: Path,
+    declaration: Dict[str, str],
+    repo_key: str = "DESIGN_SOURCE_REPO",
+    commit_key: str = "DESIGN_SOURCE_COMMIT",
+) -> tuple[Path, str]:
+    try:
+        consuming_top = Path(
+            xroot_git(path, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        )
+    except XrootAxisError as exc:
+        if exc.axis == "repository" and exc.detail == "git executable is unavailable":
+            raise
+        raise XrootAxisError(
+            "repository", "consuming relay root is not inside a Git repository"
+        ) from exc
+    declared_repo = Path(declaration[repo_key])
+    candidate = declared_repo if declared_repo.is_absolute() else consuming_top / declared_repo
+    candidate = Path(os.path.realpath(candidate))
+    if not candidate.is_dir():
+        raise XrootAxisError("repository", f"{repo_key} does not name an existing directory")
+    try:
+        reported_top = Path(
+            xroot_git(candidate, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        )
+    except XrootAxisError as exc:
+        if exc.axis == "repository" and exc.detail == "git executable is unavailable":
+            raise
+        raise XrootAxisError(
+            "repository", f"{repo_key} is not a Git repository top level"
+        ) from exc
+    if Path(os.path.realpath(reported_top)) != candidate:
+        raise XrootAxisError(
+            "repository",
+            f"{repo_key} resolves inside a Git repository but not to its top level",
+        )
+    commit = declaration[commit_key]
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise XrootAxisError(
+            "commit", f"{commit_key} must be a full lowercase 40-hex object id"
+        )
+    try:
+        object_type = xroot_git(candidate, "cat-file", "-t", commit, axis="commit")
+    except XrootAxisError as exc:
+        if exc.detail == "Git object query failed":
+            raise XrootAxisError("commit", f"{commit_key} object is unavailable") from exc
+        raise
+    if object_type != "commit":
+        raise XrootAxisError(
+            "commit", f"{commit_key} object type is {object_type}, not commit"
+        )
+    return candidate, commit
+
+
+def xroot_valid_relpath(value: str) -> bool:
+    parts = value.split("/")
+    return bool(
+        value
+        and not value.startswith("/")
+        and "\x00" not in value
+        and all(part not in {"", ".", ".."} and not part.startswith(":") for part in parts)
+    )
+
+
+def xroot_commit_tree(repo: Path, commit: str) -> str:
+    content = xroot_git(repo, "cat-file", "-p", commit, axis="commit")
+    first = content.splitlines()[0] if content else ""
+    if re.fullmatch(r"tree [0-9a-f]{40}", first) is None:
+        raise XrootAxisError("commit", "commit object lacks a canonical root tree")
+    return first.split(" ", 1)[1]
+
+
+def xroot_tree_entries(repo: Path, tree_oid: str) -> dict[bytes, tuple[str, str]]:
+    raw = xroot_git(repo, "cat-file", "tree", tree_oid, axis="repository", binary=True)
+    entries: dict[bytes, tuple[str, str]] = {}
+    offset = 0
+    while offset < len(raw):
+        space = raw.find(b" ", offset)
+        nul = raw.find(b"\x00", space + 1)
+        if space < 0 or nul < 0 or nul + 21 > len(raw):
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            )
+        try:
+            mode = raw[offset:space].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            ) from exc
+        if mode not in {"40000", "040000", "100644", "100755", "120000", "160000"}:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            )
+        name = raw[space + 1:nul]
+        if not name:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            )
+        oid = raw[nul + 1:nul + 21].hex()
+        if mode == "120000":
+            kind = "symlink"
+        elif mode in {"40000", "040000"}:
+            kind = "tree"
+        else:
+            kind = "blob"
+        entries[name] = (kind, oid)
+        offset = nul + 21
+    return entries
+
+
+def xroot_walk(
+    repo: Path,
+    root_tree: str,
+    relpath: str,
+    field_name: str,
+) -> tuple[str, str] | None:
+    tree_oid = root_tree
+    parts = relpath.split("/")
+    for index, part in enumerate(parts):
+        entry = xroot_tree_entries(repo, tree_oid).get(part.encode("utf-8"))
+        if entry is None:
+            return None
+        kind, oid = entry
+        if kind == "symlink":
+            raise XrootAxisError(
+                "declaration", f"{field_name} traverses symlink component {part}"
+            )
+        if index < len(parts) - 1:
+            if kind != "tree":
+                return None
+            tree_oid = oid
+    return kind, oid
+
+
+def xroot_paths(
+    repo: Path,
+    commit: str,
+    declaration: Dict[str, str],
+) -> tuple[str, str]:
+    for key in ("DESIGN_SOURCE_ROOT", "DESIGN_SOURCE_PATH"):
+        if not xroot_valid_relpath(declaration[key]):
+            raise XrootAxisError("declaration", f"{key} must be a literal relative path")
+    commit_tree = xroot_commit_tree(repo, commit)
+    root_entry = xroot_walk(
+        repo, commit_tree, declaration["DESIGN_SOURCE_ROOT"], "DESIGN_SOURCE_ROOT"
+    )
+    if root_entry is None:
+        raise XrootAxisError(
+            "authority-population", "DESIGN_SOURCE_ROOT does not exist at pinned commit"
+        )
+    root_kind, root_oid = root_entry
+    if root_kind != "tree":
+        raise XrootAxisError(
+            "authority-population", f"DESIGN_SOURCE_ROOT resolves to {root_kind}, not tree"
+        )
+    path_entry = xroot_walk(
+        repo, commit_tree, declaration["DESIGN_SOURCE_PATH"], "DESIGN_SOURCE_PATH"
+    )
+    if path_entry is None:
+        raise XrootAxisError("byte", "DESIGN_SOURCE_PATH does not exist at pinned commit")
+    path_kind, blob_oid = path_entry
+    if path_kind != "blob":
+        raise XrootAxisError("byte", f"DESIGN_SOURCE_PATH resolves to {path_kind}, not blob")
+    return root_oid, blob_oid
+
+
+class XrootRelay(NamedTuple):
+    name: str
+    fields: Dict[str, str]
+    text: str
+    stamp: datetime.datetime | None
+    stamp_raw: str | None
+
+
+def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
+    relays: List[XrootRelay] = []
+    stack = [("tree", root_tree, "", b"", 0)]
+    while stack:
+        kind, oid, relname, name_bytes, depth = stack.pop()
+        if kind == "tree":
+            if depth > XROOT_MAX_TREE_DEPTH:
+                raise XrootAxisError(
+                    "repository",
+                    f"DESIGN_SOURCE_ROOT exceeds maximum tree depth {XROOT_MAX_TREE_DEPTH}",
+                )
+            entries = sorted(xroot_tree_entries(repo, oid).items(), reverse=True)
+            for child_name, (child_kind, child_oid) in entries:
+                try:
+                    decoded = child_name.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise XrootAxisError(
+                        "authority-population",
+                        "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename",
+                    ) from exc
+                child_relname = f"{relname}/{decoded}" if relname else decoded
+                stack.append((child_kind, child_oid, child_relname, child_name, depth + 1))
+            continue
+        name = name_bytes.decode("utf-8")
+        if name == "INDEX.md":
+            continue
+        if kind == "symlink":
+            raise XrootAxisError(
+                "authority-population",
+                f"DESIGN_SOURCE_ROOT contains symlink carrier {relname}",
+            )
+        if not name.endswith(".md"):
+            continue
+        blob = xroot_git(
+            repo, "cat-file", "blob", oid, axis="authority-population", binary=True
+        )
+        try:
+            relay_text = blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise XrootAxisError(
+                "authority-population", f"authority carrier {relname} is not UTF-8"
+            ) from exc
+        status, stamp, raw, _utc = filename_timestamp(name)
+        relays.append(
+            XrootRelay(
+                relname,
+                header_fields(relay_text),
+                relay_text,
+                stamp if status == "ok" else None,
+                raw if status == "ok" else None,
+            )
+        )
+    return relays
+
+
+def xroot_target_ok(relay: XrootRelay, key: str, expected: str) -> bool:
+    values = [value.strip() for value in h27_occurrences(relay.text, key)]
+    if expected not in values:
+        return False
+    if len(set(values)) > 1:
+        raise XrootAxisError(
+            "authority-population", f"conflicting {key} occurrences in {relay.name}"
+        )
+    return True
+
+
+def xroot_unique_latest(
+    candidates: List[XrootRelay],
+    *,
+    empty_axis: str,
+    empty_detail: str,
+    carrier_kind: str,
+) -> XrootRelay:
+    if not candidates:
+        raise XrootAxisError(empty_axis, empty_detail)
+    for relay in candidates:
+        if relay.stamp is None:
+            raise XrootAxisError(
+                "ordering", f"authority carrier {relay.name} lacks a filename timestamp"
+            )
+    latest_stamp = max(relay.stamp for relay in candidates)
+    latest = [relay for relay in candidates if relay.stamp == latest_stamp]
+    if len(latest) != 1:
+        raw = latest[0].stamp_raw or "unknown"
+        raise XrootAxisError(
+            "ambiguity", f"multiple latest {carrier_kind} share timestamp {raw}"
+        )
+    return latest[0]
+
+
+def xroot_selected_conflicts(relay: XrootRelay, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        values = h27_occurrences(relay.text, key)
+        if len(set(value.strip() for value in values)) > 1:
+            raise XrootAxisError(
+                "authority-population",
+                f"conflicting {key} occurrences in selected carrier {relay.name}",
+            )
+
+
+def xroot_selected_role(relay: XrootRelay, kind: str) -> tuple[str, str]:
+    if not relay.fields.get("ROLE"):
+        raise XrootAxisError(
+            "authority-population", f"selected {kind} {relay.name} lacks ROLE"
+        )
+    role = canonical_role(ROLE_TO_ADDRESS_ROLE.get(relay.fields["ROLE"]))
+    from_addrs = split_addresses(relay.fields.get("FROM"))
+    if (
+        role is None
+        or len(from_addrs) != 1
+        or role != canonical_role(from_role(from_addrs[0]))
+    ):
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} ROLE does not match FROM",
+        )
+    return role, from_owner(from_addrs[0]) or ""
+
+
+def xroot_validate_selected(
+    relay: XrootRelay,
+    *,
+    kind: str,
+    owner: str,
+) -> tuple[str, str]:
+    conflict_keys = (
+        "ROLE",
+        "FROM",
+        "AUTHORITY",
+        "DISPATCH_ID",
+        "DESIGN_RECORD_KIND",
+    )
+    if kind == "origin":
+        conflict_keys += ("PARENT_DISPATCH_ID",)
+    else:
+        conflict_keys += ("DESIGN_REVIEW_VERDICT",)
+    xroot_selected_conflicts(relay, conflict_keys)
+    if not relay.fields.get("DESIGN_RECORD_KIND"):
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} lacks DESIGN_RECORD_KIND",
+        )
+    if relay.fields["DESIGN_RECORD_KIND"] != "design-doc":
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} DESIGN_RECORD_KIND is not design-doc",
+        )
+    role, relay_owner = xroot_selected_role(relay, kind)
+    if not relay.fields.get("DISPATCH_ID"):
+        raise XrootAxisError(
+            "authority-population", f"selected {kind} {relay.name} lacks DISPATCH_ID"
+        )
+    expected_authority = "design-only" if kind == "origin" else "review-only"
+    if relay.fields.get("AUTHORITY") != expected_authority:
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} AUTHORITY is not {expected_authority}",
+        )
+    if relay_owner != owner:
+        raise XrootAxisError(
+            "authority-owner",
+            f"selected {kind} owner {relay_owner} does not match DESIGN_OWNER {owner}",
+        )
+    return role, relay.fields["DISPATCH_ID"]
+
+
+def xroot_authority(
+    repo: Path,
+    root_tree: str,
+    declaration: Dict[str, str],
+) -> None:
+    relays = xroot_relays(repo, root_tree)
+    doc_id = declaration["DESIGN_DOC_ID"]
+    origins = [
+        relay for relay in relays
+        if xroot_target_ok(relay, "PHASE", "DESIGN")
+        and xroot_target_ok(relay, "DESIGN_DOC_ID", doc_id)
+    ]
+    origin = xroot_unique_latest(
+        origins,
+        empty_axis="authority-population",
+        empty_detail=f"no DESIGN origin found for DESIGN_DOC_ID {doc_id}",
+        carrier_kind="DESIGN origins",
+    )
+    origin_role, origin_dispatch = xroot_validate_selected(
+        origin, kind="origin", owner=declaration["DESIGN_OWNER"]
+    )
+    reviews = [
+        relay for relay in relays
+        if xroot_target_ok(relay, "PHASE", "DESIGN-REVIEW")
+        and xroot_target_ok(relay, "DESIGN_DOC_ID", doc_id)
+        and xroot_target_ok(relay, "PARENT_DISPATCH_ID", origin_dispatch)
+    ]
+    review = xroot_unique_latest(
+        reviews,
+        empty_axis="authority-parent",
+        empty_detail=f"no DESIGN-REVIEW found for selected origin {origin_dispatch}",
+        carrier_kind="DESIGN-REVIEW carriers",
+    )
+    review_role, _review_dispatch = xroot_validate_selected(
+        review, kind="review", owner=declaration["DESIGN_OWNER"]
+    )
+    peer_roles = {
+        "planner": {"implementer", "pair-implementer"},
+        "pair-planner": {"implementer", "pair-implementer"},
+        "domain-planner": {"domain-reviewer"},
+        "master-planner": {"master-reviewer"},
+    }
+    if review_role not in peer_roles.get(origin_role, set()):
+        raise XrootAxisError(
+            "authority-population",
+            f"selected review {review.name} is not a peer for selected origin role {origin_role}",
+        )
+    verdict = review.fields.get("DESIGN_REVIEW_VERDICT")
+    if verdict not in DESIGN_REVIEW_VERDICT_VALUES:
+        raise XrootAxisError(
+            "authority-population",
+            f"selected review {review.name} has invalid DESIGN_REVIEW_VERDICT",
+        )
+    if review.stamp is None or origin.stamp is None or review.stamp <= origin.stamp:
+        raise XrootAxisError("ordering", "selected review is not later than selected origin")
+    if verdict != "approve":
+        raise XrootAxisError(
+            "authority-verdict",
+            f"selected review {review.name} verdict {verdict} is not approve",
+        )
+
+
+def xroot_plan_gate(
+    path: Path,
+    f: Path,
+    fields: Dict[str, str],
+    text: str,
+    result: LintResult,
+) -> bool:
+    source_keys = ("PLAN_SOURCE_REPO", "PLAN_SOURCE_COMMIT")
+    if not any(h27_occurrences(text, key) for key in source_keys):
+        return False
+    rel = f.relative_to(path)
+    conflicts = xroot_field_conflicts(text, source_keys)
+    if conflicts:
+        result.error(
+            f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}"
+        )
+        return True
+    declaration = {key: fields.get(key, "").strip() for key in source_keys}
+    missing = [key for key in source_keys if not declaration[key]]
+    if missing:
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}"
+        )
+        return True
+    locks = []
+    for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
+        lock = fields.get(key, "")
+        lock_path, separator, annotation = lock.partition(" @ ")
+        if not lock_path or ("/" not in lock_path and not lock_path.endswith(".md")):
+            continue
+        locks.append((key, lock_path, separator, annotation))
+    if not locks:
+        return True
+    try:
+        repo, commit = xroot_repository_and_commit(
+            path,
+            declaration,
+            repo_key="PLAN_SOURCE_REPO",
+            commit_key="PLAN_SOURCE_COMMIT",
+        )
+        commit_tree = xroot_commit_tree(repo, commit)
+        for key, lock_path, separator, annotation in locks:
+            if not xroot_valid_relpath(lock_path):
+                raise XrootAxisError(
+                    "declaration", f"{key} path must be a literal relative path"
+                )
+            entry = xroot_walk(repo, commit_tree, lock_path, key)
+            if entry is None:
+                raise XrootAxisError("byte", f"{key} path does not exist at pinned commit")
+            kind, blob_oid = entry
+            if kind != "blob":
+                raise XrootAxisError("byte", f"{key} path resolves to {kind}, not blob")
+            blob = xroot_git(
+                repo, "cat-file", "blob", blob_oid, axis="byte", binary=True
+            )
+            if separator:
+                if re.fullmatch(r"[0-9a-f]{64}", annotation) is None:
+                    raise XrootAxisError(
+                        "byte", f"{key} annotation is not a full lowercase 64-hex digest"
+                    )
+                if hashlib.sha256(blob).hexdigest() != annotation:
+                    raise XrootAxisError(
+                        "byte", f"{key} annotation digest does not match pinned blob bytes"
+                    )
+    except XrootAxisError as exc:
+        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
+    except Exception:
+        result.error(
+            f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
+        )
+    return True
+
+
+def xroot_verify(path: Path, declaration: Dict[str, str]) -> None:
+    repo, commit = xroot_repository_and_commit(path, declaration)
+    relay_tree, blob_oid = xroot_paths(repo, commit, declaration)
+    declared_digest = declaration["DESIGN_SHA256"]
+    if re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None:
+        raise XrootAxisError(
+            "byte", "DESIGN_SHA256 must be a full lowercase 64-hex digest"
+        )
+    blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
+    if hashlib.sha256(blob).hexdigest() != declared_digest:
+        raise XrootAxisError("byte", "DESIGN_SHA256 does not match pinned blob bytes")
+    xroot_authority(repo, relay_tree, declaration)
+
+
+def xroot_design_gate(
+    path: Path,
+    f: Path,
+    fields: Dict[str, str],
+    text: str,
+    phases,
+    result: LintResult,
+) -> bool:
+    declaration = xroot_declaration(fields, text)
+    if declaration is None:
+        return False
+    rel = f.relative_to(path)
+    role_ok, from_ok = xroot_pair_plan_carrier_shape(text)
+    if not role_ok:
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'declared edge carrier ROLE must be pair-Planner class')}"
+        )
+        return True
+    if not from_ok:
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'declared edge carrier FROM must be exactly one pair-Planner-class address')}"
+        )
+        return True
+    conflicts = xroot_field_conflicts(
+        text, XROOT_REQUIRED + ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND")
+    )
+    if conflicts:
+        result.error(
+            f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}"
+        )
+        return True
+    missing = [key for key in XROOT_REQUIRED if not declaration[key]]
+    if not declaration["DESIGN_LOCK_ID"]:
+        missing.append("DESIGN_LOCK_ID")
+    if missing:
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}"
+        )
+        return True
+    if declaration["DESIGN_RECORD_KIND"] != "design-doc":
+        result.error(
+            f"{rel}: {xroot_error('declaration', 'DESIGN_RECORD_KIND must be design-doc under a declared edge')}"
+        )
+        return True
+    for local_f, _order, local_phase, local_fields, _local_text in phases:
+        if local_f == f or local_phase != "DESIGN":
+            continue
+        local_from = split_addresses(local_fields.get("FROM"))
+        if (
+            local_fields.get("DESIGN_DOC_ID") == declaration["DESIGN_DOC_ID"]
+            and len(local_from) == 1
+            and from_owner(local_from[0]) == declaration["DESIGN_OWNER"]
+        ):
+            result.error(
+                f"{rel}: {xroot_error('ambiguity', 'same-owner local DESIGN carries DESIGN_DOC_ID ' + declaration['DESIGN_DOC_ID'])}"
+            )
+            return True
+    try:
+        xroot_verify(path, declaration)
+    except XrootAxisError as exc:
+        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
+    except Exception:
+        result.error(
+            f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
+        )
+    return True
+
+
 def lint_relay_root(path: Path, *, template_mode: bool = False,
                     engine_root: bool = False,
                     projection_digests: Optional[Dict[Path, str]] = None
@@ -3247,8 +3997,21 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
     # DESIGN-REVIEW relay, and that review must parent to the DESIGN relay that
     # introduced the matching DESIGN_DOC_ID.
     for f, order, phase, fields, text in phases:
+        if phase != "PLAN":
+            continue
+        if xroot_design_gate(path, f, fields, text, phases, result):
+            continue
+        if (
+            any(h27_occurrences(text, key) for key in ("PLAN_SOURCE_REPO", "PLAN_SOURCE_COMMIT"))
+            and fields.get("DESIGN_LOCK_ID")
+            and (
+                "/" in fields["DESIGN_LOCK_ID"].split(" @ ", 1)[0]
+                or fields["DESIGN_LOCK_ID"].split(" @ ", 1)[0].endswith(".md")
+            )
+        ):
+            continue
         if lock_routes.get(f, "pair") != "pair": continue
-        if phase != "PLAN" or not fields.get("DESIGN_LOCK_ID"):
+        if not fields.get("DESIGN_LOCK_ID"):
             continue
         from_addrs = split_addresses(fields.get("FROM"))
         if len(from_addrs) != 1:
@@ -3533,10 +4296,14 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
 
     # Lock references that look like paths should exist.
     for f, _ in per_file:
-        fields = header_fields(read(f))
+        lock_text = read(f)
+        fields = header_fields(lock_text)
+        plan_source_engaged = xroot_plan_gate(path, f, fields, lock_text, result)
         for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
             val = fields.get(key)
             bare = val.split(" @ ", 1)[0] if val else ""
+            if plan_source_engaged and bare and ("/" in bare or bare.endswith(".md")):
+                continue
             if bare and ("/" in bare or bare.endswith(".md")):
                 if Path(bare).is_absolute():
                     found = Path(bare).exists()
