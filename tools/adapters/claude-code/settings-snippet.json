@@ -2,7 +2,7 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Write|Edit",
+        "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
             "type": "command",
@@ -15,6 +15,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
+          },
+          {
+            "type": "command",
             "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""
           }
         ]
@@ -24,6 +28,10 @@
       {
         "matcher": "Bash",
         "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
+          },
           {
             "type": "command",
             "command": "bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""

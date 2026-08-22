@@ -41,18 +41,28 @@ The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-dri
 
 ## Distribution and activation
 
-Generated plugin bundles distribute the relay engine, but installing or updating a bundle does not activate a hook by itself.
-The shipped relay-write hooks are Claude Code-only and enforce through the root their settings resolve.
-The primary enforcing route is the shared root, so activate it with the staged replacement above and merge the Claude Code settings snippet afterwards.
-A marketplace update does not touch the shared-root `tools/` copy, so refresh that copy explicitly after every marketplace update.
+Generated plugin bundles ship the relay-write hooks declaration alongside the relay engine and adapter scripts.
+The `claude-code/` directory name records the scripts' origin host and payload dialect; these scripts form one dual-host adapter set for Claude Code and Codex.
+Plugin-route installs discover `hooks/hooks.json` from the plugin root.
+Manual Claude Code installs instead merge `claude-code/settings-snippet.json` after staging `tools/` into the shared skills root.
 
-For the advanced plugin-root route, plugin caches are version-qualified and have no stable current-version pointer.
-Use update-plus-repoint as one operation: update the plugin and set `RELAY_LINT_SKILLS_ROOT` to the new `<plugin-root>/adt-<tier>/<version>` directory.
-An update without that repoint leaves the hook enforcing from its old configured root.
-A repoint without the update supplies no new engine bytes.
+### Plugin-route pinning and manual-install resolution
 
-Codex has no shipped relay-write hook in this kit and therefore has no hook activation procedure.
-Codex manual and agent consumers invoke the installed bundle directly as `<plugin-root>/tools/relay`.
+Every command in the plugin declaration sets `RELAY_LINT_SKILLS_ROOT` to `${CLAUDE_PLUGIN_ROOT}` for that invocation.
+The hook therefore uses the byte-matched linter and relay engine shipped in the same plugin version instead of wandering to a stale shared root.
+The command-scoped assignment does not modify the user's environment.
+
+Manual installs intentionally retain the resolution ladder documented above.
+A marketplace update does not refresh a separately installed shared-root `tools/` copy, so manual users must repeat the staged replacement after updating.
+
+### Consent and migration
+
+Codex presents a one-time content-hash trust prompt when a plugin hook or its script content is first encountered or changes.
+Declining keeps the hook disabled; lint every relay manually before handoff as documented in `harness-codex.md`.
+Claude Code applies its own plugin-install consent flow.
+
+After switching to the plugin route, remove the legacy entries copied from `settings-snippet.json` from the host settings.
+Leaving both routes enabled can produce duplicate lint attempts or advisories.
 
 Verify a refreshed route with its own executable before use:
 
@@ -68,7 +78,7 @@ For an old client and new daemon, refresh the client and retry while leaving the
 For a new client and old daemon, use only legacy `status` or `daemon stop` compatibility to stop the old daemon, then refresh and restart the daemon before retrying.
 The engine README gives the full mixed-generation recovery walk-through.
 
-## Shipped adapter: Claude Code relay-write hooks
+## Shipped adapter: dual-host relay-write hooks
 
 Files:
 
@@ -77,13 +87,31 @@ tools/adapters/claude-code/relay-lint-posttooluse.sh
 tools/adapters/claude-code/bash-relay-guard.sh
 tools/adapters/claude-code/settings-snippet.json
 tools/adapters/claude-code/test-adapter.sh
+tools/adapters/plugin-hooks.json
 ```
 
-Merge the JSON from `settings-snippet.json` into `~/.claude/settings.json` after installing `tools/` to the shared skills root. The snippet invokes each hook as `bash <script>`, so it does not depend on a script's execute bit surviving the copy/extract — a `cp -R` or `unzip` that drops the `+x` mode no longer breaks the hooks.
+Merge the JSON from `settings-snippet.json` into `~/.claude/settings.json` only for a manual Claude Code install after installing `tools/` to the shared skills root.
+The snippet invokes each hook as `bash <script>`, so it does not depend on a script's execute bit surviving the copy or extraction.
 
-The Write/Edit hook lints relay `*.md` files under a `.relays/` or visible `relays/` path and skips non-relay and non-md writes. It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
+The Write/Edit/MultiEdit normalizer lints relay `*.md` files under a `.relays/` or visible `relays/` path and skips non-relay and non-md writes.
+It also extracts relay targets declared by apply-patch envelopes delivered through the Bash or native patch payload forms.
+It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
 
-The Bash guard is registered under both `PostToolUse` and `PostToolUseFailure`. It recognizes literal relay-root writes using redirection, `tee`, `cp`, or `mv`. When exactly one existing relay Markdown target can be resolved, the guard lints it with the same linter-location chain as the Write/Edit hook. Multiple, unresolved, or backgrounded targets receive a generic manual-lint advisory without a filename lint claim. Both hooks return exit 2 feedback when advisory attention is needed, distinguish relay-lint failures from linter execution failures, and never hard-block; protocol gates remain authoritative.
+The Bash event runs the normalizer and guard additively, without suppression or duplicate elimination.
+The guard recognizes literal relay-root writes using redirection, `tee`, `cp`, or `mv`.
+When exactly one existing relay Markdown target can be resolved, the guard lints it with the same linter-location chain as the normalizer.
+Multiple, unresolved, or backgrounded targets receive a generic manual-lint advisory without a filename lint claim.
+
+Coverage is observable when the linter is invoked on the exact relay target or when an explicit noisy `UNLINTED` advisory directs manual lint.
+A clean target correctly produces silent exit 0 after linting.
+Overlapping normalizer and guard coverage can produce duplicate attempts or advisories, which are accepted to avoid silent ownership loss.
+Both hooks return exit 2 feedback when advisory attention is needed, distinguish relay-lint failures from linter execution failures, and leave the protocol gates authoritative.
+
+### Host event asymmetry
+
+Claude Code runs the additive Bash handlers for both `PostToolUse` and `PostToolUseFailure`.
+Codex recognizes `PostToolUse` and silently ignores the unknown `PostToolUseFailure` key because its hook-event field set is closed without unknown-field denial.
+Consequently, a failed Codex Bash command receives no failure-path hook advisory, while successful native patch and Bash events retain their write-time coverage.
 
 Run the hermetic test before enabling:
 
@@ -91,7 +119,9 @@ Run the hermetic test before enabling:
 bash tools/adapters/claude-code/test-adapter.sh
 ```
 
-The test builds a temporary skills root from this candidate's `tools/`. It preserves coverage for clean relay, dirty relay, dirty tripwire relay, non-relay path, non-md relay-root file, explicit INDEX mode, missing-linter degradation, and broken-linter attribution. It also covers literal Bash relay writes, non-relay writes, heredoc INDEX routing, unresolved move destinations, interpreter residuals, backgrounded writes, write-then-fail delivery, multiple relay targets, exact-basename file routing, and the shipped Bash registration under both host events.
+The test builds a temporary skills root from this candidate's `tools/`.
+It preserves coverage for clean relay, dirty relay, dirty tripwire relay, non-relay path, non-md relay-root file, explicit INDEX mode, missing-linter degradation, and broken-linter attribution.
+It also covers literal Bash relay writes, patch-envelope extraction, non-relay writes, heredoc INDEX routing, unresolved move destinations, interpreter residuals, backgrounded writes, write-then-fail delivery, multiple relay targets, exact-basename file routing, additive handler behavior, and the shipped Bash registration under both host events.
 
 ## Adapter family design
 

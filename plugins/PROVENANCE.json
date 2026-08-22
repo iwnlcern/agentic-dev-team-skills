@@ -260,7 +260,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "e321ee88873cf25f723b76c6713a832e57759b784689691bf36aeaafa5819a84",
+    "sha256": "d9c36d974b86d28281d3b0d031b24ee40f46800af054ea0ec4d16978d87ff9c4",
     "source": "tools/adapters/README.md"
   },
   {
@@ -278,7 +278,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-master/tools/adapters/claude-code/settings-snippet.json",
-    "sha256": "03893f9e68c73827455d5af4b89edc3afbd6147eb83e70426cf66d23f2f22495",
+    "sha256": "6d6e9df4291a91e6ecfbe81922c378e957c1af6158fc700512bdc1d8fd827e72",
     "source": "tools/adapters/claude-code/settings-snippet.json"
   },
   {
@@ -286,6 +286,12 @@
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
     "sha256": "7d8b52bb0970fdf20dd8ab7a57a1cbaa1226254792c3f66a391dd9f433e4d57c",
     "source": "tools/adapters/claude-code/test-adapter.sh"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-master/tools/adapters/plugin-hooks.json",
+    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "source": "tools/adapters/plugin-hooks.json"
   },
   {
     "kit_version": "2.9.0",
@@ -10454,7 +10460,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "e321ee88873cf25f723b76c6713a832e57759b784689691bf36aeaafa5819a84",
+    "sha256": "d9c36d974b86d28281d3b0d031b24ee40f46800af054ea0ec4d16978d87ff9c4",
     "source": "tools/adapters/README.md"
   },
   {
@@ -10472,7 +10478,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-orchestrator/tools/adapters/claude-code/settings-snippet.json",
-    "sha256": "03893f9e68c73827455d5af4b89edc3afbd6147eb83e70426cf66d23f2f22495",
+    "sha256": "6d6e9df4291a91e6ecfbe81922c378e957c1af6158fc700512bdc1d8fd827e72",
     "source": "tools/adapters/claude-code/settings-snippet.json"
   },
   {
@@ -10480,6 +10486,12 @@
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
     "sha256": "7d8b52bb0970fdf20dd8ab7a57a1cbaa1226254792c3f66a391dd9f433e4d57c",
     "source": "tools/adapters/claude-code/test-adapter.sh"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-orchestrator/tools/adapters/plugin-hooks.json",
+    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "source": "tools/adapters/plugin-hooks.json"
   },
   {
     "kit_version": "2.9.0",
@@ -20576,7 +20588,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "e321ee88873cf25f723b76c6713a832e57759b784689691bf36aeaafa5819a84",
+    "sha256": "d9c36d974b86d28281d3b0d031b24ee40f46800af054ea0ec4d16978d87ff9c4",
     "source": "tools/adapters/README.md"
   },
   {
@@ -20594,7 +20606,7 @@
   {
     "kit_version": "2.9.0",
     "path": "adt-pair/tools/adapters/claude-code/settings-snippet.json",
-    "sha256": "03893f9e68c73827455d5af4b89edc3afbd6147eb83e70426cf66d23f2f22495",
+    "sha256": "6d6e9df4291a91e6ecfbe81922c378e957c1af6158fc700512bdc1d8fd827e72",
     "source": "tools/adapters/claude-code/settings-snippet.json"
   },
   {
@@ -20602,6 +20614,12 @@
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
     "sha256": "7d8b52bb0970fdf20dd8ab7a57a1cbaa1226254792c3f66a391dd9f433e4d57c",
     "source": "tools/adapters/claude-code/test-adapter.sh"
+  },
+  {
+    "kit_version": "2.9.0",
+    "path": "adt-pair/tools/adapters/plugin-hooks.json",
+    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "source": "tools/adapters/plugin-hooks.json"
   },
   {
     "kit_version": "2.9.0",
