@@ -240,16 +240,28 @@ def request(root_name, op, args, timeout=10.0, cid=None):
         raise
     except (ConnectionError, FileNotFoundError, OSError) as exc:
         raise RemoteError(errors.error_for("E-DAEMON-DOWN").as_dict()) from exc
+    if not isinstance(response, dict):
+        raise ValueError("malformed response envelope")
     if response.get("id") != request_id:
         raise ValueError("response id mismatch")
-    if response.get("v") != protocol:
+    if type(response.get("v")) is not int or response.get("v") != protocol:
         raise ValueError("response version mismatch")
+    if type(response.get("ok")) is not bool:
+        raise ValueError("malformed response envelope")
     if protocol == 2:
         response_did = response.get("did")
         if not _same_identity(record["identity"], response_did):
             raise _mismatch(cid, response_did)
-    if not response.get("ok"):
-        raise RemoteError(response["error"])
+    required = {"v", "id", "ok", "did"} if protocol == 2 else {
+        "v", "id", "ok"}
+    payload = "result" if response["ok"] else "error"
+    if set(response) != required | {payload}:
+        raise ValueError("malformed response envelope")
+    if not response["ok"]:
+        remote = RemoteError(response["error"])
+        if remote.code is None:
+            raise ValueError("malformed response envelope")
+        raise remote
     return response["result"]
 
 

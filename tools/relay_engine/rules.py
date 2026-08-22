@@ -3896,7 +3896,8 @@ def xroot_design_gate(
 def _engine_record_finding(result: LintResult, cause: str,
                            path: str) -> None:
     result.error(strings.render(
-        "engine-root-record-integrity", cause=cause, path=path))
+        "engine-root-record-integrity", cause=cause,
+        path=_safe_engine_finding_path(path)))
 
 
 def _engine_outside_finding(result: LintResult, cause: str,
@@ -3917,6 +3918,10 @@ def _safe_engine_finding_path(value: str) -> str:
         encoded = value.encode("utf-8", "surrogatepass")
         candidate = "entry-%s" % hashlib.sha256(encoded).hexdigest()[:12]
     return candidate
+
+
+_ENGINE_RELAY_NAME = re.compile(
+    r"^[A-Z][A-Z-]*-[A-Za-z0-9-]+-\d{8}-\d{6}Z?\.md$")
 
 
 def _canonical_record_path(value: object) -> Optional[str]:
@@ -4065,6 +4070,7 @@ def _record_scoped_population(path: Path, context: dict,
     root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     blocked = set()
     metadata_denied = set()
+    foreign_canonical = set()
 
     def block_descendants(relative: str) -> None:
         prefix = relative + "/"
@@ -4091,9 +4097,8 @@ def _record_scoped_population(path: Path, context: dict,
             if not parent and name in {"INDEX.md", "SEATS.md"}:
                 continue
             if stat.S_ISDIR(info.st_mode):
-                if relative in record_entries:
-                    continue
-                if relative not in allowed_directories:
+                if (relative not in record_entries and
+                        relative not in allowed_directories):
                     _engine_outside_finding(
                         result,
                         "unexpected directory", relative)
@@ -4142,6 +4147,9 @@ def _record_scoped_population(path: Path, context: dict,
                 _engine_outside_finding(
                     result,
                     "foreign entry", relative)
+                if (stat.S_ISREG(info.st_mode) and
+                        _ENGINE_RELAY_NAME.fullmatch(name) is not None):
+                    foreign_canonical.add(relative)
 
     try:
         inventory(root_fd)
@@ -4176,6 +4184,17 @@ def _record_scoped_population(path: Path, context: dict,
                 _engine_record_finding(
                     result,
                     "digest-mismatch", relative)
+        for relative in sorted(foreign_canonical,
+                               key=lambda item: item.encode("utf-8")):
+            body, cause, topology = _read_record_candidate(root_fd, relative)
+            if body is None or cause is not None or topology is not None:
+                continue
+            file_path = path / relative
+            files.append(file_path)
+            try:
+                texts[file_path] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                texts[file_path] = body.decode(errors="replace")
         return files, texts, suppressed
     finally:
         os.close(root_fd)
@@ -4201,11 +4220,9 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         index_files = [p for p in all_md if p.name == "INDEX.md"]
         files = [p for p in all_md if p.name != "INDEX.md"]
     if engine_root and record_context is None:
-        relay_name = re.compile(
-            r"^[A-Z][A-Z-]*-[A-Za-z0-9-]+-\d{8}-\d{6}Z?\.md$")
         all_md = [item for item in all_md if item.name == "INDEX.md" or
                   (item.name not in {"SEATS.md"} and
-                   relay_name.fullmatch(item.name) is not None and
+                   _ENGINE_RELAY_NAME.fullmatch(item.name) is not None and
                    ".engine" not in item.relative_to(path).parts)]
         index_files = [p for p in all_md if p.name == "INDEX.md"]
         files = [p for p in all_md if p.name != "INDEX.md"]

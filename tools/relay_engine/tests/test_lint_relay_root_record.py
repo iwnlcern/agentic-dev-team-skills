@@ -384,6 +384,73 @@ class TestRecordIntegrityMatrix(unittest.TestCase):
                 "engine-root sweep: 0 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
 
+    def test_hostile_record_paths_are_safely_rendered_for_every_cause_and_mode(self):
+        long_relative = "/".join((
+            "a" * 200, "b" * 200, "c" * 100,
+            "AUDIT-pair-planner-20260821-120000.md",
+        ))
+        control_relative = (
+            "lane/AUDIT-pair\tplanner-20260821-120000.md")
+
+        def missing(_root, _relay):
+            return
+
+        def directory(_root, relay):
+            relay.mkdir()
+
+        def symlink(root, relay):
+            target = root / ".engine-target"
+            target.write_bytes(b"target must not be read")
+            relay.symlink_to(os.path.relpath(target, relay.parent))
+
+        def unreadable(_root, relay):
+            relay.write_bytes(b"unreadable")
+            relay.chmod(0)
+
+        def digest_mismatch(_root, relay):
+            relay.write_bytes(b"different bytes")
+
+        cases = (
+            ("missing", missing),
+            ("non-regular", directory),
+            ("symlinked", symlink),
+            ("unreadable", unreadable),
+            ("digest-mismatch", digest_mismatch),
+        )
+        for relative in (long_relative, control_relative):
+            display = "entry-%s" % hashlib.sha256(
+                relative.encode("utf-8")).hexdigest()[:12]
+            for mode in ("daemon", "read-only record"):
+                for cause, mutate in cases:
+                    with self.subTest(relative=relative, mode=mode,
+                                      cause=cause), \
+                            tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary, "relay-root")
+                        root.mkdir()
+                        relay = root / relative
+                        relay.parent.mkdir(parents=True)
+                        mutate(root, relay)
+                        context = {"snapshot": "1", "entries": [{
+                            "path": relative,
+                            "body_sha256": "0" * 64,
+                            "origin": "daemon",
+                        }]}
+
+                        result = _record_lint(
+                            self, root, context, mode=mode)
+
+                        self.assertIn(
+                            "record-integrity: %s: %s" % (cause, display),
+                            result.errors)
+                        integrity_errors = [
+                            error for error in result.errors
+                            if error.startswith("record-integrity:")]
+                        self.assertTrue(all(
+                            len(error.encode("utf-8")) <= 512 and
+                            "\t" not in error and "\n" not in error and
+                            "\r" not in error
+                            for error in integrity_errors))
+
 
 class TestRecordTopology(unittest.TestCase):
     def test_record_ancestor_directory_is_allowed(self):
@@ -591,6 +658,35 @@ class TestRecordTopology(unittest.TestCase):
             self.assertFalse(any("outside-the-record" in error
                                  for error in result.errors))
 
+    def test_record_known_directory_is_nonregular_and_descendants_are_inventoried(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary, "relay-root")
+            root.mkdir()
+            relative = "lane/AUDIT-pair-planner-20260821-120000.md"
+            occupied = root / relative
+            occupied.mkdir(parents=True)
+            canonical = occupied / "PLAN-pair-planner-20260821-120001.md"
+            canonical.write_text("foreign canonical\n", encoding="utf-8")
+            noncanonical = occupied / "payload.bin"
+            noncanonical.write_bytes(b"foreign noncanonical")
+            context = {"snapshot": "1", "entries": [{
+                "path": relative,
+                "body_sha256": "0" * 64,
+                "origin": "daemon",
+            }]}
+
+            result = _record_lint(self, root, context)
+
+            self.assertIn(
+                "record-integrity: non-regular: %s" % relative,
+                result.errors)
+            self.assertIn(
+                "outside-the-record: foreign entry: %s/%s" % (
+                    relative, canonical.name), result.errors)
+            self.assertIn(
+                "outside-the-record: foreign entry: %s/%s" % (
+                    relative, noncanonical.name), result.errors)
+
 
 class TestRecordFallback(unittest.TestCase):
     def _assert_strict_cli(self, root, acquire, *, direct=None,
@@ -719,6 +815,66 @@ class TestRecordFallback(unittest.TestCase):
             self.assertEqual(stderr, "unexpected error\n")
             self.assertEqual(stopped.call_count, 0)
             self.assertEqual(lint_root.call_count, 0)
+
+    def test_malformed_outer_daemon_responses_fall_back_strict_unchanged(self):
+        malformed = (
+            ("array", lambda request, identity: []),
+            ("null", lambda request, identity: None),
+            ("scalar", lambda request, identity: "response"),
+            ("non-boolean ok", lambda request, identity: {
+                "v": 2, "id": request["id"], "ok": "yes",
+                "result": {}, "did": identity,
+            }),
+            ("missing result", lambda request, identity: {
+                "v": 2, "id": request["id"], "ok": True,
+                "did": identity,
+            }),
+            ("mixed result and error", lambda request, identity: {
+                "v": 2, "id": request["id"], "ok": True,
+                "result": {}, "error": {}, "did": identity,
+            }),
+            ("missing error", lambda request, identity: {
+                "v": 2, "id": request["id"], "ok": False,
+                "did": identity,
+            }),
+            ("malformed error", lambda request, identity: {
+                "v": 2, "id": request["id"], "ok": False,
+                "error": [], "did": identity,
+            }),
+        )
+        for label, response_for in malformed:
+            with self.subTest(response=label), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = _copy_fixture(temporary, "suppressed")
+                expected = _strict_result(root)
+                identity = client._local_identity()
+                engine = root / ".engine"
+                engine.mkdir()
+                (engine / "daemon.json").write_text(json.dumps({
+                    "state": "ready",
+                    "socket": os.fspath(engine / "malformed.sock"),
+                    "version": 2,
+                    "identity": identity,
+                }), encoding="utf-8")
+                before = _tree_digest(root)
+
+                def malformed_response(_socket, request, _timeout):
+                    return response_for(request, identity)
+
+                with mock.patch.object(
+                        client, "_roundtrip",
+                        side_effect=malformed_response), \
+                        mock.patch.object(
+                            cli, "_index_projection_digests",
+                            return_value={}):
+                    status, stdout, stderr = _run_cli(
+                        ["lint", "--relay-root", os.fspath(root)])
+
+                self.assertEqual(_tree_digest(root), before)
+                self.assertEqual(stderr, "")
+                self.assertEqual(status, 1 if expected["errors"] else 0)
+                self.assertEqual(stdout, _strict_stdout(root, expected))
+                self.assertNotIn(SUMMARY_PREFIX, stdout)
 
     def test_unexpected_stopped_exception_reaches_top_level_diagnostic(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1073,6 +1229,42 @@ class TestRecordComposition(unittest.TestCase):
             self.assertIn(
                 "engine-root sweep: 2 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
+
+    def test_foreign_canonical_relay_remains_a_finding_and_joins_chain_population(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "chain")
+            review = root / (
+                "lane/PLAN-REVIEW-pair-implementer-20260821-120000.md")
+            foreign_impl = root / (
+                "lane/IMPL-pair-planner-20260821-120001.md")
+            context = _context(root, [review])
+            real_open = os.open
+            foreign_opens = []
+
+            def tracking_open(name, flags, *args, **kwargs):
+                descriptor = real_open(name, flags, *args, **kwargs)
+                if (name == foreign_impl.name and
+                        not flags & os.O_DIRECTORY):
+                    foreign_opens.append((descriptor, flags))
+                return descriptor
+
+            with mock.patch.object(rules.os, "open",
+                                   side_effect=tracking_open):
+                result = _record_lint(self, root, context)
+
+            self.assertIn(
+                "outside-the-record: foreign entry: %s" %
+                foreign_impl.relative_to(root).as_posix(), result.errors)
+            self.assertTrue(any(
+                "DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay "
+                "with verdict approve" in error for error in result.errors))
+            self.assertIn(
+                "engine-root sweep: 1 record-known relays not re-judged; "
+                "context source: daemon", result.warnings)
+            self.assertEqual(len(foreign_opens), 1)
+            self.assertTrue(foreign_opens[0][1] & os.O_NOFOLLOW)
+            with self.assertRaises(OSError):
+                os.fstat(foreign_opens[0][0])
 
     def test_structural_index_lint_composes_with_record_mode(self):
         with tempfile.TemporaryDirectory() as temporary:
