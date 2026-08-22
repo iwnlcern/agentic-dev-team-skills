@@ -41,7 +41,7 @@ def _copy_fixture(temporary, member):
     return root
 
 
-def _context(root, paths=None):
+def _context(root, paths=None, *, origin="daemon"):
     if paths is None:
         paths = sorted(path for path in root.rglob("*") if path.is_file())
     entries = []
@@ -49,7 +49,7 @@ def _context(root, paths=None):
         entries.append({
             "path": path.relative_to(root).as_posix(),
             "body_sha256": _digest(path.read_bytes()),
-            "origin": "daemon",
+            "origin": origin,
         })
     entries.sort(key=lambda entry: entry["path"].encode("utf-8"))
     return {"snapshot": str(len(entries)), "entries": entries}
@@ -213,6 +213,48 @@ class TestRecordSuppression(unittest.TestCase):
             self.assertIn(
                 "engine-root sweep: 0 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
+
+
+class TestRecordOriginFixtures(unittest.TestCase):
+    def test_hand_and_adopted_rows_suppress_their_dedicated_defect_fixtures(self):
+        for member, origin in (("origin-hand", "hand"),
+                               ("origin-adopted", "adopted")):
+            with self.subTest(member=member, origin=origin), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = _copy_fixture(temporary, member)
+                relay = next(root.rglob("*.md"))
+                self.assertTrue(rules.lint_file(relay).errors)
+
+                result = _record_lint(
+                    self, root, _context(root, origin=origin))
+
+                self.assertEqual(result.errors, [])
+                self.assertEqual(result.warnings, [
+                    "engine-root sweep: 1 record-known relays not re-judged; "
+                    "context source: daemon",
+                ])
+
+    def test_suppression_keeps_integrity_foreign_and_chain_gates_active(self):
+        cases = (
+            ("origin-integrity", "hand", None,
+             "record-integrity: digest-mismatch: lane/AUDIT-pair-planner-20260821-120000.md"),
+            ("origin-foreign", "adopted", "lane/AUDIT-pair-planner-20260821-120000.md",
+             "outside-the-record: foreign entry: foreign.bin"),
+            ("origin-chain", "hand", None,
+             "DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve"),
+        )
+        for member, origin, known_path, finding in cases:
+            with self.subTest(member=member, origin=origin), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = _copy_fixture(temporary, member)
+                paths = None if known_path is None else [root / known_path]
+                context = _context(root, paths, origin=origin)
+                if member == "origin-integrity":
+                    context["entries"][0]["body_sha256"] = "0" * 64
+
+                result = _record_lint(self, root, context)
+
+                self.assertTrue(any(finding in error for error in result.errors))
 
 
 class TestRecordIntegrityMatrix(unittest.TestCase):
