@@ -318,6 +318,19 @@ class TestEngineRootOutputInventory(unittest.TestCase):
             strings.render("engine-root-sweep-summary", count=0,
                            mode="direct record")
 
+    def test_engine_root_enum_validators_reject_unhashable_values(self):
+        cases = (
+            ("engine-root-sweep-summary", {"count": 0, "mode": []}),
+            ("engine-root-record-integrity",
+             {"cause": [], "path": "lane/relay.md"}),
+            ("engine-root-outside-the-record",
+             {"cause": {}, "path": "lane/stray"}),
+        )
+        for key, params in cases:
+            with self.subTest(key=key, params=params):
+                with self.assertRaises(ValueError):
+                    strings.render(key, **params)
+
     def test_record_integrity_findings_render_only_known_causes_and_paths(self):
         causes = ("missing", "non-regular", "symlinked", "unreadable",
                   "digest-mismatch")

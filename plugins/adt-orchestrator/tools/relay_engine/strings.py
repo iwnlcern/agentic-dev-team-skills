@@ -167,15 +167,19 @@ _VALIDATORS.update({
     ("version-result", "result"): _is_machine_result,
     ("engine-root-sweep-summary", "count"): _is_count,
     ("engine-root-sweep-summary", "mode"):
-        lambda value: value in {"daemon", "read-only record"},
+        lambda value: (isinstance(value, str) and
+                       value in {"daemon", "read-only record"}),
     ("engine-root-record-integrity", "cause"):
-        lambda value: value in {"missing", "non-regular", "symlinked",
-                                "unreadable", "digest-mismatch"},
+        lambda value: (isinstance(value, str) and
+                       value in {"missing", "non-regular", "symlinked",
+                                 "unreadable", "digest-mismatch"}),
     ("engine-root-record-integrity", "path"): _is_root_relative_path,
     ("engine-root-outside-the-record", "cause"):
-        lambda value: value in {"foreign entry", "unexpected directory",
-                                "symlinked component",
-                                "non-directory ancestor", "root escape"},
+        lambda value: (isinstance(value, str) and
+                       value in {"foreign entry", "unexpected directory",
+                                 "symlinked component",
+                                 "non-directory ancestor",
+                                 "root escape"}),
     ("engine-root-outside-the-record", "path"): _is_root_relative_path,
 })
 
