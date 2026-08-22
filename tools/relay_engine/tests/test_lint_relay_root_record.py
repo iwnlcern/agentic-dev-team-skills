@@ -216,6 +216,20 @@ class TestRecordSuppression(unittest.TestCase):
 
 
 class TestRecordOriginFixtures(unittest.TestCase):
+    def test_engine_fixture_readme_discloses_unlinted_import_consequence(self):
+        readme = (TOOLS / "relay-engine-fixtures" / "README.md").read_text(
+            encoding="utf-8")
+        long_form_lines = [
+            line for line in readme.splitlines()
+            if line and not line.startswith("#")
+        ]
+
+        self.assertIn(
+            "Imported/adopted rows are suppressed without ever having been "
+            "fully linted; filed history is not relitigated.", readme)
+        self.assertIn("filed history is not relitigated", readme)
+        self.assertFalse(any(". " in line for line in long_form_lines))
+
     def test_hand_and_adopted_rows_suppress_their_dedicated_defect_fixtures(self):
         for member, origin in (("origin-hand", "hand"),
                                ("origin-adopted", "adopted")):
