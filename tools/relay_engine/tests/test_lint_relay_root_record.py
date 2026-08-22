@@ -839,6 +839,172 @@ class TestRecordFallback(unittest.TestCase):
                 os.close(lock_fd)
 
 
+class TestCriterion11CrashMatrix(unittest.TestCase):
+    def _record_root(self, temporary, *, running=True):
+        root = _copy_fixture(temporary, "suppressed")
+        relay = next(root.rglob("*.md"))
+        identity = client._local_identity()
+        daemon_owner = RunningDaemon(
+            os.fspath(root), identity,
+            socket_name=os.fspath(root / ".engine/criterion11.sock"),
+        ).start()
+        _insert_context_rows(root, [relay])
+        (root / "INDEX.md").write_text(INDEX_TEXT, encoding="utf-8")
+        if not running:
+            daemon_owner.stop()
+        return root, daemon_owner
+
+    def _assert_record_success(self, root, mode):
+        projection_paths = (root / "INDEX.md", next((root / "lane").rglob(
+            "*.md")))
+        projection_bytes = {path: path.read_bytes()
+                            for path in projection_paths}
+        before = (_tree_digest(root)
+                  if mode == "read-only record" else None)
+        status, stdout, stderr = _run_cli(
+            ["lint", "--relay-root", os.fspath(root)])
+        expected = {
+            "errors": [],
+            "warnings": [
+                "engine-root sweep: 1 record-known relays not re-judged; "
+                "context source: %s" % mode,
+            ],
+        }
+        if before is not None:
+            self.assertEqual(_tree_digest(root), before)
+        self.assertEqual(
+            {path: path.read_bytes() for path in projection_paths},
+            projection_bytes)
+        self.assertEqual((status, stderr), (0, ""))
+        self.assertEqual(stdout, _strict_stdout(root, expected))
+        self.assertEqual(_payload(stdout, root), expected)
+
+    def _assert_strict_unchanged(self, root, *, patches=()):
+        expected = _strict_result(root)
+        before = _tree_digest(root)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(
+                cli, "_index_projection_digests", return_value={}))
+            for patch in patches:
+                stack.enter_context(patch)
+            status, stdout, stderr = _run_cli(
+                ["lint", "--relay-root", os.fspath(root)])
+        self.assertEqual(_tree_digest(root), before)
+        self.assertEqual(stderr, "")
+        self.assertEqual(status, 1 if expected["errors"] else 0)
+        self.assertEqual(stdout, _strict_stdout(root, expected))
+        self.assertEqual(_payload(stdout, root), expected)
+        self.assertNotIn(SUMMARY_PREFIX, stdout)
+
+    def test_live_daemon_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, daemon_owner = self._record_root(temporary)
+            try:
+                self._assert_record_success(root, "daemon")
+            finally:
+                daemon_owner.stop()
+
+    def test_stopped_daemon_read_only_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _daemon_owner = self._record_root(
+                temporary, running=False)
+            self._assert_record_success(root, "read-only record")
+
+    def test_daemon_death_between_probe_and_request_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _daemon_owner = self._record_root(
+                temporary, running=False)
+            state_path = root / ".engine/daemon.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["state"] = "ready"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            (root / ".engine/ledger.db-wal").write_bytes(b"")
+            reached_request = []
+
+            def die_after_probe(socket_name, request, timeout):
+                reached_request.append((socket_name, request["op"], timeout))
+                raise ConnectionError("daemon died after metadata probe")
+
+            self._assert_strict_unchanged(root, patches=(
+                mock.patch.object(client, "_roundtrip",
+                                  side_effect=die_after_probe),
+            ))
+            self.assertEqual(len(reached_request), 1)
+            self.assertEqual(reached_request[0][1], "lint.context")
+
+    def test_stale_daemon_metadata_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            engine = root / ".engine"
+            engine.mkdir(mode=0o700)
+            (engine / "daemon.json").write_text(json.dumps({
+                "state": "ready",
+                "socket": os.fspath(engine / "stale.sock"),
+                "identity": client._local_identity(),
+            }), encoding="utf-8")
+            self._assert_strict_unchanged(root)
+
+    def test_held_writer_lease_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _daemon_owner = self._record_root(
+                temporary, running=False)
+            lock_fd = os.open(root / ".engine/daemon.lock", os.O_RDONLY)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._assert_strict_unchanged(root)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
+    def test_absent_record_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _daemon_owner = self._record_root(
+                temporary, running=False)
+            (root / ".engine/ledger.db").unlink()
+            self._assert_strict_unchanged(root)
+
+    def test_corrupt_record_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _daemon_owner = self._record_root(
+                temporary, running=False)
+            (root / ".engine/ledger.db").write_bytes(b"not sqlite")
+            self._assert_strict_unchanged(root)
+
+    def test_unsupported_schema_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _daemon_owner = self._record_root(
+                temporary, running=False)
+            record = sqlite3.connect(root / ".engine/ledger.db")
+            try:
+                record.execute(
+                    "UPDATE meta SET value='999' WHERE key='schema_version'")
+                record.commit()
+            finally:
+                record.close()
+            self._assert_strict_unchanged(root)
+
+    def test_hostile_lock_and_store_file_types_fall_back_strict(self):
+        def lock_directory(root):
+            lock = root / ".engine/daemon.lock"
+            lock.unlink()
+            lock.mkdir()
+
+        def store_symlink(root):
+            record = root / ".engine/ledger.db"
+            record.unlink()
+            record.symlink_to("daemon.json")
+
+        for label, mutate in (
+                ("lock directory", lock_directory),
+                ("store symlink", store_symlink)):
+            with self.subTest(label=label), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root, _daemon_owner = self._record_root(
+                    temporary, running=False)
+                mutate(root)
+                self._assert_strict_unchanged(root)
+
+
 class TestRecordComposition(unittest.TestCase):
     def test_cross_relay_chain_still_parses_suppressed_relays(self):
         with tempfile.TemporaryDirectory() as temporary:
