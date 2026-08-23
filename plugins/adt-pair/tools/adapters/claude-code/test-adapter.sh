@@ -699,7 +699,7 @@ e3_shared_root="$tmp/e3-shared-root"
 stage_engine_root "$e3_shared_root" A
 e3_shared_a_fingerprint="$(expected_engine_fingerprint "$e3_shared_root/tools")"
 assert_case_engine_json_origin "e3-shared-vA-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 A || fail=1
-assert_relay_version "e3-shared-vA-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.0" "$e3_shared_a_fingerprint" || fail=1
+assert_relay_version "e3-shared-vA-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.1" "$e3_shared_a_fingerprint" || fail=1
 e3_shared_candidate="$tmp/e3-shared-candidate"
 stage_engine_root "$e3_shared_candidate" B
 e3_shared_b_fingerprint="$(expected_engine_fingerprint "$e3_shared_candidate/tools")"
@@ -723,7 +723,7 @@ else
   else
     echo "PASS e3-shared-refresh-backup-retains-previous-bytes"
   fi
-  assert_relay_version "e3-shared-backup-version-triad" "$e3_shared_backup/relay" "$e3_shared_backup" "2.9.0" "$e3_shared_a_fingerprint" || fail=1
+  assert_relay_version "e3-shared-backup-version-triad" "$e3_shared_backup/relay" "$e3_shared_backup" "2.9.1" "$e3_shared_a_fingerprint" || fail=1
 fi
 if [ -e "$e3_shared_root/tools/tools" ]; then
   echo "FAIL e3-shared-refresh-no-nested-tools: active tree contains tools/tools" >&2
@@ -738,7 +738,7 @@ else
   echo "PASS e3-shared-refresh-no-stale-sentinel"
 fi
 assert_case_engine_json_origin "e3-shared-vB-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 B || fail=1
-assert_relay_version "e3-shared-vB-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.0" "$e3_shared_b_fingerprint" || fail=1
+assert_relay_version "e3-shared-vB-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.1" "$e3_shared_b_fingerprint" || fail=1
 
 # E3 activation also proves that a version-qualified plugin cache remains at
 # the configured root after an update and changes only after an explicit
@@ -760,8 +760,8 @@ else
 fi
 stage_unsearched_prefix_decoys "$e3_plugin_home"
 assert_case_engine_json_origin "e3-plugin-update-keeps-old-hook-engine-json" "$engine_dirty" "$e3_plugin_old" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 A || fail=1
-assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/tools/relay" "$e3_plugin_old/tools" "2.9.0" "$e3_plugin_old_fingerprint" || fail=1
+assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/tools/relay" "$e3_plugin_old/tools" "2.9.1" "$e3_plugin_old_fingerprint" || fail=1
 assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine_dirty" "$e3_plugin_new" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 B || fail=1
-assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.0" "$e3_plugin_new_fingerprint" || fail=1
+assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.1" "$e3_plugin_new_fingerprint" || fail=1
 
 exit "$fail"

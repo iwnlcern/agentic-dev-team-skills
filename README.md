@@ -67,7 +67,7 @@ whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix 
 own correctness gate (`python3 tools/check-relay-lint-fixtures.py`, plus
 `python3 tools/check-timestamp-drift.py` for clock-dependent checks).
 
-Current version: v2.9.0 — four-tier vocabulary, three nested plugins, canonical-source generator.
+Current version: v2.9.1 — four-tier vocabulary, three nested plugins, canonical-source generator.
 
 ## Install
 
