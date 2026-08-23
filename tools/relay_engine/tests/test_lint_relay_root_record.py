@@ -701,6 +701,41 @@ class TestRecordTopology(unittest.TestCase):
             self.assertIn("outside-the-record: root escape: INDEX.md",
                           result.errors)
 
+    def test_top_level_index_swap_never_reads_target_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            context = _context(root)
+            index = root / "INDEX.md"
+            index.write_text(INDEX_TEXT, encoding="utf-8")
+            outside = Path(temporary, "outside-projection")
+            outside.write_bytes(b"OUTSIDE-PROJECTION-BYTES\n")
+            real_stat = Path.stat
+            real_open = Path.open
+            swapped = False
+
+            def swapping_stat(candidate, *args, **kwargs):
+                nonlocal swapped
+                info = real_stat(candidate, *args, **kwargs)
+                if candidate == index and not kwargs.get(
+                        "follow_symlinks", True):
+                    index.unlink()
+                    index.symlink_to(outside)
+                    swapped = True
+                return info
+
+            def nofollow_open(candidate, *args, **kwargs):
+                if candidate == index:
+                    self.fail("INDEX.md symlink target bytes were read")
+                return real_open(candidate, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", new=swapping_stat), \
+                    mock.patch.object(Path, "open", new=nofollow_open):
+                result = _record_lint(self, root, context)
+
+            self.assertTrue(swapped)
+            self.assertIn("outside-the-record: foreign entry: INDEX.md",
+                          result.errors)
+
     def test_record_known_directory_is_nonregular_and_descendants_are_inventoried(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary, "relay-root")

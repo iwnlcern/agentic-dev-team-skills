@@ -1646,7 +1646,8 @@ def a5_resolve_and_compare(path: Path, dkey: str, stem: str, sub: str, declared:
 
 def lint_relay_index(path: Path, *, audit: bool = False,
                      daemon_projection: bool = False,
-                     daemon_projection_digest: Optional[str] = None
+                     daemon_projection_digest: Optional[str] = None,
+                     snapshot: Optional[bytes] = None,
                      ) -> LintResult:
     """Check an append-only relay INDEX for timestamp truth and monotonicity.
 
@@ -1661,7 +1662,8 @@ def lint_relay_index(path: Path, *, audit: bool = False,
     Ordering and filename agreement remain mandatory for projected bytes.
     """
     result = LintResult()
-    snapshot = path.read_bytes()
+    if snapshot is None:
+        snapshot = path.read_bytes()
     try:
         text = snapshot.decode("utf-8")
     except UnicodeDecodeError:
@@ -4209,6 +4211,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
     result = LintResult()
     texts: Dict[Path, str] = {}
     suppressed: set[Path] = set()
+    index_snapshots: Dict[Path, bytes] = {}
     if engine_root and record_context is not None:
         files, texts, suppressed = _record_scoped_population(
             path, record_context, result)
@@ -4218,7 +4221,23 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         except OSError:
             index_files = []
         else:
-            index_files = [index] if stat.S_ISREG(index_info.st_mode) else []
+            if stat.S_ISREG(index_info.st_mode):
+                root_fd = os.open(
+                    path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    snapshot, cause, topology = _read_record_candidate(
+                        root_fd, "INDEX.md")
+                finally:
+                    os.close(root_fd)
+                if snapshot is None:
+                    _engine_outside_finding(
+                        result, "foreign entry", "INDEX.md")
+                    index_files = []
+                else:
+                    index_files = [index]
+                    index_snapshots[index] = snapshot
+            else:
+                index_files = []
         all_md = files + index_files
     else:
         all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
@@ -4256,7 +4275,8 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         {} if projection_digests is None else projection_digests)
     for idx in index_files:
         r = lint_relay_index(
-            idx, daemon_projection_digest=projection_digests.get(idx))
+            idx, daemon_projection_digest=projection_digests.get(idx),
+            snapshot=index_snapshots.get(idx))
         for e in r.errors:
             result.error(f"{idx.relative_to(path)}: {e}")
         for w in r.warnings:
