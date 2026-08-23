@@ -7,9 +7,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
 import stat
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -893,6 +895,58 @@ class TestRecordFallback(unittest.TestCase):
             self.assertEqual(stderr, "unexpected error\n")
             self.assertEqual(stopped.call_count, 0)
             self.assertEqual(lint_root.call_count, 0)
+
+    def test_oversize_daemon_frame_falls_back_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            engine = root / ".engine"
+            engine.mkdir()
+            socket_name = engine / "oversize.sock"
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.fspath(socket_name))
+            listener.listen()
+            failures = []
+
+            (engine / "daemon.json").write_text(json.dumps({
+                "state": "ready",
+                "socket": os.fspath(socket_name),
+                "identity": client._local_identity(),
+            }), encoding="utf-8")
+            expected = _strict_result(root)
+            before = _tree_digest(root)
+
+            def serve_oversize_frame():
+                try:
+                    connection, _ = listener.accept()
+                    try:
+                        if not connection.recv(65536):
+                            raise AssertionError("client sent no request")
+                        connection.sendall(
+                            (16 * 1024 * 1024 + 1).to_bytes(4, "big"))
+                    finally:
+                        connection.close()
+                except BaseException as exc:
+                    failures.append(exc)
+                finally:
+                    listener.close()
+
+            stub = threading.Thread(target=serve_oversize_frame)
+            stub.start()
+            with mock.patch.object(cli, "_index_projection_digests",
+                                   return_value={}):
+                status, stdout, stderr = _run_cli(
+                    ["lint", "--relay-root", os.fspath(root)])
+            stub.join(2)
+
+            self.assertFalse(stub.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(_tree_digest(root), before)
+            self.assertEqual(stderr, "")
+            self.assertEqual(status, 1 if expected["errors"] else 0)
+            self.assertEqual(stdout, _strict_stdout(root, expected))
+            self.assertEqual(_payload(stdout, root), expected)
+            self.assertNotIn(SUMMARY_PREFIX, stdout)
+            self.assertNotIn("unexpected error", stderr)
 
     def test_malformed_outer_daemon_responses_fall_back_strict_unchanged(self):
         malformed = (
