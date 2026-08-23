@@ -832,7 +832,10 @@ def _lint_context_position(ledger, cursor):
     match = re.fullmatch(r"(0|[1-9][0-9]*):(0|[1-9][0-9]*)", cursor)
     if match is None:
         raise _args_fault("lint.context", "cursor:string").error
-    snapshot, offset = (int(value) for value in match.groups())
+    try:
+        snapshot, offset = (int(value) for value in match.groups())
+    except ValueError as exc:
+        raise _args_fault("lint.context", "cursor:string").error from exc
     if snapshot > high_water:
         raise _args_fault("lint.context", "cursor:string").error
     population = ledger.execute(

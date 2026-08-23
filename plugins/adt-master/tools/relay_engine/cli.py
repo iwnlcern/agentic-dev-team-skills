@@ -196,8 +196,9 @@ def _cmd_lint(args):
 def _lint_record_context(root: Path):
     try:
         return client.lint_context(os.fspath(root)), "daemon"
-    except (client.RemoteError, errors.EngineError) as exc:
-        if exc.code == "E-VERSION-MISMATCH":
+    except (client.RemoteError, errors.EngineError, daemon.WireFault) as exc:
+        if (not isinstance(exc, daemon.WireFault) and
+                exc.code == "E-VERSION-MISMATCH"):
             raise
     except (TimeoutError, ValueError):
         pass
