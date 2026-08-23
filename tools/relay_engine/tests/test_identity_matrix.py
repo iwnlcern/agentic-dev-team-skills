@@ -357,6 +357,47 @@ class TestIdentityMatrix(unittest.TestCase):
                 }))
         self.assertEqual(daemon.ADMIN_OPS, ADMIN_OPS)
 
+    def test_lint_context_oversized_cursor_is_typed_and_keeps_connection(self):
+        cid, did = cid_did()
+        running = self.start_daemon(did)
+        malformed = {
+            "v": 2,
+            "id": "00000000-0000-0000-0000-000000000006",
+            "op": "lint.context",
+            "args": {"cursor": "9" * 5000 + ":0"},
+            "cid": cid,
+        }
+        status = {
+            "v": 2,
+            "id": "00000000-0000-0000-0000-000000000007",
+            "op": "status",
+            "args": {},
+            "cid": cid,
+        }
+        connection = socket.socket(socket.AF_UNIX)
+        try:
+            connection.settimeout(2)
+            connection.connect(running.socket_name)
+            connection.sendall(encode_frame(malformed))
+            decoder = FrameDecoder()
+            while True:
+                frames = decoder.feed(connection.recv(65536))
+                if frames:
+                    refusal = json.loads(frames[0].decode("utf-8"))
+                    break
+            self.assertFalse(refusal["ok"])
+            self.assertEqual(refusal["error"]["code"], "E-WIRE-ARGS")
+
+            connection.sendall(encode_frame(status))
+            while True:
+                frames = decoder.feed(connection.recv(65536))
+                if frames:
+                    recovered = json.loads(frames[0].decode("utf-8"))
+                    break
+            self.assertTrue(recovered["ok"])
+        finally:
+            connection.close()
+
     def test_v2_admin_requires_grammar_valid_client_identity(self):
         did = {"kit": "2.9.0", "fp": FP_A, "install": "/daemon"}
         running = self.start_daemon(did)
