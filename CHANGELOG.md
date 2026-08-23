@@ -12,7 +12,7 @@ A distribution-hardening patch: the relay engine ships inside every plugin bundl
 - **Engine distribution.**
   The relay engine and CLI ship inside all three plugin bundles under `tools/`, with adapter-ladder resolution switched to the bundled engine and version/fingerprint identity reporting (`relay version`) for consumer repointing.
 - **Dual-host relay-lint hooks.**
-  `hooks/hooks.json` ships in every bundle: the PostToolUse normalizer gains additive apply_patch envelope-target coverage — exact-target lint with silent-clean success, an explicit noisy UNLINTED fallback, and per-pass dedup of repeated identical targets — while the Bash guard rides byte-unchanged; a live-Codex witness proves the one-time trust prompt, blocked-invalid feedback, and silent-clean behavior on codex-cli 0.149.0.
+  `hooks/hooks.json` ships in every bundle: the PostToolUse normalizer gains additive apply_patch envelope-target coverage — exact-target lint with silent-clean success, an explicit noisy UNLINTED fallback, and per-pass dedup of repeated identical targets — while the Bash guard is unchanged by the hooks work itself — its only change this release is the ladder switch above; a live-Codex witness proves the one-time trust prompt, blocked-invalid feedback, and silent-clean behavior on codex-cli 0.149.0.
 - **Codex plugin install route.**
   The README's Codex section now leads with the verified `codex plugin marketplace add` / `codex plugin add` route; manual `.agents/skills` copy is the documented fallback for air-gapped installs.
 - **Derived pair-skill variants (option C).**
