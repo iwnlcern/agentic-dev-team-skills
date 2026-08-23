@@ -21,6 +21,10 @@ from relay_engine import version
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-plugins.py"
 PLUGINS_ROOT = ROOT / "plugins"
+VARIANT_SKILLS = frozenset({"pair-planner", "pair-implementer"})
+VARIANT_PLUGINS = frozenset({"adt-master", "adt-orchestrator"})
+VARIANTS_ROOT = ROOT / "skills" / "variants"
+PREAMBLE_PATH = VARIANTS_ROOT / "subordination-preamble.md"
 PYTHON = "python3"
 KIT_VERSION = "2.9.0"
 MANIFEST_PATH = "PROVENANCE.json"
@@ -286,7 +290,12 @@ def canonical_source_map() -> dict[str, str]:
 
     for plugin, skills in PLUGINS.items():
         for skill in skills:
-            record_tree(plugin, ROOT / "skills" / skill, Path("skills") / skill)
+            source = (
+                VARIANTS_ROOT / skill
+                if plugin in VARIANT_PLUGINS and skill in VARIANT_SKILLS
+                else ROOT / "skills" / skill
+            )
+            record_tree(plugin, source, Path("skills") / skill)
         for asset, recipients in LOCKED_SHARED_ASSETS.items():
             for skill in skills & recipients:
                 record(plugin, ROOT / "shared" / asset, Path("skills") / skill / asset)
@@ -312,7 +321,12 @@ def expected_plugin_files(plugin: str) -> set[str]:
     expected = {".claude-plugin/plugin.json"}
     skills = PLUGINS[plugin]
     for skill in skills:
-        expected |= canonical_files(ROOT / "skills" / skill, f"skills/{skill}")
+        source = (
+            VARIANTS_ROOT / skill
+            if plugin in VARIANT_PLUGINS and skill in VARIANT_SKILLS
+            else ROOT / "skills" / skill
+        )
+        expected |= canonical_files(source, f"skills/{skill}")
     for asset, recipients in LOCKED_SHARED_ASSETS.items():
         for skill in skills & recipients:
             source = ROOT / "shared" / asset
@@ -500,6 +514,29 @@ def check_skill_frontmatter() -> None:
         expect(
             name == path.parent.name,
             f"{path.relative_to(ROOT)} frontmatter name {name!r} does not match directory {path.parent.name!r}",
+        )
+
+
+def check_variant_derivation() -> None:
+    expect(PREAMBLE_PATH.is_file(), "variant preamble is missing: skills/variants/subordination-preamble.md")
+    preamble = PREAMBLE_PATH.read_bytes()
+    expect(
+        preamble.endswith(b"\n") and not preamble.endswith(b"\n\n"),
+        "variant preamble must end with exactly one newline: skills/variants/subordination-preamble.md",
+    )
+    for skill in sorted(VARIANT_SKILLS):
+        base_path = ROOT / "skills" / skill / "SKILL.md"
+        base = base_path.read_bytes()
+        expect(base.startswith(b"---\n"), f"variant base must start with frontmatter: {base_path.relative_to(ROOT)}")
+        delimiter = b"\n---\n"
+        delimiter_index = base.find(delimiter, len(b"---\n"))
+        expect(delimiter_index != -1, f"variant base lacks closing frontmatter: {base_path.relative_to(ROOT)}")
+        frontmatter_end = delimiter_index + len(delimiter)
+        expected = base[:frontmatter_end] + b"\n" + preamble + b"\n" + base[frontmatter_end:]
+        derived_path = VARIANTS_ROOT / skill / "SKILL.md"
+        expect(
+            derived_path.is_file() and derived_path.read_bytes() == expected,
+            f"variant derivation differs or is missing: {derived_path.relative_to(ROOT)}; derived files are generator-owned and must not be hand-edited",
         )
 
 
@@ -981,6 +1018,7 @@ def main() -> int:
         ("body mutation", check_body_mutation),
         ("strict JSON", check_strict_json),
         ("installed skill frontmatter", check_skill_frontmatter),
+        ("variant derivation", check_variant_derivation),
         ("R1 harness copies", check_r1_harness_copies),
         ("R3 protocol content", check_r3_protocol_content),
         ("R4 README content", check_r4_readme_content),

@@ -44,6 +44,10 @@ assert ENGINE_SET == (
 MANIFEST_PATH = "PROVENANCE.json"
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_ROOT = ROOT / "plugins"
+VARIANT_SKILLS = ("pair-planner", "pair-implementer")
+VARIANT_PLUGINS = frozenset({"adt-master", "adt-orchestrator"})
+VARIANTS_ROOT = ROOT / "skills" / "variants"
+PREAMBLE_PATH = VARIANTS_ROOT / "subordination-preamble.md"
 
 PLUGINS = {
     "adt-pair": {
@@ -221,6 +225,43 @@ def generated_source(output: Path, generated: Path) -> str:
 GENERATED_SOURCES: dict[str, str] = {}
 
 
+def materialize_variants(check_only: bool) -> int:
+    if not PREAMBLE_PATH.is_file():
+        raise ValueError("variant preamble is missing: skills/variants/subordination-preamble.md")
+    preamble = PREAMBLE_PATH.read_bytes()
+    if not preamble.endswith(b"\n") or preamble.endswith(b"\n\n"):
+        raise ValueError("variant preamble must end with exactly one newline")
+
+    differences = []
+    for skill in VARIANT_SKILLS:
+        base_path = ROOT / "skills" / skill / "SKILL.md"
+        base = base_path.read_bytes()
+        if not base.startswith(b"---\n"):
+            raise ValueError(f"variant base does not start with frontmatter: {source_relative(base_path)}")
+        delimiter = b"\n---\n"
+        delimiter_index = base.find(delimiter, len(b"---\n"))
+        if delimiter_index < 0:
+            raise ValueError(f"variant base has no closing frontmatter: {source_relative(base_path)}")
+        frontmatter_end = delimiter_index + len(delimiter)
+        expected = base[:frontmatter_end] + b"\n" + preamble + b"\n" + base[frontmatter_end:]
+        derived_path = VARIANTS_ROOT / skill / "SKILL.md"
+        if check_only:
+            if not derived_path.is_file():
+                differences.append(f"missing: {source_relative(derived_path)}")
+            elif derived_path.read_bytes() != expected:
+                differences.append(f"different: {source_relative(derived_path)}")
+        else:
+            derived_path.parent.mkdir(parents=True, exist_ok=True)
+            derived_path.write_bytes(expected)
+            derived_path.chmod(stat.S_IMODE(base_path.stat().st_mode))
+
+    if differences:
+        print("variant derivation drift:", file=sys.stderr)
+        print("\n".join(differences), file=sys.stderr)
+        return 1
+    return 0
+
+
 def record_copy(source: Path, destination: Path, output: Path) -> None:
     copy_file(source, destination)
     GENERATED_SOURCES[destination.relative_to(output).as_posix()] = source_relative(source)
@@ -237,7 +278,12 @@ def generate_tree(output: Path) -> None:
         plugin_root = output / plugin
         skills = tuple(data["skills"])
         for skill in sorted(skills):
-            record_tree(ROOT / "skills" / skill, plugin_root / "skills" / skill, output)
+            source = (
+                VARIANTS_ROOT / skill
+                if plugin in VARIANT_PLUGINS and skill in VARIANT_SKILLS
+                else ROOT / "skills" / skill
+            )
+            record_tree(source, plugin_root / "skills" / skill, output)
         for shared_asset, receiving_skills in sorted(SHARED_MAP.items()):
             for skill in sorted(set(skills) & set(receiving_skills)):
                 record_copy(
@@ -304,6 +350,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail when plugins/ has generation drift")
     arguments = parser.parse_args()
+    if materialize_variants(arguments.check):
+        return 1
     with tempfile.TemporaryDirectory(prefix="agentic-dev-team-skills-plugins-") as temporary:
         staging = Path(temporary) / "plugins"
         staging.mkdir()
