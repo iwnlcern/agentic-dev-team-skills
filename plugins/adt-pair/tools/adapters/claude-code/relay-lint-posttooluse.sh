@@ -35,6 +35,7 @@ end = seg.find("*** End Patch")
 if end != -1:
     seg = seg[:end + len("*** End Patch")]
 print("RELAYREF" if ((".relays/" in seg or "/relays/" in seg) and ".md" in seg) else "NORELAYREF")
+seen = set()
 for line in command.splitlines():
     stripped = line.strip()
     for marker in ("*** Add File: ", "*** Update File: ", "*** Move to: "):
@@ -42,7 +43,8 @@ for line in command.splitlines():
             path = stripped[len(marker):].strip()
             if path and not os.path.isabs(path) and cwd:
                 path = os.path.join(cwd, path)
-            if path:
+            if path and path not in seen:
+                seen.add(path)
                 print(path)
 ')"
 kind="${norm%%$'\n'*}"

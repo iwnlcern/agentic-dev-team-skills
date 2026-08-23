@@ -433,6 +433,14 @@ payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
 assert_payload_handler "p6-index-target-uses-index-mode" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|--index|$p_index" || fail=1
 
 command="*** Begin Patch
+*** Update File: .relays/run1/$(basename "$p_clean")
+*** Update File: .relays/run1/$(basename "$p_clean")
+*** Update File: .relays/run1/$(basename "$p_clean")
+*** End Patch"
+payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
+assert_payload_handler "p6a-repeated-marker-target-lints-once" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
+
+command="*** Begin Patch
 *** Delete File: .relays/run1/$(basename "$p_clean")
 *** End Patch"
 payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
