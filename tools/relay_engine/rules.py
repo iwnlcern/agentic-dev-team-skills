@@ -4094,7 +4094,8 @@ def _record_scoped_population(path: Path, context: dict,
                 continue
             if not parent and name == ".engine" and stat.S_ISDIR(info.st_mode):
                 continue
-            if not parent and name in {"INDEX.md", "SEATS.md"}:
+            if (not parent and name in {"INDEX.md", "SEATS.md"} and
+                    stat.S_ISREG(info.st_mode)):
                 continue
             if stat.S_ISDIR(info.st_mode):
                 if (relative not in record_entries and
@@ -4212,7 +4213,12 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         files, texts, suppressed = _record_scoped_population(
             path, record_context, result)
         index = path / "INDEX.md"
-        index_files = [index] if index.is_file() else []
+        try:
+            index_info = index.stat(follow_symlinks=False)
+        except OSError:
+            index_files = []
+        else:
+            index_files = [index] if stat.S_ISREG(index_info.st_mode) else []
         all_md = files + index_files
     else:
         all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),

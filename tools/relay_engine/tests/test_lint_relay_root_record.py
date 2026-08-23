@@ -658,6 +658,49 @@ class TestRecordTopology(unittest.TestCase):
             self.assertFalse(any("outside-the-record" in error
                                  for error in result.errors))
 
+    def test_top_level_projection_special_files_require_regular_entries(self):
+        for name, create, expected in (
+                ("INDEX.md", lambda root, outside: (root / "INDEX.md").symlink_to(outside),
+                 "outside-the-record: root escape: INDEX.md"),
+                ("SEATS.md", lambda root, outside: (root / "SEATS.md").symlink_to(outside),
+                 "outside-the-record: root escape: SEATS.md"),
+                ("INDEX.md", lambda root, outside: os.mkfifo(root / "INDEX.md"),
+                 "outside-the-record: foreign entry: INDEX.md"),
+                ("SEATS.md", lambda root, outside: os.mkfifo(root / "SEATS.md"),
+                 "outside-the-record: foreign entry: SEATS.md")):
+            with self.subTest(name=name, expected=expected), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = _copy_fixture(temporary, "suppressed")
+                context = _context(root)
+                outside = Path(temporary, "outside-projection")
+                outside.write_bytes(b"OUTSIDE-PROJECTION-BYTES\n")
+                create(root, outside)
+
+                result = _record_lint(self, root, context)
+
+                self.assertIn(expected, result.errors)
+
+    def test_top_level_index_symlink_never_reads_target_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = _copy_fixture(temporary, "suppressed")
+            context = _context(root)
+            outside = Path(temporary, "outside-projection")
+            outside.write_bytes(b"OUTSIDE-PROJECTION-BYTES\n")
+            index = root / "INDEX.md"
+            index.symlink_to(outside)
+            real_open = Path.open
+
+            def nofollow_open(candidate, *args, **kwargs):
+                if candidate == index:
+                    self.fail("INDEX.md symlink target bytes were read")
+                return real_open(candidate, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", new=nofollow_open):
+                result = _record_lint(self, root, context)
+
+            self.assertIn("outside-the-record: root escape: INDEX.md",
+                          result.errors)
+
     def test_record_known_directory_is_nonregular_and_descendants_are_inventoried(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary, "relay-root")
