@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+import unittest.mock
 
 from relay_engine import client, daemon, migrate, reconcile
 from relay_engine.jcs import jcs_encode
@@ -105,15 +106,43 @@ class TestMigrate(unittest.TestCase):
             "SELECT value FROM meta WHERE key='index_arity'").fetchone()[0],
                          "8")
 
-    def test_malformed_triage_red_and_cutover_refused(self):
+    def test_malformed_legacy_inventoried_green_and_cutover_excludes(self):
+        bad = Path(self.temp.name,
+                   "legacy/PLAN-planner-20260808-010001.md")
+        bad_body = b"not an envelope"
+        bad.write_bytes(bad_body)
+        result = self._check()
+        self.assertEqual(result["verdict"], "green")
+        self.assertEqual(result["census"]["malformed_inventoried"], 1)
+        self.assertEqual(
+            result["census"]["malformed"],
+            ["legacy/PLAN-planner-20260808-010001.md"])
+        cutover = migrate.cutover(self.ledger, self.root, result["receipt"])
+        self.assertEqual(cutover["imported"], [self.relay_path])
+        self.assertEqual(self.ledger.execute(
+            "SELECT COUNT(*) FROM relays").fetchone()[0], 1)
+        self.assertEqual(bad.read_bytes(), bad_body)
+
+    def test_cutover_refuses_when_malformed_set_drifts_from_receipt(self):
         bad = Path(self.temp.name,
                    "legacy/PLAN-planner-20260808-010001.md")
         bad.write_bytes(b"not an envelope")
         result = self._check()
-        self.assertEqual(result["verdict"], "red")
-        self.assertEqual(result["census"]["malformed_inventoried"], 1)
-        with self.assertRaisesRegex(ValueError, "not green"):
-            migrate.cutover(self.ledger, self.root, result["receipt"])
+        real = reconcile.prepare_candidates
+
+        def drifted(ledger, root, paths):
+            candidates, malformed = real(ledger, root, paths)
+            return candidates, []
+
+        before = self.ledger.execute(
+            "SELECT COUNT(*) FROM relays").fetchone()[0]
+        with unittest.mock.patch.object(
+                reconcile, "prepare_candidates", drifted):
+            with self.assertRaisesRegex(ValueError,
+                                        "candidate set mismatch"):
+                migrate.cutover(self.ledger, self.root, result["receipt"])
+        self.assertEqual(self.ledger.execute(
+            "SELECT COUNT(*) FROM relays").fetchone()[0], before)
 
     def test_pinned_three_row_same_stamp_corpus(self):
         fixture_root = Path(__file__).parents[2] / "relay-engine-fixtures"
