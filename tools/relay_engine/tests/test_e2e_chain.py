@@ -11,10 +11,13 @@ import time
 import unittest
 
 from relay_engine import cli, errors, strings
+from relay_engine.tests.test_identity_matrix import cid_did
+from relay_engine.version import ROSTER
 
 
 SOURCE_ROOT = Path(__file__).parents[3]
 PYTHON = os.environ.get("PYTHON", os.sys.executable)
+CID, DID = cid_did()
 ALLOWED_SITE_FIELDS = (
     "factory=strings._make_emitter",
     "verbatim_site=cli.cmd_show",
@@ -74,6 +77,9 @@ def ruled_manifest():
     for plugin in ("adt-master", "adt-orchestrator", "adt-pair"):
         prefix = "plugins/" + plugin + "/"
         entries.append((standalone, prefix + "tools/relay-lint.py"))
+        for member in ROSTER:
+            entries.append((SOURCE_ROOT / "tools" / member,
+                            prefix + "tools/" + member))
         for source in installed_markdown:
             entries.append((source, prefix +
                             source.relative_to(SOURCE_ROOT).as_posix()))
@@ -233,13 +239,25 @@ class RelayProcess:
         return result
 
 
-def run_chain(process, root):
+def run_chain(process, root, cid=None, did=None):
     root = Path(root)
-    drafts = root / "drafts"
-    drafts.mkdir()
     process.run("daemon", "start", "--root", os.fspath(root),
                 "--run-id", "e2e", "--seat",
                 "e2e.orchestrator-planner")
+    drafts = root / ".engine/drafts"
+    drafts.mkdir()
+    if cid is not None:
+        reported = process.run("version", json_result=True)
+        actual_cid = {
+            "kit": reported["kit"], "fp": reported["fingerprint"],
+            "install": reported["install"],
+        }
+        if actual_cid != cid:
+            raise AssertionError("client identity plumbing mismatch")
+    if did is not None:
+        state = json.loads(Path(root, ".engine/daemon.json").read_text())
+        if state.get("identity") != did:
+            raise AssertionError("daemon identity plumbing mismatch")
     try:
         planner = process.run(
             "seat", "register", "e2e.pair.planner", "--role", "Planner",
@@ -346,6 +364,16 @@ def run_chain(process, root):
 
 
 class TestE2EChain(unittest.TestCase):
+    def test_ruled_manifest_reaches_each_bundle_engine_copy(self):
+        destinations = {destination for _, destination in ruled_manifest()}
+        markdown = {destination for destination, _ in installed_markdown()}
+        for plugin in ("adt-pair", "adt-orchestrator", "adt-master"):
+            with self.subTest(plugin=plugin):
+                prefix = "plugins/%s/tools/" % plugin
+                self.assertTrue({prefix + member for member in ROSTER}
+                                .issubset(destinations))
+                self.assertIn(prefix + "relay_engine/README.md", markdown)
+
     def test_handoff_chain_reconcile_and_lint(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary, "root")
@@ -355,7 +383,7 @@ class TestE2EChain(unittest.TestCase):
             process = RelayProcess(
                 [PYTHON, SOURCE_ROOT / "tools/relay"], environment,
                 Path(temporary))
-            result = run_chain(process, root)
+            result = run_chain(process, root, CID, DID)
             self.assertEqual(result["review"]["advisories"], [])
             self.assertEqual(result["bypass"]["origin"], "hand")
 
@@ -396,7 +424,9 @@ class TestCensus(unittest.TestCase):
     def test_census_artifact_schema(self):
         path, _ = write_census_artifact()
         if path is None:
-            self.skipTest("durable results environment is not set")
+            self.skipTest("durable results environment is not set; export "
+                          "RELAY_ENGINE_RESULTS_ROOT and RELAY_ENGINE_MATRIX_RUN "
+                          "(see the AGENTS.md engine suite entry point)")
         lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines[0],
                          "run " + os.environ["RELAY_ENGINE_MATRIX_RUN"])

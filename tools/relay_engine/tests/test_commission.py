@@ -11,6 +11,10 @@ from relay_engine.jcs import commissioned_by_value, parse_record
 from relay_engine.ledger import admit, establish_run_identity, init_schema
 from relay_engine.paths import Root, ensure_engine_dir
 from relay_engine.tests.check_crash_matrix import matrix_case
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+CID, DID = cid_did()
 
 
 DRAFT = """## relay
@@ -132,11 +136,12 @@ class TestCommission(unittest.TestCase):
                     "run_id": "child-combined",
                     "commissioning_record": record,
                     "top_seat": "child-combined.orchestrator-planner",
+                    "did": DID,
                 })
             thread.start()
             self.assertEqual(os.read(read_fd, 1), b"R")
             os.close(read_fd)
-            client.request(child_name, "daemon.stop", {})
+            client.request(child_name, "daemon.stop", {}, cid=CID)
             thread.join(5)
             self.assertFalse(thread.is_alive())
             with Root(child_name) as child:
@@ -170,7 +175,7 @@ class TestCommission(unittest.TestCase):
             def run():
                 try:
                     daemon.start(child_name, ready_fd=write_fd,
-                                 run_id="../invalid")
+                                 run_id="../invalid", did=DID)
                 except BaseException as exc:
                     failures.append(exc)
 
@@ -190,9 +195,11 @@ class TestCommission(unittest.TestCase):
             for path in Path(self.temp.name).rglob("*") if path.is_file())
         operations = (
             lambda: client.commission_run(
-                self.temp.name, self.path, "child-down"),
-            lambda: client.adopt_commission(self.temp.name, b"record"),
-            lambda: client.adopt_ruling(self.temp.name, b"bundle"),
+                self.temp.name, self.path, "child-down", cid=CID),
+            lambda: client.adopt_commission(
+                self.temp.name, b"record", cid=CID),
+            lambda: client.adopt_ruling(
+                self.temp.name, b"bundle", cid=CID),
         )
         for operation in operations:
             with self.assertRaises(client.RemoteError) as down:

@@ -62,10 +62,15 @@ class TestRecordCarrier(unittest.TestCase):
             "from relay_engine.jcs import frame_record;"
             "sys.stdout.write(base64.b64encode(frame_record(json.loads(sys.argv[1]))).decode())"
         )
+        env = dict(os.environ)
+        tools_dir = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (tools_dir, env.get("PYTHONPATH")) if p)
         child = subprocess.run(
             [sys.executable, "-c", program,
              json.dumps(RECORD, separators=(",", ":"))],
-            capture_output=True, text=True, env=dict(os.environ),
+            capture_output=True, text=True, env=env,
         )
         self.assertEqual(child.returncode, 0, child.stderr)
         import base64

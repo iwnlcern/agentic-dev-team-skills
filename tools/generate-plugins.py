@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import shutil
 import stat
@@ -14,10 +15,39 @@ from pathlib import Path
 from typing import Iterable
 
 
-KIT_VERSION = "2.9.0"
+_version = importlib.import_module("relay_engine.version")
+KIT_VERSION = _version.KIT_VERSION
+ENGINE_SET = tuple(_version.ROSTER)
+assert ENGINE_SET == (
+    "relay",
+    "relay_engine/README.md",
+    "relay_engine/__init__.py",
+    "relay_engine/cli.py",
+    "relay_engine/client.py",
+    "relay_engine/commission.py",
+    "relay_engine/cycles.py",
+    "relay_engine/daemon.py",
+    "relay_engine/envelope.py",
+    "relay_engine/errors.py",
+    "relay_engine/jcs.py",
+    "relay_engine/ledger.py",
+    "relay_engine/migrate.py",
+    "relay_engine/paths.py",
+    "relay_engine/reconcile.py",
+    "relay_engine/render.py",
+    "relay_engine/rules.py",
+    "relay_engine/seats.py",
+    "relay_engine/strings.py",
+    "relay_engine/supersede.py",
+    "relay_engine/version.py",
+)
 MANIFEST_PATH = "PROVENANCE.json"
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_ROOT = ROOT / "plugins"
+VARIANT_SKILLS = ("pair-planner", "pair-implementer")
+VARIANT_PLUGINS = frozenset({"adt-master", "adt-orchestrator"})
+VARIANTS_ROOT = ROOT / "skills" / "variants"
+PREAMBLE_PATH = VARIANTS_ROOT / "subordination-preamble.md"
 
 PLUGINS = {
     "adt-pair": {
@@ -83,11 +113,17 @@ SHARED_MAP = {
 TOOLS_SET = (
     "relay-lint.py",
     "check-relay-lint-fixtures.py",
+    "xrootfixgen.py",
     "check-timestamp-drift.py",
     "relay-lint-fixtures",
     "adapters",
 )
-VERBATIM_COPY_ROOTS = tuple(f"tools/{path}" for path in TOOLS_SET) + ("vendor",)
+VERBATIM_COPY_ROOTS = (
+    tuple(f"tools/{path}" for path in TOOLS_SET)
+    + tuple(f"tools/{path}" for path in ENGINE_SET)
+    + ("vendor",)
+)
+HOOKS_SOURCE = ROOT / "tools" / "adapters" / "plugin-hooks.json"
 
 
 def sorted_files(path: Path) -> Iterable[Path]:
@@ -154,6 +190,7 @@ def write_plugin_manifest(plugin: str, data: dict[str, object], destination: Pat
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    destination.chmod(0o644)
 
 
 def write_provenance(output: Path) -> None:
@@ -172,10 +209,12 @@ def write_provenance(output: Path) -> None:
                 "kit_version": KIT_VERSION,
             }
         )
-    (output / MANIFEST_PATH).write_text(
+    manifest = output / MANIFEST_PATH
+    manifest.write_text(
         json.dumps(sorted(entries, key=lambda entry: entry["path"]), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    manifest.chmod(0o644)
 
 
 def generated_source(output: Path, generated: Path) -> str:
@@ -184,6 +223,43 @@ def generated_source(output: Path, generated: Path) -> str:
 
 
 GENERATED_SOURCES: dict[str, str] = {}
+
+
+def materialize_variants(check_only: bool) -> int:
+    if not PREAMBLE_PATH.is_file():
+        raise ValueError("variant preamble is missing: skills/variants/subordination-preamble.md")
+    preamble = PREAMBLE_PATH.read_bytes()
+    if not preamble.endswith(b"\n") or preamble.endswith(b"\n\n"):
+        raise ValueError("variant preamble must end with exactly one newline")
+
+    differences = []
+    for skill in VARIANT_SKILLS:
+        base_path = ROOT / "skills" / skill / "SKILL.md"
+        base = base_path.read_bytes()
+        if not base.startswith(b"---\n"):
+            raise ValueError(f"variant base does not start with frontmatter: {source_relative(base_path)}")
+        delimiter = b"\n---\n"
+        delimiter_index = base.find(delimiter, len(b"---\n"))
+        if delimiter_index < 0:
+            raise ValueError(f"variant base has no closing frontmatter: {source_relative(base_path)}")
+        frontmatter_end = delimiter_index + len(delimiter)
+        expected = base[:frontmatter_end] + b"\n" + preamble + b"\n" + base[frontmatter_end:]
+        derived_path = VARIANTS_ROOT / skill / "SKILL.md"
+        if check_only:
+            if not derived_path.is_file():
+                differences.append(f"missing: {source_relative(derived_path)}")
+            elif derived_path.read_bytes() != expected:
+                differences.append(f"different: {source_relative(derived_path)}")
+        else:
+            derived_path.parent.mkdir(parents=True, exist_ok=True)
+            derived_path.write_bytes(expected)
+            derived_path.chmod(stat.S_IMODE(base_path.stat().st_mode))
+
+    if differences:
+        print("variant derivation drift:", file=sys.stderr)
+        print("\n".join(differences), file=sys.stderr)
+        return 1
+    return 0
 
 
 def record_copy(source: Path, destination: Path, output: Path) -> None:
@@ -202,7 +278,12 @@ def generate_tree(output: Path) -> None:
         plugin_root = output / plugin
         skills = tuple(data["skills"])
         for skill in sorted(skills):
-            record_tree(ROOT / "skills" / skill, plugin_root / "skills" / skill, output)
+            source = (
+                VARIANTS_ROOT / skill
+                if plugin in VARIANT_PLUGINS and skill in VARIANT_SKILLS
+                else ROOT / "skills" / skill
+            )
+            record_tree(source, plugin_root / "skills" / skill, output)
         for shared_asset, receiving_skills in sorted(SHARED_MAP.items()):
             for skill in sorted(set(skills) & set(receiving_skills)):
                 record_copy(
@@ -217,6 +298,10 @@ def generate_tree(output: Path) -> None:
                 record_tree(source, destination, output)
             else:
                 record_copy(source, destination, output)
+        record_copy(HOOKS_SOURCE, plugin_root / "hooks" / "hooks.json", output)
+        for engine_member in ENGINE_SET:
+            record_copy(ROOT / "tools" / engine_member,
+                        plugin_root / "tools" / engine_member, output)
         record_tree(ROOT / "vendor", plugin_root / "vendor", output)
         record_copy(ROOT / "LICENSE", plugin_root / "LICENSE", output)
         record_tree(ROOT / "LICENSES", plugin_root / "LICENSES", output)
@@ -225,13 +310,21 @@ def generate_tree(output: Path) -> None:
     write_provenance(output)
 
 
-def file_map(root: Path) -> dict[str, bytes]:
+def file_map(root: Path) -> dict[str, tuple[str, int, bytes]]:
     if not root.exists():
         return {}
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted_files(root)
-    }
+    files = {}
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        if stat.S_ISDIR(status.st_mode):
+            continue
+        relative = path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISREG(status.st_mode):
+            files[relative] = ("regular", mode, path.read_bytes())
+        else:
+            files[relative] = ("non-regular", mode, b"")
+    return files
 
 
 def check_tree(expected: Path, actual: Path) -> int:
@@ -257,6 +350,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail when plugins/ has generation drift")
     arguments = parser.parse_args()
+    if materialize_variants(arguments.check):
+        return 1
     with tempfile.TemporaryDirectory(prefix="agentic-dev-team-skills-plugins-") as temporary:
         staging = Path(temporary) / "plugins"
         staging.mkdir()

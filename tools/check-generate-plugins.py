@@ -8,18 +8,25 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
 
+from relay_engine import version
+
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "generate-plugins.py"
 PLUGINS_ROOT = ROOT / "plugins"
+VARIANT_SKILLS = frozenset({"pair-planner", "pair-implementer"})
+VARIANT_PLUGINS = frozenset({"adt-master", "adt-orchestrator"})
+VARIANTS_ROOT = ROOT / "skills" / "variants"
+PREAMBLE_PATH = VARIANTS_ROOT / "subordination-preamble.md"
 PYTHON = "python3"
-KIT_VERSION = "2.9.0"
+KIT_VERSION = "2.9.1"
 MANIFEST_PATH = "PROVENANCE.json"
 
 PLUGINS = {
@@ -79,9 +86,21 @@ Model-specific files (`model-<family>.md`) follow the same pattern and ship empt
 Host and model files map protocol mechanics onto a host; they never change the protocol, and on conflict the protocol wins.
 """
 
-CODEX_INSTALL_TEXT = """- Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
-  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills).
-  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
+CODEX_INSTALL_TEXT = """- Codex: install via the plugin route, same repository, no separate artifact (verified 2026-08-20
+  on codex-cli 0.149.0 for adt-pair, adt-orchestrator, and adt-master):
+
+  ```text
+  codex plugin marketplace add iwnlcern/agentic-dev-team-skills
+  codex plugin add adt-<tier>@agentic-dev-team-skills
+  ```
+
+  Codex discovers `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json` natively, so
+  the Claude Code marketplace layout serves both hosts unchanged, with skill adjacency intact.
+  Fallback (air-gapped installs, or any other `.agents/skills` host): copy
+  `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and
+  `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working
+  deprecated destination. Manual copy needs no manifest (filesystem discovery:
+  https://learn.chatgpt.com/docs/build-skills).
 """
 
 PDC_CODEX_FORWARD_POINTER = (
@@ -91,9 +110,33 @@ PDC_CODEX_FORWARD_POINTER = (
 LOCKED_TOOLS_SET = (
     "relay-lint.py",
     "check-relay-lint-fixtures.py",
+    "xrootfixgen.py",
     "check-timestamp-drift.py",
     "relay-lint-fixtures",
     "adapters",
+)
+LOCKED_ENGINE_SET = (
+    "relay",
+    "relay_engine/README.md",
+    "relay_engine/__init__.py",
+    "relay_engine/cli.py",
+    "relay_engine/client.py",
+    "relay_engine/commission.py",
+    "relay_engine/cycles.py",
+    "relay_engine/daemon.py",
+    "relay_engine/envelope.py",
+    "relay_engine/errors.py",
+    "relay_engine/jcs.py",
+    "relay_engine/ledger.py",
+    "relay_engine/migrate.py",
+    "relay_engine/paths.py",
+    "relay_engine/reconcile.py",
+    "relay_engine/render.py",
+    "relay_engine/rules.py",
+    "relay_engine/seats.py",
+    "relay_engine/strings.py",
+    "relay_engine/supersede.py",
+    "relay_engine/version.py",
 )
 EXACT_INVENTORY_SENTINELS = {
     "adt-orchestrator": {
@@ -159,12 +202,35 @@ def expect_drift(result: subprocess.CompletedProcess[str], path: str) -> None:
     expect(f"different: {path}" in output(result), f"drift for {path} was not reported: {output(result)}")
 
 
-def file_map(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-    }
+def file_map(root: Path) -> dict[str, tuple[str, int, bytes]]:
+    files = {}
+    for path in sorted(root.rglob("*")):
+        status = path.lstat()
+        if stat.S_ISDIR(status.st_mode):
+            continue
+        relative = path.relative_to(root).as_posix()
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISREG(status.st_mode):
+            files[relative] = ("regular", mode, path.read_bytes())
+        else:
+            files[relative] = ("non-regular", mode, b"")
+    return files
+
+
+def expected_generated_mode(relative: str, source: str) -> int:
+    if relative.endswith("/.claude-plugin/plugin.json"):
+        return 0o644
+    return stat.S_IMODE((ROOT / source).lstat().st_mode)
+
+
+def require_regular_mode(path: Path, expected_mode: int, context: str) -> None:
+    status = path.lstat()
+    expect(stat.S_ISREG(status.st_mode), f"{context} is non-regular: {path}")
+    actual_mode = stat.S_IMODE(status.st_mode)
+    expect(
+        actual_mode == expected_mode,
+        f"{context} mode differs: {path}: expected {expected_mode:o}, got {actual_mode:o}",
+    )
 
 
 def check_retired_m01_compound_placeholders() -> None:
@@ -224,7 +290,12 @@ def canonical_source_map() -> dict[str, str]:
 
     for plugin, skills in PLUGINS.items():
         for skill in skills:
-            record_tree(plugin, ROOT / "skills" / skill, Path("skills") / skill)
+            source = (
+                VARIANTS_ROOT / skill
+                if plugin in VARIANT_PLUGINS and skill in VARIANT_SKILLS
+                else ROOT / "skills" / skill
+            )
+            record_tree(plugin, source, Path("skills") / skill)
         for asset, recipients in LOCKED_SHARED_ASSETS.items():
             for skill in skills & recipients:
                 record(plugin, ROOT / "shared" / asset, Path("skills") / skill / asset)
@@ -235,6 +306,9 @@ def canonical_source_map() -> dict[str, str]:
                 record_tree(plugin, source, destination)
             else:
                 record(plugin, source, destination)
+        record(plugin, ROOT / "tools" / "adapters" / "plugin-hooks.json", Path("hooks") / "hooks.json")
+        for engine_member in LOCKED_ENGINE_SET:
+            record(plugin, ROOT / "tools" / engine_member, Path("tools") / engine_member)
         record_tree(plugin, ROOT / "vendor", Path("vendor"))
         record(plugin, ROOT / "LICENSE", Path("LICENSE"))
         record_tree(plugin, ROOT / "LICENSES", Path("LICENSES"))
@@ -247,7 +321,12 @@ def expected_plugin_files(plugin: str) -> set[str]:
     expected = {".claude-plugin/plugin.json"}
     skills = PLUGINS[plugin]
     for skill in skills:
-        expected |= canonical_files(ROOT / "skills" / skill, f"skills/{skill}")
+        source = (
+            VARIANTS_ROOT / skill
+            if plugin in VARIANT_PLUGINS and skill in VARIANT_SKILLS
+            else ROOT / "skills" / skill
+        )
+        expected |= canonical_files(source, f"skills/{skill}")
     for asset, recipients in LOCKED_SHARED_ASSETS.items():
         for skill in skills & recipients:
             source = ROOT / "shared" / asset
@@ -255,6 +334,9 @@ def expected_plugin_files(plugin: str) -> set[str]:
             expected.add(f"skills/{skill}/{asset}")
     for tool in LOCKED_TOOLS_SET:
         expected |= canonical_files(ROOT / "tools" / tool, f"tools/{tool}")
+    expected.add("hooks/hooks.json")
+    for engine_member in LOCKED_ENGINE_SET:
+        expected |= canonical_files(ROOT / "tools" / engine_member, f"tools/{engine_member}")
     expected |= canonical_files(ROOT / "vendor" / "mattpocock", "vendor/mattpocock")
     expected |= canonical_files(ROOT / "LICENSE", "LICENSE")
     expected |= canonical_files(ROOT / "LICENSES", "LICENSES")
@@ -268,7 +350,7 @@ def assert_exact_plugin_file_inventory(plugin: str, plugin_root: Path) -> None:
     actual = {
         path.relative_to(plugin_root).as_posix()
         for path in plugin_root.rglob("*")
-        if path.is_file()
+        if not stat.S_ISDIR(path.lstat().st_mode)
     }
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
@@ -276,6 +358,19 @@ def assert_exact_plugin_file_inventory(plugin: str, plugin_root: Path) -> None:
         not missing and not extra,
         f"{plugin} exact file inventory differs: missing: {missing}; extra: {extra}",
     )
+
+
+def validate_plugin_metadata(plugin: str, plugin_root: Path) -> None:
+    assert_exact_plugin_file_inventory(plugin, plugin_root)
+    sources = canonical_source_map()
+    for relative in sorted(expected_plugin_files(plugin)):
+        provenance_path = f"{plugin}/{relative}"
+        source = sources[provenance_path]
+        require_regular_mode(
+            plugin_root / relative,
+            expected_generated_mode(provenance_path, source),
+            f"{plugin} shipped path",
+        )
 
 
 def copy_generator_inputs(destination: Path) -> Path:
@@ -321,6 +416,28 @@ def check_manifest_mutation() -> None:
         expect_success(run_generator(fixture), "manifest mutation regeneration")
         expect_success(run_generator(fixture, "--check"), "manifest mutation regenerated --check")
 
+        previous_umask = os.umask(0o077)
+        try:
+            restrictive_check = run_generator(fixture, "--check")
+        finally:
+            os.umask(previous_umask)
+        expect_success(restrictive_check, "restrictive-umask synthesized metadata --check")
+
+        relative = "adt-pair/tools/relay_engine/client.py"
+        generated = fixture / "plugins" / relative
+        same_bytes = fixture / "same-client.py"
+        same_bytes.write_bytes(generated.read_bytes())
+        generated.unlink()
+        generated.symlink_to(same_bytes)
+        expect_drift(run_generator(fixture, "--check"), relative)
+        expect_success(run_generator(fixture), "symlink mutation regeneration")
+
+        original_mode = stat.S_IMODE(generated.lstat().st_mode)
+        generated.chmod(original_mode ^ stat.S_IXUSR)
+        expect_drift(run_generator(fixture, "--check"), relative)
+        expect_success(run_generator(fixture), "mode mutation regeneration")
+        expect_success(run_generator(fixture, "--check"), "metadata mutations regenerated --check")
+
 
 def check_banner_mutation() -> None:
     with tempfile.TemporaryDirectory(prefix="check-generate-plugins-") as temporary:
@@ -333,7 +450,7 @@ def check_banner_mutation() -> None:
         expect(closing >= 0, "target lacks a closing frontmatter delimiter")
         banner_position = text.find("<!-- GENERATED by tools/generate-plugins.py", closing)
         expect(banner_position > closing, "target lacks a generated banner after frontmatter")
-        generated.write_text(text.replace("kit v2.9.0", "kit v0.0.0", 1), encoding="utf-8")
+        generated.write_text(text.replace("kit v2.9.1", "kit v0.0.0", 1), encoding="utf-8")
         expect_drift(run_generator(fixture, "--check"), relative)
 
 
@@ -400,6 +517,29 @@ def check_skill_frontmatter() -> None:
         )
 
 
+def check_variant_derivation() -> None:
+    expect(PREAMBLE_PATH.is_file(), "variant preamble is missing: skills/variants/subordination-preamble.md")
+    preamble = PREAMBLE_PATH.read_bytes()
+    expect(
+        preamble.endswith(b"\n") and not preamble.endswith(b"\n\n"),
+        "variant preamble must end with exactly one newline: skills/variants/subordination-preamble.md",
+    )
+    for skill in sorted(VARIANT_SKILLS):
+        base_path = ROOT / "skills" / skill / "SKILL.md"
+        base = base_path.read_bytes()
+        expect(base.startswith(b"---\n"), f"variant base must start with frontmatter: {base_path.relative_to(ROOT)}")
+        delimiter = b"\n---\n"
+        delimiter_index = base.find(delimiter, len(b"---\n"))
+        expect(delimiter_index != -1, f"variant base lacks closing frontmatter: {base_path.relative_to(ROOT)}")
+        frontmatter_end = delimiter_index + len(delimiter)
+        expected = base[:frontmatter_end] + b"\n" + preamble + b"\n" + base[frontmatter_end:]
+        derived_path = VARIANTS_ROOT / skill / "SKILL.md"
+        expect(
+            derived_path.is_file() and derived_path.read_bytes() == expected,
+            f"variant derivation differs or is missing: {derived_path.relative_to(ROOT)}; derived files are generator-owned and must not be hand-edited",
+        )
+
+
 def expected_bannered_markdown(source: str, data: bytes) -> bytes:
     banner = (
         f"<!-- GENERATED by tools/generate-plugins.py from {source} — kit v{KIT_VERSION}. "
@@ -438,18 +578,28 @@ def check_r4_readme_content() -> None:
 def check_r5_pdc_pointer() -> None:
     pdc = (
         ROOT
-        / "docs/sprints/2026-08-03-v2.9-release/results/v29-split-rename-sitrep-pdc.md"
+        / "docs/sprints/archive/2026-08-03-v2.9-release/results/v29-split-rename-sitrep-pdc.md"
     ).read_text(encoding="utf-8")
     expect(pdc.count(PDC_CODEX_FORWARD_POINTER) == 1, "R5 pdc template lacks the Codex forward pointer")
 
 
+def check_locked_engine_roster() -> None:
+    expect(
+        LOCKED_ENGINE_SET == version.ROSTER,
+        "LOCKED_ENGINE_SET differs from relay_engine.version.ROSTER",
+    )
+
+
 def validate_provenance(entries: object, plugins_root: Path) -> None:
+    require_regular_mode(
+        plugins_root / MANIFEST_PATH, 0o644, "provenance manifest")
     expect(isinstance(entries, list), "PROVENANCE.json is not an array")
     expected_sources = canonical_source_map()
     on_disk = {
         path.relative_to(plugins_root).as_posix()
         for path in plugins_root.rglob("*")
-        if path.is_file() and path.relative_to(plugins_root).as_posix() != MANIFEST_PATH
+        if (not stat.S_ISDIR(path.lstat().st_mode) and
+            path.relative_to(plugins_root).as_posix() != MANIFEST_PATH)
     }
     paths: list[str] = []
     for entry in entries:
@@ -466,7 +616,12 @@ def validate_provenance(entries: object, plugins_root: Path) -> None:
         expect(entry["source"] == expected_sources[path], f"provenance source differs for {path}")
         expect(entry["kit_version"] == KIT_VERSION, f"provenance kit version differs for {path}")
         generated = plugins_root / path
-        expect(generated.is_file(), f"provenance path is absent on disk: {path}")
+        expect(generated.exists() or generated.is_symlink(), f"provenance path is absent on disk: {path}")
+        require_regular_mode(
+            generated,
+            expected_generated_mode(path, expected_sources[path]),
+            "provenance path",
+        )
         digest = hashlib.sha256(generated.read_bytes()).hexdigest()
         expect(entry["sha256"] == digest, f"provenance hash differs for {path}")
     expect(len(paths) == len(set(paths)), "PROVENANCE.json contains duplicate paths")
@@ -476,6 +631,7 @@ def validate_provenance(entries: object, plugins_root: Path) -> None:
 
 def check_provenance() -> None:
     manifest = PLUGINS_ROOT / MANIFEST_PATH
+    require_regular_mode(manifest, 0o644, "provenance manifest")
     entries = json.loads(manifest.read_text(encoding="utf-8"))
     validate_provenance(entries, PLUGINS_ROOT)
 
@@ -489,6 +645,75 @@ def check_provenance() -> None:
     else:
         raise AssertionError("provenance hash sabotage was not rejected")
 
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-provenance-") as temporary:
+        fixture = Path(temporary) / "plugins"
+        shutil.copytree(PLUGINS_ROOT, fixture)
+        relative = "adt-pair/tools/relay_engine/client.py"
+        generated = fixture / relative
+        same_bytes = Path(temporary) / "same-client.py"
+        same_bytes.write_bytes(generated.read_bytes())
+        generated.unlink()
+        generated.symlink_to(same_bytes)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("non-regular" in str(error), f"provenance symlink failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted a same-byte symlink")
+
+        generated.unlink()
+        generated.write_bytes(same_bytes.read_bytes())
+        expected_mode = stat.S_IMODE((ROOT / "tools/relay_engine/client.py").lstat().st_mode)
+        generated.chmod(expected_mode ^ stat.S_IXUSR)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("mode differs" in str(error), f"provenance mode mutation failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted a same-byte mode mutation")
+        generated.chmod(expected_mode)
+
+        manifest = fixture / MANIFEST_PATH
+        same_manifest = Path(temporary) / "same-provenance.json"
+        same_manifest.write_bytes(manifest.read_bytes())
+        manifest.unlink()
+        manifest.symlink_to(same_manifest)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("non-regular" in str(error), f"provenance manifest symlink failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted a same-byte manifest symlink")
+
+        manifest.unlink()
+        manifest.write_bytes(same_manifest.read_bytes())
+        manifest.chmod(0o600)
+        try:
+            validate_provenance(entries, fixture)
+        except AssertionError as error:
+            expect("mode differs" in str(error), f"provenance manifest mode mutation failed for the wrong reason: {error}")
+        else:
+            raise AssertionError("provenance accepted manifest mode drift")
+
+
+def check_provenance_manifest_preflight() -> None:
+    global PLUGINS_ROOT
+    original_root = PLUGINS_ROOT
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-provenance-preflight-") as temporary:
+        fixture = Path(temporary) / "plugins"
+        fixture.mkdir()
+        (fixture / MANIFEST_PATH).symlink_to(Path(temporary) / "missing.json")
+        PLUGINS_ROOT = fixture
+        try:
+            try:
+                check_provenance()
+            except AssertionError as error:
+                expect("non-regular" in str(error), f"provenance manifest preflight failed for the wrong reason: {error}")
+            else:
+                raise AssertionError("provenance manifest was read before metadata preflight")
+        finally:
+            PLUGINS_ROOT = original_root
+
 
 def check_verbatim_copies() -> None:
     for plugin in PLUGINS:
@@ -500,6 +725,13 @@ def check_verbatim_copies() -> None:
                 expect(file_map(canonical) == file_map(installed), f"{plugin} tool tree differs byte-for-byte: {tool}")
             else:
                 expect(canonical.read_bytes() == installed.read_bytes(), f"{plugin} tool differs byte-for-byte: {tool}")
+        for engine_member in LOCKED_ENGINE_SET:
+            canonical = ROOT / "tools" / engine_member
+            installed = plugin_root / "tools" / engine_member
+            expect(
+                canonical.read_bytes() == installed.read_bytes(),
+                f"{plugin} engine member differs byte-for-byte: {engine_member}",
+            )
         expect(
             file_map(ROOT / "vendor") == file_map(plugin_root / "vendor"),
             f"{plugin} vendor tree is not copied byte-for-byte",
@@ -565,12 +797,50 @@ def check_adjacency() -> None:
 def install_tier(plugin: str, scratch_base: Path) -> Path:
     scratch = scratch_base / plugin
     plugin_root = PLUGINS_ROOT / plugin
+    validate_plugin_metadata(plugin, plugin_root)
     shutil.copytree(plugin_root / "skills", scratch / "skills")
     shutil.copytree(plugin_root / "tools", scratch / "tools")
     shutil.copytree(plugin_root / "vendor", scratch / "vendor")
     shutil.copytree(plugin_root / "LICENSES", scratch / "LICENSES")
     shutil.copy2(plugin_root / "LICENSE", scratch / "LICENSE")
     return scratch
+
+
+def check_install_metadata_refusal() -> None:
+    global PLUGINS_ROOT
+    original_root = PLUGINS_ROOT
+    with tempfile.TemporaryDirectory(prefix="check-generate-plugins-install-metadata-") as temporary:
+        temporary_root = Path(temporary)
+        fixture_root = temporary_root / "plugins"
+        fixture_root.mkdir()
+        shutil.copytree(original_root / "adt-pair", fixture_root / "adt-pair")
+        PLUGINS_ROOT = fixture_root
+        try:
+            relative = "tools/relay_engine/client.py"
+            generated = fixture_root / "adt-pair" / relative
+            same_bytes = temporary_root / "same-client.py"
+            same_bytes.write_bytes(generated.read_bytes())
+            generated.unlink()
+            generated.symlink_to(same_bytes)
+            try:
+                install_tier("adt-pair", temporary_root / "symlink-install")
+            except AssertionError as error:
+                expect("non-regular" in str(error), f"cold install symlink failed for the wrong reason: {error}")
+            else:
+                raise AssertionError("cold install dereferenced a same-byte symlink")
+
+            generated.unlink()
+            generated.write_bytes(same_bytes.read_bytes())
+            expected_mode = stat.S_IMODE((ROOT / "tools/relay_engine/client.py").lstat().st_mode)
+            generated.chmod(expected_mode ^ stat.S_IXUSR)
+            try:
+                install_tier("adt-pair", temporary_root / "mode-install")
+            except AssertionError as error:
+                expect("mode differs" in str(error), f"cold install mode mutation failed for the wrong reason: {error}")
+            else:
+                raise AssertionError("cold install copied a same-byte mode mutation")
+        finally:
+            PLUGINS_ROOT = original_root
 
 
 def run_linter(linter: Path, relay: Path, empty_cwd: Path, *, no_freshness: bool = False) -> subprocess.CompletedProcess[str]:
@@ -606,6 +876,51 @@ def check_cold_install(scratch_base: Path) -> dict[str, Path]:
         empty_cwd = scratch_base / f"empty-cwd-{plugin}"
         empty_cwd.mkdir()
         expect_success(run_linter(linter, fixture, empty_cwd, no_freshness=True), f"{plugin} cold-install linter")
+        tools_dir = scratch / "tools"
+        launcher = tools_dir / "relay"
+        expect(launcher.is_file(), f"{plugin} cold install lacks tools/relay")
+        for engine_member in LOCKED_ENGINE_SET:
+            expect(
+                (tools_dir / engine_member).is_file(),
+                f"{plugin} cold install lacks tools/{engine_member}",
+            )
+        excluded_engine_entries = [
+            path.relative_to(tools_dir).as_posix()
+            for path in (tools_dir / "relay_engine").rglob("*")
+            if path.name in {"tests", "fixtures", "__pycache__"}
+        ]
+        expect(
+            not excluded_engine_entries,
+            f"{plugin} cold install carries excluded engine entries: {sorted(excluded_engine_entries)}",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        relay_version = subprocess.run(
+            [PYTHON, str(launcher), "version"],
+            cwd=empty_cwd,
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+        expect_success(relay_version, f"{plugin} cold-install relay version")
+        expect(
+            json.loads(relay_version.stdout)
+            == {
+                "fingerprint": version.fingerprint(ROOT / "tools"),
+                "install": os.path.realpath(tools_dir),
+                "kit": KIT_VERSION,
+            },
+            f"{plugin} cold-install relay version triad differs: {output(relay_version)}",
+        )
+        excluded_engine_entries = [
+            path.relative_to(tools_dir).as_posix()
+            for path in (tools_dir / "relay_engine").rglob("*")
+            if path.name in {"tests", "fixtures", "__pycache__"}
+        ]
+        expect(
+            not excluded_engine_entries,
+            f"{plugin} cold install creates excluded engine entries: {sorted(excluded_engine_entries)}",
+        )
         self_test = subprocess.run(
             [PYTHON, str(scratch / "tools" / "check-relay-lint-fixtures.py")],
             cwd=empty_cwd,
@@ -703,11 +1018,14 @@ def main() -> int:
         ("body mutation", check_body_mutation),
         ("strict JSON", check_strict_json),
         ("installed skill frontmatter", check_skill_frontmatter),
+        ("variant derivation", check_variant_derivation),
         ("R1 harness copies", check_r1_harness_copies),
         ("R3 protocol content", check_r3_protocol_content),
         ("R4 README content", check_r4_readme_content),
         ("R5 pdc forward pointer", check_r5_pdc_pointer),
+        ("locked engine roster", check_locked_engine_roster),
         ("independent provenance", check_provenance),
+        ("provenance manifest preflight", check_provenance_manifest_preflight),
         ("verbatim detection and vendor copies", check_verbatim_copies),
         ("inventory", check_inventory),
         ("adjacency", check_adjacency),
@@ -718,12 +1036,15 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="check-generate-plugins-cold-install-") as temporary:
         scratch_base = Path(temporary)
+        install_metadata_passed, _ = run_check("cold-install metadata refusal", check_install_metadata_refusal)
         cold_install_passed, installations = run_check("cold install", lambda: check_cold_install(scratch_base))
         no_banner_passed, _ = run_check("no banner in comment-free formats", check_no_json_banner)
         validator_passed, _ = run_check("per-plugin Claude validation", check_claude_plugin_validation)
         if not no_banner_passed:
             failures += 1
         if not validator_passed:
+            failures += 1
+        if not install_metadata_passed:
             failures += 1
         if not cold_install_passed:
             failures += 1

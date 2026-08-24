@@ -1,11 +1,14 @@
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from relay_engine import errors, strings
+from relay_engine import client, errors, strings
+from relay_engine.paths import Root
 from relay_engine.jcs import jcs_encode
 
 
@@ -14,6 +17,7 @@ POLICY_CODES = {
     "E-ID-COLLISION",
     "E-SUPERSEDED",
     "E-PATH-ESCAPE",
+    "E-VERSION-MISMATCH",
 }
 
 ALL_CODES = POLICY_CODES | {
@@ -33,6 +37,7 @@ ALL_CODES = POLICY_CODES | {
     "E-WIRE-OP",
     "E-WIRE-ARGS",
     "E-DAEMON-STOPPING",
+    "E-CONTEXT-BUDGET",
 }
 
 
@@ -63,6 +68,51 @@ class TestErrorRegistry(unittest.TestCase):
             errors.EngineError("E-FRAMING", "raw cause", "raw remedy",
                                "wire", reason="truncated")
 
+    def test_not_found_variant_is_registered_and_renders(self):
+        exc = errors.error_for("E-PATH-ESCAPE", variant="not-found",
+                               field="draft", rel="x/y.md")
+        self.assertEqual(exc.code, "E-PATH-ESCAPE")
+        self.assertEqual(exc.cls, "policy")
+        self.assertIn("draft", exc.cause)
+        self.assertIn("x/y.md", exc.cause)
+        self.assertIn("root-relative", exc.remedy)
+
+    def test_not_found_rel_rejects_line_separators(self):
+        for rel in ("a\nb.md", "a\rb.md"):
+            with self.subTest(rel=repr(rel)):
+                exc = errors.error_for("E-PATH-ESCAPE", variant="not-found",
+                                       field="key", rel=rel)
+                self.assertNotIn("\n", exc.cause)
+                self.assertNotIn("\r", exc.cause)
+                self.assertIn("sha256", exc.cause)
+
+    def test_path_escape_regression_unchanged(self):
+        with tempfile.TemporaryDirectory() as root_name:
+            with Root(root_name) as root:
+                with self.assertRaises(errors.EngineError) as ctx:
+                    client._relative(root, "/outside/abs/path.md")
+        self.assertEqual(
+            ctx.exception.as_dict(),
+            {"code": "E-PATH-ESCAPE",
+             "cause": "draft path is outside the canonical root",
+             "remedy": "use the canonical drafts location",
+             "cls": "policy"},
+        )
+
+    def test_id_collision_remedy_names_the_flag_argument(self):
+        exc = errors.error_for("E-ID-COLLISION")
+        self.assertIn("--admits-against", exc.remedy)
+        self.assertIn("root-relative", exc.remedy)
+
+    def test_context_budget_error_is_a_registered_wire_refusal(self):
+        self.assertEqual(
+            errors.error_for("E-CONTEXT-BUDGET").as_dict(),
+            {"code": "E-CONTEXT-BUDGET",
+             "cause": "context page exceeded the byte budget",
+             "remedy": "a single record entry or accounting disagreement exceeded the per-page byte budget",
+             "cls": "wire"},
+        )
+
 
 class TestWireTemplates(unittest.TestCase):
     def test_wire_error_objects_byte_exact(self):
@@ -76,7 +126,7 @@ class TestWireTemplates(unittest.TestCase):
             ("E-WIRE-VERSION", {"rejected_version": rv},
              {"code": "E-WIRE-VERSION",
               "cause": "unsupported protocol version unrecognized-input (sha256:0123456789ab, length 7)",
-              "remedy": "send v:1", "cls": "wire"}),
+              "remedy": "send v:2", "cls": "wire"}),
             ("E-WIRE-OP", {"rejected_op": rv},
              {"code": "E-WIRE-OP",
               "cause": "unknown op unrecognized-input (sha256:0123456789ab, length 7)",
@@ -99,6 +149,11 @@ class TestWireTemplates(unittest.TestCase):
                 self.assertEqual(errors.error_for(code, **params).as_dict(),
                                  expected)
 
+    def test_wire_version_explain_uses_v2_contract(self):
+        explain, remedy = errors.explain_for("E-WIRE-VERSION")
+        self.assertEqual(explain, "wire requests use protocol version two")
+        self.assertEqual(remedy, "send v:2")
+
     def test_every_template_placeholder_has_one_validator(self):
         expected = set()
         for key, template in strings.INVENTORY.items():
@@ -115,6 +170,142 @@ class TestWireTemplates(unittest.TestCase):
                 rejected_op=strings.rejected_value(digest, len(value)),
             ).as_dict()["cause"]
             self.assertNotIn(value.lower(), rendered.lower())
+
+
+class TestIdentityValidators(unittest.TestCase):
+    def test_install_display_grammar_has_named_adversarial_outcomes(self):
+        cases = (
+            ("ASCII control", "/Users/Jane/\x1fskills", False),
+            ("U+0085", "/Users/Jane/\u0085skills", False),
+            ("U+202E", "/Users/Jane/\u202eskills", False),
+            ("non-ASCII letters", "/Users/José/skills", True),
+            ("noncanonical", "/a/../b", True),
+            ("relative", "Users/Jane/skills", False),
+            ("over 512 bytes", "/" + ("a" * 512), False),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(strings.valid_install(value), expected)
+
+    def test_kit_grammar_is_canonical_and_bounded(self):
+        cases = (
+            ("short", "2.9", False),
+            ("prefix", "v2.9.1", False),
+            ("four tuple", "2.9.1.0", False),
+            ("leading zeros", "02.009.0001", False),
+            ("empty", "", False),
+            ("release", "2.9.1", True),
+            ("zero", "0.0.0", True),
+            ("maximum component", "999999.0.1", True),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(strings.valid_kit(value), expected)
+
+    def test_fingerprint_grammar_is_lowercase_64_hex_bytes(self):
+        cases = (
+            ("valid", "a" * 64, True),
+            ("uppercase", "A" * 64, False),
+            ("63 bytes", "a" * 63, False),
+            ("65 bytes", "a" * 65, False),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(strings.valid_fp(value), expected)
+
+
+class TestVersionMismatch(unittest.TestCase):
+    CLIENT_INSTALL = "/Users/José/skills"
+    DAEMON_INSTALL = "/a/../b"
+    CLIENT_FP = "a" * 64
+    DAEMON_FP = "b" * 64
+
+    def mismatch(self, client_kit, daemon_kit, **overrides):
+        params = {
+            "client_install": self.CLIENT_INSTALL,
+            "client_kit": client_kit,
+            "client_fp": self.CLIENT_FP,
+            "daemon_install": self.DAEMON_INSTALL,
+            "daemon_kit": daemon_kit,
+            "daemon_fp": self.DAEMON_FP,
+        }
+        params.update(overrides)
+        return errors.error_for("E-VERSION-MISMATCH", **params)
+
+    def test_remedy_names_the_client_install_when_client_kit_is_lower(self):
+        exc = self.mismatch("2.9.0", "2.9.1")
+        self.assertEqual(
+            exc.remedy,
+            "update the client install at /Users/José/skills, then retry",
+        )
+
+    def test_remedy_names_the_daemon_install_when_daemon_kit_is_lower(self):
+        exc = self.mismatch("2.9.2", "2.9.1")
+        self.assertEqual(
+            exc.remedy,
+            "update the daemon install at /a/../b, then retry",
+        )
+
+    def test_remedy_refreshes_both_installs_when_attribution_is_indeterminate(self):
+        exc = self.mismatch("2.9.1", "2.9.1")
+        self.assertEqual(
+            exc.remedy,
+            "refresh both installs: client at /Users/José/skills; daemon at /a/../b; then retry",
+        )
+
+    def test_malformed_identity_values_render_only_as_rejected_values(self):
+        exc = self.mismatch(
+            "02.009.0001",
+            "2.9.1",
+            client_install="/Users/Jane/\u202eskills",
+            client_fp="A" * 64,
+        )
+        rendered = "\n".join((exc.cause, exc.remedy))
+        self.assertIn("unrecognized-input (sha256:", rendered)
+        self.assertNotIn("02.009.0001", rendered)
+        self.assertNotIn("\u202e", rendered)
+        self.assertNotIn("A" * 64, rendered)
+        self.assertRegex(
+            exc.remedy,
+            r"^refresh both installs: client at unrecognized-input "
+            r"\(sha256:[0-9a-f]{12}, length [0-9]+\); daemon at "
+            r"/a/\.\./b; then retry$",
+        )
+
+    def test_registry_rejects_nested_remedy_values_that_could_echo_raw_identity(self):
+        cases = (
+            errors._VersionMismatchRemedy(
+                "client", "/bad\nRAW-INSTALL", self.DAEMON_INSTALL),
+            errors._VersionMismatchRemedy(
+                "daemon", self.CLIENT_INSTALL, "/bad\nRAW-INSTALL"),
+            errors._VersionMismatchRemedy(
+                "attacker", self.CLIENT_INSTALL, self.DAEMON_INSTALL),
+        )
+        for remedy in cases:
+            with self.subTest(remedy=remedy):
+                with self.assertRaises(ValueError):
+                    strings.render("error-version-mismatch-remedy",
+                                   remedy=remedy)
+
+    def test_registry_rejects_direct_rejected_values_without_digest_invariants(self):
+        common = {
+            "client_install": self.CLIENT_INSTALL,
+            "client_kit": "2.9.1",
+            "client_fp": self.CLIENT_FP,
+            "daemon_install": self.DAEMON_INSTALL,
+            "daemon_kit": "2.9.1",
+            "daemon_fp": self.DAEMON_FP,
+        }
+        cases = (
+            strings.RejectedValue("bad\nRAW-DIGEST", 1),
+            strings.RejectedValue("a" * 12, -1),
+            strings.RejectedValue("a" * 12, True),
+        )
+        for rejected in cases:
+            with self.subTest(rejected=rejected):
+                params = dict(common, client_install=rejected)
+                with self.assertRaises(ValueError):
+                    strings.render("error-version-mismatch-cause", **params)
 
 
 class TestRedactionOracle(unittest.TestCase):

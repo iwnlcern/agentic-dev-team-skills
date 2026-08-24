@@ -1,7 +1,7 @@
 import errno, hashlib, os, re, shutil, stat, subprocess, sys, tempfile
 
 TARGET_BRANCH = "feat/v29-engine"
-RESOLVE_TRIPLES = 21  # entries in the self-test `cases` table, self-asserted
+RESOLVE_TRIPLES = 23  # entries in the self-test `cases` table, self-asserted
 # Scan-tuple positions of the framed record classes (bootstrap, supersede,
 # pass, invocation, exit, binding, rebase-witness); fault-leg sweeps these
 # and the plan's "<word> record classes" phrases cross-check the count.
@@ -97,11 +97,10 @@ def open_append(path):
 def terminate(path):
     fd = open_append(path)
     try:
-        size = os.fstat(fd).st_size
-        if size > 0:
-            os.lseek(fd, size - 1, os.SEEK_SET)
-            if os.read(fd, 1) != b"\n":
-                write_all(fd, b"\n")
+        data, torn = drop_torn(read_fd_bytes(fd))
+        if torn:
+            os.ftruncate(fd, len(data))
+            os.fsync(fd)
     finally:
         os.close(fd)
 
@@ -144,9 +143,11 @@ def complete_lines(path):
 def scan(lines):
     boots, payloads, sups = {}, {}, set()
     passes, binds, invs, exits, wits = [], [], [], [], []
-    for ln in lines:
+    for lineno, ln in enumerate(lines, 1):
         body = parse_line(ln)
         if body is None:
+            if ln.startswith("rec "):
+                return None, "corrupt frame at line %d" % lineno
             continue
         m = B.fullmatch(body)
         if m:
@@ -819,6 +820,13 @@ def selftest(root):
         return rl("binding branch=%s bound_sha=%s branch_tip=%s"
                   " previous_bound_sha=%s producer=%s"
                   % (TARGET_BRANCH, bound, tip or bound, prev, producer))
+    def corrupt_field(line, idx):
+        # line is one framed record ending in "\n"; field 1 = length,
+        # field 2 = digest.
+        parts = line.rstrip("\n").split(" ", 3)
+        parts[idx] = (str(int(parts[idx]) + 1) if idx == 1
+                      else ("0" * 64 if parts[idx][0] != "0" else "1" * 64))
+        return " ".join(parts) + "\n"
     B0 = bnd(sha_a, "none", "task0")
     MISS1 = ("expected exactly one valid hostile-legs-pass for"
              " bootstrap 1, found %d")
@@ -826,6 +834,12 @@ def selftest(root):
             " rerun the record-placement command")
     CUR = "current=%d payload-sha256=%s"
     cases = [
+        ("interior-corrupt-digest",
+         corrupt_field(rec(1, "L1"), 2) + ps(1, "L1") + B0,
+         1, "corrupt frame at line 1", False),
+        ("interior-corrupt-length",
+         corrupt_field(rec(1, "L1"), 1) + ps(1, "L1") + B0,
+         1, "corrupt frame at line 1", False),
         ("valid", rec(1, "L1") + ps(1, "L1") + B0,
          0, CUR % (1, hx(pl("L1"))), False),
         ("valid-rebind", rec(1, "L1") + ps(1, "L1") + B0 + sup(1)
@@ -866,7 +880,8 @@ def selftest(root):
          1, "bootstrap 1 payload digest mismatch", False),
         ("missing-pass", rec(1, "L1") + B0, 1, MISS1 % 0, False),
         ("wrong-runner-pass", rec(1, "L1") + B0
-         + ps(1, "L1").replace(rh, "b" * 64), 1, MISS1 % 0, False),
+         + rl(parse_line(ps(1, "L1").rstrip("\n")).replace(rh, "b" * 64)),
+         1, MISS1 % 0, False),
         ("duplicate-pass", rec(1, "L1") + ps(1, "L1") + ps(1, "L1") + B0,
          1, MISS1 % 2, False),
         ("malformed-binding", rec(1, "L1") + ps(1, "L1")
@@ -931,8 +946,10 @@ def selftest(root):
                 bad.append("embedded-frame truncation validated at %d" % cut)
         rs = pfile("recover-supersede", rec(1, "L1") + ps(1, "L1") + B0
                    + sup(1).rstrip("\n"))
+        # A fully framed but non-newline-terminated record is not landed:
+        # the terminator is part of the durable-write contract.
         expect("recover-supersede step", supersede_if_absent(rs, "1"),
-               (0, "supersession-present"))
+               (0, "supersession-appended"))
         ten = "".join(rec(i, "L%d" % i) for i in range(1, 11)) \
             + "".join(sup(i) for i in range(1, 10)) + ps(10, "L10") + B0
         sd = pfile("short-supersede-digit",

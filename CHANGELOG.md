@@ -3,6 +3,30 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow the project's own release numbering.
 
+## [2.9.1] — 2026-08-23
+
+A distribution-hardening patch: the relay engine ships inside every plugin bundle, Codex becomes a verified plugin host with write-time relay-lint hooks, and the orchestrator/master pair skills become derived subordinate variants.
+
+### Added
+
+- **Engine distribution.**
+  The relay engine and CLI ship inside all three plugin bundles under `tools/`, with adapter-ladder resolution switched to the bundled engine and version/fingerprint identity reporting (`relay version`) for consumer repointing.
+- **Dual-host relay-lint hooks.**
+  `hooks/hooks.json` ships in every bundle: the PostToolUse normalizer gains additive apply_patch envelope-target coverage — exact-target lint with silent-clean success, an explicit noisy UNLINTED fallback, and per-pass dedup of repeated identical targets — while the Bash guard is unchanged by the hooks work itself — its only change this release is the ladder switch above; a live-Codex witness proves the one-time trust prompt, blocked-invalid feedback, and silent-clean behavior on codex-cli 0.149.0.
+- **Codex plugin install route.**
+  The README's Codex section now leads with the verified `codex plugin marketplace add` / `codex plugin add` route; manual `.agents/skills` copy is the documented fallback for air-gapped installs.
+- **Derived pair-skill variants (option C).**
+  The adt-orchestrator and adt-master pair skills are derived artifacts — a tier-neutral subordination preamble plus the adt-pair base body — materialized from `skills/variants/` by the generator, drift-guarded in both check carriers, each shipped copy with single-source provenance.
+- **Relay-tree lint.**
+  The engine gains typed relay-tree integrity lint with hardened cursor/index gating, growing the engine suite to 360 tests.
+
+### Changed
+
+- **`HUMAN_GATE_REQUIRED` annotation warning.**
+  A bare `yes` without the required annotation now warns, in the standalone linter and the engine's port alike.
+- **Engine hygiene and parity hardening.**
+  The v2.9.1 hygiene items land across the engine (including the relay-root xroot mechanism and the cf1 lint port), with archive-extraction parity witnessed at every stack position.
+
 ## [2.9.0] — 2026-08-16
 
 The largest release to date: a third seat tier, a hardened relay linter with a mutation-tested fixture corpus, a native relay engine at verified parity, and tier-scoped plugin distribution.

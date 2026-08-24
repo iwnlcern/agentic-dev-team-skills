@@ -11,6 +11,10 @@ from relay_engine.envelope import parse_draft
 from relay_engine.ledger import admit, init_schema
 from relay_engine.paths import Root, ensure_engine_dir
 from relay_engine.render import render_relay
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+CID, DID = cid_did()
 
 
 DRAFT = """## relay
@@ -166,6 +170,7 @@ class _CapturedText:
 
 class TestShowBody(unittest.TestCase):
     def test_show_body_byte_exact(self):
+        self.assertEqual(CID, DID)
         body = b"\x00database-shaped\nraw\xff"
         real_request = client.request
         real_stdout = cli.sys.stdout

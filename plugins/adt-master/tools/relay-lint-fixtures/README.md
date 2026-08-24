@@ -18,6 +18,7 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `design-review/` | 24 | DESIGN → DESIGN-REVIEW → gated PLAN lineage, including shared-thread resolver precision |
 | `fold/` | 13 | REVIEW-FOLD scope artifacts: FOLD_SCOPE blocks, OUT rows, ordering |
 | `hardening/` | 13 | Hardened field and block-boundary edges: downgrades, detached rows, filled-template and prose-delegation forms |
+| `humangate/` | 4 | HUMAN_GATE_REQUIRED annotation discipline: bare/separator-only `yes` warns, annotated `yes` and `no` forms stay silent |
 | `identity/` | 1 | ROLE/FROM proxy-authoring tripwire |
 | `indexmarker/` | 3 | INDEX `root:` marker mechanics: placement and duplicate refusal |
 | `kr8a/` | 4 | KR8A carrier exemption: quoted work claims in carriers versus live tokens |
@@ -35,8 +36,9 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `rootindex/` | 2 | Root INDEX ordering |
 | `rootres/` | 15 | INDEX root resolution: markers, file cells, duplicates, near-misses |
 | `rowtruth/` | 5 | ROW_TRUTH_CHECK evidence hooks for FOLD_SCOPE and SCOPE_DIFF rows |
+| `xroot/` | 121 | Declared cross-root design edge: both axes, fail-closed, plan-path symmetry, carrier engagement, and hostile-object containment; generated at harness runtime by tools/xrootfixgen.py |
 
-**632 harness-asserted outcomes** across 24 families.
+**757 harness-asserted outcomes** across 26 families.
 
 Two notes on the corpus shape.
 An outcome is one harness assertion, not one file: the lineage-bearing families (`mastertier/`, `design-review/`, `lockdigest/`, and others) stage whole relay-root scenarios — several relay files plus an INDEX per case — because the rules under test judge chains, not single relays.

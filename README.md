@@ -67,7 +67,7 @@ whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix 
 own correctness gate (`python3 tools/check-relay-lint-fixtures.py`, plus
 `python3 tools/check-timestamp-drift.py` for clock-dependent checks).
 
-Current version: v2.9.0 — four-tier vocabulary, three nested plugins, canonical-source generator.
+Current version: v2.9.1 — four-tier vocabulary, three nested plugins, canonical-source generator.
 
 ## Install
 
@@ -87,9 +87,21 @@ Manual/drop-in: copy `plugins/adt-<tier>/skills/*` into the host skills root and
 For Claude Code the user skills root is `~/.claude/skills/`; the auto-lint hook setup is
 documented in `tools/adapters/README.md`.
 
-- Codex (and any `.agents/skills` host): copy `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working deprecated destination.
-  Manual copy is the deliberate v2.9 distribution choice for this host, and it needs no manifest (filesystem discovery: https://learn.chatgpt.com/docs/build-skills).
-  Codex plugin distribution does exist and is what current first-party guidance recommends for reusable distribution (https://developers.openai.com/codex/skills); it remains out of scope for v2.9 by operator decision — no request recorded — not because the host lacks the route.
+- Codex: install via the plugin route, same repository, no separate artifact (verified 2026-08-20
+  on codex-cli 0.149.0 for adt-pair, adt-orchestrator, and adt-master):
+
+  ```text
+  codex plugin marketplace add iwnlcern/agentic-dev-team-skills
+  codex plugin add adt-<tier>@agentic-dev-team-skills
+  ```
+
+  Codex discovers `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json` natively, so
+  the Claude Code marketplace layout serves both hosts unchanged, with skill adjacency intact.
+  Fallback (air-gapped installs, or any other `.agents/skills` host): copy
+  `plugins/adt-<tier>/skills/*` into `.agents/skills/` (project) or `~/.agents/skills/` (user), and
+  `plugins/adt-<tier>/tools/` to `~/.agents/skills/tools/`; `~/.codex/skills` remains a working
+  deprecated destination. Manual copy needs no manifest (filesystem discovery:
+  https://learn.chatgpt.com/docs/build-skills).
 
 Do not install the canonical `skills/` dirs directly. They are sources, not install artifacts;
 installing them directly ships broken skills (no adjacent `protocol.md`).

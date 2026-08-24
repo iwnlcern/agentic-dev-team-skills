@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
+          },
+          {
+            "type": "command",
+            "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/bash-relay-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/relay-lint-posttooluse.sh\""
+          },
+          {
+            "type": "command",
+            "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/bash-relay-guard.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
