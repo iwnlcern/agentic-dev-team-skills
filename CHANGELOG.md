@@ -3,6 +3,20 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow the project's own release numbering.
 
+## [2.9.2] — 2026-08-24
+
+A migration hotfix: two small fixes found by the first consumer migrations, nothing else.
+The number is one patch step, but the change is one migrate carve-out and one corrected paragraph — far smaller than the jump from 2.9 to 2.9.1.
+
+- **`migrate check`/`cutover` gain the legacy carve-out.**
+  Unparseable pre-engine relay bytes are inventoried as immutable history instead of redding the verdict and refusing cutover; the receipt records the malformed set, and cutover excludes exactly that set (a drifted set still refuses).
+  Found by the pdc-bivpak migration, whose pre-2.9 roots could never cut over as shipped (the harness-frank migration hit the same wall and worked around it with a fresh root).
+- **`sprint-doc-setup` no longer claims the daemon is "not yet adopted".**
+  The stale operator-quickstart clause predated the engine's production adoption and instructed seats to hand-maintain `INDEX.md` unconditionally — in an engine-managed root that is a defect, not the ceremony floor.
+  The paragraph now states the mode split: engine-managed roots file through `relay submit` with the daemon as the only `INDEX.md` writer; hand-authored roots (pre-cutover or rolled back) keep the D7 gated-append floor.
+  Found by the harness-frank migration; shipped into all three plugin tiers by regeneration.
+- Kit identity 2.9.1 → 2.9.2; the engine suite measures 361 tests (`AGENTS.md:18`).
+
 ## [2.9.1] — 2026-08-23
 
 A distribution-hardening patch: the relay engine ships inside every plugin bundle, Codex becomes a verified plugin host with write-time relay-lint hooks, and the orchestrator/master pair skills become derived subordinate variants.
