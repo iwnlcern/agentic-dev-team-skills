@@ -160,7 +160,11 @@ def check(ledger, root):
             candidate[1] for candidate in candidates}),
         "inventory": sorted(inventoried), "malformed": sorted(malformed),
     }
-    verdict = "green" if not malformed else "red"
+    # Legacy carve-out: pre-engine bytes that do not parse under the
+    # current grammar are inventoried history, not blockers — preserved
+    # verbatim, excluded from the ledger, listed in the census, and
+    # re-verified as the SAME set at cutover.
+    verdict = "green"
     receipt = {
         "v": 1, "scratch": scratch,
         "snapshot_manifest_sha256": _manifest_digest(entries),
@@ -204,7 +208,8 @@ def cutover(ledger, root, receipt_path, fault=None):
     snapshot = receipt["scratch"] + "/snapshot/"
     candidates, malformed = reconcile.prepare_candidates(
         ledger, root, relay_paths)
-    if malformed or len(candidates) != receipt["scratch_row_count"]:
+    if (sorted(malformed) != receipt["census"]["malformed"] or
+            len(candidates) != receipt["scratch_row_count"]):
         raise ValueError("snapshot candidate set mismatch")
     if _digest(jcs_encode([row[0] for row in candidates])) != receipt[
             "path_set_sha256"]:

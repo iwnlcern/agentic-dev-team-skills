@@ -15,7 +15,7 @@ Instructions for coding agents working on this repository.
 - Verify generated trees match canonical sources: `python3 tools/generate-plugins.py --check`
 - Self-tests: `python3 tools/check-relay-lint-fixtures.py`, `python3 tools/check-timestamp-drift.py`, `python3 tools/check-generate-plugins.py`, `python3 tools/check-fixture-readme-census.py`, and `bash tools/adapters/claude-code/test-adapter.sh`
 - Engine test suite, contributor entry point (assumes a POSIX shell and `python3` at 3.11 or newer on `PATH`): `PYTHONPATH=tools PYTHONWARNINGS=error::ResourceWarning RELAY_ENGINE_RESULTS_ROOT="$(python3 -c 'import tempfile; print(tempfile.mkdtemp())')" RELAY_ENGINE_MATRIX_RUN="$(python3 -c 'import uuid; print(uuid.uuid4())')" python3 -m unittest discover -s tools/relay_engine/tests -t tools`
-  Inspect the transcript: it should end with `Ran 360 tests` and exactly `OK` — any `skipped` count means the environment exports did not take effect.
+  Inspect the transcript: it should end with `Ran 361 tests` and exactly `OK` — any `skipped` count means the environment exports did not take effect.
   The run leaves an unretained temporary directory under the system temp root; it does not produce the engine lane's persisted acceptance artifacts, whose retained-environment proof sequence lives in that lane's plan.
 - Lint one relay: `python3 tools/relay-lint.py <file>`
 
