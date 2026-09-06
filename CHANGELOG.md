@@ -3,6 +3,17 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow the project's own release numbering.
 
+## [2.9.3] — 2026-08-25
+
+A docs-only hotfix, smaller still than 2.9.2: one corrected status paragraph and one init directive.
+
+- **The engine's own README no longer claims "the relay engine is not adopted".**
+  The status paragraph predated the 2.9.1 production adoption — the very claim 2.9.2 removed from `sprint-doc-setup` survived here under a different spelling ("not adopted" vs "not yet adopted") and escaped that release's phrase-exact survey; a consumer master session read it, took hand mode as current practice, and never surfaced the mode choice to its operator.
+  The README now states the same operator-chosen mode split as `sprint-doc-setup`, with `relay migrate` as the only path between modes.
+  The README is engine-roster content, so the fingerprint moves; the kit version bumps because plugin update machinery propagates on the version string.
+- **`sprint-doc-setup` init now requires the operator's mode choice before the first boot relay.**
+  The booting seat asks whether the run's root is engine-managed or hand-authored and records the answer in its first relay — the mode is never inferred from a document or a default.
+
 ## [2.9.2] — 2026-08-24
 
 A migration hotfix: two small fixes found by the first consumer migrations, nothing else.

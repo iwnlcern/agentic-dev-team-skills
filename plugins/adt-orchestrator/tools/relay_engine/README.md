@@ -1,7 +1,13 @@
 # Relay engine
 
-Status: the relay engine is not adopted. The shipped skills workflow remains
-current practice; this document describes a relay root operating under a daemon.
+Status: the relay engine is adopted and in production use since kit 2.9.1. A
+relay root operates in one of two modes, chosen by the operator at run init:
+engine-managed (a daemon has cut over and serves it; seats file through
+`.engine/drafts/` + `relay submit` and only the daemon writes `INDEX.md`) or
+hand-authored (pre-cutover, or rolled back; the D7 ceremony floor files relays
+and maintains `INDEX.md`). A root never changes mode implicitly — `relay
+migrate` is the only path between the modes. This document describes a relay
+root operating under a daemon.
 
 `relay` creates, checks, and records governed relays beneath one canonical
 root. Start one daemon for the root before registering seats or submitting
