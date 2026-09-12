@@ -199,3 +199,98 @@ class TestHeaderAndGrammar(IndexContractCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestRegistrationOrderAndSupersession(IndexContractCase):
+    def test_ordinary_registration_appends_one_boot_row_top_adds_none(self):
+        first = self.register("v29-a.planner")
+        rows_after_first = self.rows()
+        self.assertEqual(len(rows_after_first), 1)
+        self.assertEqual(rows_after_first[0][1], "BOOT")
+        self.assertEqual(rows_after_first[0][9], first["boot_relay"])
+        second = self.register("v29-a.implementer", "Implementer")
+        rows_after_second = self.rows()
+        self.assertEqual(len(rows_after_second), 2)
+        self.assertEqual(rows_after_second[0], rows_after_first[0])
+        self.assertEqual(rows_after_second[1][9], second["boot_relay"])
+        digest_before_top = self.index_digest()
+        top = seats.register(self.ledger, self.root,
+                             "v29.orchestrator-planner",
+                             "Orchestrator Planner", top=True)
+        self.assertIsNone(top["boot_relay"])
+        self.assertEqual(self.rows(), rows_after_second)
+        self.assertEqual(self.index_digest(), digest_before_top)
+
+    def test_rows_are_in_filing_order_with_unique_file_cells(self):
+        self.register("v29-a.planner")
+        self.register("v29-a.implementer", "Implementer")
+        boot_rows = self.rows()
+        self.assertEqual(len(boot_rows), 2)
+        w1, _ = self.admit_relay(draft("v29-work-1", "v29-a.planner",
+                                       "v29-a.implementer"), "w1")
+        w2, _ = self.admit_relay(draft("v29-work-2", "v29-a.implementer",
+                                       "v29-a.planner"), "w2")
+        w3, _ = self.admit_relay(draft("v29-work-3", "v29-a.planner",
+                                       "v29-a.implementer"), "w3")
+        rows = self.rows()
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[:2], boot_rows)
+        self.assertEqual([row[9] for row in rows[2:]],
+                         [w1.rendered_path, w2.rendered_path,
+                          w3.rendered_path])
+        self.assertEqual(len({row[9] for row in rows}), 5)
+        self.assertEqual([row[0] for row in rows],
+                         sorted(row[0] for row in rows))
+
+    def test_effective_supersession_appends_and_changes_only_target_status(self):
+        self.register("v29-a.planner")
+        self.register("v29-a.implementer", "Implementer")
+        w1, _ = self.admit_relay(draft("v29-work-1", "v29-a.planner",
+                                       "v29-a.implementer"), "w1")
+        self.admit_relay(draft("v29-work-2", "v29-a.implementer",
+                               "v29-a.planner"), "w2")
+        self.admit_relay(draft("v29-work-3", "v29-a.planner",
+                               "v29-a.implementer"), "w3")
+        before = self.rows()
+        self.assertEqual(len(before), 5)
+        self.assertEqual(before[2][9], w1.rendered_path)
+        self.assertEqual(before[2][8], "—")
+        ruling, _ = self.admit_relay(
+            draft("v29-rule-1", "operator", "v29-a.planner",
+                  supersedes=w1.rendered_path, subject="ruling"), "r1")
+        after = self.rows()
+        self.assertEqual(len(after), 6)
+        self.assertEqual(after[5][9], ruling.rendered_path)
+        for index, (old, new) in enumerate(zip(before, after[:5])):
+            if index == 2:
+                self.assertEqual(new[8], "superseded")
+                self.assertEqual(old[:8] + ["—"] + old[9:],
+                                 new[:8] + ["—"] + new[9:])
+            else:
+                self.assertEqual(old, new)
+        self.assertEqual(self.ledger.execute(
+            "SELECT target_seq,applied FROM supersession_edges").fetchall(),
+            [(w1.seq, 1)])
+
+    def test_pair_seat_supersession_is_ineffective_and_changes_no_existing_cell(self):
+        self.register("v29-a.planner")
+        self.register("v29-a.implementer", "Implementer")
+        self.admit_relay(draft("v29-work-1", "v29-a.planner",
+                               "v29-a.implementer"), "w1")
+        w2, _ = self.admit_relay(draft("v29-work-2", "v29-a.implementer",
+                                       "v29-a.planner"), "w2")
+        before = self.rows()
+        # Reviewer's note: the control targets an UNSUPERSEDED relay so an
+        # accidentally effective edge cannot hide behind an existing
+        # superseded status.
+        self.assertEqual(before[3][9], w2.rendered_path)
+        self.assertEqual(before[3][8], "—")
+        control, _ = self.admit_relay(
+            draft("v29-rule-2", "v29-a.implementer", "v29-a.planner",
+                  supersedes=w2.rendered_path, subject="not a ruling"),
+            "r2")
+        after = self.rows()
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(after[:-1], before)
+        self.assertEqual(after[-1][9], control.rendered_path)
+        self.assertEqual(self.ledger.execute(
+            "SELECT COUNT(*) FROM supersession_edges").fetchone()[0], 0)
