@@ -363,3 +363,71 @@ class TestProductionSubmitRerender(IndexContractCase):
         self.assertEqual(self.rendered_index_events(), events_before)
         self.assertEqual(self.rows(), rows_before)
         self.assertNotIn(result["path"], [row[9] for row in self.rows()])
+
+class TestAtomicPublication(IndexContractCase):
+    def _observe(self, seen, held):
+        # First action: open by name. A missing destination raises
+        # FileNotFoundError here, before any assertion runs.
+        with open(self.index_path(), "rb") as by_name:
+            seen["by_name"] = by_name.read()
+        held.seek(0)
+        seen["held"] = held.read()
+
+    def test_rename_publication_never_exposes_a_missing_or_partial_index(self):
+        self.register("v29-a.planner")
+        before = self.index_bytes()
+        held = open(self.index_path(), "rb")
+        self.addCleanup(held.close)
+        seen = {}
+        real = TempWrite.rename_replace
+
+        def observed_real(pending):
+            self._observe(seen, held)
+            return real(pending)
+
+        with mock.patch.object(TempWrite, "rename_replace", observed_real):
+            _admission, result = self.admit_relay(
+                draft("v29-work-1", "v29-a.planner", "v29-a.implementer"),
+                "w1")
+        after = self.index_bytes()
+        self.assertEqual(result.event, "rendered")
+        # At the publication boundary the name still resolved to the
+        # complete previous bytes, and so did the held descriptor.
+        self.assertEqual(seen["by_name"], before)
+        self.assertEqual(seen["held"], before)
+        # After publication: new complete bytes by name; the held
+        # descriptor still reads the previous complete bytes.
+        self.assertNotEqual(after, before)
+        self.assertEqual(hashlib.sha256(after).hexdigest(), result.digest)
+        held.seek(0)
+        self.assertEqual(held.read(), before)
+
+    def test_oracle_rejects_an_unlink_then_create_implementation(self):
+        self.register("v29-a.planner")
+        held = open(self.index_path(), "rb")
+        self.addCleanup(held.close)
+        seen = {}
+
+        def unlink_then_create(pending):
+            # A plausible wrong implementation: remove the old name first,
+            # then link the new bytes into place. Between those two steps
+            # the name is absent, which the shared observation catches.
+            pending._writer.flush()
+            os.unlink(pending.destination, dir_fd=pending.parent_fd)
+            self._observe(seen, held)
+            os.link(pending.temp_name, pending.destination,
+                    src_dir_fd=pending.parent_fd,
+                    dst_dir_fd=pending.parent_fd, follow_symlinks=False)
+            os.unlink(pending.temp_name, dir_fd=pending.parent_fd)
+            pending.temp_name = None
+            pending._published = True
+
+        with mock.patch.object(TempWrite, "rename_replace",
+                               unlink_then_create):
+            with self.assertRaises(FileNotFoundError):
+                self.admit_relay(
+                    draft("v29-work-1", "v29-a.planner",
+                          "v29-a.implementer"), "w1")
+        self.assertNotIn("by_name", seen)
+        # The scratch root is cleaned by tearDown even after the expected
+        # rejection; nothing else is asserted about the broken state.
