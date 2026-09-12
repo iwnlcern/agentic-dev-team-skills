@@ -196,10 +196,6 @@ class TestHeaderAndGrammar(IndexContractCase):
         self.assertEqual(row[7], "—")   # cc
         self.assertEqual(row[8], "—")   # status
 
-
-if __name__ == "__main__":
-    unittest.main()
-
 class TestRegistrationOrderAndSupersession(IndexContractCase):
     def test_ordinary_registration_appends_one_boot_row_top_adds_none(self):
         first = self.register("v29-a.planner")
@@ -431,3 +427,7 @@ class TestAtomicPublication(IndexContractCase):
         self.assertNotIn("by_name", seen)
         # The scratch root is cleaned by tearDown even after the expected
         # rejection; nothing else is asserted about the broken state.
+
+
+if __name__ == "__main__":
+    unittest.main()
