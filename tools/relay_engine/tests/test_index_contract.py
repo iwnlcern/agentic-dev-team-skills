@@ -294,3 +294,72 @@ class TestRegistrationOrderAndSupersession(IndexContractCase):
         self.assertEqual(after[-1][9], control.rendered_path)
         self.assertEqual(self.ledger.execute(
             "SELECT COUNT(*) FROM supersession_edges").fetchone()[0], 0)
+
+class TestProductionSubmitRerender(IndexContractCase):
+    def setUp(self):
+        super().setUp()
+        self.register("v29-a.planner")
+        self.register("v29-a.implementer", "Implementer")
+
+    def test_each_production_submit_publishes_a_new_index(self):
+        # Two ordinary registrations already re-rendered the index twice.
+        self.assertEqual(self.rendered_index_events(), 2)
+        digests = [self.index_digest()]
+        events = [self.rendered_index_events()]
+        for number in (1, 2, 3):
+            result = self.submit(
+                draft("v29-work-%d" % number, "v29-a.planner",
+                      "v29-a.implementer"), "w%d" % number)
+            self.assertFalse(result["duplicate"])
+            self.assertEqual(result["render_state"], "rendered")
+            self.assertEqual(self.rows()[-1][9], result["path"])
+            digests.append(self.index_digest())
+            events.append(self.rendered_index_events())
+        self.assertEqual(len(set(digests)), len(digests))
+        self.assertEqual(events, [2, 3, 4, 5])
+        self.assertEqual(len(self.rows()), 5)
+
+    def test_replay_submit_reuses_the_row_and_leaves_bytes_count_and_digest_unchanged(self):
+        text = draft("v29-work-1", "v29-a.planner", "v29-a.implementer")
+        first = self.submit(text, "w1")
+        self.assertFalse(first["duplicate"])
+        bytes_before = self.index_bytes()
+        rows_before = self.rows()
+        events_before = self.rendered_index_events()
+        # Reviewer's note: no intervening admission between the original
+        # and the replay.
+        replay = self.submit(text, "w1")
+        self.assertTrue(replay["duplicate"])
+        self.assertEqual(replay["path"], first["path"])
+        self.assertEqual(self.index_bytes(), bytes_before)
+        self.assertEqual(self.rows(), rows_before)
+        # The production render path still runs and records one rendered
+        # event; the bytes do not change (DD-v295-b1 guarantee 7,
+        # criterion 6).
+        self.assertEqual(self.rendered_index_events(), events_before + 1)
+        self.assertEqual(self.ledger.execute(
+            "SELECT COUNT(*) FROM relays").fetchone()[0], 3)
+
+    def test_witness_fails_when_production_publication_is_suppressed(self):
+        # Witness-of-the-witness: if production stops publishing the index
+        # on submit, the positive predicate must become false. The patch
+        # targets the name the handler resolves (daemon.render_index).
+        digest_before = self.index_digest()
+        events_before = self.rendered_index_events()
+        rows_before = self.rows()
+        with mock.patch.object(daemon, "render_index",
+                               mock.Mock(return_value=None)) as suppressed:
+            result = self.submit(
+                draft("v29-work-1", "v29-a.planner", "v29-a.implementer"),
+                "w1")
+        self.assertEqual(suppressed.call_count, 1)
+        self.assertFalse(result["duplicate"])
+        # The relay row exists in the record...
+        self.assertEqual(self.ledger.execute(
+            "SELECT COUNT(*) FROM relays").fetchone()[0], 3)
+        # ...but the index was not published: the positive predicate
+        # (digest changed AND one more rendered event) is false.
+        self.assertEqual(self.index_digest(), digest_before)
+        self.assertEqual(self.rendered_index_events(), events_before)
+        self.assertEqual(self.rows(), rows_before)
+        self.assertNotIn(result["path"], [row[9] for row in self.rows()])
