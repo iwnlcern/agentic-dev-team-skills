@@ -198,5 +198,350 @@ class IndexReaderTests(TmpEnv):
         self.assertIsNone(self.rm.locate(snap, {"file": "lane/gone.md", "position": 9}))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class StallingSink:
+    """Accepts `accept_first` bytes of the first write, then returns 0 until `released`."""
+    def __init__(self, accept_first):
+        self.buf = bytearray(); self.accept_first = accept_first; self.calls = 0; self.released = False
+    def write(self, data):
+        self.calls += 1
+        if self.calls == 1 and self.accept_first:
+            self.buf += data[: self.accept_first]; return self.accept_first
+        if not self.released:
+            return 0
+        self.buf += data; return len(data)
+    def wait_writable(self, timeout): time.sleep(min(timeout, 0.01)); return self.released
+    def flush(self): pass
+
+
+class GateSink:
+    """Signals `entered` when a consumer is inside its locked write, then blocks until `release` is set."""
+    def __init__(self):
+        self.buf = bytearray(); self.entered = threading.Event(); self.release = threading.Event()
+    def write(self, data):
+        self.entered.set(); self.release.wait(5.0); self.buf += data; return len(data)
+    def wait_writable(self, timeout): return True
+    def flush(self): pass
+
+
+def hold_owner_lock(test, path):
+    """Start a child that holds an exclusive flock on `path` for the test's life; returns once it reports the hold."""
+    code = "import fcntl, sys, time; f = open(sys.argv[1], 'w'); fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)"
+    p = subprocess.Popen([sys.executable, "-c", code, str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    test.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close()))
+    test.assertEqual(p.stdout.readline().strip(), "held")
+    return p
+
+
+class DeliveryTests(TmpEnv):
+    def setUp(self):
+        super().setUp(); self.store = self.rm.NoteStore("sess"); self.inst = "leader-1"
+
+    def bind(self, anchor=None):
+        cur = dict(self.rm.SENTINEL) if anchor is None else anchor
+        def fn(n):
+            n.update({"seat": "b.implementer", "root": str(self.root), "anchor": cur["file"], "binding_gen": 1, "binding_source": "hook", "leader": {"pid": os.getpid(), "start_time": "x", "instance": self.inst}})
+            n["progress"][str(self.root)] = dict(cur); self.rm.record_floor(n, str(self.root), "b.implementer", cur)
+        self.store.update(fn)
+
+    def deliver(self, sink=None, deadline=0.5, snap=None, **kw):
+        sink = sink if sink is not None else self.rm.ByteSink()
+        binding = kw.pop("binding", None) or self.rm.resolve_binding(self.store.load(), {}, None)
+        snap = snap or self.rm.read_index(self.index)
+        return self.rm.deliver_once(self.store, sink, binding, snap, end=time.monotonic() + deadline, leader_instance=self.inst, **kw), sink
+
+    def files(self, sink):
+        return [json.loads(l)["file"] for l in bytes(sink.buf).decode().splitlines()]
+
+    def test_env_override_wins_and_partial_is_ignored(self):
+        self.bind()
+        with mock.patch.dict(os.environ, {"ADT_SEAT": "z.planner", "ADT_RELAY_ROOT": "/other"}):
+            b = self.rm.resolve_binding(self.store.load(), os.environ, None); self.assertEqual((b.seat, b.root, b.source), ("z.planner", "/other", "env"))
+        with mock.patch.dict(os.environ, {"ADT_SEAT": "z.planner"}):
+            note = self.store.load(); b = self.rm.resolve_binding(note, os.environ, None); self.assertEqual(b.source, "hook"); self.assertEqual(note["reason"], "override-incomplete")
+
+    def test_cc_only_65_then_129_once_across_rereads_restart_and_status_only(self):
+        self.bind(); write_index(self.index, "".join(row(i, cc="b.implementer") for i in range(1, 66)))
+        r, s = self.deliver(); self.assertEqual(r.emitted, 65)
+        r, s = self.deliver(); self.assertEqual(r.emitted, 0)
+        write_index(self.index, "".join(row(i, cc="b.implementer") for i in range(1, 130)))
+        r, s = self.deliver(); self.assertEqual(r.emitted, 64); self.assertEqual(self.files(s), [f"lane/r{i}.md" for i in range(66, 130)])
+        self.rm = load_script(); self.store = self.rm.NoteStore("sess")                      # restart: fresh module, same note
+        r, s = self.deliver(); self.assertEqual(r.emitted, 0)
+        write_index(self.index, "".join(row(i, cc="b.implementer", status=("superseded" if i == 3 else "—")) for i in range(1, 130)))
+        r, s = self.deliver(); self.assertEqual(r.emitted, 0)
+
+    def test_pending_row_survives_binding_refresh(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer") + row(2, frm="b.implementer", to="a.planner"))
+        self.store.update(lambda n: n.update({"anchor": "lane/r2.md", "binding_gen": 2}))
+        r, s = self.deliver(); self.assertEqual(self.files(s), ["lane/r1.md"])
+        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r2.md")
+
+    def test_two_consumers_same_snapshot_emit_once_with_barriers(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        snap = self.rm.read_index(self.index); binding = self.rm.resolve_binding(self.store.load(), {}, None)
+        first_sink, second_sink, results = GateSink(), self.rm.ByteSink(), {}
+        second_store = self.rm.NoteStore("sess"); attempt = threading.Event(); second_store.observer = lambda ev: attempt.set()
+        t1 = threading.Thread(target=lambda: results.update(first=self.rm.deliver_once(self.store, first_sink, binding, snap, end=time.monotonic() + 5.0, leader_instance=self.inst)))
+        t2 = threading.Thread(target=lambda: results.update(second=self.rm.deliver_once(second_store, second_sink, binding, snap, end=time.monotonic() + 5.0, leader_instance=self.inst, start_cursor=dict(self.rm.SENTINEL))))
+        self.addCleanup(lambda: (first_sink.release.set(), [t.join(5) for t in (t1, t2) if t.ident is not None]))   # join only threads that started
+        t1.start(); self.assertTrue(first_sink.entered.wait(5.0))            # first is inside its locked write
+        t2.start(); self.assertTrue(attempt.wait(5.0)); time.sleep(0.05)     # second has begun its lock attempt and is blocked
+        first_sink.release.set(); t1.join(5); t2.join(5)
+        self.assertEqual((results["first"].emitted, results["second"].emitted), (1, 0)); self.assertEqual(results["second"].aborted, "progress-moved")
+
+    def test_captured_binding_is_validated_not_fresh_note(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        snap = self.rm.read_index(self.index); binding = self.rm.resolve_binding(self.store.load(), {}, None)
+        self.store.update(lambda n: n.update({"seat": "z.planner"}))                             # same root, seat switched, gen unchanged
+        r = self.rm.deliver_once(self.store, self.rm.ByteSink(), binding, snap, end=time.monotonic() + 0.5, leader_instance=self.inst)
+        self.assertEqual((r.emitted, r.aborted), (0, "binding-changed"))
+
+    def test_prefix_stall_then_resume_yields_one_framed_line(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        sink = StallingSink(accept_first=7); r, _ = self.deliver(sink=sink, deadline=0.2)
+        self.assertEqual((r.emitted, r.aborted), (0, "output-stalled"))
+        note = self.store.load(); self.assertEqual(note["frame"]["accepted"], 7); self.assertEqual(note["frame"]["identity"]["leader"], self.inst)
+        self.assertEqual(note["progress"][str(self.root)], self.rm.SENTINEL)
+        sink.released = True; r, _ = self.deliver(sink=sink, deadline=0.2); self.assertEqual(r.emitted, 1)
+        lines = bytes(sink.buf).decode().split("\n"); self.assertEqual(json.loads(lines[0])["file"], "lane/r1.md"); self.assertEqual(lines[1], "")
+        self.assertIsNone(self.store.load()["frame"])
+
+    def test_partial_frame_invalidated_by_drain_or_bind_abandons(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
+        sink = StallingSink(accept_first=5); self.deliver(sink=sink, deadline=0.2)
+        self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/r1.md", "position": 1}))   # drain committed r1 meanwhile
+        sink.released = True
+        with self.assertRaises(self.rm.TransportFailed):
+            self.deliver(sink=sink, deadline=0.2)
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        sink = StallingSink(accept_first=5); self.deliver(sink=sink, deadline=0.2)
+        self.store.update(lambda n: n.update({"root": "/elsewhere", "binding_gen": 9}))                            # bind switched root
+        sink.released = True
+        with self.assertRaises(self.rm.TransportFailed):
+            binding = self.rm.Binding("b.implementer", "/elsewhere", None, 9, "hook")
+            self.rm.deliver_once(self.store, sink, binding, self.rm.read_index(self.index), end=time.monotonic() + 0.2, leader_instance=self.inst)
+
+    def test_foreign_frame_alive_dead_unknown(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        plant = lambda lock, leader="drain-other": self.store.update(lambda n: n.__setitem__("frame", {"identity": {"root": str(self.root), "seat": "b.implementer", "binding_gen": 1, "leader": leader, "file": "lane/r1.md", "owner": {"lock": str(lock)}}, "data": "00", "accepted": 1}))
+        live = self.store.owner_lock_path("drain-live"); holder = hold_owner_lock(self, live)          # alive: a child holds the flock
+        plant(live)
+        with mock.patch.object(self.rm.subprocess, "run", side_effect=AssertionError("external probe")):
+            t0 = time.monotonic(); r, s = self.deliver(); probe = time.monotonic() - t0
+        self.assertEqual((r.emitted, r.aborted), (0, "frame-busy")); self.assertLess(probe, 0.5); self.assertEqual(bytes(s.buf), b"")
+        with self.rm.NoteStore("sess").state_lock(timeout=0.1): pass                                     # the state lock is free immediately after the probe
+        holder.kill(); holder.wait()                                                                     # dead: the flock is released by the kernel
+        r, s = self.deliver(); self.assertEqual((r.emitted, r.aborted), (1, None)); self.assertIsNone(self.store.load()["frame"]); self.assertFalse(live.exists())
+        self.assertEqual(json.loads(bytes(s.buf))["file"], "lane/r1.md")                                # reclaimed: the full row from byte zero
+        self.bind(); unheld = self.store.owner_lock_path("drain-unheld"); unheld.touch(); plant(unheld)
+        r, s = self.deliver(); self.assertEqual(r.emitted, 1); self.assertFalse(unheld.exists())        # dead: a file nobody holds
+        self.bind(); plant(self.store.owner_lock_path("drain-missing"))                                  # unknown: no such file
+        r, s = self.deliver(); self.assertEqual(r.aborted, "frame-busy"); self.assertIsNotNone(self.store.load()["frame"])
+        directory = self.store.owner_lock_path("drain-dir"); directory.mkdir(); plant(directory)          # unknown: unreadable path
+        r, s = self.deliver(); self.assertEqual(r.aborted, "frame-busy"); self.assertIsNotNone(self.store.load()["frame"])
+        self.store.update(lambda n: n.__setitem__("frame", {"identity": {"root": str(self.root), "seat": "b.implementer", "binding_gen": 1, "leader": "other-follower", "file": "lane/r1.md"}, "data": "00", "accepted": 1}))
+        r, s = self.deliver(); self.assertEqual(r.aborted, "frame-busy")                                # a follower frame without an owner is never stale; a new leader clears it
+
+    def plant_owner_frame(self, lock, leader="drain-other"):
+        frame = {"identity": {"root": str(self.root), "seat": "b.implementer", "binding_gen": 1, "leader": leader, "file": "lane/r1.md", "owner": {"lock": str(lock)}}, "data": "00", "accepted": 1}
+        self.store.update(lambda n: n.__setitem__("frame", frame)); return frame
+
+    def test_owner_probe_is_repeatable_and_reclaim_saves_before_unlink(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        unheld = self.store.owner_lock_path("drain-unheld"); unheld.touch(); frame = self.plant_owner_frame(unheld)
+        with self.store.state_lock():
+            self.assertEqual(self.rm.owner_state(frame), "dead"); self.assertTrue(unheld.exists())
+            self.assertEqual(self.rm.owner_state(frame), "dead"); self.assertTrue(unheld.exists())      # observational: the evidence survives repeated probes
+            saved = []
+            real_save = self.store.save
+            def save_then_check(note):
+                real_save(note); saved.append(unheld.exists())                                           # the file must still exist at the moment of the durable save
+            with mock.patch.object(self.store, "save", side_effect=save_then_check):
+                self.rm.reclaim_frame(self.store, self.store.load(), frame)
+        self.assertEqual(saved, [True]); self.assertFalse(unheld.exists()); self.assertIsNone(self.store.load()["frame"])   # unlink only after the save
+
+    def test_failure_between_detection_and_durable_clear_is_recoverable(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        unheld = self.store.owner_lock_path("drain-unheld"); unheld.touch(); frame = self.plant_owner_frame(unheld)
+        with mock.patch.object(self.rm.NoteStore, "save", side_effect=OSError("simulated crash before the durable clear")):
+            with self.assertRaises(OSError):
+                self.deliver()
+        self.assertEqual(self.store.load()["frame"], frame); self.assertTrue(unheld.exists())            # detection consumed nothing
+        r, s = self.deliver(); self.assertEqual(r.emitted, 1); self.assertIsNone(self.store.load()["frame"]); self.assertFalse(unheld.exists())   # the next invocation reclaims
+
+    def test_owner_creation_is_invisible_to_the_sweep(self):
+        opened, resume, result = threading.Event(), threading.Event(), {}
+        def between():
+            opened.set(); resume.wait(5.0)
+        t = threading.Thread(target=lambda: result.update(me=self.rm.stream_owner(self.store, time.monotonic() + 5.0, _between=between)))
+        self.addCleanup(lambda: (resume.set(), t.join(5)))
+        t.start(); self.assertTrue(opened.wait(5.0))                                                    # creator parked between open and flock
+        sweeper = self.rm.NoteStore("sess")
+        with self.assertRaises(self.rm.LockTimeout):
+            with sweeper.state_lock(timeout=0.3):
+                self.rm.sweep_owner_files(sweeper)                                                       # the actual sweep cannot run: the creator holds the state lock
+        resume.set(); t.join(5); me = result["me"]; self.assertIsNotNone(me); path = pathlib.Path(me["lock"])
+        self.assertTrue(path.exists())
+        frame = {"identity": {"owner": {"lock": str(path)}}}
+        with self.store.state_lock():
+            self.assertEqual(self.rm.owner_state(frame), "alive")                                        # published and held
+            self.assertEqual(self.rm.sweep_owner_files(self.store), 0); self.assertTrue(path.exists())   # a held file is never swept
+        me["_lock"].release(unlink=False)
+        with self.store.state_lock():
+            self.assertEqual(self.rm.owner_state(frame), "dead"); self.assertEqual(self.rm.sweep_owner_files(self.store), 1)   # released: reclaimable, then swept as unreferenced
+        self.assertFalse(path.exists())
+
+    def test_sweep_removes_only_unreferenced_acquirable_owner_files(self):
+        self.bind()
+        referenced = self.store.owner_lock_path("drain-referenced"); referenced.touch(); self.plant_owner_frame(referenced)
+        orphan = self.store.owner_lock_path("drain-orphan"); orphan.touch()
+        live = self.store.owner_lock_path("drain-live"); hold_owner_lock(self, live)
+        with self.store.state_lock():
+            self.assertEqual(self.rm.sweep_owner_files(self.store), 1)
+        self.assertTrue(referenced.exists()); self.assertFalse(orphan.exists()); self.assertTrue(live.exists())
+        self.assertIsNotNone(self.store.load()["frame"])
+
+    def test_write_error_raises_transport_failed_and_commits_nothing(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        class Dead:
+            def write(self, d): raise BrokenPipeError()
+            def wait_writable(self, t): return True
+            def flush(self): pass
+        with self.assertRaises(self.rm.TransportFailed):
+            self.deliver(sink=Dead())
+        self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+
+    def test_slow_positive_writes_respect_deadline_and_lock_is_bounded(self):
+        self.bind(); write_index(self.index, row(1, to="b.implementer"))
+        class Trickle:
+            def __init__(self): self.buf = bytearray()
+            def write(self, d): time.sleep(0.05); self.buf += d[:1]; return 1
+            def wait_writable(self, t): return True
+            def flush(self): pass
+        t0 = time.monotonic(); r, _ = self.deliver(sink=Trickle(), deadline=0.2)
+        self.assertEqual(r.aborted, "output-stalled"); self.assertLess(time.monotonic() - t0, 1.0)
+        other = self.rm.NoteStore("sess")
+        with other.state_lock():
+            t0 = time.monotonic(); r, _ = self.deliver(deadline=0.2); self.assertEqual(r.aborted, "lock-timeout"); self.assertLess(time.monotonic() - t0, 1.0)
+            self.index.unlink(); t0 = time.monotonic(); r, _ = self.deliver(deadline=0.2); self.assertIn(r.aborted, ("lock-timeout",)); self.assertLess(time.monotonic() - t0, 1.0)   # error-state update is bounded too
+        write_index(self.index, row(1, to="b.implementer"))
+        class ZeroOnce:
+            def __init__(self): self.buf = bytearray(); self.calls = 0
+            def write(self, d): self.calls += 1; return 0 if self.calls == 1 else (self.buf.extend(d) or len(d))
+            def wait_writable(self, t): return True
+            def flush(self): pass
+        t0 = time.monotonic(); r, _ = self.deliver(sink=ZeroOnce(), deadline=5.0)
+        self.assertEqual(r.aborted, "output-stalled"); self.assertLess(time.monotonic() - t0, 0.5)    # zero progress returns at once: no waiting under the lock
+
+    def test_pacing_is_per_row_and_leaves_rows_pending(self):
+        self.bind(); write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, 13)))
+        pacer = self.rm.Pacer(5, 60.0)
+        r, s = self.deliver(pacer=pacer); self.assertEqual((r.emitted, r.aborted), (5, "paced"))
+        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r5.md")
+        r, s = self.deliver(pacer=self.rm.Pacer(100, 60.0)); self.assertEqual(r.emitted, 7)
+
+    def test_rebase_when_progress_row_absent_and_anchor_present(self):
+        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, 4)))
+        self.bind(anchor={"file": "lane/r1.md", "position": 1})
+        self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/gone.md", "position": 2}))
+        r, s = self.deliver(); self.assertEqual(self.files(s), ["lane/r2.md", "lane/r3.md"]); self.assertEqual(self.store.load()["reason"], "rebased")
+
+    def test_header_only_index_then_first_row_is_delivered(self):
+        self.bind(); self.index.write_text(HEADER)
+        r, _ = self.deliver(); self.assertEqual(r.emitted, 0)
+        write_index(self.index, row(1, to="b.implementer")); r, s = self.deliver(); self.assertEqual(self.files(s), ["lane/r1.md"])
+
+
+class FollowProcessMixin:
+    """Helpers for real-subprocess witnesses; mixed into FollowProcessTests (T3) and EnvRestartReplayTests (T6)."""
+
+    def spawn(self, seat="b.implementer", extra_env=None, anchor=None):
+        env = dict(os.environ, ADT_SEAT=seat, ADT_RELAY_ROOT=str(self.root), **(extra_env or {}))
+        if anchor: env["ADT_RELAY_ANCHOR"] = anchor
+        p = subprocess.Popen([sys.executable, str(SCRIPT), "follow", "--host", "claude-code", "--session", "psess"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close(), p.stderr.close()))
+        return p
+
+    def wait_note(self, pred, timeout=8.0):
+        store, end = self.rm.NoteStore("psess"), time.monotonic() + timeout
+        while time.monotonic() < end:
+            note = store.load()
+            if pred(note): return note
+            time.sleep(0.05)
+        self.fail("note condition not observed: " + json.dumps(store.load(), default=str)[:300])
+
+    def bound(self, note):
+        return note.get("phase") in ("following", "waiting-for-binding") and note.get("leader") and str(self.root) in note.get("progress", {})
+
+    def read_lines(self, proc, count, timeout=8.0):
+        out, end = [], time.monotonic() + timeout
+        fd = proc.stdout.fileno(); os.set_blocking(fd, False); buf = b""
+        while len(out) < count and time.monotonic() < end:
+            r, _, _ = select.select([fd], [], [], 0.2)
+            if r:
+                chunk = os.read(fd, 65536)
+                if not chunk: break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1); out.append(json.loads(line))
+        return out
+
+
+class FollowProcessTests(FollowProcessMixin, TmpEnv):
+    """Real subprocess witnesses: crash injection, takeover on real streams, backlog pacing, note-refresh recovery."""
+
+    def test_crash_after_flush_before_persist_reemits_exactly_one_row(self):
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer") + row(3, to="b.implementer"))
+        p = self.spawn(extra_env={"ADT_TEST_CRASH_AFTER_FLUSH": "1"}, anchor="lane/r1.md")
+        first = self.read_lines(p, 1); p.wait(5); self.assertEqual(p.returncode, 9); self.assertEqual(first[0]["file"], "lane/r2.md")
+        p = self.spawn(anchor="lane/r1.md"); got = self.read_lines(p, 2)
+        self.assertEqual([g["file"] for g in got], ["lane/r2.md", "lane/r3.md"])        # r2 once more (the ruled bound), then r3
+
+    def test_three_followers_one_leader_and_takeover_on_real_streams(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        procs = [self.spawn(anchor="lane/r1.md") for _ in range(3)]
+        note = self.wait_note(lambda n: self.bound(n) and len(n.get("standbys", [])) == 2); old_leader = note["leader"]["instance"]
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
+        outputs = [self.read_lines(p, 1, timeout=4.0) for p in procs]
+        leaders = [i for i, o in enumerate(outputs) if o]; self.assertEqual(len(leaders), 1)
+        procs[leaders[0]].kill(); procs[leaders[0]].wait()
+        self.wait_note(lambda n: n.get("leader") and n["leader"]["instance"] != old_leader and self.bound(n))   # takeover observed before the next arrival
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer") + row(3, to="b.implementer"))
+        outputs = [self.read_lines(p, 1, timeout=6.0) if i != leaders[0] else [] for i, p in enumerate(procs)]
+        self.assertEqual(sum(1 for o in outputs if o), 1); self.assertEqual([o[0]["file"] for o in outputs if o], ["lane/r3.md"])
+
+    def test_backlog_above_pace_is_delivered_paced_without_loss(self):
+        self.index.write_text(HEADER)                                                             # bind at a header-only index: sentinel cursor
+        p = self.spawn(extra_env={"ADT_PACE_LINES": "5", "ADT_PACE_WINDOW": "1.0"})
+        self.wait_note(lambda n: self.bound(n) and n["progress"][str(self.root)] == self.rm.SENTINEL)   # observed bound at the sentinel before rows exist
+        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, 13)))       # twelve rows arrive at once
+        early = self.read_lines(p, 12, timeout=0.6); self.assertLessEqual(len(early), 5)
+        rest = self.read_lines(p, 12 - len(early), timeout=6.0)
+        self.assertEqual([g["file"] for g in early + rest], [f"lane/r{i}.md" for i in range(1, 13)])
+
+    def test_env_restart_with_new_seat_on_known_root_gets_its_own_floor(self):                        # D8-R1 (floors half; the replay half is EnvRestartReplayTests in T6)
+        self.index.write_text(HEADER)
+        p = self.spawn(seat="b.implementer"); first = self.wait_note(lambda n: self.bound(n) and len(n.get("floors", [])) == 1)
+        old_floor, old_progress = dict(first["floors"][0]), dict(first["progress"][str(self.root)])
+        write_index(self.index, row(1, to="b.implementer")); self.assertEqual(self.read_lines(p, 1)[0]["file"], "lane/r1.md")
+        self.wait_note(lambda n: n["progress"][str(self.root)].get("file") == "lane/r1.md")           # D9-R2: the checkpoint is persisted before the kill (output precedes persistence by design)
+        p.kill(); p.wait()
+        q = self.spawn(seat="c.reviewer")                                                             # same session, same root, new seat
+        note = self.wait_note(lambda n: n.get("seat") == "c.reviewer" and len(n.get("floors", [])) == 2)
+        self.assertEqual(note["floors"][0], old_floor); self.assertEqual(note["floors"][1]["seat"], "c.reviewer"); self.assertEqual(note["floors"][1]["root"], str(self.root))
+        self.assertEqual(note["floors"][1]["file"], "lane/r1.md")                                     # the new pair's floor is the preserved progress, not a reset
+        self.assertEqual(note["binding_source"], "env"); self.assertEqual(note["progress"][str(self.root)]["file"], "lane/r1.md")
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="c.reviewer")); self.assertEqual(self.read_lines(q, 1)[0]["file"], "lane/r2.md")
+        after = self.wait_note(lambda n: n["progress"][str(self.root)].get("file") == "lane/r2.md")   # D9-R2: clean checkpointed transition; the crash window keeps its own test
+        q.kill(); q.wait()
+        self.assertEqual(len(after["floors"]), 2); self.assertEqual(after["floors"][0], old_floor)     # the restart added exactly one floor and moved nothing
+
+    def test_missing_anchor_recovers_on_note_refresh_without_index_change(self):
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
+        store = self.rm.NoteStore("psess")
+        store.update(lambda n: (n.update({"seat": "b.implementer", "root": str(self.root), "anchor": "lane/gone.md", "binding_gen": 1, "binding_source": "hook"}), n["progress"].__setitem__(str(self.root), {"file": "lane/gone.md", "position": 5})))
+        p = subprocess.Popen([sys.executable, str(SCRIPT), "follow", "--host", "claude-code", "--session", "psess"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ))
+        self.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close(), p.stderr.close()))
+        self.wait_note(lambda n: n.get("reason") == "anchor-not-found")
+        store.update(lambda n: n.update({"anchor": "lane/r1.md", "binding_gen": 2}))            # a bind refresh, index bytes unchanged
+        got = self.read_lines(p, 1, timeout=6.0); self.assertEqual(got[0]["file"], "lane/r2.md")
