@@ -939,6 +939,189 @@ def bind(args) -> int:
 
 MODES["bind"] = bind
 
+def read_payload() -> dict:
+    try:
+        return json.load(sys.stdin) or {}
+    except (ValueError, OSError):
+        return {}
+
+
+def emit_json(doc: dict) -> int:
+    try:
+        sys.stdout.write(json.dumps(doc)); sys.stdout.flush()
+    except OSError:
+        return 1
+    return 0
+
+
+def stop_document(line: bytes) -> bytes:
+    text = line.decode("utf-8").rstrip("\n")
+    return json.dumps({"decision": "block", "reason": "Relay arrival delivered by relay-monitor; read the file before acting:\n" + text}).encode("utf-8")
+
+
+def drain(args) -> int:
+    end = time.monotonic() + float(getattr(args, "deadline", DRAIN_DEADLINE))       # one absolute deadline for everything below (P2b)
+    payload = read_payload()
+    if decide_host(args, payload, os.environ) != "codex":
+        return emit_json({})
+    session = payload.get("session_id") or resolve_session(args)
+    if not session:
+        return emit_json({})
+    store = NoteStore(session); note = store.load()
+    binding = resolve_binding(note, os.environ, args)
+    if binding is None or note.get("binding_degraded") or time.monotonic() >= end:
+        return emit_json({})
+    snap = read_index(Path(binding.root) / "INDEX.md")
+    if time.monotonic() >= end:
+        return emit_json({})
+    sink = FdSink(sys.stdout.fileno()); me = stream_owner(store, end)
+    if me is None:
+        return emit_json({})
+    try:
+        return _drain_locked(store, sink, binding, snap, end, me)
+    finally:
+        me["_lock"].release(unlink=me.get("cleared", True))
+
+
+def _drain_locked(store: NoteStore, sink, binding: Binding, snap: IndexSnapshot, end: float, me: dict) -> int:
+    try:
+        result = deliver_once(store, sink, binding, snap, end=end, leader_instance=me["instance"], owner=me, limit=1, encode=stop_document)
+    except TransportFailed:
+        me["cleared"] = False; return 1
+    if result.emitted == 1:
+        return 0
+    if result.aborted == "output-stalled":
+        if TEST_PAUSE_BEFORE_CLEANUP:
+            pause_until = time.monotonic() + 10.0
+            while not os.path.exists(TEST_PAUSE_BEFORE_CLEANUP) and time.monotonic() < pause_until:
+                time.sleep(0.01)
+        def clear_own(n):
+            if n.get("frame") and n["frame"].get("identity", {}).get("leader") == me["instance"]:
+                n["frame"] = None; n["reason"] = None
+        try:
+            store.update(clear_own, timeout=_remaining(end))                               # only the remaining original budget (R3)
+        except LockTimeout:
+            me["cleared"] = False                                                          # the frame and its owner-lock file stay; the flock dies with this process, so the next consumer finds `dead` (P4-R1)
+        return 1                                                                           # a partial Stop document is abandoned; nothing more is written
+    return emit_json({})
+
+
+MODES["drain"] = drain
+
+
+def run_relay(plugin_root: str | None, *argv, timeout=10.0):
+    relay = Path(plugin_root) / "tools" / "relay" if plugin_root else Path(__file__).resolve().parent.parent / "relay"
+    try:
+        proc = subprocess.run(["python3", str(relay), *argv], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"code": "E-EXEC", "detail": str(exc)}, 1
+    text = proc.stdout.strip() or proc.stderr.strip()
+    try:
+        return json.loads(text), proc.returncode
+    except ValueError:
+        return {"raw": text}, proc.returncode
+
+
+def check_identity(plugin_root: str | None, root: str | None):
+    client, rc = run_relay(plugin_root, "version")
+    client_id = {"kit": client.get("kit"), "fp": client.get("fingerprint")} if rc == 0 else {"kit": None, "fp": None}
+    if not root or not os.path.isdir(os.path.join(root, ".engine")):
+        return "hand-root", client_id, None
+    status_doc, rc = run_relay(plugin_root, "status", "--root", root)
+    if rc != 0:
+        if status_doc.get("code") == "E-DAEMON-DOWN" or "socket" in json.dumps(status_doc).lower():
+            return "daemon-down", client_id, None
+        return "version-mismatch", client_id, status_doc
+    ident = ((status_doc.get("daemon") or {}).get("identity")) or {}
+    daemon = {"kit": ident.get("kit"), "fp": ident.get("fp")}
+    return ("ok" if daemon == client_id else "version-mismatch"), client_id, daemon
+
+
+def readiness(store: NoteStore, _between=None):
+    probe = LeaderLock(store.session); held = not probe.acquire(blocking=False)
+    if not held:
+        probe.release()
+    if _between is not None:
+        _between()
+    holder = probe.holder_instance() if held else None
+    with store.state_lock():
+        note = store.load()
+    if not held:
+        return ("standby-only" if any(process_alive(s) for s in note.get("standbys", [])) else "not-started"), note
+    leader = note.get("leader")
+    if not leader or not holder or leader.get("instance") != holder or not process_alive(leader):
+        return "starting", note
+    if note.get("binding_degraded") or note.get("phase") == "unavailable":
+        return "unavailable", note
+    if note.get("phase") == "following" and note.get("root") and note["progress"].get(note["root"]) is not None:
+        return "armed", note
+    return "waiting-for-binding", note
+
+
+def status_line(store: NoteStore, plugin_root: str | None) -> str:
+    state, note = readiness(store)
+    ident, client_id, daemon = "unchecked", {}, None
+    if note.get("root"):
+        ident, client_id, daemon = check_identity(plugin_root, note.get("root"))
+        if ident == "version-mismatch":
+            state = "unavailable"
+        store.update(lambda n: n.update({"client_identity": client_id, "daemon_identity": daemon}))
+    reason = (note.get("binding_degraded") or {}).get("reason") or note.get("reason")
+    suffix = f": {reason}" if state == "unavailable" and reason else (": version-mismatch" if ident == "version-mismatch" else "")
+    binding = note.get("binding_source") or "none"
+    if note.get("binding_degraded"):
+        binding = f"degraded:{note['binding_degraded']['reason']}"
+    cur = (note["progress"].get(note.get("root") or "") or {}).get("file") or "-"
+    fp = lambda d: f"{d.get('kit')}@{(d.get('fp') or '')[:8]}" if d and d.get("kit") else "-"
+    daemon_txt = {"hand-root": "hand-root", "daemon-down": "down", "unchecked": "-"}.get(ident, fp(daemon))
+    return (f"relay-monitor: {state}{suffix} seat={note.get('seat') or '-'} root={note.get('root') or '-'} cursor={cur} "
+            f"binding={binding} client={fp(client_id)} daemon={daemon_txt} updated={note.get('updated') or '-'}")
+
+
+def status(args) -> int:
+    session = resolve_session(args)
+    if not session:
+        print("relay-monitor: no session identity", file=sys.stderr); return 2
+    store = NoteStore(session)
+    with store.state_lock():
+        sweep_owner_files(store)                                                          # eventual cleanup; never the referenced file
+    print(status_line(store, args.plugin_root)); return 0
+
+
+FALLBACK_OVERRIDE_TEXT = "relay-monitor: fallback: pointer (ADT_CODEX_FORK=0); relays reach this seat by the operator's pointer block."
+
+
+def ARMING_TEXT(plugin_root: str, session: str, resume: bool) -> str:
+    cmd = f'python3 "{plugin_root}/tools/adapters/relay-monitor.py" follow --host codex --session {session} --plugin-root "{plugin_root}"'
+    head = ("This session resumed. First call the `monitor` tool with action `list`; only if no watch is running the relay-monitor command below, " if resume else "On this boot turn, ")
+    return ("If the `monitor` tool is present in your advertised tool surface (the complete capability surface exposed to you, including nested code-mode definitions): "
+            + head + f"call the `monitor` tool with action `start`, command `{cmd}`, and description `Relay arrivals for the seat bound to this session`; "
+            f"then call the `monitor` tool with action `list` to confirm the watch id; then run `python3 \"{plugin_root}/tools/adapters/relay-monitor.py\" status --session {session}` "
+            "through the shell and quote its line as the delivery state in your acknowledgment. "
+            "If `monitor` is absent from your advertised tool surface, make no call against it: report `unavailable: monitor-tool` as the delivery state and `fallback: pointer` in your acknowledgment, and rely on the operator's pointer block.")
+
+
+def session_start(args) -> int:
+    payload = read_payload()
+    session = payload.get("session_id") or resolve_session(args)
+    if not session:
+        return emit_json({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "relay-monitor: no-session-identity"}})
+    store = NoteStore(session); host = decide_host(args, payload, os.environ)
+    plugin_root = args.plugin_root or os.environ.get("CLAUDE_PLUGIN_ROOT") or os.environ.get("PLUGIN_ROOT") or str(Path(__file__).resolve().parents[2])
+    lines = [status_line(store, plugin_root)]
+    if host in ("host-ambiguous", "host-unknown"):
+        store.update(lambda n: n.update({"reason": host}))
+    elif host == "codex":
+        override = os.environ.get("ADT_CODEX_FORK") == "0"                                   # the only stock signal the kit honours (erratum-1 A)
+        store.update(lambda n: n.update({"host": "codex", "codex_fork_override": override}))
+        lines.append(FALLBACK_OVERRIDE_TEXT if override else ARMING_TEXT(plugin_root, session, payload.get("source") == "resume"))
+    else:
+        store.update(lambda n: n.update({"host": "claude-code"}))
+    return emit_json({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(lines)}})
+
+
+MODES["session-start"] = session_start
+MODES["status"] = status
 # ---- entrypoint: keep these the last lines of the file; later tasks insert above `def build_parser()` ----
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="relay-monitor")

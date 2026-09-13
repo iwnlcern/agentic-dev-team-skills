@@ -693,3 +693,264 @@ class BindTests(TmpEnv):
         self.assertEqual(self.run_bind(json.dumps(failure)), 0); self.assertIsNone(self.store.load()["seat"])
         self.assertEqual(self.rm.bind(ns(session="sess", manual=True, root=str(self.root), anchor="lane/r1.md")), 0)
         self.assertEqual(self.store.load()["seat"], "a.planner")
+
+class DrainTests(TmpEnv):
+    def setUp(self):
+        super().setUp(); self.store = self.rm.NoteStore("sess")
+
+    def codex_stop(self, active=False):
+        return {"session_id": "sess", "cwd": str(self.root), "hook_event_name": "Stop", "turn_id": "t", "stop_hook_active": active, "last_assistant_message": None, "model": "m", "permission_mode": "default", "transcript_path": None}
+
+    def bind_and_rows(self, n):
+        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, n + 1)))
+        self.store.update(lambda x: (x.update({"seat": "b.implementer", "root": str(self.root), "binding_gen": 1, "binding_source": "hook", "host": "codex"}), x["progress"].__setitem__(str(self.root), dict(self.rm.SENTINEL))))
+
+    def run_drain(self, payload, deadline=5.0, env=None):
+        r, w = os.pipe(); writer = os.fdopen(w, "w"); out = b""
+        try:
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), mock.patch.dict(os.environ, env or {}), mock.patch.object(sys, "stdout", writer):
+                rc = self.rm.drain(ns(deadline=deadline))
+            writer.close()
+            while True:
+                chunk = os.read(r, 65536)
+                if not chunk: break
+                out += chunk
+        finally:
+            with contextlib.suppress(OSError): writer.close()
+            with contextlib.suppress(OSError): os.close(r)
+        return rc, out.decode()  # the writer is closed before the read so EOF arrives; both ends closed exactly once (P4-R2)
+
+    def test_claude_and_unknown_hosts_return_empty(self):
+        self.assertEqual(json.loads(self.run_drain({"session_id": "sess", "hook_event_name": "Stop", "prompt_id": "p"})[1]), {})
+        self.assertEqual(json.loads(self.run_drain({"session_id": "sess", "hook_event_name": "Stop"})[1]), {})
+
+    def test_unbound_degraded_and_no_arrival_return_empty(self):
+        self.assertEqual(json.loads(self.run_drain(self.codex_stop())[1]), {})
+        self.bind_and_rows(0); self.assertEqual(json.loads(self.run_drain(self.codex_stop())[1]), {})
+        self.bind_and_rows(1); self.store.update(lambda n: n.update({"binding_degraded": {"reason": "no-receipt", "stamp": "s"}}))
+        self.assertEqual(json.loads(self.run_drain(self.codex_stop())[1]), {})
+
+    def test_one_row_per_stop_then_next_then_empty(self):
+        self.bind_and_rows(2)
+        doc = json.loads(self.run_drain(self.codex_stop())[1]); self.assertEqual(doc["decision"], "block"); self.assertIn('"file":"lane/r1.md"', doc["reason"]); self.assertEqual(doc["reason"].count("\n"), 1)
+        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r1.md")
+        self.assertIn('"file":"lane/r2.md"', json.loads(self.run_drain(self.codex_stop(True))[1])["reason"])
+        self.assertEqual(json.loads(self.run_drain(self.codex_stop(True))[1]), {})
+
+    def test_deadline_before_output_leaves_row_eligible(self):
+        self.bind_and_rows(1); self.assertEqual(json.loads(self.run_drain(self.codex_stop(), deadline=0.0)[1]), {})
+        self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+
+    def test_total_deadline_holds_with_lock_held_and_with_index_missing(self):
+        self.bind_and_rows(1)
+        def run(deadline):
+            t0 = time.monotonic()
+            p = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "codex", "--deadline", str(deadline)], input=json.dumps(self.codex_stop()), capture_output=True, text=True, env=dict(os.environ), timeout=deadline + 5)
+            return time.monotonic() - t0, p
+        with self.store.state_lock():                                                    # the lock is held for the whole budget
+            elapsed, p = run(1.5)
+        self.assertLess(elapsed, 2.5); self.assertEqual(json.loads(p.stdout), {}); self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+        self.index.unlink()
+        with self.store.state_lock():
+            elapsed, p = run(1.5)
+        self.assertLess(elapsed, 2.5); self.assertEqual(json.loads(p.stdout), {})
+
+    def test_frame_created_between_load_and_lock_is_frame_busy(self):
+        self.bind_and_rows(1)
+        binding = self.rm.resolve_binding(self.store.load(), {}, None); snap = self.rm.read_index(self.index)
+        pre_read = dict(self.store.load()["progress"][str(self.root)])                              # drain's unlocked read happens here, before any frame exists
+        stalled = StallingSink(accept_first=5)
+        r = self.rm.deliver_once(self.store, stalled, binding, snap, end=time.monotonic() + 0.2, leader_instance="L"); self.assertEqual(r.aborted, "output-stalled")
+        frame = self.store.load()["frame"]; self.assertEqual(frame["identity"]["leader"], "L")   # the follower's partial frame now exists and its lock is released
+        out = self.rm.ByteSink()
+        r = self.rm.deliver_once(self.store, out, binding, snap, end=time.monotonic() + 0.5, leader_instance="drain-probe", limit=1, encode=self.rm.stop_document, start_cursor=pre_read)
+        self.assertEqual((r.emitted, r.aborted), (0, "frame-busy")); self.assertEqual(bytes(out.buf), b"")
+        self.assertEqual(self.store.load()["frame"], frame)                                         # drain neither failed nor touched the follower's frame
+
+    def wait_note(self, pred, timeout=8.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            note = self.store.load()
+            if pred(note): return note
+            time.sleep(0.02)
+        self.fail("note condition not observed: " + json.dumps(self.store.load(), default=str)[:300])
+
+    def test_two_stops_two_sinks_never_resume_each_others_prefix(self):
+        self.bind_and_rows(1)
+        binding = self.rm.resolve_binding(self.store.load(), {}, None); snap = self.rm.read_index(self.index)
+        far = time.monotonic() + 5.0
+        a_owner, b_owner = self.rm.stream_owner(self.store, far), self.rm.stream_owner(self.store, far); self.assertNotEqual(a_owner["instance"], b_owner["instance"])
+        self.addCleanup(lambda: [o["_lock"].release(unlink=True) for o in (a_owner, b_owner)])
+        a_sink = StallingSink(accept_first=5)
+        r = self.rm.deliver_once(self.store, a_sink, binding, snap, end=time.monotonic() + 0.2, leader_instance=a_owner["instance"], owner=a_owner, limit=1, encode=self.rm.stop_document)
+        self.assertEqual(r.aborted, "output-stalled")                                                    # A's transaction released with accepted=5 saved; A has not cleaned up yet
+        b_sink = self.rm.ByteSink()
+        r = self.rm.deliver_once(self.store, b_sink, binding, snap, end=time.monotonic() + 0.5, leader_instance=b_owner["instance"], owner=b_owner, limit=1, encode=self.rm.stop_document)
+        self.assertEqual((r.emitted, r.aborted), (0, "frame-busy")); self.assertEqual(bytes(b_sink.buf), b"")   # B never writes data[5:] to its fresh pipe
+        self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+        def clear_a(n):
+            if n.get("frame") and n["frame"]["identity"]["leader"] == a_owner["instance"]: n["frame"] = None
+        def clear_b(n):
+            if n.get("frame") and n["frame"]["identity"]["leader"] == b_owner["instance"]: n["frame"] = None
+        self.store.update(clear_b); self.assertIsNotNone(self.store.load()["frame"])                    # B's cleanup cannot clear A's frame
+        self.store.update(clear_a); self.assertIsNone(self.store.load()["frame"])                       # A's exact-identity cleanup does
+        c_owner, c_sink = self.rm.stream_owner(self.store, far), self.rm.ByteSink(); self.addCleanup(lambda: c_owner["_lock"].release(unlink=True))
+        r = self.rm.deliver_once(self.store, c_sink, binding, snap, end=time.monotonic() + 0.5, leader_instance=c_owner["instance"], owner=c_owner, limit=1, encode=self.rm.stop_document)
+        self.assertEqual(r.emitted, 1); doc = json.loads(bytes(c_sink.buf)); self.assertEqual(doc["decision"], "block")   # a fresh Stop starts at byte zero and emits the whole document
+
+    def test_stale_stop_frame_is_reclaimed_and_live_or_unknown_owner_is_not(self):
+        self.bind_and_rows(1)
+        plant = lambda lock: self.store.update(lambda n: n.__setitem__("frame", {"identity": {"root": str(self.root), "seat": "b.implementer", "binding_gen": 1, "leader": "drain-other", "file": "lane/r1.md", "owner": {"lock": str(lock)}}, "data": "00", "accepted": 1}))
+        unheld = self.store.owner_lock_path("drain-unheld"); unheld.touch(); plant(unheld)
+        with mock.patch.object(self.rm.subprocess, "run", side_effect=AssertionError("external probe")):
+            t0 = time.monotonic(); rc, out = self.run_drain(self.codex_stop()); took = time.monotonic() - t0
+        self.assertEqual(rc, 0); self.assertEqual(json.loads(out)["decision"], "block"); self.assertIsNone(self.store.load()["frame"]); self.assertLess(took, 0.5)   # dead owner reclaimed, no external probe, short budget respected
+        self.bind_and_rows(1); live = self.store.owner_lock_path("drain-live"); hold_owner_lock(self, live); plant(live)
+        rc, out = self.run_drain(self.codex_stop(), deadline=0.5); self.assertEqual(json.loads(out), {}); self.assertIsNotNone(self.store.load()["frame"])        # live owner: {} and intact
+        plant(self.store.owner_lock_path("drain-missing"))
+        rc, out = self.run_drain(self.codex_stop(), deadline=0.5); self.assertEqual(json.loads(out), {}); self.assertIsNotNone(self.store.load()["frame"])        # unknown owner: {} and intact
+        self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+        self.assertLess(time.monotonic() - t0, 3.0)
+
+    def test_stream_owner_is_cheap_and_probe_free(self):
+        with mock.patch.object(self.rm.subprocess, "run", side_effect=AssertionError("external probe")):
+            t0 = time.monotonic(); me = self.rm.stream_owner(self.store, t0 + 1.0); took = time.monotonic() - t0
+        self.assertIsNotNone(me); self.assertLess(took, 0.05); self.assertTrue(pathlib.Path(me["lock"]).exists())
+        with self.rm.NoteStore("sess").state_lock():
+            t0 = time.monotonic(); self.assertIsNone(self.rm.stream_owner(self.store, t0 + 0.2)); self.assertLess(time.monotonic() - t0, 0.6)   # contended: bounded by the budget, None
+        self.assertEqual(self.rm.owner_state({"identity": {"owner": {"lock": me["lock"]}}}), "alive")     # held by this process: would block
+        me["_lock"].release(unlink=True); self.assertFalse(pathlib.Path(me["lock"]).exists())
+
+    def test_combined_stop_budget_lock_wait_prefix_stall_and_contended_cleanup(self):
+        self.bind_and_rows(1); flag = self.base / "release-cleanup"
+        env = dict(os.environ, ADT_TEST_SINK_ACCEPT="5", ADT_TEST_PAUSE_BEFORE_CLEANUP=str(flag))
+        with self.store.state_lock():                                                                    # the drain spends most of its 1.5 s budget waiting for this lock
+            p = subprocess.Popen([sys.executable, str(SCRIPT), "drain", "--host", "codex", "--deadline", "1.5"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            t_start = time.monotonic()                                                                   # timing anchor: observed subprocess start
+            self.addCleanup(lambda: (p.kill(), p.wait(), p.stdin.close(), p.stdout.close(), p.stderr.close()))
+            p.stdin.write(json.dumps(self.codex_stop()).encode()); p.stdin.close()
+            while time.monotonic() < t_start + 1.2: time.sleep(0.01)                                    # hold until 1.2 s after start
+        note = self.wait_note(lambda n: n.get("frame") and n["frame"]["identity"]["leader"].startswith("drain-"))   # prefix written, stall recorded, transaction lock released
+        with self.store.state_lock():                                                                    # cleanup is contended for the rest of the budget
+            flag.touch(); p.wait(timeout=5); t_exit = time.monotonic()
+        out = p.stdout.read()
+        # Bound: exit within budget + 0.5 s startup tolerance = 2.0 s after start. With the remaining-budget cleanup the drain exits by
+        # t_start + startup + 1.5 <= 1.8 s (startup < 0.3 s measured at T0). A fresh 1.0 s cleanup timeout, which starts no earlier than
+        # 1.2 s, cannot exit before 2.2 s and fails this bound; the mutation control in Step 6 shows that failure.
+        self.assertLess(t_exit - t_start, 2.0); self.assertEqual(p.returncode, 1); self.assertEqual(len(out), 5)          # only the prefix reached the pipe
+        after = self.store.load(); self.assertEqual(after["progress"][str(self.root)], self.rm.SENTINEL); self.assertEqual(after["frame"], note["frame"])   # eligibility unchanged, frame left for reclaim
+        self.assertTrue(pathlib.Path(after["frame"]["identity"]["owner"]["lock"]).exists())
+        with self.store.state_lock():
+            self.assertEqual(self.rm.owner_state(after["frame"]), "dead"); self.assertEqual(self.rm.owner_state(after["frame"]), "dead")   # observational: repeatable, file left in place
+        self.assertTrue(pathlib.Path(after["frame"]["identity"]["owner"]["lock"]).exists())              # the recovery evidence survives the assertion (P5-R1)
+        q = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "codex", "--deadline", "5"], input=json.dumps(self.codex_stop()), capture_output=True, text=True, env=dict(os.environ), timeout=10)
+        self.assertEqual(json.loads(q.stdout)["decision"], "block"); self.assertIsNone(self.store.load()["frame"]); self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r1.md")   # recovery from byte zero
+
+    def test_crash_before_output_and_between_output_and_persist(self):
+        self.bind_and_rows(1)
+        env = dict(os.environ)
+        p = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "codex"], input=json.dumps(self.codex_stop()), capture_output=True, text=True, env={**env, "ADT_TEST_CRASH_BEFORE_OUTPUT": "1"})
+        self.assertEqual((p.returncode, p.stdout), (9, "")); self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+        p = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "codex"], input=json.dumps(self.codex_stop()), capture_output=True, text=True, env={**env, "ADT_TEST_CRASH_AFTER_OUTPUT": "1"})
+        self.assertEqual(p.returncode, 9); self.assertEqual(json.loads(p.stdout)["decision"], "block"); self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)   # output happened, persist did not: one re-emission allowed
+        self.assertIn('"file":"lane/r1.md"', json.loads(self.run_drain(self.codex_stop())[1])["reason"])                                                                                         # the ruled single replay
+
+    def test_write_failure_appends_nothing(self):
+        self.bind_and_rows(1)
+        r, w = os.pipe(); os.close(r); writer = os.fdopen(w, "w")
+        def close_writer():
+            with contextlib.suppress(OSError): writer.close()
+        self.addCleanup(close_writer)
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(self.codex_stop()))), mock.patch.object(sys, "stdout", writer):
+            self.assertEqual(self.rm.drain(ns()), 1)
+        self.assertEqual(self.store.load()["progress"][str(self.root)], self.rm.SENTINEL)
+
+    def test_concurrent_follow_and_bind_around_stop(self):
+        self.bind_and_rows(1); (self.root / "lane" / "r1.md").write_text("x\n")
+        binding = self.rm.resolve_binding(self.store.load(), {}, None); snap = self.rm.read_index(self.index)
+        held = GateSink(); res = {}
+        t = threading.Thread(target=lambda: res.update(f=self.rm.deliver_once(self.store, held, binding, snap, end=time.monotonic() + 5.0, leader_instance="L")))
+        self.addCleanup(lambda: (held.release.set(), t.join(5)))
+        t.start(); self.assertTrue(held.entered.wait(5.0))                                                          # follower paused inside its locked write
+        bind_store = self.rm.NoteStore("sess"); attempt = threading.Event(); bind_store.observer = lambda ev: attempt.set()
+        tb = threading.Thread(target=lambda: self.rm.bind_from_receipt(bind_store, root=str(self.root), receipt_path="lane/r1.md", key_seat=None, source="hook"))   # a real bind arrives concurrently
+        tb.start(); self.assertTrue(attempt.wait(5.0)); self.addCleanup(lambda: tb.join(5))
+        t2 = threading.Thread(target=lambda: res.update(d=self.run_drain(self.codex_stop()))); t2.start(); self.addCleanup(lambda: t2.join(5)); time.sleep(0.1)
+        held.release.set(); t.join(5); tb.join(5); t2.join(5)
+        self.assertEqual(res["f"].emitted, 1); self.assertEqual(json.loads(res["d"][1]), {})                          # follower won r1 while holding the lock; the bind then refreshed the same seat/root; drain found nothing
+        n = self.store.load(); self.assertEqual(n["binding_gen"], 2); self.assertEqual(n["progress"][str(self.root)]["file"], "lane/r1.md")
+
+
+class SessionStartTests(TmpEnv):
+    FRESH_CODEX = {"cwd": "/w", "hook_event_name": "SessionStart", "model": "m", "permission_mode": "default", "session_id": "sess", "source": "startup", "transcript_path": None}
+
+    def run_ss(self, payload, env):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), mock.patch("sys.stdout", out), mock.patch.dict(os.environ, env), \
+             mock.patch.object(self.rm, "check_identity", return_value=("ok", "2.9.3@deadbeef", "2.9.3@deadbeef")), \
+             mock.patch.object(self.rm.subprocess, "run", side_effect=AssertionError("session-start must not spawn a process")):   # A6.1: the identity check is stubbed (it is unchanged and tested in StatusTests); anything else spawning is the removed probe
+            self.rm.session_start(ns(plugin_root="/plug"))
+        return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+
+    def test_fresh_codex_arms_under_plugin_route_env_and_under_launcher(self):
+        ctx = self.run_ss(self.FRESH_CODEX, {"PLUGIN_ROOT": "/plug", "PLUGIN_DATA": "/d"})
+        self.assertIn("action `start`", ctx); self.assertIn("follow --host codex --session sess", ctx)
+        os.environ.pop("PLUGIN_ROOT", None); os.environ.pop("PLUGIN_DATA", None)
+        ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex"}); self.assertIn("action `start`", ctx)
+
+    def test_evidence_free_claude_session_start_gets_status_only_and_writes_no_host(self):
+        ctx = self.run_ss({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup", "cwd": "/w", "transcript_path": "/t"}, {})
+        self.assertIn("relay-monitor:", ctx); self.assertNotIn("action `start`", ctx); self.assertIsNone(self.rm.NoteStore("sess").load()["host"])
+
+    def test_override_falls_back_without_arming(self):                                                   # A6.2
+        ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex", "ADT_CODEX_FORK": "0"})
+        self.assertIn("fallback: pointer (ADT_CODEX_FORK=0)", ctx); self.assertNotIn("action `start`", ctx); self.assertTrue(self.rm.NoteStore("sess").load()["codex_fork_override"])
+        ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex", "ADT_CODEX_FORK": "1"}); self.assertIn("action `start`", ctx)   # any other value arms
+
+    def test_arming_context_order_and_absent_tool_report(self):                                          # A6.3
+        ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex"})
+        marks = [ctx.index("advertised tool surface"), ctx.index("action `start`"), ctx.index("action `list`"), ctx.index("relay-monitor.py\" status --session sess"), ctx.index("unavailable: monitor-tool")]
+        self.assertEqual(marks, sorted(marks)); self.assertIn("nested code-mode", ctx); self.assertIn("make no call", ctx)
+
+    def test_shipped_script_never_invokes_codex(self):                                                    # A6.4 (source-level)
+        text = SCRIPT.read_text()
+        self.assertNotIn('"codex", "features"', text); self.assertNotIn("features list", text); self.assertNotIn("fork_marker", text)
+
+    def test_resume_instructs_list_first(self):
+        ctx = self.run_ss({**self.FRESH_CODEX, "source": "resume"}, {"ADT_HOST": "codex"}); self.assertLess(ctx.index("action `list`"), ctx.index("action `start`"))
+
+    def test_ambiguous_host_writes_no_host(self):
+        self.run_ss({**self.FRESH_CODEX, "prompt_id": "p"}, {"PLUGIN_ROOT": "/plug"}); self.assertIsNone(self.rm.NoteStore("sess").load()["host"])
+
+
+class StatusTests(TmpEnv):
+    def setUp(self):
+        super().setUp(); self.store = self.rm.NoteStore("sess")
+
+    def test_readiness_states_tied_to_lock_holder(self):
+        rm = self.rm; self.assertEqual(rm.readiness(self.store)[0], "not-started")
+        lock = rm.LeaderLock("sess"); lock.acquire(blocking=False)
+        self.assertEqual(rm.readiness(self.store)[0], "starting")                                                     # lock held, no stamp, no record
+        me = rm.leader_record(); lock.stamp(me["instance"])
+        self.store.update(lambda n: n.update({"leader": me, "phase": "waiting-for-binding"})); self.assertEqual(rm.readiness(self.store)[0], "waiting-for-binding")
+        self.store.update(lambda n: (n.update({"phase": "following", "seat": "a", "root": str(self.root)}), n["progress"].__setitem__(str(self.root), {"file": "x", "position": 1})))
+        self.assertEqual(rm.readiness(self.store)[0], "armed")
+        self.assertEqual(rm.readiness(self.store, _between=lambda: lock.stamp("someone-else"))[0], "starting")           # takeover between the probe and the record read
+        lock.stamp(me["instance"])
+        self.store.update(lambda n: n.update({"leader": {**me, "start_time": "1970"}})); self.assertEqual(rm.readiness(self.store)[0], "starting")   # pid reuse
+        self.store.update(lambda n: n.update({"leader": me, "binding_degraded": {"reason": "no-receipt", "stamp": "s"}})); self.assertEqual(rm.readiness(self.store)[0], "unavailable")
+        lock.release(); self.store.update(lambda n: n.update({"binding_degraded": None, "standbys": [me]})); self.assertEqual(rm.readiness(self.store)[0], "standby-only")
+
+    def test_identity_paths(self):
+        rm = self.rm; engine_root = str(self.root)
+        with mock.patch.object(rm, "run_relay", side_effect=[({"kit": "2.9.5", "fingerprint": "aa"}, 0), ({"daemon": {"identity": {"kit": "2.9.5", "fp": "aa"}}}, 0)]):
+            self.assertEqual(rm.check_identity("/plug", engine_root)[0], "ok")
+        with mock.patch.object(rm, "run_relay", side_effect=[({"kit": "2.9.5", "fingerprint": "aa"}, 0), ({"daemon": {"identity": {"kit": "2.9.3", "fp": "bb"}}}, 0)]):
+            self.assertEqual(rm.check_identity("/plug", engine_root)[0], "version-mismatch")
+        with mock.patch.object(rm, "run_relay", side_effect=[({"kit": "2.9.5", "fingerprint": "aa"}, 0), ({"code": "E-WIRE-VERSION"}, 1)]):
+            self.assertEqual(rm.check_identity("/plug", engine_root)[0], "version-mismatch")
+        with mock.patch.object(rm, "run_relay", side_effect=[({"kit": "2.9.5", "fingerprint": "aa"}, 0), ({"code": "E-DAEMON-DOWN"}, 1)]):
+            self.assertEqual(rm.check_identity("/plug", engine_root)[0], "daemon-down")
+        hand = self.base / "hand"; hand.mkdir()
+        with mock.patch.object(rm, "run_relay", side_effect=[({"kit": "2.9.5", "fingerprint": "aa"}, 0)]):
+            self.assertEqual(rm.check_identity("/plug", str(hand))[0], "hand-root")
