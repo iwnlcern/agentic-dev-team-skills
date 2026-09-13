@@ -720,6 +720,225 @@ def follow(args) -> int:
 MODES["follow"] = follow
 
 
+@dataclass
+class SubmitParse:
+    ok: bool
+    reason: str | None = None
+    key: str | None = None
+    root_operand: str | None = None
+    cd_prefix: str | None = None
+
+
+RELAY_WORDS = ("relay", "tools/relay")
+ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+REDIRECT_OPS = (">", ">>", ">|", "<>")
+UNSUPPORTED_OPS = ("|", "||", "&", "(", ")", "<", "<<")
+
+
+def _shell_lex():
+    import importlib.util
+    path = Path(__file__).resolve().parent / "shell_lex.py"
+    spec = importlib.util.spec_from_file_location("adt_shell_lex", path); module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("adt_shell_lex", module); spec.loader.exec_module(module)
+    return module
+
+
+def parse_submit_command(command: str) -> SubmitParse:
+    sl = _shell_lex()
+    tokens = sl.lex(command)
+    if tokens is None:
+        return SubmitParse(False, "unsupported-shell")
+    if any(op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens):
+        return SubmitParse(False, "unsupported-shell")
+    commands = sl.split_commands(tokens)
+    cd_prefix, submit, count = None, None, 0
+    for i, cmd in enumerate(commands):
+        words = [(t, q) for t, q, op in cmd if not op or t in REDIRECT_OPS]
+        assigns = []
+        while words and not words[0][1] and ASSIGN_RE.match(words[0][0]):
+            assigns.append(words[0][0]); words = words[1:]
+        texts = [t for t, _q in words]
+        if texts and texts[0] == "cd" and not words[0][1]:
+            if i != 0:
+                return SubmitParse(False, "unsupported-shell")
+            cd_prefix = texts[1] if len(texts) > 1 else None; continue
+        if len(words) >= 2 and not words[0][1] and (texts[0] in RELAY_WORDS or texts[0].endswith("/relay")) and texts[1] == "submit" and not words[1][1]:
+            count += 1; submit = (words, assigns)
+    if count == 0:
+        return SubmitParse(False, "no-submit")
+    if count > 1:
+        return SubmitParse(False, "ambiguous-command")
+    words, assigns = submit
+    key = root = None
+    j = 2
+    while j < len(words):
+        t, q = words[j]
+        if not q and t in REDIRECT_OPS or (not q and re.match(r"^\d+$", t) and j + 1 < len(words) and words[j + 1][0] in REDIRECT_OPS):
+            j += 2 if t in REDIRECT_OPS else 3; continue
+        if t == "--key" and not q and j + 1 < len(words): key = words[j + 1][0]; j += 2; continue
+        if t == "--root" and not q and j + 1 < len(words): root = words[j + 1][0]; j += 2; continue
+        j += 1
+    for a in assigns:
+        if a.startswith("RELAY_KEY=") and key is None:
+            key = a.split("=", 1)[1]
+    return SubmitParse(True, None, key, root, cd_prefix)
+
+
+def response_strings(response) -> list[str]:
+    if isinstance(response, str):
+        return [response]
+    out = []
+    stdout_first = isinstance(response, dict) and isinstance(response.get("stdout"), str)
+    if stdout_first:
+        out.append(response["stdout"])                                   # the prioritized leaf, once, by structure
+    def walk(v, top=False):
+        if isinstance(v, str):
+            out.append(v)                                                # every occurrence; equal strings at distinct leaves stay distinct (plan-22)
+        elif isinstance(v, dict):
+            for k, x in v.items():                                       # insertion order == document order; never sorted
+                if top and stdout_first and k == "stdout":
+                    continue                                             # already emitted first; skipped by key, not by value
+                walk(x)
+        elif isinstance(v, list):
+            for x in v: walk(x)
+    walk(response, top=True)
+    return out
+
+
+def extract_receipts(response) -> list[dict]:
+    receipts, decoder = [], json.JSONDecoder()
+    for text in response_strings(response):
+        i = 0
+        while True:
+            i = text.find("{", i)
+            if i < 0:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, i)
+            except ValueError:
+                i += 1; continue
+            if isinstance(obj, dict) and {"path", "render_state", "duplicate"} <= set(obj):
+                receipts.append(obj)
+            i = end
+    return receipts
+
+
+def engine_client(plugin_root: str | None):
+    import importlib
+    candidates = ([Path(plugin_root) / "tools"] if plugin_root else []) + [Path(__file__).resolve().parent.parent, Path.home() / ".claude" / "skills" / "tools"]
+    for c in candidates:
+        if (c / "relay_engine" / "client.py").is_file():
+            if str(c) not in sys.path:
+                sys.path.insert(0, str(c))
+            return importlib.import_module("relay_engine.client")
+    return None
+
+
+def discover_root_like_cli(start: str | None, cwd: str, plugin_root: str | None = None) -> str | None:
+    base = (os.path.join(cwd, start) if start and not os.path.isabs(start) else start) or cwd
+    client = engine_client(plugin_root)
+    if client is not None:
+        try:
+            return client.discover_root(base)
+        except FileNotFoundError:
+            return None
+    current = os.path.realpath(base)
+    while True:
+        if os.path.isdir(os.path.join(current, ".engine")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def seat_from_key(key: str | None) -> str | None:
+    if not key:
+        return None
+    parts = Path(key).parts
+    if ".engine" in parts and "seats" in parts:
+        i = parts.index("seats"); return parts[i + 1] if i + 1 < len(parts) else None
+    return None
+
+
+def path_under_root(root: str, rel: str) -> bool:
+    if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+        return False
+    target = os.path.realpath(os.path.join(root, rel))
+    return target.startswith(os.path.realpath(root) + os.sep) and os.path.isfile(target)
+
+
+def bind_from_receipt(store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str):
+    if not path_under_root(root, receipt_path):
+        return False, "receipt-mismatch"
+    snap = read_index(Path(root) / "INDEX.md")
+    row_ = next((r for r in snap.rows if r.cells["file"] == receipt_path), None)
+    if row_ is None or not row_.cells["from"]:
+        return False, "receipt-mismatch"
+    seat = row_.cells["from"]
+    if key_seat and canonical(key_seat) != canonical(seat):
+        return False, "key-mismatch"
+    cursor = {"file": receipt_path, "position": row_.position}
+
+    def apply(n):
+        fresh = not (canonical(n.get("seat")) == canonical(seat) and n.get("root") == root)
+        n.update({"seat": seat, "root": root, "anchor": receipt_path, "bound_at": now_stamp(), "binding_source": source, "binding_degraded": None})
+        n["binding_gen"] = int(n.get("binding_gen", 0)) + 1
+        if fresh or root not in n["progress"]:
+            n["progress"][root] = dict(cursor); n["printed"][root] = []      # never n["frame"]: the follower owns and abandons its own stream (P2a)
+        record_floor(n, root, seat, cursor)
+    store.update(apply)
+    return True, "bound"
+
+
+def degrade(store: NoteStore, reason: str) -> None:
+    store.update(lambda n: n.update({"binding_degraded": {"reason": reason, "stamp": now_stamp()}}))
+
+
+def bind(args) -> int:
+    if getattr(args, "manual", False):
+        session = resolve_session(args)
+        if not session or not args.root or not args.anchor:
+            print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr); return 0
+        root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
+        ok, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
+        if not ok:
+            degrade(NoteStore(session), reason)
+        return 0
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return 0
+    session = payload.get("session_id") or resolve_session(args)
+    if not session:
+        return 0
+    store = NoteStore(session)
+    if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
+        return 0
+    parsed = parse_submit_command(((payload.get("tool_input") or {}).get("command")) or "")
+    if not parsed.ok:
+        if parsed.reason != "no-submit":
+            degrade(store, parsed.reason)
+        return 0
+    cwd = payload.get("cwd") or os.getcwd()
+    if parsed.cd_prefix:
+        cwd = parsed.cd_prefix if os.path.isabs(parsed.cd_prefix) else os.path.join(cwd, parsed.cd_prefix)
+    root = discover_root_like_cli(parsed.root_operand, cwd, args.plugin_root)
+    if root is None:
+        degrade(store, "no-root"); return 0
+    receipts = extract_receipts(payload.get("tool_response"))
+    if not receipts:
+        degrade(store, "no-receipt"); return 0
+    if len(receipts) > 1:
+        degrade(store, "ambiguous-receipt"); return 0
+    ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook")
+    if not ok:
+        degrade(store, reason)
+    return 0
+
+
+MODES["bind"] = bind
+
 # ---- entrypoint: keep these the last lines of the file; later tasks insert above `def build_parser()` ----
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="relay-monitor")

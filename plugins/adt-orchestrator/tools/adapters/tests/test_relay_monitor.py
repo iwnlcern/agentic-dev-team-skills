@@ -36,12 +36,13 @@ def write_index(path, rows_text):
 class TmpEnv(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.env = mock.patch.dict(os.environ, {"TMPDIR": self.tmp.name, "ADT_PACE_WINDOW": "0.5", "ADT_PACE_LINES": "5"}, clear=False)
+        self.base = pathlib.Path(self.tmp.name).resolve()
+        self.env = mock.patch.dict(os.environ, {"TMPDIR": str(self.base), "ADT_PACE_WINDOW": "0.5", "ADT_PACE_LINES": "5"}, clear=False)
         self.env.start()
         for k in ("ADT_SEAT", "ADT_RELAY_ROOT", "ADT_RELAY_ANCHOR", "ADT_HOST", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PLUGIN_ROOT", "CLAUDE_PROJECT_DIR"):
             os.environ.pop(k, None)
         self.rm = load_script()
-        self.root = pathlib.Path(self.tmp.name) / "sprint" / ".relays" / "v1"
+        self.root = self.base / "sprint" / ".relays" / "v1"
         (self.root / ".engine" / "seats" / "a.planner").mkdir(parents=True); (self.root / "lane").mkdir()
         self.index = self.root / "INDEX.md"
 
@@ -52,7 +53,7 @@ class TmpEnv(unittest.TestCase):
 class NoteStoreTests(TmpEnv):
     def test_note_dir_is_private_and_under_tmpdir(self):
         d = self.rm.note_dir()
-        self.assertEqual(d, pathlib.Path(self.tmp.name) / "adt-relay-monitor")
+        self.assertEqual(d, self.base / "adt-relay-monitor")
         self.assertEqual(oct(d.stat().st_mode & 0o777), "0o700")
 
     def test_load_returns_defaults_when_absent(self):
@@ -545,3 +546,150 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
         self.wait_note(lambda n: n.get("reason") == "anchor-not-found")
         store.update(lambda n: n.update({"anchor": "lane/r1.md", "binding_gen": 2}))            # a bind refresh, index bytes unchanged
         got = self.read_lines(p, 1, timeout=6.0); self.assertEqual(got[0]["file"], "lane/r2.md")
+
+
+class BindTests(TmpEnv):
+    def setUp(self):
+        super().setUp()
+        write_index(self.index, row(1, frm="a.planner", to="orch.orchestrator-planner"))
+        (self.root / "lane" / "r1.md").write_text("x\n")
+        self.store = self.rm.NoteStore("sess")
+        self.receipt = '{"advisories":[],"duplicate":false,"path":"lane/r1.md","render_state":"rendered"}'
+        self.key = str(self.root / ".engine" / "seats" / "a.planner" / "k.key")
+
+    def payload(self, command, stdout=None, host="claude"):
+        base = {"session_id": "sess", "cwd": str(self.root), "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+        if host == "claude":
+            base["prompt_id"] = "p"; base["tool_response"] = {"stdout": stdout or "", "stderr": "", "interrupted": False}
+        else:
+            base.update({"turn_id": "t", "tool_use_id": "u", "transcript_path": None, "model": "m", "permission_mode": "default"})
+            base["tool_response"] = {"output": stdout or "", "metadata": {"exit_code": 0}}
+        return json.dumps(base)
+
+    def run_bind(self, payload_text):
+        with mock.patch("sys.stdin", io.StringIO(payload_text)):
+            return self.rm.bind(ns())
+
+    def test_lexer_and_grammar(self):
+        p = self.rm.parse_submit_command
+        self.assertTrue(p("tools/relay submit .engine/drafts/x.md --key K --root R").ok)
+        self.assertEqual(p("tools/relay submit a.md --key K\ntools/relay submit b.md --key K").reason, "ambiguous-command")     # newline-separated submits (P5)
+        self.assertEqual(p("tools/relay submit d.md --root ';' --key K").root_operand, ";")                                       # quoted punctuation is an operand
+        self.assertEqual(p("ls\ncd /w && tools/relay submit d.md --key K").reason, "unsupported-shell")                         # non-leading cd after a newline
+        self.assertTrue(p("cd /w && tools/relay submit d.md --key K").ok)
+        self.assertTrue(p("RELAY_KEY=K tools/relay submit d.md").ok)
+        self.assertEqual(p('tools/relay submit d.md --root "/p/with space" --key K').root_operand, "/p/with space")
+        self.assertEqual(p("echo 'tools/relay submit d.md'").reason, "no-submit")
+        self.assertEqual(p("tools/relay submit a.md --key K;tools/relay submit b.md --key K").reason, "ambiguous-command")
+        self.assertEqual(p("tools/relay submit a.md --key K; tools/relay submit b.md --key K").reason, "ambiguous-command")
+        self.assertEqual(p("(cd /x; tools/relay submit d.md --key K)").reason, "unsupported-shell")
+        self.assertEqual(p("cat d.md | tools/relay submit - --key K").reason, "unsupported-shell")
+        self.assertEqual(p("tools/relay submit d.md --key K 2>&1 | tail -3").reason, "unsupported-shell")
+        self.assertEqual(p("echo x; cd /w && tools/relay submit d.md --key K").reason, "unsupported-shell")
+        self.assertEqual(p("tools/relay submit d.md --key K # --root R").root_operand, None)
+        self.assertEqual(p("tools/relay submit 'd#1.md' --key K").ok, True)
+        self.assertEqual(p("tools/relay submit d.md --key K >/dev/null").ok, True)
+        self.assertEqual(p("tools/relay submit d.md a=b --key K").key, "K")
+        self.assertEqual(p("tools/relay submit d.md --key K; echo 'a\"b").reason, "unsupported-shell")
+
+    def test_plain_submit_binds_and_initializes_progress_once(self):
+        cmd = f"tools/relay submit d.md --key {self.key} --root {self.root}"
+        self.assertEqual(self.run_bind(self.payload(cmd, self.receipt)), 0)
+        n = self.store.load()
+        self.assertEqual((n["seat"], n["root"], n["anchor"], n["binding_gen"], n["binding_source"]), ("a.planner", str(self.root), "lane/r1.md", 1, "hook"))
+        self.assertEqual(n["progress"][str(self.root)], {"file": "lane/r1.md", "position": 1}); self.assertEqual(n["floors"], [{"root": str(self.root), "seat": "a.planner", "file": "lane/r1.md", "position": 1}])
+        self.store.update(lambda x: (x["progress"].__setitem__(str(self.root), {"file": "lane/r9.md", "position": 9}), x["printed"].__setitem__(str(self.root), ["lane/r9.md"])))
+        self.run_bind(self.payload(cmd, self.receipt)); n = self.store.load()
+        self.assertEqual(n["binding_gen"], 2); self.assertEqual(n["progress"][str(self.root)]["file"], "lane/r9.md"); self.assertEqual(n["printed"][str(self.root)], ["lane/r9.md"])
+        self.assertEqual(n["floors"][0]["file"], "lane/r1.md"); self.assertEqual(len(n["floors"]), 1)                 # a rebind appends nothing
+
+    def other_root(self):
+        other = self.base / "other" / ".relays" / "v2"; (other / ".engine" / "seats" / "a.planner").mkdir(parents=True); (other / "lane").mkdir()
+        write_index(other / "INDEX.md", row(1, frm="a.planner", to="orch")); (other / "lane" / "r1.md").write_text("y\n"); return other
+
+    def test_root_or_seat_change_resets_progress_and_ring_but_leaves_frame(self):
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key} --root {self.root}", self.receipt))
+        frame = {"identity": {"root": str(self.root), "seat": "a.planner", "binding_gen": 1, "leader": "L", "file": "lane/r9.md"}, "data": "00", "accepted": 1}
+        self.store.update(lambda x: (x["printed"].__setitem__(str(self.root), ["lane/r1.md"]), x.__setitem__("frame", frame)))
+        other = self.other_root()
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {other}/.engine/seats/a.planner/k.key --root {other}", self.receipt))
+        n = self.store.load(); self.assertEqual(n["root"], str(other)); self.assertEqual(n["frame"], frame); self.assertEqual(n["printed"].get(str(other), []), []); self.assertEqual(n["progress"][str(other)]["file"], "lane/r1.md")
+
+    def _real_bind_mid_frame(self, other_rows):
+        # follower bound to root1, addressed row r2 from orch; the bind then switches to a root whose index holds `other_rows`
+        write_index(self.index, row(1, frm="a.planner", to="orch") + row(2, frm="orch.orchestrator-planner", to="a.planner"))
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key} --root {self.root}", self.receipt))
+        binding = self.rm.resolve_binding(self.store.load(), {}, None); snap = self.rm.read_index(self.index)
+        sink = StallingSink(accept_first=5)
+        r = self.rm.deliver_once(self.store, sink, binding, snap, end=time.monotonic() + 0.2, leader_instance="L"); self.assertEqual(r.aborted, "output-stalled")
+        other = self.other_root(); write_index(other / "INDEX.md", other_rows)
+        ok, _ = self.rm.bind_from_receipt(self.store, root=str(other), receipt_path="lane/r1.md", key_seat=None, source="hook"); self.assertTrue(ok)
+        self.assertIsNotNone(self.store.load()["frame"])                                         # the real bind left the prefix evidence in place
+        sink.released = True
+        new_binding = self.rm.resolve_binding(self.store.load(), {}, None)
+        with self.assertRaises(self.rm.TransportFailed):
+            self.rm.deliver_once(self.store, sink, new_binding, self.rm.read_index(other / "INDEX.md"), end=time.monotonic() + 0.5, leader_instance="L")
+        self.assertEqual(len(sink.buf), 5)                                                       # no new-root bytes on the damaged stream
+
+    def test_real_bind_during_paused_follower_frame_abandons_with_empty_tail(self):
+        self._real_bind_mid_frame(row(1, frm="a.planner", to="orch"))                                                                  # only the anchor: zero candidates, still abandons (R2)
+
+    def test_real_bind_during_paused_follower_frame_abandons_with_addressed_row_control(self):
+        self._real_bind_mid_frame(row(1, frm="a.planner", to="orch") + row(2, frm="orch.orchestrator-planner", to="a.planner"))         # an addressed row waits in the new root: still abandons, still no bytes
+
+    def test_discovery_forms(self):
+        below = self.root / "lane"
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key} --root {below}", self.receipt)); self.assertEqual(self.store.load()["root"], str(self.root))
+        self.store.path.unlink(); self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key}", self.receipt)); self.assertEqual(self.store.load()["root"], str(self.root))
+        self.store.path.unlink(); self.run_bind(self.payload(f"cd {self.root} && tools/relay submit d.md", self.receipt)); self.assertEqual(self.store.load()["seat"], "a.planner")
+
+    def test_codex_shaped_payload_binds_through_string_leaves(self):
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key} --root {self.root}", self.receipt, host="codex"))
+        self.assertEqual(self.store.load()["seat"], "a.planner")
+
+    def test_response_strings_keeps_document_order_and_every_leaf(self):                              # T4-R1
+        rs = self.rm.response_strings
+        self.assertEqual(rs({"z": "first", "a": "second"}), ["first", "second"])                         # insertion order, not sorted
+        self.assertEqual(rs({"output": "same", "metadata": {"repeat": "same"}}), ["same", "same"])       # equal strings at distinct leaves stay distinct
+        self.assertEqual(rs({"stdout": "s", "stderr": "e", "nested": {"stdout": "inner"}}), ["s", "e", "inner"])   # prioritized top-level stdout once; a nested key named stdout is an ordinary leaf
+        self.assertEqual(rs("bare"), ["bare"]); self.assertEqual(rs({"a": ["x", {"b": "y"}]}), ["x", "y"])
+
+    def test_equal_receipts_at_two_leaves_are_ambiguous_and_single_stdout_is_scanned_once(self):        # T4-R1
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key} --root {self.root}", self.receipt)); before = self.store.load()
+        self.assertEqual(len(self.rm.response_strings(json.loads(self.payload("x", self.receipt))["tool_response"])), 2)   # stdout once, stderr once; interrupted is a boolean, not a leaf
+        self.assertEqual(before["binding_gen"], 1); self.assertIsNone(before["binding_degraded"])         # the single-stdout control: bound exactly once
+        codex = json.loads(self.payload(f"tools/relay submit d.md --key {self.key} --root {self.root}", self.receipt, host="codex"))
+        codex["tool_response"]["metadata"]["repeat"] = self.receipt                                       # the same receipt at a second leaf
+        self.assertEqual(self.run_bind(json.dumps(codex)), 0); n = self.store.load()
+        self.assertEqual(n["binding_degraded"]["reason"], "ambiguous-receipt")
+        self.assertEqual((n["seat"], n["root"], n["binding_gen"]), (before["seat"], before["root"], before["binding_gen"]))   # prior binding preserved
+
+    def test_negatives_preserve_prior_binding(self):
+        self.run_bind(self.payload(f"tools/relay submit d.md --key {self.key} --root {self.root}", self.receipt)); before = self.store.load()
+        cases = {
+            "quoted": (f"echo 'tools/relay submit d.md --key {self.key}'", self.receipt, None),
+            "two-attached": (f"tools/relay submit a.md --key {self.key};tools/relay submit b.md --key {self.key}", self.receipt + "\n" + self.receipt, "ambiguous-command"),
+            "two-newline": (f"tools/relay submit a.md --key {self.key}\ntools/relay submit b.md --key {self.key}", self.receipt + "\n" + self.receipt, "ambiguous-command"),
+            "subshell": (f"(tools/relay submit d.md --key {self.key})", self.receipt, "unsupported-shell"),
+            "key-mismatch": (f"tools/relay submit d.md --key {self.root}/.engine/seats/z.planner/k.key", self.receipt, "key-mismatch"),
+            "foreign-row": (f"tools/relay submit d.md --key {self.key}", self.receipt.replace("lane/r1.md", "lane/nope.md"), "receipt-mismatch"),
+            "escape-path": (f"tools/relay submit d.md --key {self.key}", self.receipt.replace("lane/r1.md", "../../x.md"), "receipt-mismatch"),
+            "redirected": (f"tools/relay submit d.md --key {self.key} >/dev/null", "", "no-receipt"),
+            "escaped-envelope": (f"tools/relay submit d.md --key {self.key}", json.dumps(self.receipt), "no-receipt"),
+            "failed": (f"tools/relay submit d.md --key {self.key}", '{"code":"E-ENVELOPE"}', "no-receipt"),
+            "two-receipts": (f"tools/relay submit d.md --key {self.key}", self.receipt + "\n" + self.receipt, "ambiguous-receipt"),
+        }
+        for name, (cmd, out, reason) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self.run_bind(self.payload(cmd, out)), 0); n = self.store.load()
+                self.assertEqual((n["seat"], n["root"], n["binding_gen"]), (before["seat"], before["root"], before["binding_gen"]))
+                if reason is None:
+                    self.assertIsNone(n["binding_degraded"])
+                else:
+                    self.assertEqual(n["binding_degraded"]["reason"], reason)
+
+    def test_failure_payload_is_negative_control_and_manual_rebind_works(self):
+        failure = {"session_id": "sess", "cwd": str(self.root), "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": f"tools/relay submit d.md --key {self.key}; false"}, "error": "Command failed: ...interleaved " + self.receipt[:20], "prompt_id": "p"}
+        self.assertEqual(self.run_bind(json.dumps(failure)), 0); self.assertIsNone(self.store.load()["seat"])
+        self.assertEqual(self.rm.bind(ns(session="sess", manual=True, root=str(self.root), anchor="lane/r1.md")), 0)
+        self.assertEqual(self.store.load()["seat"], "a.planner")
