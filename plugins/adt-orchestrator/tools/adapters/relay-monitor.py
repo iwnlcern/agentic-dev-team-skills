@@ -1122,6 +1122,143 @@ def session_start(args) -> int:
 
 MODES["session-start"] = session_start
 MODES["status"] = status
+def notify(title: str, text: str, notifier: str = "osascript") -> None:
+    text = text.encode("utf-8")[:200].decode("utf-8", "ignore")
+    if notifier == "none":
+        return
+    argv = (["terminal-notifier", "-title", title, "-message", text] if notifier == "terminal-notifier"
+            else ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, text])
+    subprocess.run(argv, check=True, timeout=10, capture_output=True)
+
+
+def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
+    store, fired = NoteStore("operator"), 0
+    for root in roots:
+        snap = read_index(Path(root) / "INDEX.md")
+        if snap.error in ("index-missing", "index-malformed"):
+            continue
+        cursor = store.load()["progress"].get(root)
+        if cursor is None:
+            if since:
+                cursor = next(({"file": r.cells["file"], "position": r.position} for r in snap.rows if r.cells["file"] == since), None)
+            if cursor is None:
+                cursor = {"file": snap.rows[-1].cells["file"], "position": snap.rows[-1].position} if snap.rows else dict(SENTINEL)
+            store.update(lambda n: n["progress"].__setitem__(root, cursor))
+        start = locate(snap, cursor)
+        if start is None:
+            store.update(lambda n: n.update({"reason": f"cursor-not-found:{root}"})); continue
+        for row_ in snap.rows[start + 1:]:
+            if names_seat(row_, "operator"):
+                line = row_to_line(row_, root); sys.stdout.write(line); sys.stdout.flush()
+                try:
+                    notify(f"relay: {row_.cells['from']} -> operator ({row_.cells['phase']})", line.strip(), notifier)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    store.update(lambda n: n.update({"reason": f"notify-failed: {exc}"}))
+                fired += 1
+            store.update(lambda n: n["progress"].__setitem__(root, {"file": row_.cells["file"], "position": row_.position}))
+    return fired
+
+
+def operator(args) -> int:
+    roots, last = (args.root or [os.getcwd()]), None
+    while True:
+        sig = tuple(index_signature(Path(r) / "INDEX.md") for r in roots)
+        if sig != last:
+            operator_scan(roots, notifier=args.notifier, since=args.since); last = sig
+        time.sleep(POLL_INDEX)
+
+
+def _replay_error(root: str) -> None:
+    print(json.dumps({"error": "cannot-establish-recovery", "root": root}))
+
+
+def replay(args) -> int:
+    session = resolve_session(args)
+    if not session:
+        print("relay-monitor: no session identity", file=sys.stderr); return 2
+    note = NoteStore(session).load(); floors = list(note.get("floors") or [])
+    if args.after:                                                                        # single-binding optimization: the current binding only
+        root, seat = note.get("root"), note.get("seat")
+        if not root or not seat:
+            print(json.dumps({"error": "unbound"})); return 3
+        snap0 = read_index(Path(root) / "INDEX.md")
+        hit = None if snap0.error in ("index-missing", "index-malformed") else next((r for r in snap0.rows if r.cells["file"] == args.after), None)
+        if hit is None:
+            _replay_error(root); print(json.dumps({"done": True})); return 3               # the --after row must exist; its position is frozen here (D10-R1)
+        floors = [{"root": root, "seat": seat, "file": args.after, "position": hit.position}]
+    if not floors:
+        print(json.dumps({"error": "unbound"})); return 3
+    known = {(f["root"], canonical(f["seat"])) for f in floors}
+    if args.token:
+        try:
+            tok = json.loads(base64.b64decode(args.token).decode("utf-8"))
+            plan, index, next_pos, carried_failed = tok["floors"], tok["index"], tok["next_position"], tok["failed"]
+            if not isinstance(plan, list) or not plan or not isinstance(index, int) or not isinstance(next_pos, int) or not isinstance(carried_failed, bool):
+                raise ValueError("token shape")
+            if not (0 <= index < len(plan)) or type(next_pos) is not int or next_pos < 1:
+                raise ValueError("token bounds")                                             # an index at or past the end can only claim a walk it never made (D8-R2)
+            def _pos(v):                                                                     # strict: booleans are not positions (D9-R1)
+                return type(v) is int and v >= 0
+            def _cell(v):
+                return v is None or (isinstance(v, str) and v != "")
+            for f in plan:
+                if (f["root"], canonical(f["seat"])) not in known:
+                    raise ValueError("unknown root")
+                if not _pos(f.get("floor_position")) or not _cell(f.get("floor_file")) or ((f["floor_file"] is None) != (f["floor_position"] == 0)):
+                    raise ValueError("floor fields")                                         # the sentinel is exactly (None, 0)
+                unavailable = f.get("unavailable", False)
+                if type(unavailable) is not bool:
+                    raise ValueError("unavailable marker")
+                if unavailable:
+                    if f.get("upper_file") is not None or f.get("upper_position") is not None:
+                        raise ValueError("unavailable bounds")
+                elif not _pos(f.get("upper_position")) or not _cell(f.get("upper_file")) or ((f["upper_file"] is None) != (f["upper_position"] == 0)) or f["upper_position"] < f["floor_position"]:
+                    raise ValueError("upper fields")
+            cur = plan[index]
+            if cur.get("unavailable") or not (cur["floor_position"] < next_pos <= cur["upper_position"]):
+                raise ValueError("cursor outside the frozen interval")                      # a token this implementation emits always points inside the interval (D9-R1)
+        except (ValueError, KeyError, TypeError, UnicodeDecodeError, AttributeError):
+            print(json.dumps({"error": "cannot-establish-recovery", "root": None})); print(json.dumps({"done": True})); return 3
+    else:
+        plan, index, next_pos, carried_failed = [], 0, None, False
+        for f in floors:                                                                  # fix every root's upper bound at the first call
+            snap = read_index(Path(f["root"]) / "INDEX.md")
+            upper = note["progress"].get(f["root"])
+            if snap.error in ("index-missing", "index-malformed"):
+                plan.append({"root": f["root"], "seat": f["seat"], "upper_file": None, "upper_position": None, "floor_file": f["file"], "floor_position": f["position"], "unavailable": True}); continue
+            if upper is None:
+                upper = {"file": snap.rows[-1].cells["file"], "position": snap.rows[-1].position} if snap.rows else dict(SENTINEL)
+            plan.append({"root": f["root"], "seat": f["seat"], "upper_file": upper["file"], "upper_position": upper["position"], "floor_file": f["file"], "floor_position": f["position"]})
+    emitted, failed = 0, carried_failed                                                    # an earlier page's failure survives the walk (delta review)
+    while index < len(plan):
+        entry = plan[index]; root, seat = entry["root"], canonical(entry["seat"])
+        snap = read_index(Path(root) / "INDEX.md")
+        if entry.get("unavailable") or snap.error in ("index-missing", "index-malformed"):
+            _replay_error(root); failed = True; index += 1; next_pos = None; continue
+        start_cur = {"file": entry["floor_file"], "position": entry["floor_position"]} if entry["floor_file"] is not None else dict(SENTINEL)
+        s_ = locate(snap, start_cur)                                                           # every visit, continuation pages included: the floor row must sit at its frozen position
+        if s_ is None or (s_ >= 0 and snap.rows[s_].position != entry["floor_position"]):
+            _replay_error(root); failed = True; index += 1; next_pos = None; continue
+        if next_pos is None:
+            next_pos = (snap.rows[s_].position + 1) if s_ >= 0 else 1
+        u = locate(snap, {"file": entry["upper_file"], "position": entry["upper_position"]}) if entry["upper_file"] is not None else -1
+        if u is None or (u >= 0 and snap.rows[u].position != entry["upper_position"]):         # the upper row must sit at its frozen position; positions are dense, so every cursor at or below it names a row
+            _replay_error(root); failed = True; index += 1; next_pos = None; continue
+        upper_pos = snap.rows[u].position if u >= 0 else 0
+        for row_ in snap.rows:
+            if row_.position < next_pos or row_.position > upper_pos:
+                continue
+            if emitted >= args.limit:
+                token = base64.b64encode(json.dumps({"floors": [{k: v for k, v in e.items() if k in ("root", "seat", "upper_file", "upper_position", "floor_file", "floor_position", "unavailable")} for e in plan], "index": index, "next_position": row_.position, "failed": failed}).encode()).decode()
+                print(json.dumps({"continue": token})); return 0
+            if names_seat(row_, seat) and not is_own(row_, seat):
+                sys.stdout.write(row_to_line(row_, root)); emitted += 1
+        index += 1; next_pos = None
+    print(json.dumps({"done": True})); return 3 if failed else 0
+
+
+MODES["operator"] = operator
+MODES["replay"] = replay
 # ---- entrypoint: keep these the last lines of the file; later tasks insert above `def build_parser()` ----
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="relay-monitor")

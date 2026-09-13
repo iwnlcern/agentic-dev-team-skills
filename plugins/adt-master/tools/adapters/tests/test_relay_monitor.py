@@ -954,3 +954,190 @@ class StatusTests(TmpEnv):
         hand = self.base / "hand"; hand.mkdir()
         with mock.patch.object(rm, "run_relay", side_effect=[({"kit": "2.9.5", "fingerprint": "aa"}, 0)]):
             self.assertEqual(rm.check_identity("/plug", str(hand))[0], "hand-root")
+
+class OperatorReplayTests(TmpEnv):
+    def setUp(self):
+        super().setUp(); self.store = self.rm.NoteStore("sess")
+
+    def rows(self, specs):
+        write_index(self.index, "".join(row(i, frm=frm, to=to, cc=cc) for i, frm, to, cc in specs))
+
+    def test_operator_fires_once_per_new_row_not_for_backlog_and_not_after_restart(self):
+        self.rows([(1, "a.planner", "operator", "—"), (2, "a.planner", "b.implementer", "operator")]); fired = []
+        with mock.patch.object(self.rm, "notify", side_effect=lambda t, x, notifier: fired.append(x)):
+            self.assertEqual(self.rm.operator_scan([str(self.root)], notifier="osascript"), 0)
+            self.rows([(1, "a.planner", "operator", "—"), (2, "a.planner", "b.implementer", "operator"), (3, "a.planner", "operator", "—"), (4, "a.planner", "x.planner", "—")])
+            self.assertEqual(self.rm.operator_scan([str(self.root)], notifier="osascript"), 1); self.assertIn("lane/r3.md", fired[0])
+        self.rm = load_script()
+        with mock.patch.object(self.rm, "notify", side_effect=lambda t, x, notifier: fired.append(x)):
+            self.assertEqual(self.rm.operator_scan([str(self.root)], notifier="osascript"), 0)
+
+    def test_notifier_failure_is_recorded_and_does_not_stall(self):
+        self.rows([(1, "a.planner", "operator", "—")]); self.rm.operator_scan([str(self.root)], notifier="none")
+        self.rows([(1, "a.planner", "operator", "—"), (2, "a.planner", "operator", "—")])
+        with mock.patch.object(self.rm, "notify", side_effect=OSError("no osascript")):
+            self.assertEqual(self.rm.operator_scan([str(self.root)], notifier="osascript"), 1)
+        op = self.rm.NoteStore("operator").load(); self.assertEqual(op["progress"][str(self.root)]["file"], "lane/r2.md"); self.assertIn("notify-failed", op["reason"])
+
+    def run_replay(self, **kw):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = self.rm.replay(ns(session="sess", **kw))
+        return rc, out.getvalue().splitlines()
+
+    def seed(self, progress_file, progress_pos, floor=None, root=None, seat="b.implementer"):
+        root = str(root or self.root)
+        self.store.update(lambda n: (n.update({"seat": seat, "root": root, "binding_gen": n.get("binding_gen", 0) + 1, "binding_source": "hook", "anchor": progress_file}),
+                                     n["progress"].__setitem__(root, {"file": progress_file, "position": progress_pos}),
+                                     n["floors"].append({"root": root, "seat": seat, **(floor or dict(self.rm.SENTINEL))})))
+
+    def other_root(self, name):
+        other = self.base / name / ".relays" / "v2"; (other / "lane").mkdir(parents=True); return other
+
+    def test_two_bindings_replayed_each_from_own_floor(self):                                              # B6.1
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 4)]); self.seed("lane/r3.md", 3)                     # root A, seat X: floor sentinel, upper r3
+        other = self.other_root("B"); write_index(other / "INDEX.md", row(1, frm="q.planner", to="c.reviewer") + row(2, frm="q.planner", to="c.reviewer") + row(3, frm="q.planner", to="c.reviewer"))
+        self.seed("lane/r3.md", 3, floor={"file": "lane/r1.md", "position": 1}, root=other, seat="c.reviewer")                   # root B, seat Y: floor r1, upper r3
+        rc, lines = self.run_replay(limit=2); token = json.loads(lines[-1])["continue"]; page1 = [json.loads(l) for l in lines[:-1]]
+        rc, lines = self.run_replay(limit=10, token=token); page2 = [json.loads(l) for l in lines[:-1]]; self.assertEqual(json.loads(lines[-1]), {"done": True}); self.assertEqual(rc, 0)
+        got = [(d["root"], d["file"]) for d in page1 + page2]
+        self.assertEqual(got, [(str(self.root), "lane/r1.md"), (str(self.root), "lane/r2.md"), (str(self.root), "lane/r3.md"), (str(other), "lane/r2.md"), (str(other), "lane/r3.md")])
+        n = self.store.load(); self.assertEqual(n["progress"][str(self.root)]["file"], "lane/r3.md"); self.assertEqual(n["progress"][str(other)]["file"], "lane/r3.md")   # progress unchanged in both roots
+
+    def test_rebind_and_rebase_leave_floors_unchanged(self):                                                # B6.2
+        self.rows([(1, "a.planner", "b.implementer", "—"), (2, "b.implementer", "a.planner", "—")]); (self.root / "lane" / "r1.md").write_text("x\n"); (self.root / "lane" / "r2.md").write_text("y\n")
+        ok, _ = self.rm.bind_from_receipt(self.store, root=str(self.root), receipt_path="lane/r2.md", key_seat=None, source="hook"); self.assertTrue(ok)
+        floors = self.store.load()["floors"]; self.assertEqual(len(floors), 1)
+        ok, _ = self.rm.bind_from_receipt(self.store, root=str(self.root), receipt_path="lane/r2.md", key_seat=None, source="hook")                        # rebind, same pair
+        self.assertEqual(self.store.load()["floors"], floors)
+        self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/gone.md", "position": 9}))                                   # lost progress → rebase on the next transaction
+        binding = self.rm.resolve_binding(self.store.load(), {}, None)
+        self.rm.deliver_once(self.store, self.rm.ByteSink(), binding, self.rm.read_index(self.index), end=time.monotonic() + 0.5, leader_instance="L")
+        n = self.store.load(); self.assertEqual(n["reason"], "rebased"); self.assertEqual(n["floors"], floors)
+
+    def test_same_root_two_seats_each_from_own_floor(self):                                                  # A/X then A/Y
+        self.rows([(1, "a.planner", "b.implementer", "—"), (2, "a.planner", "c.reviewer", "—"), (3, "a.planner", "c.reviewer", "—")])
+        self.seed("lane/r3.md", 3, seat="b.implementer"); self.seed("lane/r3.md", 3, floor={"file": "lane/r2.md", "position": 2}, seat="c.reviewer")
+        rc, lines = self.run_replay(limit=50); docs = [json.loads(l) for l in lines[:-1]]
+        self.assertEqual([(d["file"], d["to"]) for d in docs], [("lane/r1.md", "b.implementer"), ("lane/r3.md", "c.reviewer")]); self.assertEqual(rc, 0)
+
+    def test_binding_appended_mid_walk_is_not_incorporated_and_failure_persists(self):
+        self.seed("lane/r1.md", 1, root=self.base / "missing" / ".relays" / "v2", seat="c.reviewer")          # unreadable entry first
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 4)]); self.seed("lane/r3.md", 3)
+        rc, lines = self.run_replay(limit=2); docs = [json.loads(l) for l in lines]
+        self.assertEqual(docs[0]["error"], "cannot-establish-recovery"); self.assertEqual([d["file"] for d in docs[1:-1]], ["lane/r1.md", "lane/r2.md"]); token = docs[-1]["continue"]
+        late = self.other_root("late"); write_index(late / "INDEX.md", row(1, frm="q.planner", to="b.implementer")); self.seed("lane/r1.md", 1, root=late)   # appended after page 1
+        rc, lines = self.run_replay(limit=50, token=token); docs = [json.loads(l) for l in lines]
+        self.assertEqual([d.get("file") for d in docs if "file" in d], ["lane/r3.md"]); self.assertEqual(docs[-1], {"done": True}); self.assertEqual(rc, 3)   # frozen set; earlier failure kept
+        rc, lines = self.run_replay(limit=50); self.assertIn(str(late), [json.loads(l).get("root") for l in lines if "file" in json.loads(l)])            # a fresh walk includes it
+
+    def test_after_round_trip_across_pages_with_producer_advance(self):                                   # D10-R1
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 5)]); self.seed("lane/r4.md", 4)
+        rc, lines = self.run_replay(limit=1, after="lane/r1.md"); self.assertEqual(rc, 0)
+        self.assertEqual([json.loads(l)["file"] for l in lines[:-1]], ["lane/r2.md"]); token = json.loads(lines[-1])["continue"]
+        frozen = json.loads(base64.b64decode(token)); self.assertEqual((frozen["floors"][0]["floor_file"], frozen["floors"][0]["floor_position"]), ("lane/r1.md", 1))   # consistent pair
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 7)]); self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/r6.md", "position": 6}))   # producer advanced
+        rc, lines = self.run_replay(limit=1, after="lane/r1.md", token=token); self.assertEqual(rc, 0); self.assertEqual([json.loads(l)["file"] for l in lines[:-1]], ["lane/r3.md"]); token = json.loads(lines[-1])["continue"]
+        rc, lines = self.run_replay(limit=1, after="lane/r1.md", token=token); self.assertEqual(rc, 0); self.assertEqual([json.loads(l)["file"] for l in lines[:-1]], ["lane/r4.md"]); self.assertEqual(json.loads(lines[-1]), {"done": True})   # r5, r6 never emitted: upper fixed at r4
+        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r6.md")
+        rc, lines = self.run_replay(limit=50, after="lane/absent.md"); docs = [json.loads(l) for l in lines]
+        self.assertEqual(rc, 3); self.assertEqual(docs[0], {"error": "cannot-establish-recovery", "root": str(self.root)}); self.assertEqual(docs[-1], {"done": True}); self.assertEqual(len(docs), 2)
+
+    def test_unreadable_root_yields_one_error_and_continues(self):                                          # B6.3
+        self.rows([(1, "a.planner", "b.implementer", "—")]); self.seed("lane/r1.md", 1)
+        self.seed("lane/r1.md", 1, root=self.base / "missing" / ".relays" / "v2", seat="c.reviewer")          # no INDEX.md there
+        rc, lines = self.run_replay(limit=50); docs = [json.loads(l) for l in lines]
+        self.assertEqual(rc, 3); self.assertEqual([d.get("file") for d in docs if "file" in d], ["lane/r1.md"])
+        errors = [d for d in docs if "error" in d]; self.assertEqual(len(errors), 1); self.assertEqual(errors[0]["error"], "cannot-establish-recovery"); self.assertIn("missing", errors[0]["root"]); self.assertEqual(docs[-1], {"done": True})
+
+    def test_schedule_a_dropped_b_then_received_c(self):
+        self.rows([(1, "a.planner", "b.implementer", "—"), (2, "a.planner", "b.implementer", "—"), (3, "a.planner", "b.implementer", "—")])
+        self.seed("lane/r3.md", 3)                                                       # B=r2 dropped by the host, C=r3 received; progress past both
+        rc, lines = self.run_replay(limit=50); self.assertEqual(rc, 0)
+        self.assertIn("lane/r2.md", [json.loads(l).get("file") for l in lines]); self.assertEqual(json.loads(lines[-1]), {"done": True})
+        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r3.md")
+
+    def test_schedule_b_dropped_b_then_own_d_refreshes_binding(self):
+        self.rows([(1, "a.planner", "b.implementer", "—")]); (self.root / "lane" / "r1.md").write_text("x\n")
+        self.seed("lane/r1.md", 1)                                                       # B=r1 dropped; nothing received yet
+        self.rows([(1, "a.planner", "b.implementer", "—"), (2, "b.implementer", "a.planner", "—")]); (self.root / "lane" / "r2.md").write_text("d\n")
+        ok, _ = self.rm.bind_from_receipt(self.store, root=str(self.root), receipt_path="lane/r2.md", key_seat=None, source="hook")   # own D filed → binding refresh
+        self.assertTrue(ok); self.assertEqual(self.store.load()["anchor"], "lane/r2.md")
+        rc, lines = self.run_replay(limit=50); self.assertEqual([json.loads(l).get("file") for l in lines[:-1]], ["lane/r1.md"])
+
+    def test_paging_keeps_first_upper_bound_while_producer_advances(self):
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 4)]); self.seed("lane/r3.md", 3)
+        rc, lines = self.run_replay(limit=2); token = json.loads(lines[-1])["continue"]; self.assertEqual([json.loads(l)["file"] for l in lines[:-1]], ["lane/r1.md", "lane/r2.md"])
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 6)]); self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/r5.md", "position": 5}))   # producer advanced
+        rc, lines = self.run_replay(limit=2, token=token); self.assertEqual([json.loads(l)["file"] for l in lines[:-1]], ["lane/r3.md"]); self.assertEqual(json.loads(lines[-1]), {"done": True})
+        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], "lane/r5.md")
+
+    def test_cannot_establish_recovery(self):
+        self.rows([(1, "a.planner", "b.implementer", "—")]); self.seed("lane/r1.md", 1, floor={"file": "lane/gone.md", "position": 7})
+        rc, lines = self.run_replay(limit=50); self.assertEqual((rc, json.loads(lines[0])), (3, {"error": "cannot-establish-recovery", "root": str(self.root)})); self.assertEqual(json.loads(lines[-1]), {"done": True})
+        self.store.update(lambda n: n.__setitem__("floors", [])); self.seed("lane/r1.md", 1)
+        def tok(**kw):
+            base = {"floors": [{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": 0, "upper_file": "lane/r1.md", "upper_position": 1}], "index": 0, "next_position": 1, "failed": False}
+            base.update(kw); return base64.b64encode(json.dumps(base).encode()).decode()
+        malformed = [
+            tok(floors=[{"root": "/elsewhere", "seat": "b.implementer", "floor_file": None, "floor_position": 0, "upper_file": "lane/r1.md", "upper_position": 1}]),   # a root this session never bound
+            tok(floors=[]),                                                                                                                                           # D8-R2: empty walk
+            tok(index=999),                                                                                                                                           # D8-R2: impossible index
+            tok(index=1),                                                                                                                                             # index at the end: nothing left to visit is not success
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer"}]),                                                                                          # D8-R2: entry missing its bounds at a valid index
+            tok(next_position=0), tok(failed="no"),
+            tok(next_position=999),                                                                                                                                   # D9-R1: cursor beyond the frozen upper bound
+            tok(next_position=2),                                                                                                                                     # D9-R1: cursor beyond upper (upper is r1)
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": "lane/r1.md", "floor_position": 1, "upper_file": "lane/r1.md", "upper_position": 1}], next_position=1),   # cursor at the floor
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": "lane/r1.md", "floor_position": 1, "upper_file": "lane/r1.md", "upper_position": 1}], next_position=0),   # cursor before the floor
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": True, "upper_file": "lane/r1.md", "upper_position": 1}]),                       # boolean position
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": 0, "upper_file": "lane/r1.md", "upper_position": -1}]),                         # negative position
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": 0, "unavailable": "yes"}]),                                                       # truthy non-boolean marker
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": 4, "upper_file": "lane/r1.md", "upper_position": 1}]),                          # inconsistent sentinel
+            tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": "lane/r1.md", "floor_position": 1, "upper_file": None, "upper_position": 0}], next_position=1),           # upper below floor
+        ]
+        for bad in malformed:
+            rc, lines = self.run_replay(limit=50, token=bad); docs = [json.loads(l) for l in lines]
+            self.assertEqual(rc, 3, bad); self.assertEqual(docs[0], {"error": "cannot-establish-recovery", "root": None}); self.assertEqual(docs[-1], {"done": True}); self.assertEqual(len(docs), 2)
+        rc, lines = self.run_replay(limit=50, token=tok()); self.assertEqual(rc, 0); self.assertEqual(json.loads(lines[0])["file"], "lane/r1.md")                    # the well-formed token still walks
+        self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 4)]); self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/r3.md", "position": 3}))
+        edge = tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": 0, "upper_file": "lane/r3.md", "upper_position": 3}], next_position=3)
+        rc, lines = self.run_replay(limit=50, token=edge); self.assertEqual(rc, 0); self.assertEqual([json.loads(l)["file"] for l in lines[:-1]], ["lane/r3.md"])            # a valid continuation exactly at the boundary row
+        gap = tok(floors=[{"root": str(self.root), "seat": "b.implementer", "floor_file": None, "floor_position": 0, "upper_file": "lane/r3.md", "upper_position": 3}], next_position=2)
+        self.index.write_text(HEADER + row(1, to="b.implementer") + row(3, to="b.implementer"))                                                                            # a rewritten index: r3 now sits at position 2, not its frozen 3
+        rc, lines = self.run_replay(limit=50, token=gap); docs = [json.loads(l) for l in lines]
+        self.assertEqual(rc, 3); self.assertEqual(docs, [{"error": "cannot-establish-recovery", "root": str(self.root)}, {"done": True}])                                  # the entry fails as recovery, not as a malformed token
+        self.store.update(lambda n: n.__setitem__("floors", [])); self.rows([(i, "a.planner", "b.implementer", "—") for i in range(1, 5)]); self.seed("lane/r4.md", 4, floor={"file": "lane/r2.md", "position": 2})
+        rc, lines = self.run_replay(limit=1); self.assertEqual(rc, 0); self.assertEqual(json.loads(lines[0])["file"], "lane/r3.md"); moved = json.loads(lines[-1])["continue"]           # a real emitted token, cursor at r4
+        self.index.write_text(HEADER + row(2, to="b.implementer") + row(1, to="b.implementer") + row(3, to="b.implementer") + row(4, to="b.implementer"))                        # floor r2 now sits at position 1; upper r4 unchanged
+        rc, lines = self.run_replay(limit=50, token=moved); docs = [json.loads(l) for l in lines]
+        self.assertEqual(rc, 3); self.assertEqual(docs, [{"error": "cannot-establish-recovery", "root": str(self.root)}, {"done": True}])                                  # the moved floor fails the entry on the continuation page too (D24-R1)
+
+
+class EnvRestartReplayTests(FollowProcessMixin, TmpEnv):
+    """The replay half of the D8-R1 witness: a real follower restart with a new seat, then the real replay subprocess."""
+
+    def test_env_restart_then_replay_recovers_the_new_seats_dropped_row(self):
+        self.index.write_text(HEADER)
+        p = self.spawn(seat="b.implementer"); first = self.wait_note(lambda n: self.bound(n) and len(n.get("floors", [])) == 1); old_floor = dict(first["floors"][0])
+        write_index(self.index, row(1, to="b.implementer")); self.assertEqual(self.read_lines(p, 1)[0]["file"], "lane/r1.md")
+        self.wait_note(lambda n: n["progress"][str(self.root)].get("file") == "lane/r1.md"); p.kill(); p.wait()
+        q = self.spawn(seat="c.reviewer"); self.wait_note(lambda n: n.get("seat") == "c.reviewer" and len(n.get("floors", [])) == 2)
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="c.reviewer")); self.assertEqual(self.read_lines(q, 1)[0]["file"], "lane/r2.md")
+        self.wait_note(lambda n: n["progress"][str(self.root)].get("file") == "lane/r2.md"); q.kill(); q.wait()
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="c.reviewer") + row(3, to="c.reviewer"))
+        self.rm.NoteStore("psess").update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/r3.md", "position": 3}))   # r3 checkpointed but dropped by the host
+        out = subprocess.run([sys.executable, str(SCRIPT), "replay", "--session", "psess", "--limit", "50"], capture_output=True, text=True, env=dict(os.environ), timeout=20)
+        docs = [json.loads(l) for l in out.stdout.splitlines()]; self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual([(d["file"], d["to"]) for d in docs if "file" in d], [("lane/r1.md", "b.implementer"), ("lane/r2.md", "c.reviewer"), ("lane/r3.md", "c.reviewer")])   # X's floor and Y's floor both walked; Y's dropped r3 recovered
+        after = self.rm.NoteStore("psess").load(); self.assertEqual(len(after["floors"]), 2); self.assertEqual(after["floors"][0], old_floor)
+
+
+class CliSmokeTests(TmpEnv):
+    def test_help_and_status_run_as_a_script(self):
+        p = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True, env=dict(os.environ)); self.assertEqual(p.returncode, 0)
+        for mode in ("follow", "bind", "drain", "session-start", "status", "operator", "replay"):
+            self.assertIn(mode, p.stdout)
+        p = subprocess.run([sys.executable, str(SCRIPT), "status", "--session", "smoke"], capture_output=True, text=True, env=dict(os.environ))
+        self.assertEqual(p.returncode, 0); self.assertTrue(p.stdout.startswith("relay-monitor: not-started"))
+        p = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "claude-code"], input="{}", capture_output=True, text=True, env=dict(os.environ)); self.assertEqual(json.loads(p.stdout), {})
