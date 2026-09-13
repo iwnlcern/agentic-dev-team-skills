@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Launch a Codex seat with the explicit host marker relay-monitor's hooks read (DD-v295-b2 component 10, row 1).
+export ADT_HOST=codex
+exec "${ADT_CODEX_BIN:-codex}" "$@"

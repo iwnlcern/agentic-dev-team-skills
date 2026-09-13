@@ -20,8 +20,14 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/hooks/hooks.json",
-    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/monitors/monitors.json",
+    "sha256": "a77c7eff1a488f6ce1b55c60753655cef997069be3f420d873ae0c17584e2ead",
+    "source": "tools/adapters/plugin-monitors.json"
   },
   {
     "kit_version": "2.9.3",
@@ -301,9 +307,21 @@
   },
   {
     "kit_version": "2.9.3",
+    "path": "adt-master/tools/adapters/codex/adt-codex",
+    "sha256": "1dc89e0053072f11b843cfd575009666554d8008295875f028950bad20c8dfaf",
+    "source": "tools/adapters/codex/adt-codex"
+  },
+  {
+    "kit_version": "2.9.3",
     "path": "adt-master/tools/adapters/plugin-hooks.json",
-    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/adapters/plugin-monitors.json",
+    "sha256": "a77c7eff1a488f6ce1b55c60753655cef997069be3f420d873ae0c17584e2ead",
+    "source": "tools/adapters/plugin-monitors.json"
   },
   {
     "kit_version": "2.9.3",
@@ -10376,8 +10394,14 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/hooks/hooks.json",
-    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/monitors/monitors.json",
+    "sha256": "a77c7eff1a488f6ce1b55c60753655cef997069be3f420d873ae0c17584e2ead",
+    "source": "tools/adapters/plugin-monitors.json"
   },
   {
     "kit_version": "2.9.3",
@@ -10555,9 +10579,21 @@
   },
   {
     "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/adapters/codex/adt-codex",
+    "sha256": "1dc89e0053072f11b843cfd575009666554d8008295875f028950bad20c8dfaf",
+    "source": "tools/adapters/codex/adt-codex"
+  },
+  {
+    "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/adapters/plugin-hooks.json",
-    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/adapters/plugin-monitors.json",
+    "sha256": "a77c7eff1a488f6ce1b55c60753655cef997069be3f420d873ae0c17584e2ead",
+    "source": "tools/adapters/plugin-monitors.json"
   },
   {
     "kit_version": "2.9.3",
@@ -20630,8 +20666,14 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/hooks/hooks.json",
-    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/monitors/monitors.json",
+    "sha256": "a77c7eff1a488f6ce1b55c60753655cef997069be3f420d873ae0c17584e2ead",
+    "source": "tools/adapters/plugin-monitors.json"
   },
   {
     "kit_version": "2.9.3",
@@ -20737,9 +20779,21 @@
   },
   {
     "kit_version": "2.9.3",
+    "path": "adt-pair/tools/adapters/codex/adt-codex",
+    "sha256": "1dc89e0053072f11b843cfd575009666554d8008295875f028950bad20c8dfaf",
+    "source": "tools/adapters/codex/adt-codex"
+  },
+  {
+    "kit_version": "2.9.3",
     "path": "adt-pair/tools/adapters/plugin-hooks.json",
-    "sha256": "30fc1a20617238582ceef5216458f71f1adf446d6e6657e2a340224ef508b30e",
+    "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/adapters/plugin-monitors.json",
+    "sha256": "a77c7eff1a488f6ce1b55c60753655cef997069be3f420d873ae0c17584e2ead",
+    "source": "tools/adapters/plugin-monitors.json"
   },
   {
     "kit_version": "2.9.3",

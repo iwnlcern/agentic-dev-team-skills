@@ -206,7 +206,7 @@ def file_map(root: Path) -> dict[str, tuple[str, int, bytes]]:
     files = {}
     for path in sorted(root.rglob("*")):
         status = path.lstat()
-        if stat.S_ISDIR(status.st_mode):
+        if stat.S_ISDIR(status.st_mode) or is_bytecode_artifact(path):
             continue
         relative = path.relative_to(root).as_posix()
         mode = stat.S_IMODE(status.st_mode)
@@ -262,6 +262,16 @@ def check_retired_m01_compound_placeholders() -> None:
     )
 
 
+def is_bytecode_artifact(path: Path) -> bool:
+    """Python bytecode caches are never shipped and never compared (test runs leave them under tools/adapters)."""
+    return "__pycache__" in path.parts or path.suffix == ".pyc"
+
+
+def is_shipped_source(path: Path) -> bool:
+    """Independent restatement of the generator's shipping rule: regular files, never Python bytecode caches."""
+    return path.is_file() and not is_bytecode_artifact(path)
+
+
 def canonical_files(source: Path, destination: str) -> set[str]:
     expect(source.exists(), f"canonical input is missing: {source.relative_to(ROOT)}")
     if source.is_file():
@@ -269,7 +279,7 @@ def canonical_files(source: Path, destination: str) -> set[str]:
     return {
         (Path(destination) / path.relative_to(source)).as_posix()
         for path in source.rglob("*")
-        if path.is_file()
+        if is_shipped_source(path)
     }
 
 
@@ -285,7 +295,7 @@ def canonical_source_map() -> dict[str, str]:
 
     def record_tree(plugin: str, source: Path, destination: Path) -> None:
         for path in sorted(source.rglob("*")):
-            if path.is_file():
+            if is_shipped_source(path):
                 record(plugin, path, destination / path.relative_to(source))
 
     for plugin, skills in PLUGINS.items():
@@ -307,6 +317,7 @@ def canonical_source_map() -> dict[str, str]:
             else:
                 record(plugin, source, destination)
         record(plugin, ROOT / "tools" / "adapters" / "plugin-hooks.json", Path("hooks") / "hooks.json")
+        record(plugin, ROOT / "tools" / "adapters" / "plugin-monitors.json", Path("monitors") / "monitors.json")
         for engine_member in LOCKED_ENGINE_SET:
             record(plugin, ROOT / "tools" / engine_member, Path("tools") / engine_member)
         record_tree(plugin, ROOT / "vendor", Path("vendor"))
@@ -335,6 +346,7 @@ def expected_plugin_files(plugin: str) -> set[str]:
     for tool in LOCKED_TOOLS_SET:
         expected |= canonical_files(ROOT / "tools" / tool, f"tools/{tool}")
     expected.add("hooks/hooks.json")
+    expected.add("monitors/monitors.json")
     for engine_member in LOCKED_ENGINE_SET:
         expected |= canonical_files(ROOT / "tools" / engine_member, f"tools/{engine_member}")
     expected |= canonical_files(ROOT / "vendor" / "mattpocock", "vendor/mattpocock")
@@ -405,6 +417,38 @@ def check_determinism() -> None:
 
 def check_clean() -> None:
     expect_success(run_generator(ROOT, "--check"), "clean --check")
+
+
+def check_monitors_declaration() -> None:
+    """Each plugin ships exactly one always-on relay-monitor watcher, readable, sourced canonically, with its three hooks."""
+    for plugin in PLUGINS:
+        path = PLUGINS_ROOT / plugin / "monitors" / "monitors.json"
+        expect(path.is_file(), f"{plugin} lacks monitors/monitors.json")
+        require_regular_mode(path, 0o644, f"{plugin} monitors declaration")
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        expect(isinstance(entries, list) and len(entries) == 1, f"{plugin} monitors.json must hold exactly one entry")
+        entry = entries[0]
+        expect(entry.get("name") == "relay-monitor", f"{plugin} monitor name must be relay-monitor")
+        expect("${CLAUDE_PLUGIN_ROOT}/tools/adapters/relay-monitor.py" in entry.get("command", ""), f"{plugin} monitor command must reference the plugin's own script")
+        expect("follow --host claude-code" in entry.get("command", ""), f"{plugin} monitor must run follow on the claude-code host")
+        expect("when" not in entry, f"{plugin} monitor must rely on the documented default when=always")
+        hooks = json.loads((PLUGINS_ROOT / plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+        def commands(event):
+            return [h["command"] for group in hooks.get(event, []) for h in group["hooks"]]
+        expect(any('relay-monitor.py" session-start --host auto' in c for c in commands("SessionStart")), f"{plugin} lacks the session-start hook")
+        expect(any('relay-monitor.py" bind --host auto' in c for c in commands("PostToolUse")), f"{plugin} lacks the bind hook")
+        expect(any('relay-monitor.py" drain --host auto' in c for c in commands("Stop")), f"{plugin} lacks the drain hook")
+        expect(not any("relay-monitor.py" in c for c in commands("PostToolUseFailure")), f"{plugin} must not run relay-monitor on PostToolUseFailure")
+
+
+def check_no_bytecode_artifacts() -> None:
+    """Generated trees and the manifest never carry Python bytecode (test runs leave __pycache__ under tools/adapters)."""
+    manifest = json.loads((PLUGINS_ROOT / MANIFEST_PATH).read_text(encoding="utf-8"))
+    for entry in manifest:
+        path = entry.get("path", "") if isinstance(entry, dict) else str(entry)
+        expect("__pycache__" not in path and not path.endswith(".pyc"), f"PROVENANCE.json records bytecode: {path}")
+    stray = [p for p in PLUGINS_ROOT.rglob("*") if p.name == "__pycache__" or p.suffix == ".pyc"]
+    expect(not stray, f"bytecode under plugins/: {stray[:3]}")
 
 
 def check_manifest_mutation() -> None:
@@ -1012,6 +1056,8 @@ def main() -> int:
     for name, check in (
         ("determinism", check_determinism),
         ("clean --check", check_clean),
+        ("monitors declaration", check_monitors_declaration),
+        ("no bytecode artifacts", check_no_bytecode_artifacts),
         ("retired M01 compound placeholders", check_retired_m01_compound_placeholders),
         ("manifest mutation", check_manifest_mutation),
         ("banner mutation", check_banner_mutation),

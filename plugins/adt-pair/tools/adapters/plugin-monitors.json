@@ -1,0 +1,7 @@
+[
+  {
+    "name": "relay-monitor",
+    "description": "Relay arrivals for the seat bound to this session",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/relay-monitor.py\" follow --host claude-code --plugin-root \"${CLAUDE_PLUGIN_ROOT}\""
+  }
+]

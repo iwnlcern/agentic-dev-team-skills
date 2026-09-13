@@ -124,10 +124,11 @@ VERBATIM_COPY_ROOTS = (
     + ("vendor",)
 )
 HOOKS_SOURCE = ROOT / "tools" / "adapters" / "plugin-hooks.json"
+MONITORS_SOURCE = ROOT / "tools" / "adapters" / "plugin-monitors.json"
 
 
 def sorted_files(path: Path) -> Iterable[Path]:
-    return sorted((item for item in path.rglob("*") if item.is_file()), key=lambda item: item.as_posix())
+    return sorted((item for item in path.rglob("*") if item.is_file() and "__pycache__" not in item.parts and item.suffix != ".pyc"), key=lambda item: item.as_posix())
 
 
 def source_relative(path: Path) -> str:
@@ -299,6 +300,7 @@ def generate_tree(output: Path) -> None:
             else:
                 record_copy(source, destination, output)
         record_copy(HOOKS_SOURCE, plugin_root / "hooks" / "hooks.json", output)
+        record_copy(MONITORS_SOURCE, plugin_root / "monitors" / "monitors.json", output)
         for engine_member in ENGINE_SET:
             record_copy(ROOT / "tools" / engine_member,
                         plugin_root / "tools" / engine_member, output)

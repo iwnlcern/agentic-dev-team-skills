@@ -20,6 +20,10 @@
           {
             "type": "command",
             "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/bash-relay-guard.sh\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/relay-monitor.py\" bind --host auto --plugin-root \"${CLAUDE_PLUGIN_ROOT}\""
           }
         ]
       }
@@ -35,6 +39,27 @@
           {
             "type": "command",
             "command": "RELAY_LINT_SKILLS_ROOT=\"${CLAUDE_PLUGIN_ROOT}\" bash \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/claude-code/bash-relay-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/relay-monitor.py\" session-start --host auto --plugin-root \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/relay-monitor.py\" drain --host auto --plugin-root \"${CLAUDE_PLUGIN_ROOT}\"",
+            "timeout": 8
           }
         ]
       }
