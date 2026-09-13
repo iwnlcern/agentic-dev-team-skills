@@ -245,3 +245,107 @@ def decide_host(args, payload, environ) -> str:
 
 
 MODES: dict = {}
+
+
+def unescape_cell(text: str) -> str | None:
+    text = text.strip()
+    if text == "—":
+        return None
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in ("|", "\\"):
+            out.append(text[i + 1]); i += 2
+        else:
+            out.append(text[i]); i += 1
+    return "".join(out)
+
+
+def split_cells(line: str) -> list[str] | None:
+    body = line.rstrip("\n")
+    if not body.startswith("|") or not body.endswith("|"):
+        return None
+    body = body[1:-1]
+    cells, cur, i = [], [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            cur.append(ch); cur.append(body[i + 1]); i += 2; continue
+        if ch == "|":
+            cells.append("".join(cur)); cur = []; i += 1; continue
+        cur.append(ch); i += 1
+    cells.append("".join(cur))
+    return cells
+
+
+@dataclass
+class Row:
+    position: int
+    cells: dict
+    raw: str
+
+
+@dataclass
+class IndexSnapshot:
+    rows: list = field(default_factory=list)
+    error: str | None = None
+    partial_tail: bool = False
+
+
+def read_index(path: Path) -> IndexSnapshot:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return IndexSnapshot(error="index-missing")
+    complete_last = text.endswith("\n")
+    lines = text.split("\n")
+    if complete_last:
+        lines = lines[:-1]
+    header_idx = next((i for i, l in enumerate(lines) if (c := split_cells(l)) and [x.strip() for x in c] == list(INDEX_HEADERS)), None)
+    if header_idx is None:
+        return IndexSnapshot(error="index-malformed")
+    snap, seen, position = IndexSnapshot(), set(), 0
+    data = lines[header_idx + 2:]
+    for j, line in enumerate(data):
+        if not line.strip():
+            continue
+        if j == len(data) - 1 and not complete_last:
+            snap.partial_tail = True; break
+        position += 1
+        cells = split_cells(line)
+        if cells is None or len(cells) != len(INDEX_HEADERS):
+            snap.error = f"index-malformed-row:{position}"; break
+        decoded = {k: unescape_cell(v) for k, v in zip(INDEX_HEADERS, cells)}
+        if not decoded["file"]:
+            snap.error = f"index-malformed-row:{position}"; break
+        if decoded["file"] in seen:
+            snap.error = f"duplicate-file-cell:{position}"; break
+        seen.add(decoded["file"]); snap.rows.append(Row(position, decoded, line))
+    return snap
+
+
+def canonical(address) -> str:
+    return (address or "").strip().lower()
+
+
+def address_list(cell) -> list[str]:
+    return [canonical(a) for a in (cell or "").split(",") if a.strip()]
+
+
+def names_seat(row: Row, seat: str) -> bool:
+    seat = canonical(seat)
+    return seat in address_list(row.cells["to"]) or seat in address_list(row.cells["cc"])
+
+
+def is_own(row: Row, seat: str) -> bool:
+    return canonical(row.cells["from"]) == canonical(seat)
+
+
+def row_to_line(row: Row, root: str) -> str:
+    payload = dict(row.cells); payload["root"] = root
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def locate(snapshot: IndexSnapshot, cursor: dict) -> int | None:
+    if cursor.get("file") is None:
+        return -1
+    return next((i for i, r in enumerate(snapshot.rows) if r.cells["file"] == cursor["file"]), None)

@@ -157,5 +157,46 @@ class HostTableTests(TmpEnv):
         self.assertEqual(self.decide(env={"ADT_HOST": "codex", "CLAUDECODE": "1"}, payload=fresh), "codex")
 
 
+class IndexReaderTests(TmpEnv):
+    def test_missing_and_malformed_header(self):
+        self.assertEqual(self.rm.read_index(self.index).error, "index-missing")
+        self.index.write_text("| a | b |\n|---|---|\n")
+        self.assertEqual(self.rm.read_index(self.index).error, "index-malformed")
+
+    def test_rows_parse_with_positions_and_unescaping(self):
+        write_index(self.index, row(1, to=r"x\|y.planner") + row(2))
+        snap = self.rm.read_index(self.index)
+        self.assertIsNone(snap.error); self.assertEqual([r.position for r in snap.rows], [1, 2])
+        self.assertEqual(snap.rows[0].cells["to"], "x|y.planner"); self.assertIsNone(snap.rows[1].cells["cc"])
+        self.assertEqual(self.rm.unescape_cell(r"a\\b"), r"a\b")
+
+    def test_partial_trailing_row_is_ignored_and_flagged(self):
+        self.index.write_text(HEADER + row(1) + "| 20260912-000002 | SITREP | Pair")
+        snap = self.rm.read_index(self.index)
+        self.assertEqual(len(snap.rows), 1); self.assertTrue(snap.partial_tail); self.assertIsNone(snap.error)
+
+    def test_malformed_complete_row_and_duplicate_file_halt(self):
+        write_index(self.index, row(1) + "| only | three | cells |\n" + row(3))
+        snap = self.rm.read_index(self.index); self.assertEqual(snap.error, "index-malformed-row:2"); self.assertEqual(len(snap.rows), 1)
+        write_index(self.index, row(1, file="lane/same.md") + row(2, file="lane/same.md") + row(3))
+        snap = self.rm.read_index(self.index); self.assertEqual(snap.error, "duplicate-file-cell:2"); self.assertEqual(len(snap.rows), 1)
+
+    def test_line_grammar(self):
+        write_index(self.index, row(1, to="B.Implementer, c.planner"))
+        line = self.rm.row_to_line(self.rm.read_index(self.index).rows[0], "docs/x/.relays/v1")
+        self.assertTrue(line.endswith("\n")); obj = json.loads(line)
+        self.assertEqual(list(obj), sorted(obj)); self.assertEqual(obj["root"], "docs/x/.relays/v1")
+        self.assertIsNone(obj["cc"]); self.assertIsNone(obj["parent"]); self.assertEqual(obj["file"], "lane/r1.md")
+        self.assertNotIn(": ", line)
+
+    def test_seat_matching_and_locate(self):
+        write_index(self.index, row(1, frm="A.Planner", to="B.Implementer, c.planner", cc="ORCH.orchestrator-reviewer") + row(2))
+        snap = self.rm.read_index(self.index); r = snap.rows[0]
+        self.assertTrue(self.rm.names_seat(r, "c.planner")); self.assertTrue(self.rm.names_seat(r, "orch.orchestrator-reviewer"))
+        self.assertFalse(self.rm.names_seat(r, "a.planner")); self.assertTrue(self.rm.is_own(r, "a.planner"))
+        self.assertEqual(self.rm.locate(snap, self.rm.SENTINEL), -1); self.assertEqual(self.rm.locate(snap, {"file": "lane/r2.md", "position": 2}), 1)
+        self.assertIsNone(self.rm.locate(snap, {"file": "lane/gone.md", "position": 9}))
+
+
 if __name__ == "__main__":
     unittest.main()
