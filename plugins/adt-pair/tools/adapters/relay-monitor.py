@@ -38,6 +38,14 @@ class TransportFailed(Exception):
     pass
 
 
+def valid_session_id(session) -> bool:
+    return (
+        isinstance(session, str)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", session) is not None
+        and ".." not in session
+    )
+
+
 def note_dir() -> Path:
     d = Path(os.environ.get("TMPDIR") or "/tmp") / "adt-relay-monitor"
     d.mkdir(mode=0o700, exist_ok=True); os.chmod(d, 0o700)
@@ -57,6 +65,8 @@ def now_stamp() -> str:
 
 class NoteStore:
     def __init__(self, session: str):
+        if not valid_session_id(session):
+            raise ValueError("invalid-session-id")
         self.session = session
         self.path = note_dir() / f"{session}.json"
         self._state_path = note_dir() / f"{session}.state"
@@ -148,6 +158,8 @@ def process_alive(record) -> bool:
 
 class LeaderLock:
     def __init__(self, session: str):
+        if not valid_session_id(session):
+            raise ValueError("invalid-session-id")
         self._path = note_dir() / f"{session}.leader"; self._fd = None
 
     def acquire(self, blocking: bool) -> bool:
@@ -218,8 +230,16 @@ class ByteSink:
         return None
 
 
-def resolve_session(args) -> str | None:
-    return getattr(args, "session", None) or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or None
+def resolve_session(args, payload=None) -> str | None:
+    if payload is not None and "session_id" in payload:
+        return payload["session_id"]
+    session = getattr(args, "session", None)
+    if session is not None:
+        return session
+    for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
+        if name in os.environ:
+            return os.environ[name]
+    return None
 
 
 def decide_host(args, payload, environ) -> str:
@@ -300,7 +320,7 @@ def read_index(path: Path) -> IndexSnapshot:
     lines = text.split("\n")
     if complete_last:
         lines = lines[:-1]
-    header_idx = next((i for i, l in enumerate(lines) if (c := split_cells(l)) and [x.strip() for x in c] == list(INDEX_HEADERS)), None)
+    header_idx = next((i for i, line in enumerate(lines) if (c := split_cells(line)) and [x.strip() for x in c] == list(INDEX_HEADERS)), None)
     if header_idx is None:
         return IndexSnapshot(error="index-malformed")
     snap, seen, position = IndexSnapshot(), set(), 0
@@ -689,8 +709,9 @@ def index_signature(path: Path):
 
 def follow(args) -> int:
     session = resolve_session(args)
-    if not session:
-        print("relay-monitor: no session identity", file=sys.stderr); return 2
+    if not valid_session_id(session):
+        print("relay-monitor: invalid-session-id", file=sys.stderr)
+        return 2
     host = decide_host(args, None, os.environ)
     store, leader, me = NoteStore(session), LeaderLock(session), leader_record()
     if not leader.acquire(blocking=False):
@@ -731,7 +752,6 @@ def follow(args) -> int:
             last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
             snap = read_index(Path(binding.root) / "INDEX.md")
             result = deliver_once(store, sink, binding, snap, end=time.monotonic() + FOLLOW_OUTPUT_DEADLINE, leader_instance=me["instance"], pacer=pacer)
-            last_note = store.mtime()
             if result.aborted == "paced":
                 pending = True; time.sleep(min(POLL_INDEX, pacer.wait_time()))
             elif result.aborted == "output-stalled":
@@ -781,11 +801,27 @@ def is_assignment_word(sl, text: str, quoted) -> bool:
 def parse_submit_command(command: str) -> SubmitParse:
     sl = _shell_lex()
     tokens = sl.lex(command)
-    if tokens is None:
-        return SubmitParse(False, "unsupported-shell")
-    if any(op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens):
-        return SubmitParse(False, "unsupported-shell")
-    commands = sl.split_commands(tokens)
+    malformed = tokens is None
+    if malformed:
+        # Close only the unfinished quoted word to inspect preceding commands.
+        tokens = sl.lex(command + "\n'")
+        if tokens is None:
+            tokens = sl.lex(command + '\n"')
+        tokens = tokens or []
+    unsupported = malformed or any(
+        op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens
+    )
+    boundaries = (*sl.SEPARATORS, "|", "||", "&", "(", ")")
+    commands, current = [], []
+    for token in tokens:
+        if token[2] and token[0] in boundaries:
+            if current:
+                commands.append(current)
+            current = []
+        else:
+            current.append(token)
+    if current:
+        commands.append(current)
     cd_prefix, submit, count = None, None, 0
     for i, cmd in enumerate(commands):
         words = [(t, q) for t, q, op in cmd if not op or t in REDIRECT_OPS]
@@ -795,12 +831,14 @@ def parse_submit_command(command: str) -> SubmitParse:
         texts = [t for t, _q in words]
         if texts and texts[0] == "cd" and not words[0][1]:
             if i != 0:
-                return SubmitParse(False, "unsupported-shell")
+                unsupported = True
             cd_prefix = texts[1] if len(texts) > 1 else None; continue
         if len(words) >= 2 and not words[0][1] and (texts[0] in RELAY_WORDS or texts[0].endswith("/relay")) and texts[1] == "submit" and not words[1][1]:
             count += 1; submit = (words, assigns)
     if count == 0:
         return SubmitParse(False, "no-submit")
+    if unsupported:
+        return SubmitParse(False, "unsupported-shell")
     if count > 1:
         return SubmitParse(False, "ambiguous-command")
     words, assigns = submit
@@ -933,7 +971,9 @@ def degrade(store: NoteStore, reason: str) -> None:
 def bind(args) -> int:
     if getattr(args, "manual", False):
         session = resolve_session(args)
-        if not session or not args.root or not args.anchor:
+        if not valid_session_id(session):
+            return 0
+        if not args.root or not args.anchor:
             print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr); return 0
         root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
         ok, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
@@ -944,8 +984,8 @@ def bind(args) -> int:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    session = payload.get("session_id") or resolve_session(args)
-    if not session:
+    session = resolve_session(args, payload)
+    if not valid_session_id(session):
         return 0
     store = NoteStore(session)
     if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
@@ -999,8 +1039,8 @@ def drain(args) -> int:
     payload = read_payload()
     if decide_host(args, payload, os.environ) != "codex":
         return emit_json({})
-    session = payload.get("session_id") or resolve_session(args)
-    if not session:
+    session = resolve_session(args, payload)
+    if not valid_session_id(session):
         return emit_json({})
     store = NoteStore(session); note = store.load()
     binding = resolve_binding(note, os.environ, args)
@@ -1054,21 +1094,39 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
     try:
         return json.loads(text), proc.returncode
     except ValueError:
-        return {"raw": text}, proc.returncode
+        return {"raw": proc.stderr.strip() or text}, proc.returncode
 
 
 def check_identity(plugin_root: str | None, root: str | None):
     client, rc = run_relay(plugin_root, "version")
-    client_id = {"kit": client.get("kit"), "fp": client.get("fingerprint")} if rc == 0 else {"kit": None, "fp": None}
+    client = client if isinstance(client, dict) else {}
+    client_id = (
+        {"kit": client.get("kit"), "fp": client.get("fingerprint")}
+        if rc == 0 else {"kit": None, "fp": None}
+    )
     if not root or not os.path.isdir(os.path.join(root, ".engine")):
         return "hand-root", client_id, None
     status_doc, rc = run_relay(plugin_root, "status", "--root", root)
+    status_doc = status_doc if isinstance(status_doc, dict) else {}
     if rc != 0:
-        if status_doc.get("code") == "E-DAEMON-DOWN" or "socket" in json.dumps(status_doc).lower():
-            return "daemon-down", client_id, None
-        return "version-mismatch", client_id, status_doc
-    ident = ((status_doc.get("daemon") or {}).get("identity")) or {}
+        raw = status_doc.get("raw") or ""
+        lines = raw.splitlines() if isinstance(raw, str) else []
+        code = status_doc.get("code") or (lines[0] if lines else "")
+        reason = (
+            code[2:].lower()
+            if isinstance(code, str) and re.fullmatch(r"E-[A-Z0-9-]+", code)
+            else "unknown"
+        )
+        return reason, client_id, status_doc
+    daemon_doc = status_doc.get("daemon")
+    ident = daemon_doc.get("identity") if isinstance(daemon_doc, dict) else None
+    ident = ident if isinstance(ident, dict) else {}
     daemon = {"kit": ident.get("kit"), "fp": ident.get("fp")}
+    if not all(
+        isinstance(value, str) and value
+        for identity in (client_id, daemon) for value in identity.values()
+    ):
+        return "unknown", client_id, daemon
     return ("ok" if daemon == client_id else "version-mismatch"), client_id, daemon
 
 
@@ -1107,16 +1165,23 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
     if note.get("binding_degraded"):
         binding = f"degraded:{note['binding_degraded']['reason']}"
     cur = (note["progress"].get(note.get("root") or "") or {}).get("file") or "-"
-    fp = lambda d: f"{d.get('kit')}@{(d.get('fp') or '')[:8]}" if d and d.get("kit") else "-"
+    def fp(d):
+        return f"{d.get('kit')}@{(d.get('fp') or '')[:8]}" if d and d.get("kit") else "-"
     daemon_txt = {"hand-root": "hand-root", "daemon-down": "down", "unchecked": "-"}.get(ident, fp(daemon))
-    return (f"relay-monitor: {state}{suffix} seat={note.get('seat') or '-'} root={note.get('root') or '-'} cursor={cur} "
+    line = (f"relay-monitor: {state}{suffix} seat={note.get('seat') or '-'} root={note.get('root') or '-'} cursor={cur} "
             f"binding={binding} client={fp(client_id)} daemon={daemon_txt} updated={note.get('updated') or '-'}")
+    raw = (daemon or {}).get("raw") or ""
+    remedy = next(
+        (text for text in raw.splitlines() if text.startswith("remedy:")), None
+    )
+    return f"{line}\n{remedy}" if remedy else line
 
 
 def status(args) -> int:
     session = resolve_session(args)
-    if not session:
-        print("relay-monitor: no session identity", file=sys.stderr); return 2
+    if not valid_session_id(session):
+        print("relay-monitor: invalid-session-id", file=sys.stderr)
+        return 2
     store = NoteStore(session)
     with store.state_lock():
         sweep_owner_files(store)                                                          # eventual cleanup; never the referenced file
@@ -1126,7 +1191,7 @@ def status(args) -> int:
 FALLBACK_OVERRIDE_TEXT = "relay-monitor: fallback: pointer (ADT_CODEX_FORK=0); relays reach this seat by the operator's pointer block."
 
 
-def ARMING_TEXT(plugin_root: str, session: str, resume: bool) -> str:
+def arming_text(plugin_root: str, session: str, resume: bool) -> str:
     cmd = f'python3 "{plugin_root}/tools/adapters/relay-monitor.py" follow --host codex --session {session} --plugin-root "{plugin_root}"'
     head = ("This session resumed. First call the `monitor` tool with action `list`; only if no watch is running the relay-monitor command below, " if resume else "On this boot turn, ")
     return ("If the `monitor` tool is present in your advertised tool surface (the complete capability surface exposed to you, including nested code-mode definitions): "
@@ -1138,9 +1203,13 @@ def ARMING_TEXT(plugin_root: str, session: str, resume: bool) -> str:
 
 def session_start(args) -> int:
     payload = read_payload()
-    session = payload.get("session_id") or resolve_session(args)
-    if not session:
-        return emit_json({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "relay-monitor: no-session-identity"}})
+    session = resolve_session(args, payload)
+    if not valid_session_id(session):
+        reason = "no-session-identity" if session is None else "invalid-session-id"
+        return emit_json({"hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": f"relay-monitor: {reason}",
+        }})
     store = NoteStore(session); host = decide_host(args, payload, os.environ)
     plugin_root = args.plugin_root or os.environ.get("CLAUDE_PLUGIN_ROOT") or os.environ.get("PLUGIN_ROOT") or str(Path(__file__).resolve().parents[2])
     lines = [status_line(store, plugin_root)]
@@ -1149,7 +1218,7 @@ def session_start(args) -> int:
     elif host == "codex":
         override = os.environ.get("ADT_CODEX_FORK") == "0"                                   # the only stock signal the kit honours (erratum-1 A)
         store.update(lambda n: n.update({"host": "codex", "codex_fork_override": override}))
-        lines.append(FALLBACK_OVERRIDE_TEXT if override else ARMING_TEXT(plugin_root, session, payload.get("source") == "resume"))
+        lines.append(FALLBACK_OVERRIDE_TEXT if override else arming_text(plugin_root, session, payload.get("source") == "resume"))
     else:
         store.update(lambda n: n.update({"host": "claude-code"}))
     return emit_json({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(lines)}})
@@ -1188,7 +1257,8 @@ def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
                 try:
                     notify(f"relay: {row_.cells['from']} -> operator ({row_.cells['phase']})", line.strip(), notifier)
                 except (OSError, subprocess.SubprocessError) as exc:
-                    store.update(lambda n: n.update({"reason": f"notify-failed: {exc}"}))
+                    reason = f"notify-failed: {exc}"
+                    store.update(lambda n: n.update({"reason": reason}))
                 fired += 1
             store.update(lambda n: n["progress"].__setitem__(root, {"file": row_.cells["file"], "position": row_.position}))
     return fired
@@ -1209,8 +1279,9 @@ def _replay_error(root: str) -> None:
 
 def replay(args) -> int:
     session = resolve_session(args)
-    if not session:
-        print("relay-monitor: no session identity", file=sys.stderr); return 2
+    if not valid_session_id(session):
+        print("relay-monitor: invalid-session-id", file=sys.stderr)
+        return 2
     note = NoteStore(session).load(); floors = list(note.get("floors") or [])
     if args.after:                                                                        # single-binding optimization: the current binding only
         root, seat = note.get("root"), note.get("seat")
@@ -1294,7 +1365,8 @@ def replay(args) -> int:
 
 MODES["operator"] = operator
 MODES["replay"] = replay
-# ---- entrypoint: keep these the last lines of the file; later tasks insert above `def build_parser()` ----
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="relay-monitor")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -1311,9 +1383,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    handler = MODES.get(args.mode)
-    if handler is None:
-        print(f"relay-monitor: mode {args.mode} not implemented", file=sys.stderr); return 2
+    handler = MODES[args.mode]
     return handler(args)
 
 

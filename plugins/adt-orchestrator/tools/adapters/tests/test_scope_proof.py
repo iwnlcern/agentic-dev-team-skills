@@ -1,4 +1,4 @@
-import os, pathlib, subprocess, tempfile, unittest
+import pathlib, subprocess, tempfile, unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "scope_proof.sh"
 
