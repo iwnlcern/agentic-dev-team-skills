@@ -44,7 +44,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/domain-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
@@ -56,7 +56,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/domain-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -68,7 +68,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/domain-reviewer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
@@ -80,7 +80,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/domain-reviewer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -98,7 +98,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/master-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
@@ -110,7 +110,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/master-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -122,7 +122,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/master-reviewer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
@@ -134,13 +134,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/master-reviewer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/orchestrator-planner/SKILL.md",
-    "sha256": "2a45e462cf90577ab47d26076b67366dd53c469519b7fe99232a440b3a7b1ace",
+    "sha256": "6772001980142e404f1663dd32fb403374856b17233f57d4224f0d399f99b316",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -152,13 +152,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "9666e4769a8ac311f0b00275da2cece9419e8c370d68bbc0846fd0fd6a130549",
+    "sha256": "8ea597eb6000d748c095b60c4c32a7ab6d276f8959d81691668b6e4a98e2efc1",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/orchestrator-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
@@ -170,7 +170,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/orchestrator-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -200,37 +200,37 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/orchestrator-reviewer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/pair-implementer/SKILL.md",
-    "sha256": "88c7cb58503034d3f42b8fc0a6d0d268365b23527d44b09938ac85161a44387d",
+    "sha256": "cb3e6d8acb98172495ee9c4586937b9d5aecf4f9f763cd690e72bb1573d89f19",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/pair-implementer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/pair-implementer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/pair-planner/SKILL.md",
-    "sha256": "40d0a5c98164a45eb35247a7c00e30f4c9cf97fc6e81908d6aeb6b0a5fbb309d",
+    "sha256": "0e9e62d6c3f8259b8e6ee3a58f4714847ee78e7dcb9f76b9ff85cbaa371eb572",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -242,13 +242,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/pair-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/pair-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -266,13 +266,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "9b60040d6b1e75df8253005759174a643e4d7903cee172aed7ded4e19013f919",
+    "sha256": "9175c6305d973c7df114b2492e540bd21acf8956fa3ed14a187f4c544729aff2",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "d9c36d974b86d28281d3b0d031b24ee40f46800af054ea0ec4d16978d87ff9c4",
+    "sha256": "ac16bdcd419632b9d08203efe991c2a39078fb7699efcc050a11e213a8253f42",
     "source": "tools/adapters/README.md"
   },
   {
@@ -10418,7 +10418,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/orchestrator-planner/SKILL.md",
-    "sha256": "2a45e462cf90577ab47d26076b67366dd53c469519b7fe99232a440b3a7b1ace",
+    "sha256": "6772001980142e404f1663dd32fb403374856b17233f57d4224f0d399f99b316",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -10430,13 +10430,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "9666e4769a8ac311f0b00275da2cece9419e8c370d68bbc0846fd0fd6a130549",
+    "sha256": "8ea597eb6000d748c095b60c4c32a7ab6d276f8959d81691668b6e4a98e2efc1",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/orchestrator-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10448,7 +10448,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/orchestrator-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -10478,37 +10478,37 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/pair-implementer/SKILL.md",
-    "sha256": "88c7cb58503034d3f42b8fc0a6d0d268365b23527d44b09938ac85161a44387d",
+    "sha256": "cb3e6d8acb98172495ee9c4586937b9d5aecf4f9f763cd690e72bb1573d89f19",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/pair-implementer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/pair-implementer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/pair-planner/SKILL.md",
-    "sha256": "40d0a5c98164a45eb35247a7c00e30f4c9cf97fc6e81908d6aeb6b0a5fbb309d",
+    "sha256": "0e9e62d6c3f8259b8e6ee3a58f4714847ee78e7dcb9f76b9ff85cbaa371eb572",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -10520,13 +10520,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/pair-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/pair-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -10544,13 +10544,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "9b60040d6b1e75df8253005759174a643e4d7903cee172aed7ded4e19013f919",
+    "sha256": "9175c6305d973c7df114b2492e540bd21acf8956fa3ed14a187f4c544729aff2",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "d9c36d974b86d28281d3b0d031b24ee40f46800af054ea0ec4d16978d87ff9c4",
+    "sha256": "ac16bdcd419632b9d08203efe991c2a39078fb7699efcc050a11e213a8253f42",
     "source": "tools/adapters/README.md"
   },
   {
@@ -20696,25 +20696,25 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/pair-implementer/SKILL.md",
-    "sha256": "ca458f0dd6f6a2a225aeb18fd16bcf43b619eb065fe2c1b8d7669dc8d33393d4",
+    "sha256": "d731a52d05fb5b5d5bd45d4aa0c9a047273a74a61d49da54691afc6c075d668c",
     "source": "skills/pair-implementer/SKILL.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/pair-implementer/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/pair-implementer/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/pair-planner/SKILL.md",
-    "sha256": "6a59d8cc277cd8aea12134fda916d6a4e5efcb42ad31f8115b5d9757671682b5",
+    "sha256": "068a202d850cd93dc89c310b2c21a79a66dafd24b01aa2c9e08806c493f16be1",
     "source": "skills/pair-planner/SKILL.md"
   },
   {
@@ -20726,13 +20726,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/pair-planner/harness-codex.md",
-    "sha256": "e7c0059bda545a2a0be0d847de2205c28ced67fdfc226b0c1e9fe7440fb6f9c5",
+    "sha256": "cfea5b315867a7aa21e08f0b5d443a1dc5376b7538420ec8955d89ddc9d9cd1c",
     "source": "shared/harness-codex.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/pair-planner/protocol.md",
-    "sha256": "58c2c7aa3fa04543b682c5eca2f8cc43c52b66f5f20f4c9d40962800fd0dc695",
+    "sha256": "6cfddb27ce1bcf7057db34b6716e62aa366f8b2ef9058e330582bb26ba0db8e0",
     "source": "shared/protocol.md"
   },
   {
@@ -20750,13 +20750,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "9b60040d6b1e75df8253005759174a643e4d7903cee172aed7ded4e19013f919",
+    "sha256": "9175c6305d973c7df114b2492e540bd21acf8956fa3ed14a187f4c544729aff2",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "d9c36d974b86d28281d3b0d031b24ee40f46800af054ea0ec4d16978d87ff9c4",
+    "sha256": "ac16bdcd419632b9d08203efe991c2a39078fb7699efcc050a11e213a8253f42",
     "source": "tools/adapters/README.md"
   },
   {

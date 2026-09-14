@@ -3,6 +3,17 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow the project's own release numbering.
 
+## [Unreleased]
+
+Relay auto-delivery (v2.9.5 sprint, bundle B2); the release identity and version bump are the orchestrator's release step.
+
+- **Every generated plugin declares an always-on `relay-monitor` watcher** (`monitors/monitors.json`) that re-reads the run's rendered `INDEX.md` and delivers each addressed row to the session as one JSON line; a PostToolUse hook binds the seat after every `tools/relay submit` with a visible receipt.
+  The engine is unaltered; the terminal pointer block remains mandatory as the fallback.
+- **Codex arming and Stop drain hooks** for the kit's Codex fork; stock Codex stays fallback-only; `adt-codex` launcher; one-time `/hooks` re-trust.
+- **Operator notification mode** (`relay-monitor.py operator`, macOS `osascript`) and `replay` for loss-marker recovery.
+- **Relay guard narrowed** to quote-aware write destinations under a relay root (the four read-only false positives are silent; a stderr redirect into a relay file still fires).
+- Protocol gains the Delivery-mode section; role skills and templates state the delivery state in the boot acknowledgment.
+
 ## [2.9.3] — 2026-08-25
 
 A docs-only hotfix, smaller still than 2.9.2: one corrected status paragraph and one init directive.
