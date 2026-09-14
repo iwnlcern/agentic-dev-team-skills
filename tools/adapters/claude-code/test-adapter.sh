@@ -485,6 +485,16 @@ assert_guard_case "g38-uncertain-with-dot-relative-relays-path-is-an-advisory" "
 '
 E${g32_tab}OF
 printf x > ./relays/run1/g38-$stamp.md" false PostToolUse 2 "could not be parsed" || fail=1
+# g39-g43: redirections beside cp/mv operands are writes of their own, never operands (final review FR3).
+g39_relay="$tmp/work/.relays/run1/g39-$stamp.md"; printf 'x\n' > "$g39_relay"
+assert_guard_case "g39-cp-relay-target-with-stderr-to-devnull-still-lints" "cp $tmp/work/a.md $g39_relay 2>/dev/null" false PostToolUse 2 "FAILS lint" || fail=1
+assert_guard_case "g40-mv-relay-target-with-stdout-to-log-still-lints" "mv $tmp/work/a.md $g39_relay >$tmp/work/log" false PostToolUse 2 "FAILS lint" || fail=1
+g41_relay="$tmp/work/.relays/run1/g41-$stamp.md"; printf 'x\n' > "$g41_relay"
+assert_guard_case "g41-cp-elsewhere-with-relay-stderr-and-ordinary-stdout-lints-the-relay" "cp $tmp/work/a.md $tmp/work/out 2>$g41_relay >$tmp/work/log" false PostToolUse 2 "FAILS lint" || fail=1
+assert_guard_case "g42-cp-relay-target-with-descriptor-dup-still-lints" "cp $tmp/work/a.md $g39_relay 2>&1" false PostToolUse 2 "FAILS lint" || fail=1
+assert_guard_case "g43-cp-from-relay-source-with-stderr-to-devnull-is-silent" "cp $g12_src $tmp/work/out.md 2>/dev/null" false PostToolUse 0 "" || fail=1
+assert_guard_case "g44-cp-relay-target-with-input-descriptor-still-lints" "cp $tmp/work/a.md $g39_relay 0</dev/null" false PostToolUse 2 "FAILS lint" || fail=1
+assert_guard_case "g45-mv-relay-target-with-input-descriptor-still-lints" "mv $tmp/work/a.md $g39_relay 0<$tmp/work/a.md" false PostToolUse 2 "FAILS lint" || fail=1
 
 # p1-p8 exercise payload normalization directly.  The production break caught
 # by these cases is silent lint-nothing for a relay target declared by an
