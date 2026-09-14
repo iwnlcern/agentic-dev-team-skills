@@ -349,6 +349,8 @@ def locate(snapshot: IndexSnapshot, cursor: dict) -> int | None:
     if cursor.get("file") is None:
         return -1
     return next((i for i, r in enumerate(snapshot.rows) if r.cells["file"] == cursor["file"]), None)
+
+
 @dataclass
 class Binding:
     seat: str
@@ -573,6 +575,7 @@ def deliver_once(store: NoteStore, sink, binding: Binding | None, snapshot: Inde
                 if (ident.get("root"), ident.get("seat"), ident.get("binding_gen")) != (binding.root, canonical(binding.seat), binding.binding_gen):
                     raise TransportFailed("frame-invalidated")          # own partial stream, binding gone: abandon even with nothing pending (R2)
             cursor = dict(start_cursor) if start_cursor is not None else dict(note["progress"].get(root_key) or SENTINEL)
+            observed = dict(note["progress"].get(root_key) or SENTINEL)   # the progress this scan is based on; a rebase may replace exactly this (final review FR2)
     except LockTimeout:
         result.aborted = "lock-timeout"; return result
     start = locate(snapshot, cursor)
@@ -582,8 +585,23 @@ def deliver_once(store: NoteStore, sink, binding: Binding | None, snapshot: Inde
             _bounded_update(store, lambda n: n.update({"phase": "unavailable", "reason": "anchor-not-found"}), end, result)
             result.halted = "anchor-not-found"; return result
         start = anchor_idx; cursor = {"file": snapshot.rows[start].cells["file"], "position": snapshot.rows[start].position}
-        if not _bounded_update(store, lambda n: (n["progress"].__setitem__(root_key, dict(cursor)), n.update({"reason": "rebased"})), end, result):
-            return result
+        try:
+            with store.state_lock(_remaining(end)):                                   # compare-and-update: a rebase never overwrites a newer binding's or another consumer's cursor (final review FR2)
+                n = store.load()
+                live_seat = canonical(n.get("seat")) if binding.source != "env" else canonical(binding.seat)
+                live_root = n.get("root") if binding.source != "env" else binding.root
+                frame = n.get("frame"); mine = bool(frame) and frame.get("identity", {}).get("leader") == leader_instance
+                if int(n.get("binding_gen", 0)) != binding.binding_gen or live_seat != canonical(binding.seat) or live_root != binding.root:
+                    if mine:
+                        raise TransportFailed("frame-invalidated")
+                    result.aborted = "binding-changed"; return result
+                if dict(n["progress"].get(root_key) or SENTINEL) != observed:
+                    if mine:
+                        raise TransportFailed("frame-invalidated")
+                    result.aborted = "progress-moved"; return result
+                n["progress"][root_key] = dict(cursor); n["reason"] = "rebased"; store.save(n)
+        except LockTimeout:
+            result.aborted = "lock-timeout"; return result
     for offset, row_ in enumerate(snapshot.rows[start + 1:]):
         if limit is not None and result.emitted >= limit:
             return result

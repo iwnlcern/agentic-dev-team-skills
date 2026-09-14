@@ -295,6 +295,45 @@ class DeliveryTests(TmpEnv):
         r = self.rm.deliver_once(self.store, self.rm.ByteSink(), binding, snap, end=time.monotonic() + 0.5, leader_instance=self.inst)
         self.assertEqual((r.emitted, r.aborted), (0, "binding-changed"))
 
+    def rebase_setup(self, seat="b.implementer"):
+        """Seat a binding with a cursor the index no longer holds; the next scan must rebase on anchor r1."""
+        self.bind(anchor={"file": "lane/r1.md", "position": 1}); write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, 4)))
+        self.store.update(lambda n: (n.update({"seat": seat}), n["progress"].__setitem__(str(self.root), {"file": "lane/gone.md", "position": 9})))
+        return self.rm.resolve_binding(self.store.load(), {}, None)
+
+    def interleave_before_lock(self, nth, action):
+        """Run action just before the nth state-lock acquisition of this test's store."""
+        real, calls = self.rm.NoteStore.state_lock, {"n": 0}
+        def hooked(store, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == nth:
+                action()
+            return real(store, *a, **kw)
+        patcher = mock.patch.object(self.rm.NoteStore, "state_lock", hooked); patcher.start(); self.addCleanup(patcher.stop)
+        return patcher
+
+    def test_rebase_is_compare_and_update_against_a_newer_binding(self):                              # final review FR2
+        binding = self.rebase_setup(seat="a.planner")
+        def bind_b():                                                                                # seat b binds at r3 between the stale read and the rebase lock
+            self.store.update(lambda n: (n.update({"seat": "b.implementer", "binding_gen": 2}), n["progress"].__setitem__(str(self.root), {"file": "lane/r3.md", "position": 3})))
+        patcher = self.interleave_before_lock(2, bind_b)
+        r, _ = self.deliver(binding=binding)
+        self.assertEqual((r.emitted, r.aborted), (0, "binding-changed"))
+        n = self.store.load(); self.assertEqual(n["progress"][str(self.root)], {"file": "lane/r3.md", "position": 3}); self.assertNotEqual(n.get("reason"), "rebased")
+        patcher.stop()
+        r2, sink = self.deliver(binding=self.rm.resolve_binding(n, {}, None)); self.assertEqual((r2.emitted, r2.aborted), (0, None)); self.assertEqual(self.files(sink), [])   # no addressed b row precedes b's floor r3
+
+    def test_rebase_is_compare_and_update_against_competing_progress(self):                          # final review FR2
+        binding = self.rebase_setup()
+        self.interleave_before_lock(2, lambda: self.store.update(lambda n: n["progress"].__setitem__(str(self.root), {"file": "lane/r2.md", "position": 2})))   # another consumer moved progress
+        r, _ = self.deliver(binding=binding)
+        self.assertEqual((r.emitted, r.aborted), (0, "progress-moved")); self.assertEqual(self.store.load()["progress"][str(self.root)], {"file": "lane/r2.md", "position": 2})
+
+    def test_ordinary_rebase_still_recovers_on_the_anchor(self):                                     # FR2 control
+        binding = self.rebase_setup(); r, sink = self.deliver(binding=binding)
+        self.assertEqual((r.emitted, r.aborted), (2, None)); self.assertEqual(self.files(sink), ["lane/r2.md", "lane/r3.md"])
+        n = self.store.load(); self.assertEqual(n["progress"][str(self.root)]["file"], "lane/r3.md"); self.assertEqual(n["reason"], "rebased")
+
     def test_prefix_stall_then_resume_yields_one_framed_line(self):
         self.bind(); write_index(self.index, row(1, to="b.implementer"))
         sink = StallingSink(accept_first=7); r, _ = self.deliver(sink=sink, deadline=0.2)
