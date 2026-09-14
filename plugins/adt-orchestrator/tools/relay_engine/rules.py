@@ -1628,9 +1628,9 @@ def plan_shape_warnings(path: Path, text: str, fields: dict,
                       (Path(rel), './' + rel),
                       (artifact_root.parent.parent / rel, '../../' + rel))
             for candidate, display in probes:
-                if not candidate.is_file():
-                    continue
                 try:
+                    if not candidate.is_file():
+                        continue
                     data = candidate.read_bytes()
                 except OSError:
                     continue

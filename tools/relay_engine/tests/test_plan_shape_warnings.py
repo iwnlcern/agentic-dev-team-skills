@@ -118,6 +118,31 @@ class TestPlanShapeWarnings(unittest.TestCase):
                 f'{CONTROL} 455 166 0.36 18 46035 1086 b7c5525e43af -',
                 f'{empty} 0 0 0.00 0 0 0 e3b0c44298fc -'])
 
+    def test_corpus_script_reports_unlisted_and_continues(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            listing = root / 'listing.md'
+            listing.write_text('| corpus | path | a | b | c | d | e | 0 | 000000000000 | - |\n')
+            extra = root / 'extra.md'
+            extra.write_bytes(b'')
+            completed = subprocess.run(
+                [sys.executable, str(TOOLS / 'measure-plan-shape.py'),
+                 '--expect', str(listing), str(extra)],
+                capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.splitlines(), [f'UNLISTED {extra}'])
+            listed = root / 'listed.md'
+            listed.write_bytes(b'')
+            listing.write_text(
+                f'| sample | {listed} | a | b | c | d | e | 0 | e3b0c44298fc | block |\n')
+            continued = subprocess.run(
+                [sys.executable, str(TOOLS / 'measure-plan-shape.py'),
+                 '--expect', str(listing), str(extra), str(listed)],
+                capture_output=True, text=True)
+            self.assertEqual(continued.returncode, 1, continued.stderr)
+            self.assertEqual(continued.stdout.splitlines(),
+                             [f'UNLISTED {extra}', f'MISMATCH {listed}'])
+
     def _cli_draft(self):
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name) / 'relays'
@@ -146,7 +171,7 @@ class TestPlanShapeWarnings(unittest.TestCase):
         temp, root, draft = self._cli_draft()
         with temp:
             result = self._engine_draft(root, draft)
-            self.assertTrue(any(line.startswith('plan shape: relay body over threshold:') for line in result['warnings']))
+            self.assertIn('plan shape: relay body over threshold: bytes 66217 > 65536, longest line 66000 > 8000', result['warnings'])
             self.assertTrue(any('filename carries no YYYYMMDD-HHMMSS timestamp' in error for error in result['errors']))
             self.assertFalse(any('plan shape' in line for line in self._engine_draft(root, draft, False)['warnings']))
 
@@ -154,7 +179,7 @@ class TestPlanShapeWarnings(unittest.TestCase):
         temp, root, draft = self._cli_draft()
         with temp:
             warnings = self._standalone_draft(root, draft)
-            self.assertTrue(any(line.startswith('plan shape: relay body over threshold:') for line in warnings))
+            self.assertIn('plan shape: relay body over threshold: bytes 66217 > 65536, longest line 66000 > 8000', warnings)
             self.assertFalse(any('plan shape' in line for line in self._standalone_draft(root, draft, False)))
 
     def test_both_clis_agree_on_the_draft(self):
@@ -187,10 +212,17 @@ class TestPlanShapeWarnings(unittest.TestCase):
             shape = module.plan_shape_measure(b'~~~\na\nb\n')
             self.assertEqual((shape.lines, shape.fenced, shape.largest_block), (3, 2, 2))
 
+    def test_measure_shorter_closer_stays_inside(self):
+        for module in _modules():
+            shape = module.plan_shape_measure(b'````\na\n```\nb\n````\n')
+            self.assertEqual((shape.lines, shape.fenced, shape.largest_block), (5, 3, 3))
+
     def test_measure_crlf_and_trailing_newline(self):
         for module in _modules():
             self.assertEqual(module.plan_shape_measure(b'a\r\nb\r\n').lines, 2)
             self.assertEqual(module.plan_shape_measure(b'a\nb\n').lines, 2)
+            self.assertEqual(module.plan_shape_measure('a\u2028b\nc\n'.encode()).lines, 2)
+            self.assertEqual(module.plan_shape_measure('a\x85b\rc\n'.encode()).lines, 2)
 
     def test_measure_invalid_utf8_never_raises(self):
         for module in _modules():
@@ -201,6 +233,8 @@ class TestPlanShapeWarnings(unittest.TestCase):
             shape = module.PlanShape
             self.assertIn('ratio', [x[0] for x in module.plan_shape_exceeded(shape(401, 201, 0, 0, 0))])
             self.assertNotIn('ratio', [x[0] for x in module.plan_shape_exceeded(shape(402, 201, 0, 0, 0))])
+            self.assertNotIn('ratio', [x[0] for x in module.plan_shape_exceeded(shape(400, 201, 0, 0, 0))])
+            self.assertNotIn('fenced', [x[0] for x in module.plan_shape_exceeded(shape(400, 400, 0, 0, 0))])
 
     def test_exceeded_order_and_display(self):
         for module in _modules():
@@ -293,6 +327,60 @@ class TestPlanShapeWarnings(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
             self.assertEqual(len(set(seen)), 1)
+
+    def test_probe_stat_permission_error_falls_back_to_body(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = _file(root, _relay(locator='target'))
+            for module in _modules():
+                with self.subTest(module=module.__name__):
+                    with mock.patch.object(Path, 'is_file', side_effect=PermissionError('denied')):
+                        warnings = module.plan_shape_warnings(path, path.read_text(),
+                            module.header_fields(path.read_text()), root)
+                    self.assertEqual(warnings, ["plan shape: PLAN_ARTIFACT 'target' resolves at no probe root; the relay body was measured"])
+
+    def test_probe_unreadable_parent_and_long_stem_do_not_raise(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'relays'
+            root.mkdir()
+            plans = root / 'plans'
+            plans.mkdir()
+            plans.chmod(0)
+            try:
+                for stem in ('target', 'x' * 4096):
+                    path = _file(root, _relay(locator=stem))
+                    for module in _modules():
+                        with self.subTest(module=module.__name__, stem_length=len(stem)):
+                            warnings = module.plan_shape_warnings(path, path.read_text(),
+                                module.header_fields(path.read_text()), root)
+                            self.assertEqual(warnings, [f"plan shape: PLAN_ARTIFACT {stem!r} resolves at no probe root; the relay body was measured"])
+            finally:
+                plans.chmod(0o700)
+
+    def test_cwd_probe_uses_exact_display(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / 'relays'
+            path = _file(root, _relay(locator='target'))
+            cwd = base / 'cwd'
+            _file(cwd, ('x' * 99 + '\n') * 660, 'plans/target.md')
+            previous = Path.cwd()
+            try:
+                os.chdir(cwd)
+                for module in _modules():
+                    warnings = module.plan_shape_warnings(path, path.read_text(),
+                        module.header_fields(path.read_text()), root)
+                    self.assertEqual(warnings, ['plan shape: ./plans/target.md over threshold: bytes 66000 > 65536'])
+            finally:
+                os.chdir(previous)
+
+    def test_template_mode_suppresses_shape_warning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = _file(root, _relay('x' * 66000))
+            for module in _modules():
+                self.assertFalse(any('plan shape' in warning for warning in
+                    module.lint_file(path, artifact_root=root, template_mode=True).warnings))
 
     def test_shape_digest_field_never_changes_measurement(self):
         with tempfile.TemporaryDirectory() as temp:

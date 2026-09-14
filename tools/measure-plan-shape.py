@@ -44,6 +44,9 @@ def main() -> int:
             print(f'{label} {shape.lines} {shape.fenced} {ratio:.2f} {shape.largest_block} '
                   f'{shape.byte_count} {shape.longest_line} {digest} {over}')
             continue
+        if label not in expected:
+            print(f'UNLISTED {label}')
+            continue
         old_digest, old_names = expected[label]
         if digest != old_digest:
             print(f'DRIFT {label} {old_digest} {digest}')
