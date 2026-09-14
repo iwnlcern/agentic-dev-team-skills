@@ -49,6 +49,75 @@ def _file(root, text, name='01-plan.md'):
 
 
 class TestPlanShapeWarnings(unittest.TestCase):
+    @staticmethod
+    def _raw_inline_body(crlf=False):
+        headers = b'ROLE: Planner\r\nPHASE: PLAN\r\nFROM: qi.planner\r\n'
+        if crlf:
+            return headers + (b'x' * 64 + b'\r\n') * 993
+        headers = headers.replace(b'\r\n', b'\n')
+        return headers + b'x' * (65500 - len(headers)) + b'\xff' * 30
+
+    def test_inline_body_measures_raw_bytes_crlf(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'PLAN-pair-planner-20260914-000000.md'
+            body = self._raw_inline_body(crlf=True)
+            path.write_bytes(body)
+            self.assertEqual(len(body), 65584)
+            self.assertEqual(len(path.read_text().encode()), 64588)
+            for module in _modules():
+                with self.subTest(module=module.__name__):
+                    warnings = module.lint_file(path, artifact_root=root).warnings
+                    self.assertIn('plan shape: no PLAN_ARTIFACT declared; the relay body was measured', warnings)
+                    self.assertIn('plan shape: relay body over threshold: bytes 65584 > 65536', warnings)
+
+    def test_inline_body_invalid_utf8_counts_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'PLAN-pair-planner-20260914-000000.md'
+            body = self._raw_inline_body()
+            path.write_bytes(body)
+            self.assertEqual(len(body), 65530)
+            self.assertEqual(len(body.decode('utf-8', errors='replace').encode()), 65590)
+            for module in _modules():
+                with self.subTest(module=module.__name__):
+                    warnings = module.lint_file(path, artifact_root=root).warnings
+                    self.assertFalse(any('bytes ' in warning for warning in warnings), warnings)
+
+    def _raw_record_result(self, root, body):
+        path = root / 'PLAN-pair-planner-20260914-000000.md'
+        path.write_bytes(body)
+        context = {'snapshot': '1', 'entries': [{
+            'path': path.name, 'body_sha256': '0' * 64, 'origin': 'daemon'}]}
+        result = rules.lint_relay_root(
+            root, engine_root=True, record_context=context, context_mode='daemon')
+        self.assertTrue(any('digest-mismatch' in finding
+                            for finding in result.errors + result.warnings), result)
+        return result
+
+    def test_engine_record_path_supplies_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._raw_record_result(Path(temporary), self._raw_inline_body())
+            self.assertFalse(any('bytes ' in warning for warning in result.warnings), result.warnings)
+
+    def test_engine_record_path_crlf_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._raw_record_result(Path(temporary), self._raw_inline_body(crlf=True))
+            self.assertTrue(any('plan shape: relay body over threshold: bytes 65584 > 65536'
+                                in warning for warning in result.warnings), result.warnings)
+
+    def test_corpus_script_prints_six_measures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            empty = Path(temporary) / 'empty.md'
+            empty.write_bytes(b'')
+            completed = subprocess.run(
+                [sys.executable, str(TOOLS / 'measure-plan-shape.py'), str(CONTROL), str(empty)],
+                capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.splitlines(), [
+                f'{CONTROL} 455 166 0.36 18 46035 1086 b7c5525e43af -',
+                f'{empty} 0 0 0.00 0 0 0 e3b0c44298fc -'])
+
     def _cli_draft(self):
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name) / 'relays'

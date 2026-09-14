@@ -1078,8 +1078,17 @@ def lint_file(
     freshness: bool = False,
     max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
     artifact_root: Path | None = None,
+    _raw: bytes | None = None,
 ) -> LintResult:
-    text = read(path)
+    """Lint text while measuring the original body bytes.
+
+    A supplied text snapshot without raw bytes falls back to re-encoding;
+    that fallback cannot preserve original newlines or invalid UTF-8 bytes.
+    """
+    body = path.read_bytes()
+    text = body.decode('utf-8', errors='replace').replace('\r\n', '\n').replace('\r', '\n')
+    if _raw is None:
+        _raw = body
     clean = sanitized_text(text)
     result = LintResult()
     fields = header_fields(text)
@@ -1089,7 +1098,7 @@ def lint_file(
             result.error(_a5e)
 
     if not template_mode:
-        for _warning in plan_shape_warnings(path, text, fields, artifact_root):
+        for _warning in plan_shape_warnings(path, text, fields, artifact_root, raw=_raw):
             result.warn(_warning)
         _ordinal_warning = plan_revision_ordinal_warning(fields)
         if _ordinal_warning is not None:
@@ -1587,7 +1596,12 @@ def plan_shape_exceeded(shape: PlanShape) -> list[tuple[str, str, str]]:
 
 
 def plan_shape_warnings(path: Path, text: str, fields: dict,
-                        artifact_root: Path | None) -> list[str]:
+                        artifact_root: Path | None, raw: bytes | None = None) -> list[str]:
+    """Measure raw body bytes when supplied, otherwise re-encode the text.
+
+    The text-only fallback cannot recover original newlines or invalid bytes;
+    lint_file supplies bytes from its read or the caller's record snapshot.
+    """
     if (artifact_root is None or fields.get('PHASE') != 'PLAN'
             or not h27_pair_planner_address(fields.get('FROM'))):
         return []
@@ -1615,7 +1629,7 @@ def plan_shape_warnings(path: Path, text: str, fields: dict,
         if data is None:
             warnings.append(f"plan shape: PLAN_ARTIFACT {stem!r} resolves at no probe root; the relay body was measured")
     if data is None:
-        data = text.encode('utf-8', errors='replace')
+        data = raw if raw is not None else text.encode('utf-8', errors='replace')
     exceeded = plan_shape_exceeded(plan_shape_measure(data))
     if exceeded:
         items = ', '.join(f'{name} {value} > {limit}' for name, value, limit in exceeded)

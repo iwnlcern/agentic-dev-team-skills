@@ -40,7 +40,8 @@ def main() -> int:
                         if name in names) or '-'
         label = str(path)
         if expected is None:
-            print(f'{label} {shape.lines} {shape.fenced} {shape.largest_block} '
+            ratio = shape.fenced / shape.lines if shape.lines else 0
+            print(f'{label} {shape.lines} {shape.fenced} {ratio:.2f} {shape.largest_block} '
                   f'{shape.byte_count} {shape.longest_line} {digest} {over}')
             continue
         old_digest, old_names = expected[label]
