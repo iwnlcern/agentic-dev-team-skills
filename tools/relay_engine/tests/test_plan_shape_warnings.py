@@ -2,8 +2,11 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -46,6 +49,53 @@ def _file(root, text, name='01-plan.md'):
 
 
 class TestPlanShapeWarnings(unittest.TestCase):
+    def _cli_draft(self):
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name) / 'relays'
+        draft = _file(root, _relay('x' * 66000), '.engine/drafts/qi.planner/draft.md')
+        return temp, root, draft
+
+    def _engine_draft(self, root, draft, with_root=True):
+        args = [sys.executable, str(TOOLS / 'relay'), 'lint']
+        if with_root:
+            args += ['--relay-root', str(root)]
+        completed = subprocess.run(args + [str(draft)], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        return json.loads(completed.stdout)[str(draft)]
+
+    def _standalone_draft(self, root, draft, with_root=True):
+        args = [sys.executable, str(SCRIPT)]
+        if with_root:
+            args += ['--relay-root', str(root)]
+        completed = subprocess.run(args + [str(draft)], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn(f'ERROR {draft}: filename carries no YYYYMMDD-HHMMSS timestamp', completed.stdout)
+        prefix = f'WARN {draft}: '
+        return [line[len(prefix):] for line in completed.stdout.splitlines() if line.startswith(prefix)]
+
+    def test_engine_cli_root_pass_through(self):
+        temp, root, draft = self._cli_draft()
+        with temp:
+            result = self._engine_draft(root, draft)
+            self.assertTrue(any(line.startswith('plan shape: relay body over threshold:') for line in result['warnings']))
+            self.assertTrue(any('filename carries no YYYYMMDD-HHMMSS timestamp' in error for error in result['errors']))
+            self.assertFalse(any('plan shape' in line for line in self._engine_draft(root, draft, False)['warnings']))
+
+    def test_standalone_cli_root_pass_through(self):
+        temp, root, draft = self._cli_draft()
+        with temp:
+            warnings = self._standalone_draft(root, draft)
+            self.assertTrue(any(line.startswith('plan shape: relay body over threshold:') for line in warnings))
+            self.assertFalse(any('plan shape' in line for line in self._standalone_draft(root, draft, False)))
+
+    def test_both_clis_agree_on_the_draft(self):
+        temp, root, draft = self._cli_draft()
+        with temp:
+            engine = [line for line in self._engine_draft(root, draft)['warnings'] if line.startswith('plan shape: relay body over threshold:')]
+            standalone = [line for line in self._standalone_draft(root, draft) if line.startswith('plan shape: relay body over threshold:')]
+            self.assertEqual(len(engine), 1)
+            self.assertEqual(engine, standalone)
+
     def test_measure_matches_a5_control(self):
         env = os.environ.get('RELAY_A5_CONTROL')
         path = Path(env) if env else CONTROL
