@@ -450,6 +450,13 @@ class DeliveryTests(TmpEnv):
         r, _ = self.deliver(); self.assertEqual(r.emitted, 0)
         write_index(self.index, row(1, to="b.implementer")); r, s = self.deliver(); self.assertEqual(self.files(s), ["lane/r1.md"])
 
+    def test_completed_empty_scan_establishes_following(self):                                       # final review FR1, in-process half
+        self.bind(anchor={"file": "lane/r1.md", "position": 1}); write_index(self.index, row(1, to="b.implementer"))
+        self.store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
+        r, sink = self.deliver(); self.assertEqual((r.emitted, r.aborted, r.halted), (0, None, None)); self.assertEqual(self.store.load()["phase"], "following")
+        self.store.update(lambda n: n.update({"phase": "waiting-for-binding", "binding_degraded": "x"})); self.deliver(); self.assertEqual(self.store.load()["phase"], "waiting-for-binding")   # degraded: never promoted
+        self.store.update(lambda n: n.update({"binding_degraded": None})); self.index.unlink(); r, _ = self.deliver(); self.assertEqual(r.halted, "index-missing"); self.assertEqual(self.store.load()["phase"], "unavailable")
+
 
 class FollowProcessMixin:
     """Helpers for real-subprocess witnesses; mixed into FollowProcessTests (T3) and EnvRestartReplayTests (T6)."""
@@ -517,6 +524,19 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
         early = self.read_lines(p, 12, timeout=0.6); self.assertLessEqual(len(early), 5)
         rest = self.read_lines(p, 12 - len(early), timeout=6.0)
         self.assertEqual([g["file"] for g in early + rest], [f"lane/r{i}.md" for i in range(1, 13)])
+
+    def test_env_bound_follower_at_index_tail_is_armed_without_new_rows(self):                       # final review FR1
+        write_index(self.index, row(1, to="b.implementer"))
+        p = self.spawn(seat="b.implementer"); note = self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+        self.assertEqual(note["progress"][str(self.root)]["file"], "lane/r1.md"); self.assertEqual(self.rm.readiness(self.rm.NoteStore("psess"))[0], "armed")
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer")); self.assertEqual(self.read_lines(p, 1)[0]["file"], "lane/r2.md")   # arrival control
+        self.assertEqual(self.rm.readiness(self.rm.NoteStore("psess"))[0], "armed"); p.kill(); p.wait()
+        q = self.spawn(seat="b.implementer"); self.wait_note(lambda n: n.get("phase") == "following" and n.get("leader", {}).get("pid") == q.pid)   # resume at the tail: armed with no backlog
+        self.assertEqual(self.rm.readiness(self.rm.NoteStore("psess"))[0], "armed"); q.kill(); q.wait()
+
+    def test_unbound_or_indexless_follower_is_not_armed(self):                                       # FR1 negatives
+        p = self.spawn(seat="b.implementer")                                                         # no INDEX.md yet
+        note = self.wait_note(lambda n: n.get("leader") and n.get("phase") in ("unavailable", "waiting-for-binding")); self.assertNotEqual(self.rm.readiness(self.rm.NoteStore("psess"))[0], "armed"); p.kill(); p.wait()
 
     def test_env_restart_with_new_seat_on_known_root_gets_its_own_floor(self):                        # D8-R1 (floors half; the replay half is EnvRestartReplayTests in T6)
         self.index.write_text(HEADER)

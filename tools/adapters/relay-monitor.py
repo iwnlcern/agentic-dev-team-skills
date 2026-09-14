@@ -647,6 +647,18 @@ def deliver_once(store: NoteStore, sink, binding: Binding | None, snapshot: Inde
     if snapshot.error:
         _bounded_update(store, lambda n: n.update({"phase": "unavailable", "reason": snapshot.error}), end, result)
         result.halted = snapshot.error
+    if binding is not None and not result.aborted and not result.halted:          # a completed scan, even with no candidate row, is healthy following (final review FR1)
+        try:
+            with store.state_lock(_remaining(end)):
+                n = store.load()
+                live_seat = canonical(n.get("seat")) if binding.source != "env" else canonical(binding.seat)
+                live_root = n.get("root") if binding.source != "env" else binding.root
+                frame = n.get("frame"); foreign = bool(frame) and frame.get("identity", {}).get("leader") != leader_instance
+                if (int(n.get("binding_gen", 0)) == binding.binding_gen and live_seat == canonical(binding.seat) and live_root == binding.root
+                        and not n.get("binding_degraded") and not foreign and n.get("phase") != "following"):
+                    n["phase"] = "following"; store.save(n)
+        except LockTimeout:
+            result.aborted = "lock-timeout"
     return result
 
 
