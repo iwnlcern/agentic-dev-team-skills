@@ -1339,6 +1339,8 @@ EXPECTED_WARN_SET: dict[str, list[str]] = {
         "02-report.md: DISPATCH IMPL appears inside fenced code on line 16; quoted/fenced tokens are inert",
     ],
     "ambiguity/AMB3-latest-wins": [
+        "01-plan.md: plan shape: no PLAN_ARTIFACT declared; the relay body was measured",
+        "04-dispatch.md: plan shape: no PLAN_ARTIFACT declared; the relay body was measured",
         "04-dispatch.md: 2 relays under 'amb3' qualify as the PLAN-REVIEW parent; selected latest 03-review-mustrevise.md; candidates: 02-review-approve.md",
     ],
     "humangate/HG1-bare-yes.md": [
