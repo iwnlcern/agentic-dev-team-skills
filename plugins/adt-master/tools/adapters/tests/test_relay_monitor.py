@@ -41,7 +41,7 @@ class TmpEnv(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"TMPDIR": str(self.base), "ADT_PACE_WINDOW": "0.5", "ADT_PACE_LINES": "5"}, clear=False)
         self.env.start()
         self.addCleanup(self.env.stop)
-        for k in ("ADT_SEAT", "ADT_RELAY_ROOT", "ADT_RELAY_ANCHOR", "ADT_HOST", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PLUGIN_ROOT", "CLAUDE_PROJECT_DIR"):
+        for k in ("ADT_SEAT", "ADT_RELAY_ROOT", "ADT_RELAY_ANCHOR", "ADT_HOST", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PLUGIN_ROOT", "CLAUDE_PROJECT_DIR", "CLAUDE_PLUGIN_ROOT"):
             os.environ.pop(k, None)
         self.rm = load_script()
         self.root = self.base / "sprint" / ".relays" / "v1"
@@ -134,13 +134,17 @@ class HostTableTests(TmpEnv):
         return self.rm.decide_host(ns(host=flag), payload, env or {})
 
     def test_row1_flag_and_env_override_win(self):
-        self.assertEqual(self.decide(flag="codex", env={"CLAUDE_PROJECT_DIR": "/p"}, payload={"prompt_id": "x"}), "codex")
+        self.assertEqual(self.decide(flag="codex", env={"CLAUDE_PLUGIN_ROOT": "/p"}, payload={"prompt_id": "x"}), "codex")
         self.assertEqual(self.decide(env={"ADT_HOST": "claude-code", "PLUGIN_ROOT": "/x"}), "claude-code")
 
     def test_row2_environment_evidence(self):
         fresh = {"cwd": "/w", "hook_event_name": "SessionStart", "model": "m", "permission_mode": "default", "session_id": "s", "source": "startup", "transcript_path": None}
-        self.assertEqual(self.decide(env={"PLUGIN_ROOT": "/x", "PLUGIN_DATA": "/d"}, payload=fresh), "codex")
-        self.assertEqual(self.decide(env={"CLAUDE_PROJECT_DIR": "/p"}, payload=fresh), "claude-code")
+        self.assertEqual(self.decide(env={"PLUGIN_ROOT": "/x"}, payload=fresh), "codex")
+        self.assertEqual(self.decide(env={"CLAUDE_PLUGIN_ROOT": "/plug"}, payload=fresh), "claude-code")                  # the measured Claude plugin-hook environment (hook-env capture, v2.0.26)
+        self.assertEqual(self.decide(env={"CLAUDE_PROJECT_DIR": "/p"}, payload=fresh), "host-unknown")                  # documented but absent in the capture: not consulted
+        self.assertEqual(self.decide(env={"CLAUDE_PLUGIN_ROOT": ""}, payload=fresh), "host-unknown")                    # empty is unset (the monitor process sees it empty)
+        self.assertEqual(self.decide(env={"PLUGIN_ROOT": "/x", "CLAUDE_PLUGIN_ROOT": "/x", "PLUGIN_DATA": "/d", "CLAUDE_PLUGIN_DATA": "/d"}, payload=fresh), "codex")   # the exact pinned Codex plugin-route export set (discovery.rs:265-270) decides codex
+        self.assertEqual(self.decide(env={"CLAUDE_PLUGIN_ROOT": "/plug"}, payload={"turn_id": "t"}), "host-ambiguous")   # Claude environment against Codex payload evidence: the reverse-direction conflict
 
     def test_row3_payload_evidence(self):
         self.assertEqual(self.decide(payload={"turn_id": "t", "session_id": "s"}), "codex")
@@ -961,9 +965,9 @@ class SessionStartTests(TmpEnv):
         return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
 
     def test_fresh_codex_arms_under_plugin_route_env_and_under_launcher(self):
-        ctx = self.run_ss(self.FRESH_CODEX, {"PLUGIN_ROOT": "/plug", "PLUGIN_DATA": "/d"})
+        ctx = self.run_ss(self.FRESH_CODEX, {"PLUGIN_ROOT": "/plug", "CLAUDE_PLUGIN_ROOT": "/plug", "PLUGIN_DATA": "/d", "CLAUDE_PLUGIN_DATA": "/d"})
         self.assertIn("action `start`", ctx); self.assertIn("follow --host codex --session sess", ctx)
-        os.environ.pop("PLUGIN_ROOT", None); os.environ.pop("PLUGIN_DATA", None)
+        [os.environ.pop(k, None) for k in ("PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_ROOT", "CLAUDE_PLUGIN_DATA")]
         ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex"}); self.assertIn("action `start`", ctx)
 
     def test_evidence_free_claude_session_start_gets_status_only_and_writes_no_host(self):

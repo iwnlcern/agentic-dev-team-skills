@@ -232,8 +232,8 @@ def decide_host(args, payload, environ) -> str:
     has_claude = any(k in payload for k in CLAUDE_PAYLOAD_FIELDS)
     if "turn_id" in payload and has_claude:
         return "host-ambiguous"
-    env_codex = bool(environ.get("PLUGIN_ROOT")) and not environ.get("CLAUDE_PROJECT_DIR")
-    env_claude = bool(environ.get("CLAUDE_PROJECT_DIR")) and not environ.get("PLUGIN_ROOT")
+    env_codex = bool(environ.get("PLUGIN_ROOT"))                                                 # Codex-native: the pinned plugin route exports PLUGIN_ROOT beside the CLAUDE_* aliases (discovery.rs:265-270); Claude sets no PLUGIN_ROOT (measured)
+    env_claude = bool(environ.get("CLAUDE_PLUGIN_ROOT")) and not environ.get("PLUGIN_ROOT")      # Claude Code exports CLAUDE_PLUGIN_ROOT to plugin hooks (measured 2026-09-14, v2.0.26 SessionStart); CLAUDE_PROJECT_DIR was absent there and is not consulted
     pay_codex = "turn_id" in payload
     pay_claude = has_claude and "turn_id" not in payload
     votes = set()
