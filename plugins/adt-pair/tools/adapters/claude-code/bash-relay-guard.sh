@@ -5,15 +5,21 @@ set -u
 payload="$(cat)"
 command="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("tool_input",{}).get("command",""))')"
 bg="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(str(d.get("tool_input",{}).get("run_in_background",False)).lower())')"
-case "$command" in
-  *".relays/"*|*"/relays/"*) ;;
-  *) exit 0 ;;
-esac
-case "$command" in
-  *">"*|*"tee "*|*"cp "*|*"mv "*) ;;
-  *) exit 0 ;;
-esac
-targets="$(printf '%s' "$command" | grep -oE '[^ >]*(\.relays|/relays)/[^ ;|&"'"'"']*\.md' | sort -u)"
+cwd="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("cwd","") or "")')"
+[ -z "$cwd" ] && cwd="$PWD"
+parse_rc=0
+destinations="$(printf '%s' "$command" | python3 "$(dirname "${BASH_SOURCE[0]}")/relay-guard-destinations.py" "$cwd" 2>/dev/null)" || parse_rc=$?
+if [ "$parse_rc" -ne 0 ]; then
+  # a relay root named anywhere in the raw text: `.relays/` in any position, or `relays/` opening a word or a path component
+  if printf '%s' "$command" | grep -Eq '(^|[^[:alnum:]_])\.?relays/'; then
+    echo "relay-guard: a Bash command naming a relay root could not be parsed for its write destinations; lint manually before handoff" >&2
+    exit 2
+  fi
+  exit 0
+fi
+relay_destinations="$(printf '%s\n' "$destinations" | grep -E '(^|/)(\.relays|relays)/' || true)"
+[ -z "$relay_destinations" ] && exit 0
+targets="$(printf '%s\n' "$relay_destinations" | grep -E '\.md$' | sort -u)"
 target_count="$(printf '%s' "$targets" | grep -c . || true)"
 target=""
 [ "$target_count" = "1" ] && target="$targets"

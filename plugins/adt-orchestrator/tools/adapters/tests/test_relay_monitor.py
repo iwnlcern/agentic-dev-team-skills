@@ -36,19 +36,17 @@ def write_index(path, rows_text):
 class TmpEnv(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.base = pathlib.Path(self.tmp.name).resolve()
         self.env = mock.patch.dict(os.environ, {"TMPDIR": str(self.base), "ADT_PACE_WINDOW": "0.5", "ADT_PACE_LINES": "5"}, clear=False)
         self.env.start()
+        self.addCleanup(self.env.stop)
         for k in ("ADT_SEAT", "ADT_RELAY_ROOT", "ADT_RELAY_ANCHOR", "ADT_HOST", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "PLUGIN_ROOT", "CLAUDE_PROJECT_DIR"):
             os.environ.pop(k, None)
         self.rm = load_script()
         self.root = self.base / "sprint" / ".relays" / "v1"
         (self.root / ".engine" / "seats" / "a.planner").mkdir(parents=True); (self.root / "lane").mkdir()
         self.index = self.root / "INDEX.md"
-
-    def tearDown(self):
-        self.env.stop(); self.tmp.cleanup()
-
 
 class NoteStoreTests(TmpEnv):
     def test_note_dir_is_private_and_under_tmpdir(self):

@@ -392,6 +392,100 @@ g9_relay="$tmp/work/.relays/run1/NOTINDEX-$stamp.md"
 cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$g9_relay"
 assert_guard_case "g9-notindex-routes-explicit-file-mode" "printf x > $g9_relay" false PostToolUse 0 "" || fail=1
 
+# g10-g18: destination-based narrowing (DD-v295-b2 component 14; RECONCILE R3.13; plan-2 P6).
+assert_guard_case "g10-stderr-to-devnull-is-silent" "ls $tmp/work/.relays/run1 2>/dev/null" false PostToolUse 0 "" || fail=1
+assert_guard_case "g11-quoted-path-with-gt-is-silent" "printf '%s' 'see .relays/run1/x.md > y'" false PostToolUse 0 "" || fail=1
+g12_src="$tmp/work/.relays/run1/g12-$stamp.md"; printf 'x\n' > "$g12_src"
+assert_guard_case "g12-copy-from-relay-source-to-tmp-is-silent" "cp $g12_src $tmp/work/out.md" false PostToolUse 0 "" || fail=1
+assert_guard_case "g13-backgrounded-stderr-redirect-is-silent" "ls $tmp/work/.relays/run1 2>/dev/null" true PostToolUse 0 "" || fail=1
+assert_guard_case "g14-descriptor-dup-is-silent" "cat $tmp/work/.relays/run1/INDEX.md 2>&1 | head -3" false PostToolUse 0 "" || fail=1
+g15_relay="$tmp/work/.relays/run1/g15-$stamp.md"
+assert_guard_case "g15-stderr-into-relay-target-fires" "printf warn 2> $g15_relay" false PostToolUse 2 "could not be linted" || fail=1
+assert_guard_case "g16-plain-ls-control-stays-silent" "ls $tmp/work/.relays/run1" false PostToolUse 0 "" || fail=1
+assert_guard_case "g17-quoted-word-starting-with-gt-is-silent" "printf '%s' '>$tmp/work/.relays/run1/quoted.md'" false PostToolUse 0 "" || fail=1
+g18_relay="$tmp/work/.relays/run1/g18-$stamp.md"; printf 'x\n' > "$g18_relay"
+assert_guard_case "g18-attached-redirect-lints-target" "printf x >$g18_relay" false PostToolUse 2 "FAILS lint" || fail=1
+g19_a="$tmp/work/.relays/run1/g19a-$stamp.md"; g19_b="$tmp/work/.relays/run1/g19b-$stamp.md"; printf 'x\n' > "$g19_a"; printf 'x\n' > "$g19_b"
+assert_guard_case "g19-multiline-cp-list-has-two-destinations" "cp $tmp/work/a.md $g19_a
+cp $tmp/work/b.md $g19_b" false PostToolUse 2 "could not be linted" || fail=1
+assert_guard_case "g20-comment-with-apparent-redirect-is-silent" "ls $tmp/work # > $tmp/work/.relays/run1/never.md" false PostToolUse 0 "" || fail=1
+assert_guard_case "g21-quoted-semicolon-operand-is-not-a-separator" "printf '%s' 'a;b' > $tmp/work/out.md" false PostToolUse 0 "" || fail=1
+g22_relay="$tmp/work/.relays/run1/g22-$stamp.md"; printf 'x\n' > "$g22_relay"
+assert_guard_case "g22-redirect-adjacent-to-separator-lints-target" "printf x >$g22_relay;true" false PostToolUse 2 "FAILS lint" || fail=1
+# g23-g25: here-document bodies are data, never destinations (DD-v295-b2 component 14: quoted text never fires; plan-28 D27-R1).
+g23_relay="$tmp/work/.relays/run1/g23-$stamp.md"
+assert_guard_case "g23-quoted-heredoc-body-redirect-is-not-a-destination" "cat > $tmp/work/out.md <<'EOF'
+> $g23_relay
+EOF" false PostToolUse 0 "" || fail=1
+assert_guard_case "g24-patch-body-redirect-is-not-a-destination" "apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: $tmp/work/src/note.md
+@@
++value > $g23_relay
+*** End Patch
+PATCH" false PostToolUse 0 "" || fail=1
+g25_relay="$tmp/work/.relays/run1/g25-$stamp.md"; printf 'x\n' > "$g25_relay"
+assert_guard_case "g25-real-redirect-outside-body-is-the-only-destination" "cat > $g25_relay <<EOF
+> $g23_relay
+EOF" false PostToolUse 2 "FAILS lint" "could not be linted" || fail=1
+g26_relay="$tmp/work/.relays/run1/g26-$stamp.md"; printf 'x\n' > "$g26_relay"
+assert_guard_case "g26-here-string-does-not-swallow-the-next-command" "cat <<< hello
+printf x > $g26_relay" false PostToolUse 2 "FAILS lint" || fail=1
+g27_relay="$tmp/work/.relays/run1/g27-$stamp.md"; printf 'x\n' > "$g27_relay"
+assert_guard_case "g27-escaped-quote-delimiter-ends-the-body" "cat <<\"E\\\"OF\" > $tmp/work/out.md
+> $g23_relay
+E\"OF
+printf x > $g27_relay" false PostToolUse 2 "FAILS lint" "could not be linted" || fail=1
+g28_relay="$tmp/work/.relays/run1/g28-$stamp.md"; printf 'x\n' > "$g28_relay"
+assert_guard_case "g28-literal-backslash-in-quoted-delimiter-is-kept" "cat <<\"E\\qOF\" > $tmp/work/out.md
+> $g23_relay
+E\\qOF
+printf x > $g28_relay" false PostToolUse 2 "FAILS lint" "could not be linted" || fail=1
+g29_relay="$tmp/work/.relays/run1/g29-$stamp.md"; printf 'x\n' > "$g29_relay"
+assert_guard_case "g29-bare-continuation-in-delimiter-vanishes" "cat <<E\\
+OF > $tmp/work/out.md
+> $g23_relay
+EOF
+printf x > $g29_relay" false PostToolUse 2 "FAILS lint" "could not be linted" || fail=1
+g30_relay="$tmp/work/.relays/run1/g30-$stamp.md"; printf 'x\n' > "$g30_relay"
+assert_guard_case "g30-quoted-continuation-in-delimiter-vanishes" "cat <<\"E\\
+OF\" > $tmp/work/out.md
+> $g23_relay
+EOF
+printf x > $g30_relay" false PostToolUse 2 "FAILS lint" "could not be linted" || fail=1
+g31_relay="$tmp/work/.relays/run1/g31-$stamp.md"; printf 'x\n' > "$g31_relay"
+assert_guard_case "g31-ansi-c-quoted-delimiter-quotes-like-single" "cat <<\$'EOF' > $tmp/work/out.md
+> $g23_relay
+EOF
+printf x > $g31_relay" false PostToolUse 2 "FAILS lint" "could not be linted" || fail=1
+g32_relay="$tmp/work/.relays/run1/g32-$stamp.md"; printf 'x\n' > "$g32_relay"; g32_tab="$(printf '\t')"
+assert_guard_case "g32-missing-terminator-fails-open-to-an-advisory" "cat <<\$'E\\tOF' > $tmp/work/out.md
+> $g23_relay
+E${g32_tab}OF
+printf x > $g32_relay" false PostToolUse 2 "could not be parsed" || fail=1
+g33_relay="$tmp/work/.relays/run1/g33-$stamp.md"; printf 'x\n' > "$g33_relay"
+assert_guard_case "g33-uncertain-delimiter-with-unbalanced-body-quote-is-an-advisory" "cat <<\$'E\\tOF' > $tmp/work/out.md
+'
+E${g32_tab}OF
+printf x > $g33_relay" false PostToolUse 2 "could not be parsed" || fail=1
+g34_relay="$tmp/work/.relays/run1/g34-$stamp.md"; printf 'x\n' > "$g34_relay"
+assert_guard_case "g34-uncertain-delimiter-never-matches-a-later-line" "cat <<\$'E\\tOF' > $tmp/work/out.md
+body
+E${g32_tab}OF
+printf x > $g34_relay
+E\\tOF" false PostToolUse 2 "could not be parsed" || fail=1
+g35_relay="$tmp/work/.relays/run1/g35-$stamp.md"; printf 'x\n' > "$g35_relay"
+assert_guard_case "g35-unbalanced-quote-naming-a-relay-is-an-advisory" "printf x > $g35_relay; echo \"it's" false PostToolUse 2 "could not be parsed" || fail=1
+assert_guard_case "g36-unbalanced-quote-without-a-relay-stays-silent" "echo \"it's" false PostToolUse 0 "" || fail=1
+assert_guard_case "g37-uncertain-with-bare-relative-relays-path-is-an-advisory" "cat <<\$'E\\tOF' > $tmp/work/out.md
+'
+E${g32_tab}OF
+printf x > relays/run1/g37-$stamp.md" false PostToolUse 2 "could not be parsed" || fail=1
+assert_guard_case "g38-uncertain-with-dot-relative-relays-path-is-an-advisory" "cat <<\$'E\\tOF' > $tmp/work/out.md
+'
+E${g32_tab}OF
+printf x > ./relays/run1/g38-$stamp.md" false PostToolUse 2 "could not be parsed" || fail=1
+
 # p1-p8 exercise payload normalization directly.  The production break caught
 # by these cases is silent lint-nothing for a relay target declared by an
 # apply_patch envelope, including targets that require INDEX mode or a noisy
@@ -520,7 +614,7 @@ command="apply_patch <<'PATCH'
 PATCH"
 payload="$(payload_for_command "$command" Bash "$tmp/work")"
 assert_payload_handler "r8-body-redirect-marker-normalizer-target" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
-assert_payload_handler "r8-body-redirect-marker-guard-also-runs" guard "$BASH_GUARD" "$payload" 0 "" 0 1 "guard|$p_clean" || fail=1
+assert_payload_handler "r8-body-redirect-marker-guard-stays-silent" guard "$BASH_GUARD" "$payload" 0 "" 0 0 "" || fail=1
 
 relay_a="$tmp/work/.relays/run1/relay-a-$stamp.md"
 relay_b="$tmp/work/.relays/run1/relay-b-$stamp.md"
@@ -542,7 +636,7 @@ command="apply_patch </dev/null; cat > $relay_a <<'EOF'
 EOF"
 payload="$(payload_for_command "$command" Bash "$tmp/work")"
 assert_payload_handler "r10-marker-data-suffix-normalizer-additive" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$relay_b" || fail=1
-assert_payload_handler "r10-marker-data-suffix-guard-multi-target-fallback" guard "$BASH_GUARD" "$payload" 2 "relay-guard: a Bash command appears to have written into a relay root and could not be linted; lint manually before handoff" 0 0 "" || fail=1
+assert_payload_handler "r10-marker-data-suffix-guard-lints-real-target" guard "$BASH_GUARD" "$payload" 0 "" 0 1 "guard|$relay_a" || fail=1
 
 payload="$(payload_for_file "$p_clean")"
 assert_payload_handler "r11-clean-write-primary-route-silent" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
@@ -763,5 +857,11 @@ assert_case_engine_json_origin "e3-plugin-update-keeps-old-hook-engine-json" "$e
 assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/tools/relay" "$e3_plugin_old/tools" "2.9.3" "$e3_plugin_old_fingerprint" || fail=1
 assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine_dirty" "$e3_plugin_new" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 B || fail=1
 assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.3" "$e3_plugin_new_fingerprint" || fail=1
+
+if ! (cd "$ROOT" && python3 -m unittest tools.adapters.tests.test_relay_monitor 2>"$tmp/unittest.err"); then
+  echo "FAIL relay-monitor unittest" >&2; cat "$tmp/unittest.err" >&2; fail=1
+else
+  echo "PASS relay-monitor unittest"
+fi
 
 exit "$fail"
