@@ -635,6 +635,11 @@ class BindTests(TmpEnv):
         self.assertEqual(p("ls\ncd /w && tools/relay submit d.md --key K").reason, "unsupported-shell")                         # non-leading cd after a newline
         self.assertTrue(p("cd /w && tools/relay submit d.md --key K").ok)
         self.assertTrue(p("RELAY_KEY=K tools/relay submit d.md").ok)
+        self.assertEqual(p("RELAY_KEY='K' tools/relay submit d.md").key, "K"); self.assertEqual(p('RELAY_KEY="K" tools/relay submit d.md').key, "K")
+        self.assertEqual(p("RELAY_KEY='/p/with space/k' ADT_X=1 tools/relay submit d.md").key, "/p/with space/k")
+        self.assertEqual(p('"RELAY_KEY=K" tools/relay submit d.md').reason, "no-submit"); self.assertEqual(p("echo 'RELAY_KEY=K tools/relay submit d.md'").reason, "no-submit")
+        for bad in ('RELAY_"KEY"=K tools/relay submit d.md', 'RELAY_KEY"="K tools/relay submit d.md', "RELAY_KEY\\=K tools/relay submit d.md", "\\RELAY_KEY=K tools/relay submit d.md"):
+            self.assertEqual(p(bad).reason, "no-submit", bad)
         self.assertEqual(p('tools/relay submit d.md --root "/p/with space" --key K').root_operand, "/p/with space")
         self.assertEqual(p("echo 'tools/relay submit d.md'").reason, "no-submit")
         self.assertEqual(p("tools/relay submit a.md --key K;tools/relay submit b.md --key K").reason, "ambiguous-command")
@@ -648,6 +653,12 @@ class BindTests(TmpEnv):
         self.assertEqual(p("tools/relay submit d.md --key K >/dev/null").ok, True)
         self.assertEqual(p("tools/relay submit d.md a=b --key K").key, "K")
         self.assertEqual(p("tools/relay submit d.md --key K; echo 'a\"b").reason, "unsupported-shell")
+
+    def test_quoted_assignment_key_binds_and_a_quoted_foreign_key_degrades(self):
+        self.assertEqual(self.run_bind(self.payload(f"RELAY_KEY='{self.key}' tools/relay submit d.md --root {self.root}", self.receipt)), 0)
+        n = self.store.load(); self.assertEqual((n["seat"], n["binding_gen"], n.get("binding_degraded")), ("a.planner", 1, None))
+        foreign = f'RELAY_KEY="{self.root}/.engine/seats/z.planner/k.key" tools/relay submit d.md --root {self.root}'
+        self.run_bind(self.payload(foreign, self.receipt)); n = self.store.load(); self.assertEqual(n["binding_degraded"]["reason"], "key-mismatch"); self.assertEqual(n["binding_gen"], 1)
 
     def test_plain_submit_binds_and_initializes_progress_once(self):
         cmd = f"tools/relay submit d.md --key {self.key} --root {self.root}"

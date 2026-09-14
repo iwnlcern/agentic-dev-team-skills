@@ -332,13 +332,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/adapters/relay-monitor.py",
-    "sha256": "c37a34fb63ad4eb426d9606a60bc24efc1ebbc89708f05441b4ecf7700dc5775",
+    "sha256": "1c3e92ee9e132eaf4bc71d90e0294753d238cac51ecc8d43297fb8040034b4fe",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/adapters/shell_lex.py",
-    "sha256": "29c178e95e57a4feb4c71ff1d8abd29a114c848b29109d43cc59413a582a81ed",
+    "sha256": "99f8740185afa3c3db297c89dbd49820b9e43e124e08bcd77ad772c5afa41420",
     "source": "tools/adapters/shell_lex.py"
   },
   {
@@ -356,7 +356,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "39a4539eefb9d7485113c0cf3b3f35c6e770a9c66052dbe6c9520679791b244d",
+    "sha256": "41eb31ed39a308ea5380a48c78d5dd1b39739461a215e3f472672600f2e789ec",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -368,7 +368,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/adapters/tests/test_shell_lex.py",
-    "sha256": "d0c91ce3d2ca4332288be97cbbc6609fa4cf6ab63c8793c64e620996470b2eb2",
+    "sha256": "cc4dd2f7a8bb593a40012bdb5646507fd55b7f745c598a6e91fa847e9d92e4fd",
     "source": "tools/adapters/tests/test_shell_lex.py"
   },
   {
@@ -10610,13 +10610,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/adapters/relay-monitor.py",
-    "sha256": "c37a34fb63ad4eb426d9606a60bc24efc1ebbc89708f05441b4ecf7700dc5775",
+    "sha256": "1c3e92ee9e132eaf4bc71d90e0294753d238cac51ecc8d43297fb8040034b4fe",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/adapters/shell_lex.py",
-    "sha256": "29c178e95e57a4feb4c71ff1d8abd29a114c848b29109d43cc59413a582a81ed",
+    "sha256": "99f8740185afa3c3db297c89dbd49820b9e43e124e08bcd77ad772c5afa41420",
     "source": "tools/adapters/shell_lex.py"
   },
   {
@@ -10634,7 +10634,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "39a4539eefb9d7485113c0cf3b3f35c6e770a9c66052dbe6c9520679791b244d",
+    "sha256": "41eb31ed39a308ea5380a48c78d5dd1b39739461a215e3f472672600f2e789ec",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -10646,7 +10646,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/adapters/tests/test_shell_lex.py",
-    "sha256": "d0c91ce3d2ca4332288be97cbbc6609fa4cf6ab63c8793c64e620996470b2eb2",
+    "sha256": "cc4dd2f7a8bb593a40012bdb5646507fd55b7f745c598a6e91fa847e9d92e4fd",
     "source": "tools/adapters/tests/test_shell_lex.py"
   },
   {
@@ -20816,13 +20816,13 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/adapters/relay-monitor.py",
-    "sha256": "c37a34fb63ad4eb426d9606a60bc24efc1ebbc89708f05441b4ecf7700dc5775",
+    "sha256": "1c3e92ee9e132eaf4bc71d90e0294753d238cac51ecc8d43297fb8040034b4fe",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/adapters/shell_lex.py",
-    "sha256": "29c178e95e57a4feb4c71ff1d8abd29a114c848b29109d43cc59413a582a81ed",
+    "sha256": "99f8740185afa3c3db297c89dbd49820b9e43e124e08bcd77ad772c5afa41420",
     "source": "tools/adapters/shell_lex.py"
   },
   {
@@ -20840,7 +20840,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "39a4539eefb9d7485113c0cf3b3f35c6e770a9c66052dbe6c9520679791b244d",
+    "sha256": "41eb31ed39a308ea5380a48c78d5dd1b39739461a215e3f472672600f2e789ec",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -20852,7 +20852,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/adapters/tests/test_shell_lex.py",
-    "sha256": "d0c91ce3d2ca4332288be97cbbc6609fa4cf6ab63c8793c64e620996470b2eb2",
+    "sha256": "cc4dd2f7a8bb593a40012bdb5646507fd55b7f745c598a6e91fa847e9d92e4fd",
     "source": "tools/adapters/tests/test_shell_lex.py"
   },
   {

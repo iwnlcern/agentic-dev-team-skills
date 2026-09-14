@@ -773,6 +773,11 @@ def _shell_lex():
     return module
 
 
+def is_assignment_word(sl, text: str, quoted) -> bool:
+    m = ASSIGN_RE.match(text)
+    return bool(m) and m.end() <= sl.unquoted_prefix(text, quoted)
+
+
 def parse_submit_command(command: str) -> SubmitParse:
     sl = _shell_lex()
     tokens = sl.lex(command)
@@ -785,7 +790,7 @@ def parse_submit_command(command: str) -> SubmitParse:
     for i, cmd in enumerate(commands):
         words = [(t, q) for t, q, op in cmd if not op or t in REDIRECT_OPS]
         assigns = []
-        while words and not words[0][1] and ASSIGN_RE.match(words[0][0]):
+        while words and is_assignment_word(sl, *words[0]):
             assigns.append(words[0][0]); words = words[1:]
         texts = [t for t, _q in words]
         if texts and texts[0] == "cd" and not words[0][1]:

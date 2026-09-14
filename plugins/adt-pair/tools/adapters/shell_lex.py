@@ -26,9 +26,9 @@ def lex(command: str):
             else:
                 cur.append(ch)
         elif ch in ("'", '"'):
-            q = ch; quoted = True
+            q = ch; quoted = quoted or (True if not cur else len(cur))
         elif ch == "\\" and i + 1 < len(command):
-            cur.append(command[i + 1]); quoted = True; i += 1
+            quoted = quoted or (True if not cur else len(cur)); cur.append(command[i + 1]); i += 1
         elif ch == "#" and not cur and not quoted:
             while i < len(command) and command[i] != "\n":
                 i += 1
@@ -56,6 +56,10 @@ def lex(command: str):
         return None
     flush()
     return tokens
+
+
+def unquoted_prefix(text: str, quoted) -> int:
+    return 0 if quoted is True else (len(text) if quoted is False else quoted)
 
 
 def split_commands(tokens):
