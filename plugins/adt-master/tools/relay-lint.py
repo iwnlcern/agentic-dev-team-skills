@@ -1077,8 +1077,18 @@ def lint_file(
     template_mode: bool = False,
     freshness: bool = False,
     max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
+    artifact_root: Path | None = None,
+    _raw: bytes | None = None,
 ) -> LintResult:
-    text = read(path)
+    """Lint text while measuring the original body bytes.
+
+    A supplied text snapshot without raw bytes falls back to re-encoding;
+    that fallback cannot preserve original newlines or invalid UTF-8 bytes.
+    """
+    body = path.read_bytes()
+    text = body.decode('utf-8', errors='replace').replace('\r\n', '\n').replace('\r', '\n')
+    if _raw is None:
+        _raw = body
     clean = sanitized_text(text)
     result = LintResult()
     fields = header_fields(text)
@@ -1086,6 +1096,13 @@ def lint_file(
     if not template_mode:
         for _a5e in lock_digest_shape_errors(text):
             result.error(_a5e)
+
+    if not template_mode:
+        for _warning in plan_shape_warnings(path, text, fields, artifact_root, raw=_raw):
+            result.warn(_warning)
+        _ordinal_warning = plan_revision_ordinal_warning(fields)
+        if _ordinal_warning is not None:
+            result.warn(_ordinal_warning)
 
     check_filename_timestamp(
         result, path, freshness=freshness,
@@ -1518,6 +1535,120 @@ def a5_sanitized_text(text: str) -> str:
             continue
         out.append(line)
     return "\n".join(out)
+
+
+class PlanShape(NamedTuple):
+    lines: int
+    fenced: int
+    largest_block: int
+    byte_count: int
+    longest_line: int
+
+
+def plan_shape_measure(data: bytes) -> PlanShape:
+    text = data.decode('utf-8', errors='replace')
+    lines = a5_split_lines(text)
+    if lines and lines[-1] == '' and text.endswith(('\n', '\r')):
+        lines.pop()
+    if not data:
+        lines = []
+    fenced = largest = block = 0
+    open_char = ''
+    open_len = 0
+    for line in lines:
+        match = A5_FENCE_RE.match(line)
+        if open_char:
+            if (match and match.group(2)[0] == open_char
+                    and len(match.group(2)) >= open_len
+                    and match.group(3).strip(' \t') == ''):
+                largest = max(largest, block)
+                block = 0
+                open_char = ''
+                open_len = 0
+            else:
+                fenced += 1
+                block += 1
+            continue
+        if match:
+            family = match.group(2)[0]
+            if family == '`' and '`' in match.group(3):
+                continue
+            open_char = family
+            open_len = len(match.group(2))
+    return PlanShape(len(lines), fenced, max(largest, block), len(data),
+                     max((len(line) for line in lines), default=0))
+
+
+def plan_shape_exceeded(shape: PlanShape) -> list[tuple[str, str, str]]:
+    exceeded = []
+    for name, value, limit in (('block', shape.largest_block, 80),
+                               ('fenced', shape.fenced, 400)):
+        if value > limit:
+            exceeded.append((name, str(value), str(limit)))
+    if shape.lines > 400 and 2 * shape.fenced > shape.lines:
+        exceeded.append(('ratio', f'{shape.fenced / shape.lines:.2f}', '0.50'))
+    for name, value, limit in (('lines', shape.lines, 1500),
+                               ('bytes', shape.byte_count, 65536),
+                               ('longest line', shape.longest_line, 8000)):
+        if value > limit:
+            exceeded.append((name, str(value), str(limit)))
+    return exceeded
+
+
+def plan_shape_warnings(path: Path, text: str, fields: dict,
+                        artifact_root: Path | None, raw: bytes | None = None) -> list[str]:
+    """Measure raw body bytes when supplied, otherwise re-encode the text.
+
+    The text-only fallback cannot recover original newlines or invalid bytes;
+    lint_file supplies bytes from its read or the caller's record snapshot.
+    """
+    if (artifact_root is None or fields.get('PHASE') != 'PLAN'
+            or not h27_pair_planner_address(fields.get('FROM'))):
+        return []
+    stem = fields.get('PLAN_ARTIFACT')
+    warnings = []
+    data = None
+    target = 'relay body'
+    if stem is None:
+        warnings.append('plan shape: no PLAN_ARTIFACT declared; the relay body was measured')
+    else:
+        if a5_stem_is_bare(stem):
+            rel = f'plans/{stem}.md'
+            probes = ((artifact_root / rel, rel),
+                      (Path(rel), './' + rel),
+                      (artifact_root.parent.parent / rel, '../../' + rel))
+            for candidate, display in probes:
+                try:
+                    if not candidate.is_file():
+                        continue
+                    data = candidate.read_bytes()
+                except OSError:
+                    continue
+                target = display
+                break
+        if data is None:
+            warnings.append(f"plan shape: PLAN_ARTIFACT {stem!r} resolves at no probe root; the relay body was measured")
+    if data is None:
+        data = raw if raw is not None else text.encode('utf-8', errors='replace')
+    exceeded = plan_shape_exceeded(plan_shape_measure(data))
+    if exceeded:
+        items = ', '.join(f'{name} {value} > {limit}' for name, value, limit in exceeded)
+        warnings.append(f'plan shape: {target} over threshold: {items}')
+    return warnings
+
+
+def plan_revision_ordinal(dispatch_id: str | None) -> int | None:
+    match = re.fullmatch(r'.+-plan(?:-([1-9][0-9]{0,2}))?', dispatch_id or '')
+    return (int(match.group(1)) if match.group(1) else 1) if match else None
+
+
+def plan_revision_ordinal_warning(fields: dict) -> str | None:
+    if fields.get('PHASE') != 'PLAN' or not h27_pair_planner_address(fields.get('FROM')):
+        return None
+    ordinal = plan_revision_ordinal(fields.get('DISPATCH_ID'))
+    if ordinal is not None and ordinal >= 8:
+        return f'plan revision ordinal {ordinal} declared by DISPATCH_ID; the corpus median is 5'
+    return None
 
 
 def a5_field_occurrences(text: str) -> Dict[str, List[str]]:
@@ -3775,7 +3906,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     if not all_md:
         result.error(f"no .md relay files found under {path}")
         return result
-    per_file: List[Tuple[Path, LintResult]] = [(f, lint_file(f, template_mode=template_mode)) for f in files]
+    per_file: List[Tuple[Path, LintResult]] = [(f, lint_file(f, template_mode=template_mode, artifact_root=path)) for f in files]
     for f, r in per_file:
         for e in r.errors:
             result.error(f"{f.relative_to(path)}: {e}")
@@ -4252,6 +4383,7 @@ def main(argv: List[str]) -> int:
         r = lint_file(
             path, template_mode=args.templates,
             freshness=freshness, max_drift_minutes=args.max_drift_minutes,
+            artifact_root=args.relay_root,
         )
         print_result(str(path), r)
         overall.errors.extend(r.errors)

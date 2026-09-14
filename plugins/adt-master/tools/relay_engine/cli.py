@@ -186,7 +186,8 @@ def _cmd_lint(args):
         result = rules.lint_file(
             Path(name), template_mode=args.templates,
             freshness=not args.no_freshness,
-            max_drift_minutes=args.max_drift_minutes)
+            max_drift_minutes=args.max_drift_minutes,
+            artifact_root=Path(args.relay_root) if args.relay_root is not None else None)
         results[name] = {"errors": result.errors,
                          "warnings": result.warnings}
     _emit_result(results)
