@@ -15,7 +15,7 @@ from relay_engine import rules
 
 TOOLS = Path(__file__).parents[2]
 SCRIPT = TOOLS / 'relay-lint.py'
-CONTROL = TOOLS / 'relay-lint-fixtures/plancontract/PC16-a5-control/plans/fixture-plan.md'
+CONTROL = TOOLS / 'relay-engine-fixtures/plan-shape/PL-v291-b3-20260816.md'
 
 
 def _standalone():

@@ -421,7 +421,26 @@ COMMISSION_EXPECTED = [
 C13_CM79 = "mastertier/C13-CM79-dispatch-index"
 C13_CM79C = "mastertier/C13-CM79c-dispatch-index-control"
 
-EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + [
+PLANCONTRACT_MEMBERS = (
+    "PC01-under-all", "PC02-over-block", "PC03-over-fenced",
+    "PC04-over-ratio-only", "PC05-over-lines-only", "PC06-over-bytes-only",
+    "PC07-over-longest-only", "PC08-missing-locator", "PC09-inline-body-over",
+    "PC10-draft-explicit-root", "PC11-ordinal-7", "PC12-ordinal-8",
+    "PC13-date-suffix", "PC14-fence-evasion", "PC15-orchestrator-carrier",
+)
+PC10_DRAFT = "plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md"
+PC10_DRAFT_NOROOT = "plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md"
+PC12_FILE = "plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md"
+FILE_ROOT_OF = {
+    PC10_DRAFT: "plancontract/PC10-draft-explicit-root/.relays/v29",
+}
+PLANCONTRACT_EXPECTED = [
+    ("root", f"plancontract/{name}/.relays/v29", 0)
+    for name in PLANCONTRACT_MEMBERS
+] + [("file-root", PC10_DRAFT, 0), ("file", PC10_DRAFT_NOROOT, 0),
+     ("file", PC12_FILE, 0)]
+
+EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + PLANCONTRACT_EXPECTED + [
     ("root", C13_CM79, 1),
     ("root", C13_CM79C, 1),
     ("file", "mastertier/DI1a-dispatch-id-conflict.md", 1),
@@ -1352,6 +1371,28 @@ EXPECTED_WARN_SET: dict[str, list[str]] = {
     ],
     "humangate/HG4-bare-no.md": [],
 }
+_pc_prefix = "01-plan-20260801-130000.md: "
+_pc_root = lambda name: f"plancontract/{name}/.relays/v29"
+EXPECTED_WARN_SET.update({
+    _pc_root("PC01-under-all"): [],
+    _pc_root("PC02-over-block"): [_pc_prefix + "plan shape: ../../plans/fixture-plan.md over threshold: block 81 > 80"],
+    _pc_root("PC03-over-fenced"): [_pc_prefix + "plan shape: ../../plans/fixture-plan.md over threshold: fenced 401 > 400"],
+    _pc_root("PC04-over-ratio-only"): [_pc_prefix + "plan shape: ../../plans/fixture-plan.md over threshold: ratio 0.51 > 0.50"],
+    _pc_root("PC05-over-lines-only"): [_pc_prefix + "plan shape: ../../plans/fixture-plan.md over threshold: lines 1501 > 1500"],
+    _pc_root("PC06-over-bytes-only"): [_pc_prefix + "plan shape: ../../plans/fixture-plan.md over threshold: bytes 65537 > 65536"],
+    _pc_root("PC07-over-longest-only"): [_pc_prefix + "plan shape: ../../plans/fixture-plan.md over threshold: longest line 8001 > 8000"],
+    _pc_root("PC08-missing-locator"): [_pc_prefix + "plan shape: no PLAN_ARTIFACT declared; the relay body was measured"],
+    _pc_root("PC09-inline-body-over"): [_pc_prefix + "plan shape: no PLAN_ARTIFACT declared; the relay body was measured", _pc_prefix + "plan shape: relay body over threshold: bytes 65537 > 65536"],
+    _pc_root("PC10-draft-explicit-root"): [],
+    PC10_DRAFT: ["plan shape: ../../plans/fixture-plan-draft.md over threshold: block 81 > 80"],
+    PC10_DRAFT_NOROOT: [],
+    _pc_root("PC11-ordinal-7"): [],
+    _pc_root("PC12-ordinal-8"): [_pc_prefix + "plan revision ordinal 8 declared by DISPATCH_ID; the corpus median is 5"],
+    PC12_FILE: ["plan revision ordinal 8 declared by DISPATCH_ID; the corpus median is 5"],
+    _pc_root("PC13-date-suffix"): [],
+    _pc_root("PC14-fence-evasion"): [],
+    _pc_root("PC15-orchestrator-carrier"): [],
+})
 
 
 
@@ -2237,6 +2278,8 @@ def main() -> int:
         try:
             if kind == "file":
                 result = lint.lint_file(target)
+            elif kind == "file-root":
+                result = lint.lint_file(target, artifact_root=FIXTURES / FILE_ROOT_OF[rel])
             elif kind == "template":
                 result = lint.lint_file(target, template_mode=True)
             elif kind == "index":

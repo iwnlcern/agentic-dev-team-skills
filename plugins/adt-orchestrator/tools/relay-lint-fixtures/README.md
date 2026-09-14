@@ -31,6 +31,7 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `merge-token/` | 9 | Merge-token grants: phase binding, grantor and addressee restrictions, inert quoted forms |
 | `orch-review/` | 22 | Orchestrator-reviewer visibility gate over the broad SET, waivers, and exemptions |
 | `p9/` | 2 | P9 block-boundary regressions |
+| `plancontract/` | 18 | plan-shape and revision-ordinal warnings: thresholds, missing locators, inline bodies, explicit-root drafts, ordinal grammar, fence evasion, non-pair carriers |
 | `probes/` | 4 | Adversarial/evasive probes: code spans, fenced tokens, scan-result mismatches |
 | `rolevocab/` | 61 | Role-vocabulary enforcement: v2.9 renames, leftover roles, multiholder and late-binding edges |
 | `rootindex/` | 2 | Root INDEX ordering |
@@ -38,7 +39,7 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `rowtruth/` | 5 | ROW_TRUTH_CHECK evidence hooks for FOLD_SCOPE and SCOPE_DIFF rows |
 | `xroot/` | 121 | Declared cross-root design edge: both axes, fail-closed, plan-path symmetry, carrier engagement, and hostile-object containment; generated at harness runtime by tools/xrootfixgen.py |
 
-**757 harness-asserted outcomes** across 26 families.
+**775 harness-asserted outcomes** across 27 families.
 
 Two notes on the corpus shape.
 An outcome is one harness assertion, not one file: the lineage-bearing families (`mastertier/`, `design-review/`, `lockdigest/`, and others) stage whole relay-root scenarios — several relay files plus an INDEX per case — because the rules under test judge chains, not single relays.

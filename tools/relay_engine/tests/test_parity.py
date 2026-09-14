@@ -59,7 +59,17 @@ def _collect(module):
     indexes = {str(path.relative_to(REPO)): _verdict(
         module.lint_relay_index(path)) for path in _population()
         if path.name == "INDEX.md"}
-    return {"single": single, "root": roots, "index": indexes}
+    file_root = {}
+    plancontract = TOOLS / "relay-lint-fixtures" / "plancontract"
+    for member in sorted(plancontract.iterdir()):
+        if member.is_dir():
+            artifact_root = member / ".relays" / "v29"
+            for path in sorted(member.rglob("*.md")):
+                file_root[str(path.relative_to(REPO))] = _verdict(
+                    module.lint_file(path, freshness=False,
+                                     artifact_root=artifact_root))
+    return {"single": single, "root": roots, "index": indexes,
+            "file_root": file_root}
 
 
 def generate_artifacts():

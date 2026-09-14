@@ -302,7 +302,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/check-relay-lint-fixtures.py",
-    "sha256": "cc205e1bf71a55f16467c19b7e3796effb5976b4bb86f07cba85d5440aac3cf0",
+    "sha256": "58c7f3662ec8e2827ab5e92d7d9467a49b5809595baaf2d81a226e868f350d07",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -320,7 +320,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-master/tools/relay-lint-fixtures/README.md",
-    "sha256": "7998aa39c37622f0f2e5be3d544250bf0d3d4342dc0f87e2d7734f0ad1bfb54c",
+    "sha256": "b034e8f0e2d39f9bf5e2f8994b430ceecd980146522394de8144eb037b5fd324",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -7525,6 +7525,204 @@
   },
   {
     "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC01-under-all/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "49518907399abe68d0214597e1b65d2c4d4e1ee6afcac5dc1b4a0c0232e86067",
+    "source": "tools/relay-lint-fixtures/plancontract/PC01-under-all/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC01-under-all/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC01-under-all/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC02-over-block/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "524a0a8d9b89584dbe058e4aa41d75614e971be493931a3d52cabcfaf104bdf3",
+    "source": "tools/relay-lint-fixtures/plancontract/PC02-over-block/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC02-over-block/plans/fixture-plan.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC02-over-block/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC03-over-fenced/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "8518941f86c98a3cb615ac95a57b250cae3ab0cd0cdfee53108c3747fe5254e7",
+    "source": "tools/relay-lint-fixtures/plancontract/PC03-over-fenced/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC03-over-fenced/plans/fixture-plan.md",
+    "sha256": "d825dfb06124d01abe696b0066448d47ad2599dd26368d2e7456a89f9c96dba4",
+    "source": "tools/relay-lint-fixtures/plancontract/PC03-over-fenced/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "58ae97989cf3edbb83a3402d4581b86b2a3b87ab280118afb7659ced703ae8c9",
+    "source": "tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/plans/fixture-plan.md",
+    "sha256": "3257c063745b28c603aed9a1e74366c2c630a2771b84a0a54b8e327435b8f45d",
+    "source": "tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "448f43bde102eca3b8dbf3a3eb944833e9499fefccc2ffd61a828f6eef27af06",
+    "source": "tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/plans/fixture-plan.md",
+    "sha256": "40b5546d0b757cd0b3d60c2d60277231f63f1ce6059e5ad249467281b1d54209",
+    "source": "tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "14840c8c200b425cf7de598966847f59ffe14f8336fd8a41977a4a6a22472f34",
+    "source": "tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/plans/fixture-plan.md",
+    "sha256": "10f25ff057b6b3aac6ee4e80ddf06c6c770b7a0bcca6c6e8629d00c876ca22d5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "93ddf1ecd9be8cc3987c59deb3f4efa19f41f821d47386f48178a0e89c095b35",
+    "source": "tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/plans/fixture-plan.md",
+    "sha256": "f1b94f3f95663febc177b770e29ca856fe0fb5e931c0fd0ff09b9c4235c8ba5e",
+    "source": "tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC08-missing-locator/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "4a75d19c86b449f4dca195e13407986b825eefcad6e1451d9d5795e6a3947a99",
+    "source": "tools/relay-lint-fixtures/plancontract/PC08-missing-locator/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC08-missing-locator/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC08-missing-locator/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "e33529b4e69e67fd04b9aaa96f8d27a0038b895ebad2893eb8e0fb4ba50f6c07",
+    "source": "tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md",
+    "sha256": "3c24b07484800b80af55e2da271ba8bcc24ca42880b67c50d0d3c818873a3c16",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md",
+    "sha256": "3c24b07484800b80af55e2da271ba8bcc24ca42880b67c50d0d3c818873a3c16",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "49518907399abe68d0214597e1b65d2c4d4e1ee6afcac5dc1b4a0c0232e86067",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan-draft.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan-draft.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "7185db95e1badc67b556ef92faced08481e46c81c3b0723dccf844936777ec3b",
+    "source": "tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "5651656a3f8a2c5d972c15eba91e0044f00e9a6a9f43b30bffaf5d589d496f0b",
+    "source": "tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC13-date-suffix/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "0c39a65a699b67e22fe632c1f15838dea5cae465f6c63013b5c56318cb19c3bd",
+    "source": "tools/relay-lint-fixtures/plancontract/PC13-date-suffix/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC13-date-suffix/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC13-date-suffix/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "fdfff3ce2b73d1066c5315af6c8162ee91d5703110684e7f3fb4568028dd0526",
+    "source": "tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/plans/fixture-plan.md",
+    "sha256": "892c7672f7eee4055471e73e97282d35298309dc8f5dac656c4d0ee82adaf42a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "f5055de7c97097e5f10ef1f0eb4c25b2f85627cc6f0fe62cca6cee98f36f30fe",
+    "source": "tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-master/tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/plans/fixture-plan.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
     "path": "adt-master/tools/relay-lint-fixtures/probes/N2-refusal-code-span.md",
     "sha256": "041cfd56a1f7254fed84706e5db6541b60f07a19cf14e55c7fc2e49c52682a48",
     "source": "tools/relay-lint-fixtures/probes/N2-refusal-code-span.md"
@@ -10508,7 +10706,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/check-relay-lint-fixtures.py",
-    "sha256": "cc205e1bf71a55f16467c19b7e3796effb5976b4bb86f07cba85d5440aac3cf0",
+    "sha256": "58c7f3662ec8e2827ab5e92d7d9467a49b5809595baaf2d81a226e868f350d07",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -10526,7 +10724,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/README.md",
-    "sha256": "7998aa39c37622f0f2e5be3d544250bf0d3d4342dc0f87e2d7734f0ad1bfb54c",
+    "sha256": "b034e8f0e2d39f9bf5e2f8994b430ceecd980146522394de8144eb037b5fd324",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -17731,6 +17929,204 @@
   },
   {
     "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC01-under-all/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "49518907399abe68d0214597e1b65d2c4d4e1ee6afcac5dc1b4a0c0232e86067",
+    "source": "tools/relay-lint-fixtures/plancontract/PC01-under-all/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC01-under-all/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC01-under-all/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC02-over-block/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "524a0a8d9b89584dbe058e4aa41d75614e971be493931a3d52cabcfaf104bdf3",
+    "source": "tools/relay-lint-fixtures/plancontract/PC02-over-block/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC02-over-block/plans/fixture-plan.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC02-over-block/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC03-over-fenced/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "8518941f86c98a3cb615ac95a57b250cae3ab0cd0cdfee53108c3747fe5254e7",
+    "source": "tools/relay-lint-fixtures/plancontract/PC03-over-fenced/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC03-over-fenced/plans/fixture-plan.md",
+    "sha256": "d825dfb06124d01abe696b0066448d47ad2599dd26368d2e7456a89f9c96dba4",
+    "source": "tools/relay-lint-fixtures/plancontract/PC03-over-fenced/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "58ae97989cf3edbb83a3402d4581b86b2a3b87ab280118afb7659ced703ae8c9",
+    "source": "tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/plans/fixture-plan.md",
+    "sha256": "3257c063745b28c603aed9a1e74366c2c630a2771b84a0a54b8e327435b8f45d",
+    "source": "tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "448f43bde102eca3b8dbf3a3eb944833e9499fefccc2ffd61a828f6eef27af06",
+    "source": "tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/plans/fixture-plan.md",
+    "sha256": "40b5546d0b757cd0b3d60c2d60277231f63f1ce6059e5ad249467281b1d54209",
+    "source": "tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "14840c8c200b425cf7de598966847f59ffe14f8336fd8a41977a4a6a22472f34",
+    "source": "tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/plans/fixture-plan.md",
+    "sha256": "10f25ff057b6b3aac6ee4e80ddf06c6c770b7a0bcca6c6e8629d00c876ca22d5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "93ddf1ecd9be8cc3987c59deb3f4efa19f41f821d47386f48178a0e89c095b35",
+    "source": "tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/plans/fixture-plan.md",
+    "sha256": "f1b94f3f95663febc177b770e29ca856fe0fb5e931c0fd0ff09b9c4235c8ba5e",
+    "source": "tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC08-missing-locator/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "4a75d19c86b449f4dca195e13407986b825eefcad6e1451d9d5795e6a3947a99",
+    "source": "tools/relay-lint-fixtures/plancontract/PC08-missing-locator/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC08-missing-locator/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC08-missing-locator/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "e33529b4e69e67fd04b9aaa96f8d27a0038b895ebad2893eb8e0fb4ba50f6c07",
+    "source": "tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md",
+    "sha256": "3c24b07484800b80af55e2da271ba8bcc24ca42880b67c50d0d3c818873a3c16",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md",
+    "sha256": "3c24b07484800b80af55e2da271ba8bcc24ca42880b67c50d0d3c818873a3c16",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "49518907399abe68d0214597e1b65d2c4d4e1ee6afcac5dc1b4a0c0232e86067",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan-draft.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan-draft.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "7185db95e1badc67b556ef92faced08481e46c81c3b0723dccf844936777ec3b",
+    "source": "tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "5651656a3f8a2c5d972c15eba91e0044f00e9a6a9f43b30bffaf5d589d496f0b",
+    "source": "tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC13-date-suffix/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "0c39a65a699b67e22fe632c1f15838dea5cae465f6c63013b5c56318cb19c3bd",
+    "source": "tools/relay-lint-fixtures/plancontract/PC13-date-suffix/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC13-date-suffix/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC13-date-suffix/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "fdfff3ce2b73d1066c5315af6c8162ee91d5703110684e7f3fb4568028dd0526",
+    "source": "tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/plans/fixture-plan.md",
+    "sha256": "892c7672f7eee4055471e73e97282d35298309dc8f5dac656c4d0ee82adaf42a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "f5055de7c97097e5f10ef1f0eb4c25b2f85627cc6f0fe62cca6cee98f36f30fe",
+    "source": "tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/plans/fixture-plan.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/probes/N2-refusal-code-span.md",
     "sha256": "041cfd56a1f7254fed84706e5db6541b60f07a19cf14e55c7fc2e49c52682a48",
     "source": "tools/relay-lint-fixtures/probes/N2-refusal-code-span.md"
@@ -20642,7 +21038,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/check-relay-lint-fixtures.py",
-    "sha256": "cc205e1bf71a55f16467c19b7e3796effb5976b4bb86f07cba85d5440aac3cf0",
+    "sha256": "58c7f3662ec8e2827ab5e92d7d9467a49b5809595baaf2d81a226e868f350d07",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -20660,7 +21056,7 @@
   {
     "kit_version": "2.9.3",
     "path": "adt-pair/tools/relay-lint-fixtures/README.md",
-    "sha256": "7998aa39c37622f0f2e5be3d544250bf0d3d4342dc0f87e2d7734f0ad1bfb54c",
+    "sha256": "b034e8f0e2d39f9bf5e2f8994b430ceecd980146522394de8144eb037b5fd324",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -27862,6 +28258,204 @@
     "path": "adt-pair/tools/relay-lint-fixtures/p9/P9b-claim-after-scan-blank-line.md",
     "sha256": "5f77fc8f826d2c826e65abec099da902a25af6609671eb89021bac9f791da1a7",
     "source": "tools/relay-lint-fixtures/p9/P9b-claim-after-scan-blank-line.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC01-under-all/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "49518907399abe68d0214597e1b65d2c4d4e1ee6afcac5dc1b4a0c0232e86067",
+    "source": "tools/relay-lint-fixtures/plancontract/PC01-under-all/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC01-under-all/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC01-under-all/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC02-over-block/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "524a0a8d9b89584dbe058e4aa41d75614e971be493931a3d52cabcfaf104bdf3",
+    "source": "tools/relay-lint-fixtures/plancontract/PC02-over-block/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC02-over-block/plans/fixture-plan.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC02-over-block/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC03-over-fenced/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "8518941f86c98a3cb615ac95a57b250cae3ab0cd0cdfee53108c3747fe5254e7",
+    "source": "tools/relay-lint-fixtures/plancontract/PC03-over-fenced/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC03-over-fenced/plans/fixture-plan.md",
+    "sha256": "d825dfb06124d01abe696b0066448d47ad2599dd26368d2e7456a89f9c96dba4",
+    "source": "tools/relay-lint-fixtures/plancontract/PC03-over-fenced/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "58ae97989cf3edbb83a3402d4581b86b2a3b87ab280118afb7659ced703ae8c9",
+    "source": "tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/plans/fixture-plan.md",
+    "sha256": "3257c063745b28c603aed9a1e74366c2c630a2771b84a0a54b8e327435b8f45d",
+    "source": "tools/relay-lint-fixtures/plancontract/PC04-over-ratio-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "448f43bde102eca3b8dbf3a3eb944833e9499fefccc2ffd61a828f6eef27af06",
+    "source": "tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/plans/fixture-plan.md",
+    "sha256": "40b5546d0b757cd0b3d60c2d60277231f63f1ce6059e5ad249467281b1d54209",
+    "source": "tools/relay-lint-fixtures/plancontract/PC05-over-lines-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "14840c8c200b425cf7de598966847f59ffe14f8336fd8a41977a4a6a22472f34",
+    "source": "tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/plans/fixture-plan.md",
+    "sha256": "10f25ff057b6b3aac6ee4e80ddf06c6c770b7a0bcca6c6e8629d00c876ca22d5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC06-over-bytes-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "93ddf1ecd9be8cc3987c59deb3f4efa19f41f821d47386f48178a0e89c095b35",
+    "source": "tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/plans/fixture-plan.md",
+    "sha256": "f1b94f3f95663febc177b770e29ca856fe0fb5e931c0fd0ff09b9c4235c8ba5e",
+    "source": "tools/relay-lint-fixtures/plancontract/PC07-over-longest-only/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC08-missing-locator/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "4a75d19c86b449f4dca195e13407986b825eefcad6e1451d9d5795e6a3947a99",
+    "source": "tools/relay-lint-fixtures/plancontract/PC08-missing-locator/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC08-missing-locator/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC08-missing-locator/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "e33529b4e69e67fd04b9aaa96f8d27a0038b895ebad2893eb8e0fb4ba50f6c07",
+    "source": "tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC09-inline-body-over/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md",
+    "sha256": "3c24b07484800b80af55e2da271ba8bcc24ca42880b67c50d0d3c818873a3c16",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md",
+    "sha256": "3c24b07484800b80af55e2da271ba8bcc24ca42880b67c50d0d3c818873a3c16",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "49518907399abe68d0214597e1b65d2c4d4e1ee6afcac5dc1b4a0c0232e86067",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan-draft.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan-draft.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC10-draft-explicit-root/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "7185db95e1badc67b556ef92faced08481e46c81c3b0723dccf844936777ec3b",
+    "source": "tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC11-ordinal-7/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "5651656a3f8a2c5d972c15eba91e0044f00e9a6a9f43b30bffaf5d589d496f0b",
+    "source": "tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC12-ordinal-8/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC13-date-suffix/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "0c39a65a699b67e22fe632c1f15838dea5cae465f6c63013b5c56318cb19c3bd",
+    "source": "tools/relay-lint-fixtures/plancontract/PC13-date-suffix/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC13-date-suffix/plans/fixture-plan.md",
+    "sha256": "522077ca6e54d4c4accea2a88b9b1981267613fc7392b709c5ba90a8535bf10a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC13-date-suffix/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "fdfff3ce2b73d1066c5315af6c8162ee91d5703110684e7f3fb4568028dd0526",
+    "source": "tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/plans/fixture-plan.md",
+    "sha256": "892c7672f7eee4055471e73e97282d35298309dc8f5dac656c4d0ee82adaf42a",
+    "source": "tools/relay-lint-fixtures/plancontract/PC14-fence-evasion/plans/fixture-plan.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/.relays/v29/01-plan-20260801-130000.md",
+    "sha256": "f5055de7c97097e5f10ef1f0eb4c25b2f85627cc6f0fe62cca6cee98f36f30fe",
+    "source": "tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/.relays/v29/01-plan-20260801-130000.md"
+  },
+  {
+    "kit_version": "2.9.3",
+    "path": "adt-pair/tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/plans/fixture-plan.md",
+    "sha256": "d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5",
+    "source": "tools/relay-lint-fixtures/plancontract/PC15-orchestrator-carrier/plans/fixture-plan.md"
   },
   {
     "kit_version": "2.9.3",
