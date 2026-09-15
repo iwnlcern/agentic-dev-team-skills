@@ -125,6 +125,12 @@ Serialize when teams touch:
 
 Always name the colliding file/test/contract.
 
+### Post-approve fold
+
+When a ruling or an execution stop lands after a PLAN approve, compare the correction against the bound items in the Plan contract section of `protocol.md`.
+If the bound items are unchanged, direct an erratum using the existing `-erratum-N` stem grammar and a delta review of the erratum alone instead of a full plan reissue.
+Reissue the plan when a bound item changes.
+
 ## Hard escalation triggers
 
 Do not decide alone when work touches:
