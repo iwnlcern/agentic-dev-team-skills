@@ -1922,8 +1922,7 @@ class BindTests(TmpEnv):
         self.assertEqual(rs("bare"), ["bare"])
         self.assertEqual(rs({"a": ["x", {"b": "y"}]}), ["x", "y"])
 
-    def \
-        test_equal_receipts_at_two_leaves_are_ambiguous_and_single_stdout_is_scanned_once(
+    def test_equal_receipts_are_ambiguous_and_single_stdout_is_scanned_once(
         self,
     ):  # T4-R1
         self.run_bind(
@@ -2064,12 +2063,91 @@ class BindTests(TmpEnv):
             "echo 'tools/relay submit unfinished",
             "echo tools/relay submit | head",
             "ls; cd x",
+            "cat <<'EOF'\ntools/relay submit draft.md\nEOF\n",
+            "cat <<EOF\ntools/relay submit draft.md\nEOF\n",
+            "cat <<-EOF\n\ttools/relay submit draft.md\n\tEOF\n",
         )
         for command in commands:
             with self.subTest(command=command):
                 self.store.path.write_bytes(before)
                 self.assertEqual(self.run_bind(self.payload(command)), 0)
                 self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_heredoc_data_preserves_binding_and_pending_stop_delivery(self):
+        commands = (
+            "cat <<'EOF'\ntools/relay submit draft.md\nEOF\n",
+            "cat <<EOF\ntools/relay submit draft.md\nEOF\n",
+            "cat <<-EOF\n\ttools/relay submit draft.md\n\tEOF\n",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.store.path.unlink(missing_ok=True)
+                write_index(self.index, row(1, frm="a.planner", to="orch"))
+                self.assertEqual(
+                    self.run_bind(
+                        self.payload(
+                            f"tools/relay submit d.md --key {self.key} "
+                            f"--root {self.root}",
+                            self.receipt,
+                        )
+                    ),
+                    0,
+                )
+                before = self.store.path.read_bytes()
+                write_index(
+                    self.index,
+                    row(1, frm="a.planner", to="orch")
+                    + row(2, frm="b.planner", to="a.planner"),
+                )
+                self.assertEqual(self.run_bind(self.payload(command)), 0)
+                self.assertEqual(self.store.path.read_bytes(), before)
+                self.assertIsNone(self.store.load()["binding_degraded"])
+                drain = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "drain",
+                        "--host",
+                        "codex",
+                        "--session",
+                        "sess",
+                    ],
+                    input=json.dumps({"session_id": "sess", "turn_id": "t"}),
+                    capture_output=True,
+                    text=True,
+                    env=dict(os.environ),
+                    timeout=5,
+                )
+                self.assertEqual(drain.returncode, 0, drain.stderr)
+                document = json.loads(drain.stdout)
+                self.assertEqual(document["decision"], "block")
+                self.assertIn('"file":"lane/r2.md"', document["reason"])
+                self.assertEqual(
+                    self.store.load()["progress"][str(self.root)],
+                    {"file": "lane/r2.md", "position": 2},
+                )
+
+    def test_submit_after_heredoc_and_uncertainty_controls(self):
+        parse = self.rm.parse_submit_command
+        for command in (
+            "cat <<'EOF'\ndata\nEOF\ntools/relay submit draft.md",
+            "cat <<EOF\ntools/relay submit draft.md\n",
+            "tools/relay submit draft.md; cat <<'EOF\ndata",
+            "cat <<$'E\\x4fF'\ntools/relay submit draft.md\nEOF\n",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(parse(command).reason, "unsupported-shell")
+        for command in (
+            "cat <<EOF\nordinary data\n",
+            "cat <<'EOF\nordinary data\n",
+            "cat <<$'E\\x4fF'\nordinary data\nEOF\n",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(parse(command).reason, "no-submit")
+        self.assertEqual(
+            parse("tools/relay submit a.md; tools/relay submit b.md").reason,
+            "ambiguous-command",
+        )
 
     def test_submit_with_unsupported_shell_still_degrades(self):
         commands = (

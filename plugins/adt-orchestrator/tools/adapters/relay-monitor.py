@@ -1245,6 +1245,12 @@ def is_assignment_word(sl, text: str, quoted) -> bool:
 
 def parse_submit_command(command: str) -> SubmitParse:
     sl = _shell_lex()
+    uncertain = False
+    try:
+        command = sl.strip_heredoc_bodies(command)
+    except sl.Uncertain:
+        # Inspect raw command positions only when the pre-pass cannot decide.
+        uncertain = True
     tokens = sl.lex(command)
     malformed = tokens is None
     if malformed:
@@ -1253,8 +1259,10 @@ def parse_submit_command(command: str) -> SubmitParse:
         if tokens is None:
             tokens = sl.lex(command + '\n"')
         tokens = tokens or []
-    unsupported = malformed or any(
-        op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens
+    unsupported = (
+        uncertain
+        or malformed
+        or any(op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens)
     )
     boundaries = (*sl.SEPARATORS, "|", "||", "&", "(", ")")
     commands, current = [], []
