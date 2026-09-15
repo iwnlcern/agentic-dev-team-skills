@@ -157,3 +157,32 @@ Adapters must state evidence source per condition. Code/worktree claims use git 
 Observed degraded-host realities: Codex workspace-write can block `.git` writes; `.relays/` can be gitignored; wrapper tooling can mask byte diffs. Evidence-grade comparisons use `/usr/bin/git`, `cmp`, `sha256sum`, or direct filesystem reads, not hooked wrappers.
 
 Deployment drift remains on the watch list. A future adapter hardening turn may add a relay-lint version handshake. It keeps the cheaper rule: install `tools/` under the shared skills root and use `RELAY_LINT_SKILLS_ROOT` for hermetic tests and nonstandard installs.
+
+## Shipped adapter: relay auto-delivery (`relay-monitor.py`)
+
+Files: `tools/adapters/relay-monitor.py`, `tools/adapters/shell_lex.py`, `tools/adapters/plugin-monitors.json` (shipped as `monitors/monitors.json`), the three hooks in `plugin-hooks.json`, `tools/adapters/codex/adt-codex`, `tools/adapters/claude-code/relay-guard-destinations.py`, tests and the scope oracle in `tools/adapters/tests/`.
+
+Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `status`, `operator`, `replay`.
+State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell; the binding anchor initializes it once.
+Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` optional) bind without a hook, for hand-authored roots; `ADT_HOST` names the host explicitly.
+Test instrumentation (read once at import, default off, never set in production): `ADT_TEST_CRASH_BEFORE_OUTPUT`, `ADT_TEST_CRASH_AFTER_FLUSH`, `ADT_TEST_CRASH_AFTER_OUTPUT` exit the process with status 9 at the named point; `ADT_TEST_SINK_ACCEPT` caps, process-wide, the total number of bytes the delivery sink accepts (a write is truncated to the remaining room and reports zero progress once the cap is spent), which the tests use to force an output stall; `ADT_TEST_PAUSE_BEFORE_CLEANUP` names a file that a Stop drain aborted by an output stall waits for, at most ten seconds, before its stall cleanup, which the tests use to hold the drain at that point; `ADT_PACE_LINES` and `ADT_PACE_WINDOW` override the pacing budget.
+
+Operator notifications on macOS: run `python3 <plugin-root>/tools/adapters/relay-monitor.py operator --root <run-root>` in a terminal, or install this launch agent as `~/Library/LaunchAgents/com.adt.relay-monitor.operator.plist` (validate with `plutil -lint`, load with `launchctl load`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.adt.relay-monitor.operator</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/USER/.claude/plugins/cache/agentic-dev-team-skills/adt-orchestrator/VERSION/tools/adapters/relay-monitor.py</string>
+    <string>operator</string><string>--root</string><string>/absolute/path/to/docs/sprints/active/RUN/.relays/RUN_ID</string>
+  </array>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/USER/Library/Logs/adt-relay-monitor/operator.log</string>
+  <key>StandardErrorPath</key><string>/Users/USER/Library/Logs/adt-relay-monitor/operator.err</string>
+</dict></plist>
+```
+
+The stdout log is the durable record of notified rows; the notification itself is best-effort.

@@ -25,6 +25,8 @@ You normally do **not** implement. Do not edit source/tests, create scratch/prot
 
 **Not your job:** do not act on relays where your address is absent from `TO`; CC is context only; non-addressed relays are not yours. Do not proxy-author another seat's relay: `FROM` must be your own address. Do not spawn your own reviewer for orchestration or pair-review authority; route to the addressed reviewer seat. Use qualified role nouns (`pair Planner`, `Implementer`, `Orchestrator Planner`, `Orchestrator Reviewer`) when ambiguity could change who acts.
 
+**Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing. An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; report `unavailable-file` and do not act if the read fails); act only when your address is in `TO`; a `CC` arrival ends the turn with nothing filed.
+
 ## Pair lifecycle
 
 1. **Intake and tier selection** — choose the lightest safe ceremony tier; record any downgrade; escalate on hard triggers.

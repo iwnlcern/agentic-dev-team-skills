@@ -549,6 +549,22 @@ The shipped merge/live-verification verdict list (`merge-blocked`, `merged-not-d
 Widening the reserved universe beyond the grill record was declined; a future cycle may reserve more tokens by one-line amendment under the same rules.
 The lint exemption is stated as a rule, not "normally": the INDEX is exempt from relay-lint's per-relay checks; its own checks run in `--index` mode, which a per-file invocation must request explicitly.
 
+## Delivery mode
+
+Where a seat's host is armed, an admitted relay that names the seat in `TO` or `CC` is delivered to the session as one event line carrying the index row for that relay; the line is a pointer with exactly the standing of a hand-relayed pointer block.
+An arrival is E0.
+The row is a locator, not proof that the file is available: on an engine root the seat reads the relay through `tools/relay show --body <file>`, and on a hand root reads the file; if the read fails, the seat reports the arrival as `unavailable-file` in its next relay and does not act.
+The event line is never an authority carrier and cannot widen a phase or authorize implementation.
+On the fork host a notification may carry a `MONITOR-NOTICE: loss` line (records the host dropped, with counts and no locator); the seat then runs `relay-monitor.py replay` through the shell tool, which re-prints every addressed row after each retained floor for every root and seat this session has bound, up to a bound fixed at the first call, without moving progress; the seat checks whether each replayed row's work has already been handled before acting.
+Only lines that parse as a JSON object carrying the ten index cells plus `root` are rows; a `MONITOR-NOTICE:` line and the tagged stderr block are never rows.
+A row over 4 KiB of text is unsupported for monitor delivery on the fork host and is recovered through `replay`.
+A `TO` addressee acts immediately under the relay's own authority; a `CC` arrival is context: read it and end the turn with nothing filed.
+An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
+A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it, and every later filing refreshes the binding without moving delivery progress.
+Arming is automatic on Claude Code through the plugin monitor at every session start and resume; on Codex the SessionStart hook always supplies the arming context unless `ADT_CODEX_FORK=0`, the boot turn arms only when the `monitor` tool is in its advertised surface, and otherwise reports `unavailable: monitor-tool` and falls back to the pointer.
+The boot acknowledgment states the delivery state as a measured claim.
+The terminal pointer block remains mandatory on every relay-filing turn as the copy-paste fallback; auto-delivery does not relieve it, and a seat whose state is `unavailable` or `fallback` is served by the pointer as today.
+
 ## Hand-off pointer
 
 Every turn that files one or more relays MUST end its terminal output with one
@@ -570,8 +586,9 @@ If the receiver cannot access the path, additionally relay the file contents
 verbatim or attach the file.
 
 The pointer is terminal output, outside relay-lint's surface, so it is not
-linter-enforced: the operator enforces it by declining to hand-relay a relay
-that arrives without one.
+linter-enforced: the pointer block remains mandatory on every relay-filing turn as the
+copy-paste fallback; auto-delivery does not relieve it, and the operator enforces it by
+declining to hand-relay a relay that arrives without one.
 
 
 ## Relay lint

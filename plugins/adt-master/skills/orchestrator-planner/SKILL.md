@@ -23,7 +23,7 @@ You decompose, route, sequence, address relays with `FROM` / `TO` / `CC`, reconc
 
 **Not your job:** do not panel ordinary routing relays or non-PR handoffs. Panels are for code/PR review and explicitly requested adversarial review; routing relays must still be written. Do not skip writing a relay because review feels pending — review happens on the relay, not instead of it. Do not spawn your own reviewer as a substitute for the `Orchestrator Reviewer` seat. Every authority-bearing relay you author in the broad SET (AUDIT, DESIGN, REVIEW-FOLD, MERGE-GATE, delegated PLAN, or override IMPL dispatch) must carry `<run>.orchestrator-reviewer` in `CC` unless the operator has filed an `ORCH_REVIEW_WAIVER`. This is reviewer visibility, not approval; never wait on an approve to write the relay. Do not proxy-author downstream relays with another seat's `FROM`.
 
-**Do not spawn the team yourself.** You emit relays for the operator to hand-relay to separate downstream sessions; you never spawn subagents/agent-teams to fill the pair Planner, Implementer, or any downstream seat, or to follow, execute, or simulate the relay workflow. Those seats are independent operator-relayed sessions (distinct models/lanes); collapsing them into subagents you spawn destroys the cross-session, cross-model, judge-from-disk geometry the protocol depends on. The only sanctioned subagent spawn is read-only reviewer lenses for adversarial review — never seat-occupants or executors, and never a substitute for the addressed Orchestrator Reviewer seat.
+**Do not spawn the team yourself.** You emit relays that reach separate downstream sessions by auto-delivery where a seat is armed, and by the operator's hand-relay of the pointer block otherwise; you never spawn subagents/agent-teams to fill the pair Planner, Implementer, or any downstream seat, or to follow, execute, or simulate the relay workflow. Those seats are independent operator-relayed sessions (distinct models/lanes); collapsing them into subagents you spawn destroys the cross-session, cross-model, judge-from-disk geometry the protocol depends on. The only sanctioned subagent spawn is read-only reviewer lenses for adversarial review — never seat-occupants or executors, and never a substitute for the addressed Orchestrator Reviewer seat.
 
 ## Init directive
 
@@ -31,7 +31,7 @@ On `init`:
 
 1. Run the `sprint-doc-setup` skill to create the sprint tree, `.relays/<RUN_ID>/` substrate, and seed `INDEX.md`.
 2. Emit one lint-clean boot relay per seat: `<pair>.planner` and `<pair>.implementer` for every Agent Pair in the sprint, plus one boot relay for your Orchestrator Reviewer partner at `<run>.orchestrator-reviewer`. Use existing schema: `PHASE: SITREP`, `AUTHORITY: report-only`, `ROLE: Orchestrator Planner`, `FROM: <run>.orchestrator-planner`, and `TO` exactly one seat. Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted; render that segment one way.
-3. Print the per-seat relay pointers for the operator to hand-relay.
+3. Print the per-seat relay pointers; armed seats receive the arrival automatically, and the pointer is the operator's fallback for the rest.
 
 Do not spawn the seats. Boot relays bring operator-relayed sessions online, including the Orchestrator Reviewer; they grant no work authority. The AUDIT / DESIGN / PLAN / IMPL dispatches still do. Keep boot relays greppable with `DISPATCH_ID: <run>-boot-<owner>-<role>` and `SUBJECT: BOOT — initialize <owner>.<role> for RUN_ID <run>`.
 
@@ -65,4 +65,4 @@ Use all available teams. Disjoint surfaces can run in parallel. Shared files, mi
 
 ## Relay transport
 
-Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. If a receiver cannot access the path, relay or attach the file contents.
+Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. Armed seats receive the arrival automatically (protocol Delivery mode); the pointer block is printed regardless as the fallback. If a receiver cannot access the path, relay or attach the file contents.

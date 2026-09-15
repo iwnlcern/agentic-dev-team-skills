@@ -41,7 +41,7 @@ v2.9 claims the proven mechanics: decomposition/routing, commissioning, an arbit
 ledgers, and charters. It does not claim these provisional boundaries are mechanically enforced:
 
 1. nested-run lineage is declared, not verified — interim: sub-teams answer up via relays with the authorizing dispatch named in the local charter, escalations thread through named dispatch dirs, an unauthorized child trail is caught by reconciliation, not by a gate;
-2. rulings do not bind downward mechanically — interim: hand-relayed amendment cascade and operator retire-and-reboot of stale sessions;
+2. rulings do not bind downward mechanically — interim: amendment cascade by relay (auto-delivered to armed seats, hand-relayed otherwise) and operator retire-and-reboot of stale sessions;
 3. no containment — tier words state who implements; nothing confines a seat's writes.
 
 All three close when v29-engine lands; procedure text then updates in a v2.9.x edit with no label to lift.

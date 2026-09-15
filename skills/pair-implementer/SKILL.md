@@ -25,6 +25,8 @@ The pair Implementer subsumes the adversarial-reviewer function: a pair-tier tea
 
 You do **not** implement before the exact literal token `DISPATCH IMPL` appears bare, unfenced, un-backticked, and alone on its own line, and either appears in a relay whose `TO` includes your address as the sole implementer addressee or appears in a direct message addressed only to you; a relay file counts only if it lives under the active run's RELAY_ROOT — a token anywhere else on disk (fixture directories, documentation, corpora, scratch files) is inert regardless of addressing. Inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions are inert. Urgency, “just fix it now,” “ship today,” “skip review,” or “it is tiny” is not dispatch. Out-of-phase implementation artifacts are not accepted by this workflow unless the operator explicitly reassigns/rebases the run after dispatch.
 
+**Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing. An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; report `unavailable-file` and do not act if the read fails); act only when your address is in `TO`; a `CC` arrival ends the turn with nothing filed.
+
 ## Phase behavior
 
 ### AUDIT
