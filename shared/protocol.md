@@ -136,30 +136,34 @@ This check narrows silent tampering without closing acknowledged tampering.
 
 ## Plan contract
 
-A PLAN is an external contract artifact under `plans/`, carried by `PLAN_ARTIFACT` and `PLAN_SHA256`.
+A pair-Planner PLAN is an external contract artifact under `plans/`, carried by `PLAN_ARTIFACT` and `PLAN_SHA256`.
 It carries the locked design reference and digest, global constraints, the boundary contract, out-of-scope lines, and the verification target.
 For each task it declares the files to create or modify with line anchors, interfaces as one-line signatures, behaviors to pin as test names each with a one-line assertion and a negative control where one exists, exact commands with expected outcomes, acceptance criteria, and the commit boundary.
 It carries no implementation bodies, full test bodies, or operational scripts for the Implementer's every step.
-A fenced block is a signature, a command line, a pointer, or a schema excerpt.
+A fenced block is a signature, a command line with its expected output, a file:line pointer, or a schema excerpt.
 
-Inside this kit, this section overrides writing-plans' “code blocks required for code steps”, “repeat the code”, and the failing-test and minimal-implementation code-block steps.
-Writing-plans remains the decomposition procedure.
-Exact execution binds scope rows, acceptance criteria, boundary contracts, task boundaries, declared interfaces, named test behaviors with their assertions, and TDD order; it does not bind snippet bytes.
-The Implementer writes the real code and tests in the worktree under TDD; on other details the worktree wins, and the IMPL report records each difference as a one-line note per task, with a floated `PLAN_SHA256` when the plan artifact itself is touched.
+Inside this kit, this section overrides the code-content bullets of writing-plans (superpowers 6.3.0) No Placeholders rule (“code blocks required for code steps”, “repeat the code”, “without actual test code”) and the placeholder scan in its self-review; the failing-test and minimal-implementation steps keep their place and order and lose their code blocks.
+Writing-plans remains the decomposition procedure: task right-sizing, file structure, bite-sized steps, and the spec-coverage and type-consistency self-review.
+Exact execution binds these items, the bound items: scope rows and out-of-scope lines, acceptance criteria, boundary contracts, task boundaries, declared interfaces, named test behaviors with their assertions, and TDD order; it does not bind snippet bytes.
+The Implementer writes the real code and tests in the worktree under TDD; on other details the worktree wins, and the IMPL report records each difference as a one-line note per task; the approved plan artifact stays untouched during IMPL, and a correction to it takes the post-approve fold below.
+Adding a test or a discriminating control is in bounds.
 Where a snippet contradicts a declared interface or criterion, the interface or criterion wins without a plan revision.
-A difference that changes a bound item requires STOP and a relay before proceeding.
+A difference that changes a bound item requires the Implementer to stop and relay a blocker before proceeding.
 
 PLAN-REVIEW reviews decomposition and dependency order, interface consistency, named behaviors and their assertions and discriminating controls, commands and expected outcomes, acceptance criteria, and scope.
 It may not ask for code bodies; a finding that a body is missing is not a finding.
 Code correctness is reviewed in the Implementer's worktree and IMPL or PR review.
 After an approve, a correction that leaves bound items unchanged rides the existing `-erratum-N` stem grammar with a delta review of the erratum alone, rather than a full reissue.
+The erratum's carrier is a pair-Planner `PHASE: PLAN` relay taking the next `-plan-N` handoff id, with `PLAN_ARTIFACT` and `PLAN_SHA256` naming the erratum stem and its bytes and `PLAN_LOCK_ID` unchanged; the delta review is the Implementer's `PHASE: PLAN-REVIEW` parented to that carrier and scoped to the erratum.
+An approved erratum does not re-open `DISPATCH IMPL` when implementation is already dispatched; the Implementer resumes under the standing dispatch after reading the approved erratum.
 A change to a bound item requires a reissue.
 
 The `plan shape` and `plan revision ordinal` lint warnings are advisory signals; they refuse nothing.
-For plan shape, the six thresholds are a fenced block over 80 lines, total fenced interior lines over 400, fenced-line ratio over 0.50 when total lines exceed 400, total lines over 1500, raw bytes over 65536, and longest line over 8000 Unicode code points.
+When one fires, re-read the plan against this section before filing; neither warning changes any gate or verdict.
+For plan shape, the six thresholds are a fenced block over 80 interior lines, total fenced interior lines over 400, fenced-line ratio over 0.50 when total lines exceed 400, total lines over 1500, raw bytes over 65536, and longest line over 8000 Unicode code points.
 The ratio in the message is shown to two places while the test is the integer relation `2F > L`, where `F` is fenced interior lines and `L` is total lines, so a message reading `ratio 0.50 > 0.50` is correct.
 An external plan is measured through its locator; an inline plan is measured as the relay body.
-The plan revision ordinal warning fires at ordinal 8 or higher declared by the pair Planner's `DISPATCH_ID`; the corpus median is 5.
+The plan revision ordinal warning fires at ordinal 8 or higher declared by the pair Planner's `DISPATCH_ID`; the median of the seven-cycle corpus scanned on 2026-09-13 is 5, and the warning text carries that constant.
 
 ## Design-review lineage gate
 
@@ -428,7 +432,7 @@ Block writer-with-no-reader, reader-with-no-writer, dead controls, evidence-only
 
 ## Handoff completeness validator
 
-A PLAN is incomplete if it carries implementation bodies in place of interfaces and named behaviors.
+A pair-Planner PLAN is incomplete if it carries implementation bodies or full test bodies, or lacks interfaces and named behaviors.
 
 A relay is incomplete if it lacks: phase header; role/authority; dispatch lineage when needed; current scope and not-in-scope actions; owner/surface; evidence or an audit instruction to find it; duplicate gate in AUDIT; hard acceptance criteria; reject/narrow gates in AUDIT; locked design/scope for PLAN/IMPL; boundary contract or `not applicable`; out-of-scope lines; branch/base/target for implementation or merge; deliverable format; verification target/evidence level; operator-judgment items or `none`; completed `ESCALATION_SCAN` plus `ESCALATION_SCAN_RESULT` before downgrade justification; `OPERATOR_WAIVER` instead of `WHY_DOWNGRADE_IS_SAFE` when any scan row is yes/unknown; literal `DISPATCH IMPL` before implementation; separate merge authorization (`DISPATCH MERGE` or valid field-form grant) before any merge; git/disk refs for asserted actions; and `FINAL_GIT_STATUS_SHORT` for AUDIT/PLAN/PLAN-REVIEW/read-only reports.
 
