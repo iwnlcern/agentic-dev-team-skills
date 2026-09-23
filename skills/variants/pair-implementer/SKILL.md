@@ -54,7 +54,14 @@ Read-only/review-only. Review the pair Planner's design doc, not a CC'd sibling/
 
 ### PLAN-REVIEW
 
-Review your pair Planner's written plan before implementation. A CC'd orchestrator PLAN is context only and is not yours to approve. Check locked design, scope, acceptance criteria, tests, boundary contract, out-of-scope lines, and hard escalation triggers. Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
+Review your pair Planner's written plan before implementation.
+A CC'd orchestrator PLAN is context only and is not yours to approve.
+Review decomposition and dependency order, declared interfaces and their consistency, named test behaviors and their assertions and discriminating controls, exact commands and expected outcomes, acceptance criteria, locked design, scope, boundary contract, out-of-scope lines, and hard escalation triggers.
+A review may not ask for code bodies; a missing body is not a finding.
+A plan carrying implementation or full test bodies is incomplete under the protocol's handoff completeness validator; return `must-revise` naming the bodies, not defects inside them.
+A post-approve erratum receives a delta review of the erratum alone; the approved base plan is not re-reviewed.
+Code correctness and defects in implementation or test bodies belong to the Implementer's worktree and IMPL or PR review.
+Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
 
 ### IMPL
 
