@@ -26,10 +26,11 @@ This release adds:
 - **Liveness repair** makes readiness and the `status` state reflect the running monitor while preserving the existing delivery paths.
   A refused (`EPERM`) process probe reads alive, so a sandboxed seat no longer reports a running monitor as starting.
   The adapter guide explains manual binding under a restrictive profile that refuses the relay daemon's socket.
-- **Upgrade consequence:** `version.py` is engine-roster content, so the fingerprint moves to `a69bee630380afb910b85728ed0e1535ab6b29edf4dfd071b80435674865484d`.
+- **Merge-claim classification** treats a no-action `ACTIONS_GIT_REF` as no merge claim while continuing to recognize `merge=<sha>`.
+- **Upgrade consequence:** `version.py` is engine-roster content, so the fingerprint moves to `93eb0c24818b0c707038ec9a80c3a22513342fa55e0cedccaaa793d716aee092`.
   Every seat fast-forwards the checkout its relay client runs from, and each root's eligible starter restarts that root's daemon from the refreshed checkout.
   Until client and daemon match, record operations refuse with `E-VERSION-MISMATCH` in either direction.
-- The engine suite measures 407 tests.
+- The engine suite measures 412 tests.
 
 ## [2.9.3] — 2026-08-25
 
