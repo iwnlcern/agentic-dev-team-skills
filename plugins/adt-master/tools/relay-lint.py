@@ -938,7 +938,10 @@ def merge_claimed(text: str, fields: Dict[str, str]) -> bool:
         r"\bmerged\b",
         r"\bgit\s+merge\b",
     ]
-    field_claim = bool(action_ref_block.strip()) and any(
+    no_action_ref = re.match(
+        r"^ACTIONS_GIT_REF:\s*none\s+—\s+\S", action_ref_block, flags=re.IGNORECASE
+    ) is not None
+    field_claim = bool(action_ref_block.strip()) and not no_action_ref and any(
         re.search(pattern, scoped, flags=re.IGNORECASE) for pattern in field_patterns
     )
     canonical_surface = remove_named_block(operational, "ESCALATION_SCAN")
