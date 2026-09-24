@@ -5,7 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-Relay auto-delivery (v2.9.5 sprint, bundle B2); the release identity and version bump are the orchestrator's release step.
+## [2.9.5] — 2026-09-23
+
+A minor release by content despite the patch-step number: relay auto-delivery to idle seats adds a new delivery mode, and the kit's Codex fork (`iwnlcern/codex`, tags `v<upstream>-monitor.<n>`) adds a new host artifact.
+
+- **B1's pinned INDEX contract test** ships from PR 23.
+- **B4's plan contract** ships the plan-shape and revision-ordinal lint warnings from PR 24 and the protocol's plan contract section from PR 26.
+
+B2's delivery adapters shipped in PR 25:
 
 - **Every generated plugin declares an always-on `relay-monitor` watcher** (`monitors/monitors.json`) that re-reads the run's rendered `INDEX.md` and delivers each addressed row to the session as one JSON line; a PostToolUse hook binds the seat after every `tools/relay submit` with a visible receipt.
   The engine is unaltered; the terminal pointer block remains mandatory as the fallback.
@@ -13,6 +20,11 @@ Relay auto-delivery (v2.9.5 sprint, bundle B2); the release identity and version
 - **Operator notification mode** (`relay-monitor.py operator`, macOS `osascript`) and `replay` for loss-marker recovery.
 - **Relay guard narrowed** to quote-aware write destinations under a relay root (the four read-only false positives are silent; a stderr redirect into a relay file still fires).
 - Protocol gains the Delivery-mode section; role skills and templates state the delivery state in the boot acknowledgment.
+- **Liveness repair** makes readiness and the `status` state reflect the running monitor while preserving the existing delivery paths.
+  The adapter guide explains manual binding under a restrictive profile that refuses the relay daemon's socket.
+- **Upgrade consequence:** `version.py` is engine-roster content, so the fingerprint moves to `a69bee630380afb910b85728ed0e1535ab6b29edf4dfd071b80435674865484d`.
+  Every seat fast-forwards the checkout its relay client runs from and restarts its daemon; an unrefreshed client is refused with `E-VERSION-MISMATCH` until it refreshes.
+- The engine suite measures 407 tests.
 
 ## [2.9.3] — 2026-08-25
 
