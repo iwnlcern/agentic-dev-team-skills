@@ -309,6 +309,9 @@ class LeaderLockTests(TmpEnv):
             "dead",
         )
         self.assertEqual(self.rm.process_liveness({**rec, "pid": 2**22 - 1}), "dead")
+        for pid in (0, -1, True, "invalid"):
+            with self.subTest(pid=pid):
+                self.assertEqual(self.rm.process_liveness({"pid": pid}), "dead")
 
     def test_probe_classifies_by_errno(self):
         for error, expected in (
