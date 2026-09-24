@@ -165,6 +165,13 @@ Files: `tools/adapters/relay-monitor.py`, `tools/adapters/shell_lex.py`, `tools/
 Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `status`, `operator`, `replay`.
 State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell; the binding anchor initializes it once.
 Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` optional) bind without a hook, for hand-authored roots; `ADT_HOST` names the host explicitly.
+
+Inbound delivery needs no socket permission because the watcher reads the run's rendered `INDEX.md` and never calls the engine.
+A seat that also files its own relays needs a sandbox profile that permits the relay daemon's socket.
+A seat under a profile that refuses the socket binds its watcher once at setup with `relay-monitor.py bind --manual --session <session-id> --root <run-root> --anchor <file>` instead of by the post-submit hook, and every later delivery needs no action.
+Without `--session`, the command resolves the session from `CLAUDE_CODE_SESSION_ID` or `CODEX_THREAD_ID` and does nothing when neither names one.
+A seat that sees `E-DAEMON-DOWN` while the daemon is running is hitting that socket permission, not a stopped daemon.
+
 Test instrumentation (read once at import, default off, never set in production): `ADT_TEST_CRASH_BEFORE_OUTPUT`, `ADT_TEST_CRASH_AFTER_FLUSH`, `ADT_TEST_CRASH_AFTER_OUTPUT` exit the process with status 9 at the named point; `ADT_TEST_SINK_ACCEPT` caps, process-wide, the total number of bytes the delivery sink accepts (a write is truncated to the remaining room and reports zero progress once the cap is spent), which the tests use to force an output stall; `ADT_TEST_PAUSE_BEFORE_CLEANUP` names a file that a Stop drain aborted by an output stall waits for, at most ten seconds, before its stall cleanup, which the tests use to hold the drain at that point; `ADT_PACE_LINES` and `ADT_PACE_WINDOW` override the pacing budget.
 
 Operator notifications on macOS: run `python3 <plugin-root>/tools/adapters/relay-monitor.py operator --root <run-root>` in a terminal, or install this launch agent as `~/Library/LaunchAgents/com.adt.relay-monitor.operator.plist` (validate with `plutil -lint`, load with `launchctl load`):
