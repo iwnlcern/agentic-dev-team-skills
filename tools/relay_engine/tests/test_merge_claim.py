@@ -35,6 +35,20 @@ class TestMergeClaim(unittest.TestCase):
             "ACTIONS_GIT_REF: read-only reads of the merged adapter on main\n", True
         )
 
+        self.assert_claim("ACTIONS_GIT_REF: none merge commit abc123\n", True)
+        self.assert_claim("ACTIONS_GIT_REF: none: merge commit abc123\n", True)
+        self.assert_claim("ACTIONS_GIT_REF: none—merge commit abc123\n", True)
+        self.assert_claim(
+            "ACTIONS_GIT_REF: nonexistent branch, merge commit abc123\n", True
+        )
+        self.assert_claim(
+            "ACTIONS_GIT_REF: merge commit abc123 on main\n"
+            "  superseding an earlier ACTIONS_GIT_REF: none — draft value\n", True
+        )
+        self.assert_claim(
+            "ACTIONS_GIT_REF: NONE — read-only reads of merge commit abc123\n", False
+        )
+
     def test_no_action_ref_with_machine_form_still_claims(self):
         self.assert_claim(
             "ACTIONS_GIT_REF: none — read-only reads of the merged adapter on main\n"
