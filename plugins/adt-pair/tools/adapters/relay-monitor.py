@@ -215,14 +215,35 @@ def leader_record() -> dict:
     }
 
 
-def process_alive(record) -> bool:
-    if not record or not record.get("pid"):
-        return False
+PROC_ALIVE, PROC_DEAD, PROC_UNKNOWN = "alive", "dead", "unknown"
+
+
+def process_probe(pid: int) -> str:
     try:
-        os.kill(int(record["pid"]), 0)
-    except (OSError, ValueError):
-        return False
-    return process_start_time(int(record["pid"])) == record.get("start_time")
+        os.kill(pid, 0)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return PROC_DEAD
+        if exc.errno == errno.EPERM:
+            return PROC_ALIVE
+        return PROC_UNKNOWN
+    return PROC_ALIVE
+
+
+def process_liveness(record: dict | None) -> str:
+    if not isinstance(record, dict):
+        return PROC_DEAD
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return PROC_DEAD
+    probe = process_probe(pid)
+    if probe == PROC_DEAD:
+        return PROC_DEAD
+    recorded = record.get("start_time")
+    observed = process_start_time(pid)
+    if recorded is not None and observed is not None:
+        return PROC_ALIVE if recorded == observed else PROC_DEAD
+    return probe
 
 
 class LeaderLock:
@@ -1746,7 +1767,7 @@ def readiness(store: NoteStore, _between=None):
     if not held:
         return (
             "standby-only"
-            if any(process_alive(s) for s in note.get("standbys", []))
+            if any(process_liveness(s) != PROC_DEAD for s in note.get("standbys", []))
             else "not-started"
         ), note
     leader = note.get("leader")
@@ -1754,7 +1775,7 @@ def readiness(store: NoteStore, _between=None):
         not leader
         or not holder
         or leader.get("instance") != holder
-        or not process_alive(leader)
+        or process_liveness(leader) == PROC_DEAD
     ):
         return "starting", note
     if note.get("binding_degraded") or note.get("phase") == "unavailable":

@@ -5,7 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-Relay auto-delivery (v2.9.5 sprint, bundle B2); the release identity and version bump are the orchestrator's release step.
+## [2.9.5] — 2026-09-23
+
+This release skips 2.9.4 and is minor by content despite the patch-step number: relay auto-delivery to idle seats adds a new delivery mode, and the kit's Codex fork (`iwnlcern/codex`, tags `v<upstream>-monitor.<n>`) adds a new host artifact.
+
+- **B1's pinned INDEX contract test** ships from PR 23.
+- **B4's plan contract** ships the plan-shape and revision-ordinal lint warnings from PR 24 and the protocol's plan contract section from PR 26.
+
+B2's delivery adapters shipped in PR 25:
 
 - **Every generated plugin declares an always-on `relay-monitor` watcher** (`monitors/monitors.json`) that re-reads the run's rendered `INDEX.md` and delivers each addressed row to the session as one JSON line; a PostToolUse hook binds the seat after every `tools/relay submit` with a visible receipt.
   The engine is unaltered; the terminal pointer block remains mandatory as the fallback.
@@ -13,6 +20,17 @@ Relay auto-delivery (v2.9.5 sprint, bundle B2); the release identity and version
 - **Operator notification mode** (`relay-monitor.py operator`, macOS `osascript`) and `replay` for loss-marker recovery.
 - **Relay guard narrowed** to quote-aware write destinations under a relay root (the four read-only false positives are silent; a stderr redirect into a relay file still fires).
 - Protocol gains the Delivery-mode section; role skills and templates state the delivery state in the boot acknowledgment.
+
+This release adds:
+
+- **Liveness repair** makes readiness and the `status` state reflect the running monitor while preserving the existing delivery paths.
+  A refused (`EPERM`) process probe reads alive, so a sandboxed seat no longer reports a running monitor as starting.
+  The adapter guide explains manual binding under a restrictive profile that refuses the relay daemon's socket.
+- **Merge-claim classification** treats a no-action `ACTIONS_GIT_REF` as no merge claim while continuing to recognize `merge=<sha>`.
+- **Upgrade consequence:** `version.py` is engine-roster content, so the fingerprint moves to `93eb0c24818b0c707038ec9a80c3a22513342fa55e0cedccaaa793d716aee092`.
+  Every seat fast-forwards the checkout its relay client runs from, and each root's eligible starter restarts that root's daemon from the refreshed checkout.
+  Until client and daemon match, record operations refuse with `E-VERSION-MISMATCH` in either direction.
+- The engine suite measures 412 tests.
 
 ## [2.9.3] — 2026-08-25
 

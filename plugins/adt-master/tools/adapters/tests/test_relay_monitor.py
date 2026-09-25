@@ -1,6 +1,7 @@
 # tools/adapters/tests/test_relay_monitor.py
 import base64
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -302,11 +303,78 @@ class LeaderLockTests(TmpEnv):
     def test_leader_record_matches_live_process(self):
         rec = self.rm.leader_record()
         self.assertEqual(rec["pid"], os.getpid())
-        self.assertTrue(self.rm.process_alive(rec))
-        self.assertFalse(
-            self.rm.process_alive({**rec, "start_time": "1970-01-01 00:00:00"})
+        self.assertEqual(self.rm.process_liveness(rec), "alive")
+        self.assertEqual(
+            self.rm.process_liveness({**rec, "start_time": "1970-01-01 00:00:00"}),
+            "dead",
         )
-        self.assertFalse(self.rm.process_alive({**rec, "pid": 2**22 - 1}))
+        self.assertEqual(self.rm.process_liveness({**rec, "pid": 2**22 - 1}), "dead")
+        for pid in (0, -1, True, "invalid"):
+            with self.subTest(pid=pid):
+                self.assertEqual(self.rm.process_liveness({"pid": pid}), "dead")
+
+    def test_probe_classifies_by_errno(self):
+        for error, expected in (
+            (None, "alive"),
+            (errno.EPERM, "alive"),
+            (errno.ESRCH, "dead"),
+            (errno.EINVAL, "unknown"),
+        ):
+            with self.subTest(error=error):
+                side_effect = None if error is None else OSError(error, "probe failed")
+                with mock.patch.object(self.rm.os, "kill", side_effect=side_effect):
+                    self.assertEqual(self.rm.process_probe(os.getpid()), expected)
+
+    def test_absent_process_reads_dead(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait(timeout=5)
+        self.assertEqual(self.rm.process_liveness({"pid": child.pid}), "dead")
+
+    def test_start_time_evidence(self):
+        for recorded, observed, expected in (
+            (None, "A", "alive"),
+            ("A", None, "alive"),
+            (None, None, "alive"),
+            ("A", "A", "alive"),
+            ("A", "B", "dead"),
+        ):
+            with self.subTest(recorded=recorded, observed=observed):
+                with (
+                    mock.patch.object(self.rm, "process_probe", return_value="alive"),
+                    mock.patch.object(
+                        self.rm, "process_start_time", return_value=observed
+                    ),
+                ):
+                    self.assertEqual(
+                        self.rm.process_liveness(
+                            {"pid": os.getpid(), "start_time": recorded}
+                        ),
+                        expected,
+                    )
+        with (
+            mock.patch.object(
+                self.rm.os, "kill", side_effect=OSError(errno.EPERM, "refused")
+            ),
+            mock.patch.object(self.rm, "process_start_time", return_value="B"),
+        ):
+            self.assertEqual(
+                self.rm.process_liveness({"pid": os.getpid(), "start_time": "A"}),
+                "dead",
+            )
+
+    def test_unknown_propagates_through_liveness(self):
+        with mock.patch.object(self.rm, "process_start_time", return_value=None):
+            for error, expected in ((errno.EINVAL, "unknown"), (errno.ESRCH, "dead")):
+                with self.subTest(error=error):
+                    with mock.patch.object(
+                        self.rm.os, "kill", side_effect=OSError(error, "probe failed")
+                    ):
+                        self.assertEqual(
+                            self.rm.process_liveness(
+                                {"pid": os.getpid(), "start_time": "A"}
+                            ),
+                            expected,
+                        )
 
 
 class SinkTests(TmpEnv):
@@ -2892,6 +2960,59 @@ class StatusTests(TmpEnv):
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
+
+    def test_refused_probe_never_reads_dead(self):
+        rm = self.rm
+        leader = rm.leader_record()
+        lock = rm.LeaderLock("sess")
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        lock.stamp(leader["instance"])
+        self.store.update(
+            lambda note: note.update(
+                {
+                    "leader": leader,
+                    "phase": "following",
+                    "root": str(self.root),
+                    "progress": {str(self.root): {"file": "x", "position": 1}},
+                }
+            )
+        )
+        for error, observed, expected in (
+            (errno.EPERM, None, "armed"),
+            (errno.EINVAL, None, "armed"),
+            (errno.ESRCH, None, "starting"),
+            (errno.EPERM, "different-start", "starting"),
+        ):
+            with self.subTest(error=error, observed=observed):
+                with (
+                    mock.patch.object(
+                        rm.os, "kill", side_effect=OSError(error, "probe failed")
+                    ),
+                    mock.patch.object(rm, "process_start_time", return_value=observed),
+                ):
+                    self.assertEqual(rm.readiness(self.store)[0], expected)
+
+    def test_standby_with_refused_probe_counts(self):
+        rm = self.rm
+        self.store.update(
+            lambda note: note.update(
+                {"standbys": [{"pid": os.getpid(), "start_time": "A"}]}
+            )
+        )
+        for error, expected in (
+            (errno.EPERM, "standby-only"),
+            (errno.EINVAL, "standby-only"),
+            (errno.ESRCH, "not-started"),
+        ):
+            with self.subTest(error=error):
+                with (
+                    mock.patch.object(
+                        rm.os, "kill", side_effect=OSError(error, "probe failed")
+                    ),
+                    mock.patch.object(rm, "process_start_time", return_value=None),
+                ):
+                    self.assertEqual(rm.readiness(self.store)[0], expected)
 
     def test_readiness_states_tied_to_lock_holder(self):
         rm = self.rm
