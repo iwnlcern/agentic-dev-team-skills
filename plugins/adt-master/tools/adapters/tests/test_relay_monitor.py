@@ -1692,6 +1692,445 @@ class BindTests(TmpEnv):
         with mock.patch("sys.stdin", io.StringIO(payload_text)):
             return self.rm.bind(ns())
 
+    def test_submit_parse_table(self):
+        cases = (
+            ("tools/relay submit d.md --key K --root R", "K", "R"),
+            ("relay submit d.md --root R --key K", "K", "R"),
+            ("/opt/relay submit d.md --key K --root R", "K", "R"),
+            ("RELAY_KEY=K tools/relay submit d.md --root R", "K", "R"),
+            ("X=1 RELAY_KEY=K tools/relay submit d.md --root R", "K", "R"),
+            (
+                "tools/relay submit d.md --admits-against boot.md --key K --root R",
+                "K",
+                "R",
+            ),
+        )
+        for bare, key, root in cases:
+            for cd in ("", "cd X && "):
+                for interpreter in (
+                    "",
+                    "python3 ",
+                    "python ",
+                    "py ",
+                    "python3.12 ",
+                    "/usr/bin/python3 ",
+                ):
+                    with self.subTest(bare=bare, cd=cd, interpreter=interpreter):
+                        words = bare.split(" ")
+                        prefix = next(
+                            (
+                                i
+                                for i, word in enumerate(words)
+                                if word.endswith("relay")
+                            ),
+                            0,
+                        )
+                        command = cd + " ".join(
+                            words[:prefix]
+                            + ([interpreter.strip()] if interpreter else [])
+                            + words[prefix:]
+                        )
+                        got = self.rm.parse_submit_command(command)
+                        self.assertEqual(
+                            (
+                                got.ok,
+                                got.reason,
+                                got.key,
+                                got.root_operand,
+                                got.cd_prefix,
+                            ),
+                            (True, None, key, root, "X" if cd else None),
+                        )
+        for command in (
+            "python3 tools/relay submit d.md --key K --admits-against boot.md --root R",
+            "python3 tools/relay submit d.md --admits-against boot.md --root R --key K",
+        ):
+            with self.subTest(command=command):
+                got = self.rm.parse_submit_command(command)
+                self.assertEqual((got.ok, got.key, got.root_operand), (True, "K", "R"))
+
+    def test_interpreter_prefixed_submit_binds(self):
+        command = f"python3 tools/relay submit d.md --key {self.key} --root {self.root}"
+        self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+        note = self.store.load()
+        self.assertEqual(
+            (note["seat"], note["binding_source"], note["binding_degraded"]),
+            ("a.planner", "hook", None),
+        )
+
+    def test_near_miss_reason(self):
+        for command in (
+            "python3 -B tools/relay submit d.md",
+            "env python3 tools/relay submit d.md",
+            "/usr/bin/env python3 tools/relay submit d.md",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.rm.parse_submit_command(command).reason, "submit-near-miss"
+                )
+
+    def test_near_miss_requires_executed_relay(self):
+        for command in (
+            "python3 other.py tools/relay submit d.md",
+            "python3 -c 'pass' tools/relay submit d.md",
+            "python3 -cpass tools/relay submit d.md",
+            "python3 -mhttp.server tools/relay submit d.md",
+            "env echo tools/relay submit d.md",
+            "echo tools/relay submit d.md",
+            "python3 -B 'tools/relay' submit d.md",
+            "python3 -B tools/relay 'submit' d.md",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.rm.parse_submit_command(command).reason, "no-submit"
+                )
+
+    def test_launcher_and_option_operand_near_misses(self):
+        commands = (
+            "uv run tools/relay submit d.md",
+            "uv run python3 tools/relay submit d.md",
+            "/usr/bin/uv run python3 -W ignore tools/relay submit d.md",
+            "python3 -W ignore tools/relay submit d.md",
+            "python3 -X dev tools/relay submit d.md",
+            "python3 -BW ignore -Xdev tools/relay submit d.md",
+            "env python3 -W ignore tools/relay submit d.md",
+            "python3 -- tools/relay submit d.md",
+        )
+        for command in commands:
+            with self.subTest(command=command, bound=False):
+                self.store.path.unlink(missing_ok=True)
+                self.assertEqual(
+                    self.rm.parse_submit_command(command).reason, "submit-near-miss"
+                )
+                before = self.rm.readiness(self.store)[0]
+                self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+                self.assertEqual(self.rm.readiness(self.store)[0], before)
+                self.assertIsNone(self.store.load()["binding_degraded"])
+                self.assertRegex(
+                    self.rm.status_line(self.store, None).splitlines()[0],
+                    r" binding=none .* miss=submit-near-miss$",
+                )
+        self.store.path.unlink(missing_ok=True)
+        self._bound_following()
+        fields = (
+            "seat",
+            "root",
+            "anchor",
+            "binding_source",
+            "binding_gen",
+            "phase",
+            "progress",
+            "printed",
+        )
+        before = self.store.load()
+        for command in commands:
+            with self.subTest(command=command, bound=True):
+                self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+                after = self.store.load()
+                self.assertEqual(
+                    {field: after[field] for field in fields},
+                    {field: before[field] for field in fields},
+                )
+                self.assertIsNone(after["binding_degraded"])
+                self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+                with mock.patch.object(
+                    self.rm, "check_identity", return_value=("ok", {}, {})
+                ):
+                    self.assertTrue(
+                        self.rm.status_line(self.store, None)
+                        .splitlines()[0]
+                        .endswith("miss=submit-near-miss")
+                    )
+
+    def test_terminal_combined_and_launcher_data_stay_silent(self):
+        commands = (
+            "python3 -Bcpass tools/relay submit d.md",
+            "python3 -Bmhttp.server tools/relay submit d.md",
+            "python3 -V tools/relay submit d.md",
+            "python3 -BV tools/relay submit d.md",
+            "python3 --version tools/relay submit d.md",
+            "python3 -h tools/relay submit d.md",
+            "python3 --help tools/relay submit d.md",
+            "python3 -W tools/relay submit d.md",
+            "python3 -X tools/relay submit d.md",
+            "uv run echo tools/relay submit d.md",
+            "uv run python3 -Bcpass tools/relay submit d.md",
+            "uv run python3 -V tools/relay submit d.md",
+            "uv run 'tools/relay' submit d.md",
+            "uv run tools/relay 'submit' d.md",
+            "env -u tools/relay submit d.md",
+        )
+        for bound in (False, True):
+            if bound:
+                self._bound_following()
+            for command in commands:
+                with self.subTest(command=command, bound=bound):
+                    self.assertEqual(
+                        self.rm.parse_submit_command(command).reason, "no-submit"
+                    )
+                    before = (
+                        self.store.path.read_bytes()
+                        if self.store.path.exists()
+                        else None
+                    )
+                    self.assertEqual(
+                        self.run_bind(self.payload(command, self.receipt)), 0
+                    )
+                    after = (
+                        self.store.path.read_bytes()
+                        if self.store.path.exists()
+                        else None
+                    )
+                    self.assertEqual(after, before)
+
+    def test_launcher_near_miss_preserves_mixed_precedence(self):
+        good = f"tools/relay submit d.md --key {self.key} --root {self.root}"
+        for bad in (
+            "uv run tools/relay submit other.md",
+            "python3 -W ignore tools/relay submit other.md",
+        ):
+            for command in (f"{good}; {bad}", f"{bad}; {good}"):
+                with self.subTest(command=command):
+                    self.store.path.unlink(missing_ok=True)
+                    self.assertTrue(self.rm.parse_submit_command(command).ok)
+                    self.assertEqual(
+                        self.run_bind(self.payload(command, self.receipt)), 0
+                    )
+                    note = self.store.load()
+                    self.assertEqual(note["seat"], "a.planner")
+                    self.assertIsNone(note.get("submit_miss"))
+                    self.assertIsNone(note["binding_degraded"])
+
+    def test_unrelated_commands_stay_silent(self):
+        for command in (
+            "git status",
+            "tools/relay show d.md",
+            "python3 tools/relay lint d.md",
+            "python3 tools/relay-lint.py d.md",
+            "python3 tools/adapters/relay-monitor.py status",
+            "echo 'tools/relay submit d.md'",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.rm.parse_submit_command(command).reason, "no-submit"
+                )
+                before = (
+                    self.store.path.read_bytes() if self.store.path.exists() else None
+                )
+                self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+                after = (
+                    self.store.path.read_bytes() if self.store.path.exists() else None
+                )
+                self.assertEqual(after, before)
+
+    def test_near_miss_visible_when_unbound(self):
+        before = self.rm.readiness(self.store)[0]
+        self.assertEqual(
+            self.run_bind(
+                self.payload("python3 -B tools/relay submit d.md", self.receipt)
+            ),
+            0,
+        )
+        self.assertEqual(self.rm.readiness(self.store)[0], before)
+        self.assertIsNone(self.store.load()["binding_degraded"])
+        self.assertRegex(
+            self.rm.status_line(self.store, None).splitlines()[0],
+            r" binding=none .* miss=submit-near-miss$",
+        )
+
+    def _bound_following(self):
+        command = f"tools/relay submit d.md --key {self.key} --root {self.root}"
+        self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+        leader = self.rm.leader_record()
+        lock = self.rm.LeaderLock("sess")
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        lock.stamp(leader["instance"])
+        self.store.update(
+            lambda note: note.update({"leader": leader, "phase": "following"})
+        )
+
+    def test_near_miss_leaves_bound_seat_delivering(self):
+        self._bound_following()
+        fields = (
+            "seat",
+            "root",
+            "anchor",
+            "binding_source",
+            "binding_gen",
+            "phase",
+            "progress",
+            "printed",
+        )
+        before = self.store.load()
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+        self.assertEqual(
+            self.run_bind(
+                self.payload("env python3 tools/relay submit d.md", self.receipt)
+            ),
+            0,
+        )
+        after = self.store.load()
+        self.assertEqual(
+            {field: after[field] for field in fields},
+            {field: before[field] for field in fields},
+        )
+        self.assertIsNone(after["binding_degraded"])
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            self.assertTrue(
+                self.rm.status_line(self.store, None)
+                .splitlines()[0]
+                .endswith("miss=submit-near-miss")
+            )
+
+    def test_successful_bind_clears_miss(self):
+        self.assertEqual(
+            self.run_bind(
+                self.payload("python3 -B tools/relay submit d.md", self.receipt)
+            ),
+            0,
+        )
+        self.assertTrue(
+            self.rm.status_line(self.store, None)
+            .splitlines()[0]
+            .endswith("miss=submit-near-miss")
+        )
+        command = f"python3 tools/relay submit d.md --key {self.key} --root {self.root}"
+        self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            self.assertNotIn("miss=", self.rm.status_line(self.store, None))
+
+    def test_later_near_miss_survives_successful_bind(self):
+        first_miss = "python3 -B tools/relay submit first.md"
+        later_miss = "env python3 tools/relay submit later.md"
+        self.assertEqual(self.run_bind(self.payload(first_miss, self.receipt)), 0)
+        original = self.rm.bind_from_receipt
+
+        def bind_then_miss(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.assertTrue(result[0])
+            self.assertEqual(self.run_bind(self.payload(later_miss, self.receipt)), 0)
+            return result
+
+        command = f"tools/relay submit d.md --key {self.key} --root {self.root}"
+        with mock.patch.object(
+            self.rm, "bind_from_receipt", side_effect=bind_then_miss
+        ):
+            self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+        note = self.store.load()
+        self.assertEqual(
+            (note["seat"], note["binding_source"], note["binding_degraded"]),
+            ("a.planner", "hook", None),
+        )
+        self.assertEqual(note.get("submit_miss"), "submit-near-miss")
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            self.assertTrue(
+                self.rm.status_line(self.store, None)
+                .splitlines()[0]
+                .endswith("miss=submit-near-miss")
+            )
+
+    def test_earlier_near_miss_clears_at_successful_bind(self):
+        command = f"tools/relay submit d.md --key {self.key} --root {self.root}"
+        prior = "python3 -B tools/relay submit prior.md"
+        just_before = "env python3 tools/relay submit just-before.md"
+        original = self.rm.bind_from_receipt
+        for has_prior in (False, True):
+            with self.subTest(has_prior=has_prior):
+                self.store.path.unlink(missing_ok=True)
+                if has_prior:
+                    self.assertEqual(
+                        self.run_bind(self.payload(prior, self.receipt)), 0
+                    )
+
+                def miss_then_bind(*args, **kwargs):
+                    self.assertEqual(
+                        self.run_bind(self.payload(just_before, self.receipt)), 0
+                    )
+                    return original(*args, **kwargs)
+
+                with mock.patch.object(
+                    self.rm, "bind_from_receipt", side_effect=miss_then_bind
+                ):
+                    self.assertEqual(
+                        self.run_bind(self.payload(command, self.receipt)), 0
+                    )
+                note = self.store.load()
+                self.assertEqual((note["seat"], note["binding_gen"]), ("a.planner", 1))
+                self.assertIsNone(note.get("submit_miss"))
+                with mock.patch.object(
+                    self.rm, "check_identity", return_value=("ok", {}, {})
+                ):
+                    self.assertNotIn("miss=", self.rm.status_line(self.store, None))
+
+    def test_mixed_accepted_and_near_miss_keep_todays_result(self):
+        good = f"tools/relay submit d.md --key {self.key} --root {self.root}"
+        bad = "python3 -B tools/relay submit other.md"
+        for command in (f"{good}; {bad}", f"{bad}; {good}", f"{good} && {bad}"):
+            with self.subTest(command=command):
+                self.store.path.unlink(missing_ok=True)
+                parsed = self.rm.parse_submit_command(command)
+                self.assertEqual(
+                    (parsed.ok, parsed.key, parsed.root_operand),
+                    (True, self.key, str(self.root)),
+                )
+                self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
+                note = self.store.load()
+                self.assertEqual(
+                    (note["seat"], note["binding_degraded"], note.get("submit_miss")),
+                    ("a.planner", None, None),
+                )
+                self.assertEqual(
+                    self.run_bind(
+                        self.payload(command, self.receipt + "\n" + self.receipt)
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    self.store.load()["binding_degraded"]["reason"], "ambiguous-receipt"
+                )
+
+    def test_interpreter_submits_follow_bare_rules(self):
+        for command, reason in (
+            (
+                "python3 tools/relay submit a; python3 tools/relay submit b",
+                "ambiguous-command",
+            ),
+            ("python3 tools/relay submit a --key K | tail -3", "unsupported-shell"),
+        ):
+            with self.subTest(command=command):
+                bare = command.replace("python3 tools/relay", "tools/relay")
+                self.assertEqual(self.rm.parse_submit_command(command).reason, reason)
+                self.assertEqual(self.rm.parse_submit_command(bare).reason, reason)
+
+    def test_near_miss_inside_unsupported_shell(self):
+        for command in (
+            "python3 -B tools/relay submit a 2>&1 | tail -3",
+            "python3 -B tools/relay submit a; python3 -B tools/relay submit b",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.rm.parse_submit_command(command).reason, "submit-near-miss"
+                )
+        self._bound_following()
+        self.assertEqual(
+            self.run_bind(
+                self.payload(
+                    "python3 -B tools/relay submit a 2>&1 | tail -3", self.receipt
+                )
+            ),
+            0,
+        )
+        self.assertIsNone(self.store.load()["binding_degraded"])
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            self.assertTrue(
+                self.rm.status_line(self.store, None)
+                .splitlines()[0]
+                .endswith("miss=submit-near-miss")
+            )
+
     def test_lexer_and_grammar(self):
         p = self.rm.parse_submit_command
         self.assertTrue(p("tools/relay submit .engine/drafts/x.md --key K --root R").ok)

@@ -1264,6 +1264,14 @@ def is_assignment_word(sl, text: str, quoted) -> bool:
     return bool(m) and m.end() <= sl.unquoted_prefix(text, quoted)
 
 
+def is_interpreter_word(text: str, quoted) -> bool:
+    return (
+        not quoted
+        and re.fullmatch(r"(?:python|python3(?:\.[0-9]+)?|py)", text.rsplit("/", 1)[-1])
+        is not None
+    )
+
+
 def parse_submit_command(command: str) -> SubmitParse:
     sl = _shell_lex()
     uncertain = False
@@ -1296,7 +1304,7 @@ def parse_submit_command(command: str) -> SubmitParse:
             current.append(token)
     if current:
         commands.append(current)
-    cd_prefix, submit, count = None, None, 0
+    cd_prefix, submit, count, near_miss = None, None, 0, False
     for i, cmd in enumerate(commands):
         words = [(t, q) for t, q, op in cmd if not op or t in REDIRECT_OPS]
         assigns = []
@@ -1309,17 +1317,83 @@ def parse_submit_command(command: str) -> SubmitParse:
                 unsupported = True
             cd_prefix = texts[1] if len(texts) > 1 else None
             continue
+        if words and is_interpreter_word(*words[0]):
+            candidate = words[1:]
+        else:
+            candidate = words
         if (
-            len(words) >= 2
-            and not words[0][1]
-            and (texts[0] in RELAY_WORDS or texts[0].endswith("/relay"))
-            and texts[1] == "submit"
-            and not words[1][1]
+            len(candidate) >= 2
+            and not candidate[0][1]
+            and (candidate[0][0] in RELAY_WORDS or candidate[0][0].endswith("/relay"))
+            and candidate[1][0] == "submit"
+            and not candidate[1][1]
         ):
             count += 1
-            submit = (words, assigns)
+            submit = (candidate, assigns)
+        elif words:
+            # Locate the script operand for these named launchers only; arbitrary
+            # wrappers, aliases and shell runtime resolution are not inferred.
+            pending = words
+            wrapped = False
+            if not pending[0][1] and pending[0][0].rsplit("/", 1)[-1] == "env":
+                wrapped = True
+                pending = pending[1:]
+                while pending:
+                    option = pending[0][0]
+                    if option in ("-i", "--ignore-environment"):
+                        pending = pending[1:]
+                    elif option in ("-u", "--unset") and len(pending) > 1:
+                        pending = pending[2:]
+                    elif option.startswith("--unset="):
+                        pending = pending[1:]
+                    elif option == "--":
+                        pending = pending[1:]
+                        break
+                    elif is_assignment_word(sl, *pending[0]):
+                        pending = pending[1:]
+                    else:
+                        break
+            if (
+                len(pending) >= 2
+                and not pending[0][1]
+                and pending[0][0].rsplit("/", 1)[-1] == "uv"
+                and pending[1] == ("run", False)
+            ):
+                wrapped = True
+                pending = pending[2:]
+            if pending and is_interpreter_word(*pending[0]):
+                wrapped = True
+                pending = pending[1:]
+                while pending and pending[0][0].startswith("-"):
+                    option = pending[0][0]
+                    pending = pending[1:]
+                    if option == "--":
+                        break
+                    # c/m consume command/module data; h/V terminate. Unknown
+                    # options cannot establish that a script will be executed.
+                    flags = option[1:]
+                    if not flags or flags.startswith("-"):
+                        pending = []
+                        break
+                    for index, flag in enumerate(flags):
+                        if flag in "cmhV" or flag not in "bBdEiIOPqRsSuvxWX":
+                            pending = []
+                            break
+                        if flag in "WX":
+                            if index == len(flags) - 1:
+                                pending = pending[1:]
+                            break
+            if (
+                wrapped
+                and len(pending) >= 2
+                and not pending[0][1]
+                and (pending[0][0] in RELAY_WORDS or pending[0][0].endswith("/relay"))
+                and pending[1][0] == "submit"
+                and not pending[1][1]
+            ):
+                near_miss = True
     if count == 0:
-        return SubmitParse(False, "no-submit")
+        return SubmitParse(False, "submit-near-miss" if near_miss else "no-submit")
     if unsupported:
         return SubmitParse(False, "unsupported-shell")
     if count > 1:
@@ -1552,7 +1626,16 @@ def bind(args) -> int:
         ((payload.get("tool_input") or {}).get("command")) or ""
     )
     if not parsed.ok:
-        if parsed.reason != "no-submit":
+        if parsed.reason == "submit-near-miss":
+            store.update(
+                lambda n: n.update(
+                    {
+                        "submit_miss": parsed.reason,
+                        "submit_miss_binding_gen": int(n.get("binding_gen", 0)),
+                    }
+                )
+            )
+        elif parsed.reason != "no-submit":
             degrade(store, parsed.reason)
         return 0
     cwd = payload.get("cwd") or os.getcwd()
@@ -1582,6 +1665,15 @@ def bind(args) -> int:
     )
     if not ok:
         degrade(store, reason)
+    else:
+        with store.state_lock():
+            note = store.load()
+            if note.get("submit_miss") and note.get(
+                "submit_miss_binding_gen"
+            ) != note.get("binding_gen"):
+                note.pop("submit_miss", None)
+                note.pop("submit_miss_binding_gen", None)
+                store.save(note)
     return 0
 
 
@@ -1829,6 +1921,7 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         f"binding={binding} client={fp(client_id)} "
         f"daemon={daemon_txt} "
         f"updated={note.get('updated') or '-'}"
+        f"{' miss=' + note['submit_miss'] if note.get('submit_miss') else ''}"
     )
     raw = (daemon or {}).get("raw") or ""
     remedy = next(
