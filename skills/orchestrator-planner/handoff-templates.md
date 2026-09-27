@@ -618,7 +618,9 @@ Sprint root: <repo-relative sprint doc root>
 Relay root: .relays/<RUN_ID>/
 INDEX: .relays/<RUN_ID>/INDEX.md
 Current authority: report-only onboarding. This boot relay grants no AUDIT, DESIGN, PLAN, IMPL, REVIEW-FOLD, MERGE, or LIVE-VERIFY work authority.
-Acknowledge identity, loaded skill, reachable relay root, and delivery state — one of `armed`, `waiting-for-binding`, `unavailable: <reason>`, `fallback: pointer` — as a measured claim: run `python3 <plugin-root>/tools/adapters/relay-monitor.py status` through the shell (and the `monitor` tool with action `list` on Codex) immediately before filing and quote its line; the acknowledgment you are filing is the relay that binds the watcher, so `waiting-for-binding (this filing binds)` is the honest first value. Orchestrator Reviewer boot grants visibility/review context only, not approval authority.
+Acknowledge identity, loaded skill, reachable relay root, and delivery state — one of `armed`, `waiting-for-binding`, `unavailable: <reason>`, `fallback: pointer` — as a measured claim: run `python3 <plugin-root>/tools/adapters/relay-monitor.py status` through the shell (and the `monitor` tool with action `list` on Codex) immediately before filing and quote its line; the acknowledgment you are filing is the relay that binds the watcher, so `waiting-for-binding (this filing binds)` is the honest first value.
+Carry this relay's own `DISPATCH_ID` (`<run>-boot-<owner>-<role>`), not its parent id or directory name, and set `IN_REPLY_TO` to this relay's path; submit with `--admits-against` this relay's root-relative path as the hand-off pointer or INDEX row names it.
+Orchestrator Reviewer boot grants visibility/review context only, not approval authority.
 FINAL_GIT_STATUS_SHORT: <paste git status --short or unavailable — reason>
 ```
 
