@@ -627,7 +627,7 @@ Relay root: <verified reachable relay root>
 Delivery state: <measured state from relay-monitor.py status>
 FINAL_GIT_STATUS_SHORT: <measured git status --short output, clean if empty, or unavailable with reason>
 ```
-Use your own role for `ROLE`, derived from the boot relay's `TO`, and preserve its context addressees in `CC` (leave the value empty when the boot relay has none).
+Use your own role for `ROLE`, derived from the boot relay's `TO`, and preserve its context addressees in `CC` (omit the `CC` line when the boot relay has no `CC`).
 For a host without the monitor tool, the measured delivery state is `unavailable: monitor-tool; fallback: pointer`.
 Submit on an engine root with `tools/relay submit <draft> --key <seat key path> --root <relay root> --admits-against <root-relative path of boot relay>`.
 The terminal pointer block remains mandatory on every relay-filing turn as the copy-paste fallback; auto-delivery does not relieve it, and a seat whose state is `unavailable` or `fallback` is served by the pointer as today.
