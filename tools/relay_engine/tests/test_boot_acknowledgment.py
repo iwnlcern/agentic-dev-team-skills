@@ -9,6 +9,7 @@ from relay_engine import cycles, errors, seats, supersede
 from relay_engine.envelope import parse_draft
 from relay_engine.ledger import admit, init_schema
 from relay_engine.paths import Root, ensure_engine_dir
+from relay_engine.render import render_relay
 
 
 class TestBootAcknowledgment(unittest.TestCase):
@@ -18,14 +19,28 @@ class TestBootAcknowledgment(unittest.TestCase):
         self.engine_fd = ensure_engine_dir(self.root.dirfd)
         self.ledger = init_schema(self.engine_fd, self.root.path)
         self.ledger.execute("INSERT INTO meta(key,value) VALUES('run_id','v29')")
+        self.orchestrator = "v29.orchestrator-planner"
+        seats.register(self.ledger, self.root, self.orchestrator,
+                       "Orchestrator Planner", top=True)
         self.boots = {}
         for address, role, dispatch in (
                 ("v29-a.planner", "Planner", "v29-boot-v29-a-planner"),
                 ("v29-b.implementer", "Implementer",
                  "v29-boot-v29-b-implementer")):
-            result = seats.register(self.ledger, self.root, address, role,
-                                    dispatch)
-            self.boots[address] = (dispatch, result["boot_relay"])
+            seats.register(self.ledger, self.root, address, role,
+                           "v29-registration-" + address)
+            boot_body = (
+                "## BOOT — initialize seat\n\n"
+                "ROLE: Orchestrator Planner\nPHASE: SITREP\n"
+                "AUTHORITY: report-only\nDISPATCH_ID: %s\n"
+                "RUN_ID: v29\nCEREMONY_TIER: large\nEVIDENCE_TARGET: E1\n"
+                "HUMAN_GATE_REQUIRED: no\nFROM: %s\nTO: %s\n"
+                "CC: operator\nSUBJECT: BOOT — initialize seat\n\n"
+                "FINAL_GIT_STATUS_SHORT: clean\n" % (
+                    dispatch, self.orchestrator, address))
+            boot = self.send(boot_body, "boot-" + address)
+            render_relay(self.ledger, self.root, boot.seq)
+            self.boots[address] = (dispatch, boot.rendered_path)
 
     def tearDown(self):
         self.ledger.close()
@@ -41,14 +56,20 @@ class TestBootAcknowledgment(unittest.TestCase):
                 "HUMAN_GATE_REQUIRED: no\nFROM: %s\n"
                 "TO: v29.orchestrator-planner\n"
                 "SUBJECT: boot acknowledgment\n\n"
-                "Delivery: waiting-for-binding (this filing binds).\n" % (
+                "Delivery: waiting-for-binding (this filing binds).\n"
+                "FINAL_GIT_STATUS_SHORT: clean\n" % (
                     address.rsplit(".", 1)[1].title(), dispatch,
                     boot_path, address)).encode()
+        return self.send(body.decode(), "sid-" + address + "-" + dispatch,
+                         edge=edge)
+
+    def send(self, text, sid, *, edge=None):
+        body = text.encode()
         envelope = parse_draft(body.decode())
         events, advisories = cycles.prepare(self.ledger, envelope, edge)
         supersession_edges, more = supersede.prepare(self.ledger, envelope)
         return admit(self.ledger, self.root, envelope, body,
-                     "sid-" + address + "-" + dispatch,
+                     sid,
                      admits_against=edge, prechecks=(cycles.precheck,),
                      cycle_events=events, supersession_edges=supersession_edges,
                      advisories=tuple(advisories) + tuple(more))
@@ -57,6 +78,10 @@ class TestBootAcknowledgment(unittest.TestCase):
         for address, (dispatch, path) in self.boots.items():
             boot = Path(self.temp.name, path).read_text()
             self.assertIn("DISPATCH_ID: " + dispatch + "\n", boot)
+            self.assertIn("FROM: " + self.orchestrator + "\n", boot)
+            self.assertIn("TO: " + address + "\n", boot)
+            self.assertEqual(cycles.participants(self.ledger, dispatch),
+                             {self.orchestrator, address})
             ack = self.acknowledge(address, dispatch, path, edge=path)
             self.assertEqual(cycles.state(self.ledger, dispatch), "open")
             self.assertEqual(self.ledger.execute(

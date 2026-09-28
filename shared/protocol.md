@@ -603,12 +603,31 @@ This rule applies to every seat receiving a boot relay, including the Orchestrat
 Use this acknowledgment template, replacing the fields with the boot relay's values and the delivery state measured immediately before filing:
 
 ```text
+## SITREP — boot acknowledgment
+
+ROLE: <acknowledging seat role>
+PHASE: SITREP
+AUTHORITY: report-only
 DISPATCH_ID: <boot relay DISPATCH_ID>
 IN_REPLY_TO: <root-relative path of boot relay>
+RUN_ID: <boot relay RUN_ID>
+CEREMONY_TIER: <boot relay CEREMONY_TIER>
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+FROM: <acknowledging seat address from boot relay TO>
+TO: <boot relay FROM>
+CC: <boot relay CC>
+SUBJECT: Boot acknowledgment for <acknowledging seat address from boot relay TO>
 
+Identity: <acknowledging seat address from boot relay TO>
+Loaded skill: <loaded role skill>
+Relay root: <verified reachable relay root>
 Delivery state: <measured state from relay-monitor.py status>
+FINAL_GIT_STATUS_SHORT: <measured git status --short output, clean if empty, or unavailable with reason>
 ```
-Submit on an engine root with `tools/relay submit <draft> --admits-against <root-relative path of boot relay>`.
+Use your own role for `ROLE`, derived from the boot relay's `TO`, and preserve its context addressees in `CC` (leave the value empty when the boot relay has none).
+For a host without the monitor tool, the measured delivery state is `unavailable: monitor-tool; fallback: pointer`.
+Submit on an engine root with `tools/relay submit <draft> --key <seat key path> --root <relay root> --admits-against <root-relative path of boot relay>`.
 The terminal pointer block remains mandatory on every relay-filing turn as the copy-paste fallback; auto-delivery does not relieve it, and a seat whose state is `unavailable` or `fallback` is served by the pointer as today.
 
 ## Hand-off pointer
