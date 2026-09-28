@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [2.9.6] — 2026-09-27
+
+This patch contains two defect fixes and a version bump, with no new feature.
+
+- **Boot acknowledgment admission:** The protocol and templates now require each seat to reuse its own boot relay's `DISPATCH_ID` and submit with `--admits-against` that relay's path.
+  Previously, an acknowledgment that carried the reply headers but omitted the admission edge was refused with `E-ID-COLLISION`; a shared run-level boot ID also collided across seats.
+- **Relay monitor binding:** The adapter now recognizes supported interpreter-prefixed `tools/relay submit` commands and records an executed but unsupported submit as a visible near miss.
+  Previously, those submits could leave a seat unbound without a status reason; a near miss does not interrupt delivery for a bound seat.
+- **Upgrade identity:** The engine fingerprint is `bf8b7d1dc85889dec409e00ec80a3e6a1f5e51572be94c5a6f3ceba3b9d54ab2`, derived from the final engine roster at this head.
+  The engine suite measured 415 tests.
+  Each root's eligible starter restarts that root's daemon from the refreshed checkout, and client and daemon refuse each other with `E-VERSION-MISMATCH` until both report kit 2.9.6 and this fingerprint.
+
 ## [2.9.5] — 2026-09-23
 
 This release skips 2.9.4 and is minor by content despite the patch-step number: relay auto-delivery to idle seats adds a new delivery mode, and the kit's Codex fork (`iwnlcern/codex`, tags `v<upstream>-monitor.<n>`) adds a new host artifact.

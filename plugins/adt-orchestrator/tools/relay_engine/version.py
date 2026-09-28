@@ -4,7 +4,7 @@ from pathlib import Path
 import stat
 
 
-KIT_VERSION = "2.9.5"
+KIT_VERSION = "2.9.6"
 ROSTER = (
     "relay",
     "relay_engine/README.md",
