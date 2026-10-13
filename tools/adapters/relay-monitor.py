@@ -522,6 +522,11 @@ def locate(snapshot: IndexSnapshot, cursor: dict) -> int | None:
     )
 
 
+def start_position(snapshot: IndexSnapshot, cursor: dict, anchor: str | None) -> int | None:
+    start = locate(snapshot, cursor)
+    return start if start is not None else locate(snapshot, {"file": anchor}) if anchor else None
+
+
 @dataclass
 class Binding:
     seat: str
@@ -863,12 +868,9 @@ def deliver_once(
     except LockTimeout:
         result.aborted = "lock-timeout"
         return result
-    start = locate(snapshot, cursor)
-    if start is None:
-        anchor_idx = (
-            locate(snapshot, {"file": binding.anchor}) if binding.anchor else None
-        )
-        if anchor_idx is None:
+    start = start_position(snapshot, cursor, binding.anchor)
+    if locate(snapshot, cursor) is None:
+        if start is None:
             _bounded_update(
                 store,
                 lambda n: n.update(
@@ -879,7 +881,6 @@ def deliver_once(
             )
             result.halted = "anchor-not-found"
             return result
-        start = anchor_idx
         cursor = {
             "file": snapshot.rows[start].cells["file"],
             "position": snapshot.rows[start].position,
@@ -1063,7 +1064,6 @@ def deliver_once(
                     int(n.get("binding_gen", 0)) == binding.binding_gen
                     and live_seat == canonical(binding.seat)
                     and live_root == binding.root
-                    and not n.get("binding_degraded")
                     and not foreign
                     and n.get("phase") != "following"
                 ):
@@ -1779,7 +1779,7 @@ def drain(args) -> int:
     store = NoteStore(session)
     note = store.load()
     binding = resolve_binding(note, os.environ, args)
-    if binding is None or note.get("binding_degraded") or time.monotonic() >= end:
+    if binding is None or time.monotonic() >= end:
         return emit_json({})
     snap = read_index(Path(binding.root) / "INDEX.md")
     if time.monotonic() >= end:

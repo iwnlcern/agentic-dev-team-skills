@@ -1317,8 +1317,8 @@ class DeliveryTests(TmpEnv):
         )
         self.deliver()
         self.assertEqual(
-            self.store.load()["phase"], "waiting-for-binding"
-        )  # degraded: never promoted
+            self.store.load()["phase"], "following"
+        )  # legacy observation does not block recovery
         self.store.update(lambda n: n.update({"binding_degraded": None}))
         self.index.unlink()
         r, _ = self.deliver()
@@ -3039,6 +3039,145 @@ class DrainTests(TmpEnv):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
 
+    def _matrix(self, case):
+        # Followers share deliver_once; drain uses its real Stop entry point.
+        # Separate notes and real leader/owner locks isolate all three paths.
+        for path in ("codex-follower", "codex-drain", "claude-code-follower"):
+            with self.subTest(path=path, case=case):
+                self.store.path.unlink(missing_ok=True)
+                write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
+                leader = self.rm.leader_record()
+                lock = self.rm.LeaderLock("sess")
+                owner = None
+                has_leader = case != "no-leader"
+                if has_leader:
+                    self.assertTrue(lock.acquire(blocking=False))
+                    lock.stamp(leader["instance"])
+                try:
+                    def seed(n):
+                        n.update(seat="b.implementer", root=str(self.root), anchor="lane/r1.md", binding_gen=1, binding_source="hook", phase="following", host="claude-code" if path.startswith("claude") else "codex", leader=leader if has_leader else None)
+                        n["progress"][str(self.root)] = {"file": "lane/r1.md", "position": 1}
+                        if case == "unbound":
+                            n.update(seat=None, root=None, anchor=None, phase="waiting-for-binding")
+                        if case in ("observation", "recovered"):
+                            n["bind_observation"] = {"reason": "unsupported-syntax", "root": None, "root_provenance": "none", "receipts": ["lane/seen.md"], "call": None, "stamp": "s"}
+                        if case in ("legacy", "recovered"):
+                            n["binding_degraded"] = {"reason": "no-receipt", "stamp": "s"}
+                        if case == "recovered":
+                            n.update(phase="unavailable", reason="index-missing")
+                        if case in ("lost", "fallback"):
+                            n["progress"][str(self.root)] = {"file": "lane/gone.md", "position": 9}
+                            if case == "lost":
+                                n["anchor"] = "lane/missing.md"
+                        if case == "sentinel":
+                            n["progress"][str(self.root)] = dict(self.rm.SENTINEL)
+                        if case == "foreign":
+                            n["phase"] = "waiting-for-binding"
+                    self.store.update(seed)
+                    if case == "missing-index":
+                        self.index.unlink()
+                    elif case == "malformed-index":
+                        self.index.write_text("not an index\n")
+                    if case == "foreign":
+                        owner = self.rm.stream_owner(self.store, time.monotonic() + 2)
+                        self.assertIsNotNone(owner)
+                        binding = self.rm.resolve_binding(self.store.load(), {}, None)
+                        frame = {"identity": self.rm.frame_identity(binding, owner["instance"], "lane/r2.md", owner), "data": "00", "accepted": 0}
+                        self.store.update(lambda n: n.update(frame=frame))
+                    expected = case not in ("unbound", "missing-index", "malformed-index", "lost", "foreign") and (has_leader or path == "codex-drain")
+                    wanted_file = "lane/r1.md" if case == "sentinel" else "lane/r2.md"
+                    if path == "codex-drain":
+                        rc, output = self.run_drain(self.codex_stop())
+                        self.assertEqual(rc, 0)
+                        document = json.loads(output)
+                        if expected:
+                            self.assertEqual(document["decision"], "block")
+                            self.assertIn('"file":"' + wanted_file + '"', document["reason"])
+                        else:
+                            self.assertEqual(document, {})
+                    else:
+                        sink = self.rm.ByteSink()
+                        if has_leader:
+                            result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"], limit=1 if case == "sentinel" else None)
+                            self.assertEqual(result.emitted, int(expected))
+                        lines = bytes(sink.buf).decode().splitlines()
+                        self.assertEqual([json.loads(line)["file"] for line in lines], [wanted_file] if expected else [])
+                    state = self.rm.readiness(self.store)[0]
+                    expected_state = "not-started" if not has_leader else "waiting-for-binding" if case in ("unbound", "foreign") else "unavailable" if case in ("missing-index", "malformed-index", "lost") else "armed"
+                    self.assertEqual(state, expected_state)
+                    identity = "version-mismatch" if case == "mismatch" else "ok"
+                    with mock.patch.object(self.rm, "check_identity", return_value=(identity, {}, {})):
+                        line = self.rm.status_line(self.store, None).splitlines()[0]
+                    self.assertTrue(line.startswith("relay-monitor: " + expected_state))
+                    if case == "lost":
+                        self.assertTrue(line.startswith("relay-monitor: unavailable: anchor-not-found "))
+                    if case == "mismatch":
+                        self.assertTrue(line.endswith("identity=mismatch"))
+                    if expected:
+                        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], wanted_file)
+                    if case == "foreign":
+                        self.assertEqual(self.store.load()["frame"], frame)
+                finally:
+                    if owner:
+                        owner["_lock"].release(unlink=True)
+                    lock.release()
+
+    def test_matrix_healthy_delivers(self):
+        self._matrix("healthy")
+
+    def test_matrix_observation_delivers(self):
+        self._matrix("observation")
+        self._matrix("legacy")
+
+    def test_matrix_unbound_delivers_nothing(self):
+        self._matrix("unbound")
+
+    def test_matrix_index_missing_or_malformed_delivers_nothing(self):
+        self._matrix("missing-index")
+        self._matrix("malformed-index")
+
+    def test_matrix_missing_cursor_and_anchor_delivers_nothing(self):
+        self._matrix("lost")
+
+    def test_matrix_fallback_anchor_rebases_and_delivers(self):
+        self._matrix("fallback")
+
+    def test_matrix_start_sentinel_delivers_first_row(self):
+        self._matrix("sentinel")
+
+    def test_matrix_recovered_fault_restores_phase(self):
+        self._matrix("recovered")
+
+    def test_matrix_no_leader_follower_none_drain_delivers(self):
+        self._matrix("no-leader")
+
+    def test_matrix_version_mismatch_delivers(self):
+        self._matrix("mismatch")
+
+    def test_matrix_foreign_frame_waits(self):
+        self._matrix("foreign")
+
+    def test_armed_across_arrivals_without_commands(self):
+        for host in ("codex", "claude-code"):
+            with self.subTest(host=host):
+                self.store.path.unlink(missing_ok=True)
+                self.bind_and_rows(0)
+                leader = self.rm.leader_record()
+                lock = self.rm.LeaderLock("sess")
+                self.assertTrue(lock.acquire(blocking=False))
+                lock.stamp(leader["instance"])
+                try:
+                    self.store.update(lambda n: n.update(leader=leader, phase="following", host=host))
+                    for number in range(1, 4):
+                        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, number + 1)))
+                        sink = self.rm.ByteSink()
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"])
+                        self.assertEqual(result.emitted, 1)
+                        self.assertEqual(json.loads(bytes(sink.buf))["file"], f"lane/r{number}.md")
+                        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+                finally:
+                    lock.release()
+
     def codex_stop(self, active=False):
         return {
             "session_id": "sess",
@@ -3127,7 +3266,9 @@ class DrainTests(TmpEnv):
                 {"binding_degraded": {"reason": "no-receipt", "stamp": "s"}}
             )
         )
-        self.assertEqual(json.loads(self.run_drain(self.codex_stop())[1]), {})
+        doc = json.loads(self.run_drain(self.codex_stop())[1])
+        self.assertEqual(doc["decision"], "block")
+        self.assertIn('"file":"lane/r1.md"', doc["reason"])
 
     def test_one_row_per_stop_then_next_then_empty(self):
         self.bind_and_rows(2)
