@@ -1404,6 +1404,43 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
     """
 
     def test_note_written_during_scan_wakes_without_index_change(self):
+        self._assert_note_wake()
+
+    def test_note_wake_survives_polling_process_probe(self):
+        self._assert_note_wake(force_poll=True)
+
+    def _assert_note_wake(self, force_poll=False):
+        polls = []
+
+        class PollingProcess(subprocess.Popen):
+            def _try_wait(child, wait_flags):
+                if wait_flags == os.WNOHANG and not getattr(child, "forced_poll", False):
+                    child.forced_poll = True
+                    polls.append(child.pid)
+                    return 0, 0
+                return super()._try_wait(wait_flags)
+
+        def polling_probe(args, **kwargs):
+            with PollingProcess(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=kwargs.get("text", False)) as child:
+                stdout, stderr = child.communicate(timeout=kwargs.get("timeout"))
+                return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+
+        probe_module = types.SimpleNamespace(**{
+            **vars(subprocess), "run": polling_probe if force_poll else subprocess.run,
+        })
+        platform_module = types.SimpleNamespace(**{
+            **vars(self.rm.platform), "system": lambda: "Darwin",
+        }) if force_poll else self.rm.platform
+        with (
+            mock.patch.object(self.rm, "subprocess", probe_module),
+            mock.patch.object(self.rm, "platform", platform_module),
+        ):
+            self._exercise_note_wake()
+        if force_poll:
+            self.assertGreaterEqual(len(polls), 1, "probe never entered polling wait")
+
+    def _exercise_note_wake(self):
         write_index(self.index, row(1, to="b.implementer"))
         store = self.rm.NoteStore("scan-session")
         store.update(
@@ -1438,7 +1475,9 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
             mock.patch.object(self.rm, "deliver_once", side_effect=scan),
             mock.patch.object(self.rm, "LeaderLock", return_value=lock),
             mock.patch.object(self.rm, "FdSink", return_value=self.rm.ByteSink()),
-            mock.patch.object(self.rm.time, "sleep", side_effect=StopLoop),
+            mock.patch.object(self.rm, "time", types.SimpleNamespace(**{
+                **vars(time), "sleep": mock.Mock(side_effect=StopLoop),
+            })),
         ):
             with self.assertRaises(StopLoop):
                 self.rm.follow(ns(session="scan-session", host="claude-code"))
