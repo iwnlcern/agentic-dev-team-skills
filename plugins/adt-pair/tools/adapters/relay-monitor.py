@@ -95,7 +95,8 @@ def default_note() -> dict:
         "anchor": None,
         "bound_at": None,
         "binding_source": None,
-        "binding_degraded": None,
+        "bind_observation": None,
+        "handled_calls": [],
         "binding_gen": 0,
         "leader": None,
         "standbys": [],
@@ -1563,53 +1564,111 @@ def path_under_root(root: str, rel: str) -> bool:
     return target.startswith(os.path.realpath(root) + os.sep) and os.path.isfile(target)
 
 
+def call_identity(session: str, payload: dict) -> str | None:
+    value = payload.get("tool_use_id")
+    return json.dumps([session, value], separators=(",", ":")) if isinstance(value, str) and value else None
+
+
+def names_submit_verb(command: str) -> bool:
+    sl = _shell_lex()
+    try:
+        command = sl.strip_heredoc_bodies(command)
+    except sl.Uncertain:
+        # Match the grammar's recovery; uncertainty does not prove no filing.
+        pass
+    tokens = sl.lex(command)
+    if tokens is None:
+        tokens = sl.lex(command + "\n'") or sl.lex(command + '\n"') or []
+    return any(
+        not quoted and not op and (word in RELAY_WORDS or word.endswith("/relay"))
+        and following == ("submit", False, False)
+        for (word, quoted, op), following in zip(tokens, tokens[1:])
+    )
+
+
+def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dict], plugin_root: str | None) -> tuple[str | None, str]:
+    if parsed.cd_prefix:
+        cwd = os.path.join(cwd, parsed.cd_prefix)
+    if parsed.root_operand:
+        root = discover_root_like_cli(parsed.root_operand, cwd, plugin_root)
+        if root:
+            return root, "command"
+        return None, "none"
+    if len(receipts) != 1:
+        return None, "none"
+    candidates = {root for root in (discover_root_like_cli(None, cwd, plugin_root), note.get("root")) if root}
+    matches = []
+    for root in candidates:
+        try:
+            snap = read_index(Path(root) / "INDEX.md")
+        except (OSError, ValueError):
+            return None, "none"
+        if snap.error:
+            return None, "none"
+        if any(row.cells["file"] == receipts[0]["path"] for row in snap.rows):
+            matches.append(root)
+    return (matches[0], "inferred") if len(matches) == 1 else (None, "none")
+
+
+def _remember_call(note: dict, call: str | None) -> None:
+    if call:
+        note["handled_calls"] = (note.get("handled_calls", []) + [call])[-8:]
+
+
+def record_observation(note: dict, *, reason: str, receipts: list[str], root: str | None, provenance: str, call: str | None) -> bool:
+    if call and call in note.get("handled_calls", []):
+        return False
+    record = dict(reason=reason, receipts=receipts, root=root, root_provenance=provenance, call=call)
+    old = note.get("bind_observation") or {}
+    if call is None and all(old.get(k) == v for k, v in record.items()):
+        return False
+    note["bind_observation"] = dict(record, stamp=now_stamp())
+    _remember_call(note, call)
+    return True
+
+
+def clear_observations(note: dict) -> None:
+    note["bind_observation"] = None
+    for key in ("binding_degraded", "submit_miss", "submit_miss_binding_gen"):
+        note.pop(key, None)
+
+
 def bind_from_receipt(
-    store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str
-):
-    if not path_under_root(root, receipt_path):
+    store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str, call: str | None = None
+) -> tuple[bool, str]:
+    if not isinstance(receipt_path, str) or not path_under_root(root, receipt_path):
         return False, "receipt-mismatch"
-    snap = read_index(Path(root) / "INDEX.md")
+    try:
+        snap = read_index(Path(root) / "INDEX.md")
+    except (OSError, ValueError):
+        return False, "receipt-mismatch"
     row_ = next((r for r in snap.rows if r.cells["file"] == receipt_path), None)
-    if row_ is None or not row_.cells["from"]:
+    if snap.error or row_ is None or not row_.cells["from"]:
         return False, "receipt-mismatch"
     seat = row_.cells["from"]
     if key_seat and canonical(key_seat) != canonical(seat):
         return False, "key-mismatch"
     cursor = {"file": receipt_path, "position": row_.position}
-
-    def apply(n):
-        fresh = not (
-            canonical(n.get("seat")) == canonical(seat) and n.get("root") == root
-        )
-        n.update(
-            {
-                "seat": seat,
-                "root": root,
-                "anchor": receipt_path,
-                "bound_at": now_stamp(),
-                "binding_source": source,
-                "binding_degraded": None,
-            }
-        )
-        n["binding_gen"] = int(n.get("binding_gen", 0)) + 1
+    with store.state_lock():
+        n = store.load()
+        if source == "hook" and call and call in n.get("handled_calls", []):
+            return True, "handled"
+        fresh = not (canonical(n.get("seat")) == canonical(seat) and n.get("root") == root)
+        changed = fresh or n.get("anchor") != receipt_path or root not in n["progress"]
+        if source == "hook" and not changed:
+            return True, "unchanged"
+        clear_observations(n)
+        n.update(seat=seat, root=root, anchor=receipt_path, bound_at=now_stamp(), binding_source=source)
+        if changed:
+            n["binding_gen"] = int(n.get("binding_gen", 0)) + 1
         if fresh or root not in n["progress"]:
             n["progress"][root] = dict(cursor)
-            n["printed"][
-                root
-                # never n["frame"]: the follower owns and abandons its own stream (P2a)
-            ] = []
+            # A follower retains ownership of its partially written frame.
+            n["printed"][root] = []
         record_floor(n, root, seat, cursor)
-
-    store.update(apply)
+        _remember_call(n, call)
+        store.save(n)
     return True, "bound"
-
-
-def degrade(store: NoteStore, reason: str) -> None:
-    store.update(
-        lambda n: n.update(
-            {"binding_degraded": {"reason": reason, "stamp": now_stamp()}}
-        )
-    )
 
 
 def bind(args) -> int:
@@ -1618,91 +1677,57 @@ def bind(args) -> int:
         if not valid_session_id(session):
             return 0
         if not args.root or not args.anchor:
-            print(
-                "relay-monitor: manual bind needs --session/--root/--anchor",
-                file=sys.stderr,
-            )
+            print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
             return 0
-        root = (
-            discover_root_like_cli(args.root, os.getcwd(), args.plugin_root)
-            or args.root
-        )
-        ok, reason = bind_from_receipt(
-            NoteStore(session),
-            root=root,
-            receipt_path=args.anchor,
-            key_seat=None,
-            source="manual",
-        )
-        if not ok:
-            degrade(NoteStore(session), reason)
+        root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
+        bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
         return 0
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
+    if not isinstance(payload, dict):
+        return 0
     session = resolve_session(args, payload)
     if not valid_session_id(session):
         return 0
-    store = NoteStore(session)
-    if (
-        payload.get("hook_event_name") != "PostToolUse"
-        or "tool_response" not in payload
-    ):
+    if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
         return 0
-    parsed = parse_submit_command(
-        ((payload.get("tool_input") or {}).get("command")) or ""
-    )
-    if not parsed.ok:
-        if parsed.reason == "submit-near-miss":
-            store.update(
-                lambda n: n.update(
-                    {
-                        "submit_miss": parsed.reason,
-                        "submit_miss_binding_gen": int(n.get("binding_gen", 0)),
-                    }
-                )
-            )
-        elif parsed.reason != "no-submit":
-            degrade(store, parsed.reason)
-        return 0
-    cwd = payload.get("cwd") or os.getcwd()
-    if parsed.cd_prefix:
-        cwd = (
-            parsed.cd_prefix
-            if os.path.isabs(parsed.cd_prefix)
-            else os.path.join(cwd, parsed.cd_prefix)
-        )
-    root = discover_root_like_cli(parsed.root_operand, cwd, args.plugin_root)
-    if root is None:
-        degrade(store, "no-root")
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    if not isinstance(command, str) or not names_submit_verb(command):
         return 0
     receipts = extract_receipts(payload.get("tool_response"))
+    receipts = [r for r in receipts if isinstance(r.get("path"), str)]
     if not receipts:
-        degrade(store, "no-receipt")
         return 0
-    if len(receipts) > 1:
-        degrade(store, "ambiguous-receipt")
-        return 0
-    ok, reason = bind_from_receipt(
-        store,
-        root=root,
-        receipt_path=receipts[0]["path"],
-        key_seat=seat_from_key(parsed.key),
-        source="hook",
-    )
-    if not ok:
-        degrade(store, reason)
-    else:
-        with store.state_lock():
-            note = store.load()
-            if note.get("submit_miss") and note.get(
-                "submit_miss_binding_gen"
-            ) != note.get("binding_gen"):
-                note.pop("submit_miss", None)
-                note.pop("submit_miss_binding_gen", None)
-                store.save(note)
+    parsed = parse_submit_command(command)
+    cwd = payload.get("cwd") or os.getcwd()
+    if not isinstance(cwd, str):
+        cwd = os.getcwd()
+    store = NoteStore(session)
+    call = call_identity(session, payload)
+    reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
+    if parsed.ok:
+        base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
+        root = discover_root_like_cli(parsed.root_operand, base, args.plugin_root)
+        if root is None:
+            reason = "no-root"
+        elif len(receipts) != 1:
+            reason = "ambiguous-receipt"
+        else:
+            ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
+            if ok:
+                return 0
+    with store.state_lock():
+        note = store.load()
+        if call and call in note.get("handled_calls", []):
+            return 0
+        root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root)
+        if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call):
+            store.save(note)
     return 0
+
 
 
 MODES["bind"] = bind
@@ -1942,6 +1967,9 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         "daemon-down": "down",
         "unchecked": "-",
     }.get(ident, fp(daemon))
+    miss = (note.get("bind_observation") or {}).get("reason")
+    if miss != "submit-near-miss":
+        miss = note.get("submit_miss")
     line = (
         f"relay-monitor: {state}{suffix} "
         f"seat={note.get('seat') or '-'} "
@@ -1949,7 +1977,7 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         f"binding={binding} client={fp(client_id)} "
         f"daemon={daemon_txt} "
         f"updated={note.get('updated') or '-'}"
-        f"{' miss=' + note['submit_miss'] if note.get('submit_miss') else ''}"
+        f"{' miss=' + miss if miss else ''}"
     )
     raw = (daemon or {}).get("raw") or ""
     remedy = next(

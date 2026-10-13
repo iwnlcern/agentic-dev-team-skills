@@ -1750,7 +1750,7 @@ class BindTests(TmpEnv):
         )
         self.key = str(self.root / ".engine" / "seats" / "a.planner" / "k.key")
 
-    def payload(self, command, stdout=None, host="claude"):
+    def payload(self, command, stdout=None, host="claude", call_id=None):
         base = {
             "session_id": "sess",
             "cwd": str(self.root),
@@ -1779,6 +1779,8 @@ class BindTests(TmpEnv):
                 "output": stdout or "",
                 "metadata": {"exit_code": 0},
             }
+        if call_id is not None:
+            base["tool_use_id"] = call_id
         return json.dumps(base)
 
     def run_bind(self, payload_text):
@@ -1847,7 +1849,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
         note = self.store.load()
         self.assertEqual(
-            (note["seat"], note["binding_source"], note["binding_degraded"]),
+            (note["seat"], note["binding_source"], note["bind_observation"]),
             ("a.planner", "hook", None),
         )
 
@@ -1898,7 +1900,7 @@ class BindTests(TmpEnv):
                 before = self.rm.readiness(self.store)[0]
                 self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
                 self.assertEqual(self.rm.readiness(self.store)[0], before)
-                self.assertIsNone(self.store.load()["binding_degraded"])
+                self.assertEqual(self.store.load()["bind_observation"]["reason"], "submit-near-miss")
                 self.assertRegex(
                     self.rm.status_line(self.store, None).splitlines()[0],
                     r" binding=none .* miss=submit-near-miss$",
@@ -1924,7 +1926,7 @@ class BindTests(TmpEnv):
                     {field: after[field] for field in fields},
                     {field: before[field] for field in fields},
                 )
-                self.assertIsNone(after["binding_degraded"])
+                self.assertEqual(after["bind_observation"]["reason"], "submit-near-miss")
                 self.assertEqual(self.rm.readiness(self.store)[0], "armed")
                 with mock.patch.object(
                     self.rm, "check_identity", return_value=("ok", {}, {})
@@ -1966,6 +1968,8 @@ class BindTests(TmpEnv):
                         if self.store.path.exists()
                         else None
                     )
+                    binding_before = self.store.load()
+                    readiness_before = self.rm.readiness(self.store)[0]
                     self.assertEqual(
                         self.run_bind(self.payload(command, self.receipt)), 0
                     )
@@ -1974,7 +1978,14 @@ class BindTests(TmpEnv):
                         if self.store.path.exists()
                         else None
                     )
-                    self.assertEqual(after, before)
+                    if "'tools/relay'" in command or "'submit'" in command:
+                        self.assertEqual(after, before)
+                    else:
+                        note = self.store.load()
+                        self.assertEqual(note["bind_observation"]["reason"], "submit-near-miss")
+                        for field in ("seat", "root", "anchor", "binding_source", "binding_gen", "progress", "printed"):
+                            self.assertEqual(note[field], binding_before[field])
+                        self.assertEqual(self.rm.readiness(self.store)[0], readiness_before)
 
     def test_launcher_near_miss_preserves_mixed_precedence(self):
         good = f"tools/relay submit d.md --key {self.key} --root {self.root}"
@@ -1991,8 +2002,8 @@ class BindTests(TmpEnv):
                     )
                     note = self.store.load()
                     self.assertEqual(note["seat"], "a.planner")
-                    self.assertIsNone(note.get("submit_miss"))
-                    self.assertIsNone(note["binding_degraded"])
+                    self.assertIsNone((note.get("bind_observation") or {}).get("reason"))
+                    self.assertIsNone(note["bind_observation"])
 
     def test_unrelated_commands_stay_silent(self):
         for command in (
@@ -2025,7 +2036,7 @@ class BindTests(TmpEnv):
             0,
         )
         self.assertEqual(self.rm.readiness(self.store)[0], before)
-        self.assertIsNone(self.store.load()["binding_degraded"])
+        self.assertEqual(self.store.load()["bind_observation"]["reason"], "submit-near-miss")
         self.assertRegex(
             self.rm.status_line(self.store, None).splitlines()[0],
             r" binding=none .* miss=submit-near-miss$",
@@ -2068,7 +2079,7 @@ class BindTests(TmpEnv):
             {field: after[field] for field in fields},
             {field: before[field] for field in fields},
         )
-        self.assertIsNone(after["binding_degraded"])
+        self.assertEqual(after["bind_observation"]["reason"], "submit-near-miss")
         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertTrue(
@@ -2094,6 +2105,10 @@ class BindTests(TmpEnv):
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertNotIn("miss=", self.rm.status_line(self.store, None))
 
+        self.run_bind(self._miss())
+        self.assertEqual(self._manual(), 0)
+        self.assertIsNone(self.store.load().get("bind_observation"))
+
     def test_later_near_miss_survives_successful_bind(self):
         first_miss = "python3 -B tools/relay submit first.md"
         later_miss = "env python3 tools/relay submit later.md"
@@ -2113,10 +2128,10 @@ class BindTests(TmpEnv):
             self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
         note = self.store.load()
         self.assertEqual(
-            (note["seat"], note["binding_source"], note["binding_degraded"]),
-            ("a.planner", "hook", None),
+            (note["seat"], note["binding_source"], note["bind_observation"]["reason"]),
+            ("a.planner", "hook", "submit-near-miss"),
         )
-        self.assertEqual(note.get("submit_miss"), "submit-near-miss")
+        self.assertEqual((note.get("bind_observation") or {}).get("reason"), "submit-near-miss")
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertTrue(
                 self.rm.status_line(self.store, None)
@@ -2149,9 +2164,10 @@ class BindTests(TmpEnv):
                     self.assertEqual(
                         self.run_bind(self.payload(command, self.receipt)), 0
                     )
+                    self.assertEqual(self._manual(), 0)
                 note = self.store.load()
                 self.assertEqual((note["seat"], note["binding_gen"]), ("a.planner", 1))
-                self.assertIsNone(note.get("submit_miss"))
+                self.assertIsNone((note.get("bind_observation") or {}).get("reason"))
                 with mock.patch.object(
                     self.rm, "check_identity", return_value=("ok", {}, {})
                 ):
@@ -2171,7 +2187,7 @@ class BindTests(TmpEnv):
                 self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
                 note = self.store.load()
                 self.assertEqual(
-                    (note["seat"], note["binding_degraded"], note.get("submit_miss")),
+                    (note["seat"], note["bind_observation"], (note.get("bind_observation") or {}).get("reason")),
                     ("a.planner", None, None),
                 )
                 self.assertEqual(
@@ -2181,7 +2197,7 @@ class BindTests(TmpEnv):
                     0,
                 )
                 self.assertEqual(
-                    self.store.load()["binding_degraded"]["reason"], "ambiguous-receipt"
+                    self.store.load()["bind_observation"]["reason"], "ambiguous-receipt"
                 )
 
     def test_interpreter_submits_follow_bare_rules(self):
@@ -2215,7 +2231,7 @@ class BindTests(TmpEnv):
             ),
             0,
         )
-        self.assertIsNone(self.store.load()["binding_degraded"])
+        self.assertEqual(self.store.load()["bind_observation"]["reason"], "submit-near-miss")
         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertTrue(
@@ -2312,7 +2328,7 @@ class BindTests(TmpEnv):
         )
         n = self.store.load()
         self.assertEqual(
-            (n["seat"], n["binding_gen"], n.get("binding_degraded")),
+            (n["seat"], n["binding_gen"], n.get("bind_observation")),
             ("a.planner", 1, None),
         )
         foreign = (
@@ -2322,7 +2338,7 @@ class BindTests(TmpEnv):
         )
         self.run_bind(self.payload(foreign, self.receipt))
         n = self.store.load()
-        self.assertEqual(n["binding_degraded"]["reason"], "key-mismatch")
+        self.assertEqual(n["bind_observation"]["reason"], "key-mismatch")
         self.assertEqual(n["binding_gen"], 1)
 
     def test_plain_submit_binds_and_initializes_progress_once(self):
@@ -2355,9 +2371,11 @@ class BindTests(TmpEnv):
                 x["printed"].__setitem__(str(self.root), ["lane/r9.md"]),
             )
         )
+        before_repeat = self.store.path.read_bytes()
         self.run_bind(self.payload(cmd, self.receipt))
+        self.assertEqual(self.store.path.read_bytes(), before_repeat)
         n = self.store.load()
-        self.assertEqual(n["binding_gen"], 2)
+        self.assertEqual(n["binding_gen"], 1)
         self.assertEqual(n["progress"][str(self.root)]["file"], "lane/r9.md")
         self.assertEqual(n["printed"][str(self.root)], ["lane/r9.md"])
         self.assertEqual(n["floors"][0]["file"], "lane/r1.md")
@@ -2542,7 +2560,7 @@ class BindTests(TmpEnv):
         )  # stdout once, stderr once; interrupted is a boolean, not a leaf
         self.assertEqual(before["binding_gen"], 1)
         self.assertIsNone(
-            before["binding_degraded"]
+            before["bind_observation"]
         )  # the single-stdout control: bound exactly once
         codex = json.loads(
             self.payload(
@@ -2556,7 +2574,7 @@ class BindTests(TmpEnv):
         )  # the same receipt at a second leaf
         self.assertEqual(self.run_bind(json.dumps(codex)), 0)
         n = self.store.load()
-        self.assertEqual(n["binding_degraded"]["reason"], "ambiguous-receipt")
+        self.assertEqual(n["bind_observation"]["reason"], "ambiguous-receipt")
         self.assertEqual(
             (n["seat"], n["root"], n["binding_gen"]),
             (before["seat"], before["root"], before["binding_gen"]),
@@ -2634,16 +2652,17 @@ class BindTests(TmpEnv):
         }
         for name, (cmd, out, reason) in cases.items():
             with self.subTest(name):
+                prior_bytes = self.store.path.read_bytes()
                 self.assertEqual(self.run_bind(self.payload(cmd, out)), 0)
                 n = self.store.load()
                 self.assertEqual(
                     (n["seat"], n["root"], n["binding_gen"]),
                     (before["seat"], before["root"], before["binding_gen"]),
                 )
-                if reason is None:
-                    self.assertIsNone(n["binding_degraded"])
+                if reason is None or reason == "no-receipt":
+                    self.assertEqual(self.store.path.read_bytes(), prior_bytes)
                 else:
-                    self.assertEqual(n["binding_degraded"]["reason"], reason)
+                    self.assertEqual(n["bind_observation"]["reason"], reason)
 
     def test_non_submit_shell_commands_preserve_note_bytes(self):
         self.run_bind(
@@ -2701,7 +2720,7 @@ class BindTests(TmpEnv):
                 )
                 self.assertEqual(self.run_bind(self.payload(command)), 0)
                 self.assertEqual(self.store.path.read_bytes(), before)
-                self.assertIsNone(self.store.load()["binding_degraded"])
+                self.assertIsNone(self.store.load()["bind_observation"])
                 drain = subprocess.run(
                     [
                         sys.executable,
@@ -2749,20 +2768,25 @@ class BindTests(TmpEnv):
             "ambiguous-command",
         )
 
-    def test_submit_with_unsupported_shell_still_degrades(self):
+    def test_unreadable_submit_with_receipt_records_observation(self):
         commands = (
             "tools/relay submit d.md | head",
             "ls | tools/relay submit d.md",
             "(tools/relay submit d.md)",
             "tools/relay submit 'unfinished",
         )
+        self.run_bind(self._submit())
+        before = self.store.load()
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self.run_bind(self.payload(command)), 0)
+                self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
                 self.assertEqual(
-                    self.store.load()["binding_degraded"]["reason"],
+                    self.store.load()["bind_observation"]["reason"],
                     "unsupported-syntax",
                 )
+
+                for field in ("seat", "root", "anchor", "binding_gen", "progress"):
+                    self.assertEqual(self.store.load()[field], before[field])
 
     def test_failure_payload_is_negative_control_and_manual_rebind_works(self):
         failure = {
@@ -2790,6 +2814,224 @@ class BindTests(TmpEnv):
             0,
         )
         self.assertEqual(self.store.load()["seat"], "a.planner")
+
+    def _submit(self, call=None, root=None, anchor="lane/r1.md"):
+        root = root or self.root
+        command = f"tools/relay submit d.md --root {root}"
+        receipt = self.receipt.replace("lane/r1.md", anchor)
+        return self.payload(command, receipt, call_id=call)
+
+    def _manual(self, root=None, anchor="lane/r1.md"):
+        return self.rm.bind(ns(manual=True, session="sess", root=str(root or self.root), anchor=anchor))
+
+    def _miss(self, call=None):
+        return self.payload("env tools/relay submit d.md", self.receipt, call_id=call)
+
+    def _observation(self):
+        value = self.store.load().get("bind_observation")
+        self.assertIsInstance(value, dict)
+        self.assertEqual(set(value), {"reason", "stamp", "receipts", "root", "root_provenance", "call"})
+        return value
+
+    def test_help_piped_to_head_leaves_armed_note_unchanged(self):
+        self._bound_following()
+        before = self.store.path.read_bytes()
+        self.assertEqual(self.run_bind(self.payload("tools/relay submit --help | head")), 0)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+
+    def test_refused_submit_records_nothing(self):
+        for bound in (False, True):
+            if bound:
+                self.run_bind(self._submit())
+            before = self.store.path.read_bytes() if self.store.path.exists() else None
+            self.assertEqual(self.run_bind(self.payload("tools/relay submit bad.md", '{"code":"E-ENVELOPE"}')), 0)
+            self.assertEqual(self.store.path.read_bytes() if self.store.path.exists() else None, before)
+
+    def test_near_miss_shapes_record_observation(self):
+        for command in ("py -3 tools/relay submit d.md", "for x in a; do tools/relay submit d.md; done", "if tools/relay submit d.md; then true; fi", "time tools/relay submit d.md"):
+            with self.subTest(command=command):
+                self.store.path.unlink(missing_ok=True)
+                self.run_bind(self.payload(command, self.receipt))
+                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertIsNone(self.store.load()["seat"])
+
+    def test_verb_in_heredoc_body_is_not_a_verb(self):
+        for command in ("cat <<EOF\ntools/relay submit d.md\nEOF\n", "echo 'tools/relay submit d.md'"):
+            self.run_bind(self.payload(command, self.receipt))
+            self.assertFalse(self.store.path.exists())
+
+    def test_displayed_receipt_without_verb_records_nothing(self):
+        for command in ("echo receipt", "tools/relay show d.md", "git status"):
+            self.run_bind(self.payload(command, self.receipt))
+            self.assertFalse(self.store.path.exists())
+
+    def test_unterminated_quote_naming_verb_exits_zero(self):
+        self.assertEqual(self.run_bind(self.payload("tools/relay submit d.md 'unfinished", self.receipt)), 0)
+        self.assertEqual(self._observation()["reason"], "unsupported-syntax")
+        self.store.path.unlink()
+        self.run_bind(self.payload("echo 'tools/relay submit unfinished", self.receipt))
+        self.assertFalse(self.store.path.exists())
+
+    def test_echo_with_fabricated_receipt_records_suspicion_only(self):
+        self.run_bind(self.payload("echo tools/relay submit d.md", self.receipt.replace("r1.md", "fake.md")))
+        record = self._observation()
+        self.assertEqual((record["root"], record["root_provenance"], record["receipts"]), (None, "none", ["lane/fake.md"]))
+        self.assertIsNone(self.store.load()["seat"])
+
+    def test_unexecuted_branch_beside_receipt_binds_nothing(self):
+        self.run_bind(self.payload("if false; then tools/relay submit d.md; fi; echo receipt", self.receipt))
+        self.assertEqual(self._observation()["reason"], "submit-near-miss")
+        self.assertIsNone(self.store.load()["seat"])
+
+    def test_bound_to_a_filing_to_b_records(self):
+        self.run_bind(self._submit())
+        before = self.store.load()
+        self.run_bind(self.payload("ssh elsewhere tools/relay submit d.md", self.receipt.replace("r1.md", "r99.md")))
+        record = self._observation()
+        self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
+        self.assertEqual(self.store.load()["anchor"], before["anchor"])
+
+    def test_same_path_in_two_roots_is_not_duplicate(self):
+        self.run_bind(self._submit())
+        other = self.other_root()
+        payload = json.loads(self._miss())
+        payload["cwd"] = str(other)
+        self.run_bind(json.dumps(payload))
+        record = self._observation()
+        self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
+        self.assertEqual(self.store.load()["root"], str(self.root))
+
+    def test_unreadable_index_and_unrendered_row_still_record(self):
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable):
+                self.store.path.unlink(missing_ok=True)
+                if unreadable:
+                    self.index.unlink()
+                else:
+                    write_index(self.index, "")
+                self.run_bind(self._miss())
+                self.assertEqual(self._observation()["root_provenance"], "none")
+
+    def test_manual_bind_to_current_anchor_clears_without_advancing(self):
+        self.run_bind(self._submit("file"))
+        self.run_bind(self._miss("miss"))
+        self._observation()
+        before = self.store.load()
+        self.assertEqual(self._manual(), 0)
+        after = self.store.load()
+        self.assertIsNone(after.get("bind_observation"))
+        self.assertEqual(after["binding_gen"], before["binding_gen"])
+        self.assertEqual(after["progress"], before["progress"])
+
+    def test_delayed_duplicate_hook_leaves_newer_observation(self):
+        payload = self._submit("file")
+        self.run_bind(payload)
+        self.run_bind(self._miss("miss"))
+        before = self.store.path.read_bytes()
+        self.run_bind(payload)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_r_then_s_then_delayed_r_keeps_s(self):
+        write_index(self.index, row(1) + row(2))
+        (self.root / "lane/r2.md").write_text("r2\n")
+        first = self._submit("r")
+        self.run_bind(first)
+        self.run_bind(self._submit("s", anchor="lane/r2.md"))
+        before = self.store.path.read_bytes()
+        self.run_bind(first)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+        self.assertEqual(self.store.load()["anchor"], "lane/r2.md")
+
+    def test_separate_call_same_content_binds_again(self):
+        self.run_bind(self._submit("first"))
+        self._manual(root=self.other_root())
+        self.run_bind(self._submit("second"))
+        self.assertEqual(self.store.load()["root"], str(self.root))
+        self.assertEqual(self.store.load()["binding_gen"], 3)
+
+    def test_separate_call_same_display_records_again(self):
+        self.run_bind(self._submit("file"))
+        first = self._miss("first")
+        self.run_bind(first)
+        self._manual()
+        before = self.store.path.read_bytes()
+        self.run_bind(first)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.run_bind(self._miss("second"))
+        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "second"}))
+
+    def test_same_anchor_absent_progress_establishes_progress(self):
+        self.run_bind(self._submit())
+        self.store.update(lambda n: n["progress"].clear())
+        self.run_bind(self._submit())
+        self.assertEqual(self.store.load()["progress"][str(self.root)], {"file": "lane/r1.md", "position": 1})
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_miss_after_bind_survives(self):
+        for source in ("hook", "manual"):
+            with self.subTest(source=source):
+                self.store.path.unlink(missing_ok=True)
+                if source == "hook":
+                    self.run_bind(self._submit())
+                else:
+                    self._manual()
+                self.run_bind(self._miss())
+                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertEqual(self.store.load()["binding_source"], source)
+
+    def test_three_concurrent_hooks_one_call_advance_once(self):
+        payload = self._submit("concurrent")
+        children = [subprocess.Popen([sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(3)]
+        for child in children:
+            self.addCleanup(lambda p=child: p.kill() if p.poll() is None else None)
+            child.stdin.write(payload)
+            child.stdin.close()
+            child.stdin = None
+        for child in children:
+            out, err = child.communicate(timeout=10)
+            self.assertEqual((child.returncode, out, err), (0, "", ""))
+        self.assertEqual(self.store.load()["binding_gen"], 1)
+        self.assertEqual(len(self.store.load()["handled_calls"]), 1)
+
+    def test_no_call_id_only_consecutive_duplicates_collapse(self):
+        # Deliberately exercise the weaker guarantee of hosts without a call id.
+        self.run_bind(self._submit())
+        before = self.store.path.read_bytes()
+        self.run_bind(self._submit())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.run_bind(self._miss())
+        before = self.store.path.read_bytes()
+        self.run_bind(self._miss())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self._manual()
+        self.run_bind(self._miss())
+        self._observation()
+        self.assertEqual(self.store.load()["handled_calls"], [])
+
+    def test_ninth_call_evicts_oldest(self):
+        for i in range(9):
+            self.run_bind(self._miss(str(i)))
+        self.assertEqual(self.store.load()["handled_calls"], [self.rm.call_identity("sess", {"tool_use_id": str(i)}) for i in range(1, 9)])
+        self.run_bind(self._miss("0"))
+        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "0"}))
+
+    def test_receipt_with_findings_and_routed_notice_binds_author_relay(self):
+        output = '{"findings":[{"path":"other.md"}]}\n' + self.receipt + '\nMONITOR-NOTICE: {"file":"lane/notice.md"}'
+        self.run_bind(self.payload("tools/relay submit d.md", output))
+        self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
+        self.assertIsNone(self.store.load().get("bind_observation"))
+
+    def test_legacy_note_keys_read_and_cleared(self):
+        self.run_bind(self._submit())
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "no-receipt", "stamp": "old"}, submit_miss="submit-near-miss", submit_miss_binding_gen=1))
+        self.assertEqual(self.store.load()["submit_miss"], "submit-near-miss")
+        self._manual()
+        raw = json.loads(self.store.path.read_text())
+        for key in ("binding_degraded", "submit_miss", "submit_miss_binding_gen"):
+            self.assertNotIn(key, raw)
+
 
 
 class DrainTests(TmpEnv):
