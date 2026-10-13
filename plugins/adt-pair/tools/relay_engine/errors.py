@@ -37,6 +37,9 @@ class _VersionMismatchRemedy:
 
 
 _TEXT = {
+    "error-no-top-seat-cause": "no top seat is recorded on this root",
+    "error-no-top-seat-remedy": "have the eligible starter run daemon start --seat <address> on this root",
+    "error-no-top-seat-explain": "declarations require the current key of an explicitly designated top seat",
     "error-key-mismatch-cause": "registration tag does not name the current seat occupancy",
     "error-key-mismatch-remedy": "re-register or run from the occupying session",
     "error-id-collision-cause": "dispatch id is not reusable in this run scope",
@@ -171,6 +174,7 @@ def _spec(stem, cls):
 
 
 ERRORS = {
+    "no-top-seat": _spec("no-top-seat", "command"),
     "E-KEY-MISMATCH": _spec("key-mismatch", "policy"),
     "E-ID-COLLISION": _spec("id-collision", "policy"),
     "E-SUPERSEDED": _spec("superseded", "policy"),

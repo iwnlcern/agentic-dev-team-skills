@@ -35,6 +35,7 @@ class ExistingTargets:
 
 
 INVENTORY = {
+    "notice-name-caution": "caution: this name is also an engine notice label; registration or declaration grants no authority",
     "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
     "authority.grant-shape-absent": "MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing",
     "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
@@ -65,14 +66,14 @@ _CODE_VALUES = {
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
     "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN",
     "E-VERSION-MISMATCH",
-    "seat-occupied", "commission-conflict", "commission-late",
+    "no-top-seat", "seat-occupied", "commission-conflict", "commission-late",
     "run-id-mismatch", "run-id-uninitialized", "run-id-invalid",
     "E-FRAMING", "E-WIRE-VERSION", "E-WIRE-OP", "E-WIRE-ARGS",
     "E-DAEMON-STOPPING",
     "E-CONTEXT-BUDGET",
 }
 _OPS = {
-    "submit", "seat.register", "seat.replace", "seat.stand_down",
+    "seat.declare", "submit", "seat.register", "seat.replace", "seat.stand_down",
     "seat.show", "show", "status", "roster", "commission", "adopt_commission",
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
     "migrate.check", "lint.context", "daemon.stop",

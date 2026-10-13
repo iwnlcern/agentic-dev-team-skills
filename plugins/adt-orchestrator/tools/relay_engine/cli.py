@@ -104,9 +104,36 @@ def _emit_result(result):
 
 
 def _cmd_seat_register(args):
+    if args.address.lower().endswith("-engine-notice.planner"):
+        strings.emit("stderr", "notice-name-caution")
     return _emit_result(client.seat_register(
         _command_root(args), args.address, args.role, args.dispatch,
         replace=args.seat_command == "replace", timeout=args.timeout))
+
+
+def _cmd_seat_declare(args):
+    if args.from_file:
+        if args.address is not None or args.role is not None:
+            raise errors.error_for("E-HEADER", field="ADDRESS")
+        try:
+            lines = Path(args.from_file).read_text().splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise errors.error_for("E-HEADER", field="ADDRESS") from exc
+        entries = [line.split(maxsplit=1) for line in lines if line.strip()]
+        if any(len(entry) != 2 for entry in entries):
+            raise errors.error_for("E-HEADER", field="ROLE")
+    else:
+        if args.address is None or args.role is None:
+            raise errors.error_for("E-HEADER", field="ADDRESS")
+        entries = [[args.address, args.role]]
+    root_name = _command_root(args)
+    with Root(root_name) as root:
+        key = client._relative(root, args.key)
+        tag = client._open_required(root, key, "key").decode("utf-8").strip()
+    result = client.request(root_name, "seat.declare", {"entries": entries, "tag": tag}, timeout=args.timeout)
+    if any(entry[0].lower().endswith("-engine-notice.planner") for entry in entries):
+        strings.emit("stderr", "notice-name-caution")
+    return _emit_result(result)
 
 
 def _cmd_seat_stand_down(args):
@@ -329,6 +356,14 @@ def build_parser():
         _root_option(command)
         _timeout_option(command)
         command.set_defaults(handler=_cmd_seat_register)
+    declare = seat_commands.add_parser("declare")
+    declare.add_argument("address", nargs="?")
+    declare.add_argument("--role")
+    declare.add_argument("--from-file")
+    declare.add_argument("--key", required=True)
+    _root_option(declare)
+    _timeout_option(declare)
+    declare.set_defaults(handler=_cmd_seat_declare)
     stand_down = seat_commands.add_parser("stand-down")
     stand_down.add_argument("address")
     _root_option(stand_down)

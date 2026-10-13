@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
-                          rules, seats, strings, supersede, version, judging)
+                          rules, seats, strings, supersede, version, judging, roster)
 from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state, ensure_additive_schema, judgment_for
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -125,6 +125,7 @@ def _rejected(value):
 _SCHEMAS = {
     "submit": ({"envelope", "body_b64", "body_sha256", "content_hash",
                 "submission_id", "tag"}, {"admits_against"}),
+    "seat.declare": ({"entries", "tag"}, set()),
     "seat.register": ({"address", "role_word"},
                       {"dispatch_ref", "replace"}),
     "seat.replace": ({"address", "role_word"},
@@ -163,6 +164,10 @@ def _validate_args(op, args):
         if key == "envelope":
             if not isinstance(value, dict):
                 raise _args_fault(op, "envelope:object")
+        elif key == "entries":
+            if (not isinstance(value, list) or any(not isinstance(entry, list)
+                    or len(entry) != 2 or any(not isinstance(v, str) for v in entry) for entry in value)):
+                raise _args_fault(op, "entries:array")
         elif key in {"replace", "body"}:
             if not isinstance(value, bool):
                 raise _args_fault(op, "replace:boolean")
@@ -811,18 +816,24 @@ def _submit_handler(ledger, root, args):
             judging.corpus_before(ctx.ledger, ctx.seq), ctx.rendered_path,
             ctx.envelope, ctx.body, artifact_root=Path(root.path),
             deadline=time.monotonic() + 5.0)),
+        effects=roster.notice_effect,
         prechecks=(cycles.callback(),),
         cycle_events=cycle_events,
         supersession_edges=supersession_edges,
         advisories=tuple(cycle_advisories) + tuple(
             supersession_advisories) + rules.advisories_for(envelope))
+    notice = ledger.execute(
+        "SELECT r.seq,r.rendered_path FROM routed_notices n JOIN relays r ON r.seq=n.notice_seq WHERE n.relay_seq=?",
+        (admission.seq,)).fetchone()
     rendered = render_relay(ledger, root, admission.seq)
+    if notice is not None:
+        render_relay(ledger, root, notice[0])
     render_index(root, index_rows(ledger), 10, epoch_state(ledger))
     advisory_row = ledger.execute(
         "SELECT advisories_json FROM relays WHERE seq=?",
         (admission.seq,)).fetchone()
     _status, findings = judgment_for(ledger, admission.seq)
-    return {"path": admission.rendered_path,
+    result = {"path": admission.rendered_path,
             "render_state": ("rendered" if rendered.event == "rendered"
                              else "render-conflict"),
             "advisories": json.loads(advisory_row[0]),
@@ -830,6 +841,9 @@ def _submit_handler(ledger, root, args):
             "findings": [{"id": f.id, "lint_severity": f.lint_severity,
                           "subject": f.subject, "operands": list(f.operands),
                           "params": f.params, "message": f.message} for f in findings]}
+    if notice is not None:
+        result["routed_notice"] = notice[1]
+    return result
 
 
 def _lint_context_position(ledger, cursor):
@@ -878,6 +892,9 @@ def _default_handler(ledger, root, state, handlers, request):
         return handlers[op](request["args"])
     if op == "submit":
         return _submit_handler(ledger, root, request["args"])
+    if op == "seat.declare":
+        args = request["args"]
+        return {"results": roster.declare(ledger, root, args["entries"], args["tag"])}
     if op in {"seat.register", "seat.replace"}:
         args = request["args"]
         replacing = op == "seat.replace" or args.get("replace", False)

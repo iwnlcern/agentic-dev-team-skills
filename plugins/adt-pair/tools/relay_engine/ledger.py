@@ -649,3 +649,34 @@ def admit(ledger, root, envelope, body, submission_id, *,
             answer = Admission(seq, allocated_stamp, allocated_path, False)
     _hit(fault, "post-commit-pre-response", committed=True)
     return answer
+
+
+def insert_engine_relay(ledger, root, envelope: Envelope, body: bytes, *, clock) -> Admission:
+    if not ledger.in_transaction:
+        raise ValueError("engine relay requires an open transaction")
+    seq = _next_seq(ledger, "relays")
+    allocated_stamp, allocated_path, foreign = _daemon_slot(ledger, root, envelope, clock)
+    submission_id = None
+    edge_seq = None
+    actual_body_hash = body_sha256(body)
+    actual_content_hash = content_hash(envelope, body, None)
+    origin, occupancy_ref, advisory_json = "daemon", None, "[]"
+    ledger.execute(
+        "INSERT INTO relays("
+        "seq,submission_id,stamp,rendered_path,admits_against_seq,"
+        "phase,role,dispatch_id,parent_dispatch_id,run_id,from_seat,"
+        "to_seats,cc_seats,status,subject,headers_json,body,"
+        "body_sha256,content_hash,origin,occupancy_ref,advisories_json"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (seq, submission_id, allocated_stamp, allocated_path,
+         edge_seq, envelope.phase, envelope.role,
+         envelope.dispatch_id, envelope.parent_dispatch_id,
+         envelope.run_id, envelope.from_seat,
+         jcs_encode(list(envelope.to_seats)).decode("utf-8"),
+         jcs_encode(list(envelope.cc_seats)).decode("utf-8"),
+         envelope.status, envelope.subject,
+         jcs_encode(envelope.headers).decode("utf-8"), body,
+         actual_body_hash, actual_content_hash, origin,
+         occupancy_ref, advisory_json))
+    _insert_projection_divergences(ledger, foreign)
+    return Admission(seq, allocated_stamp, allocated_path, False)

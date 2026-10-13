@@ -23,6 +23,7 @@ ROSTER = (
     "relay_engine/paths.py",
     "relay_engine/reconcile.py",
     "relay_engine/render.py",
+    "relay_engine/roster.py",
     "relay_engine/rules.py",
     "relay_engine/seats.py",
     "relay_engine/strings.py",

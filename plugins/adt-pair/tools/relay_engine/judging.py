@@ -18,13 +18,17 @@ from relay_engine.rules import _structural
 @dataclass(frozen=True)
 class Corpus:
     entries: tuple[tuple[int, str, bytes], ...]
+    known_addresses: frozenset[str] | None = None
+    top_address: str | None = None
 
 
 def corpus_before(ledger, seq: int | None) -> Corpus:
     rows = ledger.execute(
         "SELECT seq,rendered_path,body FROM relays WHERE (? IS NULL OR seq<?) ORDER BY seq",
         (seq, seq)).fetchall()
-    return Corpus(tuple((number, path, bytes(body)) for number, path, body in rows))
+    from relay_engine import roster
+    return Corpus(tuple((number, path, bytes(body)) for number, path, body in rows),
+                  roster.known(ledger), roster.top_seat(ledger))
 
 
 def partition_of(case) -> str:
@@ -1401,6 +1405,17 @@ def judge_candidate(corpus: Corpus, subject: str, envelope: Envelope, body: byte
             and not merge_authorized(text, fields) and not merge_authorization_verdict_lines(text)):
         result.add_finding(Finding('authority.grant-shape-absent', 'warn', subject, (), {},
                                   'MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing'))
+    if corpus.known_addresses is not None:
+        addresses = {address.lower() for key in ('FROM', 'TO', 'CC')
+                     for address in split_addresses(fields.get(key))}
+        unknown = sorted(addresses - corpus.known_addresses)
+        if unknown:
+            known_names = sorted(corpus.known_addresses)
+            notice = 'filed' if corpus.top_address is not None else 'none-no-top-seat'
+            result.add_finding(Finding('routing.unknown-address', 'warn', subject, (),
+                {'addresses': unknown, 'known': known_names, 'notice': notice},
+                strings.render('routing.unknown-address', addresses=', '.join(unknown),
+                               known=', '.join(known_names), notice=notice)))
     unique = {}
     for finding in result.findings:
         identity = (finding.id, finding.lint_severity, finding.subject, finding.operands,
