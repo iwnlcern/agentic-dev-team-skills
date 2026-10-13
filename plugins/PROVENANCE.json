@@ -152,7 +152,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "7889d3f0873a837e010a3326a789567638d8041507c39d49b7eee4e3d02537d5",
+    "sha256": "274fa54c6379579a7a8e02b2ba5ed803ed0e9733da2f297d88b5d1b5bcff34c4",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -164,7 +164,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/orchestration-moves.md",
-    "sha256": "02f39648ffaae252d1f3696433118c2d71230c6ba735a50dbbf7c7b44372822f",
+    "sha256": "7f26c439cc415f3091dc7029c2a6b6dc2581c705efda9981798d77e3b7a56d25",
     "source": "skills/orchestrator-planner/orchestration-moves.md"
   },
   {
@@ -230,7 +230,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-planner/SKILL.md",
-    "sha256": "f26c462e574899eaaf033db5f3a912252123fef7247cf83d2e4dffe2535a767f",
+    "sha256": "15e7c0d3e35705c93d3e05bd40fd214d2833cc9a8b9ce486f564a3a726e4a17b",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -10628,7 +10628,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "7889d3f0873a837e010a3326a789567638d8041507c39d49b7eee4e3d02537d5",
+    "sha256": "274fa54c6379579a7a8e02b2ba5ed803ed0e9733da2f297d88b5d1b5bcff34c4",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -10640,7 +10640,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/orchestration-moves.md",
-    "sha256": "02f39648ffaae252d1f3696433118c2d71230c6ba735a50dbbf7c7b44372822f",
+    "sha256": "7f26c439cc415f3091dc7029c2a6b6dc2581c705efda9981798d77e3b7a56d25",
     "source": "skills/orchestrator-planner/orchestration-moves.md"
   },
   {
@@ -10706,7 +10706,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-planner/SKILL.md",
-    "sha256": "f26c462e574899eaaf033db5f3a912252123fef7247cf83d2e4dffe2535a767f",
+    "sha256": "15e7c0d3e35705c93d3e05bd40fd214d2833cc9a8b9ce486f564a3a726e4a17b",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -21110,7 +21110,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-planner/SKILL.md",
-    "sha256": "a7e69b35e84962cb2f04ecdcb02c49b5bd2796e41f0e93b9bdaf3054f23fbca7",
+    "sha256": "792185fee2dd6902cb4f76cfd069a9a365612eb005b4c5bd026bd439cb98c6f9",
     "source": "skills/pair-planner/SKILL.md"
   },
   {

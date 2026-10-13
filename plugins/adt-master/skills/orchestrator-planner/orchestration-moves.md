@@ -24,6 +24,8 @@ Use all available Agent Pairs. Do not stack unrelated work on one pair when othe
 
 Use the single cycle-id and authority-chain `DISPATCH_ID` definitions in `protocol.md`; those definitions take precedence here. Calendar dates and relay/index timestamps are read from the real clock at authoring time — never carried over from a sibling id or advanced to keep a tidy sequence; see the timestamp policy in `protocol.md`.
 
+See `protocol.md` § Continuation dispatch for continuations.
+
 Record:
 
 - parent dispatch ID,
@@ -132,6 +134,7 @@ Always name the colliding file/test/contract.
 When a ruling or an execution stop lands after a PLAN approve, compare the correction against the bound items in the Plan contract section of `protocol.md`.
 If the bound items are unchanged, direct an erratum using the existing `-erratum-N` stem grammar and a delta review of the erratum alone instead of a full plan reissue.
 Reissue the plan when a bound item changes.
+See `protocol.md` § Continuation dispatch for the standing-dispatch case.
 
 ## Hard escalation triggers
 
