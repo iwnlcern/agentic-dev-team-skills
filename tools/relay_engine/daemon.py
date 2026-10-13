@@ -23,7 +23,7 @@ from pathlib import Path
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
                           rules, seats, strings, supersede, version)
 from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
-from relay_engine.ledger import admit, epoch_state
+from relay_engine.ledger import admit, epoch_state, ensure_additive_schema
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
 from relay_engine.render import index_rows, render_index, render_relay
 from relay_engine.paths import Root, TempWrite, ensure_engine_dir
@@ -980,6 +980,7 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
             fresh_ledger = True
         else:
             ledger = open_ledger(lease.engine_dirfd)
+            ensure_additive_schema(ledger)
         holder["ledger"] = ledger
         _trace(trace, "schema-init")
         context = {"root": root, "lease": lease, "ledger": ledger,

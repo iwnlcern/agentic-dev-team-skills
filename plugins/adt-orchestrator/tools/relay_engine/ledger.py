@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import fcntl
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -13,6 +14,7 @@ import time
 import uuid
 
 from relay_engine import errors, strings
+from relay_engine.rules import Finding
 from relay_engine.envelope import (Envelope, body_sha256, content_hash,
                                    parse_draft, valid_run_id)
 from relay_engine.jcs import commissioned_by_value, jcs_encode, parse_record
@@ -60,6 +62,75 @@ CREATE TABLE commissions(child_run_id TEXT PRIMARY KEY,
   dispatch_content_digest TEXT NOT NULL, record_digest TEXT NOT NULL);
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+
+_ADDITIVE_DDL = """
+CREATE TABLE IF NOT EXISTS admission_judgments(
+  relay_seq INTEGER PRIMARY KEY REFERENCES relays(seq),
+  status TEXT NOT NULL CHECK(status IN ('judged','exempt','failed')),
+  rules_version TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admission_findings(
+  relay_seq INTEGER NOT NULL REFERENCES admission_judgments(relay_seq),
+  ord INTEGER NOT NULL, check_id TEXT NOT NULL,
+  lint_severity TEXT NOT NULL CHECK(lint_severity IN ('error','warn')),
+  operands_json TEXT NOT NULL, params_json TEXT NOT NULL, message TEXT NOT NULL,
+  PRIMARY KEY(relay_seq,ord));
+CREATE TABLE IF NOT EXISTS roster(
+  address TEXT PRIMARY KEY, role TEXT NOT NULL, declared_by TEXT NOT NULL,
+  declared_at_seq INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS routed_notices(
+  relay_seq INTEGER PRIMARY KEY REFERENCES relays(seq),
+  notice_seq INTEGER NOT NULL UNIQUE REFERENCES relays(seq));
+"""
+
+
+def ensure_additive_schema(ledger):
+    """Install additive tables without rewriting existing state or epochs."""
+    for statement in _ADDITIVE_DDL.split(";"):
+        if statement.strip():
+            ledger.execute(statement)
+
+
+def record_judgment(ledger, relay_seq: int, status: str,
+                    rules_version: str, findings) -> None:
+    if not ledger.in_transaction:
+        raise ValueError("judgment requires an open transaction")
+    findings = tuple(findings)
+    if status not in ("judged", "exempt", "failed"):
+        raise ValueError("unknown judgment status")
+    if status != "judged" and findings:
+        raise ValueError("only judged rows may carry findings")
+    if any(not isinstance(finding, Finding) for finding in findings):
+        raise TypeError("judgment requires Finding values")
+    ledger.execute(
+        "INSERT INTO admission_judgments(relay_seq,status,rules_version) VALUES(?,?,?)",
+        (relay_seq, status, rules_version))
+    ledger.executemany(
+        "INSERT INTO admission_findings(relay_seq,ord,check_id,lint_severity,"
+        "operands_json,params_json,message) VALUES(?,?,?,?,?,?,?)",
+        ((relay_seq, order, finding.id, finding.lint_severity,
+          jcs_encode(list(finding.operands)).decode("utf-8"),
+          jcs_encode(finding.params).decode("utf-8"), finding.message)
+         for order, finding in enumerate(findings)))
+
+
+def judgment_for(ledger, relay_seq: int) -> tuple[str, tuple[Finding, ...]]:
+    if not ledger.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='admission_judgments'").fetchone():
+        return "none", ()
+    row = ledger.execute(
+        "SELECT j.status,r.rendered_path FROM admission_judgments j "
+        "JOIN relays r ON r.seq=j.relay_seq WHERE j.relay_seq=?",
+        (relay_seq,)).fetchone()
+    if row is None:
+        return "none", ()
+    entries = ledger.execute(
+        "SELECT check_id,lint_severity,operands_json,params_json,message "
+        "FROM admission_findings WHERE relay_seq=? ORDER BY ord",
+        (relay_seq,)).fetchall()
+    return row[0], tuple(Finding(check_id, severity, row[1],
+                                tuple(json.loads(operands)), json.loads(params), message)
+                         for check_id, severity, operands, params, message in entries)
 
 
 class InjectedFault(RuntimeError):
@@ -154,6 +225,7 @@ def init_schema(engine_dirfd, canonical_root, fault=None):
             for statement in _DDL.split(";"):
                 if statement.strip():
                     ledger.execute(statement)
+            ensure_additive_schema(ledger)
             _hit(fault, "after-ddl")
             seeds = (("schema_version", SCHEMA_VERSION),
                      ("canonical_root", canonical_root),
