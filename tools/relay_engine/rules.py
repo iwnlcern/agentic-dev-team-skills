@@ -9,6 +9,7 @@ It does not verify whether claims are true.
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
 import errno
 import hashlib
 import os
@@ -157,16 +158,61 @@ MIN_HEADER_FIELDS = [
     "EVIDENCE_TARGET", "HUMAN_GATE_REQUIRED",
 ]
 
+FAMILY_IDS = frozenset((
+    "file.lint", "lineage.lock-lifecycle", "lineage.receiving-seat",
+    "lineage.commission", "lineage.cross-root-design", "lineage.design-review",
+    "lineage.dispatch", "lineage.impl-report-parent", "lineage.merge-claim",
+    "lineage.row-truth", "lineage.review-visibility", "lineage.lock-path",
+    "lineage.governing-digest",
+))
+
+
+@dataclass(frozen=True)
+class Finding:
+    id: str
+    lint_severity: str
+    subject: str
+    operands: tuple[str, ...]
+    params: dict
+    message: str
+
+
+def _structural(check_id, subject, message, *, operands=(), params=None,
+                severity="error"):
+    return Finding(check_id, severity, str(subject),
+                   tuple(sorted(set(str(value) for value in operands))),
+                   {} if params is None else dict(params), message)
+
+
 class LintResult:
     def __init__(self) -> None:
         self.errors: List[str] = []
         self.warnings: List[str] = []
+        self.findings: List[Finding] = []
 
-    def error(self, msg: str) -> None:
+    def error(self, msg: str, *, check_id=None, subject=None,
+              operands=(), params=None) -> None:
         self.errors.append(msg)
+        if check_id is not None:
+            self.findings.append(_structural(check_id, subject, msg,
+                                            operands=operands, params=params))
 
-    def warn(self, msg: str) -> None:
+    def warn(self, msg: str, *, check_id=None, subject=None,
+             operands=(), params=None) -> None:
         self.warnings.append(msg)
+        if check_id is not None:
+            self.findings.append(_structural(check_id, subject, msg,
+                                            operands=operands, params=params,
+                                            severity="warn"))
+
+    def add_finding(self, finding: Finding) -> None:
+        if not isinstance(finding, Finding):
+            raise TypeError("structural emission requires a Finding")
+        if finding.lint_severity not in ("error", "warn"):
+            raise ValueError("unknown finding severity")
+        target = self.errors if finding.lint_severity == "error" else self.warnings
+        target.append(finding.message)
+        self.findings.append(finding)
 
     @property
     def ok(self) -> bool:
@@ -1439,7 +1485,7 @@ def run_has_operator_orch_review_waiver(phases: List[Tuple[Path, Tuple[int, obje
     return False
 
 
-def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]) -> List[str]:
+def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]) -> List[Finding]:
     """Orchestrator-pair review visibility gate.
 
     Every orchestrator authority relay in the broad SET must address an
@@ -1447,7 +1493,7 @@ def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[i
     operator-authored no-reviewer waiver. Pair-seat and operator-authored relays
     are exempt by construction because the FROM-set check comes first.
     """
-    errors: List[str] = []
+    errors: List[Finding] = []
     waiver = run_has_operator_orch_review_waiver(phases)
     for f, _order, phase, fields, text in phases:
         from_addrs = split_addresses(fields.get("FROM"))
@@ -1464,7 +1510,7 @@ def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[i
             continue
         if waiver:
             continue
-        errors.append(f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)")
+        errors.append(_structural('lineage.review-visibility', f.relative_to(path), f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)", operands=()))
     return errors
 
 
@@ -2117,9 +2163,9 @@ def h27_receipt_self_grants(text: str, is_receipt: bool) -> bool:
     return is_receipt and "yes" in h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY")
 
 
-def h27_receiving_seat_errors(root: Path, phases) -> List[str]:
+def h27_receiving_seat_errors(root: Path, phases) -> List[Finding]:
     """Rule 3(e): conflict-first, every-occurrence receiving-seat refusal."""
-    errors: List[str] = []
+    errors: List[Finding] = []
     for item in phases:
         relname = item[0].relative_to(root)
         text = item[4]
@@ -2138,9 +2184,9 @@ def h27_receiving_seat_errors(root: Path, phases) -> List[str]:
             if len(set(values)) > 1:
                 conflicts.append(key)
                 errors.append(
-                    f"{relname}: rule 3e gate: {key} carries {len(set(values))} distinct values across "
+                    _structural('lineage.receiving-seat', relname, f"{relname}: rule 3e gate: {key} carries {len(set(values))} distinct values across "
                     f"{len(values)} occurrences; a conflicting discriminator contributes no passing operand "
-                    "(DD-v29-master-authority-20260809 rule 5)"
+                    "(DD-v29-master-authority-20260809 rule 5)", operands=())
                 )
         if conflicts:
             continue
@@ -2154,9 +2200,9 @@ def h27_receiving_seat_errors(root: Path, phases) -> List[str]:
                     continue
                 seen_targets.add(normalized)
                 errors.append(
-                    f"{relname}: DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat {target!r}; "
+                    _structural('lineage.receiving-seat', relname, f"{relname}: DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat {target!r}; "
                     "the tier never receives delegated dispatch authority "
-                    "(DD-v29-master-authority-20260809 cross-seat rule 3e)"
+                    "(DD-v29-master-authority-20260809 cross-seat rule 3e)", operands=())
                 )
     return errors
 
@@ -2286,15 +2332,15 @@ def h27_commission_grant_shape_ok(item) -> bool:
 
 def h27_foreign_lock_errors(
     root: Path, consumer, lock_id: str, owner: str | None, origins, phases,
-) -> List[str]:
+) -> List[Finding]:
     """Validate the foreign lock origin/review/consumer lifecycle branch."""
     consumer_path, consumer_order, _consumer_phase, _consumer_fields, consumer_text = consumer
     consumer_name = consumer_path.relative_to(root)
     latest_origins = h27_same_position_latest(origins)
     if len(latest_origins) != 1:
         return [
-            f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} has {len(latest_origins)} same-position latest origins "
-            f"for owner {owner}; lock resolution fails closed{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} has {len(latest_origins)} same-position latest origins "
+            f"for owner {owner}; lock resolution fails closed{H27_LOCK_RULE}", operands=())
         ]
     origin = latest_origins[0]
     origin_path, _origin_order, _origin_phase, _origin_fields, origin_text = origin
@@ -2303,8 +2349,8 @@ def h27_foreign_lock_errors(
         _value, conflict = h27_resolved_discriminator(origin_text, key)
         if conflict:
             return [
-                f"{consumer_name}: foreign origin {origin_name} has conflicting {key} occurrences; "
-                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}"
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign origin {origin_name} has conflicting {key} occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}", operands=(origin_name,))
             ]
 
     origin_from = h27_single_from(origin_text)
@@ -2315,30 +2361,30 @@ def h27_foreign_lock_errors(
     origin_doc, _ = h27_resolved_discriminator(origin_text, "DESIGN_DOC_ID")
     origin_kind, _ = h27_resolved_discriminator(origin_text, "DESIGN_RECORD_KIND")
     if origin_kind is None:
-        return [f"{consumer_name}: foreign origin {origin_name} requires DESIGN_RECORD_KIND{H27_LOCK_RULE}"]
+        return [_structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign origin {origin_name} requires DESIGN_RECORD_KIND{H27_LOCK_RULE}", operands=(origin_name,))]
     if origin_role in {"master-reviewer", "domain-reviewer"}:
         return [
-            f"{consumer_name}: foreign {origin_kind} may not originate from reviewer seat {origin_role!r} "
-            f"in PHASE {origin_phase}{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign {origin_kind} may not originate from reviewer seat {origin_role!r} "
+            f"in PHASE {origin_phase}{H27_LOCK_RULE}", operands=(origin_name,))
         ]
     if origin_kind == "design-doc" and not (
         origin_role in {"master-planner", "domain-planner"}
         and origin_phase == "DESIGN" and origin_authority == "design-only"
     ):
         return [
-            f"{consumer_name}: foreign design-doc origin {origin_name} must be planner-seat PHASE DESIGN "
-            f"with AUTHORITY: design-only{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign design-doc origin {origin_name} must be planner-seat PHASE DESIGN "
+            f"with AUTHORITY: design-only{H27_LOCK_RULE}", operands=(origin_name,))
         ]
     if origin_kind == "audit-record" and not (
         origin_role in {"master-planner", "domain-planner"}
         and origin_phase == "AUDIT" and origin_authority in {"review-only", "report-only"}
     ):
         return [
-            f"{consumer_name}: foreign audit-record origin {origin_name} must be planner-seat PHASE AUDIT "
-            f"with AUTHORITY: review-only or report-only{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign audit-record origin {origin_name} must be planner-seat PHASE AUDIT "
+            f"with AUTHORITY: review-only or report-only{H27_LOCK_RULE}", operands=(origin_name,))
         ]
     if origin_kind not in {"design-doc", "audit-record"} or origin_doc != lock_id or not origin_id:
-        return [f"{consumer_name}: foreign origin {origin_name} does not resolve lock identity {lock_id!r}{H27_LOCK_RULE}"]
+        return [_structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign origin {origin_name} does not resolve lock identity {lock_id!r}{H27_LOCK_RULE}", operands=(origin_name,))]
 
     review_candidates = []
     for item in phases:
@@ -2355,14 +2401,14 @@ def h27_foreign_lock_errors(
         review_candidates.append(item)
     if not review_candidates:
         return [
-            f"{consumer_name}: foreign DESIGN_LOCK_ID {lock_id!r} has no earlier DESIGN-REVIEW parented "
-            f"to latest origin {origin_name}{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign DESIGN_LOCK_ID {lock_id!r} has no earlier DESIGN-REVIEW parented "
+            f"to latest origin {origin_name}{H27_LOCK_RULE}", operands=(origin_name,))
         ]
     latest_reviews = h27_same_position_latest(review_candidates)
     if len(latest_reviews) != 1:
         return [
-            f"{consumer_name}: latest origin {origin_name} has {len(latest_reviews)} same-position latest "
-            f"DESIGN-REVIEW candidates; lock resolution fails closed{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: latest origin {origin_name} has {len(latest_reviews)} same-position latest "
+            f"DESIGN-REVIEW candidates; lock resolution fails closed{H27_LOCK_RULE}", operands=(origin_name,))
         ]
     review = latest_reviews[0]
     review_path, _review_order, _review_phase, _review_fields, review_text = review
@@ -2374,8 +2420,8 @@ def h27_foreign_lock_errors(
         _value, conflict = h27_resolved_discriminator(review_text, key)
         if conflict:
             return [
-                f"{consumer_name}: foreign approval {review_name} has conflicting {key} occurrences; "
-                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}"
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} has conflicting {key} occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}", operands=(review_name, origin_name,))
             ]
 
     review_from = h27_single_from(review_text)
@@ -2383,31 +2429,31 @@ def h27_foreign_lock_errors(
     expected_review_from = same_owner_addr(owner, expected_review_role)
     if normalized_addr(review_from) != expected_review_from:
         return [
-            f"{consumer_name}: foreign approval {review_name} must be FROM {expected_review_from}, "
-            f"the same-owner tier reviewer{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} must be FROM {expected_review_from}, "
+            f"the same-owner tier reviewer{H27_LOCK_RULE}", operands=(review_name, origin_name,))
         ]
     review_kind, _ = h27_resolved_discriminator(review_text, "DESIGN_RECORD_KIND")
     if review_kind is None:
         return [
-            f"{consumer_name}: foreign approval {review_name} requires DESIGN_RECORD_KIND equal to "
-            f"origin kind {origin_kind!r}{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} requires DESIGN_RECORD_KIND equal to "
+            f"origin kind {origin_kind!r}{H27_LOCK_RULE}", operands=(review_name, origin_name,))
         ]
     if review_kind != origin_kind:
         return [
-            f"{consumer_name}: foreign approval {review_name} DESIGN_RECORD_KIND {review_kind!r} does not "
-            f"equal origin kind {origin_kind!r}{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} DESIGN_RECORD_KIND {review_kind!r} does not "
+            f"equal origin kind {origin_kind!r}{H27_LOCK_RULE}", operands=(review_name, origin_name,))
         ]
     review_verdict, _ = h27_resolved_discriminator(review_text, "DESIGN_REVIEW_VERDICT")
     if review_verdict != "approve":
         return [
-            f"{consumer_name}: latest foreign approval {review_name} requires DESIGN_REVIEW_VERDICT: approve; "
-            f"got {review_verdict!r}{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: latest foreign approval {review_name} requires DESIGN_REVIEW_VERDICT: approve; "
+            f"got {review_verdict!r}{H27_LOCK_RULE}", operands=(review_name, origin_name,))
         ]
     consumer_kind, _ = h27_resolved_discriminator(consumer_text, "DESIGN_RECORD_KIND")
     if consumer_kind is not None and consumer_kind != origin_kind:
         return [
-            f"{consumer_name}: consumer DESIGN_RECORD_KIND {consumer_kind!r} does not equal foreign origin "
-            f"kind {origin_kind!r}{H27_LOCK_RULE}"
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: consumer DESIGN_RECORD_KIND {consumer_kind!r} does not equal foreign origin "
+            f"kind {origin_kind!r}{H27_LOCK_RULE}", operands=(origin_name, review_name,))
         ]
     return []
 
@@ -2415,7 +2461,7 @@ def h27_foreign_lock_errors(
 def h27_lock_lifecycle_precompute(root: Path, phases):
     """Precompute every consumer route and all foreign-branch diagnostics."""
     routes: Dict[Path, str] = {}
-    errors: List[str] = []
+    errors: List[Finding] = []
     for consumer in phases:
         consumer_path, consumer_order, _phase, _fields, consumer_text = consumer
         lock_values = h27_occurrences(consumer_text, "DESIGN_LOCK_ID")
@@ -2428,7 +2474,7 @@ def h27_lock_lifecycle_precompute(root: Path, phases):
             if conflict:
                 consumer_conflict = True
                 if not h27_has_foreign_from_occurrence(consumer_text):
-                    errors.append(f"{consumer_name}: {conflict}")
+                    errors.append(_structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: {conflict}", operands=()))
         if consumer_conflict:
             routes[consumer_path] = "refuse"
             continue
@@ -2441,19 +2487,19 @@ def h27_lock_lifecycle_precompute(root: Path, phases):
         routes[consumer_path] = route
         if refusal == "collision":
             errors.append(
-                f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to both pair and master/domain origin "
-                f"groups; lock routing fails closed{H27_LOCK_RULE}"
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to both pair and master/domain origin "
+                f"groups; lock routing fails closed{H27_LOCK_RULE}", operands=())
             )
         elif refusal == "multiple-foreign":
             owner_count = len({from_owner(h27_single_from(item[4])) for item in origins if h27_tier_classification(h27_single_from(item[4])) == "foreign"})
             errors.append(
-                f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to {owner_count} master/domain owner "
-                f"groups; lock routing fails closed{H27_LOCK_RULE}"
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to {owner_count} master/domain owner "
+                f"groups; lock routing fails closed{H27_LOCK_RULE}", operands=())
             )
         elif refusal == "master-no-origin":
             errors.append(
-                f"{consumer_name}: master/domain-seat consumer DESIGN_LOCK_ID {lock_id!r} has no resolvable "
-                f"earlier master/domain origin{H27_LOCK_RULE}"
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: master/domain-seat consumer DESIGN_LOCK_ID {lock_id!r} has no resolvable "
+                f"earlier master/domain origin{H27_LOCK_RULE}", operands=())
             )
         elif refusal == "origin-conflict":
             conflicted_origin = next(
@@ -2462,17 +2508,17 @@ def h27_lock_lifecycle_precompute(root: Path, phases):
             origin_name = conflicted_origin[0].relative_to(root)
             origin_label = "foreign origin" if h27_has_foreign_from_occurrence(conflicted_origin[4]) else "origin"
             errors.append(
-                f"{consumer_name}: {origin_label} {origin_name} has conflicting FROM occurrences; "
-                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}"
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: {origin_label} {origin_name} has conflicting FROM occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}", operands=(origin_name,))
             )
         elif route == "foreign":
             errors.extend(h27_foreign_lock_errors(root, consumer, lock_id, owner, foreign_origins, phases))
     return routes, errors
 
 
-def h27_commission_precompute(root: Path, phases) -> List[str]:
+def h27_commission_precompute(root: Path, phases) -> List[Finding]:
     """Validate commission carriers, exact ancestry, and authorization lifetime."""
-    errors: List[str] = []
+    errors: List[Finding] = []
 
     dispatch_holders: Dict[str, List[object]] = {}
     for phase_item in phases:
@@ -2515,21 +2561,21 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         )
         if not candidates:
             errors.append(
-                f"{relname(consumer)}: {edge} {parent_id!r} does not resolve to an earlier relay{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: {edge} {parent_id!r} does not resolve to an earlier relay{site_rule}", operands=())
             )
             return None
         latest = h27_same_position_latest(candidates)
         if len(latest) != 1:
             errors.append(
-                f"{relname(consumer)}: {edge} {parent_id!r} has {len(latest)} same-position latest holders; "
-                f"ambiguity fails closed{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: {edge} {parent_id!r} has {len(latest)} same-position latest holders; "
+                f"ambiguity fails closed{site_rule}", operands=())
             )
             return None
         selected = latest[0]
         if h27_resolved_discriminator(selected[4], "DISPATCH_ID")[1]:
             errors.append(
-                f"{relname(consumer)}: selected {edge} relay {relname(selected)} has conflicting DISPATCH_ID "
-                f"occurrences; ancestry resolution refuses first-value resolution{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected {edge} relay {relname(selected)} has conflicting DISPATCH_ID "
+                f"occurrences; ancestry resolution refuses first-value resolution{site_rule}", operands=(relname(selected),))
             )
             return None
         return selected
@@ -2541,8 +2587,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         latest = h27_same_position_latest(candidates)
         if len(latest) != 1:
             errors.append(
-                f"{relname(consumer)}: commission {h27_resolved_discriminator(consumer[4], 'COMMISSION_ID')[0]!r} "
-                f"has {len(latest)} {label} at the latest order position; ambiguity fails closed{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: commission {h27_resolved_discriminator(consumer[4], 'COMMISSION_ID')[0]!r} "
+                f"has {len(latest)} {label} at the latest order position; ambiguity fails closed{site_rule}", operands=())
             )
             return False
         return latest[0]
@@ -2578,8 +2624,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         conflict = selected_conflict(item, keys)
         if conflict:
             errors.append(
-                f"{relname(consumer)}: selected {label} {relname(item)} has conflicting {conflict} occurrences; "
-                f"ancestry resolution refuses first-value resolution{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected {label} {relname(item)} has conflicting {conflict} occurrences; "
+                f"ancestry resolution refuses first-value resolution{site_rule}", operands=(relname(item),))
             )
             return True
         return False
@@ -2596,8 +2642,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             return False
         if parent_id in {None, ""}:
             errors.append(
-                f"{relname(consumer)}: selected charter revision {relname(charter)} lacks a usable "
-                f"PARENT_DISPATCH_ID{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected charter revision {relname(charter)} lacks a usable "
+                f"PARENT_DISPATCH_ID{site_rule}", operands=(relname(charter),))
             )
             return False
         parent = resolve_ancestry(parent_id, charter[1], consumer, "charter parent", site_rule)
@@ -2605,8 +2651,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             return False
         if parent is not authorization:
             errors.append(
-                f"{relname(consumer)}: charter parent {parent_id!r} resolves to {relname(parent)}, which is not "
-                f"the reselected stage-(a) authorization{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: charter parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                f"the reselected stage-(a) authorization{site_rule}", operands=(relname(parent),))
             )
             return False
         return True
@@ -2619,8 +2665,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         )
         if conflict:
             errors.append(
-                f"{relname(consumer)}: selected authorization-universe member {relname(selected)} has conflicting "
-                f"{conflict} occurrences; universe selection refuses first-value resolution{H27_COMMISSION_AUTH_RULE}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected authorization-universe member {relname(selected)} has conflicting "
+                f"{conflict} occurrences; universe selection refuses first-value resolution{H27_COMMISSION_AUTH_RULE}", operands=(relname(selected),))
             )
             return True
         return False
@@ -2630,21 +2676,21 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         selected, tied = latest_at_one_position(candidates)
         if not candidates:
             errors.append(
-                f"{relname(consumer)}: commission {commission_id!r} has no earlier authorization-universe member{site_rule}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: commission {commission_id!r} has no earlier authorization-universe member{site_rule}", operands=())
             )
             return None
         if selected is None:
             errors.append(
-                f"{relname(consumer)}: commission {commission_id!r} has {tied} authorization-universe candidates "
-                f"at the latest order position; ambiguity fails closed{H27_COMMISSION_AUTH_RULE}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: commission {commission_id!r} has {tied} authorization-universe candidates "
+                f"at the latest order position; ambiguity fails closed{H27_COMMISSION_AUTH_RULE}", operands=())
             )
             return None
         if selected_authorization_conflict(selected, consumer):
             return None
         if not h27_commission_auth_shape_ok(selected):
             errors.append(
-                f"{relname(consumer)}: latest authorization-universe member {relname(selected)} fails stage-(a) "
-                f"shape; marker-bearing malformed authorization shadows and fails{H27_COMMISSION_AUTH_RULE}"
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: latest authorization-universe member {relname(selected)} fails stage-(a) "
+                f"shape; marker-bearing malformed authorization shadows and fails{H27_COMMISSION_AUTH_RULE}", operands=(relname(selected),))
             )
             return None
         return selected
@@ -2668,7 +2714,7 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             if conflict:
                 conflicted = True
                 if not is_master:
-                    errors.append(f"{relname(item)}: {conflict}")
+                    errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: {conflict}", operands=()))
         return conflicted
 
     for item in phases:
@@ -2699,9 +2745,9 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         # authorization carrier produces the both-markers case.
         if h27_direct_path_has_commission_carrier(from_role_value, dda_presence, carrier_presence):
             errors.append(
-                f"{relname(item)}: a direct delegation grant carries commission gating carriers; "
+                _structural('lineage.commission', relname(item), f"{relname(item)}: a direct delegation grant carries commission gating carriers; "
                 "direct path must carry none of the five"
-                f"{H27_COMMISSION_RULE}"
+                f"{H27_COMMISSION_RULE}", operands=())
             )
             continue
 
@@ -2713,8 +2759,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             and not h27_commission_id_grammatical(commission_id)
         ):
             errors.append(
-                f"{relname(item)}: commission machine engaged with non-grammatical COMMISSION_ID "
-                f"{commission_id!r}; expected [a-z0-9][a-z0-9-]*{H27_COMMISSION_RULE}"
+                _structural('lineage.commission', relname(item), f"{relname(item)}: commission machine engaged with non-grammatical COMMISSION_ID "
+                f"{commission_id!r}; expected [a-z0-9][a-z0-9-]*{H27_COMMISSION_RULE}", operands=())
             )
             continue
 
@@ -2729,8 +2775,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             and charter_doc_id not in {None, f"CH-{commission_id}"}
         ):
             errors.append(
-                f"{relname(item)}: CHARTER_DOC_ID {charter_doc_id!r} must equal "
-                f"{'CH-' + commission_id!r}{H27_COMMISSION_RULE}"
+                _structural('lineage.commission', relname(item), f"{relname(item)}: CHARTER_DOC_ID {charter_doc_id!r} must equal "
+                f"{'CH-' + commission_id!r}{H27_COMMISSION_RULE}", operands=())
             )
             continue
 
@@ -2741,10 +2787,10 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if not h27_commission_auth_shape_ok(item):
                 errors.append(
-                    f"{relname(item)}: relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape "
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape "
                     "(literal yes, direct-authority FROM, PHASE PLAN, AUTHORITY plan-only, TO exactly one "
                     "master-planner, complete equality surface, pair-planner COMMISSION_TO)"
-                    f"{H27_COMMISSION_AUTH_RULE}"
+                    f"{H27_COMMISSION_AUTH_RULE}", operands=())
                 )
             continue
 
@@ -2752,15 +2798,15 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         if is_receipt and not h27_commission_surface_complete(text):
             if add_nonmaster_conflicts(item):
                 continue
-            errors.append(f"{relname(item)}: commissioned pair receipt has incomplete equality surface{H27_COMMISSION_RECEIPT_RULE}")
+            errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: commissioned pair receipt has incomplete equality surface{H27_COMMISSION_RECEIPT_RULE}", operands=()))
             continue
 
         if add_nonmaster_conflicts(item):
             continue
         if commission_id in {None, ""}:
             errors.append(
-                f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
-                f"{H27_COMMISSION_RULE}"
+                _structural('lineage.commission', relname(item), f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
+                f"{H27_COMMISSION_RULE}", operands=())
             )
             continue
 
@@ -2769,16 +2815,16 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         design_doc_id, _ = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
         if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id != charter_doc_id:
             errors.append(
-                f"{relname(item)}: charter DESIGN_DOC_ID {design_doc_id!r} must equal "
-                f"CHARTER_DOC_ID {charter_doc_id!r}{H27_COMMISSION_CHARTER_RULE}"
+                _structural('lineage.commission', relname(item), f"{relname(item)}: charter DESIGN_DOC_ID {design_doc_id!r} must equal "
+                f"CHARTER_DOC_ID {charter_doc_id!r}{H27_COMMISSION_CHARTER_RULE}", operands=())
             )
             continue
         if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id == charter_doc_id:
             if not h27_commission_charter_shape_ok(item):
                 errors.append(
-                    f"{relname(item)}: charter fails stage-(b) shape; requires master-planner PHASE DESIGN, "
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter fails stage-(b) shape; requires master-planner PHASE DESIGN, "
                     "AUTHORITY design-only, matching document identity, and DESIGN_RECORD_KIND design-doc"
-                    f"{H27_COMMISSION_CHARTER_RULE}"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             authorization = authorization_for(item, commission_id, H27_COMMISSION_CHARTER_RULE)
@@ -2787,8 +2833,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
             if parent_id in {None, ""}:
                 errors.append(
-                    f"{relname(item)}: charter PARENT_DISPATCH_ID is mandatory and must resolve the selected "
-                    f"authorization{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter PARENT_DISPATCH_ID is mandatory and must resolve the selected "
+                    f"authorization{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             parent = resolve_ancestry(parent_id, order, item, "charter parent", H27_COMMISSION_CHARTER_RULE)
@@ -2798,27 +2844,27 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 selected_id, _ = h27_resolved_discriminator(authorization[4], "DISPATCH_ID")
                 if h27_commission_auth_shape_ok(parent):
                     errors.append(
-                        f"{relname(item)}: charter parent {parent_id!r} does not equal selected authorization "
-                        f"{selected_id!r}{H27_COMMISSION_CHARTER_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter parent {parent_id!r} does not equal selected authorization "
+                        f"{selected_id!r}{H27_COMMISSION_CHARTER_RULE}", operands=())
                     )
                 else:
                     errors.append(
-                        f"{relname(item)}: charter parent {parent_id!r} resolves to {relname(parent)}, which is not "
-                        f"the selected stage-(a) authorization{H27_COMMISSION_CHARTER_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                        f"the selected stage-(a) authorization{H27_COMMISSION_CHARTER_RULE}", operands=(relname(parent),))
                     )
                 continue
             auth_to, _ = h27_resolved_discriminator(authorization[4], "TO")
             auth_to_addrs = split_addresses(auth_to)
             if len(auth_to_addrs) != 1 or normalized_addr(auth_to_addrs[0]) != normalized_addr(from_addr):
                 errors.append(
-                    f"{relname(item)}: charter FROM must equal the master-planner address selected authorization TO"
-                    f"{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter FROM must equal the master-planner address selected authorization TO"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             if h27_commission_surface(text) != h27_commission_surface(authorization[4]):
                 errors.append(
-                    f"{relname(item)}: charter equality surface is not byte-equal to the selected authorization"
-                    f"{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter equality surface is not byte-equal to the selected authorization"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
             continue
 
@@ -2827,8 +2873,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         if phase == "DESIGN-REVIEW" and from_role_value == "master-reviewer" and design_doc_id not in {None, ""}:
             if not h27_commission_approval_shape_ok(item):
                 errors.append(
-                    f"{relname(item)}: charter approval requires DESIGN_RECORD_KIND: design-doc and a "
-                    f"grammatical DESIGN_REVIEW_VERDICT{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval requires DESIGN_RECORD_KIND: design-doc and a "
+                    f"grammatical DESIGN_REVIEW_VERDICT{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             charter = latest_stage(
@@ -2838,13 +2884,13 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             if charter is False:
                 continue
             if charter is None:
-                errors.append(f"{relname(item)}: charter approval has no earlier charter revision{H27_COMMISSION_CHARTER_RULE}")
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: charter approval has no earlier charter revision{H27_COMMISSION_CHARTER_RULE}", operands=()))
                 continue
             parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
             if parent_id in {None, ""}:
                 errors.append(
-                    f"{relname(item)}: charter approval PARENT_DISPATCH_ID is mandatory and must resolve the latest "
-                    f"charter revision{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval PARENT_DISPATCH_ID is mandatory and must resolve the latest "
+                    f"charter revision{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             parent = resolve_ancestry(parent_id, order, item, "charter approval parent", H27_COMMISSION_CHARTER_RULE)
@@ -2854,13 +2900,13 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 charter_id_value, _ = h27_resolved_discriminator(charter[4], "DISPATCH_ID")
                 if h27_commission_charter_shape_ok(parent):
                     errors.append(
-                        f"{relname(item)}: charter approval parent {parent_id!r} does not equal latest charter "
-                        f"revision {charter_id_value!r}{H27_COMMISSION_CHARTER_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval parent {parent_id!r} does not equal latest charter "
+                        f"revision {charter_id_value!r}{H27_COMMISSION_CHARTER_RULE}", operands=())
                     )
                 else:
                     errors.append(
-                        f"{relname(item)}: charter approval parent {parent_id!r} resolves to {relname(parent)}, "
-                        f"which is not the latest charter revision{H27_COMMISSION_CHARTER_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval parent {parent_id!r} resolves to {relname(parent)}, "
+                        f"which is not the latest charter revision{H27_COMMISSION_CHARTER_RULE}", operands=(relname(parent),))
                     )
                 continue
             charter_conflicted = stage_conflict(
@@ -2874,20 +2920,20 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if not h27_commission_charter_shape_ok(charter):
                 errors.append(
-                    f"{relname(item)}: charter approval parent is not a valid stage-(b) charter revision"
-                    f"{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval parent is not a valid stage-(b) charter revision"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             if not same_owner_reviewer(item, charter):
                 charter_owner = from_owner(h27_single_from(charter[4]))
                 errors.append(
-                    f"{relname(item)}: charter approval must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
-                    f"the charter owner's tier reviewer{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
                 continue
             charter_id, conflict = h27_resolved_discriminator(charter[4], "COMMISSION_ID")
             if conflict or charter_id in {None, ""}:
-                errors.append(f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_CHARTER_RULE}")
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_CHARTER_RULE}", operands=()))
                 continue
             authorization = authorization_for(item, charter_id, H27_COMMISSION_CHARTER_RULE)
             if authorization is None:
@@ -2901,8 +2947,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             }
             if len(surfaces) != 1:
                 errors.append(
-                    f"{relname(item)}: approval equality surface is not byte-equal to the selected authorization "
-                    f"and charter revision{H27_COMMISSION_CHARTER_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: approval equality surface is not byte-equal to the selected authorization "
+                    f"and charter revision{H27_COMMISSION_CHARTER_RULE}", operands=())
                 )
             continue
 
@@ -2912,24 +2958,24 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             marker, _ = h27_resolved_discriminator(text, "DELEGATED_DISPATCH_AUTHORITY")
             if marker != "yes":
                 errors.append(
-                    f"{relname(item)}: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; "
-                    f"got {marker!r}{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; "
+                    f"got {marker!r}{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
                 continue
             commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
             if not h27_pair_planner_address(commission_to):
                 errors.append(
-                    f"{relname(item)}: COMMISSION_TO {commission_to!r} is not exactly one non-special "
-                    f"pair-planner address{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: COMMISSION_TO {commission_to!r} is not exactly one non-special "
+                    f"pair-planner address{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
                 continue
             to_raw, _ = h27_resolved_discriminator(text, "TO")
             to_addrs = split_addresses(to_raw)
             if len(to_addrs) != 1 or normalized_addr(to_addrs[0]) != normalized_addr(commission_to):
-                errors.append(f"{relname(item)}: grant TO must be exactly the COMMISSION_TO address{H27_COMMISSION_GRANT_RULE}")
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: grant TO must be exactly the COMMISSION_TO address{H27_COMMISSION_GRANT_RULE}", operands=()))
                 continue
             if not h27_commission_grant_shape_ok(item):
-                errors.append(f"{relname(item)}: master-planner grant fails stage-(c) shape{H27_COMMISSION_GRANT_RULE}")
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: master-planner grant fails stage-(c) shape{H27_COMMISSION_GRANT_RULE}", operands=()))
                 continue
             charter = latest_stage(
                 charter_candidates(charter_doc_id, commission_id, order), item,
@@ -2938,7 +2984,7 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             if charter is False:
                 continue
             if charter is None:
-                errors.append(f"{relname(item)}: grant lacks an earlier charter revision{H27_COMMISSION_GRANT_RULE}")
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: grant lacks an earlier charter revision{H27_COMMISSION_GRANT_RULE}", operands=()))
                 continue
             charter_conflicted = stage_conflict(
                 charter,
@@ -2961,8 +3007,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if not h27_commission_charter_shape_ok(charter):
                 errors.append(
-                    f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
-                    f"{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
+                    f"{H27_COMMISSION_GRANT_RULE}", operands=(relname(charter),))
                 )
                 continue
             approval = latest_stage(
@@ -2973,8 +3019,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if approval is None:
                 errors.append(
-                    f"{relname(item)}: grant has no earlier charter review for the latest charter revision"
-                    f"{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant has no earlier charter review for the latest charter revision"
+                    f"{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
                 continue
             approval_conflicted = stage_conflict(
@@ -2990,24 +3036,24 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             if not h27_commission_approval_shape_ok(approval) or verdict != "approve":
                 if h27_commission_approval_shape_ok(approval):
                     errors.append(
-                        f"{relname(item)}: latest charter review {relname(approval)} requires "
-                        f"DESIGN_REVIEW_VERDICT: approve; got {verdict!r}{H27_COMMISSION_GRANT_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: latest charter review {relname(approval)} requires "
+                        f"DESIGN_REVIEW_VERDICT: approve; got {verdict!r}{H27_COMMISSION_GRANT_RULE}", operands=(relname(approval),))
                     )
                 else:
-                    errors.append(f"{relname(item)}: grant parent is not a valid charter review{H27_COMMISSION_GRANT_RULE}")
+                    errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: grant parent is not a valid charter review{H27_COMMISSION_GRANT_RULE}", operands=()))
                 continue
             if not same_owner_reviewer(approval, charter):
                 charter_owner = from_owner(h27_single_from(charter[4]))
                 errors.append(
-                    f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
-                    f"the charter owner's tier reviewer{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
                 continue
             parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
             if parent_id in {None, ""}:
                 errors.append(
-                    f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving "
-                    f"review{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving "
+                    f"review{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
                 continue
             parent = resolve_ancestry(parent_id, order, item, "grant parent", H27_COMMISSION_GRANT_RULE)
@@ -3017,20 +3063,20 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 approval_id, _ = h27_resolved_discriminator(approval[4], "DISPATCH_ID")
                 if h27_commission_approval_shape_ok(parent):
                     errors.append(
-                        f"{relname(item)}: grant parent {parent_id!r} does not equal latest charter review "
-                        f"{approval_id!r}{H27_COMMISSION_GRANT_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: grant parent {parent_id!r} does not equal latest charter review "
+                        f"{approval_id!r}{H27_COMMISSION_GRANT_RULE}", operands=())
                     )
                 else:
                     errors.append(
-                        f"{relname(item)}: grant parent {parent_id!r} resolves to {relname(parent)}, which is not "
-                        f"the latest charter review{H27_COMMISSION_GRANT_RULE}"
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: grant parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                        f"the latest charter review{H27_COMMISSION_GRANT_RULE}", operands=(relname(parent),))
                     )
                 continue
             approval_parent_id, _ = h27_resolved_discriminator(approval[4], "PARENT_DISPATCH_ID")
             if approval_parent_id in {None, ""}:
                 errors.append(
-                    f"{relname(item)}: selected charter review {relname(approval)} lacks a usable "
-                    f"PARENT_DISPATCH_ID{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} lacks a usable "
+                    f"PARENT_DISPATCH_ID{H27_COMMISSION_GRANT_RULE}", operands=(relname(approval),))
                 )
                 continue
             approval_parent = resolve_ancestry(
@@ -3040,13 +3086,13 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if approval_parent is not charter:
                 errors.append(
-                    f"{relname(item)}: approval parent {approval_parent_id!r} resolves to {relname(approval_parent)}, "
-                    f"which is not the charter revision{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: approval parent {approval_parent_id!r} resolves to {relname(approval_parent)}, "
+                    f"which is not the charter revision{H27_COMMISSION_GRANT_RULE}", operands=(relname(approval_parent),))
                 )
                 continue
             charter_id, conflict = h27_resolved_discriminator(charter[4], "COMMISSION_ID")
             if conflict or charter_id in {None, ""}:
-                errors.append(f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_GRANT_RULE}")
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_GRANT_RULE}", operands=()))
                 continue
             authorization = authorization_for(item, charter_id, H27_COMMISSION_GRANT_RULE)
             if authorization is None:
@@ -3057,8 +3103,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             auth_to_addrs = split_addresses(auth_to)
             if len(auth_to_addrs) != 1 or normalized_addr(auth_to_addrs[0]) != normalized_addr(from_addr):
                 errors.append(
-                    f"{relname(item)}: grant FROM must equal the master-planner address selected authorization TO"
-                    f"{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant FROM must equal the master-planner address selected authorization TO"
+                    f"{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
                 continue
             surfaces = {
@@ -3067,8 +3113,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             }
             if len(surfaces) != 1:
                 errors.append(
-                    f"{relname(item)}: grant equality surface is not byte-equal across selected authorization, "
-                    f"charter revision, approval, and grant{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant equality surface is not byte-equal across selected authorization, "
+                    f"charter revision, approval, and grant{H27_COMMISSION_GRANT_RULE}", operands=())
                 )
             continue
 
@@ -3076,29 +3122,29 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
         if is_receipt:
             if h27_receipt_self_grants(text, is_receipt):
                 errors.append(
-                    f"{relname(item)}: commissioned pair receipt carries DELEGATED_DISPATCH_AUTHORITY: yes; "
-                    f"self-grant is prohibited{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commissioned pair receipt carries DELEGATED_DISPATCH_AUTHORITY: yes; "
+                    f"self-grant is prohibited{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
             if normalized_addr(from_addr) != normalized_addr(commission_to):
                 errors.append(
-                    f"{relname(item)}: commissioned pair receipt FROM {from_addr!r} does not equal "
-                    f"COMMISSION_TO {commission_to!r}{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commissioned pair receipt FROM {from_addr!r} does not equal "
+                    f"COMMISSION_TO {commission_to!r}{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             candidates = marker_universe("DELEGATED_DISPATCH_AUTHORITY", commission_id, order)
             selected, tied = latest_at_one_position(candidates)
             if not candidates:
                 errors.append(
-                    f"{relname(item)}: commission {commission_id!r} has no earlier grant-universe member"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commission {commission_id!r} has no earlier grant-universe member"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             if selected is None:
                 errors.append(
-                    f"{relname(item)}: commission {commission_id!r} has {tied} grant-universe candidates at the "
-                    f"latest order position; ambiguity fails closed{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commission {commission_id!r} has {tied} grant-universe candidates at the "
+                    f"latest order position; ambiguity fails closed{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             conflict = selected_conflict(
@@ -3107,8 +3153,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             )
             if conflict:
                 errors.append(
-                    f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting {conflict} "
-                    f"occurrences; universe selection refuses first-value resolution{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting {conflict} "
+                    f"occurrences; universe selection refuses first-value resolution{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(selected),))
                 )
                 eager_charter, _tied = latest_at_one_position(
                     charter_candidates(charter_doc_id, commission_id, selected[1])
@@ -3134,14 +3180,14 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if not h27_commission_grant_shape_ok(selected):
                 errors.append(
-                    f"{relname(item)}: latest grant-universe member {relname(selected)} fails stage-(c) shape; "
-                    f"marker-bearing malformed grant shadows and fails{H27_COMMISSION_GRANT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: latest grant-universe member {relname(selected)} fails stage-(c) shape; "
+                    f"marker-bearing malformed grant shadows and fails{H27_COMMISSION_GRANT_RULE}", operands=(relname(selected),))
                 )
                 continue
             if h27_commission_surface(text) != h27_commission_surface(selected[4]):
                 errors.append(
-                    f"{relname(item)}: latest grant-universe member is not targeted to this pair planner with a "
-                    f"byte-equal surface{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: latest grant-universe member is not targeted to this pair planner with a "
+                    f"byte-equal surface{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             grant_parent_id, grant_parent_conflict = h27_resolved_discriminator(
@@ -3149,15 +3195,15 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             )
             if grant_parent_conflict:
                 errors.append(
-                    f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting "
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting "
                     f"PARENT_DISPATCH_ID occurrences; ancestry resolution refuses first-value resolution"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(selected),))
                 )
                 continue
             if grant_parent_id in {None, ""}:
                 errors.append(
-                    f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve an approving review"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve an approving review"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             charter = latest_stage(
@@ -3168,8 +3214,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if charter is None:
                 errors.append(
-                    f"{relname(item)}: selected latest charter revision <none> fails stage-(b) shape"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected latest charter revision <none> fails stage-(b) shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             charter_conflicted = stage_conflict(
@@ -3193,8 +3239,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if not h27_commission_charter_shape_ok(charter):
                 errors.append(
-                    f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(charter),))
                 )
                 continue
             approval = latest_stage(
@@ -3205,8 +3251,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if approval is None:
                 errors.append(
-                    f"{relname(item)}: selected grant has no earlier charter review"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant has no earlier charter review"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             approval_conflicted = stage_conflict(
@@ -3220,22 +3266,22 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if not h27_commission_approval_shape_ok(approval):
                 errors.append(
-                    f"{relname(item)}: selected charter review {relname(approval)} fails stage-(b) review shape"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} fails stage-(b) review shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
                 )
                 continue
             approval_verdict, _ = h27_resolved_discriminator(approval[4], "DESIGN_REVIEW_VERDICT")
             if approval_verdict != "approve":
                 errors.append(
-                    f"{relname(item)}: selected charter review {relname(approval)} requires "
-                    f"DESIGN_REVIEW_VERDICT: approve; got {approval_verdict!r}{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} requires "
+                    f"DESIGN_REVIEW_VERDICT: approve; got {approval_verdict!r}{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
                 )
                 continue
             if not same_owner_reviewer(approval, charter):
                 charter_owner = from_owner(h27_single_from(charter[4]))
                 errors.append(
-                    f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
-                    f"the charter owner's tier reviewer{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             grant_parent = resolve_ancestry(
@@ -3245,8 +3291,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if grant_parent is not approval:
                 errors.append(
-                    f"{relname(item)}: selected grant does not parent to the latest charter review before the grant"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant does not parent to the latest charter review before the grant"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             approval_parent_id, approval_parent_conflict = h27_resolved_discriminator(
@@ -3254,15 +3300,15 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             )
             if approval_parent_conflict:
                 errors.append(
-                    f"{relname(item)}: selected charter review {relname(approval)} has conflicting "
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} has conflicting "
                     f"PARENT_DISPATCH_ID occurrences; ancestry resolution refuses first-value resolution"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
                 )
                 continue
             if approval_parent_id in {None, ""}:
                 errors.append(
-                    f"{relname(item)}: selected charter review {relname(approval)} lacks a usable "
-                    f"PARENT_DISPATCH_ID{H27_COMMISSION_RECEIPT_RULE}"
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} lacks a usable "
+                    f"PARENT_DISPATCH_ID{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
                 )
                 continue
             approval_parent = resolve_ancestry(
@@ -3272,9 +3318,9 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
                 continue
             if approval_parent is not charter:
                 errors.append(
-                    f"{relname(item)}: approval parent {approval_parent_id!r} does not resolve to the latest "
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: approval parent {approval_parent_id!r} does not resolve to the latest "
                     f"charter revision before the review"
-                    f"{H27_COMMISSION_RECEIPT_RULE}"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
                 )
                 continue
             authorization = authorization_for(item, commission_id, H27_COMMISSION_RECEIPT_RULE)
@@ -3287,8 +3333,8 @@ def h27_commission_precompute(root: Path, phases) -> List[str]:
             continue
 
         errors.append(
-            f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
-            f"{H27_COMMISSION_RULE}"
+            _structural('lineage.commission', relname(item), f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
+            f"{H27_COMMISSION_RULE}", operands=())
         )
     return errors
 
@@ -3892,16 +3938,12 @@ def xroot_plan_gate(
     rel = f.relative_to(path)
     conflicts = xroot_field_conflicts(text, source_keys)
     if conflicts:
-        result.error(
-            f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}", check_id='lineage.lock-path', subject=str(rel), operands=())
         return True
     declaration = {key: fields.get(key, "").strip() for key in source_keys}
     missing = [key for key in source_keys if not declaration[key]]
     if missing:
-        result.error(
-            f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}", check_id='lineage.lock-path', subject=str(rel), operands=())
         return True
     locks = []
     for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
@@ -3944,11 +3986,9 @@ def xroot_plan_gate(
                         "byte", f"{key} annotation digest does not match pinned blob bytes"
                     )
     except XrootAxisError as exc:
-        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
+        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}", check_id='lineage.lock-path', subject=str(rel), operands=())
     except Exception:
-        result.error(
-            f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
-        )
+        result.error(f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}", check_id='lineage.lock-path', subject=str(rel), operands=())
     return True
 
 
@@ -3980,35 +4020,25 @@ def xroot_design_gate(
     rel = f.relative_to(path)
     role_ok, from_ok = xroot_pair_plan_carrier_shape(text)
     if not role_ok:
-        result.error(
-            f"{rel}: {xroot_error('declaration', 'declared edge carrier ROLE must be pair-Planner class')}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', 'declared edge carrier ROLE must be pair-Planner class')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
         return True
     if not from_ok:
-        result.error(
-            f"{rel}: {xroot_error('declaration', 'declared edge carrier FROM must be exactly one pair-Planner-class address')}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', 'declared edge carrier FROM must be exactly one pair-Planner-class address')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
         return True
     conflicts = xroot_field_conflicts(
         text, XROOT_REQUIRED + ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND")
     )
     if conflicts:
-        result.error(
-            f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
         return True
     missing = [key for key in XROOT_REQUIRED if not declaration[key]]
     if not declaration["DESIGN_LOCK_ID"]:
         missing.append("DESIGN_LOCK_ID")
     if missing:
-        result.error(
-            f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
         return True
     if declaration["DESIGN_RECORD_KIND"] != "design-doc":
-        result.error(
-            f"{rel}: {xroot_error('declaration', 'DESIGN_RECORD_KIND must be design-doc under a declared edge')}"
-        )
+        result.error(f"{rel}: {xroot_error('declaration', 'DESIGN_RECORD_KIND must be design-doc under a declared edge')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
         return True
     for local_f, _order, local_phase, local_fields, _local_text in phases:
         if local_f == f or local_phase != "DESIGN":
@@ -4019,18 +4049,14 @@ def xroot_design_gate(
             and len(local_from) == 1
             and from_owner(local_from[0]) == declaration["DESIGN_OWNER"]
         ):
-            result.error(
-                f"{rel}: {xroot_error('ambiguity', 'same-owner local DESIGN carries DESIGN_DOC_ID ' + declaration['DESIGN_DOC_ID'])}"
-            )
+            result.error(f"{rel}: {xroot_error('ambiguity', 'same-owner local DESIGN carries DESIGN_DOC_ID ' + declaration['DESIGN_DOC_ID'])}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
             return True
     try:
         xroot_verify(path, declaration)
     except XrootAxisError as exc:
-        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
+        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
     except Exception:
-        result.error(
-            f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}"
-        )
+        result.error(f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
     return True
 def _engine_record_finding(result: LintResult, cause: str,
                            path: str) -> None:
@@ -4481,13 +4507,13 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
 
     lock_routes, lock_lifecycle_errors = h27_lock_lifecycle_precompute(path, phases)
     for lock_lifecycle_error in lock_lifecycle_errors:
-        result.error(lock_lifecycle_error)
+        result.add_finding(lock_lifecycle_error)
 
     for receiving_seat_error in h27_receiving_seat_errors(path, phases):
-        result.error(receiving_seat_error)
+        result.add_finding(receiving_seat_error)
 
     for commission_error in h27_commission_precompute(path, phases):
-        result.error(commission_error)
+        result.add_finding(commission_error)
 
     # Design-review lineage gate. A pair-Planner PLAN that locks a
     # design-doc-backed design must parent to an approving Implementer
@@ -4521,18 +4547,18 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         kind = fields.get("DESIGN_RECORD_KIND")
 
         if design_record_kind_error_context(fields, plan_owner, phases):
-            result.error(f"{f.relative_to(path)}: DESIGN_LOCK_ID present with design-review context but DESIGN_RECORD_KIND is missing")
+            result.error(f"{f.relative_to(path)}: DESIGN_LOCK_ID present with design-review context but DESIGN_RECORD_KIND is missing", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
             continue
 
         if kind == "direct-override":
             if not is_direct_design_override(fields):
-                result.error(f"{f.relative_to(path)}: pair Planner cannot use DESIGN_RECORD_KIND: direct-override; only operator/orchestrator/orchestrator-planner authority may override design review")
+                result.error(f"{f.relative_to(path)}: pair Planner cannot use DESIGN_RECORD_KIND: direct-override; only operator/orchestrator/orchestrator-planner authority may override design review", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
             continue
 
         same_owner_designs = design_doc_items_for_owner(phases, plan_owner)
         if kind == "audit-record":
             if same_owner_designs:
-                result.error(f"{f.relative_to(path)}: DESIGN_RECORD_KIND: audit-record conflicts with observable same-owner DESIGN relay carrying DESIGN_DOC_ID")
+                result.error(f"{f.relative_to(path)}: DESIGN_RECORD_KIND: audit-record conflicts with observable same-owner DESIGN relay carrying DESIGN_DOC_ID", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
             continue
 
         if not design_review_gate_applies(fields, plan_owner, phases):
@@ -4548,44 +4574,44 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         design_candidates = [item for item in same_owner_designs if item[3].get("DESIGN_DOC_ID") == lock_id]
         earlier_designs = [item for item in design_candidates if item[1] < order]
         if not earlier_designs:
-            result.error(f"{f.relative_to(path)}: DESIGN_LOCK_ID {lock_id!r} has no earlier same-owner DESIGN relay carrying matching DESIGN_DOC_ID")
+            result.error(f"{f.relative_to(path)}: DESIGN_LOCK_ID {lock_id!r} has no earlier same-owner DESIGN relay carrying matching DESIGN_DOC_ID", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
             continue
         design_item = sorted(earlier_designs, key=lambda item: item[1])[-1]
         dp, do, dph, dfields, dtext = design_item
 
         if not fields.get("PARENT_DISPATCH_ID"):
-            result.error(f"{f.relative_to(path)}: design-doc PLAN requires PARENT_DISPATCH_ID to the approving DESIGN-REVIEW relay")
+            result.error(f"{f.relative_to(path)}: design-doc PLAN requires PARENT_DISPATCH_ID to the approving DESIGN-REVIEW relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path),))
             continue
         review_item = owner_review_by_id(fields.get("PARENT_DISPATCH_ID"), plan_owner, lock_id, order)
         if review_item is None:
-            result.error(f"{f.relative_to(path)}: design-doc PLAN parent {fields.get('PARENT_DISPATCH_ID')!r} does not resolve to a relay in this lineage")
+            result.error(f"{f.relative_to(path)}: design-doc PLAN parent {fields.get('PARENT_DISPATCH_ID')!r} does not resolve to a relay in this lineage", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path),))
             continue
         rp, ro, rph, rfields, rtext = review_item
         if ro >= order:
-            result.error(f"{f.relative_to(path)}: approving DESIGN-REVIEW parent is not earlier than the PLAN relay")
+            result.error(f"{f.relative_to(path)}: approving DESIGN-REVIEW parent is not earlier than the PLAN relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
         if rph != "DESIGN-REVIEW":
-            result.error(f"{f.relative_to(path)}: design-doc PLAN parent must be a DESIGN-REVIEW relay")
+            result.error(f"{f.relative_to(path)}: design-doc PLAN parent must be a DESIGN-REVIEW relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
         rfrom = split_addresses(rfields.get("FROM"))
         if len(rfrom) != 1 or not addr_is(rfrom[0], plan_owner, "implementer"):
-            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must be FROM {plan_owner}.implementer")
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must be FROM {plan_owner}.implementer", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
         if rfields.get("DESIGN_REVIEW_VERDICT") != "approve":
-            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve")
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
         if rfields.get("DESIGN_DOC_ID") != lock_id:
-            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}")
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
         review_parent = owner_design_by_id(rfields.get("PARENT_DISPATCH_ID"), plan_owner, lock_id, ro)
         if review_parent is None:
-            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent lacks a resolvable DESIGN parent")
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent lacks a resolvable DESIGN parent", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
             continue
         vdp, vdo, vdph, vdfields, vdtext = review_parent
         if vdo >= ro:
-            result.error(f"{f.relative_to(path)}: DESIGN parent is not earlier than the DESIGN-REVIEW relay")
+            result.error(f"{f.relative_to(path)}: DESIGN parent is not earlier than the DESIGN-REVIEW relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
         if vdph != "DESIGN":
-            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must point to a DESIGN relay")
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must point to a DESIGN relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
         vfrom = split_addresses(vdfields.get("FROM"))
         if len(vfrom) != 1 or not addr_is(vfrom[0], plan_owner, "planner"):
-            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW must review the pair Planner's DESIGN relay")
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW must review the pair Planner's DESIGN relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
         if vdfields.get("DESIGN_DOC_ID") != lock_id:
-            result.error(f"{f.relative_to(path)}: DESIGN parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}")
+            result.error(f"{f.relative_to(path)}: DESIGN parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
 
     for f, order, phase, fields, text in phases:
         clean = sanitized_text(text)
@@ -4609,10 +4635,10 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         if not dispatch_owner or dispatch_owner in SPECIAL_ADDRESS_VALUES:
             continue
         if from_owner(from_addr) != dispatch_owner:
-            result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL FROM owner does not match TO implementer owner")
+            result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL FROM owner does not match TO implementer owner", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
             continue
         if not fields.get("PARENT_DISPATCH_ID"):
-            result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL requires PARENT_DISPATCH_ID to an approving PLAN-REVIEW relay; absence is not a delegated-dispatch escape hatch")
+            result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL requires PARENT_DISPATCH_ID to an approving PLAN-REVIEW relay; absence is not a delegated-dispatch escape hatch", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
             continue
 
         did = fields.get("PARENT_DISPATCH_ID")
@@ -4627,28 +4653,24 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         )
         if review_item is None:
             if holders:
-                result.error(
-                    f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} is held by {len(holders)} relays "
+                result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} is held by {len(holders)} relays "
                     f"({', '.join(h[0].name for h in holders)}); none is an earlier PLAN-REVIEW relay "
-                    f"from {dispatch_owner}.implementer"
-                )
+                    f"from {dispatch_owner}.implementer", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
             else:
-                result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} does not resolve to a relay in this lineage")
+                result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} does not resolve to a relay in this lineage", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
             continue
         if extra_qualifying:
-            result.warn(
-                f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
+            result.warn(f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
                 f"PLAN-REVIEW parent; selected latest {review_item[0].name}; candidates: "
-                f"{', '.join(h[0].name for h in extra_qualifying)}"
-            )
+                f"{', '.join(h[0].name for h in extra_qualifying)}", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
         rp, ro, rph, rfields, rtext = review_item
         if ro >= order:
-            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {fields.get('PARENT_DISPATCH_ID')!r} is not earlier than the dispatch relay")
+            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {fields.get('PARENT_DISPATCH_ID')!r} is not earlier than the dispatch relay", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path),))
         if rph != "PLAN-REVIEW" or not plan_review_approved(rtext):
-            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve")
+            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path),))
         rfrom = split_addresses(rfields.get("FROM"))
         if len(rfrom) != 1 or not addr_is(rfrom[0], dispatch_owner, "implementer"):
-            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must be FROM {dispatch_owner}.implementer")
+            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must be FROM {dispatch_owner}.implementer", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path),))
         plan_did = rfields.get("PARENT_DISPATCH_ID")
         plan_item, holders, extra_qualifying = resolve_parent(
             by_id,
@@ -4661,30 +4683,26 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         )
         if plan_item is None:
             if holders:
-                result.error(
-                    f"{f.relative_to(path)}: PLAN-REVIEW parent {plan_did!r} is held by {len(holders)} relays "
+                result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent {plan_did!r} is held by {len(holders)} relays "
                     f"({', '.join(h[0].name for h in holders)}); none is an earlier PLAN relay "
-                    f"from {dispatch_owner}.planner"
-                )
+                    f"from {dispatch_owner}.planner", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
             else:
-                result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent")
+                result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
             continue
         if extra_qualifying:
-            result.warn(
-                f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {plan_did!r} qualify as the "
+            result.warn(f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {plan_did!r} qualify as the "
                 f"PLAN parent; selected latest {plan_item[0].name}; candidates: "
-                f"{', '.join(h[0].name for h in extra_qualifying)}"
-            )
+                f"{', '.join(h[0].name for h in extra_qualifying)}", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
         pp, po, pph, pfields, ptext = plan_item
         if po >= ro:
-            result.error(f"{f.relative_to(path)}: pair-Planner PLAN parent is not earlier than the PLAN-REVIEW relay")
+            result.error(f"{f.relative_to(path)}: pair-Planner PLAN parent is not earlier than the PLAN-REVIEW relay", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
         if pph != "PLAN":
-            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must point to a PLAN relay")
+            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must point to a PLAN relay", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
         pfrom = split_addresses(pfields.get("FROM"))
         if len(pfrom) != 1 or not addr_is(pfrom[0], dispatch_owner, "planner"):
-            result.error(f"{f.relative_to(path)}: PLAN-REVIEW must review the pair Planner's PLAN, not a CC'd orchestrator dispatch")
+            result.error(f"{f.relative_to(path)}: PLAN-REVIEW must review the pair Planner's PLAN, not a CC'd orchestrator dispatch", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
         if not any(addr_is(a, dispatch_owner, "implementer") for a in split_addresses(pfields.get("TO"))):
-            result.error(f"{f.relative_to(path)}: pair-Planner PLAN must address the Implementer in TO for review")
+            result.error(f"{f.relative_to(path)}: pair-Planner PLAN must address the Implementer in TO for review", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
 
     # Non-addressee action trap: if an IMPL report claims substantive
     # implementation actions, it must point back to the dispatch that authorized
@@ -4705,7 +4723,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
             # falls through and is caught below.
             continue
         if not fields.get("PARENT_DISPATCH_ID"):
-            result.error(f"{f.relative_to(path)}: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay")
+            result.error(f"{f.relative_to(path)}: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=())
             continue
         actor_from = split_addresses(fields.get("FROM"))
         did = fields.get("PARENT_DISPATCH_ID")
@@ -4718,29 +4736,23 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         if parent is None:
             if holders:
                 actor = actor_from[0] if len(actor_from) == 1 else fields.get("FROM", "")
-                result.error(
-                    f"{f.relative_to(path)}: IMPL report parent {did!r} is held by {len(holders)} relays "
+                result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} is held by {len(holders)} relays "
                     f"({', '.join(h[0].name for h in holders)}); none is an earlier DISPATCH IMPL relay "
-                    f"addressed to {actor}"
-                )
+                    f"addressed to {actor}", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=())
             else:
-                result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} does not resolve to a relay in this lineage")
+                result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} does not resolve to a relay in this lineage", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=())
             continue
         if len(holders) == 1 and impl_dispatch_parent_qualifies(actor_from, parent) and parent[1] >= order:
-            result.error(
-                f"{f.relative_to(path)}: IMPL report parent {did!r} is held by 1 relays "
-                f"({parent[0].name}); none is an earlier DISPATCH IMPL relay addressed to {actor_from[0]}"
-            )
+            result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} is held by 1 relays "
+                f"({parent[0].name}); none is an earlier DISPATCH IMPL relay addressed to {actor_from[0]}", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
             continue
         if extra_qualifying:
-            result.warn(
-                f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
+            result.warn(f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
                 f"DISPATCH IMPL parent; selected latest {parent[0].name}; candidates: "
-                f"{', '.join(h[0].name for h in extra_qualifying)}"
-            )
+                f"{', '.join(h[0].name for h in extra_qualifying)}", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
         pp, po, pph, pfields, ptext = parent
         if not own_line_dispatch_present(ptext):
-            result.error(f"{f.relative_to(path)}: IMPL report parent must be a DISPATCH IMPL relay")
+            result.error(f"{f.relative_to(path)}: IMPL report parent must be a DISPATCH IMPL relay", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
             continue
         parent_to = split_addresses(pfields.get("TO"))
         if len(actor_from) == 1 and len(parent_to) == 1 and not (
@@ -4749,7 +4761,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
             and address_owner(actor_from[0]) == address_owner(parent_to[0])
             and canonical_role(address_role(actor_from[0])) == canonical_role(address_role(parent_to[0]))
         ):
-            result.error(f"{f.relative_to(path)}: IMPL report FROM {actor_from[0]!r} is not the addressee of the parent DISPATCH IMPL relay")
+            result.error(f"{f.relative_to(path)}: IMPL report FROM {actor_from[0]!r} is not the addressee of the parent DISPATCH IMPL relay", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
 
     # Merge-claim visibility: report claiming a merge commit needs an earlier merge authorization.
     for f, order, phase, fields, text in phases:
@@ -4763,7 +4775,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                 for p, o, ph, fl, tx in phases
             )
             if not prior_merge_auth:
-                result.error(f"{f.relative_to(path)}: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID")
+                result.error(f"{f.relative_to(path)}: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID", check_id='lineage.merge-claim', subject=str(f.relative_to(path)), operands=())
 
     # Reconciliation-layer honest-false-row support: when a lineage declares
     # ROW_TRUTH_CHECK, an OUT->IN flip for the same path is structurally dirty
@@ -4782,14 +4794,14 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                 if key in row_state:
                     prior_val, prior_file = row_state[key]
                     if prior_val == "out" and val == "in":
-                        result.error(f"{f.relative_to(path)}: {header} flips {row_path!r} from OUT in {prior_file.relative_to(path)} to IN without a reconciliation evidence override")
+                        result.error(f"{f.relative_to(path)}: {header} flips {row_path!r} from OUT in {prior_file.relative_to(path)} to IN without a reconciliation evidence override", check_id='lineage.row-truth', subject=str(f.relative_to(path)), operands=(prior_file.relative_to(path),))
                 row_state[key] = (val, f)
 
     # Orchestrator-review visibility gate. Every orchestrator
     # authority-bearing relay in the broad SET must make the reviewer seat
     # visible by address, unless the run carries an operator-authored waiver.
     for err in orchestrator_review_gate_errors(path, phases):
-        result.error(err)
+        result.add_finding(err)
 
     # Lock references that look like paths should exist.
     for f, _ in per_file:
@@ -4811,7 +4823,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                         or (path.parent.parent / bare).exists()
                     )
                 if not found:
-                    result.error(f"{f.relative_to(path)}: {key} references missing file {bare}")
+                    result.error(f"{f.relative_to(path)}: {key} references missing file {bare}", check_id='lineage.lock-path', subject=str(f.relative_to(path)), operands=())
 
     # A5 check 1 (root mode): the GOVERNING declaration per (key, stem) —
     # latest parse-valid stamp; distinct values at an indistinguishable
@@ -4830,17 +4842,15 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         _a5values = {item[2] for item in _a5stratum}
         if len(_a5values) > 1:
             for _stamp, _a5f, _v in _a5stratum:
-                result.error(
-                    f"{_a5f.relative_to(path)}: {_a5dkey}: stem {_a5stem!r} carries {len(_a5values)} "
-                    "indistinguishable latest declarations; verification refuses"
-                )
+                result.error(f"{_a5f.relative_to(path)}: {_a5dkey}: stem {_a5stem!r} carries {len(_a5values)} "
+                    "indistinguishable latest declarations; verification refuses", check_id='lineage.governing-digest', subject=str(_a5f.relative_to(path)), operands=())
             continue
         _a5declared = next(iter(_a5values))
         _a5sub = dict((k, s) for k, _a, s in A5_LOCK_PAIRS)[_a5dkey]
         _a5errs = a5_resolve_and_compare(path, _a5dkey, _a5stem, _a5sub, _a5declared)
         for _stamp, _a5f, _v in _a5stratum:
             for _a5e in _a5errs:
-                result.error(f"{_a5f.relative_to(path)}: {_a5e}")
+                result.error(f"{_a5f.relative_to(path)}: {_a5e}", check_id='lineage.governing-digest', subject=str(_a5f.relative_to(path)), operands=())
 
     return result
 
