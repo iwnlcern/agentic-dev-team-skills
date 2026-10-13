@@ -3,6 +3,33 @@ from tools.adapters import shell_lex
 
 
 class ShellLexTests(unittest.TestCase):
+    def test_lex_fd_duplication_is_one_operator(self):
+        self.assertEqual([t for t in shell_lex.lex("x >f 2>&1") if t[2]],
+                         [(">", False, True), (">&", False, True)])
+
+    def test_lex_separated_gt_amp_stays_two_operators(self):
+        self.assertEqual([t[0] for t in shell_lex.lex("x > &1") if t[2]], [">", "&"])
+
+    def test_lex_background_ampersand_unchanged(self):
+        self.assertEqual(shell_lex.lex("x & y")[1], ("&", False, True))
+
+    def test_lex_quoted_and_escaped_dup_are_words(self):
+        for command in ("'>&'", r"\>\&"):
+            self.assertEqual(shell_lex.lex(command), [(">&", True, False)])
+
+    def test_lex_spans_projects_to_lex(self):
+        for command in ("x >f 2>&1", "x 2 >& 1", "x 'a b' c", 'K="a b" x',
+                        "a;b\nc", "echo '' # comment", r"x a\ b", "x & y"):
+            with self.subTest(command=command):
+                spans = shell_lex.lex_spans(command)
+                self.assertEqual([t[:3] for t in spans], shell_lex.lex(command))
+                self.assertTrue(all(0 <= t[3] < t[4] <= len(command) for t in spans))
+        self.assertEqual(shell_lex.lex_spans("x 2>&1"), [
+            ("x", False, False, 0, 1), ("2", False, False, 2, 3),
+            (">&", False, True, 3, 5), ("1", False, False, 5, 6)])
+        self.assertEqual(shell_lex.lex_spans("x 2 >&1")[2][3], 4)
+        self.assertIsNone(shell_lex.lex_spans("x 'oops"))
+
     def texts(self, cmd):
         return [(t, q, o) for t, q, o in shell_lex.lex(cmd)]
 
@@ -22,8 +49,7 @@ class ShellLexTests(unittest.TestCase):
                 (">", False, True),
                 ("f", False, False),
                 ("2", False, False),
-                (">", False, True),
-                ("&", False, True),
+                (">&", False, True),
                 ("1", False, False),
             ],
         )

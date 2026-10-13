@@ -1697,6 +1697,48 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
 
 
 class BindTests(TmpEnv):
+    def test_submit_ending_in_fd_duplication_parses(self):
+        for suffix in ("2>&1", ">&2", "2>&-", "1>&-"):
+            with self.subTest(suffix=suffix):
+                parsed = self.rm.parse_submit_command(
+                    "tools/relay submit d.md --key K --root R " + suffix)
+                self.assertTrue(parsed.ok)
+                self.assertEqual((parsed.key, parsed.root_operand), ("K", "R"))
+
+    def test_adjacent_fd_is_consumed_separated_number_is_argument(self):
+        p = self.rm.parse_submit_command
+        for suffix in ("2>&1", "2 >&1"):
+            self.assertTrue(p("tools/relay submit d.md " + suffix).ok)
+        self.assertIsNone(p("tools/relay submit d.md --root 2>&1").root_operand)
+        self.assertEqual(p("tools/relay submit d.md --root 2 >&1").root_operand, "2")
+        self.assertEqual(p("tools/relay submit d.md --root '2'>&1").root_operand, "2")
+
+    def test_separated_gt_amp_is_backgrounding(self):
+        self.assertEqual(self.rm.parse_submit_command(
+            "tools/relay submit d.md > &1").reason, "unsupported-syntax")
+
+    def test_dup_operand_may_follow_blanks(self):
+        self.assertTrue(self.rm.parse_submit_command("tools/relay submit d.md 2>& 1").ok)
+
+    def test_dup_with_non_fd_operand_refused(self):
+        for suffix in (">&out.txt", ">&", ">&; echo hi"):
+            self.assertEqual(self.rm.parse_submit_command(
+                "tools/relay submit d.md " + suffix).reason, "unsupported-syntax")
+
+    def test_submit_with_ampersand_redirect_refused(self):
+        for suffix in ("&>out", "&>>out"):
+            self.assertEqual(self.rm.parse_submit_command(
+                "tools/relay submit d.md " + suffix).reason, "unsupported-syntax")
+
+    def test_submit_backgrounded_refused(self):
+        self.assertEqual(self.rm.parse_submit_command(
+            "tools/relay submit d.md &").reason, "unsupported-syntax")
+
+    def test_heredoc_controls_report_unsupported_syntax(self):
+        for suffix in ("<<EOF\nx\nEOF", "<<<x"):
+            self.assertEqual(self.rm.parse_submit_command(
+                "tools/relay submit d.md " + suffix).reason, "unsupported-syntax")
+
     def setUp(self):
         super().setUp()
         write_index(self.index, row(1, frm="a.planner", to="orch.orchestrator-planner"))
@@ -2148,7 +2190,7 @@ class BindTests(TmpEnv):
                 "python3 tools/relay submit a; python3 tools/relay submit b",
                 "ambiguous-command",
             ),
-            ("python3 tools/relay submit a --key K | tail -3", "unsupported-shell"),
+            ("python3 tools/relay submit a --key K | tail -3", "unsupported-syntax"),
         ):
             with self.subTest(command=command):
                 bare = command.replace("python3 tools/relay", "tools/relay")
@@ -2196,7 +2238,7 @@ class BindTests(TmpEnv):
         )  # quoted punctuation is an operand
         self.assertEqual(
             p("ls\ncd /w && tools/relay submit d.md --key K").reason,
-            "unsupported-shell",
+            "unsupported-syntax",
         )  # non-leading cd after a newline
         self.assertTrue(p("cd /w && tools/relay submit d.md --key K").ok)
         self.assertTrue(p("RELAY_KEY=K tools/relay submit d.md").ok)
@@ -2233,18 +2275,18 @@ class BindTests(TmpEnv):
             "ambiguous-command",
         )
         self.assertEqual(
-            p("(cd /x; tools/relay submit d.md --key K)").reason, "unsupported-shell"
+            p("(cd /x; tools/relay submit d.md --key K)").reason, "unsupported-syntax"
         )
         self.assertEqual(
-            p("cat d.md | tools/relay submit - --key K").reason, "unsupported-shell"
+            p("cat d.md | tools/relay submit - --key K").reason, "unsupported-syntax"
         )
         self.assertEqual(
             p("tools/relay submit d.md --key K 2>&1 | tail -3").reason,
-            "unsupported-shell",
+            "unsupported-syntax",
         )
         self.assertEqual(
             p("echo x; cd /w && tools/relay submit d.md --key K").reason,
-            "unsupported-shell",
+            "unsupported-syntax",
         )
         self.assertEqual(
             p("tools/relay submit d.md --key K # --root R").root_operand, None
@@ -2253,7 +2295,7 @@ class BindTests(TmpEnv):
         self.assertEqual(p("tools/relay submit d.md --key K >/dev/null").ok, True)
         self.assertEqual(p("tools/relay submit d.md a=b --key K").key, "K")
         self.assertEqual(
-            p("tools/relay submit d.md --key K; echo 'a\"b").reason, "unsupported-shell"
+            p("tools/relay submit d.md --key K; echo 'a\"b").reason, "unsupported-syntax"
         )
 
     def test_quoted_assignment_key_binds_and_a_quoted_foreign_key_degrades(self):
@@ -2551,7 +2593,7 @@ class BindTests(TmpEnv):
             "subshell": (
                 f"(tools/relay submit d.md --key {self.key})",
                 self.receipt,
-                "unsupported-shell",
+                "unsupported-syntax",
             ),
             "key-mismatch": (
                 f"tools/relay submit d.md --key "
@@ -2694,7 +2736,7 @@ class BindTests(TmpEnv):
             "cat <<$'E\\x4fF'\ntools/relay submit draft.md\nEOF\n",
         ):
             with self.subTest(command=command):
-                self.assertEqual(parse(command).reason, "unsupported-shell")
+                self.assertEqual(parse(command).reason, "unsupported-syntax")
         for command in (
             "cat <<EOF\nordinary data\n",
             "cat <<'EOF\nordinary data\n",
@@ -2719,7 +2761,7 @@ class BindTests(TmpEnv):
                 self.assertEqual(self.run_bind(self.payload(command)), 0)
                 self.assertEqual(
                     self.store.load()["binding_degraded"]["reason"],
-                    "unsupported-shell",
+                    "unsupported-syntax",
                 )
 
     def test_failure_payload_is_negative_control_and_manual_rebind_works(self):

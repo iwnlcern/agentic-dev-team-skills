@@ -240,6 +240,22 @@ assert_payload_handler() {
   echo "PASS $name"
 }
 fail=0
+# B3: preserve the guard's destination classifications across lexer changes.
+assert_guard_destinations() {
+  local name="$1" command="$2" expected="$3" actual
+  actual=$(printf '%s' "$command" | python3 "$ROOT/tools/adapters/claude-code/relay-guard-destinations.py" /review)
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL $name: destination list differs" >&2
+    fail=1
+  else
+    echo "PASS $name"
+  fi
+}
+assert_guard_destinations "b3-dup-no-file" 'cmd >&2' ''
+assert_guard_destinations "b3-existing-non-fd-operand-limitation" 'cmd >& relay.md' ''
+assert_guard_destinations "b3-adjacent-fd-relay-write" 'cmd 2>&1 > relay.md' '/review/relay.md'
+assert_guard_destinations "b3-separated-number-relay-write" 'cmd 2 >&1 > relay.md' '/review/relay.md'
+assert_guard_destinations "b3-background-relay-write" 'cmd > relay.md &' '/review/relay.md'
 PATH_NORMAL="$PATH"
 spy_skills="$tmp/spy-skills"
 spy_log="$tmp/spy-invocations"

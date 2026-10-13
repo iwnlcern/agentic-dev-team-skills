@@ -21,7 +21,7 @@ shell_lex = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(shell_lex)
 
 SEPARATORS = (";", "&&", "||", "|", "&", "\n")
-REDIRECT_OPS = (">", ">>", ">|")
+REDIRECT_OPS = (">", ">>", ">|", ">&")
 DIGITS = re.compile(r"^\d+$")
 
 
@@ -35,6 +35,9 @@ def _redirection(toks, i, out):
     after it; otherwise None.
     """
     text, quoted, op = toks[i]
+    if op and text == ">&":
+        # Preserve the old >, &, operand classification, including non-fd operands.
+        return i + 2 if i + 1 < len(toks) and not toks[i + 1][2] else i + 1
     if (
         not quoted
         and not op

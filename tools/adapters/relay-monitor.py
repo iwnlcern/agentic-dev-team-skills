@@ -1282,16 +1282,42 @@ def parse_submit_command(command: str) -> SubmitParse:
     except sl.Uncertain:
         # Inspect raw command positions only when the pre-pass cannot decide.
         uncertain = True
-    tokens = sl.lex(command)
+    tokens = sl.lex_spans(command)
     malformed = tokens is None
     if malformed:
         # Close only the unfinished quoted word to inspect preceding commands.
-        tokens = sl.lex(command + "\n'")
+        tokens = sl.lex_spans(command + "\n'")
         if tokens is None:
-            tokens = sl.lex(command + '\n"')
+            tokens = sl.lex_spans(command + '\n"')
         tokens = tokens or []
+    # Remove fd-duplication redirections before interpreting submit operands.
+    # Offsets distinguish an IO number from a separate numeric argument.
+    words_with_spans = []
+    duplication_error = False
+    j = 0
+    while j < len(tokens):
+        token = tokens[j]
+        if token[2] and token[0] == ">&":
+            if words_with_spans:
+                previous = words_with_spans[-1]
+                if (not previous[1] and not previous[2]
+                        and re.fullmatch(r"[0-9]+", previous[0])
+                        and previous[4] == token[3]):
+                    words_with_spans.pop()
+            operand = tokens[j + 1] if j + 1 < len(tokens) else None
+            if (operand is None or operand[2]
+                    or re.fullmatch(r"(?:[0-9]+|-)", operand[0]) is None):
+                duplication_error = True
+                j += 1
+            else:
+                j += 2
+            continue
+        words_with_spans.append(token)
+        j += 1
+    tokens = [token[:3] for token in words_with_spans]
     unsupported = (
-        uncertain
+        duplication_error
+        or uncertain
         or malformed
         or any(op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens)
     )
@@ -1397,7 +1423,7 @@ def parse_submit_command(command: str) -> SubmitParse:
     if count == 0:
         return SubmitParse(False, "submit-near-miss" if near_miss else "no-submit")
     if unsupported:
-        return SubmitParse(False, "unsupported-shell")
+        return SubmitParse(False, "unsupported-syntax")
     if count > 1:
         return SubmitParse(False, "ambiguous-command")
     words, assigns = submit
