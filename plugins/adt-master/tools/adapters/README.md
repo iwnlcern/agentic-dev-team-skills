@@ -166,6 +166,51 @@ Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start
 State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell; the binding anchor initializes it once.
 Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` optional) bind without a hook, for hand-authored roots; `ADT_HOST` names the host explicitly.
 
+The status grammar separates follower readiness from binding observations and install identity:
+
+```text
+relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> client=<id> daemon=<id> updated=<stamp>[ miss=submit-near-miss][ last-bind=<reason>][ tiers=mixed][ identity=mismatch]
+[remedy: <one line>]
+[rebind: <one line>]
+```
+
+The six readiness words are `not-started` (no leader or live standby), `standby-only` (a live or unknown standby without a leader), `starting` (the lock holder and leader record do not yet agree), `waiting-for-binding` (a live leader without initialized binding progress), `armed` (a live leader following initialized progress), and `unavailable` (a recorded delivery fault).
+A binding observation changes neither readiness nor delivery eligibility.
+Delivery requires a binding, a usable index and cursor or fallback anchor, an addressed row beyond that position, and an available output path; the Codex drain can deliver without a follower.
+A missing cursor and fallback anchor produce `unavailable: anchor-not-found`; a completed healthy scan restores following.
+The `binding=` cell reports only the binding source.
+A new near-miss observation supplies `miss=submit-near-miss`; another new reason supplies `last-bind=<reason>`.
+Legacy miss and bind-failure keys are displayed only, with the new record taking precedence in its cell; a legacy value in the other cell can coexist.
+An identity mismatch adds `identity=mismatch` and a remedy on every reading, preserving the readiness word and delivery while filing remains subject to the engine's identity check.
+
+A command containing adjacent unquoted relay and submit words outside a heredoc body, with a receipt in its response, records an observation when it cannot bind.
+No receipt means no observation or binding change, including help, refused submits and redirected output.
+A displayed receipt or an unexecuted branch can therefore produce a suspicion even when nothing was filed; this does not bind the seat.
+The hook emits a bounded `PostToolUse` additional-context hint with exit 0 when it records a new observation.
+The three hint forms are:
+
+```text
+rebind: python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
+rebind (root inferred, check it): python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
+rebind: incomplete — supply --root <run root> --anchor <receipt path> seen=[...]
+```
+
+The complete form uses the root parsed from the command and shell-quotes every argument as needed.
+The inferred form requires exactly one candidate root with the receipt's index row and asks the operator to check it.
+The incomplete form is not runnable and never substitutes the existing binding anchor for the observed receipt.
+Hints are at most 1,024 characters; an oversized or multiline command uses the incomplete form.
+A manual bind clears observations even at the current anchor, without advancing the generation there; it preserves existing progress for the same seat and root.
+A hook reporting the current seat, root and anchor with progress already present is a no-op and clears nothing.
+A changed binding clears earlier observations inside its transaction; a later observation survives.
+
+For hosts supplying `tool_use_id`, the last eight session-and-call identities suppress duplicate tier-hook reports inside one note transaction.
+A different call with the same content is a different invocation; without the identifier only consecutive duplicate binds or observations collapse.
+The guarantee applies only when all hooks use this version: the mixed sequence new hook, 2.9.6 hook, 2.9.6 hook advances the generation by three.
+Each follower records its own kit version and fingerprint; differing identities among non-dead leader and standby records produce `tiers=mixed`, with missing identity treated as its own value and unknown liveness counted as present.
+This diagnostic triggers no automatic leader handover.
+Numeric fd duplication and close, including `2>&1`, `>&2` and `2>&-`, are accepted while a background ampersand remains unsupported.
+The relay guard retains its existing limitation for a file operand of `>&`, such as `>& relay.md`; this change does not add destination detection for that form.
+
 Inbound delivery needs no socket permission because the watcher reads the run's rendered `INDEX.md` and never calls the engine.
 A seat that also files its own relays needs a sandbox profile that permits the relay daemon's socket.
 A seat under a profile that refuses the socket binds its watcher once at setup with `python3 <plugin-root>/tools/adapters/relay-monitor.py bind --manual --session <session-id> --root <run-root> --anchor <relay-file>`, and every later delivery needs no action.
