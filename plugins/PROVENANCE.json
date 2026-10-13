@@ -212,7 +212,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-implementer/SKILL.md",
-    "sha256": "47031d2fe91a28f9aa1a2c487b8e9ff2dd2518d481e6d51fd4a816eb7f663cdf",
+    "sha256": "495bf304e3c727ed80ed7ca5145a53005bdc3cfffc69d6c30198d7cd36304979",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
@@ -10688,7 +10688,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-implementer/SKILL.md",
-    "sha256": "47031d2fe91a28f9aa1a2c487b8e9ff2dd2518d481e6d51fd4a816eb7f663cdf",
+    "sha256": "495bf304e3c727ed80ed7ca5145a53005bdc3cfffc69d6c30198d7cd36304979",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
@@ -21092,7 +21092,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-implementer/SKILL.md",
-    "sha256": "0901c7cbafaef30dede02e4ee8b9ae6a91dcb8d3ec72a459b6f324d41633b722",
+    "sha256": "574ceed52ac65bf9475e601a899e5bcec65199022c11f4f4e81a3c5685f76511",
     "source": "skills/pair-implementer/SKILL.md"
   },
   {

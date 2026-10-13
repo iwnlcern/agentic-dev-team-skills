@@ -58,6 +58,7 @@ Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
 ### IMPL
 
 Begin only after a current relay/message contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and either addressed to you in `TO` as the sole implementer addressee from a relay file under the active run's RELAY_ROOT or sent to you as the sole recipient in a direct message. Execution itself defers to Superpowers: `using-git-worktrees` for isolation, `executing-plans` for how the plan is carried out (including its own checkpoints), and `finishing-a-development-branch` for branch/PR completion — those skills own the how. This skill fixes only the interface: enter with the token plus the locked plan relay; keep scope locked to that plan; exit with the implementation report relay (file-first) and the PR. Stop and relay a blocker instead of improvising if the plan is materially wrong, already built, lacks a downstream consumer, or requires operator judgment.
+For continuation and the standing-dispatch case, see `protocol.md` § Continuation dispatch.
 
 ### REVIEW-FOLD
 
@@ -69,7 +70,12 @@ Merge is human/operator gated. Tests green plus valid dispatch is not merge auth
 
 ## Implementation report
 
+Use the report-parent edge in `protocol.md` § Relay transport when filling the skeleton below.
+The boot acknowledgment's reuse of its boot id is a separate instruction from the report's parent edge; it does not choose the report's own id.
+
 ```text
+DISPATCH_ID: <report handoff id under protocol.md § Relay transport>
+PARENT_DISPATCH_ID: <authorizing dispatch's DISPATCH_ID>
 Summary:
 PR:
 Plan lock:
@@ -83,4 +89,38 @@ Evidence levels:
 Out-of-scope preserved:
 Remaining risk:
 Next requested action:
+```
+
+Filled example for the dispatch `example-b4/IMPL-orchestrator-planner-20261013-060000.md`, whose `DISPATCH_ID` is `example-b4-impl-1`:
+
+```text
+## IMPL — example report
+
+ROLE: Pair Implementer
+PHASE: IMPL
+AUTHORITY: implementation
+DISPATCH_ID: example-b4-result-1
+PARENT_DISPATCH_ID: example-b4-impl-1
+IN_REPLY_TO: example-b4/IMPL-orchestrator-planner-20261013-060000.md
+RUN_ID: example
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no — report only; merge remains separately gated
+FROM: example-kit.implementer
+TO: example-kit.planner
+CC: example.orchestrator-planner
+SUBJECT: Example local implementation report
+
+Summary: Updated the report instructions under the addressed dispatch.
+PR: none — example local report before PR handoff
+Plan lock: example-b4-plan
+Files changed: shared/protocol.md
+ACTIONS_GIT_REF: edited shared/protocol.md; no commit or ref change in this example
+Acceptance criteria status: report instruction updated; review pending.
+Boundary contract proof: canonical text regenerated into the installed copies.
+Tests/verification: generator --check exited 0.
+Evidence levels: E2 local command proof only.
+Out-of-scope preserved: engine, linter and release identity unchanged.
+Remaining risk: reviewer acceptance and merge remain outstanding.
+Next requested action: review the implementation report.
 ```
