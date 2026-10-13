@@ -289,6 +289,18 @@ class NoteStoreTests(TmpEnv):
 
 
 class LeaderLockTests(TmpEnv):
+    def test_probe_out_of_range_pid_reads_dead(self):
+        for pid in (2**31, 2**63, -(2**63)-1):
+            with self.subTest(pid=pid):
+                self.assertEqual(self.rm.process_probe(pid), "dead")
+
+    def test_probe_eperm_reads_alive(self):
+        probe_os = types.SimpleNamespace(
+            kill=mock.Mock(side_effect=PermissionError(errno.EPERM, "denied"))
+        )
+        with mock.patch.object(self.rm, "os", probe_os):
+            self.assertEqual(self.rm.process_probe(os.getpid()), "alive")
+
     def test_second_acquire_blocks_probe_reports_held_and_instance_is_readable(self):
         a = self.rm.LeaderLock("s")
         b = self.rm.LeaderLock("s")
@@ -3399,6 +3411,24 @@ class StatusTests(TmpEnv):
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
+
+    def test_status_returns_word_for_out_of_range_leader_pid(self):
+        lock = self.rm.LeaderLock("sess")
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        lock.stamp("oversized")
+        self.store.update(lambda n: n.update({
+            "leader": {"pid": 2**31, "instance": "oversized"},
+        }))
+        self.assertTrue(self.rm.status_line(self.store, None).startswith(
+            "relay-monitor: starting "
+        ))
+
+    def test_status_returns_word_for_out_of_range_standby_pid(self):
+        self.store.update(lambda n: n.update({"standbys": [{"pid": 2**31}]}))
+        self.assertTrue(self.rm.status_line(self.store, None).startswith(
+            "relay-monitor: not-started "
+        ))
 
     def test_refused_probe_never_reads_dead(self):
         rm = self.rm

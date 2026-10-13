@@ -221,6 +221,8 @@ PROC_ALIVE, PROC_DEAD, PROC_UNKNOWN = "alive", "dead", "unknown"
 def process_probe(pid: int) -> str:
     try:
         os.kill(pid, 0)
+    except OverflowError:
+        return PROC_DEAD
     except OSError as exc:
         if exc.errno == errno.ESRCH:
             return PROC_DEAD
