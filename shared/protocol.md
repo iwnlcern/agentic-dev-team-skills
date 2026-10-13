@@ -22,7 +22,7 @@ ROLE: <Master Planner | Master Reviewer | Domain Planner | Domain Reviewer | Orc
 PHASE: <AUDIT | DESIGN | DESIGN-REVIEW | PLAN | PLAN-REVIEW | IMPL | REVIEW-FOLD | MERGE-GATE | LIVE-VERIFY | SITREP | RECONCILE>
 AUTHORITY: <read-only | design-only | plan-only | review-only | implementation | fold-in-only | merge-gated | live-verify | report-only>
 DISPATCH_ID: <handoff id for authority-chain relay | cycle id otherwise>
-PARENT_DISPATCH_ID: <immediate predecessor dispatch id; for an IMPL action report, the authorizing dispatch's DISPATCH_ID; for a pair-Planner DISPATCH IMPL, the approving PLAN-REVIEW id; for a gated design-doc PLAN, the approving DESIGN-REVIEW id; see Relay transport>
+PARENT_DISPATCH_ID: <immediate predecessor dispatch id; required for pair-Planner DISPATCH IMPL and substantive IMPL action reports; for an IMPL action report, the authorizing dispatch's DISPATCH_ID; for a pair-Planner DISPATCH IMPL, the approving PLAN-REVIEW id; for a gated design-doc PLAN, the approving DESIGN-REVIEW id; see Relay transport>
 RUN_ID: <sprint/run id; local/router grouping, not a lint input>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>

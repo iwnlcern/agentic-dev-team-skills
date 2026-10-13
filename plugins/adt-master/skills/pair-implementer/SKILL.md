@@ -83,7 +83,7 @@ Merge is human/operator gated. Tests green plus valid dispatch is not merge auth
 ## Implementation report
 
 Use the report-parent edge in `protocol.md` § Relay transport when filling the skeleton below.
-The boot acknowledgment's reuse of its boot id is a separate instruction from the report's parent edge; it does not choose the report's own id.
+The boot acknowledgment's reuse of its boot id is a separate instruction from the report's parent edge; the boot instruction does not choose the report's own id.
 
 ```text
 DISPATCH_ID: <report handoff id under protocol.md § Relay transport>
@@ -103,7 +103,7 @@ Remaining risk:
 Next requested action:
 ```
 
-Filled example for the dispatch `example-b4/IMPL-orchestrator-planner-20261013-060000.md`, whose `DISPATCH_ID` is `example-b4-impl-1`:
+Filled example using fictional PR and commit references for the dispatch `example-b4/IMPL-orchestrator-planner-20261013-060000.md`, whose `DISPATCH_ID` is `example-b4-impl-1` and whose own `PARENT_DISPATCH_ID` is `example-b4-plan-review-1` (not the report's parent):
 
 ```text
 ## IMPL — example report
@@ -124,10 +124,10 @@ CC: example.orchestrator-planner
 SUBJECT: Example local implementation report
 
 Summary: Updated the report instructions under the addressed dispatch.
-PR: none — example local report before PR handoff
+PR: example/project#42
 Plan lock: example-b4-plan
-Files changed: shared/protocol.md
-ACTIONS_GIT_REF: edited shared/protocol.md; no commit or ref change in this example
+Files changed: shared/protocol.md and regenerated plugins/ protocol copies and provenance
+ACTIONS_GIT_REF: edited shared/protocol.md and regenerated plugins/; branch example-b4, commit 0123456789abcdef0123456789abcdef01234567; PR example/project#42
 Acceptance criteria status: report instruction updated; review pending.
 Boundary contract proof: canonical text regenerated into the installed copies.
 Tests/verification: generator --check exited 0.
