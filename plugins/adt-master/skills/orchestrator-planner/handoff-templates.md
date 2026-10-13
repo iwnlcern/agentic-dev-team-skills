@@ -425,6 +425,7 @@ Out of scope:
 
 Deliverable:
 PR + implementation summary + tests/verification + evidence levels + remaining risks + ACTIONS_GIT_REF for claimed edits/commits/PRs + standardized SITREP.
+Parent the IMPL report to this dispatch's DISPATCH_ID, per protocol.md § Relay transport.
 ```
 
 The REVIEW-FOLD template is relettered **Template J** — the first unoccupied label under the shipped heading census — and every reference to it is updated in the same batch. Every template label in this file resolves to exactly one heading.
