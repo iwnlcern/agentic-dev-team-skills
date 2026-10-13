@@ -3647,6 +3647,13 @@ class SessionStartTests(TmpEnv):
             self.rm.session_start(ns(plugin_root="/plug"))
         return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
 
+    def test_session_start_context_uses_new_grammar(self):
+        self.rm.NoteStore("sess").update(lambda n: n.update(binding_source="hook", binding_degraded={"reason": "unsupported-shell"}))
+        ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex"})
+        self.assertIn("binding=hook", ctx.splitlines()[0])
+        self.assertIn("last-bind=unsupported-shell", ctx.splitlines()[0])
+        self.assertTrue(ctx.splitlines()[1].startswith("rebind: incomplete"))
+
     def test_fresh_codex_arms_under_plugin_route_env_and_under_launcher(self):
         ctx = self.run_ss(
             self.FRESH_CODEX,
@@ -3734,6 +3741,140 @@ class StatusTests(TmpEnv):
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
+
+    def _live_status(self, phase="following", bound=True):
+        lock = self.rm.LeaderLock("sess")
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        me = self.rm.leader_record()
+        lock.stamp(me["instance"])
+        def seed(note):
+            note.update(leader=me, phase=phase)
+            if bound:
+                note.update(seat="a.planner", root=str(self.root), binding_source="hook")
+                note["progress"][str(self.root)] = {"file": "lane/r1.md", "position": 1}
+        self.store.update(seed)
+
+    def _record(self, reason="unsupported-syntax", provenance="command", root=None, receipts=None):
+        self.store.update(lambda n: n.update(bind_observation={"reason": reason, "root": str(root or self.root) if provenance != "none" else None, "root_provenance": provenance, "receipts": receipts or ["lane/r1.md"], "stamp": "s", "call": None}))
+
+    def _status(self, identity="ok"):
+        with mock.patch.object(self.rm, "check_identity", return_value=(identity, {"kit": "new", "fp": "aa"}, {"kit": "old" if identity == "version-mismatch" else "new", "fp": "bb"})):
+            return self.rm.status_line(self.store, None)
+
+    def test_observation_does_not_produce_unavailable(self):
+        self._live_status()
+        self._record()
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "no-receipt"}))
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+
+    def test_phase_unavailable_still_reads_unavailable(self):
+        self._live_status(phase="unavailable")
+        self.assertEqual(self.rm.readiness(self.store)[0], "unavailable")
+
+    def test_unbound_live_follower_reads_waiting_for_binding_after_any_command(self):
+        self._live_status(phase="waiting-for-binding", bound=False)
+        for command, response in (("ls", ""), ("tools/relay submit d.md", ""), ("time tools/relay submit d.md", '{"path":"lane/r1.md","render_state":"rendered","duplicate":false}')):
+            payload = dict(session_id="sess", cwd=str(self.root), hook_event_name="PostToolUse", tool_input={"command": command}, tool_response=response)
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+                self.assertEqual(self.rm.bind(ns()), 0)
+            self.assertEqual(self.rm.readiness(self.store)[0], "waiting-for-binding")
+
+    def test_binding_cell_reports_source_only(self):
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "no-receipt"}))
+        for source in (None, "hook", "manual", "env"):
+            self.store.update(lambda n: n.update(binding_source=source))
+            self.assertEqual(next(x for x in self._status().splitlines()[0].split() if x.startswith("binding=")), "binding=" + (source or "none"))
+
+    def test_one_record_prints_one_cell(self):
+        for reason, cell, absent in (("submit-near-miss", "miss=submit-near-miss", "last-bind="), ("unsupported-syntax", "last-bind=unsupported-syntax", "miss=")):
+            self._record(reason=reason)
+            first = self._status().splitlines()[0]
+            self.assertEqual(first.split().count(cell), 1)
+            self.assertNotIn(absent, first)
+
+    def test_legacy_degraded_beside_new_record_prints_new_only(self):
+        self._record()
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "unsupported-shell"}))
+        self.assertEqual([v for v in self._status().splitlines()[0].split() if v.startswith("last-bind=")], ["last-bind=unsupported-syntax"])
+
+    def test_legacy_miss_and_new_last_bind_can_coexist(self):
+        self._record()
+        self.store.update(lambda n: n.update(submit_miss="submit-near-miss"))
+        first = self._status().splitlines()[0]
+        self.assertIn(" miss=submit-near-miss last-bind=unsupported-syntax", first)
+
+    def test_rebind_complete_form_round_trips_shell_quoting(self):
+        import shlex
+        root = "/a space/it's-root"
+        self._record(root=root, receipts=["lane/it's here.md"])
+        line = self.rm.rebind_line(self.store.load(), "session quoted")
+        self.assertTrue(line.startswith("rebind: "))
+        words = shlex.split(line[len("rebind: "):])
+        self.assertEqual(words[words.index("--root") + 1], root)
+        self.assertEqual(words[words.index("--anchor") + 1], "lane/it's here.md")
+        self.assertEqual(words[words.index("--session") + 1], "session quoted")
+        self.assertIn("--manual", words)
+
+    def test_rebind_inferred_form_is_labelled(self):
+        self._record(provenance="inferred")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
+
+    def test_rebind_incomplete_form_is_not_runnable_and_omits_anchor(self):
+        self.store.update(lambda n: n.update(anchor="lane/old-anchor.md"))
+        self._record(provenance="none", receipts=["lane/seen.md"])
+        line = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertTrue(line.startswith("rebind: incomplete — supply "))
+        self.assertNotIn("lane/old-anchor.md", line)
+        self.assertNotIn("--manual", line)
+        self.assertIn("lane/seen.md", line)
+        self._record(provenance="none", receipts=["x" * 5000])
+        self.assertLessEqual(len(self.rm.rebind_line(self.store.load(), "sess")), 1024)
+
+    def test_mismatch_on_armed_seat_reads_armed_with_cell_and_remedy(self):
+        self._live_status()
+        lines = self._status("version-mismatch").splitlines()
+        self.assertTrue(lines[0].startswith("relay-monitor: armed "))
+        self.assertTrue(lines[0].endswith("identity=mismatch"))
+        self.assertTrue(lines[1].startswith("remedy: "))
+
+    def test_mismatch_with_no_follower_reads_not_started_with_cell(self):
+        self.store.update(lambda n: n.update(root=str(self.root)))
+        line = self._status("version-mismatch").splitlines()[0]
+        self.assertTrue(line.startswith("relay-monitor: not-started "))
+        self.assertTrue(line.endswith("identity=mismatch"))
+
+    def test_mismatch_cell_on_every_reading(self):
+        self.store.update(lambda n: n.update(root=str(self.root)))
+        for _ in range(2):
+            text = self._status("version-mismatch")
+            self.assertTrue(text.splitlines()[0].endswith("identity=mismatch"))
+            self.assertTrue(text.splitlines()[1].startswith("remedy: "))
+
+    def test_tiers_mixed_on_differing_identity(self):
+        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{"identity": {"kit": "1", "fp": "b"}}]}
+        with mock.patch.object(self.rm, "process_liveness", return_value=self.rm.PROC_UNKNOWN):
+            self.assertTrue(self.rm.tiers_mixed(note))
+            self.store.update(lambda n: n.update(note))
+            self.assertTrue(self._status().splitlines()[0].endswith("tiers=mixed"))
+            note["standbys"][0]["identity"]["fp"] = "a"
+            self.assertFalse(self.rm.tiers_mixed(note))
+
+    def test_tiers_mixed_ignores_dead_record(self):
+        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{"identity": {"kit": "2", "fp": "b"}}]}
+        with mock.patch.object(self.rm, "process_liveness", side_effect=[self.rm.PROC_ALIVE, self.rm.PROC_DEAD]):
+            self.assertFalse(self.rm.tiers_mixed(note))
+
+    def test_record_without_identity_counts_as_different(self):
+        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{}]}
+        with mock.patch.object(self.rm, "process_liveness", return_value=self.rm.PROC_ALIVE):
+            self.assertTrue(self.rm.tiers_mixed(note))
+            note["leader"] = {}
+            self.assertFalse(self.rm.tiers_mixed(note))
+
+    def test_leader_record_carries_own_install_identity(self):
+        with mock.patch.object(self.rm, "run_relay", return_value=({"kit": "2.9.7", "fingerprint": "abc"}, 0)):
+            self.assertEqual(self.rm.leader_record()["identity"], {"kit": "2.9.7", "fp": "abc"})
 
     def test_status_returns_word_for_out_of_range_leader_pid(self):
         lock = self.rm.LeaderLock("sess")
@@ -3842,7 +3983,7 @@ class StatusTests(TmpEnv):
                 }
             )
         )
-        self.assertEqual(rm.readiness(self.store)[0], "unavailable")
+        self.assertEqual(rm.readiness(self.store)[0], "armed")
         lock.release()
         self.store.update(
             lambda n: n.update({"binding_degraded": None, "standbys": [me]})
@@ -3949,7 +4090,7 @@ class StatusTests(TmpEnv):
                         0,
                     ),
                 ],
-                "unavailable: version-mismatch",
+                "identity=mismatch",
             ),
         ):
             with self.subTest(expected=expected):

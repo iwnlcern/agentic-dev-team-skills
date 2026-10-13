@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import select
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -209,10 +210,15 @@ def process_start_time(pid: int) -> str | None:
 
 
 def leader_record() -> dict:
+    version, rc = run_relay(None, "version")
+    identity = None
+    if rc == 0 and isinstance(version, dict) and version.get("kit") and version.get("fingerprint"):
+        identity = {"kit": version["kit"], "fp": version["fingerprint"]}
     return {
         "pid": os.getpid(),
         "start_time": process_start_time(os.getpid()),
         "instance": str(uuid.uuid4()),
+        "identity": identity,
     }
 
 
@@ -1923,7 +1929,7 @@ def readiness(store: NoteStore, _between=None):
         or process_liveness(leader) == PROC_DEAD
     ):
         return "starting", note
-    if note.get("binding_degraded") or note.get("phase") == "unavailable":
+    if note.get("phase") == "unavailable":
         return "unavailable", note
     if (
         note.get("phase") == "following"
@@ -1934,27 +1940,47 @@ def readiness(store: NoteStore, _between=None):
     return "waiting-for-binding", note
 
 
+def tiers_mixed(note: dict) -> bool:
+    identities = set()
+    for record in [note.get("leader"), *note.get("standbys", [])]:
+        if record is None or process_liveness(record) == PROC_DEAD:
+            continue
+        identity = record.get("identity")
+        identities.add((identity.get("kit"), identity.get("fp")) if isinstance(identity, dict) else None)
+    return len(identities) > 1
+
+
+def rebind_line(note: dict, session: str) -> str | None:
+    record = note.get("bind_observation")
+    if not record and not note.get("binding_degraded") and not note.get("submit_miss"):
+        return None
+    record = record or {}
+    receipts = record.get("receipts") or []
+    root, provenance = record.get("root"), record.get("root_provenance")
+    if root and len(receipts) == 1 and provenance in ("command", "inferred"):
+        prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
+        command = shlex.join(["python3", str(Path(__file__).resolve()), "bind", "--manual", "--session", session, "--root", root, "--anchor", receipts[0]])
+        if len(prefix + command) <= 1024 and "\n" not in command and "\r" not in command:
+            return prefix + command
+    prefix = "rebind: incomplete — supply --root <run root> --anchor <receipt path>"
+    seen = " seen=" + json.dumps(receipts, ensure_ascii=True) if receipts else ""
+    text = prefix + seen
+    return text if len(text) <= 1024 else text[:1021] + "..."
+
+
 def status_line(store: NoteStore, plugin_root: str | None) -> str:
     state, note = readiness(store)
     ident, client_id, daemon = "unchecked", {}, None
     if note.get("root"):
         ident, client_id, daemon = check_identity(plugin_root, note.get("root"))
-        if ident == "version-mismatch":
-            state = "unavailable"
         store.update(
             lambda n: n.update(
                 {"client_identity": client_id, "daemon_identity": daemon}
             )
         )
-    reason = (note.get("binding_degraded") or {}).get("reason") or note.get("reason")
-    suffix = (
-        f": {reason}"
-        if state == "unavailable" and reason
-        else (": version-mismatch" if ident == "version-mismatch" else "")
-    )
+    reason = note.get("reason")
+    suffix = f": {reason}" if state == "unavailable" and reason else ""
     binding = note.get("binding_source") or "none"
-    if note.get("binding_degraded"):
-        binding = f"degraded:{note['binding_degraded']['reason']}"
     cur = (note["progress"].get(note.get("root") or "") or {}).get("file") or "-"
 
     def fp(d):
@@ -1967,9 +1993,10 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         "daemon-down": "down",
         "unchecked": "-",
     }.get(ident, fp(daemon))
-    miss = (note.get("bind_observation") or {}).get("reason")
-    if miss != "submit-near-miss":
-        miss = note.get("submit_miss")
+    record = note.get("bind_observation") or {}
+    observed = record.get("reason")
+    miss = "submit-near-miss" if observed == "submit-near-miss" else note.get("submit_miss")
+    last_bind = observed if observed and observed != "submit-near-miss" else (note.get("binding_degraded") or {}).get("reason")
     line = (
         f"relay-monitor: {state}{suffix} "
         f"seat={note.get('seat') or '-'} "
@@ -1978,12 +2005,18 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         f"daemon={daemon_txt} "
         f"updated={note.get('updated') or '-'}"
         f"{' miss=' + miss if miss else ''}"
+        f"{' last-bind=' + last_bind if last_bind else ''}"
+        f"{' tiers=mixed' if tiers_mixed(note) else ''}"
+        f"{' identity=mismatch' if ident == 'version-mismatch' else ''}"
     )
     raw = (daemon or {}).get("raw") or ""
     remedy = next(
         (text for text in raw.splitlines() if text.startswith("remedy:")), None
     )
-    return f"{line}\n{remedy}" if remedy else line
+    if ident == "version-mismatch" and not remedy:
+        remedy = "remedy: align the relay client and daemon installs before filing; delivery remains available"
+    hint = rebind_line(note, store.session)
+    return "\n".join(text for text in (line, remedy, hint) if text)
 
 
 def status(args) -> int:
