@@ -11,3 +11,6 @@ The `judging/future-sensitive/` fixtures hold the six named temporal cases and e
 The lock-lifecycle and commission-surface cases require late ingestion of older-stamped evidence, so the required order-divergent precedence classifies those two as order-divergent despite their storage directory.
 The `judging/order-divergent/` fixture covers a dispatch ingested before its older-stamped parent.
 Fixture partition flags describe the actual input ordering, not a directory-name oracle.
+
+The `record-root/history-only/` fixture holds recorded lineage defects and their frozen cbc8f07 sweep diagnostics.
+Default managed sweeps suppress those defects; history audits report the exact frozen messages as warnings.

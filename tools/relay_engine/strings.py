@@ -35,6 +35,7 @@ class ExistingTargets:
 
 
 INVENTORY = {
+    "engine-root-admission-summary": "engine-root admission: {judged} judged at admission, {with_findings} with findings, {failed} judging failed, {unevaluated} never judged, {exempt} engine-authored",
     "notice-name-caution": "caution: this name is also an engine notice label; registration or declaration grants no authority",
     "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
     "authority.grant-shape-absent": "MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing",
@@ -200,6 +201,10 @@ _VALIDATORS.update({
     ("routing.unknown-address", "known"): lambda value: isinstance(value, str),
     ("routing.unknown-address", "notice"): lambda value: isinstance(value, str),
 })
+
+
+_VALIDATORS.update({('engine-root-admission-summary', field): _is_count
+                    for field in ('judged', 'with_findings', 'failed', 'unevaluated', 'exempt')})
 
 
 def register_inventory(entries, validators):

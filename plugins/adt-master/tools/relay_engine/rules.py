@@ -4389,8 +4389,14 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                     engine_root: bool = False,
                     projection_digests: Optional[Dict[Path, str]] = None,
                     record_context: Optional[dict] = None,
-                    context_mode: Optional[str] = None) -> LintResult:
+                    context_mode: Optional[str] = None,
+                    history_audit: bool = False) -> LintResult:
     result = LintResult()
+    received_entries = record_context.get('entries', []) if isinstance(record_context, dict) else []
+    if not isinstance(received_entries, list):
+        received_entries = []
+    record_entries = {entry['path']: entry for entry in received_entries
+                      if isinstance(entry, dict) and _canonical_record_path(entry.get('path')) is not None}
     texts: Dict[Path, str] = {}
     raws: Dict[Path, bytes] = {}
     suppressed: set[Path] = set()
@@ -4442,17 +4448,24 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         (f, lint_file(f, template_mode=template_mode,
                       _text=texts.get(f), _raw=raws.get(f), artifact_root=path)) for f in files]
     for f, r in per_file:
-        if f in suppressed:
-            continue
         for e in r.errors:
-            result.error(f"{f.relative_to(path)}: {e}")
+            result.error(f"{f.relative_to(path)}: {e}", check_id='file.lint' if record_context is not None else None, subject=str(f.relative_to(path)))
         for w in r.warnings:
-            result.warn(f"{f.relative_to(path)}: {w}")
+            result.warn(f"{f.relative_to(path)}: {w}", check_id='file.lint' if record_context is not None else None, subject=str(f.relative_to(path)))
 
     if record_context is not None:
         result.warn(strings.render(
-            "engine-root-sweep-summary", count=len(suppressed),
+            "engine-root-sweep-summary", count=len(record_entries),
             mode=context_mode))
+        counts = {status: 0 for status in ('judged', 'failed', 'none', 'exempt')}
+        with_findings = 0
+        for entry in record_entries.values():
+            status = entry.get('judgment', 'none')
+            counts[status] += 1
+            with_findings += status == 'judged' and entry.get('finding_count', 0) > 0
+        result.warn(strings.render('engine-root-admission-summary',
+            judged=counts['judged'], with_findings=with_findings,
+            failed=counts['failed'], unevaluated=counts['none'], exempt=counts['exempt']))
 
     projection_digests = (
         {} if projection_digests is None else projection_digests)
@@ -4868,6 +4881,16 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
             for _a5e in _a5errs:
                 result.error(f"{_a5f.relative_to(path)}: {_a5e}", check_id='lineage.governing-digest', subject=str(_a5f.relative_to(path)), operands=())
 
+    if record_context is not None:
+        entries = record_entries
+        historical = [finding for finding in result.findings if finding.subject in entries]
+        result.findings = [finding for finding in result.findings if finding.subject not in entries]
+        for finding in historical:
+            messages = result.errors if finding.lint_severity == 'error' else result.warnings
+            messages.remove(finding.message)
+            if history_audit:
+                result.add_finding(Finding(finding.id, 'warn', finding.subject,
+                    finding.operands, finding.params, 'history-audit: ' + finding.message))
     return result
 
 

@@ -1,0 +1,8 @@
+{
+  "source_commit": "cbc8f071cd593af4c48994ec30b0775b3c919ad6",
+  "errors": [
+    "lane/IMPL-pair-planner-20260821-120001.md: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve",
+    "lane/IMPL-pair-planner-20260821-120001.md: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent"
+  ],
+  "warnings": []
+}

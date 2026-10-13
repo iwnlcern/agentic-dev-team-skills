@@ -448,6 +448,27 @@ def _readonly_entry(row):
     return {"path": path, "body_sha256": digest, "origin": origin}
 
 
+def _context_entries(ledger, rows):
+    tables = {row[0] for row in ledger.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    has_judgments = {'admission_judgments', 'admission_findings'} <= tables
+    entries = []
+    for seq, path, digest, origin in rows:
+        entry = _readonly_entry((path, digest, origin))
+        judgment = None
+        if has_judgments:
+            judgment = ledger.execute(
+                "SELECT status,(SELECT COUNT(*) FROM admission_findings WHERE relay_seq=?) "
+                "FROM admission_judgments WHERE relay_seq=?", (seq, seq)).fetchone()
+        status, count = judgment if judgment else ('none', 0)
+        if (status not in {'none', 'judged', 'failed', 'exempt'} or
+                not isinstance(count, int) or count < 0 or
+                (status != 'judged' and count != 0)):
+            raise ValueError("malformed judgment context")
+        entry.update(judgment=status, finding_count=count)
+        entries.append(entry)
+    return entries
+
+
 def _record_identity(info):
     return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
             stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid,
@@ -503,10 +524,10 @@ def read_lint_context(root_name):
                 snapshot < 0):
             raise ValueError("malformed record snapshot")
         rows = record.execute(
-            "SELECT rendered_path,body_sha256,origin FROM relays "
+            "SELECT seq,rendered_path,body_sha256,origin FROM relays "
             "WHERE seq<=? ORDER BY CAST(rendered_path AS BLOB)",
             (snapshot,)).fetchall()
-        entries = [_readonly_entry(row) for row in rows]
+        entries = _context_entries(record, rows)
         previous = None
         for entry in entries:
             current = entry["path"].encode("utf-8")
@@ -870,13 +891,12 @@ def _lint_context_position(ledger, cursor):
 def _lint_context_handler(ledger, args, request_id, did):
     snapshot, offset = _lint_context_position(ledger, args.get("cursor"))
     rows = ledger.execute(
-        "SELECT rendered_path,body_sha256,origin FROM relays WHERE seq<=? "
+        "SELECT seq,rendered_path,body_sha256,origin FROM relays WHERE seq<=? "
         "ORDER BY CAST(rendered_path AS BLOB) LIMIT ? OFFSET ?",
         (snapshot, strings.CONTEXT_ENTRY_CAP + 1, offset)).fetchall()
     more = len(rows) > strings.CONTEXT_ENTRY_CAP
     rows = rows[:strings.CONTEXT_ENTRY_CAP]
-    entries = [{"path": row[0], "body_sha256": row[1], "origin": row[2]}
-               for row in rows]
+    entries = _context_entries(ledger, rows)
     page = {"snapshot": str(snapshot), "entries": entries}
     if more:
         page["cursor"] = "%d:%d" % (snapshot, offset + len(entries))

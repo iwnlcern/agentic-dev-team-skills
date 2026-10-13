@@ -201,7 +201,8 @@ def _cmd_lint(args):
         result = rules.lint_relay_root(
             relay_root, template_mode=args.templates, engine_root=True,
             projection_digests=projection_digests,
-            record_context=record_context, context_mode=context_mode)
+            record_context=record_context, context_mode=context_mode,
+            history_audit=args.history_audit)
         results[args.relay_root] = {
             "errors": result.errors, "warnings": result.warnings}
     if args.index is not None:
@@ -412,6 +413,7 @@ def build_parser():
     lint.add_argument("--index")
     lint.add_argument("--templates", action="store_true")
     lint.add_argument("--index-audit", action="store_true")
+    lint.add_argument("--history-audit", action="store_true")
     lint.add_argument("--no-freshness", action="store_true")
     lint.add_argument("--max-drift-minutes", type=int,
                       default=rules.DEFAULT_MAX_DRIFT_MINUTES)

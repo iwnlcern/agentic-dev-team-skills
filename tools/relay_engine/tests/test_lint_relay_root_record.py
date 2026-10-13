@@ -161,10 +161,12 @@ class TestRecordSuppression(unittest.TestCase):
             self.assertEqual(live["warnings"], [
                 "engine-root sweep: 1 record-known relays not re-judged; "
                 "context source: daemon",
+                "engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 1 never judged, 0 engine-authored",
             ])
             self.assertEqual(stopped["warnings"], [
                 "engine-root sweep: 1 record-known relays not re-judged; "
                 "context source: read-only record",
+                "engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 1 never judged, 0 engine-authored",
             ])
 
     def test_matching_identity_is_opened_once_no_follow_and_descriptor_closed(self):
@@ -213,7 +215,7 @@ class TestRecordSuppression(unittest.TestCase):
             self.assertFalse(any("outside-the-record" in error
                                  for error in result.errors))
             self.assertIn(
-                "engine-root sweep: 0 record-known relays not re-judged; "
+                "engine-root sweep: 1 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
 
 
@@ -248,6 +250,7 @@ class TestRecordOriginFixtures(unittest.TestCase):
                 self.assertEqual(result.warnings, [
                     "engine-root sweep: 1 record-known relays not re-judged; "
                     "context source: daemon",
+                    "engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 1 never judged, 0 engine-authored",
                 ])
 
     def test_suppression_keeps_integrity_foreign_and_chain_gates_active(self):
@@ -270,11 +273,16 @@ class TestRecordOriginFixtures(unittest.TestCase):
 
                 result = _record_lint(self, root, context)
 
-                self.assertTrue(any(finding in error for error in result.errors))
+                if member == "origin-chain":
+                    self.assertEqual(result.errors, [])
+                    audit = _record_lint(self, root, context, history_audit=True)
+                    self.assertTrue(any("history-audit: " in warning and finding in warning for warning in audit.warnings))
+                else:
+                    self.assertTrue(any(finding in error for error in result.errors))
 
 
 class TestRecordIntegrityMatrix(unittest.TestCase):
-    def _case(self, label, mutate, expected):
+    def _case(self, label, mutate, expected, *, summary_count=0):
         with self.subTest(label=label), \
                 tempfile.TemporaryDirectory() as temporary:
             root = _copy_fixture(temporary, "suppressed")
@@ -288,8 +296,8 @@ class TestRecordIntegrityMatrix(unittest.TestCase):
             self.assertFalse(any("outside-the-record" in error
                                  for error in result.errors))
             self.assertIn(
-                "engine-root sweep: 0 record-known relays not re-judged; "
-                "context source: daemon", result.warnings)
+                "engine-root sweep: %d record-known relays not re-judged; "
+                "context source: daemon" % summary_count, result.warnings)
 
     def test_missing_nonregular_and_unreadable_are_distinct(self):
         def missing(_root, relay):
@@ -311,7 +319,7 @@ class TestRecordIntegrityMatrix(unittest.TestCase):
                 ("directory", directory, "non-regular"),
                 ("fifo", fifo, "non-regular"),
                 ("unreadable", unreadable, "unreadable")):
-            self._case(label, mutate, expected)
+            self._case(label, mutate, expected, summary_count=1)
 
     def test_valid_and_dangling_symlinks_are_unfollowed_integrity(self):
         target_marker = "TARGET-BYTES-MUST-NOT-BE-LINTED"
@@ -383,7 +391,7 @@ class TestRecordIntegrityMatrix(unittest.TestCase):
             ])
             self.assertEqual(candidate_opens, [])
             self.assertIn(
-                "engine-root sweep: 0 record-known relays not re-judged; "
+                "engine-root sweep: 1 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
 
     def test_hostile_record_paths_are_safely_rendered_for_every_cause_and_mode(self):
@@ -594,7 +602,7 @@ class TestRecordTopology(unittest.TestCase):
                 "outside-the-record: symlinked component: lane",
             ])
             self.assertIn(
-                "engine-root sweep: 0 record-known relays not re-judged; "
+                "engine-root sweep: 1 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
 
     def test_hostile_filesystem_names_have_bounded_stable_safe_displays(self):
@@ -1198,7 +1206,7 @@ class TestCriterion11CrashMatrix(unittest.TestCase):
             daemon_owner.stop()
         return root, daemon_owner
 
-    def _assert_record_success(self, root, mode):
+    def _assert_record_success(self, root, mode, *, admission_summary=None):
         projection_paths = (root / "INDEX.md", next((root / "lane").rglob(
             "*.md")))
         projection_bytes = {path: path.read_bytes()
@@ -1214,6 +1222,8 @@ class TestCriterion11CrashMatrix(unittest.TestCase):
                 "context source: %s" % mode,
             ],
         }
+        if admission_summary is not None:
+            expected["warnings"].append(admission_summary)
         if before is not None:
             self.assertEqual(_tree_digest(root), before)
         self.assertEqual(
@@ -1244,7 +1254,7 @@ class TestCriterion11CrashMatrix(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root, daemon_owner = self._record_root(temporary)
             try:
-                self._assert_record_success(root, "daemon")
+                self._assert_record_success(root, "daemon", admission_summary="engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 1 never judged, 0 engine-authored")
             finally:
                 daemon_owner.stop()
 
@@ -1252,7 +1262,7 @@ class TestCriterion11CrashMatrix(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root, _daemon_owner = self._record_root(
                 temporary, running=False)
-            self._assert_record_success(root, "read-only record")
+            self._assert_record_success(root, "read-only record", admission_summary="engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 1 never judged, 0 engine-authored")
 
     def test_daemon_death_between_probe_and_request_falls_back_strict(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1355,9 +1365,12 @@ class TestRecordComposition(unittest.TestCase):
             root = _copy_fixture(temporary, "chain")
             context = _context(root)
             result = _record_lint(self, root, context)
+            self.assertEqual(result.errors, [])
+            audit = _record_lint(self, root, context, history_audit=True)
             self.assertTrue(any(
+                "history-audit: " in warning and
                 "DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay "
-                "with verdict approve" in error for error in result.errors))
+                "with verdict approve" in warning for warning in audit.warnings))
             self.assertIn(
                 "engine-root sweep: 2 record-known relays not re-judged; "
                 "context source: daemon", result.warnings)
@@ -1414,7 +1427,7 @@ class TestRecordComposition(unittest.TestCase):
             self.assertEqual(record.errors, strict.errors)
             self.assertEqual(
                 [warning for warning in record.warnings
-                 if not warning.startswith(SUMMARY_PREFIX)], strict.warnings)
+                 if not warning.startswith(SUMMARY_PREFIX)], strict.warnings + ["engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 0 never judged, 0 engine-authored"])
 
             index.write_text(INDEX_TEXT + (
                 "| 20260816-120000 | SITREP | Pair Planner | task4-old | "

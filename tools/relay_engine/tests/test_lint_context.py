@@ -25,7 +25,7 @@ def _json_string(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _predicted_response_bytes(request_id, did, page):
+def _predicted_response_bytes(request_id, did, page, *, include_judgment=False):
     did_json = ("{\"fp\":" + _json_string(did["fp"]) +
                 ",\"install\":" + _json_string(did["install"]) +
                 ",\"kit\":" + _json_string(did["kit"]) + "}")
@@ -33,6 +33,9 @@ def _predicted_response_bytes(request_id, did, page):
     for entry in page["entries"]:
         entries.append(
             "{\"body_sha256\":" + _json_string(entry["body_sha256"]) +
+            ((",\"finding_count\":" + str(entry["finding_count"]) +
+              ",\"judgment\":" + _json_string(entry["judgment"]))
+             if include_judgment else "") +
             ",\"origin\":" + _json_string(entry["origin"]) +
             ",\"path\":" + _json_string(entry["path"]) + "}")
     page_parts = []
@@ -47,8 +50,11 @@ def _predicted_response_bytes(request_id, did, page):
             ",\"v\":2}").encode("utf-8")
 
 
-def _entry(path, *, origin="hand", body_sha256=HASH):
-    return {"path": path, "body_sha256": body_sha256, "origin": origin}
+def _entry(path, *, origin="hand", body_sha256=HASH, judgment=None, finding_count=0):
+    entry = {"path": path, "body_sha256": body_sha256, "origin": origin}
+    if judgment is not None:
+        entry.update(judgment=judgment, finding_count=finding_count)
+    return entry
 
 
 class _StubDaemon:
@@ -191,13 +197,13 @@ class TestLintContextBudget(ContextDaemonCase):
         self.assertLess(strings.CONTEXT_PAGE_BUDGET, daemon.MAX_FRAME)
 
     def test_largest_accepted_page_uses_complete_response_bytes(self):
-        empty = _entry("")
+        empty = _entry("", judgment="none")
         empty_page = {"snapshot": "1", "entries": [empty]}
-        empty_size = len(_predicted_response_bytes(REQUEST_ID, DID, empty_page))
+        empty_size = len(_predicted_response_bytes(REQUEST_ID, DID, empty_page, include_judgment=True))
         path = "a" * (strings.CONTEXT_PAGE_BUDGET - empty_size - 3)
-        expected_entry = _entry(path)
+        expected_entry = _entry(path, judgment="none")
         expected_page = {"snapshot": "1", "entries": [expected_entry]}
-        predicted = _predicted_response_bytes(REQUEST_ID, DID, expected_page)
+        predicted = _predicted_response_bytes(REQUEST_ID, DID, expected_page, include_judgment=True)
         self.assertEqual(len(predicted), strings.CONTEXT_PAGE_BUDGET - 3)
         self.insert_entries([expected_entry])
 
@@ -214,12 +220,12 @@ class TestLintContextBudget(ContextDaemonCase):
 
     def test_multibyte_and_escaped_paths_have_exact_byte_accounting(self):
         entries = [
-            _entry('lane/quote-"-and-backslash-\\.md', origin="daemon"),
-            _entry("lane/éclair-雪-😀.md", origin="adopted"),
+            _entry('lane/quote-"-and-backslash-\\.md', origin="daemon", judgment="none"),
+            _entry("lane/éclair-雪-😀.md", origin="adopted", judgment="none"),
         ]
         ordered = sorted(entries, key=lambda entry: entry["path"].encode("utf-8"))
         expected_page = {"snapshot": "2", "entries": ordered}
-        predicted = _predicted_response_bytes(REQUEST_ID, DID, expected_page)
+        predicted = _predicted_response_bytes(REQUEST_ID, DID, expected_page, include_judgment=True)
         generic = json.dumps(
             daemon.success_response(REQUEST_ID, expected_page, DID),
             ensure_ascii=False, separators=(",", ":"), sort_keys=True,
@@ -239,16 +245,16 @@ class TestLintContextBudget(ContextDaemonCase):
         self.assertEqual(captured, [predicted])
 
     def test_first_over_budget_candidate_refuses_before_frame_encoding(self):
-        first = _entry("a")
-        empty_second = _entry("")
+        first = _entry("a", judgment="none")
+        empty_second = _entry("", judgment="none")
         empty_page = {"snapshot": "2", "entries": [first, empty_second]}
-        empty_size = len(_predicted_response_bytes(REQUEST_ID, DID, empty_page))
-        second = _entry("b" * (strings.CONTEXT_PAGE_BUDGET - empty_size))
+        empty_size = len(_predicted_response_bytes(REQUEST_ID, DID, empty_page, include_judgment=True))
+        second = _entry("b" * (strings.CONTEXT_PAGE_BUDGET - empty_size), judgment="none")
         candidate = {"snapshot": "2", "entries": [first, second]}
         self.assertEqual(len(_predicted_response_bytes(
-            REQUEST_ID, DID, candidate)), strings.CONTEXT_PAGE_BUDGET)
+            REQUEST_ID, DID, candidate, include_judgment=True)), strings.CONTEXT_PAGE_BUDGET)
         self.assertLess(len(_predicted_response_bytes(
-            REQUEST_ID, DID, {"snapshot": "2", "entries": [first]})),
+            REQUEST_ID, DID, {"snapshot": "2", "entries": [first]}, include_judgment=True)),
             strings.CONTEXT_PAGE_BUDGET)
         self.insert_entries([first, second])
 
@@ -265,12 +271,12 @@ class TestLintContextBudget(ContextDaemonCase):
                             for body in captured))
 
     def test_individually_unrepresentable_entry_refuses_without_large_frame(self):
-        empty_page = {"snapshot": "1", "entries": [_entry("")]}
-        empty_size = len(_predicted_response_bytes(REQUEST_ID, DID, empty_page))
-        entry = _entry("z" * (strings.CONTEXT_PAGE_BUDGET - empty_size))
+        empty_page = {"snapshot": "1", "entries": [_entry("", judgment="none")]}
+        empty_size = len(_predicted_response_bytes(REQUEST_ID, DID, empty_page, include_judgment=True))
+        entry = _entry("z" * (strings.CONTEXT_PAGE_BUDGET - empty_size), judgment="none")
         candidate = {"snapshot": "1", "entries": [entry]}
         self.assertEqual(len(_predicted_response_bytes(
-            REQUEST_ID, DID, candidate)), strings.CONTEXT_PAGE_BUDGET)
+            REQUEST_ID, DID, candidate, include_judgment=True)), strings.CONTEXT_PAGE_BUDGET)
         self.insert_entries([entry])
 
         captured, patch = self.capture_daemon_frames()
@@ -289,7 +295,7 @@ class TestLintContextBudget(ContextDaemonCase):
 class TestLintContextPagination(ContextDaemonCase):
     def test_entry_cap_paginates_and_client_reassembles_total_byte_order(self):
         entries = [_entry("lane/%04d.md" % index,
-                          origin=("daemon", "hand", "adopted")[index % 3])
+                          origin=("daemon", "hand", "adopted")[index % 3], judgment="none")
                    for index in range(strings.CONTEXT_ENTRY_CAP + 1)]
         self.insert_entries(list(reversed(entries)))
         cid = dict(DID, install="/context-client")
@@ -298,7 +304,7 @@ class TestLintContextPagination(ContextDaemonCase):
         self.assertEqual(len(first["entries"]), strings.CONTEXT_ENTRY_CAP)
         self.assertEqual(first["cursor"], "%d:%d" % (
             len(entries), strings.CONTEXT_ENTRY_CAP))
-        appended = _entry("lane/zzzz-appended.md", origin="daemon")
+        appended = _entry("lane/zzzz-appended.md", origin="daemon", judgment="none")
         self.insert_entries([appended], start_seq=len(entries) + 1)
         second = client.request(
             self.root_name, "lint.context", {"cursor": first["cursor"]},
@@ -332,30 +338,30 @@ class TestLintContextHostilePages(unittest.TestCase):
 
     def test_truncated_page_set_aborts_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "2", "entries": [_entry("a")], "cursor": "2:1"},
+            {"snapshot": "2", "entries": [_entry("a", judgment="none")], "cursor": "2:1"},
             {"snapshot": "2", "entries": []},
         ])
 
     def test_duplicate_entry_aborts_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "2", "entries": [_entry("a")], "cursor": "2:1"},
-            {"snapshot": "2", "entries": [_entry("a")]},
+            {"snapshot": "2", "entries": [_entry("a", judgment="none")], "cursor": "2:1"},
+            {"snapshot": "2", "entries": [_entry("a", judgment="none")]},
         ])
 
     def test_reordered_entries_abort_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "2", "entries": [_entry("b"), _entry("a")]},
+            {"snapshot": "2", "entries": [_entry("b", judgment="none"), _entry("a", judgment="none")]},
         ])
 
     def test_snapshot_churn_aborts_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "2", "entries": [_entry("a")], "cursor": "2:1"},
-            {"snapshot": "3", "entries": [_entry("b")]},
+            {"snapshot": "2", "entries": [_entry("a", judgment="none")], "cursor": "2:1"},
+            {"snapshot": "3", "entries": [_entry("b", judgment="none")]},
         ])
 
     def test_page_gap_aborts_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "3", "entries": [_entry("a")], "cursor": "3:2"},
+            {"snapshot": "3", "entries": [_entry("a", judgment="none")], "cursor": "3:2"},
         ])
 
     def test_malformed_page_aborts_without_partial_context(self):
@@ -368,11 +374,11 @@ class TestLintContextHostilePages(unittest.TestCase):
 
     def test_explicit_null_cursor_aborts_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "1", "entries": [_entry("a")], "cursor": None},
+            {"snapshot": "1", "entries": [_entry("a", judgment="none")], "cursor": None},
         ])
 
     def test_terminal_page_after_overall_deadline_aborts(self):
-        terminal = {"snapshot": "1", "entries": [_entry("a")]}
+        terminal = {"snapshot": "1", "entries": [_entry("a", judgment="none")]}
         with mock.patch.object(
                 client.time, "monotonic",
                 side_effect=(100.0, 100.002, 100.020)), \
@@ -386,13 +392,13 @@ class TestLintContextHostilePages(unittest.TestCase):
 
     def test_framed_response_read_consumes_absolute_remaining_deadline(self):
         self._assert_total_abort([
-            {"snapshot": "1", "entries": [_entry("a")]},
+            {"snapshot": "1", "entries": [_entry("a", judgment="none")]},
         ], timeout=0.08, chunk_delay=0.05)
 
     def test_timeout_aborts_without_partial_context(self):
         self._assert_total_abort([
-            {"snapshot": "2", "entries": [_entry("a")], "cursor": "2:1"},
-            {"snapshot": "2", "entries": [_entry("b")]},
+            {"snapshot": "2", "entries": [_entry("a", judgment="none")], "cursor": "2:1"},
+            {"snapshot": "2", "entries": [_entry("b", judgment="none")]},
         ], timeout=0.05, delay_at=1)
 
 
