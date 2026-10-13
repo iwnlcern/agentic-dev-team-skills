@@ -33,6 +33,7 @@ EXPECTED_ROSTER = (
     "relay_engine/envelope.py",
     "relay_engine/errors.py",
     "relay_engine/jcs.py",
+    "relay_engine/judging.py",
     "relay_engine/ledger.py",
     "relay_engine/migrate.py",
     "relay_engine/paths.py",

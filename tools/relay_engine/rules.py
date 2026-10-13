@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
+from contextvars import ContextVar
 import errno
 import hashlib
 import os
@@ -3428,7 +3429,18 @@ def _xroot_kill_and_reap(pid: int) -> None:
             return
 
 
-def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = False):
+_XROOT_BUDGET = ContextVar("relay_xroot_budget", default=None)
+
+
+def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = False,
+              deadline: float | None = None):
+    budget = _XROOT_BUDGET.get()
+    if budget is not None:
+        deadline = budget[0] if deadline is None else min(deadline, budget[0])
+    if deadline is not None and deadline <= time.monotonic():
+        if budget is not None:
+            budget[1].append("Git object query timed out")
+        raise XrootAxisError(axis, "Git object query timed out")
     argv = ["git", "-C", str(repo), *args]
     stdout_chunks: List[bytes] = []
     stderr_chunks: List[bytes] = []
@@ -3469,7 +3481,7 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
             os.set_blocking(fd, False)
             selector.register(fd, selectors.EVENT_READ, chunks)
 
-        deadline = time.monotonic() + XROOT_GIT_TIMEOUT_SECONDS
+        deadline = time.monotonic() + XROOT_GIT_TIMEOUT_SECONDS if deadline is None else deadline
         while selector.get_map() or status is None:
             if status is None:
                 waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
@@ -3481,11 +3493,15 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
+                if budget is not None:
+                    budget[1].append("Git object query timed out")
                 raise XrootAxisError(axis, "Git object query timed out")
             if selector.get_map():
                 events = selector.select(remaining)
                 if not events:
                     timed_out = True
+                    if budget is not None:
+                        budget[1].append("Git object query timed out")
                     raise XrootAxisError(axis, "Git object query timed out")
                 for key, _mask in events:
                     fd = key.fd

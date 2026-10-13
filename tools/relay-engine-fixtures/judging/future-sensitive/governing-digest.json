@@ -1,0 +1,25 @@
+{
+  "case": "governing-digest",
+  "order_divergent": false,
+  "future_sensitive": true,
+  "partition": "future-sensitive",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Pair Planner\nPHASE: DESIGN\nAUTHORITY: design-only\nDISPATCH_ID: candidate\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nDESIGN_ARTIFACT: D\nDESIGN_SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Pair Planner\nPHASE: DESIGN\nAUTHORITY: design-only\nDISPATCH_ID: new\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nDESIGN_ARTIFACT: D\nDESIGN_SHA256: c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c\n\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120100.md",
+  "family": "lineage.governing-digest",
+  "admission_messages": [
+    "does not match"
+  ],
+  "sweep_messages": [],
+  "artifacts": {
+    "designs/D.md": "artifact"
+  }
+}

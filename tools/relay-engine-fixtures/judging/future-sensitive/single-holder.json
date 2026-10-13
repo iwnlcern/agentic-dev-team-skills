@@ -1,0 +1,29 @@
+{
+  "case": "single-holder",
+  "order_divergent": false,
+  "future_sensitive": true,
+  "partition": "future-sensitive",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Pair Planner\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: parent\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\n\n\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Pair Implementer\nPHASE: IMPL\nAUTHORITY: implementation\nDISPATCH_ID: candidate\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.implementer\nTO: p.planner\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nPARENT_DISPATCH_ID: parent\nACTIONS_GIT_REF: implemented change abcdef1\n\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120300.md",
+      "text": "ROLE: Pair Planner\nPHASE: SITREP\nAUTHORITY: report-only\nDISPATCH_ID: parent\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\n\n\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120200.md",
+  "family": "lineage.impl-report-parent",
+  "admission_messages": [
+    "must be a DISPATCH IMPL"
+  ],
+  "sweep_messages": [
+    "held by 2 relays"
+  ],
+  "artifacts": {}
+}

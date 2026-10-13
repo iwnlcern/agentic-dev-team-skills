@@ -1,0 +1,27 @@
+{
+  "case": "dispatch-before-parent",
+  "order_divergent": true,
+  "future_sensitive": true,
+  "partition": "order-divergent",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120300.md",
+      "text": "ROLE: Pair Planner\nPHASE: IMPL\nAUTHORITY: implementation\nDISPATCH_ID: dispatch\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nPARENT_DISPATCH_ID: review\nDISPATCH IMPL\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Pair Planner\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: plan\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\n\n\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Pair Implementer\nPHASE: PLAN-REVIEW\nAUTHORITY: review-only\nDISPATCH_ID: review\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.implementer\nTO: p.planner\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nPARENT_DISPATCH_ID: plan\nVerdict: approve\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120300.md",
+  "family": "lineage.dispatch",
+  "admission_messages": [
+    "does not resolve"
+  ],
+  "sweep_messages": [],
+  "artifacts": {}
+}

@@ -1,0 +1,23 @@
+{
+  "case": "audit-record",
+  "order_divergent": false,
+  "future_sensitive": true,
+  "partition": "future-sensitive",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Pair Planner\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: candidate\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nDESIGN_LOCK_ID: DD\nDESIGN_RECORD_KIND: audit-record\n\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Pair Planner\nPHASE: DESIGN\nAUTHORITY: design-only\nDISPATCH_ID: design\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: p.implementer\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nDESIGN_DOC_ID: DD\n\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120100.md",
+  "family": "lineage.design-review",
+  "admission_messages": [],
+  "sweep_messages": [
+    "conflicts with observable"
+  ],
+  "artifacts": {}
+}

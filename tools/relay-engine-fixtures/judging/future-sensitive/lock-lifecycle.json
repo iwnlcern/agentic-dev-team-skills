@@ -1,0 +1,27 @@
+{
+  "case": "lock-lifecycle",
+  "order_divergent": true,
+  "future_sensitive": true,
+  "partition": "order-divergent",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120300.md",
+      "text": "ROLE: Pair Planner\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: c5-reviewer-design-consumer\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: beta.pair-planner\nTO: beta.pair-implementer\nDESIGN_LOCK_ID: lock-c5-reviewer-design\nDESIGN_RECORD_KIND: design-doc\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Master Reviewer\nPHASE: DESIGN\nAUTHORITY: design-only\nDISPATCH_ID: c5-reviewer-design-origin\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: alpha.master-reviewer\nTO: alpha.master-planner\nDESIGN_DOC_ID: lock-c5-reviewer-design\nDESIGN_RECORD_KIND: design-doc\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Master Reviewer\nPHASE: DESIGN-REVIEW\nAUTHORITY: review-only\nDISPATCH_ID: c5-reviewer-design-review\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: alpha.master-reviewer\nTO: alpha.master-planner\nPARENT_DISPATCH_ID: c5-reviewer-design-origin\nDESIGN_DOC_ID: lock-c5-reviewer-design\nDESIGN_RECORD_KIND: design-doc\nDESIGN_REVIEW_VERDICT: approve\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120300.md",
+  "family": "lineage.lock-lifecycle",
+  "admission_messages": [],
+  "sweep_messages": [
+    "may not originate from reviewer"
+  ],
+  "artifacts": {}
+}
