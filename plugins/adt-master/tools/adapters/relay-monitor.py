@@ -1677,6 +1677,10 @@ def bind_from_receipt(
     return True, "bound"
 
 
+def hook_context(line: str) -> bytes:
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": line}}, ensure_ascii=True).encode("utf-8")
+
+
 def bind(args) -> int:
     if getattr(args, "manual", False):
         session = resolve_session(args)
@@ -1725,6 +1729,7 @@ def bind(args) -> int:
             ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
             if ok:
                 return 0
+    hint = None
     with store.state_lock():
         note = store.load()
         if call and call in note.get("handled_calls", []):
@@ -1732,6 +1737,9 @@ def bind(args) -> int:
         root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root)
         if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call):
             store.save(note)
+            hint = rebind_line(note, session)
+    if hint:
+        print(hook_context(hint).decode("utf-8"), flush=True)
     return 0
 
 

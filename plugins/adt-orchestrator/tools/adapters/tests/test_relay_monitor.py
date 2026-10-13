@@ -2815,6 +2815,53 @@ class BindTests(TmpEnv):
         )
         self.assertEqual(self.store.load()["seat"], "a.planner")
 
+    def _hook_output(self, payload):
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            rc = self.run_bind(payload)
+        return rc, output.getvalue()
+
+    def test_hook_emits_additional_context_on_new_observation(self):
+        rc, text = self._hook_output(self._miss("one"))
+        self.assertEqual(rc, 0)
+        doc = json.loads(text)
+        self.assertEqual(set(doc), {"hookSpecificOutput"})
+        self.assertEqual(doc["hookSpecificOutput"], {"hookEventName": "PostToolUse", "additionalContext": self.rm.rebind_line(self.store.load(), "sess")})
+        self.assertTrue(doc["hookSpecificOutput"]["additionalContext"].startswith("rebind"))
+
+    def test_hook_emits_nothing_for_handled_call(self):
+        first = self._miss("one")
+        self._hook_output(first)
+        self.assertEqual(self._hook_output(first), (0, ""))
+        self._manual()
+        self.assertEqual(self._hook_output(first), (0, ""))
+
+    def test_hook_emits_nothing_on_successful_bind(self):
+        self.assertEqual(self._hook_output(self._submit("one")), (0, ""))
+        self.assertEqual(self._hook_output(self._submit("one")), (0, ""))
+
+    def test_hook_never_blocks(self):
+        outcomes = ["invalid-json", "[]", self.payload("tools/relay submit d.md"), self.payload("ls", self.receipt), self._submit("ok"), self._miss("miss"), self.payload("tools/relay submit d.md | head", self.receipt), self.payload("tools/relay submit d.md --root /missing", self.receipt), self.payload("tools/relay submit d.md", self.receipt + self.receipt), self.payload("tools/relay submit d.md", self.receipt.replace("r1.md", "missing.md")), self.payload("tools/relay submit d.md --key /x/.engine/seats/z.planner/key", self.receipt)]
+        emitted = 0
+        for payload in outcomes:
+            rc, text = self._hook_output(payload)
+            self.assertEqual(rc, 0)
+            if text:
+                doc = json.loads(text)
+                self.assertEqual(set(doc), {"hookSpecificOutput"})
+                self.assertEqual(set(doc["hookSpecificOutput"]), {"hookEventName", "additionalContext"})
+                self.assertEqual(doc["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+                self.assertLessEqual(len(doc["hookSpecificOutput"]["additionalContext"]), 1024)
+                emitted += 1
+        self.assertEqual(emitted, 6)
+
+    def test_second_call_same_display_emits_again(self):
+        rc, first = self._hook_output(self._miss("one"))
+        rc2, second = self._hook_output(self._miss("two"))
+        self.assertEqual((rc, rc2), (0, 0))
+        self.assertEqual(json.loads(first), json.loads(second))
+        self.assertNotEqual(self.rm.call_identity("sess", {"tool_use_id": "one"}), self.rm.call_identity("sess", {"tool_use_id": "two"}))
+
     def _submit(self, call=None, root=None, anchor="lane/r1.md"):
         root = root or self.root
         command = f"tools/relay submit d.md --root {root}"
