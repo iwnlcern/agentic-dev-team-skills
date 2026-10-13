@@ -385,6 +385,7 @@ class TestE2EChain(unittest.TestCase):
                 Path(temporary))
             result = run_chain(process, root, CID, DID)
             self.assertEqual(result["review"]["advisories"], [])
+            self.assertEqual(result["review"]["findings"], [])
             self.assertEqual(result["bypass"]["origin"], "hand")
 
 

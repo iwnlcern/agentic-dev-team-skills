@@ -21,9 +21,9 @@ import uuid
 from pathlib import Path
 
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
-                          rules, seats, strings, supersede, version)
+                          rules, seats, strings, supersede, version, judging)
 from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
-from relay_engine.ledger import admit, epoch_state, ensure_additive_schema
+from relay_engine.ledger import admit, epoch_state, ensure_additive_schema, judgment_for
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
 from relay_engine.render import index_rows, render_index, render_relay
 from relay_engine.paths import Root, TempWrite, ensure_engine_dir
@@ -807,6 +807,10 @@ def _submit_handler(ledger, root, args):
         claimed_body_sha256=args["body_sha256"],
         claimed_content_hash=args["content_hash"],
         admits_against=args.get("admits_against"),
+        judge=lambda ctx: ("judged", judging.judge_candidate(
+            judging.corpus_before(ctx.ledger, ctx.seq), ctx.rendered_path,
+            ctx.envelope, ctx.body, artifact_root=Path(root.path),
+            deadline=time.monotonic() + 5.0)),
         prechecks=(cycles.callback(),),
         cycle_events=cycle_events,
         supersession_edges=supersession_edges,
@@ -817,11 +821,15 @@ def _submit_handler(ledger, root, args):
     advisory_row = ledger.execute(
         "SELECT advisories_json FROM relays WHERE seq=?",
         (admission.seq,)).fetchone()
+    _status, findings = judgment_for(ledger, admission.seq)
     return {"path": admission.rendered_path,
             "render_state": ("rendered" if rendered.event == "rendered"
                              else "render-conflict"),
             "advisories": json.loads(advisory_row[0]),
-            "duplicate": admission.replay}
+            "duplicate": admission.replay,
+            "findings": [{"id": f.id, "lint_severity": f.lint_severity,
+                          "subject": f.subject, "operands": list(f.operands),
+                          "params": f.params, "message": f.message} for f in findings]}
 
 
 def _lint_context_position(ledger, cursor):

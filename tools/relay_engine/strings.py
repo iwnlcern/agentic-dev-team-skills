@@ -35,6 +35,11 @@ class ExistingTargets:
 
 
 INVENTORY = {
+    "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
+    "authority.grant-shape-absent": "MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing",
+    "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
+    "external.could-not-evaluate": "{gate} could not be evaluated: {cause}",
+    "routing.unknown-address": "address not on this root's roster: {addresses}; known: {known}; notice to the top seat: {notice}",
     "explain-heading": "{code}",
     "explain-cause": "cause: {cause}",
     "explain-remedy": "remedy: {remedy}",
@@ -184,6 +189,15 @@ _VALIDATORS.update({
                                  "non-directory ancestor",
                                  "root escape"}),
     ("engine-root-outside-the-record", "path"): _is_root_relative_path,
+})
+
+
+_VALIDATORS.update({
+    ("external.could-not-evaluate", "gate"): lambda value: isinstance(value, str),
+    ("external.could-not-evaluate", "cause"): lambda value: isinstance(value, str),
+    ("routing.unknown-address", "addresses"): lambda value: isinstance(value, str),
+    ("routing.unknown-address", "known"): lambda value: isinstance(value, str),
+    ("routing.unknown-address", "notice"): lambda value: isinstance(value, str),
 })
 
 
