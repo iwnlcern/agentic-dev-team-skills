@@ -2931,6 +2931,91 @@ class BindTests(TmpEnv):
         self.assertEqual(self._observation()["reason"], "submit-near-miss")
         self.assertIsNone(self.store.load()["seat"])
 
+    def _indicated_miss(self, command, cwd=None):
+        payload = json.loads(self.payload(command, self.receipt))
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        self.run_bind(json.dumps(payload))
+        return self.store.load()["bind_observation"]
+
+    def test_unreadable_other_root_with_colliding_path_gets_incomplete_hint(self):
+        self.run_bind(self._submit("initial"))
+        other = self.other_root()
+        before = self.store.load()
+        record = self._indicated_miss(f"tools/relay submit d.md --root {other} | cat")
+        self.assertEqual(record["root_provenance"], "none")
+        self.assertEqual(record["command_roots"], [str(other)])
+        line = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertIn("command text", line)
+        self.assertIn(str(other), line)
+        self.assertNotIn("bind --manual", line)
+        for key in ("seat", "root", "anchor", "binding_gen", "progress"):
+            self.assertEqual(self.store.load()[key], before[key])
+
+    def test_unreadable_same_root_operand_keeps_inferred_hint(self):
+        record = self._indicated_miss(f"tools/relay submit d.md --root {self.root} | cat")
+        self.assertEqual(record["root_provenance"], "inferred")
+
+    def test_quoted_and_equals_root_spellings_withhold_inference(self):
+        for operand in ('--root "/B with space"', '--root=/B', '--root="/B with space"'):
+            with self.subTest(operand=operand):
+                record = self._indicated_miss(f"tools/relay submit d.md {operand} | cat")
+                self.assertEqual(record["root_provenance"], "none")
+
+    def test_dynamic_root_operand_withholds_inference(self):
+        record = self._indicated_miss('tools/relay submit d.md --root "$R" | cat')
+        self.assertEqual(record["root_provenance"], "none")
+        self.assertEqual(record["command_roots"], ['"$R"'])
+
+    def test_single_quoted_dollar_is_static_double_quoted_is_dynamic(self):
+        candidate = self.base / "$literal"
+        (candidate / ".engine").mkdir(parents=True)
+        write_index(candidate / "INDEX.md", row(1))
+        for quote, provenance in (("'", "inferred"), ('"', "none")):
+            command = f"tools/relay submit d.md --root {quote}{candidate}{quote} | cat"
+            record = self._indicated_miss(command, candidate)
+            self.assertEqual(record["root_provenance"], provenance)
+            indications, directory = self.rm.root_indications(command)
+            self.assertEqual(indications, [(f"{quote}{candidate}{quote}", str(candidate), quote == '"')])
+            self.assertFalse(directory)
+
+    def test_quoted_static_operand_resolves_without_its_quotes(self):
+        candidate = self.base / "root with space"
+        (candidate / ".engine").mkdir(parents=True)
+        write_index(candidate / "INDEX.md", row(1))
+        record = self._indicated_miss(f'tools/relay submit d.md --root "{candidate}" | cat', candidate)
+        self.assertEqual(record["root_provenance"], "inferred")
+        self.assertEqual(record["command_roots"], [f'"{candidate}"'])
+
+    def test_multiple_distinct_root_operands_withhold_inference(self):
+        record = self._indicated_miss(f"tools/relay submit d.md --root {self.root} --root /B | cat")
+        self.assertEqual(record["root_provenance"], "none")
+        self.assertEqual(record["command_roots"], [str(self.root), "/B"])
+
+    def test_directory_word_withholds_inference(self):
+        for word in ("cd", "pushd"):
+            record = self._indicated_miss(f"{word} /B; time tools/relay submit d.md")
+            self.assertEqual(record["root_provenance"], "none")
+
+    def test_quoted_root_option_token_is_not_an_indication(self):
+        command = "tools/relay submit d.md '--root' /B | cat"
+        self.assertEqual(self.rm.root_indications(command), ([], False))
+        self.assertEqual(self._indicated_miss(command)["root_provenance"], "inferred")
+
+    def test_inference_uses_untruncated_operand(self):
+        candidate = self.base / ("a" * 80) / ("b" * 80) / ("c" * 80)
+        (candidate / ".engine").mkdir(parents=True)
+        write_index(candidate / "INDEX.md", row(1))
+        record = self._indicated_miss(f"tools/relay submit d.md --root {candidate} | cat", candidate)
+        self.assertEqual(record["root_provenance"], "inferred")
+        self.assertEqual(record["root"], str(candidate))
+        self.assertEqual(record["command_roots"], [str(candidate)[:200]])
+
+    def test_indications_never_bind(self):
+        self._indicated_miss(f"time tools/relay submit d.md --root {self.root}")
+        self.assertIsNone(self.store.load()["seat"])
+        self.assertEqual(self.store.load()["binding_gen"], 0)
+
     def test_bound_to_a_filing_to_b_records(self):
         self.run_bind(self._submit())
         before = self.store.load()
@@ -4004,6 +4089,21 @@ class StatusTests(TmpEnv):
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
+
+    def test_record_without_command_roots_renders_hint(self):
+        self._record(provenance="none")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind: incomplete"))
+
+    def test_incomplete_hint_shows_operands_as_command_text_on_one_line(self):
+        self._record(provenance="none")
+        self.store.update(lambda n: n["bind_observation"].update(command_roots=["/B with space", "line\nnext", "x" * 200] * 10))
+        line = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertIn("command text", line)
+        self.assertIn("'/B with space'", line)
+        self.assertNotIn("\n", line)
+        self.assertNotIn("\r", line)
+        self.assertLessEqual(len(line), 1024)
+        self.assertNotIn("bind --manual", line)
 
     def _live_status(self, phase="following", bound=True):
         lock = self.rm.LeaderLock("sess")

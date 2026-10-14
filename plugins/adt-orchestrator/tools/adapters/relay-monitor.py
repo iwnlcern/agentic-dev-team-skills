@@ -1596,7 +1596,56 @@ def names_submit_verb(command: str) -> bool:
     )
 
 
-def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dict], plugin_root: str | None) -> tuple[str | None, str]:
+def root_indications(command: str) -> tuple[list[tuple[str, str, bool]], bool]:
+    """Read contrary root evidence without extending the submit grammar."""
+    sl = _shell_lex()
+    try:
+        command = sl.strip_heredoc_bodies(command)
+    except sl.Uncertain:
+        pass
+    tokens = sl.lex_spans(command)
+    if tokens is None:
+        tokens = sl.lex_spans(command + "\n'") or sl.lex_spans(command + '\n"') or []
+
+    def operand(raw):
+        quote, dynamic, i = None, False, 0
+        while i < len(raw):
+            char = raw[i]
+            if char == "\\" and quote != "'":
+                i += 2
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                elif quote == '"' and char in "$`":
+                    dynamic = True
+            elif char in "'\"":
+                quote = char
+            elif char in "$`*?[":
+                dynamic = True
+            i += 1
+        try:
+            decoded = shlex.split(raw)
+        except ValueError:
+            return raw, raw, True
+        return raw, decoded[0] if len(decoded) == 1 else "", dynamic or len(decoded) != 1
+
+    roots, directory = [], False
+    for i, (word, quoted, operator, start, end) in enumerate(tokens):
+        if operator:
+            continue
+        if not quoted and word in ("cd", "pushd"):
+            directory = True
+        if not quoted and word == "--root":
+            if i + 1 < len(tokens) and not tokens[i + 1][2]:
+                following = tokens[i + 1]
+                roots.append(operand(command[following[3]:following[4]]))
+        elif word.startswith("--root=") and sl.unquoted_prefix(word, quoted) >= 7:
+            roots.append(operand(command[start + 7:end]))
+    return roots, directory
+
+
+def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dict], plugin_root: str | None, indications: tuple[list[tuple[str, str, bool]], bool]) -> tuple[str | None, str]:
     if parsed.cd_prefix:
         cwd = os.path.join(cwd, parsed.cd_prefix)
     if parsed.root_operand:
@@ -1617,7 +1666,16 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
             return None, "none"
         if any(row.cells["file"] == receipts[0]["path"] for row in snap.rows):
             matches.append(root)
-    return (matches[0], "inferred") if len(matches) == 1 else (None, "none")
+    if len(matches) != 1:
+        return None, "none"
+    operands, directory = indications
+    if directory or len({value for _, value, _ in operands}) > 1:
+        return None, "none"
+    candidate = os.path.realpath(matches[0])
+    for _, value, dynamic in operands:
+        if dynamic or not value or os.path.realpath(os.path.join(cwd, value)) != candidate:
+            return None, "none"
+    return matches[0], "inferred"
 
 
 def _remember_call(note: dict, call: str | None) -> None:
@@ -1625,12 +1683,14 @@ def _remember_call(note: dict, call: str | None) -> None:
         note["handled_calls"] = (note.get("handled_calls", []) + [call])[-8:]
 
 
-def record_observation(note: dict, *, reason: str, receipts: list[str], root: str | None, provenance: str, call: str | None) -> bool:
+def record_observation(note: dict, *, reason: str, receipts: list[str], root: str | None, provenance: str, call: str | None, command_roots: list[str] | None = None) -> bool:
     if call and call in note.get("handled_calls", []):
         return False
     record = dict(reason=reason, receipts=receipts, root=root, root_provenance=provenance, call=call)
+    if command_roots:
+        record["command_roots"] = [text[:200] for text in command_roots]
     old = note.get("bind_observation") or {}
-    if call is None and all(old.get(k) == v for k, v in record.items()):
+    if call is None and all(old.get(k) == v for k, v in record.items()) and old.get("command_roots", []) == record.get("command_roots", []):
         return False
     note["bind_observation"] = dict(record, stamp=now_stamp())
     _remember_call(note, call)
@@ -1719,6 +1779,7 @@ def bind(args) -> int:
     if not receipts:
         return 0
     parsed = parse_submit_command(command)
+    indications = root_indications(command)
     cwd = payload.get("cwd") or os.getcwd()
     if not isinstance(cwd, str):
         cwd = os.getcwd()
@@ -1741,8 +1802,8 @@ def bind(args) -> int:
         note = store.load()
         if call and call in note.get("handled_calls", []):
             return 0
-        root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root)
-        if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call):
+        root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root, indications)
+        if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
             store.save(note)
             hint = rebind_line(note, session)
     if hint:
@@ -1980,6 +2041,11 @@ def rebind_line(note: dict, session: str) -> str | None:
     prefix = "rebind: incomplete — supply --root <run root> --anchor <receipt path>"
     seen = " seen=" + json.dumps(receipts, ensure_ascii=True) if receipts else ""
     text = prefix + seen
+    operands = record.get("command_roots") or []
+    if operands:
+        rendered = shlex.join(operands)
+        rendered = "".join(char if char.isprintable() else ascii(char)[1:-1] for char in rendered)
+        text += " command text=" + rendered
     return text if len(text) <= 1024 else text[:1021] + "..."
 
 

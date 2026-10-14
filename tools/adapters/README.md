@@ -198,6 +198,7 @@ rebind: incomplete — supply --root <run root> --anchor <receipt path> seen=[..
 The complete form uses the root parsed from the command and shell-quotes every argument as needed.
 The inferred form requires exactly one candidate root with the receipt's index row and asks the operator to check it.
 The incomplete form is not runnable and never substitutes the existing binding anchor for the observed receipt.
+When lexical root indications contradict inference, the incomplete hint shows their bounded, shell-quoted operand spellings as command text; this optional stored text never drives binding or delivery.
 Hints are at most 1,024 characters; an oversized or multiline command uses the incomplete form.
 A manual bind clears observations even at the current anchor, without advancing the generation there; it preserves existing progress for the same seat and root.
 A hook reporting the current seat, root and anchor with progress already present is a no-op and clears nothing.
