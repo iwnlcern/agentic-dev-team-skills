@@ -2979,6 +2979,81 @@ class BindTests(TmpEnv):
         self.run_bind(payload)
         self.assertEqual(self.store.path.read_bytes(), before)
 
+    def test_repeat_r_then_s_then_delayed_repeat_keeps_s(self):
+        write_index(self.index, row(1) + row(2))
+        (self.root / "lane/r2.md").write_text("r2\n")
+        self.run_bind(self._submit("initial"))
+        repeat = self._submit("repeat")
+        self.run_bind(repeat)
+        self.run_bind(self._submit("later", anchor="lane/r2.md"))
+        self.run_bind(self._miss("observation"))
+        before = self.store.path.read_bytes()
+        self.run_bind(repeat)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.store.load()["anchor"], "lane/r2.md")
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_bind_s_clears_observation_recorded_before_it(self):
+        write_index(self.index, row(1) + row(2))
+        (self.root / "lane/r2.md").write_text("r2\n")
+        self.run_bind(self._submit("initial"))
+        self.run_bind(self._submit("repeat"))
+        self.run_bind(self._miss("observation"))
+        self.assertIsNotNone(self.store.load()["bind_observation"])
+        self.run_bind(self._submit("later", anchor="lane/r2.md"))
+        self.assertIsNone(self.store.load()["bind_observation"])
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_repeat_sequence_across_root_change_keeps_new_binding(self):
+        self.run_bind(self._submit("initial"))
+        repeat = self._submit("repeat")
+        self.run_bind(repeat)
+        other = self.other_root()
+        self.run_bind(self._submit("later", root=other))
+        self.run_bind(self._miss("observation"))
+        before = self.store.path.read_bytes()
+        self.run_bind(repeat)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.store.load()["root"], str(other))
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_same_anchor_identified_call_records_only_its_identity(self):
+        self.run_bind(self._submit("initial"))
+        self.run_bind(self._miss("observation"))
+        before = self.store.load()
+        with mock.patch.object(self.rm, "now_stamp", return_value="later-stamp"):
+            self.run_bind(self._submit("repeat"))
+        expected = dict(before)
+        expected["handled_calls"] = before["handled_calls"] + [
+            self.rm.call_identity("sess", {"tool_use_id": "repeat"})
+        ]
+        self.assertEqual(self.store.load(), expected)
+
+    def test_same_anchor_without_identifier_is_byte_identical(self):
+        self.run_bind(self._submit("initial"))
+        self.run_bind(self._miss("observation"))
+        before = self.store.path.read_bytes()
+        self.run_bind(self._submit())
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_identified_help_and_refused_submit_not_remembered(self):
+        self.run_bind(self._submit("initial"))
+        before = self.store.path.read_bytes()
+        for command, response in (("tools/relay submit --help", "usage"),
+                                  ("tools/relay submit bad.md", '{"code":"E-ENVELOPE"}')):
+            self.run_bind(self.payload(command, response, call_id=command))
+            self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_eight_unrelated_identified_calls_do_not_evict(self):
+        original = self._submit("initial")
+        self.run_bind(original)
+        before = self.store.path.read_bytes()
+        for i in range(8):
+            self.run_bind(self.payload("echo unrelated", self.receipt, call_id=f"unrelated-{i}"))
+            self.assertEqual(self.store.path.read_bytes(), before)
+        self.run_bind(original)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
     def test_r_then_s_then_delayed_r_keeps_s(self):
         write_index(self.index, row(1) + row(2))
         (self.root / "lane/r2.md").write_text("r2\n")

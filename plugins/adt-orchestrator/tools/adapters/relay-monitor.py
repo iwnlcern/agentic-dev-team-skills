@@ -164,6 +164,10 @@ class NoteStore:
 
     def save(self, note: dict) -> None:
         note["updated"] = now_stamp()
+        self._write(note)
+
+    def _write(self, note: dict) -> None:
+        """Persist under the caller's state lock without changing note fields."""
         fd, tmp = tempfile.mkstemp(
             dir=self.path.parent, prefix=f".{self.session}.", suffix=".tmp"
         )
@@ -1662,6 +1666,9 @@ def bind_from_receipt(
         fresh = not (canonical(n.get("seat")) == canonical(seat) and n.get("root") == root)
         changed = fresh or n.get("anchor") != receipt_path or root not in n["progress"]
         if source == "hook" and not changed:
+            if call:
+                _remember_call(n, call)
+                store._write(n)
             return True, "unchanged"
         clear_observations(n)
         n.update(seat=seat, root=root, anchor=receipt_path, bound_at=now_stamp(), binding_source=source)
