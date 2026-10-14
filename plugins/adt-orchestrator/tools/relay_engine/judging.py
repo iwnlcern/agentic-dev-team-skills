@@ -1354,6 +1354,26 @@ def _artifact_findings(root, subject, text):
     return result
 
 
+def _authority_citation(text):
+    values = h27_occurrences(text, 'AUTHORITY_CHECK')
+    if len(values) != 1:
+        return False
+    value = values[0]
+    if re.fullmatch(r'unavailable\s+[—-]\s+\S.*', value):
+        return True
+    match = re.fullmatch(r'allowed (implement|merge) (\S+) (\d{8}-\d{6})', value)
+    if match is None:
+        return False
+    path = Path(match[2])
+    if path.is_absolute() or any(p in ('', '.', '..') for p in match[2].split('/')):
+        return False
+    try:
+        datetime.datetime.strptime(match[3], '%Y%m%d-%H%M%S')
+    except ValueError:
+        return False
+    return True
+
+
 def judge_candidate(corpus: Corpus, subject: str, envelope: Envelope, body: bytes, *, artifact_root: Path, deadline: float) -> tuple[Finding, ...]:
     root = Path(artifact_root)
     text = body.decode('utf-8')
@@ -1405,6 +1425,10 @@ def judge_candidate(corpus: Corpus, subject: str, envelope: Envelope, body: byte
             and not merge_authorized(text, fields) and not merge_authorization_verdict_lines(text)):
         result.add_finding(Finding('authority.grant-shape-absent', 'warn', subject, (), {},
                                   'MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing'))
+    if (((fields.get('PHASE') == 'IMPL' and implementation_work_claimed(text, fields))
+            or merge_claimed(text, fields)) and not _authority_citation(text)):
+        result.add_finding(Finding('authority.check-not-cited', 'warn', subject, (), {},
+                                  strings.render('authority.check-not-cited')))
     if corpus.known_addresses is not None:
         addresses = {address.lower() for key in ('FROM', 'TO', 'CC')
                      for address in split_addresses(fields.get(key))}

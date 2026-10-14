@@ -374,7 +374,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/check-relay-lint-fixtures.py",
-    "sha256": "58c7f3662ec8e2827ab5e92d7d9467a49b5809595baaf2d81a226e868f350d07",
+    "sha256": "a8770df215ea5ba21f54ec87fd6a6492730e934f67814fc2cb2f8d9e898bcc44",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -392,7 +392,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay-lint-fixtures/README.md",
-    "sha256": "b034e8f0e2d39f9bf5e2f8994b430ceecd980146522394de8144eb037b5fd324",
+    "sha256": "10565fe63c68e1b493602abf93d4f3565a93932bfc60128ec4211f81a4202f75",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -7165,6 +7165,30 @@
   },
   {
     "kit_version": "2.9.6",
+    "path": "adt-master/tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/IMPL-20260611-110001.md",
+    "sha256": "ae2de625b19f7d6553eb9c862aa2f3cd32f78431f6eb5b5fcaa6ceb7c0126314",
+    "source": "tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/IMPL-20260611-110001.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-master/tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/MERGE-GATE-20260611-110000.md",
+    "sha256": "228ec32f7358f0433b062889a22318e706bd153c7155777fa5d96846429e91af",
+    "source": "tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/MERGE-GATE-20260611-110000.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-master/tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/IMPL-20260611-110001.md",
+    "sha256": "a36338d70bef23b39b8f9ef3ff0e160867ecff0621f77f78c4fe0753e739edbb",
+    "source": "tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/IMPL-20260611-110001.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-master/tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/MERGE-GATE-20260611-110000.md",
+    "sha256": "a20baed9fefb33271a49802867a1bc987f939dbf2114ed34b7b7a6d24d7322ce",
+    "source": "tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/MERGE-GATE-20260611-110000.md"
+  },
+  {
+    "kit_version": "2.9.6",
     "path": "adt-master/tools/relay-lint-fixtures/merge-token/MT2-backticked-token-inert/IMPL-report-20260610-131000.md",
     "sha256": "a439969747408034a1583add60b4b0b77d208ec065fd3a36b1ec41a46c147dc2",
     "source": "tools/relay-lint-fixtures/merge-token/MT2-backticked-token-inert/IMPL-report-20260610-131000.md"
@@ -10442,7 +10466,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay-lint.py",
-    "sha256": "edbde37f2f30f7938ef390afbefef0de4afe7ae122a9a92e7c6b1044705cb2a7",
+    "sha256": "63024ff4a4d5b21b80f0836e2e5c8749406f0e974ed50442f4d9986787103bb4",
     "source": "tools/relay-lint.py"
   },
   {
@@ -10459,8 +10483,14 @@
   },
   {
     "kit_version": "2.9.6",
+    "path": "adt-master/tools/relay_engine/authority.py",
+    "sha256": "43a0146ac65809cf42e76df1b4cf4cd1e9324d305efd7869cdd205de54c2ac9d",
+    "source": "tools/relay_engine/authority.py"
+  },
+  {
+    "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/cli.py",
-    "sha256": "5a732fbc07a0d006fbeb0886602dd8b7c3fc447e55ddb8a2a21e97aa2db59ef6",
+    "sha256": "503812b329799e070b9ec5398389607fb4936c036eb9e8f4b421fc781b3d4c48",
     "source": "tools/relay_engine/cli.py"
   },
   {
@@ -10484,7 +10514,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/daemon.py",
-    "sha256": "4da8bf7f7e96722b979498a890aee0e27b898b39c1d24b3a459b27a7216d497a",
+    "sha256": "fb73417bd59106c6adbf7b92815f43edbb879144d6b8b4cc1a5cb819eea2a7b6",
     "source": "tools/relay_engine/daemon.py"
   },
   {
@@ -10508,7 +10538,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/judging.py",
-    "sha256": "cf050e4e7c7dc1f7c9bc9bb3fe971133b3de9f37a75ca74c57e7885047799d31",
+    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -10550,7 +10580,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/rules.py",
-    "sha256": "b185ec0bc77813f8c02c9c182613c640a38d37a36226777dc29011c169298f4d",
+    "sha256": "5c4a531644820d86692341159b9199bdcc23e85ca99d24ff2a19018d1e0174e2",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -10562,7 +10592,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/strings.py",
-    "sha256": "541e736ea1c131d365e3f605d804f2368b018cba66501da69b734e5bb1931ff2",
+    "sha256": "382e7b51c7d27f6c15489b0dbb59e3999eca22abc8dc636d8e220cff32e13fa4",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -10574,7 +10604,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "f213fef21a037fa4eb0759a30989380989ff705d7c08928a3f41735a4b2e1146",
+    "sha256": "d2d50b99d709217a1120874570555ac946c45e4f4b58a233b787f397f7a01f55",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -10862,7 +10892,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/check-relay-lint-fixtures.py",
-    "sha256": "58c7f3662ec8e2827ab5e92d7d9467a49b5809595baaf2d81a226e868f350d07",
+    "sha256": "a8770df215ea5ba21f54ec87fd6a6492730e934f67814fc2cb2f8d9e898bcc44",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -10880,7 +10910,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/README.md",
-    "sha256": "b034e8f0e2d39f9bf5e2f8994b430ceecd980146522394de8144eb037b5fd324",
+    "sha256": "10565fe63c68e1b493602abf93d4f3565a93932bfc60128ec4211f81a4202f75",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -17653,6 +17683,30 @@
   },
   {
     "kit_version": "2.9.6",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/IMPL-20260611-110001.md",
+    "sha256": "ae2de625b19f7d6553eb9c862aa2f3cd32f78431f6eb5b5fcaa6ceb7c0126314",
+    "source": "tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/IMPL-20260611-110001.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/MERGE-GATE-20260611-110000.md",
+    "sha256": "228ec32f7358f0433b062889a22318e706bd153c7155777fa5d96846429e91af",
+    "source": "tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/MERGE-GATE-20260611-110000.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/IMPL-20260611-110001.md",
+    "sha256": "a36338d70bef23b39b8f9ef3ff0e160867ecff0621f77f78c4fe0753e739edbb",
+    "source": "tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/IMPL-20260611-110001.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-orchestrator/tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/MERGE-GATE-20260611-110000.md",
+    "sha256": "a20baed9fefb33271a49802867a1bc987f939dbf2114ed34b7b7a6d24d7322ce",
+    "source": "tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/MERGE-GATE-20260611-110000.md"
+  },
+  {
+    "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay-lint-fixtures/merge-token/MT2-backticked-token-inert/IMPL-report-20260610-131000.md",
     "sha256": "a439969747408034a1583add60b4b0b77d208ec065fd3a36b1ec41a46c147dc2",
     "source": "tools/relay-lint-fixtures/merge-token/MT2-backticked-token-inert/IMPL-report-20260610-131000.md"
@@ -20930,7 +20984,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay-lint.py",
-    "sha256": "edbde37f2f30f7938ef390afbefef0de4afe7ae122a9a92e7c6b1044705cb2a7",
+    "sha256": "63024ff4a4d5b21b80f0836e2e5c8749406f0e974ed50442f4d9986787103bb4",
     "source": "tools/relay-lint.py"
   },
   {
@@ -20947,8 +21001,14 @@
   },
   {
     "kit_version": "2.9.6",
+    "path": "adt-orchestrator/tools/relay_engine/authority.py",
+    "sha256": "43a0146ac65809cf42e76df1b4cf4cd1e9324d305efd7869cdd205de54c2ac9d",
+    "source": "tools/relay_engine/authority.py"
+  },
+  {
+    "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/cli.py",
-    "sha256": "5a732fbc07a0d006fbeb0886602dd8b7c3fc447e55ddb8a2a21e97aa2db59ef6",
+    "sha256": "503812b329799e070b9ec5398389607fb4936c036eb9e8f4b421fc781b3d4c48",
     "source": "tools/relay_engine/cli.py"
   },
   {
@@ -20972,7 +21032,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/daemon.py",
-    "sha256": "4da8bf7f7e96722b979498a890aee0e27b898b39c1d24b3a459b27a7216d497a",
+    "sha256": "fb73417bd59106c6adbf7b92815f43edbb879144d6b8b4cc1a5cb819eea2a7b6",
     "source": "tools/relay_engine/daemon.py"
   },
   {
@@ -20996,7 +21056,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/judging.py",
-    "sha256": "cf050e4e7c7dc1f7c9bc9bb3fe971133b3de9f37a75ca74c57e7885047799d31",
+    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -21038,7 +21098,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/rules.py",
-    "sha256": "b185ec0bc77813f8c02c9c182613c640a38d37a36226777dc29011c169298f4d",
+    "sha256": "5c4a531644820d86692341159b9199bdcc23e85ca99d24ff2a19018d1e0174e2",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -21050,7 +21110,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/strings.py",
-    "sha256": "541e736ea1c131d365e3f605d804f2368b018cba66501da69b734e5bb1931ff2",
+    "sha256": "382e7b51c7d27f6c15489b0dbb59e3999eca22abc8dc636d8e220cff32e13fa4",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -21062,7 +21122,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "f213fef21a037fa4eb0759a30989380989ff705d7c08928a3f41735a4b2e1146",
+    "sha256": "d2d50b99d709217a1120874570555ac946c45e4f4b58a233b787f397f7a01f55",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21278,7 +21338,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/check-relay-lint-fixtures.py",
-    "sha256": "58c7f3662ec8e2827ab5e92d7d9467a49b5809595baaf2d81a226e868f350d07",
+    "sha256": "a8770df215ea5ba21f54ec87fd6a6492730e934f67814fc2cb2f8d9e898bcc44",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -21296,7 +21356,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay-lint-fixtures/README.md",
-    "sha256": "b034e8f0e2d39f9bf5e2f8994b430ceecd980146522394de8144eb037b5fd324",
+    "sha256": "10565fe63c68e1b493602abf93d4f3565a93932bfc60128ec4211f81a4202f75",
     "source": "tools/relay-lint-fixtures/README.md"
   },
   {
@@ -28069,6 +28129,30 @@
   },
   {
     "kit_version": "2.9.6",
+    "path": "adt-pair/tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/IMPL-20260611-110001.md",
+    "sha256": "ae2de625b19f7d6553eb9c862aa2f3cd32f78431f6eb5b5fcaa6ceb7c0126314",
+    "source": "tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/IMPL-20260611-110001.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-pair/tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/MERGE-GATE-20260611-110000.md",
+    "sha256": "228ec32f7358f0433b062889a22318e706bd153c7155777fa5d96846429e91af",
+    "source": "tools/relay-lint-fixtures/merge-token/MT10-field-grant-to-planner/MERGE-GATE-20260611-110000.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-pair/tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/IMPL-20260611-110001.md",
+    "sha256": "a36338d70bef23b39b8f9ef3ff0e160867ecff0621f77f78c4fe0753e739edbb",
+    "source": "tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/IMPL-20260611-110001.md"
+  },
+  {
+    "kit_version": "2.9.6",
+    "path": "adt-pair/tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/MERGE-GATE-20260611-110000.md",
+    "sha256": "a20baed9fefb33271a49802867a1bc987f939dbf2114ed34b7b7a6d24d7322ce",
+    "source": "tools/relay-lint-fixtures/merge-token/MT11-token-beside-denial/MERGE-GATE-20260611-110000.md"
+  },
+  {
+    "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay-lint-fixtures/merge-token/MT2-backticked-token-inert/IMPL-report-20260610-131000.md",
     "sha256": "a439969747408034a1583add60b4b0b77d208ec065fd3a36b1ec41a46c147dc2",
     "source": "tools/relay-lint-fixtures/merge-token/MT2-backticked-token-inert/IMPL-report-20260610-131000.md"
@@ -31346,7 +31430,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay-lint.py",
-    "sha256": "edbde37f2f30f7938ef390afbefef0de4afe7ae122a9a92e7c6b1044705cb2a7",
+    "sha256": "63024ff4a4d5b21b80f0836e2e5c8749406f0e974ed50442f4d9986787103bb4",
     "source": "tools/relay-lint.py"
   },
   {
@@ -31363,8 +31447,14 @@
   },
   {
     "kit_version": "2.9.6",
+    "path": "adt-pair/tools/relay_engine/authority.py",
+    "sha256": "43a0146ac65809cf42e76df1b4cf4cd1e9324d305efd7869cdd205de54c2ac9d",
+    "source": "tools/relay_engine/authority.py"
+  },
+  {
+    "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/cli.py",
-    "sha256": "5a732fbc07a0d006fbeb0886602dd8b7c3fc447e55ddb8a2a21e97aa2db59ef6",
+    "sha256": "503812b329799e070b9ec5398389607fb4936c036eb9e8f4b421fc781b3d4c48",
     "source": "tools/relay_engine/cli.py"
   },
   {
@@ -31388,7 +31478,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/daemon.py",
-    "sha256": "4da8bf7f7e96722b979498a890aee0e27b898b39c1d24b3a459b27a7216d497a",
+    "sha256": "fb73417bd59106c6adbf7b92815f43edbb879144d6b8b4cc1a5cb819eea2a7b6",
     "source": "tools/relay_engine/daemon.py"
   },
   {
@@ -31412,7 +31502,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/judging.py",
-    "sha256": "cf050e4e7c7dc1f7c9bc9bb3fe971133b3de9f37a75ca74c57e7885047799d31",
+    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -31454,7 +31544,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/rules.py",
-    "sha256": "b185ec0bc77813f8c02c9c182613c640a38d37a36226777dc29011c169298f4d",
+    "sha256": "5c4a531644820d86692341159b9199bdcc23e85ca99d24ff2a19018d1e0174e2",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -31466,7 +31556,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/strings.py",
-    "sha256": "541e736ea1c131d365e3f605d804f2368b018cba66501da69b734e5bb1931ff2",
+    "sha256": "382e7b51c7d27f6c15489b0dbb59e3999eca22abc8dc636d8e220cff32e13fa4",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -31478,7 +31568,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "f213fef21a037fa4eb0759a30989380989ff705d7c08928a3f41735a4b2e1146",
+    "sha256": "d2d50b99d709217a1120874570555ac946c45e4f4b58a233b787f397f7a01f55",
     "source": "tools/relay_engine/version.py"
   },
   {

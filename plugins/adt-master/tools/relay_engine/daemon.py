@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
-                          rules, seats, strings, supersede, version, judging, roster)
+                          rules, seats, strings, supersede, version, judging, roster, authority)
 from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
 from relay_engine.ledger import admit, epoch_state, ensure_additive_schema, judgment_for
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
@@ -125,6 +125,7 @@ def _rejected(value):
 _SCHEMAS = {
     "submit": ({"envelope", "body_b64", "body_sha256", "content_hash",
                 "submission_id", "tag"}, {"admits_against"}),
+    "authority.check": ({"relay", "seat", "action"}, set()),
     "seat.declare": ({"entries", "tag"}, set()),
     "seat.register": ({"address", "role_word"},
                       {"dispatch_ref", "replace"}),
@@ -912,6 +913,9 @@ def _default_handler(ledger, root, state, handlers, request):
         return handlers[op](request["args"])
     if op == "submit":
         return _submit_handler(ledger, root, request["args"])
+    if op == "authority.check":
+        args = request["args"]
+        return authority.check(ledger, root, args["relay"], args["seat"], args["action"])
     if op == "seat.declare":
         args = request["args"]
         return {"results": roster.declare(ledger, root, args["entries"], args["tag"])}

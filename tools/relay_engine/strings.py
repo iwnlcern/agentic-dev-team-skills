@@ -38,6 +38,7 @@ INVENTORY = {
     "engine-root-admission-summary": "engine-root admission: {judged} judged at admission, {with_findings} with findings, {failed} judging failed, {unevaluated} never judged, {exempt} engine-authored",
     "notice-name-caution": "caution: this name is also an engine notice label; registration or declaration grants no authority",
     "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
+    "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
     "authority.grant-shape-absent": "MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing",
     "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
     "external.could-not-evaluate": "{gate} could not be evaluated: {cause}",

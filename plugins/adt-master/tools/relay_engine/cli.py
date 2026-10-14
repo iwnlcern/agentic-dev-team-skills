@@ -264,6 +264,16 @@ def _index_projection_digests(root: Path) -> dict[Path, str]:
     return {root / "INDEX.md": digest} if isinstance(digest, str) else {}
 
 
+def _cmd_authority_check(args):
+    result = client.request(_command_root(args), "authority.check",
+                            {"relay": args.relay, "seat": args.seat, "action": args.action},
+                            timeout=args.timeout)
+    _emit_result(result)
+    if "authority.could-not-evaluate" in result["reasons"]:
+        return 2
+    return 0 if result["allowed"] else 1
+
+
 def cmd_show(args):
     result = client.request(
         _command_root(args), "show",
@@ -418,6 +428,16 @@ def build_parser():
     lint.add_argument("--max-drift-minutes", type=int,
                       default=rules.DEFAULT_MAX_DRIFT_MINUTES)
     lint.set_defaults(handler=_cmd_lint)
+
+    authority = commands.add_parser("authority")
+    authority_commands = authority.add_subparsers(dest="authority_command", required=True)
+    authority_check = authority_commands.add_parser("check")
+    authority_check.add_argument("relay")
+    authority_check.add_argument("--seat", required=True)
+    authority_check.add_argument("--action", choices=("implement", "merge"), required=True)
+    _root_option(authority_check)
+    _timeout_option(authority_check)
+    authority_check.set_defaults(handler=_cmd_authority_check)
 
     show = commands.add_parser("show")
     show.add_argument("target")

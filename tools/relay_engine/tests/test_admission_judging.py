@@ -51,6 +51,10 @@ class TestAdmissionJudging(LedgerFixture):
         self.seed(body('IMPL', ident='grant', content='DISPATCH IMPL'))
         clean = self.handler(self.report().replace(b'candidate', b'valid-report'), 'valid')
         self.assertEqual(clean['findings'], [{
+            'id': 'authority.check-not-cited', 'lint_severity': 'warn',
+            'subject': clean['path'], 'operands': [], 'params': {},
+            'message': 'report of implementation or merge carries no AUTHORITY_CHECK line',
+        }, {
             'id': 'routing.unknown-address', 'lint_severity': 'warn',
             'subject': clean['path'], 'operands': [],
             'params': {'addresses': ['r.orchestrator-reviewer'],
@@ -59,7 +63,14 @@ class TestAdmissionJudging(LedgerFixture):
             'message': "address not on this root's roster: r.orchestrator-reviewer; known: operator, orchestrator, p.implementer, p.planner, r.relay-engine; notice to the top seat: none-no-top-seat",
         }])
         all_known = self.report().replace(b'candidate', b'all-known').replace(b'CC: r.orchestrator-reviewer', b'CC: operator')
-        self.assertEqual(self.handler(all_known, 'all-known')['findings'], [])
+        known_result = self.handler(all_known, 'all-known')
+        self.assertEqual(known_result['findings'], [{
+            'id': 'authority.check-not-cited', 'lint_severity': 'warn',
+            'subject': known_result['path'], 'operands': [], 'params': {},
+            'message': 'report of implementation or merge carries no AUTHORITY_CHECK line',
+        }])
+        cited = all_known.replace(b'all-known', b'cited') + '\nAUTHORITY_CHECK: unavailable — direct message\n'.encode()
+        self.assertEqual(self.handler(cited, 'cited')['findings'], [])
 
     def test_result_keys(self):
         result = self.handler(body('SITREP'))

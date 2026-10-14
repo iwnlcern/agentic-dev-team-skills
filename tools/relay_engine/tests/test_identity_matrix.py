@@ -23,7 +23,7 @@ FP_A = "a" * 64
 FP_B = "b" * 64
 ADMIN_OPS = {"status", "daemon.stop"}
 RECORD_OPS = {
-    "seat.declare",
+    "seat.declare", "authority.check",
     "submit", "seat.register", "seat.replace", "seat.stand_down",
     "seat.show", "show", "roster", "commission", "adopt_commission",
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
