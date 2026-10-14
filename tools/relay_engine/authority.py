@@ -10,7 +10,7 @@ from relay_engine import cycles, errors, rules
 from relay_engine.paths import Root, _parts, _read_regular_at
 
 
-CRITICAL = ('FROM', 'TO', 'DISPATCH_ID', 'PARENT_DISPATCH_ID',
+CRITICAL = ('PHASE', 'FROM', 'TO', 'DISPATCH_ID', 'PARENT_DISPATCH_ID',
             'DESIGN_LOCK_ID', 'DESIGN_DOC_ID', 'PLAN_LOCK_ID',
             'DESIGN_ARTIFACT', 'DESIGN_SHA256', 'PLAN_ARTIFACT', 'PLAN_SHA256',
             'PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT') + rules.XROOT_TRIGGERS
@@ -60,7 +60,7 @@ def _review_verdicts(item):
     values = []
     for line in clean.splitlines():
         match = re.match(r'^\s*([^:]+):\s*(.*)$', line)
-        if match and match[1].upper() in keys:
+        if match and match[1].strip().upper() in keys:
             values.append(match[2].strip().lower())
     return values
 
@@ -146,6 +146,26 @@ def _declarations(item, reasons):
             reasons.add('authority.could-not-evaluate')
             continue
         declarations[f'{directory}/{locators[0]}.md'] = digests[0]
+    for key in ('PLAN_LOCK_ID', 'DESIGN_LOCK_ID'):
+        # Foreign lock locators belong to the pinned Git source, not this root.
+        if any(rules.h27_occurrences(item.text, field)
+               for field in ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT')):
+            continue
+        if key == 'DESIGN_LOCK_ID' and rules.xroot_design_engaged(item.text):
+            continue
+        value = item.fields.get(key, '')
+        locator, separator, digest = value.partition(' @ ')
+        if '/' not in locator and not locator.endswith('.md'):
+            continue  # A symbolic lock id is not an artifact declaration.
+        if digest.startswith('sha256 '):
+            digest = digest[len('sha256 '):]
+        if (not separator or not rules.xroot_valid_relpath(locator)
+                or rules.A5_SHA256_RE.fullmatch(digest) is None):
+            reasons.add('authority.could-not-evaluate')
+            continue
+        if locator in declarations and declarations[locator] != digest:
+            reasons.add('authority.header-conflict')
+        declarations[locator] = digest
     return declarations
 
 

@@ -120,6 +120,60 @@ class TestAuthority(LedgerFixture):
         self.grant=self.add('MERGE-GATE','operator',extra='MERGE_AUTHORIZATION: approved\nVERDICT: denied',content='DISPATCH MERGE')
         self.denied('verdict-conflict',action='merge')
 
+    def test_spaced_verdict_denial_and_conflicting_review_deny(self):
+        for whitespace in (' ', '\t'):
+            with self.subTest(whitespace=whitespace):
+                direct=self.add(sender='operator',extra=f'VERDICT{whitespace}: denied')
+                self.denied('denied',direct)
+            with self.subTest(review_whitespace=whitespace):
+                ident=f'plan-{self.number}'
+                self.add('PLAN',ident=ident,content='')
+                review_id=f'review-{self.number}'
+                self.add('PLAN-REVIEW','p.implementer','p.planner',review_id,
+                         f'PARENT_DISPATCH_ID: {ident}',
+                         f'VERDICT: approve\nVERDICT{whitespace}: denied')
+                grant=self.add(extra=f'PARENT_DISPATCH_ID: {review_id}')
+                self.denied('lineage-incomplete',grant)
+
+    def test_legacy_artifact_locks_are_verified_at_use(self):
+        for action,phase,token in (('implement','IMPL','DISPATCH IMPL'),
+                                   ('merge','MERGE-GATE','DISPATCH MERGE')):
+            for field,directory in (('PLAN_LOCK_ID','plans'),('DESIGN_LOCK_ID','designs')):
+                for prefix in ('sha256 ', ''):
+                    with self.subTest(action=action,field=field,prefix=prefix):
+                        self.artifact(directory,'legacy')
+                        digest=hashlib.sha256(b'original').hexdigest()
+                        grant=self.add(phase,'operator',
+                            extra=f'{field}: {directory}/legacy.md @ {prefix}{digest}',content=token)
+                        with mock.patch.object(authority,'read_artifact',wraps=authority.read_artifact) as read:
+                            self.assertTrue(self.check(grant,action=action)['allowed'])
+                        read.assert_called_once()
+                        self.files['legacy'].write_bytes(b'edited')
+                        self.denied('artifact-changed',grant,action=action)
+                        self.files['legacy'].unlink()
+                        self.denied('could-not-evaluate',grant,action=action)
+
+    def test_legacy_artifact_lock_without_usable_digest_refuses(self):
+        self.artifact('plans','legacy')
+        for value in ('plans/legacy.md','plans/legacy.md @ sha256 invalid'):
+            with self.subTest(value=value):
+                grant=self.add(sender='operator',extra='PLAN_LOCK_ID: '+value)
+                self.denied('could-not-evaluate',grant)
+
+    def test_conflicting_phase_denies_grant_and_required_lineage(self):
+        for action,phase,token in (('implement','IMPL','DISPATCH IMPL'),
+                                   ('merge','MERGE-GATE','DISPATCH MERGE')):
+            with self.subTest(action=action):
+                valid=self.add(phase,'operator',content=token+'\n\nPHASE: '+phase)
+                self.assertTrue(self.check(valid,action=action)['allowed'])
+                invalid=self.add(phase,'operator',content=token+'\n\nPHASE: SITREP')
+                self.denied('header-conflict',invalid,action=action)
+        self.add('PLAN',ident='conflict-plan',content='PHASE: SITREP')
+        self.add('PLAN-REVIEW','p.implementer','p.planner','conflict-review',
+                 'PARENT_DISPATCH_ID: conflict-plan','VERDICT: approve')
+        grant=self.add(extra='PARENT_DISPATCH_ID: conflict-review')
+        self.denied('header-conflict',grant)
+
     def test_quoted_token_is_inert(self):
         for content in ('`DISPATCH IMPL`','```\nDISPATCH IMPL\n```','> DISPATCH IMPL'):
             with self.subTest(content=content):
