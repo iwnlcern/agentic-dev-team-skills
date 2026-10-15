@@ -224,13 +224,13 @@ def _declarations(item, reasons):
         digests, locators = fields[digest], fields[locator]
         if digest == 'DESIGN_SHA256' and rules.xroot_design_engaged(item.text):
             continue  # The pinned source path is checked by _external_evidence.
-        if not digests:continue
-        if (len(set(digests)) != 1 or len(set(locators)) != 1
-                or rules.A5_SHA256_RE.fullmatch(digests[0]) is None
-                or not rules.a5_stem_is_bare(locators[0])):
+        if not digests and not locators:continue
+        if (len(set(locators)) != 1 or not rules.a5_stem_is_bare(locators[0])
+                or (digests and (len(set(digests)) != 1
+                    or rules.A5_SHA256_RE.fullmatch(digests[0]) is None))):
             reasons.add('authority.could-not-evaluate')
             continue
-        declarations[f'{directory}/{locators[0]}.md'] = digests[0]
+        declarations[f'{directory}/{locators[0]}.md'] = digests[0] if digests else None
     for key in ('PLAN_LOCK_ID', 'DESIGN_LOCK_ID'):
         # Foreign lock locators belong to the pinned Git source, not this root.
         if any(rules.h27_occurrences(item.text, field)
@@ -244,13 +244,16 @@ def _declarations(item, reasons):
             continue  # A symbolic lock id is not an artifact declaration.
         if digest.startswith('sha256 '):
             digest = digest[len('sha256 '):]
-        if (not separator or not rules.xroot_valid_relpath(locator)
-                or rules.A5_SHA256_RE.fullmatch(digest) is None):
+        if (not rules.xroot_valid_relpath(locator)
+                or (separator and rules.A5_SHA256_RE.fullmatch(digest) is None)):
             reasons.add('authority.could-not-evaluate')
             continue
-        if locator in declarations and declarations[locator] != digest:
+        digest = digest if separator else None
+        if (declarations.get(locator) is not None and digest is not None
+                and declarations[locator] != digest):
             reasons.add('authority.header-conflict')
-        declarations[locator] = digest
+        if digest is not None or locator not in declarations:
+            declarations[locator] = digest
     return declarations
 
 
@@ -260,7 +263,10 @@ def _required_artifacts(rows,lineage,seat,reasons):
     direct = rules.from_is_direct_authority(grant.fields)
     base_lineage = lineage if direct else lineage[1:]
     for row in sorted(base_lineage,key=lambda row:row.seq):
-        required.update(_declarations(row,reasons))
+        for locator, digest in _declarations(row,reasons).items():
+            # A later locator-only declaration cannot erase an earlier pin.
+            if digest is not None or locator not in required:
+                required[locator] = digest
     base = dict(required)
     for origin in lineage:
         phase = origin.fields.get('PHASE')
@@ -277,7 +283,7 @@ def _required_artifacts(rows,lineage,seat,reasons):
             declarations = _declarations(carrier,ignored)
             if ignored:continue
             amendments = {path:digest for path,digest in declarations.items()
-                          if any(re.fullmatch(re.escape(path0[:-3])+r'-(?:erratum|supplement|amendment)-[0-9]+\.md',path)
+                          if digest is not None and any(re.fullmatch(re.escape(path0[:-3])+r'-(?:erratum|supplement|amendment)-[0-9]+\.md',path)
                                  for path0 in origin_declarations) and path not in base}
             if not amendments:continue
             matches = []
@@ -295,9 +301,13 @@ def _required_artifacts(rows,lineage,seat,reasons):
                 required.update(amendments)
     if not direct and 'authority.lineage-incomplete' not in reasons:
         for locator, digest in _declarations(grant, reasons).items():
-            if required.get(locator) != digest:
+            if digest is None:
+                required.setdefault(locator, None)
+            elif required.get(locator) != digest:
                 reasons.add('authority.artifact-changed')
-    return required
+    if any(digest is None for digest in required.values()):
+        reasons.add('authority.could-not-evaluate')
+    return {locator:digest for locator,digest in required.items() if digest is not None}
 
 
 def read_artifact(root, locator):

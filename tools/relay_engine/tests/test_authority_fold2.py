@@ -58,10 +58,10 @@ class TestAuthorityFold2(LedgerFixture):
         for value in ('all-in','All-In. — note'):
             self.assertTrue(self.check(self.add(extra='PARENT_DISPATCH_ID: review\nSCOPE_DIFF_RESULT: '+value))['allowed'])
 
-    def test_F5_locator_only_declares_nothing(self):
+    def test_F5_locator_only_requires_lineage_digest(self):
         for value in ('PL-v295-b3-20260911','PL-v295-b3-20260911-erratum-1'):
             g=self.add('MERGE-GATE','operator',extra='PLAN_ARTIFACT: '+value,content='DISPATCH MERGE')
-            self.assertTrue(self.check(g,action='merge')['allowed'])
+            self.assertEqual(self.check(g,action='merge')['reasons'],['authority.could-not-evaluate'])
         self.denied('could-not-evaluate',self.add(sender='operator',extra='PLAN_SHA256: '+'a'*64))
 
     def test_F6_incomplete_lineage_does_not_invent_artifact_change(self):
