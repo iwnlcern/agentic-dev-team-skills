@@ -190,11 +190,12 @@ The hook emits a bounded `PostToolUse` additional-context hint with exit 0 when 
 The three hint forms are:
 
 ```text
-rebind: python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
-rebind (root inferred, check it): python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
+rebind, may need operator approval: python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
+rebind (root inferred, check it, may need operator approval): python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
 # rebind: incomplete, supply --root and --anchor seen=...
 ```
 
+Both runnable hints note that the command may need operator approval; the text after the first `: ` is the copyable command.
 The complete form uses the root parsed from the command and shell-quotes every argument as needed.
 The inferred form requires exactly one candidate root with the receipt's index row and asks the operator to check it.
 Both runnable forms recheck the stored root's index on every rendering; a missing row or unreadable index gives the incomplete form until the row can be read.

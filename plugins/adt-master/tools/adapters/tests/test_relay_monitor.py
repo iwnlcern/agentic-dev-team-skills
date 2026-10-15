@@ -1713,7 +1713,7 @@ class BindTests(TmpEnv):
                     self.store.update(lambda note: note.update(bind_observation={"root": str(observed), "root_provenance": provenance, "receipts": ["lane/r1.md"]}))
                     line = self.rm.rebind_line(self.store.load(), "sess")
                     if row_in_observation:
-                        prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
+                        prefix = "rebind, may need operator approval: " if provenance == "command" else "rebind (root inferred, check it, may need operator approval): "
                         self.assertTrue(line.startswith(prefix))
                         words = shlex.split(line.removeprefix(prefix))
                         self.assertEqual(words[words.index("--root") + 1], str(observed))
@@ -1751,8 +1751,8 @@ class BindTests(TmpEnv):
             stream.write(row(2, file="lane/missing.md"))
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             status = self.rm.status_line(self.store, None)
-        hint = next(line for line in status.splitlines() if line.startswith("rebind: "))
-        words = shlex.split(hint.removeprefix("rebind: "))
+        hint = next(line for line in status.splitlines() if line.startswith("rebind, may need operator approval: "))
+        words = shlex.split(hint.removeprefix("rebind, may need operator approval: "))
         self.assertEqual(words[-4:], ["--root", str(self.root), "--anchor", "lane/missing.md"])
         self.assertEqual(self.store.load()["bind_observation"], before)
 
@@ -1767,10 +1767,10 @@ class BindTests(TmpEnv):
         self._hook_output(self._miss())
         record = self.store.load()["bind_observation"]
         self.assertEqual(record["root_provenance"], "inferred")
-        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it, may need operator approval): "))
         with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
             self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
-        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it, may need operator approval): "))
         self.assertEqual(self.store.load()["bind_observation"], record)
 
     def test_refused_manual_bind_exits_one_with_reason(self):
@@ -1845,7 +1845,7 @@ raise SystemExit(m.main(sys.argv[3:]))
                     self.assertFalse(marker.exists())
                     self.assertEqual(result.stdout, "")
             else:
-                prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
+                prefix = "rebind, may need operator approval: " if provenance == "command" else "rebind (root inferred, check it, may need operator approval): "
                 words = shlex.split(hint.removeprefix(prefix))
                 self.assertEqual(words, ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"])
                 for shell in shells:
@@ -1914,6 +1914,53 @@ raise SystemExit(m.main(sys.argv[3:]))
                     self.fail(f"truncation left an open quote: {error}")
                 self.assertRegex(words[-1], r"^dropped=[1-9][0-9]*$")
                 self._assert_incomplete_in_interactive_shells(hint)
+
+    def test_runnable_approval_prefixes_preserve_hook_and_status_arguments(self):
+        import shlex
+        root = self.base / "root with ' quote: text"
+        (root / ".engine").mkdir(parents=True)
+        receipt = "lane/it's a: receipt.md"
+        write_index(root / "INDEX.md", row(1, file=receipt))
+        response = json.dumps(dict(path=receipt, render_state="rendered", duplicate=False))
+        expected = ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "sess",
+                    "--root", str(root), "--anchor", receipt]
+        for provenance, prefix in [("command", "rebind, may need operator approval: "),
+                                   ("inferred", "rebind (root inferred, check it, may need operator approval): ")]:
+            with self.subTest(provenance=provenance):
+                command = ("tools/relay submit d.md --root " + shlex.quote(str(root))
+                           if provenance == "command" else "time tools/relay submit d.md")
+                payload = json.loads(self.payload(command, response, call_id=provenance))
+                payload["cwd"] = str(root)
+                rc, output = self._hook_output(json.dumps(payload))
+                self.assertEqual(rc, 0)
+                self.assertEqual(self.store.load()["bind_observation"]["root_provenance"], provenance)
+                context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+                with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+                    status = self.rm.status_line(self.store, None).splitlines()[-1]
+                for line in (context, status):
+                    self.assertTrue(line.startswith(prefix))
+                    self.assertEqual(shlex.split(line.split(": ", 1)[1]), expected)
+                    self.assertLessEqual(len(line), 1024)
+                    self.assertTrue(all(32 <= ord(c) <= 126 for c in line))
+
+    def test_runnable_approval_prefixes_count_toward_line_bound(self):
+        import shlex
+        for provenance, prefix in [("command", "rebind, may need operator approval: "),
+                                   ("inferred", "rebind (root inferred, check it, may need operator approval): ")]:
+            with self.subTest(provenance=provenance):
+                record = dict(root=str(self.root), root_provenance=provenance, receipts=["lane/r1.md"])
+                args = ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "s",
+                        "--root", str(self.root), "--anchor", "lane/r1.md"]
+                session = "s" + "x" * (1024 - len(prefix + shlex.join(args)))
+                args[args.index("--session") + 1] = session
+                line = self.rm.rebind_line({"bind_observation": record}, session)
+                self.assertTrue(line.startswith(prefix))
+                self.assertEqual(len(line), 1024)
+                self.assertEqual(shlex.split(line.split(": ", 1)[1]), args)
+                overflow = self.rm.rebind_line({"bind_observation": record}, session + "x")
+                self.assertTrue(overflow.startswith("# rebind: incomplete, supply "))
+                self.assertNotIn("bind --manual", overflow)
+                self.assertLessEqual(len(overflow), 1024)
 
     def test_lookup_reports_match_no_match_and_unreadable(self):
         self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "match")
@@ -4657,8 +4704,8 @@ class StatusTests(TmpEnv):
         with mock.patch.object(self.rm, "read_index", return_value=snapshot) as reader:
             line = self.rm.rebind_line(self.store.load(), "session quoted")
         reader.assert_called_once_with(pathlib.Path(root) / "INDEX.md")
-        self.assertTrue(line.startswith("rebind: "))
-        words = shlex.split(line[len("rebind: "):])
+        self.assertTrue(line.startswith("rebind, may need operator approval: "))
+        words = shlex.split(line[len("rebind, may need operator approval: "):])
         self.assertEqual(words[words.index("--root") + 1], root)
         self.assertEqual(words[words.index("--anchor") + 1], "lane/it's here.md")
         self.assertEqual(words[words.index("--session") + 1], "session quoted")
@@ -4668,7 +4715,7 @@ class StatusTests(TmpEnv):
         self._record(provenance="inferred")
         self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
         write_index(self.index, row(1))
-        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it, may need operator approval): "))
 
     def test_rebind_incomplete_form_is_not_runnable_and_omits_anchor(self):
         self.store.update(lambda n: n.update(anchor="lane/old-anchor.md"))

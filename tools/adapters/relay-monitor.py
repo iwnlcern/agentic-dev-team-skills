@@ -2058,7 +2058,7 @@ def rebind_line(note: dict, session: str) -> str | None:
     receipts = record.get("receipts") or []
     root, provenance = record.get("root"), record.get("root_provenance")
     if root and len(receipts) == 1 and provenance in ("command", "inferred") and receipt_row_lookup(root, receipts[0]) == "match":
-        prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
+        prefix = "rebind, may need operator approval: " if provenance == "command" else "rebind (root inferred, check it, may need operator approval): "
         command = shlex.join(["python3", str(Path(__file__).resolve()), "bind", "--manual", "--session", session, "--root", root, "--anchor", receipts[0]])
         if len(prefix + command) <= 1024 and all(32 <= ord(char) <= 126 for char in command):
             return prefix + command
