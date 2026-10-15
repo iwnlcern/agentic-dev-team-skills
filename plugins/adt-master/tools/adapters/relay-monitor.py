@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import select
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -95,7 +96,8 @@ def default_note() -> dict:
         "anchor": None,
         "bound_at": None,
         "binding_source": None,
-        "binding_degraded": None,
+        "bind_observation": None,
+        "handled_calls": [],
         "binding_gen": 0,
         "leader": None,
         "standbys": [],
@@ -162,6 +164,10 @@ class NoteStore:
 
     def save(self, note: dict) -> None:
         note["updated"] = now_stamp()
+        self._write(note)
+
+    def _write(self, note: dict) -> None:
+        """Persist under the caller's state lock without changing note fields."""
         fd, tmp = tempfile.mkstemp(
             dir=self.path.parent, prefix=f".{self.session}.", suffix=".tmp"
         )
@@ -208,10 +214,15 @@ def process_start_time(pid: int) -> str | None:
 
 
 def leader_record() -> dict:
+    version, rc = run_relay(None, "version")
+    identity = None
+    if rc == 0 and isinstance(version, dict) and version.get("kit") and version.get("fingerprint"):
+        identity = {"kit": version["kit"], "fp": version["fingerprint"]}
     return {
         "pid": os.getpid(),
         "start_time": process_start_time(os.getpid()),
         "instance": str(uuid.uuid4()),
+        "identity": identity,
     }
 
 
@@ -221,6 +232,8 @@ PROC_ALIVE, PROC_DEAD, PROC_UNKNOWN = "alive", "dead", "unknown"
 def process_probe(pid: int) -> str:
     try:
         os.kill(pid, 0)
+    except OverflowError:
+        return PROC_DEAD
     except OSError as exc:
         if exc.errno == errno.ESRCH:
             return PROC_DEAD
@@ -511,6 +524,11 @@ def locate(snapshot: IndexSnapshot, cursor: dict) -> int | None:
         (i for i, r in enumerate(snapshot.rows) if r.cells["file"] == cursor["file"]),
         None,
     )
+
+
+def start_position(snapshot: IndexSnapshot, cursor: dict, anchor: str | None) -> int | None:
+    start = locate(snapshot, cursor)
+    return start if start is not None else locate(snapshot, {"file": anchor}) if anchor else None
 
 
 @dataclass
@@ -854,12 +872,9 @@ def deliver_once(
     except LockTimeout:
         result.aborted = "lock-timeout"
         return result
-    start = locate(snapshot, cursor)
-    if start is None:
-        anchor_idx = (
-            locate(snapshot, {"file": binding.anchor}) if binding.anchor else None
-        )
-        if anchor_idx is None:
+    start = start_position(snapshot, cursor, binding.anchor)
+    if locate(snapshot, cursor) is None:
+        if start is None:
             _bounded_update(
                 store,
                 lambda n: n.update(
@@ -870,7 +885,6 @@ def deliver_once(
             )
             result.halted = "anchor-not-found"
             return result
-        start = anchor_idx
         cursor = {
             "file": snapshot.rows[start].cells["file"],
             "position": snapshot.rows[start].position,
@@ -1054,7 +1068,6 @@ def deliver_once(
                     int(n.get("binding_gen", 0)) == binding.binding_gen
                     and live_seat == canonical(binding.seat)
                     and live_root == binding.root
-                    and not n.get("binding_degraded")
                     and not foreign
                     and n.get("phase") != "following"
                 ):
@@ -1280,16 +1293,42 @@ def parse_submit_command(command: str) -> SubmitParse:
     except sl.Uncertain:
         # Inspect raw command positions only when the pre-pass cannot decide.
         uncertain = True
-    tokens = sl.lex(command)
+    tokens = sl.lex_spans(command)
     malformed = tokens is None
     if malformed:
         # Close only the unfinished quoted word to inspect preceding commands.
-        tokens = sl.lex(command + "\n'")
+        tokens = sl.lex_spans(command + "\n'")
         if tokens is None:
-            tokens = sl.lex(command + '\n"')
+            tokens = sl.lex_spans(command + '\n"')
         tokens = tokens or []
+    # Remove fd-duplication redirections before interpreting submit operands.
+    # Offsets distinguish an IO number from a separate numeric argument.
+    words_with_spans = []
+    duplication_error = False
+    j = 0
+    while j < len(tokens):
+        token = tokens[j]
+        if token[2] and token[0] == ">&":
+            if words_with_spans:
+                previous = words_with_spans[-1]
+                if (not previous[1] and not previous[2]
+                        and re.fullmatch(r"[0-9]+", previous[0])
+                        and previous[4] == token[3]):
+                    words_with_spans.pop()
+            operand = tokens[j + 1] if j + 1 < len(tokens) else None
+            if (operand is None or operand[2]
+                    or re.fullmatch(r"(?:[0-9]+|-)", operand[0]) is None):
+                duplication_error = True
+                j += 1
+            else:
+                j += 2
+            continue
+        words_with_spans.append(token)
+        j += 1
+    tokens = [token[:3] for token in words_with_spans]
     unsupported = (
-        uncertain
+        duplication_error
+        or uncertain
         or malformed
         or any(op and text in UNSUPPORTED_OPS for text, _quoted, op in tokens)
     )
@@ -1395,7 +1434,7 @@ def parse_submit_command(command: str) -> SubmitParse:
     if count == 0:
         return SubmitParse(False, "submit-near-miss" if near_miss else "no-submit")
     if unsupported:
-        return SubmitParse(False, "unsupported-shell")
+        return SubmitParse(False, "unsupported-syntax")
     if count > 1:
         return SubmitParse(False, "ambiguous-command")
     words, assigns = submit
@@ -1499,23 +1538,26 @@ def engine_client(plugin_root: str | None):
 def discover_root_like_cli(
     start: str | None, cwd: str, plugin_root: str | None = None
 ) -> str | None:
-    base = (
-        os.path.join(cwd, start) if start and not os.path.isabs(start) else start
-    ) or cwd
-    client = engine_client(plugin_root)
-    if client is not None:
-        try:
-            return client.discover_root(base)
-        except FileNotFoundError:
-            return None
-    current = os.path.realpath(base)
-    while True:
-        if os.path.isdir(os.path.join(current, ".engine")):
-            return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            return None
-        current = parent
+    try:
+        base = (
+            os.path.join(cwd, start) if start and not os.path.isabs(start) else start
+        ) or cwd
+        client = engine_client(plugin_root)
+        if client is not None:
+            try:
+                return client.discover_root(base)
+            except FileNotFoundError:
+                return None
+        current = os.path.realpath(base)
+        while True:
+            if os.path.isdir(os.path.join(current, ".engine")):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                return None
+            current = parent
+    except (OSError, ValueError):
+        return None
 
 
 def seat_from_key(key: str | None) -> str | None:
@@ -1529,152 +1571,264 @@ def seat_from_key(key: str | None) -> str | None:
 
 
 def path_under_root(root: str, rel: str) -> bool:
-    if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+    try:
+        if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+            return False
+        target = os.path.realpath(os.path.join(root, rel))
+        return target.startswith(os.path.realpath(root) + os.sep) and os.path.isfile(target)
+    except (OSError, ValueError):
         return False
-    target = os.path.realpath(os.path.join(root, rel))
-    return target.startswith(os.path.realpath(root) + os.sep) and os.path.isfile(target)
+
+
+def call_identity(session: str, payload: dict) -> str | None:
+    value = payload.get("tool_use_id")
+    return json.dumps([session, value], separators=(",", ":")) if isinstance(value, str) and value else None
+
+
+def names_submit_verb(command: str) -> bool:
+    sl = _shell_lex()
+    try:
+        command = sl.strip_heredoc_bodies(command)
+    except sl.Uncertain:
+        # Match the grammar's recovery; uncertainty does not prove no filing.
+        pass
+    tokens = sl.lex(command)
+    if tokens is None:
+        tokens = sl.lex(command + "\n'") or sl.lex(command + '\n"') or []
+    return any(
+        not quoted and not op and (word in RELAY_WORDS or word.endswith("/relay"))
+        and following == ("submit", False, False)
+        for (word, quoted, op), following in zip(tokens, tokens[1:])
+    )
+
+
+def root_indications(command: str) -> tuple[list[tuple[str, str, bool]], bool]:
+    """Read contrary root evidence without extending the submit grammar."""
+    sl = _shell_lex()
+    try:
+        command = sl.strip_heredoc_bodies(command)
+    except sl.Uncertain:
+        pass
+    tokens = sl.lex_spans(command)
+    if tokens is None:
+        tokens = sl.lex_spans(command + "\n'") or sl.lex_spans(command + '\n"') or []
+
+    def operand(raw):
+        quote, dynamic, i = None, False, 0
+        while i < len(raw):
+            char = raw[i]
+            if char == "\\" and quote != "'":
+                i += 2
+                continue
+            if quote:
+                if char == quote:
+                    quote = None
+                elif quote == '"' and char in "$`":
+                    dynamic = True
+            elif char in "'\"":
+                quote = char
+            elif char in "$`*?[":
+                dynamic = True
+            i += 1
+        try:
+            decoded = shlex.split(raw)
+        except ValueError:
+            return raw, raw, True
+        return raw, decoded[0] if len(decoded) == 1 else "", dynamic or len(decoded) != 1
+
+    roots, directory = [], False
+    for i, (word, quoted, operator, start, end) in enumerate(tokens):
+        if operator:
+            continue
+        if not quoted and word in ("cd", "pushd"):
+            directory = True
+        if not quoted and word == "--root":
+            if i + 1 < len(tokens) and not tokens[i + 1][2]:
+                following = tokens[i + 1]
+                roots.append(operand(command[following[3]:following[4]]))
+        elif word.startswith("--root=") and sl.unquoted_prefix(word, quoted) >= 7:
+            roots.append(operand(command[start + 7:end]))
+    return roots, directory
+
+
+def receipt_row_lookup(root: str, receipt: str) -> str:
+    try:
+        snap = read_index(Path(root) / "INDEX.md")
+    except (OSError, ValueError):
+        return "unreadable"
+    if snap.error:
+        return "unreadable"
+    return "match" if any(row.cells["file"] == receipt for row in snap.rows) else "no-match"
+
+
+def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dict], plugin_root: str | None, indications: tuple[list[tuple[str, str, bool]], bool]) -> tuple[str | None, str]:
+    if parsed.cd_prefix:
+        cwd = os.path.join(cwd, parsed.cd_prefix)
+    if parsed.root_operand:
+        root = discover_root_like_cli(parsed.root_operand, cwd, plugin_root)
+        if root:
+            return root, "command"
+        return None, "none"
+    if len(receipts) != 1:
+        return None, "none"
+    candidates = {root for root in (discover_root_like_cli(None, cwd, plugin_root), note.get("root")) if root}
+    matches = []
+    for root in candidates:
+        lookup = receipt_row_lookup(root, receipts[0]["path"])
+        if lookup == "unreadable":
+            return None, "none"
+        if lookup == "match":
+            matches.append(root)
+    if len(matches) != 1:
+        return None, "none"
+    operands, directory = indications
+    if directory or len({value for _, value, _ in operands}) > 1:
+        return None, "none"
+    candidate = os.path.realpath(matches[0])
+    for _, value, dynamic in operands:
+        if dynamic or not value or os.path.realpath(os.path.join(cwd, value)) != candidate:
+            return None, "none"
+    return matches[0], "inferred"
+
+
+def _remember_call(note: dict, call: str | None) -> None:
+    if call:
+        note["handled_calls"] = (note.get("handled_calls", []) + [call])[-8:]
+
+
+def record_observation(note: dict, *, reason: str, receipts: list[str], root: str | None, provenance: str, call: str | None, command_roots: list[str] | None = None) -> bool:
+    if call and call in note.get("handled_calls", []):
+        return False
+    record = dict(reason=reason, receipts=receipts, root=root, root_provenance=provenance, call=call)
+    if command_roots:
+        record["command_roots"] = [text[:200] for text in command_roots]
+    old = note.get("bind_observation") or {}
+    if call is None and all(old.get(k) == v for k, v in record.items()) and old.get("command_roots", []) == record.get("command_roots", []):
+        return False
+    note["bind_observation"] = dict(record, stamp=now_stamp())
+    _remember_call(note, call)
+    return True
+
+
+def clear_observations(note: dict) -> None:
+    note["bind_observation"] = None
+    for key in ("binding_degraded", "submit_miss", "submit_miss_binding_gen"):
+        note.pop(key, None)
 
 
 def bind_from_receipt(
-    store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str
-):
-    if not path_under_root(root, receipt_path):
+    store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str, call: str | None = None
+) -> tuple[bool, str]:
+    if not isinstance(receipt_path, str) or not path_under_root(root, receipt_path):
         return False, "receipt-mismatch"
-    snap = read_index(Path(root) / "INDEX.md")
+    try:
+        snap = read_index(Path(root) / "INDEX.md")
+    except (OSError, ValueError):
+        return False, "receipt-mismatch"
     row_ = next((r for r in snap.rows if r.cells["file"] == receipt_path), None)
-    if row_ is None or not row_.cells["from"]:
+    if snap.error or row_ is None or not row_.cells["from"]:
         return False, "receipt-mismatch"
     seat = row_.cells["from"]
     if key_seat and canonical(key_seat) != canonical(seat):
         return False, "key-mismatch"
     cursor = {"file": receipt_path, "position": row_.position}
-
-    def apply(n):
-        fresh = not (
-            canonical(n.get("seat")) == canonical(seat) and n.get("root") == root
-        )
-        n.update(
-            {
-                "seat": seat,
-                "root": root,
-                "anchor": receipt_path,
-                "bound_at": now_stamp(),
-                "binding_source": source,
-                "binding_degraded": None,
-            }
-        )
-        n["binding_gen"] = int(n.get("binding_gen", 0)) + 1
+    with store.state_lock():
+        n = store.load()
+        if source == "hook" and call and call in n.get("handled_calls", []):
+            return True, "handled"
+        fresh = not (canonical(n.get("seat")) == canonical(seat) and n.get("root") == root)
+        changed = fresh or n.get("anchor") != receipt_path or root not in n["progress"]
+        if source == "hook" and not changed:
+            if call:
+                _remember_call(n, call)
+                store._write(n)
+            return True, "unchanged"
+        clear_observations(n)
+        n.update(seat=seat, root=root, anchor=receipt_path, bound_at=now_stamp(), binding_source=source)
+        if changed:
+            n["binding_gen"] = int(n.get("binding_gen", 0)) + 1
         if fresh or root not in n["progress"]:
             n["progress"][root] = dict(cursor)
-            n["printed"][
-                root
-                # never n["frame"]: the follower owns and abandons its own stream (P2a)
-            ] = []
+            # A follower retains ownership of its partially written frame.
+            n["printed"][root] = []
         record_floor(n, root, seat, cursor)
-
-    store.update(apply)
+        _remember_call(n, call)
+        store.save(n)
     return True, "bound"
 
 
-def degrade(store: NoteStore, reason: str) -> None:
-    store.update(
-        lambda n: n.update(
-            {"binding_degraded": {"reason": reason, "stamp": now_stamp()}}
-        )
-    )
+def hook_context(line: str) -> bytes:
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": line}}, ensure_ascii=True).encode("utf-8")
 
 
 def bind(args) -> int:
     if getattr(args, "manual", False):
         session = resolve_session(args)
         if not valid_session_id(session):
-            return 0
+            print("relay-monitor: invalid-session-id", file=sys.stderr)
+            return 2
         if not args.root or not args.anchor:
-            print(
-                "relay-monitor: manual bind needs --session/--root/--anchor",
-                file=sys.stderr,
-            )
-            return 0
-        root = (
-            discover_root_like_cli(args.root, os.getcwd(), args.plugin_root)
-            or args.root
-        )
-        ok, reason = bind_from_receipt(
-            NoteStore(session),
-            root=root,
-            receipt_path=args.anchor,
-            key_seat=None,
-            source="manual",
-        )
-        if not ok:
-            degrade(NoteStore(session), reason)
+            print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
+            return 2
+        root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
+        bound, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
+        if not bound:
+            print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
+            return 1
         return 0
     try:
         payload = json.load(sys.stdin)
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
+        return 0
+    if not isinstance(payload, dict):
         return 0
     session = resolve_session(args, payload)
     if not valid_session_id(session):
         return 0
-    store = NoteStore(session)
-    if (
-        payload.get("hook_event_name") != "PostToolUse"
-        or "tool_response" not in payload
-    ):
+    if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
         return 0
-    parsed = parse_submit_command(
-        ((payload.get("tool_input") or {}).get("command")) or ""
-    )
-    if not parsed.ok:
-        if parsed.reason == "submit-near-miss":
-            store.update(
-                lambda n: n.update(
-                    {
-                        "submit_miss": parsed.reason,
-                        "submit_miss_binding_gen": int(n.get("binding_gen", 0)),
-                    }
-                )
-            )
-        elif parsed.reason != "no-submit":
-            degrade(store, parsed.reason)
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    if not isinstance(command, str):
         return 0
-    cwd = payload.get("cwd") or os.getcwd()
-    if parsed.cd_prefix:
-        cwd = (
-            parsed.cd_prefix
-            if os.path.isabs(parsed.cd_prefix)
-            else os.path.join(cwd, parsed.cd_prefix)
-        )
-    root = discover_root_like_cli(parsed.root_operand, cwd, args.plugin_root)
-    if root is None:
-        degrade(store, "no-root")
+    parsed = parse_submit_command(command)
+    if not parsed.ok and not names_submit_verb(command):
         return 0
     receipts = extract_receipts(payload.get("tool_response"))
+    receipts = [r for r in receipts if isinstance(r.get("path"), str)]
     if not receipts:
-        degrade(store, "no-receipt")
         return 0
-    if len(receipts) > 1:
-        degrade(store, "ambiguous-receipt")
-        return 0
-    ok, reason = bind_from_receipt(
-        store,
-        root=root,
-        receipt_path=receipts[0]["path"],
-        key_seat=seat_from_key(parsed.key),
-        source="hook",
-    )
-    if not ok:
-        degrade(store, reason)
-    else:
-        with store.state_lock():
-            note = store.load()
-            if note.get("submit_miss") and note.get(
-                "submit_miss_binding_gen"
-            ) != note.get("binding_gen"):
-                note.pop("submit_miss", None)
-                note.pop("submit_miss_binding_gen", None)
-                store.save(note)
+    indications = root_indications(command)
+    cwd = payload.get("cwd") or os.getcwd()
+    if not isinstance(cwd, str):
+        cwd = os.getcwd()
+    store = NoteStore(session)
+    call = call_identity(session, payload)
+    reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
+    if parsed.ok:
+        base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
+        root = discover_root_like_cli(parsed.root_operand, base, args.plugin_root)
+        if root is None:
+            reason = "no-root"
+        elif len(receipts) != 1:
+            reason = "ambiguous-receipt"
+        else:
+            ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
+            if ok:
+                return 0
+    hint = None
+    with store.state_lock():
+        note = store.load()
+        if call and call in note.get("handled_calls", []):
+            return 0
+        root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root, indications)
+        if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
+            store.save(note)
+            hint = rebind_line(note, session)
+    if hint:
+        print(hook_context(hint).decode("utf-8"), flush=True)
     return 0
+
 
 
 MODES["bind"] = bind
@@ -1683,7 +1837,7 @@ MODES["bind"] = bind
 def read_payload() -> dict:
     try:
         return json.load(sys.stdin) or {}
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
         return {}
 
 
@@ -1720,7 +1874,7 @@ def drain(args) -> int:
     store = NoteStore(session)
     note = store.load()
     binding = resolve_binding(note, os.environ, args)
-    if binding is None or note.get("binding_degraded") or time.monotonic() >= end:
+    if binding is None or time.monotonic() >= end:
         return emit_json({})
     snap = read_index(Path(binding.root) / "INDEX.md")
     if time.monotonic() >= end:
@@ -1870,7 +2024,7 @@ def readiness(store: NoteStore, _between=None):
         or process_liveness(leader) == PROC_DEAD
     ):
         return "starting", note
-    if note.get("binding_degraded") or note.get("phase") == "unavailable":
+    if note.get("phase") == "unavailable":
         return "unavailable", note
     if (
         note.get("phase") == "following"
@@ -1881,27 +2035,65 @@ def readiness(store: NoteStore, _between=None):
     return "waiting-for-binding", note
 
 
+def tiers_mixed(note: dict) -> bool:
+    identities = set()
+    for record in [note.get("leader"), *note.get("standbys", [])]:
+        if record is None or process_liveness(record) == PROC_DEAD:
+            continue
+        identity = record.get("identity")
+        identities.add((identity.get("kit"), identity.get("fp")) if isinstance(identity, dict) else None)
+    return len(identities) > 1
+
+
+def printable_text(text: str) -> str:
+    """Render untrusted diagnostic text without terminal or line controls."""
+    return "".join(char if 32 <= ord(char) <= 126 else ascii(char)[1:-1] for char in text)
+
+
+def rebind_line(note: dict, session: str) -> str | None:
+    record = note.get("bind_observation")
+    if not record and not note.get("binding_degraded") and not note.get("submit_miss"):
+        return None
+    record = record or {}
+    receipts = record.get("receipts") or []
+    root, provenance = record.get("root"), record.get("root_provenance")
+    if root and len(receipts) == 1 and provenance in ("command", "inferred") and receipt_row_lookup(root, receipts[0]) == "match":
+        prefix = "rebind, may need operator approval: " if provenance == "command" else "rebind (root inferred, check it, may need operator approval): "
+        command = shlex.join(["python3", str(Path(__file__).resolve()), "bind", "--manual", "--session", session, "--root", root, "--anchor", receipts[0]])
+        if len(prefix + command) <= 1024 and all(32 <= ord(char) <= 126 for char in command):
+            return prefix + command
+    # No command separator even when an interactive shell disables comments.
+    prefix = "# rebind: incomplete, supply --root and --anchor"
+    seen = [shlex.quote(printable_text(value)) for value in receipts]
+    operands = [shlex.quote(printable_text(value)) for value in record.get("command_roots") or []]
+    parts = [prefix]
+    if seen:
+        parts += [" seen=" + seen[0], *(" " + value for value in seen[1:])]
+    if operands:
+        parts += [" command text=" + operands[0], *(" " + value for value in operands[1:])]
+    length = sum(map(len, parts))
+    dropped = 0
+    suffix = ""
+    while length + len(suffix) > 1024:
+        length -= len(parts.pop())
+        dropped += 1
+        suffix = f" dropped={dropped}"
+    return "".join(parts) + suffix
+
+
 def status_line(store: NoteStore, plugin_root: str | None) -> str:
     state, note = readiness(store)
     ident, client_id, daemon = "unchecked", {}, None
     if note.get("root"):
         ident, client_id, daemon = check_identity(plugin_root, note.get("root"))
-        if ident == "version-mismatch":
-            state = "unavailable"
         store.update(
             lambda n: n.update(
                 {"client_identity": client_id, "daemon_identity": daemon}
             )
         )
-    reason = (note.get("binding_degraded") or {}).get("reason") or note.get("reason")
-    suffix = (
-        f": {reason}"
-        if state == "unavailable" and reason
-        else (": version-mismatch" if ident == "version-mismatch" else "")
-    )
+    reason = note.get("reason")
+    suffix = f": {reason}" if state == "unavailable" and reason else ""
     binding = note.get("binding_source") or "none"
-    if note.get("binding_degraded"):
-        binding = f"degraded:{note['binding_degraded']['reason']}"
     cur = (note["progress"].get(note.get("root") or "") or {}).get("file") or "-"
 
     def fp(d):
@@ -1914,6 +2106,10 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         "daemon-down": "down",
         "unchecked": "-",
     }.get(ident, fp(daemon))
+    record = note.get("bind_observation") or {}
+    observed = record.get("reason")
+    miss = "submit-near-miss" if observed == "submit-near-miss" else note.get("submit_miss")
+    last_bind = observed if observed and observed != "submit-near-miss" else (note.get("binding_degraded") or {}).get("reason")
     line = (
         f"relay-monitor: {state}{suffix} "
         f"seat={note.get('seat') or '-'} "
@@ -1921,13 +2117,19 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         f"binding={binding} client={fp(client_id)} "
         f"daemon={daemon_txt} "
         f"updated={note.get('updated') or '-'}"
-        f"{' miss=' + note['submit_miss'] if note.get('submit_miss') else ''}"
+        f"{' miss=' + miss if miss else ''}"
+        f"{' last-bind=' + last_bind if last_bind else ''}"
+        f"{' tiers=mixed' if tiers_mixed(note) else ''}"
+        f"{' identity=mismatch' if ident == 'version-mismatch' else ''}"
     )
     raw = (daemon or {}).get("raw") or ""
     remedy = next(
         (text for text in raw.splitlines() if text.startswith("remedy:")), None
     )
-    return f"{line}\n{remedy}" if remedy else line
+    if ident == "version-mismatch" and not remedy:
+        remedy = "remedy: align the relay client and daemon installs before filing; delivery remains available"
+    hint = rebind_line(note, store.session)
+    return "\n".join(printable_text(text) for text in (line, remedy, hint) if text)
 
 
 def status(args) -> int:
@@ -2408,7 +2610,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     handler = MODES[args.mode]
-    return handler(args)
+    try:
+        return handler(args)
+    except Exception:
+        # Hooks consume untrusted payloads and must not interrupt their host.
+        # Other modes retain their ordinary error reporting.
+        if args.mode in ("drain", "session-start") or (args.mode == "bind" and not args.manual):
+            return 0
+        raise
 
 
 if __name__ == "__main__":

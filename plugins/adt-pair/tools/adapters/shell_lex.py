@@ -162,17 +162,20 @@ def strip_heredoc_bodies(command):
     return "".join(out)
 
 
-def lex(command: str):
+def lex_spans(command: str):
     tokens, cur, quoted, q, i = [], [], False, None, 0
+    word_start = None
 
     def flush():
-        nonlocal cur, quoted
+        nonlocal cur, quoted, word_start
         if cur or quoted:
-            tokens.append(("".join(cur), quoted, False))
-            cur, quoted = [], False
+            tokens.append(("".join(cur), quoted, False, word_start, i))
+            cur, quoted, word_start = [], False, None
 
     while i < len(command):
         ch = command[i]
+        if word_start is None and (q or (not ch.isspace() and ch not in ";|&<>()#")):
+            word_start = i
         if q:
             if ch == q:
                 q = None
@@ -194,26 +197,30 @@ def lex(command: str):
             continue
         elif ch == "\n":
             flush()
-            tokens.append(("\n", False, True))
+            tokens.append(("\n", False, True, i, i + 1))
         elif ch.isspace():
             flush()
         elif ch in ";|&":
             flush()
+            op_start = i
             op = ch
             if ch in "|&" and i + 1 < len(command) and command[i + 1] == ch:
                 op = ch * 2
                 i += 1
-            tokens.append((op, False, True))
+            tokens.append((op, False, True, op_start, i + 1))
         elif ch in "<>":
             flush()
+            op_start = i
             op = ch
-            if i + 1 < len(command) and command[i + 1] in "<>|":
+            if i + 1 < len(command) and (
+                command[i + 1] in "<>|" or (ch == ">" and command[i + 1] == "&")
+            ):
                 op += command[i + 1]
                 i += 1
-            tokens.append((op, False, True))
+            tokens.append((op, False, True, op_start, i + 1))
         elif ch in "()":
             flush()
-            tokens.append((ch, False, True))
+            tokens.append((ch, False, True, i, i + 1))
         else:
             cur.append(ch)
         i += 1
@@ -237,3 +244,8 @@ def split_commands(tokens):
             cur.append(tok)
     commands.append(cur)
     return [c for c in commands if c]
+
+
+def lex(command: str):
+    tokens = lex_spans(command)
+    return None if tokens is None else [token[:3] for token in tokens]

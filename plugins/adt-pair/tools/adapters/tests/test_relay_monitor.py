@@ -200,7 +200,11 @@ class SessionIdentityTests(TmpEnv):
                 ):
                     with self.subTest(mode=mode, session=session, source=source):
                         result = self.invalid_entry(mode, session, source)
-                        self.assertEqual(result.returncode, 0, result.stderr)
+                        if mode == "bind" and source != "payload":
+                            self.assertEqual(result.returncode, 2, result.stderr)
+                            self.assertIn("invalid-session-id", result.stderr)
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_invalid_cli_sessions_report_reason_and_refuse(self):
         for mode in ("status", "follow", "replay"):
@@ -289,6 +293,18 @@ class NoteStoreTests(TmpEnv):
 
 
 class LeaderLockTests(TmpEnv):
+    def test_probe_out_of_range_pid_reads_dead(self):
+        for pid in (2**31, 2**63, -(2**63)-1):
+            with self.subTest(pid=pid):
+                self.assertEqual(self.rm.process_probe(pid), "dead")
+
+    def test_probe_eperm_reads_alive(self):
+        probe_os = types.SimpleNamespace(
+            kill=mock.Mock(side_effect=PermissionError(errno.EPERM, "denied"))
+        )
+        with mock.patch.object(self.rm, "os", probe_os):
+            self.assertEqual(self.rm.process_probe(os.getpid()), "alive")
+
     def test_second_acquire_blocks_probe_reports_held_and_instance_is_readable(self):
         a = self.rm.LeaderLock("s")
         b = self.rm.LeaderLock("s")
@@ -1305,8 +1321,8 @@ class DeliveryTests(TmpEnv):
         )
         self.deliver()
         self.assertEqual(
-            self.store.load()["phase"], "waiting-for-binding"
-        )  # degraded: never promoted
+            self.store.load()["phase"], "following"
+        )  # legacy observation does not block recovery
         self.store.update(lambda n: n.update({"binding_degraded": None}))
         self.index.unlink()
         r, _ = self.deliver()
@@ -1392,6 +1408,43 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
     """
 
     def test_note_written_during_scan_wakes_without_index_change(self):
+        self._assert_note_wake()
+
+    def test_note_wake_survives_polling_process_probe(self):
+        self._assert_note_wake(force_poll=True)
+
+    def _assert_note_wake(self, force_poll=False):
+        polls = []
+
+        class PollingProcess(subprocess.Popen):
+            def _try_wait(child, wait_flags):
+                if wait_flags == os.WNOHANG and not getattr(child, "forced_poll", False):
+                    child.forced_poll = True
+                    polls.append(child.pid)
+                    return 0, 0
+                return super()._try_wait(wait_flags)
+
+        def polling_probe(args, **kwargs):
+            with PollingProcess(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=kwargs.get("text", False)) as child:
+                stdout, stderr = child.communicate(timeout=kwargs.get("timeout"))
+                return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+
+        probe_module = types.SimpleNamespace(**{
+            **vars(subprocess), "run": polling_probe if force_poll else subprocess.run,
+        })
+        platform_module = types.SimpleNamespace(**{
+            **vars(self.rm.platform), "system": lambda: "Darwin",
+        }) if force_poll else self.rm.platform
+        with (
+            mock.patch.object(self.rm, "subprocess", probe_module),
+            mock.patch.object(self.rm, "platform", platform_module),
+        ):
+            self._exercise_note_wake()
+        if force_poll:
+            self.assertGreaterEqual(len(polls), 1, "probe never entered polling wait")
+
+    def _exercise_note_wake(self):
         write_index(self.index, row(1, to="b.implementer"))
         store = self.rm.NoteStore("scan-session")
         store.update(
@@ -1426,7 +1479,9 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
             mock.patch.object(self.rm, "deliver_once", side_effect=scan),
             mock.patch.object(self.rm, "LeaderLock", return_value=lock),
             mock.patch.object(self.rm, "FdSink", return_value=self.rm.ByteSink()),
-            mock.patch.object(self.rm.time, "sleep", side_effect=StopLoop),
+            mock.patch.object(self.rm, "time", types.SimpleNamespace(**{
+                **vars(time), "sleep": mock.Mock(side_effect=StopLoop),
+            })),
         ):
             with self.assertRaises(StopLoop):
                 self.rm.follow(ns(session="scan-session", host="claude-code"))
@@ -1646,6 +1701,495 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
 
 
 class BindTests(TmpEnv):
+    def test_rebind_checks_observation_root_instead_of_bound_root(self):
+        import shlex
+        observed = self.other_root()
+        self.store.update(lambda note: note.update(root=str(self.root)))
+        for provenance in ("command", "inferred"):
+            for row_in_observation in (False, True):
+                with self.subTest(provenance=provenance, row_in_observation=row_in_observation):
+                    write_index(self.index, "" if row_in_observation else row(1))
+                    write_index(observed / "INDEX.md", row(1) if row_in_observation else "")
+                    self.store.update(lambda note: note.update(bind_observation={"root": str(observed), "root_provenance": provenance, "receipts": ["lane/r1.md"]}))
+                    line = self.rm.rebind_line(self.store.load(), "sess")
+                    if row_in_observation:
+                        prefix = "rebind, may need operator approval: " if provenance == "command" else "rebind (root inferred, check it, may need operator approval): "
+                        self.assertTrue(line.startswith(prefix))
+                        words = shlex.split(line.removeprefix(prefix))
+                        self.assertEqual(words[words.index("--root") + 1], str(observed))
+                        self.assertEqual(words[words.index("--anchor") + 1], "lane/r1.md")
+                    else:
+                        self.assertTrue(line.startswith("# rebind: incomplete"))
+                        self.assertNotIn("bind --manual", line)
+                    self.assertEqual(self.store.load()["root"], str(self.root))
+
+    def test_lookup_rejects_nul_root_and_requires_exact_file_cell(self):
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root) + "\0", "lane/r1.md"), "unreadable")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "match")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/./r1.md"), "no-match")
+
+    def test_nonrow_receipt_under_command_provenance_gets_incomplete_hint(self):
+        (self.root / "lane/missing.md").write_text("not filed")
+        rc, output = self._hook_output(self._submit(anchor="lane/missing.md"))
+        self.assertEqual(rc, 0)
+        record = self.store.load()["bind_observation"]
+        self.assertEqual((record["reason"], record["root_provenance"]), ("receipt-mismatch", "command"))
+        hint = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(hint.startswith("# rebind: incomplete"))
+        self.assertNotIn("bind --manual", hint)
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            status = self.rm.status_line(self.store, None)
+        self.assertIn("# rebind: incomplete", status)
+        self.assertNotIn("bind --manual", status)
+
+    def test_complete_hint_appears_once_row_exists(self):
+        import shlex
+        self._hook_output(self._submit(anchor="lane/missing.md"))
+        before = self.store.load()["bind_observation"]
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+        with self.index.open("a") as stream:
+            stream.write(row(2, file="lane/missing.md"))
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            status = self.rm.status_line(self.store, None)
+        hint = next(line for line in status.splitlines() if line.startswith("rebind, may need operator approval: "))
+        words = shlex.split(hint.removeprefix("rebind, may need operator approval: "))
+        self.assertEqual(words[-4:], ["--root", str(self.root), "--anchor", "lane/missing.md"])
+        self.assertEqual(self.store.load()["bind_observation"], before)
+
+    def test_command_observation_with_unreadable_index_gets_incomplete_hint(self):
+        self._hook_output(self._submit(anchor="lane/missing.md"))
+        with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
+            hint = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertTrue(hint.startswith("# rebind: incomplete"))
+        self.assertNotIn("bind --manual", hint)
+
+    def test_inferred_observation_follows_index_readability(self):
+        self._hook_output(self._miss())
+        record = self.store.load()["bind_observation"]
+        self.assertEqual(record["root_provenance"], "inferred")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it, may need operator approval): "))
+        with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
+            self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it, may need operator approval): "))
+        self.assertEqual(self.store.load()["bind_observation"], record)
+
+    def test_refused_manual_bind_exits_one_with_reason(self):
+        self._manual()
+        before = self.store.path.read_bytes()
+        (self.root / "lane/missing.md").write_text("not filed")
+        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/missing.md"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "relay-monitor: manual bind refused: receipt-mismatch\n")
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_manual_bind_usage_and_session_errors_exit_two(self):
+        before = set(self.base.rglob("*"))
+        for operands, reason in ((["--root", str(self.root)], "manual bind needs"), (["--anchor", "lane/r1.md"], "manual bind needs"), (["--root", str(self.root), "--anchor", "lane/r1.md", "--session", "../bad"], "invalid-session-id")):
+            with self.subTest(operands=operands):
+                result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", *operands], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+                self.assertIn(reason, result.stderr)
+                self.assertEqual(set(self.base.rglob("*")), before)
+
+    def test_successful_manual_bind_is_silent(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"], capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
+        self.assertEqual(self.store.load()["seat"], "a.planner")
+
+    def test_manual_bind_unexpected_error_is_not_swallowed(self):
+        bootstrap = """import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fault_adapter', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+def fail(*args, **kwargs):
+    Path(sys.argv[2]).write_text('bind fault reached')
+    raise RuntimeError('injected bind fault')
+m.bind_from_receipt = fail
+raise SystemExit(m.main(sys.argv[3:]))
+"""
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                marker = self.base / ("manual-fault" if manual else "hook-fault")
+                self.assertFalse(marker.exists())
+                args = ["bind", "--host", "codex"]
+                if manual:
+                    args += ["--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"]
+                result = subprocess.run([sys.executable, "-c", bootstrap, str(SCRIPT), str(marker), *args], input=self._submit(), capture_output=True, text=True, timeout=10)
+                self.assertEqual(marker.read_text(), "bind fault reached")
+                self.assertEqual(result.stdout, "")
+                if manual:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("RuntimeError: injected bind fault", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_every_hint_form_is_inert_or_runnable_in_shells(self):
+        import shlex
+        marker = self.base / "must-not-exist"
+        shells = (["sh", "-c"], ["bash", "-c"], ["zsh", "-f", "-i", "-c"])
+        for provenance in ("none", "command", "inferred"):
+            record = dict(root=str(self.root), root_provenance=provenance, receipts=["lane/r1.md"])
+            if provenance == "none":
+                record["receipts"] = [f"$(touch {marker})", f"`touch {marker}`", "a'; touch nope; '"]
+            hint = self.rm.rebind_line({"bind_observation": record}, "sess")
+            if provenance == "none":
+                for shell in shells:
+                    result = subprocess.run([*shell, hint], capture_output=True, text=True, timeout=10)
+                    self.assertFalse(marker.exists())
+                    self.assertEqual(result.stdout, "")
+            else:
+                prefix = "rebind, may need operator approval: " if provenance == "command" else "rebind (root inferred, check it, may need operator approval): "
+                words = shlex.split(hint.removeprefix(prefix))
+                self.assertEqual(words, ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"])
+                for shell in shells:
+                    # Shell parsing, without executing a real manual bind.
+                    result = subprocess.run([*shell, "printf '%s\\n' " + hint.removeprefix(prefix)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), words)
+
+    def _assert_incomplete_in_interactive_shells(self, hint):
+        import shlex
+        # Sentinel executables cover all fixed words, including an old separator
+        # mutant and the dropped-value marker, without defining a hash command.
+        sentinels = self.base / "hint-sentinels"
+        sentinels.mkdir(exist_ok=True)
+        names = ["rebind:", "incomplete", "incomplete,", "supply", "--root",
+                 "and", "--anchor", "seen=", "command", "text="]
+        names += [word for word in shlex.split(hint) if word.startswith("dropped=")]
+        for name in names:
+            executable = sentinels / name
+            executable.write_text("#!/bin/sh\nprintf 'FIXED_WORD_EXECUTED\\n'\n")
+            executable.chmod(0o755)
+        modes = [(["zsh", "-f", "-i"], "unsetopt interactivecomments"),
+                 (["zsh", "-f", "-i"], "setopt interactivecomments"),
+                 (["bash", "--noprofile", "--norc", "-i"], "shopt -u interactive_comments"),
+                 (["bash", "--noprofile", "--norc", "-i"], "shopt -s interactive_comments"),
+                 (["sh"], "")]
+        for shell, option in modes:
+            with self.subTest(shell=shell, option=option, hint=hint):
+                script = option + "\nPATH=" + shlex.quote(str(sentinels)) + ":$PATH\n"
+                script += hint + "\nprintf 'AFTER_HINT\\n'\nexit\n"
+                result = subprocess.run(shell, input=script, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.stdout, "AFTER_HINT\n", result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_incomplete_hint_fixed_words_are_inert_with_comments_disabled(self):
+        marker = self.base / "incomplete-hostile-marker"
+        cases = [(["lane/r1.md"], []),
+                 ([f"$(touch {marker})", f"`touch {marker}`", f"a'; touch {marker}; '"],
+                  [f"$(touch {marker})", "a|b&c;d<e>f(g)\nnext"])]
+        for receipts, operands in cases:
+            hint = self.rm.rebind_line({"bind_observation": dict(
+                receipts=receipts, command_roots=operands, root_provenance="none")}, "sess")
+            self._assert_incomplete_in_interactive_shells(hint)
+            self.assertFalse(marker.exists())
+            self.assertNotIn("\n", hint)
+
+    def test_incomplete_hint_truncation_keeps_complete_quoted_values(self):
+        import shlex
+        prefix = "# rebind: incomplete, supply --root and --anchor seen="
+        # A quoted value exactly fills the bound; the next value forces a cut.
+        value = "a b" + "x" * (1024 - len(prefix) - 2 - 3)
+        exact = self.rm.rebind_line({"bind_observation": dict(receipts=[value])}, "sess")
+        self.assertEqual(len(exact), 1024)
+        self.assertEqual(shlex.split(exact)[-1], "seen=" + value)
+        self._assert_incomplete_in_interactive_shells(exact)
+        for receipts, operands in [([value, "last"], []),
+                                    (["lane/r1.md", value], ["root with spaces"]),
+                                    (["lane/r1.md"], [value, "last"])]:
+            with self.subTest(receipts=receipts, operands=operands):
+                hint = self.rm.rebind_line({"bind_observation": dict(
+                    receipts=receipts, command_roots=operands)}, "sess")
+                self.assertLessEqual(len(hint), 1024)
+                try:
+                    words = shlex.split(hint)
+                except ValueError as error:
+                    self.fail(f"truncation left an open quote: {error}")
+                self.assertRegex(words[-1], r"^dropped=[1-9][0-9]*$")
+                self._assert_incomplete_in_interactive_shells(hint)
+
+    def test_runnable_approval_prefixes_preserve_hook_and_status_arguments(self):
+        import shlex
+        root = self.base / "root with ' quote: text"
+        (root / ".engine").mkdir(parents=True)
+        receipt = "lane/it's a: receipt.md"
+        write_index(root / "INDEX.md", row(1, file=receipt))
+        response = json.dumps(dict(path=receipt, render_state="rendered", duplicate=False))
+        expected = ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "sess",
+                    "--root", str(root), "--anchor", receipt]
+        for provenance, prefix in [("command", "rebind, may need operator approval: "),
+                                   ("inferred", "rebind (root inferred, check it, may need operator approval): ")]:
+            with self.subTest(provenance=provenance):
+                command = ("tools/relay submit d.md --root " + shlex.quote(str(root))
+                           if provenance == "command" else "time tools/relay submit d.md")
+                payload = json.loads(self.payload(command, response, call_id=provenance))
+                payload["cwd"] = str(root)
+                rc, output = self._hook_output(json.dumps(payload))
+                self.assertEqual(rc, 0)
+                self.assertEqual(self.store.load()["bind_observation"]["root_provenance"], provenance)
+                context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+                with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+                    status = self.rm.status_line(self.store, None).splitlines()[-1]
+                for line in (context, status):
+                    self.assertTrue(line.startswith(prefix))
+                    self.assertEqual(shlex.split(line.split(": ", 1)[1]), expected)
+                    self.assertLessEqual(len(line), 1024)
+                    self.assertTrue(all(32 <= ord(c) <= 126 for c in line))
+
+    def test_runnable_approval_prefixes_count_toward_line_bound(self):
+        import shlex
+        for provenance, prefix in [("command", "rebind, may need operator approval: "),
+                                   ("inferred", "rebind (root inferred, check it, may need operator approval): ")]:
+            with self.subTest(provenance=provenance):
+                record = dict(root=str(self.root), root_provenance=provenance, receipts=["lane/r1.md"])
+                args = ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "s",
+                        "--root", str(self.root), "--anchor", "lane/r1.md"]
+                session = "s" + "x" * (1024 - len(prefix + shlex.join(args)))
+                args[args.index("--session") + 1] = session
+                line = self.rm.rebind_line({"bind_observation": record}, session)
+                self.assertTrue(line.startswith(prefix))
+                self.assertEqual(len(line), 1024)
+                self.assertEqual(shlex.split(line.split(": ", 1)[1]), args)
+                overflow = self.rm.rebind_line({"bind_observation": record}, session + "x")
+                self.assertTrue(overflow.startswith("# rebind: incomplete, supply "))
+                self.assertNotIn("bind --manual", overflow)
+                self.assertLessEqual(len(overflow), 1024)
+
+    def test_lookup_reports_match_no_match_and_unreadable(self):
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "match")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/missing.md"), "no-match")
+        with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
+            self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "unreadable")
+        self.index.unlink()
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "unreadable")
+        self.index.write_text("malformed index\n")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "unreadable")
+
+    def test_inference_allows_readable_nonmatching_second_candidate(self):
+        other = self.other_root()
+        write_index(other / "INDEX.md", "")
+        with mock.patch.object(self.rm, "discover_root_like_cli", return_value=str(other)):
+            result = self.rm.attribute_root(self.rm.SubmitParse(False), str(other), {"root": str(self.root)}, [{"path": "lane/r1.md"}], None, ([], False))
+        self.assertEqual(result, (str(self.root), "inferred"))
+
+    def test_inference_withheld_when_second_candidate_unreadable_in_either_order(self):
+        other = self.other_root()
+        real_read = self.rm.read_index
+        ordered = []
+        def observe_order(path):
+            ordered.append(str(path.parent))
+            return real_read(path)
+        with mock.patch.object(self.rm, "discover_root_like_cli", return_value=str(self.root)), mock.patch.object(self.rm, "read_index", side_effect=observe_order):
+            self.rm.attribute_root(self.rm.SubmitParse(False), str(self.root), {"root": str(other)}, [{"path": "lane/r1.md"}], None, ([], False))
+        self.assertEqual(len(ordered), 2)
+        self.assertEqual(set(ordered), {str(self.root), str(other)})
+        for bad_position in (0, 1):
+            for malformed in (False, True):
+                with self.subTest(bad_position=bad_position, malformed=malformed):
+                    bad = ordered[bad_position]
+                    good = ordered[1 - bad_position]
+                    write_index(pathlib.Path(good) / "INDEX.md", row(1))
+                    pathlib.Path(bad, "INDEX.md").write_text("malformed\n")
+                    reads = []
+                    def read(path):
+                        reads.append(str(path.parent))
+                        if str(path.parent) == bad and not malformed:
+                            raise PermissionError("fixture unreadable")
+                        return real_read(path)
+                    with mock.patch.object(self.rm, "discover_root_like_cli", return_value=str(self.root)), mock.patch.object(self.rm, "read_index", side_effect=read):
+                        result = self.rm.attribute_root(self.rm.SubmitParse(False), str(self.root), {"root": str(other)}, [{"path": "lane/r1.md"}], None, ([], False))
+                    self.assertEqual(result, (None, "none"))
+                    self.assertEqual(reads, ordered[:bad_position + 1])
+
+    def _advance_stamps(self):
+        # A stray save must change persisted bytes even within one real second.
+        import itertools
+        ticks = itertools.count()
+        patcher = mock.patch.object(self.rm, "now_stamp", side_effect=lambda: f"test-stamp-{next(ticks):08d}")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_fd_duplication_before_submit_verb_binds(self):
+        command = f"tools/relay 2>&1 submit d.md --root {self.root} --key {self.key}"
+        self.assertTrue(self.rm.parse_submit_command(command).ok)
+        rc, out = self._hook_output(self.payload(command, self.receipt))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
+        self.assertEqual(self.store.load()["binding_gen"], 1)
+
+    def test_hook_context_escapes_non_ascii_and_control_receipts(self):
+        for char in ("\v", "\f", "\x85", "\u2028", "\x1b", "é"):
+            with self.subTest(char=repr(char)):
+                receipt = json.dumps(dict(path=f"lane/a{char}b.md", render_state="rendered", duplicate=False))
+                rc, out = self._hook_output(self.payload(f"tools/relay submit d.md --root {self.root}", receipt))
+                self.assertEqual(rc, 0)
+                hint = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+                self.assertEqual(len(hint.splitlines()), 1)
+                self.assertTrue(all(32 <= ord(c) <= 126 for c in hint))
+                self.assertNotIn("bind --manual", hint)
+                self.assertIn(ascii(char)[1:-1], hint)
+
+    def test_hook_context_escapes_non_ascii_and_control_roots(self):
+        import shlex
+        for char in ("\v", "\f", "\x85", "\u2028", "\x1b", "é"):
+            with self.subTest(char=repr(char)):
+                root = self.base / f"root{char}name"
+                (root / ".engine").mkdir(parents=True)
+                rc, out = self._hook_output(self.payload(f"tools/relay submit d.md --root {shlex.quote(str(root))}", self.receipt))
+                self.assertEqual(rc, 0)
+                self.assertEqual(self.store.load()["bind_observation"]["root"], str(root))
+                hint = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+                self.assertEqual(len(hint.splitlines()), 1)
+                self.assertTrue(all(32 <= ord(c) <= 126 for c in hint))
+                self.assertNotIn("bind --manual", hint)
+                self.assertIn(ascii(char)[1:-1], hint)
+
+    def _assert_hook_input_is_total(self, payload, mode="bind"):
+        result = subprocess.run([sys.executable, str(SCRIPT), mode, "--host", "codex"],
+                                input=payload, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        if result.stdout.strip():
+            self.assertIsInstance(json.loads(result.stdout), dict)
+
+    def _assert_hook_observation(self, payload, reason, provenance, receipt_path):
+        self.store.path.unlink(missing_ok=True)
+        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--host", "codex"],
+                                input=payload, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(result.stdout.strip(), "seen receipt must produce a hint")
+        context = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "PostToolUse")
+        hint = context["additionalContext"]
+        self.assertTrue(hint.startswith("# rebind: incomplete"))
+        self.assertIn("seen=", hint)
+        self.assertEqual(len(hint.splitlines()), 1)
+        self.assertTrue(self.store.path.exists(), "seen receipt must record an observation")
+        observation = self.store.load()["bind_observation"]
+        self.assertEqual(observation["reason"], reason)
+        self.assertEqual(observation["root_provenance"], provenance)
+        self.assertEqual(observation["receipts"], [receipt_path])
+        self.assertEqual(observation["root"], str(self.root) if provenance == "command" else None)
+
+    def test_hook_nul_receipt_exits_zero(self):
+        receipt = json.dumps(dict(path="lane/nu\0l.md", render_state="rendered", duplicate=False))
+        self._assert_hook_observation(self.payload(f"tools/relay submit d.md --root {self.root}", receipt),
+                                      "receipt-mismatch", "command", "lane/nu\0l.md")
+
+    def test_hook_nul_root_and_cwd_exit_zero(self):
+        for field in ("root", "cwd"):
+            with self.subTest(field=field):
+                payload = json.loads(self.payload("tools/relay submit d.md", self.receipt))
+                if field == "root":
+                    payload["tool_input"]["command"] += " --root '/nu\0l'"
+                else:
+                    payload["cwd"] = "/nu\0l"
+                self._assert_hook_observation(json.dumps(payload), "no-root", "none", "lane/r1.md")
+
+    def test_hook_overlong_root_and_cwd_exit_zero(self):
+        for field in ("root", "cwd"):
+            with self.subTest(field=field):
+                payload = json.loads(self.payload("tools/relay submit d.md", self.receipt))
+                value = "/" + "x" * 300
+                if field == "root":
+                    payload["tool_input"]["command"] += " --root " + value
+                else:
+                    payload["cwd"] = value
+                self._assert_hook_observation(json.dumps(payload), "no-root", "none", "lane/r1.md")
+
+    def test_hook_deep_json_exits_zero(self):
+        # Inject the decoder failure: actual depth thresholds vary by interpreter.
+        for mode in ("bind", "drain", "session-start"):
+            with self.subTest(mode=mode):
+                output, errors = io.StringIO(), io.StringIO()
+                with (
+                    mock.patch.object(self.rm.json, "load", side_effect=RecursionError("injected payload recursion")),
+                    mock.patch("sys.stdin", io.StringIO("{}")),
+                    mock.patch("sys.stdout", output),
+                    mock.patch("sys.stderr", errors),
+                ):
+                    self.assertEqual(self.rm.main([mode, "--host", "codex"]), 0)
+                if mode == "bind":
+                    self.assertEqual(output.getvalue(), "")
+                elif mode == "drain":
+                    self.assertEqual(json.loads(output.getvalue()), {})
+                else:
+                    self.assertEqual(json.loads(output.getvalue()), {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "relay-monitor: no-session-identity"}})
+                self.assertNotIn("Traceback", errors.getvalue())
+                self.assertFalse(self.store.path.exists())
+
+    def test_hook_deep_receipt_json_exits_zero(self):
+        # Initial payload decoding remains real; inject only receipt decoding.
+        decoder = json.JSONDecoder()
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(decoder, "raw_decode", side_effect=RecursionError("injected receipt recursion")),
+            mock.patch.object(self.rm.json, "JSONDecoder", return_value=decoder),
+            mock.patch("sys.stdin", io.StringIO(self.payload("tools/relay submit d.md", self.receipt))),
+            mock.patch("sys.stdout", output),
+            mock.patch("sys.stderr", errors),
+        ):
+            self.assertEqual(self.rm.main(["bind", "--host", "codex"]), 0)
+        self.assertEqual(output.getvalue(), "")
+        self.assertNotIn("Traceback", errors.getvalue())
+        self.assertFalse(self.store.path.exists())
+
+    def test_quoted_equals_root_option_is_not_an_indication(self):
+        command = "tools/relay submit d.md '--root=/B' | cat"
+        self.assertEqual(self.rm.root_indications(command), ([], False))
+        self.assertEqual(self._indicated_miss(command)["root_provenance"], "inferred")
+
+    def test_submit_ending_in_fd_duplication_parses(self):
+        for suffix in ("2>&1", ">&2", "2>&-", "1>&-"):
+            with self.subTest(suffix=suffix):
+                parsed = self.rm.parse_submit_command(
+                    "tools/relay submit d.md --key K --root R " + suffix)
+                self.assertTrue(parsed.ok)
+                self.assertEqual((parsed.key, parsed.root_operand), ("K", "R"))
+
+    def test_adjacent_fd_is_consumed_separated_number_is_argument(self):
+        p = self.rm.parse_submit_command
+        for suffix in ("2>&1", "2 >&1"):
+            self.assertTrue(p("tools/relay submit d.md " + suffix).ok)
+        self.assertIsNone(p("tools/relay submit d.md --root 2>&1").root_operand)
+        self.assertEqual(p("tools/relay submit d.md --root 2 >&1").root_operand, "2")
+        self.assertEqual(p("tools/relay submit d.md --root '2'>&1").root_operand, "2")
+
+    def test_separated_gt_amp_is_backgrounding(self):
+        self.assertEqual(self.rm.parse_submit_command(
+            "tools/relay submit d.md > &1").reason, "unsupported-syntax")
+
+    def test_dup_operand_may_follow_blanks(self):
+        self.assertTrue(self.rm.parse_submit_command("tools/relay submit d.md 2>& 1").ok)
+
+    def test_dup_with_non_fd_operand_refused(self):
+        for suffix in (">&out.txt", ">&", ">&; echo hi"):
+            self.assertEqual(self.rm.parse_submit_command(
+                "tools/relay submit d.md " + suffix).reason, "unsupported-syntax")
+
+    def test_submit_with_ampersand_redirect_refused(self):
+        for suffix in ("&>out", "&>>out"):
+            self.assertEqual(self.rm.parse_submit_command(
+                "tools/relay submit d.md " + suffix).reason, "unsupported-syntax")
+
+    def test_submit_backgrounded_refused(self):
+        self.assertEqual(self.rm.parse_submit_command(
+            "tools/relay submit d.md &").reason, "unsupported-syntax")
+
+    def test_heredoc_controls_report_unsupported_syntax(self):
+        for suffix in ("<<EOF\nx\nEOF", "<<<x"):
+            self.assertEqual(self.rm.parse_submit_command(
+                "tools/relay submit d.md " + suffix).reason, "unsupported-syntax")
+
     def setUp(self):
         super().setUp()
         write_index(self.index, row(1, frm="a.planner", to="orch.orchestrator-planner"))
@@ -1657,7 +2201,7 @@ class BindTests(TmpEnv):
         )
         self.key = str(self.root / ".engine" / "seats" / "a.planner" / "k.key")
 
-    def payload(self, command, stdout=None, host="claude"):
+    def payload(self, command, stdout=None, host="claude", call_id=None):
         base = {
             "session_id": "sess",
             "cwd": str(self.root),
@@ -1686,6 +2230,8 @@ class BindTests(TmpEnv):
                 "output": stdout or "",
                 "metadata": {"exit_code": 0},
             }
+        if call_id is not None:
+            base["tool_use_id"] = call_id
         return json.dumps(base)
 
     def run_bind(self, payload_text):
@@ -1754,7 +2300,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
         note = self.store.load()
         self.assertEqual(
-            (note["seat"], note["binding_source"], note["binding_degraded"]),
+            (note["seat"], note["binding_source"], note["bind_observation"]),
             ("a.planner", "hook", None),
         )
 
@@ -1805,7 +2351,7 @@ class BindTests(TmpEnv):
                 before = self.rm.readiness(self.store)[0]
                 self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
                 self.assertEqual(self.rm.readiness(self.store)[0], before)
-                self.assertIsNone(self.store.load()["binding_degraded"])
+                self.assertEqual(self.store.load()["bind_observation"]["reason"], "submit-near-miss")
                 self.assertRegex(
                     self.rm.status_line(self.store, None).splitlines()[0],
                     r" binding=none .* miss=submit-near-miss$",
@@ -1831,7 +2377,7 @@ class BindTests(TmpEnv):
                     {field: after[field] for field in fields},
                     {field: before[field] for field in fields},
                 )
-                self.assertIsNone(after["binding_degraded"])
+                self.assertEqual(after["bind_observation"]["reason"], "submit-near-miss")
                 self.assertEqual(self.rm.readiness(self.store)[0], "armed")
                 with mock.patch.object(
                     self.rm, "check_identity", return_value=("ok", {}, {})
@@ -1843,6 +2389,7 @@ class BindTests(TmpEnv):
                     )
 
     def test_terminal_combined_and_launcher_data_stay_silent(self):
+        self._advance_stamps()
         commands = (
             "python3 -Bcpass tools/relay submit d.md",
             "python3 -Bmhttp.server tools/relay submit d.md",
@@ -1873,6 +2420,8 @@ class BindTests(TmpEnv):
                         if self.store.path.exists()
                         else None
                     )
+                    binding_before = self.store.load()
+                    readiness_before = self.rm.readiness(self.store)[0]
                     self.assertEqual(
                         self.run_bind(self.payload(command, self.receipt)), 0
                     )
@@ -1881,7 +2430,14 @@ class BindTests(TmpEnv):
                         if self.store.path.exists()
                         else None
                     )
-                    self.assertEqual(after, before)
+                    if "'tools/relay'" in command or "'submit'" in command:
+                        self.assertEqual(after, before)
+                    else:
+                        note = self.store.load()
+                        self.assertEqual(note["bind_observation"]["reason"], "submit-near-miss")
+                        for field in ("seat", "root", "anchor", "binding_source", "binding_gen", "progress", "printed"):
+                            self.assertEqual(note[field], binding_before[field])
+                        self.assertEqual(self.rm.readiness(self.store)[0], readiness_before)
 
     def test_launcher_near_miss_preserves_mixed_precedence(self):
         good = f"tools/relay submit d.md --key {self.key} --root {self.root}"
@@ -1898,10 +2454,11 @@ class BindTests(TmpEnv):
                     )
                     note = self.store.load()
                     self.assertEqual(note["seat"], "a.planner")
-                    self.assertIsNone(note.get("submit_miss"))
-                    self.assertIsNone(note["binding_degraded"])
+                    self.assertIsNone((note.get("bind_observation") or {}).get("reason"))
+                    self.assertIsNone(note["bind_observation"])
 
     def test_unrelated_commands_stay_silent(self):
+        self._advance_stamps()
         for command in (
             "git status",
             "tools/relay show d.md",
@@ -1932,7 +2489,7 @@ class BindTests(TmpEnv):
             0,
         )
         self.assertEqual(self.rm.readiness(self.store)[0], before)
-        self.assertIsNone(self.store.load()["binding_degraded"])
+        self.assertEqual(self.store.load()["bind_observation"]["reason"], "submit-near-miss")
         self.assertRegex(
             self.rm.status_line(self.store, None).splitlines()[0],
             r" binding=none .* miss=submit-near-miss$",
@@ -1975,7 +2532,7 @@ class BindTests(TmpEnv):
             {field: after[field] for field in fields},
             {field: before[field] for field in fields},
         )
-        self.assertIsNone(after["binding_degraded"])
+        self.assertEqual(after["bind_observation"]["reason"], "submit-near-miss")
         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertTrue(
@@ -2001,6 +2558,10 @@ class BindTests(TmpEnv):
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertNotIn("miss=", self.rm.status_line(self.store, None))
 
+        self.run_bind(self._miss())
+        self.assertEqual(self._manual(), 0)
+        self.assertIsNone(self.store.load().get("bind_observation"))
+
     def test_later_near_miss_survives_successful_bind(self):
         first_miss = "python3 -B tools/relay submit first.md"
         later_miss = "env python3 tools/relay submit later.md"
@@ -2020,10 +2581,10 @@ class BindTests(TmpEnv):
             self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
         note = self.store.load()
         self.assertEqual(
-            (note["seat"], note["binding_source"], note["binding_degraded"]),
-            ("a.planner", "hook", None),
+            (note["seat"], note["binding_source"], note["bind_observation"]["reason"]),
+            ("a.planner", "hook", "submit-near-miss"),
         )
-        self.assertEqual(note.get("submit_miss"), "submit-near-miss")
+        self.assertEqual((note.get("bind_observation") or {}).get("reason"), "submit-near-miss")
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertTrue(
                 self.rm.status_line(self.store, None)
@@ -2056,9 +2617,10 @@ class BindTests(TmpEnv):
                     self.assertEqual(
                         self.run_bind(self.payload(command, self.receipt)), 0
                     )
+                    self.assertEqual(self._manual(), 0)
                 note = self.store.load()
                 self.assertEqual((note["seat"], note["binding_gen"]), ("a.planner", 1))
-                self.assertIsNone(note.get("submit_miss"))
+                self.assertIsNone((note.get("bind_observation") or {}).get("reason"))
                 with mock.patch.object(
                     self.rm, "check_identity", return_value=("ok", {}, {})
                 ):
@@ -2078,7 +2640,7 @@ class BindTests(TmpEnv):
                 self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
                 note = self.store.load()
                 self.assertEqual(
-                    (note["seat"], note["binding_degraded"], note.get("submit_miss")),
+                    (note["seat"], note["bind_observation"], (note.get("bind_observation") or {}).get("reason")),
                     ("a.planner", None, None),
                 )
                 self.assertEqual(
@@ -2088,7 +2650,7 @@ class BindTests(TmpEnv):
                     0,
                 )
                 self.assertEqual(
-                    self.store.load()["binding_degraded"]["reason"], "ambiguous-receipt"
+                    self.store.load()["bind_observation"]["reason"], "ambiguous-receipt"
                 )
 
     def test_interpreter_submits_follow_bare_rules(self):
@@ -2097,7 +2659,7 @@ class BindTests(TmpEnv):
                 "python3 tools/relay submit a; python3 tools/relay submit b",
                 "ambiguous-command",
             ),
-            ("python3 tools/relay submit a --key K | tail -3", "unsupported-shell"),
+            ("python3 tools/relay submit a --key K | tail -3", "unsupported-syntax"),
         ):
             with self.subTest(command=command):
                 bare = command.replace("python3 tools/relay", "tools/relay")
@@ -2122,7 +2684,7 @@ class BindTests(TmpEnv):
             ),
             0,
         )
-        self.assertIsNone(self.store.load()["binding_degraded"])
+        self.assertEqual(self.store.load()["bind_observation"]["reason"], "submit-near-miss")
         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
         with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
             self.assertTrue(
@@ -2145,7 +2707,7 @@ class BindTests(TmpEnv):
         )  # quoted punctuation is an operand
         self.assertEqual(
             p("ls\ncd /w && tools/relay submit d.md --key K").reason,
-            "unsupported-shell",
+            "unsupported-syntax",
         )  # non-leading cd after a newline
         self.assertTrue(p("cd /w && tools/relay submit d.md --key K").ok)
         self.assertTrue(p("RELAY_KEY=K tools/relay submit d.md").ok)
@@ -2182,18 +2744,18 @@ class BindTests(TmpEnv):
             "ambiguous-command",
         )
         self.assertEqual(
-            p("(cd /x; tools/relay submit d.md --key K)").reason, "unsupported-shell"
+            p("(cd /x; tools/relay submit d.md --key K)").reason, "unsupported-syntax"
         )
         self.assertEqual(
-            p("cat d.md | tools/relay submit - --key K").reason, "unsupported-shell"
+            p("cat d.md | tools/relay submit - --key K").reason, "unsupported-syntax"
         )
         self.assertEqual(
             p("tools/relay submit d.md --key K 2>&1 | tail -3").reason,
-            "unsupported-shell",
+            "unsupported-syntax",
         )
         self.assertEqual(
             p("echo x; cd /w && tools/relay submit d.md --key K").reason,
-            "unsupported-shell",
+            "unsupported-syntax",
         )
         self.assertEqual(
             p("tools/relay submit d.md --key K # --root R").root_operand, None
@@ -2202,7 +2764,7 @@ class BindTests(TmpEnv):
         self.assertEqual(p("tools/relay submit d.md --key K >/dev/null").ok, True)
         self.assertEqual(p("tools/relay submit d.md a=b --key K").key, "K")
         self.assertEqual(
-            p("tools/relay submit d.md --key K; echo 'a\"b").reason, "unsupported-shell"
+            p("tools/relay submit d.md --key K; echo 'a\"b").reason, "unsupported-syntax"
         )
 
     def test_quoted_assignment_key_binds_and_a_quoted_foreign_key_degrades(self):
@@ -2219,7 +2781,7 @@ class BindTests(TmpEnv):
         )
         n = self.store.load()
         self.assertEqual(
-            (n["seat"], n["binding_gen"], n.get("binding_degraded")),
+            (n["seat"], n["binding_gen"], n.get("bind_observation")),
             ("a.planner", 1, None),
         )
         foreign = (
@@ -2229,10 +2791,11 @@ class BindTests(TmpEnv):
         )
         self.run_bind(self.payload(foreign, self.receipt))
         n = self.store.load()
-        self.assertEqual(n["binding_degraded"]["reason"], "key-mismatch")
+        self.assertEqual(n["bind_observation"]["reason"], "key-mismatch")
         self.assertEqual(n["binding_gen"], 1)
 
     def test_plain_submit_binds_and_initializes_progress_once(self):
+        self._advance_stamps()
         cmd = f"tools/relay submit d.md --key {self.key} --root {self.root}"
         self.assertEqual(self.run_bind(self.payload(cmd, self.receipt)), 0)
         n = self.store.load()
@@ -2262,9 +2825,11 @@ class BindTests(TmpEnv):
                 x["printed"].__setitem__(str(self.root), ["lane/r9.md"]),
             )
         )
+        before_repeat = self.store.path.read_bytes()
         self.run_bind(self.payload(cmd, self.receipt))
+        self.assertEqual(self.store.path.read_bytes(), before_repeat)
         n = self.store.load()
-        self.assertEqual(n["binding_gen"], 2)
+        self.assertEqual(n["binding_gen"], 1)
         self.assertEqual(n["progress"][str(self.root)]["file"], "lane/r9.md")
         self.assertEqual(n["printed"][str(self.root)], ["lane/r9.md"])
         self.assertEqual(n["floors"][0]["file"], "lane/r1.md")
@@ -2449,7 +3014,7 @@ class BindTests(TmpEnv):
         )  # stdout once, stderr once; interrupted is a boolean, not a leaf
         self.assertEqual(before["binding_gen"], 1)
         self.assertIsNone(
-            before["binding_degraded"]
+            before["bind_observation"]
         )  # the single-stdout control: bound exactly once
         codex = json.loads(
             self.payload(
@@ -2463,13 +3028,14 @@ class BindTests(TmpEnv):
         )  # the same receipt at a second leaf
         self.assertEqual(self.run_bind(json.dumps(codex)), 0)
         n = self.store.load()
-        self.assertEqual(n["binding_degraded"]["reason"], "ambiguous-receipt")
+        self.assertEqual(n["bind_observation"]["reason"], "ambiguous-receipt")
         self.assertEqual(
             (n["seat"], n["root"], n["binding_gen"]),
             (before["seat"], before["root"], before["binding_gen"]),
         )  # prior binding preserved
 
     def test_negatives_preserve_prior_binding(self):
+        self._advance_stamps()
         self.run_bind(
             self.payload(
                 f"tools/relay submit d.md --key {self.key} --root {self.root}",
@@ -2500,7 +3066,7 @@ class BindTests(TmpEnv):
             "subshell": (
                 f"(tools/relay submit d.md --key {self.key})",
                 self.receipt,
-                "unsupported-shell",
+                "unsupported-syntax",
             ),
             "key-mismatch": (
                 f"tools/relay submit d.md --key "
@@ -2541,18 +3107,20 @@ class BindTests(TmpEnv):
         }
         for name, (cmd, out, reason) in cases.items():
             with self.subTest(name):
+                prior_bytes = self.store.path.read_bytes()
                 self.assertEqual(self.run_bind(self.payload(cmd, out)), 0)
                 n = self.store.load()
                 self.assertEqual(
                     (n["seat"], n["root"], n["binding_gen"]),
                     (before["seat"], before["root"], before["binding_gen"]),
                 )
-                if reason is None:
-                    self.assertIsNone(n["binding_degraded"])
+                if reason is None or reason == "no-receipt":
+                    self.assertEqual(self.store.path.read_bytes(), prior_bytes)
                 else:
-                    self.assertEqual(n["binding_degraded"]["reason"], reason)
+                    self.assertEqual(n["bind_observation"]["reason"], reason)
 
     def test_non_submit_shell_commands_preserve_note_bytes(self):
+        self._advance_stamps()
         self.run_bind(
             self.payload(
                 f"tools/relay submit d.md --key {self.key} --root {self.root}",
@@ -2581,6 +3149,7 @@ class BindTests(TmpEnv):
                 self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_heredoc_data_preserves_binding_and_pending_stop_delivery(self):
+        self._advance_stamps()
         commands = (
             "cat <<'EOF'\ntools/relay submit draft.md\nEOF\n",
             "cat <<EOF\ntools/relay submit draft.md\nEOF\n",
@@ -2608,7 +3177,7 @@ class BindTests(TmpEnv):
                 )
                 self.assertEqual(self.run_bind(self.payload(command)), 0)
                 self.assertEqual(self.store.path.read_bytes(), before)
-                self.assertIsNone(self.store.load()["binding_degraded"])
+                self.assertIsNone(self.store.load()["bind_observation"])
                 drain = subprocess.run(
                     [
                         sys.executable,
@@ -2643,7 +3212,7 @@ class BindTests(TmpEnv):
             "cat <<$'E\\x4fF'\ntools/relay submit draft.md\nEOF\n",
         ):
             with self.subTest(command=command):
-                self.assertEqual(parse(command).reason, "unsupported-shell")
+                self.assertEqual(parse(command).reason, "unsupported-syntax")
         for command in (
             "cat <<EOF\nordinary data\n",
             "cat <<'EOF\nordinary data\n",
@@ -2656,20 +3225,25 @@ class BindTests(TmpEnv):
             "ambiguous-command",
         )
 
-    def test_submit_with_unsupported_shell_still_degrades(self):
+    def test_unreadable_submit_with_receipt_records_observation(self):
         commands = (
             "tools/relay submit d.md | head",
             "ls | tools/relay submit d.md",
             "(tools/relay submit d.md)",
             "tools/relay submit 'unfinished",
         )
+        self.run_bind(self._submit())
+        before = self.store.load()
         for command in commands:
             with self.subTest(command=command):
-                self.assertEqual(self.run_bind(self.payload(command)), 0)
+                self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
                 self.assertEqual(
-                    self.store.load()["binding_degraded"]["reason"],
-                    "unsupported-shell",
+                    self.store.load()["bind_observation"]["reason"],
+                    "unsupported-syntax",
                 )
+
+                for field in ("seat", "root", "anchor", "binding_gen", "progress"):
+                    self.assertEqual(self.store.load()[field], before[field])
 
     def test_failure_payload_is_negative_control_and_manual_rebind_works(self):
         failure = {
@@ -2698,11 +3272,614 @@ class BindTests(TmpEnv):
         )
         self.assertEqual(self.store.load()["seat"], "a.planner")
 
+    def _hook_output(self, payload):
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            rc = self.run_bind(payload)
+        return rc, output.getvalue()
+
+    def test_hook_emits_additional_context_on_new_observation(self):
+        rc, text = self._hook_output(self._miss("one"))
+        self.assertEqual(rc, 0)
+        doc = json.loads(text)
+        self.assertEqual(set(doc), {"hookSpecificOutput"})
+        self.assertEqual(doc["hookSpecificOutput"], {"hookEventName": "PostToolUse", "additionalContext": self.rm.rebind_line(self.store.load(), "sess")})
+        self.assertTrue(doc["hookSpecificOutput"]["additionalContext"].startswith("rebind"))
+
+    def test_hook_emits_nothing_for_handled_call(self):
+        first = self._miss("one")
+        self._hook_output(first)
+        self.assertEqual(self._hook_output(first), (0, ""))
+        self._manual()
+        self.assertEqual(self._hook_output(first), (0, ""))
+
+    def test_hook_emits_nothing_on_successful_bind(self):
+        self.assertEqual(self._hook_output(self._submit("one")), (0, ""))
+        self.assertEqual(self._hook_output(self._submit("one")), (0, ""))
+
+    def test_hook_never_blocks(self):
+        outcomes = ["invalid-json", "[]", self.payload("tools/relay submit d.md"), self.payload("ls", self.receipt), self._submit("ok"), self._miss("miss"), self.payload("tools/relay submit d.md | head", self.receipt), self.payload("tools/relay submit d.md --root /missing", self.receipt), self.payload("tools/relay submit d.md", self.receipt + self.receipt), self.payload("tools/relay submit d.md", self.receipt.replace("r1.md", "missing.md")), self.payload("tools/relay submit d.md --key /x/.engine/seats/z.planner/key", self.receipt)]
+        emitted = 0
+        for payload in outcomes:
+            rc, text = self._hook_output(payload)
+            self.assertEqual(rc, 0)
+            if text:
+                doc = json.loads(text)
+                self.assertEqual(set(doc), {"hookSpecificOutput"})
+                self.assertEqual(set(doc["hookSpecificOutput"]), {"hookEventName", "additionalContext"})
+                self.assertEqual(doc["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+                self.assertLessEqual(len(doc["hookSpecificOutput"]["additionalContext"]), 1024)
+                emitted += 1
+        self.assertEqual(emitted, 6)
+
+    def test_second_call_same_display_emits_again(self):
+        rc, first = self._hook_output(self._miss("one"))
+        rc2, second = self._hook_output(self._miss("two"))
+        self.assertEqual((rc, rc2), (0, 0))
+        self.assertEqual(json.loads(first), json.loads(second))
+        self.assertNotEqual(self.rm.call_identity("sess", {"tool_use_id": "one"}), self.rm.call_identity("sess", {"tool_use_id": "two"}))
+
+    def _submit(self, call=None, root=None, anchor="lane/r1.md"):
+        root = root or self.root
+        command = f"tools/relay submit d.md --root {root}"
+        receipt = self.receipt.replace("lane/r1.md", anchor)
+        return self.payload(command, receipt, call_id=call)
+
+    def _manual(self, root=None, anchor="lane/r1.md"):
+        return self.rm.bind(ns(manual=True, session="sess", root=str(root or self.root), anchor=anchor))
+
+    def _miss(self, call=None):
+        return self.payload("env tools/relay submit d.md", self.receipt, call_id=call)
+
+    def _observation(self):
+        value = self.store.load().get("bind_observation")
+        self.assertIsInstance(value, dict)
+        self.assertEqual(set(value), {"reason", "stamp", "receipts", "root", "root_provenance", "call"})
+        return value
+
+    def test_help_piped_to_head_leaves_armed_note_unchanged(self):
+        self._advance_stamps()
+        self._bound_following()
+        before = self.store.path.read_bytes()
+        self.assertEqual(self.run_bind(self.payload("tools/relay submit --help | head")), 0)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+
+    def test_refused_submit_records_nothing(self):
+        self._advance_stamps()
+        for bound in (False, True):
+            if bound:
+                self.run_bind(self._submit())
+            before = self.store.path.read_bytes() if self.store.path.exists() else None
+            self.assertEqual(self.run_bind(self.payload("tools/relay submit bad.md", '{"code":"E-ENVELOPE"}')), 0)
+            self.assertEqual(self.store.path.read_bytes() if self.store.path.exists() else None, before)
+
+    def test_near_miss_shapes_record_observation(self):
+        for command in ("py -3 tools/relay submit d.md", "for x in a; do tools/relay submit d.md; done", "if tools/relay submit d.md; then true; fi", "time tools/relay submit d.md"):
+            with self.subTest(command=command):
+                self.store.path.unlink(missing_ok=True)
+                self.run_bind(self.payload(command, self.receipt))
+                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertIsNone(self.store.load()["seat"])
+
+    def test_verb_in_heredoc_body_is_not_a_verb(self):
+        for command in ("cat <<EOF\ntools/relay submit d.md\nEOF\n", "echo 'tools/relay submit d.md'"):
+            self.run_bind(self.payload(command, self.receipt))
+            self.assertFalse(self.store.path.exists())
+
+    def test_displayed_receipt_without_verb_records_nothing(self):
+        for command in ("echo receipt", "tools/relay show d.md", "git status"):
+            self.run_bind(self.payload(command, self.receipt))
+            self.assertFalse(self.store.path.exists())
+
+    def test_unterminated_quote_naming_verb_exits_zero(self):
+        self.assertEqual(self.run_bind(self.payload("tools/relay submit d.md 'unfinished", self.receipt)), 0)
+        self.assertEqual(self._observation()["reason"], "unsupported-syntax")
+        self.store.path.unlink()
+        self.run_bind(self.payload("echo 'tools/relay submit unfinished", self.receipt))
+        self.assertFalse(self.store.path.exists())
+
+    def test_echo_with_fabricated_receipt_records_suspicion_only(self):
+        self.run_bind(self.payload("echo tools/relay submit d.md", self.receipt.replace("r1.md", "fake.md")))
+        record = self._observation()
+        self.assertEqual((record["root"], record["root_provenance"], record["receipts"]), (None, "none", ["lane/fake.md"]))
+        self.assertIsNone(self.store.load()["seat"])
+
+    def test_unexecuted_branch_beside_receipt_binds_nothing(self):
+        self.run_bind(self.payload("if false; then tools/relay submit d.md; fi; echo receipt", self.receipt))
+        self.assertEqual(self._observation()["reason"], "submit-near-miss")
+        self.assertIsNone(self.store.load()["seat"])
+
+    def _indicated_miss(self, command, cwd=None):
+        payload = json.loads(self.payload(command, self.receipt))
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        self.run_bind(json.dumps(payload))
+        return self.store.load()["bind_observation"]
+
+    def test_unreadable_other_root_with_colliding_path_gets_incomplete_hint(self):
+        self.run_bind(self._submit("initial"))
+        other = self.other_root()
+        before = self.store.load()
+        record = self._indicated_miss(f"tools/relay submit d.md --root {other} | cat")
+        self.assertEqual(record["root_provenance"], "none")
+        self.assertEqual(record["command_roots"], [str(other)])
+        line = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertIn("command text", line)
+        self.assertIn(str(other), line)
+        self.assertNotIn("bind --manual", line)
+        for key in ("seat", "root", "anchor", "binding_gen", "progress"):
+            self.assertEqual(self.store.load()[key], before[key])
+
+    def test_unreadable_same_root_operand_keeps_inferred_hint(self):
+        record = self._indicated_miss(f"tools/relay submit d.md --root {self.root} | cat")
+        self.assertEqual(record["root_provenance"], "inferred")
+
+    def test_quoted_and_equals_root_spellings_withhold_inference(self):
+        for operand in ('--root "/B with space"', '--root=/B', '--root="/B with space"'):
+            with self.subTest(operand=operand):
+                record = self._indicated_miss(f"tools/relay submit d.md {operand} | cat")
+                self.assertEqual(record["root_provenance"], "none")
+
+    def test_dynamic_root_operand_withholds_inference(self):
+        record = self._indicated_miss('tools/relay submit d.md --root "$R" | cat')
+        self.assertEqual(record["root_provenance"], "none")
+        self.assertEqual(record["command_roots"], ['"$R"'])
+
+    def test_single_quoted_dollar_is_static_double_quoted_is_dynamic(self):
+        candidate = self.base / "$literal"
+        (candidate / ".engine").mkdir(parents=True)
+        write_index(candidate / "INDEX.md", row(1))
+        for quote, provenance in (("'", "inferred"), ('"', "none")):
+            command = f"tools/relay submit d.md --root {quote}{candidate}{quote} | cat"
+            record = self._indicated_miss(command, candidate)
+            self.assertEqual(record["root_provenance"], provenance)
+            indications, directory = self.rm.root_indications(command)
+            self.assertEqual(indications, [(f"{quote}{candidate}{quote}", str(candidate), quote == '"')])
+            self.assertFalse(directory)
+
+    def test_quoted_static_operand_resolves_without_its_quotes(self):
+        candidate = self.base / "root with space"
+        (candidate / ".engine").mkdir(parents=True)
+        write_index(candidate / "INDEX.md", row(1))
+        record = self._indicated_miss(f'tools/relay submit d.md --root "{candidate}" | cat', candidate)
+        self.assertEqual(record["root_provenance"], "inferred")
+        self.assertEqual(record["command_roots"], [f'"{candidate}"'])
+
+    def test_multiple_distinct_root_operands_withhold_inference(self):
+        record = self._indicated_miss(f"tools/relay submit d.md --root {self.root} --root {self.root}/. | cat")
+        self.assertEqual(record["root_provenance"], "none")
+        self.assertEqual(record["command_roots"], [str(self.root), str(self.root) + "/."])
+
+    def test_directory_word_withholds_inference(self):
+        for word in ("cd", "pushd"):
+            record = self._indicated_miss(f"{word} /B; time tools/relay submit d.md")
+            self.assertEqual(record["root_provenance"], "none")
+
+    def test_quoted_root_option_token_is_not_an_indication(self):
+        command = "tools/relay submit d.md '--root' /B | cat"
+        self.assertEqual(self.rm.root_indications(command), ([], False))
+        self.assertEqual(self._indicated_miss(command)["root_provenance"], "inferred")
+
+    def test_inference_uses_untruncated_operand(self):
+        candidate = self.base / ("a" * 80) / ("b" * 80) / ("c" * 80)
+        (candidate / ".engine").mkdir(parents=True)
+        write_index(candidate / "INDEX.md", row(1))
+        record = self._indicated_miss(f"tools/relay submit d.md --root {candidate} | cat", candidate)
+        self.assertEqual(record["root_provenance"], "inferred")
+        self.assertEqual(record["root"], str(candidate))
+        self.assertEqual(record["command_roots"], [str(candidate)[:200]])
+
+    def test_indications_never_bind(self):
+        self._indicated_miss(f"time tools/relay submit d.md --root {self.root}")
+        self.assertIsNone(self.store.load()["seat"])
+        self.assertEqual(self.store.load()["binding_gen"], 0)
+
+    def test_bound_to_a_filing_to_b_records(self):
+        self.run_bind(self._submit())
+        before = self.store.load()
+        self.run_bind(self.payload("ssh elsewhere tools/relay submit d.md", self.receipt.replace("r1.md", "r99.md")))
+        record = self._observation()
+        self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
+        self.assertEqual(self.store.load()["anchor"], before["anchor"])
+
+    def test_same_path_in_two_roots_is_not_duplicate(self):
+        self.run_bind(self._submit())
+        other = self.other_root()
+        payload = json.loads(self._miss())
+        payload["cwd"] = str(other)
+        self.run_bind(json.dumps(payload))
+        record = self._observation()
+        self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
+        self.assertEqual(self.store.load()["root"], str(self.root))
+
+    def test_unreadable_index_and_unrendered_row_still_record(self):
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable):
+                self.store.path.unlink(missing_ok=True)
+                if unreadable:
+                    self.index.unlink()
+                else:
+                    write_index(self.index, "")
+                self.run_bind(self._miss())
+                self.assertEqual(self._observation()["root_provenance"], "none")
+
+    def test_manual_bind_to_current_anchor_clears_without_advancing(self):
+        self.run_bind(self._submit("file"))
+        self.run_bind(self._miss("miss"))
+        self._observation()
+        before = self.store.load()
+        self.assertEqual(self._manual(), 0)
+        after = self.store.load()
+        self.assertIsNone(after.get("bind_observation"))
+        self.assertEqual(after["binding_gen"], before["binding_gen"])
+        self.assertEqual(after["progress"], before["progress"])
+
+    def test_delayed_duplicate_hook_leaves_newer_observation(self):
+        self._advance_stamps()
+        payload = self._submit("file")
+        self.run_bind(payload)
+        self.run_bind(self._miss("miss"))
+        before = self.store.path.read_bytes()
+        self.run_bind(payload)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_repeat_r_then_s_then_delayed_repeat_keeps_s(self):
+        self._advance_stamps()
+        write_index(self.index, row(1) + row(2))
+        (self.root / "lane/r2.md").write_text("r2\n")
+        self.run_bind(self._submit("initial"))
+        repeat = self._submit("repeat")
+        self.run_bind(repeat)
+        self.run_bind(self._submit("later", anchor="lane/r2.md"))
+        self.run_bind(self._miss("observation"))
+        before = self.store.path.read_bytes()
+        self.run_bind(repeat)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.store.load()["anchor"], "lane/r2.md")
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_bind_s_clears_observation_recorded_before_it(self):
+        write_index(self.index, row(1) + row(2))
+        (self.root / "lane/r2.md").write_text("r2\n")
+        self.run_bind(self._submit("initial"))
+        self.run_bind(self._submit("repeat"))
+        self.run_bind(self._miss("observation"))
+        self.assertIsNotNone(self.store.load()["bind_observation"])
+        self.run_bind(self._submit("later", anchor="lane/r2.md"))
+        self.assertIsNone(self.store.load()["bind_observation"])
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_repeat_sequence_across_root_change_keeps_new_binding(self):
+        self._advance_stamps()
+        self.run_bind(self._submit("initial"))
+        repeat = self._submit("repeat")
+        self.run_bind(repeat)
+        other = self.other_root()
+        self.run_bind(self._submit("later", root=other))
+        self.run_bind(self._miss("observation"))
+        before = self.store.path.read_bytes()
+        self.run_bind(repeat)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.store.load()["root"], str(other))
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_same_anchor_identified_call_records_only_its_identity(self):
+        self.run_bind(self._submit("initial"))
+        self.run_bind(self._miss("observation"))
+        before = self.store.load()
+        with mock.patch.object(self.rm, "now_stamp", return_value="later-stamp"):
+            self.run_bind(self._submit("repeat"))
+        expected = dict(before)
+        expected["handled_calls"] = before["handled_calls"] + [
+            self.rm.call_identity("sess", {"tool_use_id": "repeat"})
+        ]
+        self.assertEqual(self.store.load(), expected)
+
+    def test_same_anchor_without_identifier_is_byte_identical(self):
+        self._advance_stamps()
+        self.run_bind(self._submit("initial"))
+        self.run_bind(self._miss("observation"))
+        before = self.store.path.read_bytes()
+        self.run_bind(self._submit())
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_identified_help_and_refused_submit_not_remembered(self):
+        self._advance_stamps()
+        self.run_bind(self._submit("initial"))
+        before = self.store.path.read_bytes()
+        for command, response in (("tools/relay submit --help", "usage"),
+                                  ("tools/relay submit bad.md", '{"code":"E-ENVELOPE"}')):
+            self.run_bind(self.payload(command, response, call_id=command))
+            self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_eight_unrelated_identified_calls_do_not_evict(self):
+        self._advance_stamps()
+        original = self._submit("initial")
+        self.run_bind(original)
+        before = self.store.path.read_bytes()
+        for i in range(8):
+            self.run_bind(self.payload("echo unrelated", self.receipt, call_id=f"unrelated-{i}"))
+            self.assertEqual(self.store.path.read_bytes(), before)
+        self.run_bind(original)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_r_then_s_then_delayed_r_keeps_s(self):
+        self._advance_stamps()
+        write_index(self.index, row(1) + row(2))
+        (self.root / "lane/r2.md").write_text("r2\n")
+        first = self._submit("r")
+        self.run_bind(first)
+        self.run_bind(self._submit("s", anchor="lane/r2.md"))
+        before = self.store.path.read_bytes()
+        self.run_bind(first)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+        self.assertEqual(self.store.load()["anchor"], "lane/r2.md")
+
+    def test_separate_call_same_content_binds_again(self):
+        self.run_bind(self._submit("first"))
+        self._manual(root=self.other_root())
+        self.run_bind(self._submit("second"))
+        self.assertEqual(self.store.load()["root"], str(self.root))
+        self.assertEqual(self.store.load()["binding_gen"], 3)
+
+    def test_separate_call_same_display_records_again(self):
+        self._advance_stamps()
+        self.run_bind(self._submit("file"))
+        first = self._miss("first")
+        self.run_bind(first)
+        self._manual()
+        before = self.store.path.read_bytes()
+        self.run_bind(first)
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.run_bind(self._miss("second"))
+        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "second"}))
+
+    def test_same_anchor_absent_progress_establishes_progress(self):
+        self.run_bind(self._submit())
+        self.store.update(lambda n: n["progress"].clear())
+        self.run_bind(self._submit())
+        self.assertEqual(self.store.load()["progress"][str(self.root)], {"file": "lane/r1.md", "position": 1})
+        self.assertEqual(self.store.load()["binding_gen"], 2)
+
+    def test_miss_after_bind_survives(self):
+        for source in ("hook", "manual"):
+            with self.subTest(source=source):
+                self.store.path.unlink(missing_ok=True)
+                if source == "hook":
+                    self.run_bind(self._submit())
+                else:
+                    self._manual()
+                self.run_bind(self._miss())
+                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertEqual(self.store.load()["binding_source"], source)
+
+    def test_three_concurrent_hooks_one_call_advance_once(self):
+        payload = self._submit("concurrent")
+        children = [subprocess.Popen([sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(3)]
+        for child in children:
+            self.addCleanup(lambda p=child: p.kill() if p.poll() is None else None)
+            child.stdin.write(payload)
+            child.stdin.close()
+            child.stdin = None
+        for child in children:
+            out, err = child.communicate(timeout=10)
+            self.assertEqual((child.returncode, out, err), (0, "", ""))
+        self.assertEqual(self.store.load()["binding_gen"], 1)
+        self.assertEqual(len(self.store.load()["handled_calls"]), 1)
+
+    def test_no_call_id_only_consecutive_duplicates_collapse(self):
+        # Deliberately exercise the weaker guarantee of hosts without a call id.
+        self._advance_stamps()
+        self.run_bind(self._submit())
+        before = self.store.path.read_bytes()
+        self.run_bind(self._submit())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.run_bind(self._miss())
+        before = self.store.path.read_bytes()
+        self.run_bind(self._miss())
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self._manual()
+        self.run_bind(self._miss())
+        self._observation()
+        self.assertEqual(self.store.load()["handled_calls"], [])
+
+    def test_ninth_call_evicts_oldest(self):
+        for i in range(9):
+            self.run_bind(self._miss(str(i)))
+        self.assertEqual(self.store.load()["handled_calls"], [self.rm.call_identity("sess", {"tool_use_id": str(i)}) for i in range(1, 9)])
+        self.run_bind(self._miss("0"))
+        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "0"}))
+
+    def test_receipt_with_findings_and_routed_notice_binds_author_relay(self):
+        output = '{"findings":[{"path":"other.md"}]}\n' + self.receipt + '\nMONITOR-NOTICE: {"file":"lane/notice.md"}'
+        self.run_bind(self.payload("tools/relay submit d.md", output))
+        self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
+        self.assertIsNone(self.store.load().get("bind_observation"))
+
+    def test_legacy_note_keys_read_and_cleared(self):
+        self.run_bind(self._submit())
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "no-receipt", "stamp": "old"}, submit_miss="submit-near-miss", submit_miss_binding_gen=1))
+        self.assertEqual(self.store.load()["submit_miss"], "submit-near-miss")
+        self._manual()
+        raw = json.loads(self.store.path.read_text())
+        for key in ("binding_degraded", "submit_miss", "submit_miss_binding_gen"):
+            self.assertNotIn(key, raw)
+
+
 
 class DrainTests(TmpEnv):
+
+    def test_recovered_empty_scan_restores_phase_with_observation(self):
+        for path in ("shared-follower", "codex-drain"):
+            with self.subTest(path=path):
+                self.store.path.unlink(missing_ok=True)
+                self.bind_and_rows(1)
+                leader = self.rm.leader_record()
+                lock = self.rm.LeaderLock("sess")
+                if path == "shared-follower":
+                    self.assertTrue(lock.acquire(blocking=False))
+                    lock.stamp(leader["instance"])
+                observation = {"reason": "submit-near-miss", "receipts": ["lane/seen.md"], "root_provenance": "none"}
+                self.store.update(lambda n: (n.update(phase="unavailable", reason="index-missing", leader=leader if path == "shared-follower" else None, bind_observation=observation), n["progress"].update({str(self.root): {"file": "lane/r1.md", "position": 1}})))
+                try:
+                    if path == "shared-follower":
+                        sink = self.rm.ByteSink()
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic()+2, leader_instance=leader["instance"])
+                        self.assertEqual(result.emitted, 0)
+                        self.assertEqual(bytes(sink.buf), b"")
+                    else:
+                        rc, out = self.run_drain(self.codex_stop())
+                        self.assertEqual(rc, 0)
+                        self.assertEqual(json.loads(out), {})
+                    self.assertEqual(self.store.load()["phase"], "following")
+                    self.assertEqual(self.store.load()["bind_observation"], observation)
+                finally:
+                    lock.release()
+
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
+
+    def _matrix(self, case):
+        # Followers share deliver_once; drain uses its real Stop entry point.
+        # Separate notes and real leader/owner locks isolate all three paths.
+        for path in ("codex-follower", "codex-drain", "claude-code-follower"):
+            with self.subTest(path=path, case=case):
+                self.store.path.unlink(missing_ok=True)
+                write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
+                leader = self.rm.leader_record()
+                lock = self.rm.LeaderLock("sess")
+                owner = None
+                has_leader = case != "no-leader"
+                if has_leader:
+                    self.assertTrue(lock.acquire(blocking=False))
+                    lock.stamp(leader["instance"])
+                try:
+                    def seed(n):
+                        n.update(seat="b.implementer", root=str(self.root), anchor="lane/r1.md", binding_gen=1, binding_source="hook", phase="following", host="claude-code" if path.startswith("claude") else "codex", leader=leader if has_leader else None)
+                        n["progress"][str(self.root)] = {"file": "lane/r1.md", "position": 1}
+                        if case == "unbound":
+                            n.update(seat=None, root=None, anchor=None, phase="waiting-for-binding")
+                        if case in ("observation", "recovered"):
+                            n["bind_observation"] = {"reason": "unsupported-syntax", "root": None, "root_provenance": "none", "receipts": ["lane/seen.md"], "call": None, "stamp": "s"}
+                        if case in ("legacy", "recovered"):
+                            n["binding_degraded"] = {"reason": "no-receipt", "stamp": "s"}
+                        if case == "recovered":
+                            n.update(phase="unavailable", reason="index-missing")
+                        if case in ("lost", "fallback"):
+                            n["progress"][str(self.root)] = {"file": "lane/gone.md", "position": 9}
+                            if case == "lost":
+                                n["anchor"] = "lane/missing.md"
+                        if case == "sentinel":
+                            n["progress"][str(self.root)] = dict(self.rm.SENTINEL)
+                        if case == "foreign":
+                            n["phase"] = "waiting-for-binding"
+                    self.store.update(seed)
+                    if case == "missing-index":
+                        self.index.unlink()
+                    elif case == "malformed-index":
+                        self.index.write_text("not an index\n")
+                    if case == "foreign":
+                        owner = self.rm.stream_owner(self.store, time.monotonic() + 2)
+                        self.assertIsNotNone(owner)
+                        binding = self.rm.resolve_binding(self.store.load(), {}, None)
+                        frame = {"identity": self.rm.frame_identity(binding, owner["instance"], "lane/r2.md", owner), "data": "00", "accepted": 0}
+                        self.store.update(lambda n: n.update(frame=frame))
+                    expected = case not in ("unbound", "missing-index", "malformed-index", "lost", "foreign") and (has_leader or path == "codex-drain")
+                    wanted_file = "lane/r1.md" if case == "sentinel" else "lane/r2.md"
+                    if path == "codex-drain":
+                        rc, output = self.run_drain(self.codex_stop())
+                        self.assertEqual(rc, 0)
+                        document = json.loads(output)
+                        if expected:
+                            self.assertEqual(document["decision"], "block")
+                            self.assertIn('"file":"' + wanted_file + '"', document["reason"])
+                        else:
+                            self.assertEqual(document, {})
+                    else:
+                        sink = self.rm.ByteSink()
+                        if has_leader:
+                            result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"], limit=1 if case == "sentinel" else None)
+                            self.assertEqual(result.emitted, int(expected))
+                        lines = bytes(sink.buf).decode().splitlines()
+                        self.assertEqual([json.loads(line)["file"] for line in lines], [wanted_file] if expected else [])
+                    state = self.rm.readiness(self.store)[0]
+                    expected_state = "not-started" if not has_leader else "waiting-for-binding" if case in ("unbound", "foreign") else "unavailable" if case in ("missing-index", "malformed-index", "lost") else "armed"
+                    self.assertEqual(state, expected_state)
+                    identity = "version-mismatch" if case == "mismatch" else "ok"
+                    with mock.patch.object(self.rm, "check_identity", return_value=(identity, {}, {})):
+                        line = self.rm.status_line(self.store, None).splitlines()[0]
+                    self.assertTrue(line.startswith("relay-monitor: " + expected_state))
+                    if case == "lost":
+                        self.assertTrue(line.startswith("relay-monitor: unavailable: anchor-not-found "))
+                    if case == "mismatch":
+                        self.assertTrue(line.endswith("identity=mismatch"))
+                    if expected:
+                        self.assertEqual(self.store.load()["progress"][str(self.root)]["file"], wanted_file)
+                    if case == "foreign":
+                        self.assertEqual(self.store.load()["frame"], frame)
+                finally:
+                    if owner:
+                        owner["_lock"].release(unlink=True)
+                    lock.release()
+
+    def test_matrix_healthy_delivers(self):
+        self._matrix("healthy")
+
+    def test_matrix_observation_delivers(self):
+        self._matrix("observation")
+        self._matrix("legacy")
+
+    def test_matrix_unbound_delivers_nothing(self):
+        self._matrix("unbound")
+
+    def test_matrix_index_missing_or_malformed_delivers_nothing(self):
+        self._matrix("missing-index")
+        self._matrix("malformed-index")
+
+    def test_matrix_missing_cursor_and_anchor_delivers_nothing(self):
+        self._matrix("lost")
+
+    def test_matrix_fallback_anchor_rebases_and_delivers(self):
+        self._matrix("fallback")
+
+    def test_matrix_start_sentinel_delivers_first_row(self):
+        self._matrix("sentinel")
+
+    def test_matrix_recovered_fault_restores_phase(self):
+        self._matrix("recovered")
+
+    def test_matrix_no_leader_follower_none_drain_delivers(self):
+        self._matrix("no-leader")
+
+    def test_matrix_version_mismatch_delivers(self):
+        self._matrix("mismatch")
+
+    def test_matrix_foreign_frame_waits(self):
+        self._matrix("foreign")
+
+    def test_armed_across_arrivals_without_commands(self):
+        for host in ("codex", "claude-code"):
+            with self.subTest(host=host):
+                self.store.path.unlink(missing_ok=True)
+                self.bind_and_rows(0)
+                leader = self.rm.leader_record()
+                lock = self.rm.LeaderLock("sess")
+                self.assertTrue(lock.acquire(blocking=False))
+                lock.stamp(leader["instance"])
+                try:
+                    self.store.update(lambda n: n.update(leader=leader, phase="following", host=host))
+                    for number in range(1, 4):
+                        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, number + 1)))
+                        sink = self.rm.ByteSink()
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"])
+                        self.assertEqual(result.emitted, 1)
+                        self.assertEqual(json.loads(bytes(sink.buf))["file"], f"lane/r{number}.md")
+                        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+                finally:
+                    lock.release()
 
     def codex_stop(self, active=False):
         return {
@@ -2792,7 +3969,9 @@ class DrainTests(TmpEnv):
                 {"binding_degraded": {"reason": "no-receipt", "stamp": "s"}}
             )
         )
-        self.assertEqual(json.loads(self.run_drain(self.codex_stop())[1]), {})
+        doc = json.loads(self.run_drain(self.codex_stop())[1])
+        self.assertEqual(doc["decision"], "block")
+        self.assertIn('"file":"lane/r1.md"', doc["reason"])
 
     def test_one_row_per_stop_then_next_then_empty(self):
         self.bind_and_rows(2)
@@ -3312,6 +4491,13 @@ class SessionStartTests(TmpEnv):
             self.rm.session_start(ns(plugin_root="/plug"))
         return json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
 
+    def test_session_start_context_uses_new_grammar(self):
+        self.rm.NoteStore("sess").update(lambda n: n.update(binding_source="hook", binding_degraded={"reason": "unsupported-shell"}))
+        ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex"})
+        self.assertIn("binding=hook", ctx.splitlines()[0])
+        self.assertIn("last-bind=unsupported-shell", ctx.splitlines()[0])
+        self.assertTrue(ctx.splitlines()[1].startswith("# rebind: incomplete"))
+
     def test_fresh_codex_arms_under_plugin_route_env_and_under_launcher(self):
         ctx = self.run_ss(
             self.FRESH_CODEX,
@@ -3396,9 +4582,214 @@ class SessionStartTests(TmpEnv):
 
 
 class StatusTests(TmpEnv):
+
+    def test_incomplete_hint_is_inert_in_shell(self):
+        marker = self.base / "must-not-exist"
+        for value in (f"lane/`touch {marker}`.md", f"lane/$(touch {marker}).md", "lane/a\nb\x1b.md"):
+            with self.subTest(value=value):
+                self._record(provenance="none", receipts=[value])
+                hint = self.rm.rebind_line(self.store.load(), "sess")
+                parsed = subprocess.run(["sh", "-n"], input=hint, text=True, capture_output=True)
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+                ran = subprocess.run(["sh", "-c", hint], cwd=self.base, text=True, capture_output=True)
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertFalse(marker.exists())
+                self.assertEqual(ran.stdout, "")
+                self.assertTrue(hint.startswith("#"))
+                self.assertEqual(len(hint.splitlines()), 1)
+
+    def test_status_escapes_non_ascii_and_control_arguments(self):
+        for char in ("\v", "\f", "\x85", "\u2028", "\x1b", "é"):
+            for provenance, field in ((p, f) for p in ("command", "inferred") for f in ("root", "receipt")):
+                with self.subTest(char=repr(char), provenance=provenance):
+                    root = f"/a{char}b" if field == "root" else "/a/b"
+                    receipt = f"lane/a{char}b.md" if field == "receipt" else "lane/r1.md"
+                    self._record(provenance=provenance, root=root, receipts=[receipt])
+                    self.store.update(lambda n: (n.update(root=root), n["progress"].update({root: {"file": receipt, "position": 1}})))
+                    status = self._status()
+                    self.assertEqual(len(status.splitlines()), 2)
+                    self.assertTrue(all(c == "\n" or 32 <= ord(c) <= 126 for c in status))
+                    self.assertNotIn("bind --manual", status)
+                    self.assertIn(ascii(char)[1:-1], status)
+
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
+
+    def test_record_without_command_roots_renders_hint(self):
+        self._record(provenance="none")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+
+    def test_incomplete_hint_shows_operands_as_command_text_on_one_line(self):
+        self._record(provenance="none")
+        self.store.update(lambda n: n["bind_observation"].update(command_roots=["/B with space", "line\nnext", "x" * 200] * 10))
+        line = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertIn("command text", line)
+        self.assertIn("'/B with space'", line)
+        self.assertNotIn("\n", line)
+        self.assertNotIn("\r", line)
+        self.assertLessEqual(len(line), 1024)
+        self.assertNotIn("bind --manual", line)
+
+    def _live_status(self, phase="following", bound=True):
+        lock = self.rm.LeaderLock("sess")
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        me = self.rm.leader_record()
+        lock.stamp(me["instance"])
+        def seed(note):
+            note.update(leader=me, phase=phase)
+            if bound:
+                note.update(seat="a.planner", root=str(self.root), binding_source="hook")
+                note["progress"][str(self.root)] = {"file": "lane/r1.md", "position": 1}
+        self.store.update(seed)
+
+    def _record(self, reason="unsupported-syntax", provenance="command", root=None, receipts=None):
+        self.store.update(lambda n: n.update(bind_observation={"reason": reason, "root": str(root or self.root) if provenance != "none" else None, "root_provenance": provenance, "receipts": receipts or ["lane/r1.md"], "stamp": "s", "call": None}))
+
+    def _status(self, identity="ok"):
+        with mock.patch.object(self.rm, "check_identity", return_value=(identity, {"kit": "new", "fp": "aa"}, {"kit": "old" if identity == "version-mismatch" else "new", "fp": "bb"})):
+            return self.rm.status_line(self.store, None)
+
+    def test_observation_does_not_produce_unavailable(self):
+        self._live_status()
+        self._record()
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "no-receipt"}))
+        self.assertEqual(self.rm.readiness(self.store)[0], "armed")
+
+    def test_phase_unavailable_still_reads_unavailable(self):
+        self._live_status(phase="unavailable")
+        self.assertEqual(self.rm.readiness(self.store)[0], "unavailable")
+
+    def test_unbound_live_follower_reads_waiting_for_binding_after_any_command(self):
+        self._live_status(phase="waiting-for-binding", bound=False)
+        for command, response in (("ls", ""), ("tools/relay submit d.md", ""), ("time tools/relay submit d.md", '{"path":"lane/r1.md","render_state":"rendered","duplicate":false}')):
+            payload = dict(session_id="sess", cwd=str(self.root), hook_event_name="PostToolUse", tool_input={"command": command}, tool_response=response)
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+                self.assertEqual(self.rm.bind(ns()), 0)
+            self.assertEqual(self.rm.readiness(self.store)[0], "waiting-for-binding")
+
+    def test_binding_cell_reports_source_only(self):
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "no-receipt"}))
+        for source in (None, "hook", "manual", "env"):
+            self.store.update(lambda n: n.update(binding_source=source))
+            self.assertEqual(next(x for x in self._status().splitlines()[0].split() if x.startswith("binding=")), "binding=" + (source or "none"))
+
+    def test_one_record_prints_one_cell(self):
+        for reason, cell, absent in (("submit-near-miss", "miss=submit-near-miss", "last-bind="), ("unsupported-syntax", "last-bind=unsupported-syntax", "miss=")):
+            self._record(reason=reason)
+            first = self._status().splitlines()[0]
+            self.assertEqual(first.split().count(cell), 1)
+            self.assertNotIn(absent, first)
+
+    def test_legacy_degraded_beside_new_record_prints_new_only(self):
+        self._record()
+        self.store.update(lambda n: n.update(binding_degraded={"reason": "unsupported-shell"}))
+        self.assertEqual([v for v in self._status().splitlines()[0].split() if v.startswith("last-bind=")], ["last-bind=unsupported-syntax"])
+
+    def test_legacy_miss_and_new_last_bind_can_coexist(self):
+        self._record()
+        self.store.update(lambda n: n.update(submit_miss="submit-near-miss"))
+        first = self._status().splitlines()[0]
+        self.assertIn(" miss=submit-near-miss last-bind=unsupported-syntax", first)
+
+    def test_rebind_complete_form_round_trips_shell_quoting(self):
+        import shlex
+        root = "/a space/it's-root"
+        self._record(root=root, receipts=["lane/it's here.md"])
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "session quoted").startswith("# rebind: incomplete"))
+        fixture = self.base / "quoting-index.md"
+        write_index(fixture, row(1, file="lane/it's here.md"))
+        snapshot = self.rm.read_index(fixture)
+        with mock.patch.object(self.rm, "read_index", return_value=snapshot) as reader:
+            line = self.rm.rebind_line(self.store.load(), "session quoted")
+        reader.assert_called_once_with(pathlib.Path(root) / "INDEX.md")
+        self.assertTrue(line.startswith("rebind, may need operator approval: "))
+        words = shlex.split(line[len("rebind, may need operator approval: "):])
+        self.assertEqual(words[words.index("--root") + 1], root)
+        self.assertEqual(words[words.index("--anchor") + 1], "lane/it's here.md")
+        self.assertEqual(words[words.index("--session") + 1], "session quoted")
+        self.assertIn("--manual", words)
+
+    def test_rebind_inferred_form_is_labelled(self):
+        self._record(provenance="inferred")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+        write_index(self.index, row(1))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it, may need operator approval): "))
+
+    def test_rebind_incomplete_form_is_not_runnable_and_omits_anchor(self):
+        self.store.update(lambda n: n.update(anchor="lane/old-anchor.md"))
+        self._record(provenance="none", receipts=["lane/seen.md"])
+        line = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertTrue(line.startswith("# rebind: incomplete, supply "))
+        self.assertNotIn("lane/old-anchor.md", line)
+        self.assertNotIn("--manual", line)
+        self.assertIn("lane/seen.md", line)
+        self._record(provenance="none", receipts=["x" * 5000])
+        self.assertLessEqual(len(self.rm.rebind_line(self.store.load(), "sess")), 1024)
+
+    def test_mismatch_on_armed_seat_reads_armed_with_cell_and_remedy(self):
+        self._live_status()
+        lines = self._status("version-mismatch").splitlines()
+        self.assertTrue(lines[0].startswith("relay-monitor: armed "))
+        self.assertTrue(lines[0].endswith("identity=mismatch"))
+        self.assertTrue(lines[1].startswith("remedy: "))
+
+    def test_mismatch_with_no_follower_reads_not_started_with_cell(self):
+        self.store.update(lambda n: n.update(root=str(self.root)))
+        line = self._status("version-mismatch").splitlines()[0]
+        self.assertTrue(line.startswith("relay-monitor: not-started "))
+        self.assertTrue(line.endswith("identity=mismatch"))
+
+    def test_mismatch_cell_on_every_reading(self):
+        self.store.update(lambda n: n.update(root=str(self.root)))
+        for _ in range(2):
+            text = self._status("version-mismatch")
+            self.assertTrue(text.splitlines()[0].endswith("identity=mismatch"))
+            self.assertTrue(text.splitlines()[1].startswith("remedy: "))
+
+    def test_tiers_mixed_on_differing_identity(self):
+        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{"identity": {"kit": "1", "fp": "b"}}]}
+        with mock.patch.object(self.rm, "process_liveness", return_value=self.rm.PROC_UNKNOWN):
+            self.assertTrue(self.rm.tiers_mixed(note))
+            self.store.update(lambda n: n.update(note))
+            self.assertTrue(self._status().splitlines()[0].endswith("tiers=mixed"))
+            note["standbys"][0]["identity"]["fp"] = "a"
+            self.assertFalse(self.rm.tiers_mixed(note))
+
+    def test_tiers_mixed_ignores_dead_record(self):
+        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{"identity": {"kit": "2", "fp": "b"}}]}
+        with mock.patch.object(self.rm, "process_liveness", side_effect=[self.rm.PROC_ALIVE, self.rm.PROC_DEAD]):
+            self.assertFalse(self.rm.tiers_mixed(note))
+
+    def test_record_without_identity_counts_as_different(self):
+        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{}]}
+        with mock.patch.object(self.rm, "process_liveness", return_value=self.rm.PROC_ALIVE):
+            self.assertTrue(self.rm.tiers_mixed(note))
+            note["leader"] = {}
+            self.assertFalse(self.rm.tiers_mixed(note))
+
+    def test_leader_record_carries_own_install_identity(self):
+        with mock.patch.object(self.rm, "run_relay", return_value=({"kit": "2.9.7", "fingerprint": "abc"}, 0)):
+            self.assertEqual(self.rm.leader_record()["identity"], {"kit": "2.9.7", "fp": "abc"})
+
+    def test_status_returns_word_for_out_of_range_leader_pid(self):
+        lock = self.rm.LeaderLock("sess")
+        self.assertTrue(lock.acquire(blocking=False))
+        self.addCleanup(lock.release)
+        lock.stamp("oversized")
+        self.store.update(lambda n: n.update({
+            "leader": {"pid": 2**31, "instance": "oversized"},
+        }))
+        self.assertTrue(self.rm.status_line(self.store, None).startswith(
+            "relay-monitor: starting "
+        ))
+
+    def test_status_returns_word_for_out_of_range_standby_pid(self):
+        self.store.update(lambda n: n.update({"standbys": [{"pid": 2**31}]}))
+        self.assertTrue(self.rm.status_line(self.store, None).startswith(
+            "relay-monitor: not-started "
+        ))
 
     def test_refused_probe_never_reads_dead(self):
         rm = self.rm
@@ -3489,7 +4880,7 @@ class StatusTests(TmpEnv):
                 }
             )
         )
-        self.assertEqual(rm.readiness(self.store)[0], "unavailable")
+        self.assertEqual(rm.readiness(self.store)[0], "armed")
         lock.release()
         self.store.update(
             lambda n: n.update({"binding_degraded": None, "standbys": [me]})
@@ -3596,7 +4987,7 @@ class StatusTests(TmpEnv):
                         0,
                     ),
                 ],
-                "unavailable: version-mismatch",
+                "identity=mismatch",
             ),
         ):
             with self.subTest(expected=expected):
