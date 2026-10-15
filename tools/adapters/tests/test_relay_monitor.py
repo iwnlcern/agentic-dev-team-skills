@@ -1705,7 +1705,6 @@ class BindTests(TmpEnv):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-
     def test_fd_duplication_before_submit_verb_binds(self):
         command = f"tools/relay 2>&1 submit d.md --root {self.root} --key {self.key}"
         self.assertTrue(self.rm.parse_submit_command(command).ok)
@@ -1750,9 +1749,30 @@ class BindTests(TmpEnv):
         if result.stdout.strip():
             self.assertIsInstance(json.loads(result.stdout), dict)
 
+    def _assert_hook_observation(self, payload, reason, provenance, receipt_path):
+        self.store.path.unlink(missing_ok=True)
+        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--host", "codex"],
+                                input=payload, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(result.stdout.strip(), "seen receipt must produce a hint")
+        context = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "PostToolUse")
+        hint = context["additionalContext"]
+        self.assertTrue(hint.startswith("# rebind: incomplete"))
+        self.assertIn("seen=", hint)
+        self.assertEqual(len(hint.splitlines()), 1)
+        self.assertTrue(self.store.path.exists(), "seen receipt must record an observation")
+        observation = self.store.load()["bind_observation"]
+        self.assertEqual(observation["reason"], reason)
+        self.assertEqual(observation["root_provenance"], provenance)
+        self.assertEqual(observation["receipts"], [receipt_path])
+        self.assertEqual(observation["root"], str(self.root) if provenance == "command" else None)
+
     def test_hook_nul_receipt_exits_zero(self):
         receipt = json.dumps(dict(path="lane/nu\0l.md", render_state="rendered", duplicate=False))
-        self._assert_hook_input_is_total(self.payload(f"tools/relay submit d.md --root {self.root}", receipt))
+        self._assert_hook_observation(self.payload(f"tools/relay submit d.md --root {self.root}", receipt),
+                                      "receipt-mismatch", "command", "lane/nu\0l.md")
 
     def test_hook_nul_root_and_cwd_exit_zero(self):
         for field in ("root", "cwd"):
@@ -1762,7 +1782,7 @@ class BindTests(TmpEnv):
                     payload["tool_input"]["command"] += " --root '/nu\0l'"
                 else:
                     payload["cwd"] = "/nu\0l"
-                self._assert_hook_input_is_total(json.dumps(payload))
+                self._assert_hook_observation(json.dumps(payload), "no-root", "none", "lane/r1.md")
 
     def test_hook_overlong_root_and_cwd_exit_zero(self):
         for field in ("root", "cwd"):
@@ -1773,16 +1793,44 @@ class BindTests(TmpEnv):
                     payload["tool_input"]["command"] += " --root " + value
                 else:
                     payload["cwd"] = value
-                self._assert_hook_input_is_total(json.dumps(payload))
+                self._assert_hook_observation(json.dumps(payload), "no-root", "none", "lane/r1.md")
 
     def test_hook_deep_json_exits_zero(self):
+        # Inject the decoder failure: actual depth thresholds vary by interpreter.
         for mode in ("bind", "drain", "session-start"):
             with self.subTest(mode=mode):
-                self._assert_hook_input_is_total("[" * 10000 + "0" + "]" * 10000, mode)
+                output, errors = io.StringIO(), io.StringIO()
+                with (
+                    mock.patch.object(self.rm.json, "load", side_effect=RecursionError("injected payload recursion")),
+                    mock.patch("sys.stdin", io.StringIO("{}")),
+                    mock.patch("sys.stdout", output),
+                    mock.patch("sys.stderr", errors),
+                ):
+                    self.assertEqual(self.rm.main([mode, "--host", "codex"]), 0)
+                if mode == "bind":
+                    self.assertEqual(output.getvalue(), "")
+                elif mode == "drain":
+                    self.assertEqual(json.loads(output.getvalue()), {})
+                else:
+                    self.assertEqual(json.loads(output.getvalue()), {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "relay-monitor: no-session-identity"}})
+                self.assertNotIn("Traceback", errors.getvalue())
+                self.assertFalse(self.store.path.exists())
 
     def test_hook_deep_receipt_json_exits_zero(self):
-        response = '{"path":' + '[' * 10000 + '0' + ']' * 10000 + '}'
-        self._assert_hook_input_is_total(self.payload("tools/relay submit d.md", response))
+        # Initial payload decoding remains real; inject only receipt decoding.
+        decoder = json.JSONDecoder()
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(decoder, "raw_decode", side_effect=RecursionError("injected receipt recursion")),
+            mock.patch.object(self.rm.json, "JSONDecoder", return_value=decoder),
+            mock.patch("sys.stdin", io.StringIO(self.payload("tools/relay submit d.md", self.receipt))),
+            mock.patch("sys.stdout", output),
+            mock.patch("sys.stderr", errors),
+        ):
+            self.assertEqual(self.rm.main(["bind", "--host", "codex"]), 0)
+        self.assertEqual(output.getvalue(), "")
+        self.assertNotIn("Traceback", errors.getvalue())
+        self.assertFalse(self.store.path.exists())
 
     def test_quoted_equals_root_option_is_not_an_indication(self):
         command = "tools/relay submit d.md '--root=/B' | cat"
