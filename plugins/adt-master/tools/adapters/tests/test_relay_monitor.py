@@ -1841,8 +1841,15 @@ raise SystemExit(m.main(sys.argv[2:]))
 
     def test_inference_withheld_when_second_candidate_unreadable_in_either_order(self):
         other = self.other_root()
-        ordered = list({str(self.root), str(other)})
         real_read = self.rm.read_index
+        ordered = []
+        def observe_order(path):
+            ordered.append(str(path.parent))
+            return real_read(path)
+        with mock.patch.object(self.rm, "discover_root_like_cli", return_value=str(self.root)), mock.patch.object(self.rm, "read_index", side_effect=observe_order):
+            self.rm.attribute_root(self.rm.SubmitParse(False), str(self.root), {"root": str(other)}, [{"path": "lane/r1.md"}], None, ([], False))
+        self.assertEqual(len(ordered), 2)
+        self.assertEqual(set(ordered), {str(self.root), str(other)})
         for bad_position in (0, 1):
             for malformed in (False, True):
                 with self.subTest(bad_position=bad_position, malformed=malformed):
@@ -1856,8 +1863,8 @@ raise SystemExit(m.main(sys.argv[2:]))
                         if str(path.parent) == bad and not malformed:
                             raise PermissionError("fixture unreadable")
                         return real_read(path)
-                    with mock.patch.object(self.rm, "discover_root_like_cli", return_value=ordered[0]), mock.patch.object(self.rm, "read_index", side_effect=read):
-                        result = self.rm.attribute_root(self.rm.SubmitParse(False), ordered[0], {"root": ordered[1]}, [{"path": "lane/r1.md"}], None, ([], False))
+                    with mock.patch.object(self.rm, "discover_root_like_cli", return_value=str(self.root)), mock.patch.object(self.rm, "read_index", side_effect=read):
+                        result = self.rm.attribute_root(self.rm.SubmitParse(False), str(self.root), {"root": str(other)}, [{"path": "lane/r1.md"}], None, ([], False))
                     self.assertEqual(result, (None, "none"))
                     self.assertEqual(reads, ordered[:bad_position + 1])
 
