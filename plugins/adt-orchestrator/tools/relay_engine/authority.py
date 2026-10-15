@@ -100,28 +100,121 @@ def _sender(item):
     return addresses[0] if len(addresses) == 1 else None
 
 
-def _operational_lines(text):
-    # Mask equal-length CommonMark code spans without creating a bare token
-    # from the text on either side, or splitting Unicode separators into lines.
-    clean = rules.a5_sanitized_text(text)
-    paragraphs = re.split(r'(\n[ \t]*\n)', clean)
-    for index in range(0, len(paragraphs), 2):
-        part = paragraphs[index]
-        runs = list(re.finditer(r'`+', part))
-        chars = list(part)
-        i = 0
-        while i < len(runs):
-            close = next((j for j in range(i + 1, len(runs))
-                          if len(runs[j][0]) == len(runs[i][0])), None)
-            if close is None:
-                i += 1
+@dataclass(frozen=True)
+class VisibleLine:
+    text: str
+    ordinary_indent: bool
+    comment: bool
+
+
+@dataclass(frozen=True)
+class Verdict:
+    key: str
+    value: str
+    strict: bool
+    approval_eligible: bool
+
+
+def _visible_lines(text):
+    """Read original markers in order; deletion cannot create new syntax.
+
+    Comments disappear from the verdict view, including inline newlines.
+    Their provenance remains attached to the resulting line so neither a
+    bare token nor a positive field can be manufactured by deletion.
+    Fences and code spans are masked rather than deleted.
+    """
+    source = '\n'.join(rules.a5_split_lines(text))
+    out, chars = [], []
+    comment = False
+    ordinary = True
+    fence_char, fence_len = '', 0
+    i = 0
+
+    def append_visible(chunk):
+        nonlocal chars, comment, ordinary
+        for char in chunk:
+            if char == '\n':
+                out.append(VisibleLine(''.join(chars), ordinary, comment))
+                chars, comment, ordinary = [], False, True
+            else:
+                chars.append(char)
+
+    while i < len(source):
+        if source[i] == '\n':
+            append_visible('\n')
+            i += 1
+            continue
+        at_start = i == 0 or source[i-1] == '\n'
+        end = source.find('\n', i)
+        if end < 0:
+            end = len(source)
+        line = source[i:end]
+        if at_start:
+            ordinary = re.match(r' {0,3}[^ \t]', line) is not None
+            fence = rules.A5_FENCE_RE.match(line)
+            if fence_char:
+                if (fence and fence[2][0] == fence_char and len(fence[2]) >= fence_len
+                        and not fence[3].strip(' \t')):
+                    fence_char, fence_len = '', 0
+                append_visible('\x00' * len(line))
+                i = end
                 continue
-            for offset in range(runs[i].start(), runs[close].end()):
-                if chars[offset] not in '\r\n':
-                    chars[offset] = '\x00'
-            i = close + 1
-        paragraphs[index] = ''.join(chars)
-    return rules.a5_split_lines(''.join(paragraphs))
+            if re.match(r'^[ \t]*>', line):
+                append_visible('\x00' * len(line))
+                i = end
+                continue
+            if fence and not (fence[2][0] == '`' and '`' in fence[3]):
+                fence_char, fence_len = fence[2][0], len(fence[2])
+                append_visible('\x00' * len(line))
+                i = end
+                continue
+            block = re.match(r' {0,3}<!--', line)
+            if block:
+                opening = i + block.end() - 4
+                closing = source.find('-->', opening + 2)
+                comment = True
+                append_visible(source[i:opening])
+                i = len(source) if closing < 0 else closing + 3
+                continue
+        if source.startswith('<!--', i):
+            # A backslash-escaped inline '<' is literal, unlike a block opener.
+            back = i - 1
+            while back >= 0 and source[back] == '\\':
+                back -= 1
+            escaped = (i - back - 1) % 2
+            blank = re.search(r'\n[ \t]*\n', source[i:])
+            limit = i + blank.start() if blank else len(source)
+            closing = source.find('-->', i + 2, limit)
+            if not escaped and closing >= 0:
+                comment = True
+                i = closing + 3
+                continue
+        if source[i] == '`':
+            opening = re.match(r'`+', source[i:])[0]
+            # Block boundaries interrupt paragraphs. A code span cannot hide
+            # a subsequent block opener, quote, or blank line.
+            boundary = re.search(r'\n(?:[ \t]*\n|[ \t]*>| {0,3}<!--| {0,3}(?:`{3,}[^`\n]*(?=\n|$)|~{3,}))',
+                                 source[i+len(opening):])
+            limit = (i + len(opening) + boundary.start()) if boundary else len(source)
+            close = next((m for m in re.finditer(r'`+', source[i+len(opening):limit])
+                          if len(m[0]) == len(opening)), None)
+            if close:
+                stop = i + len(opening) + close.end()
+                append_visible(''.join('\n' if c == '\n' else '\x00' for c in source[i:stop]))
+                i = stop
+                continue
+            append_visible(opening)
+            i += len(opening)
+            continue
+        append_visible(source[i])
+        i += 1
+    out.append(VisibleLine(''.join(chars), ordinary, comment))
+    return out
+
+
+def _operational_lines(text):
+    return [line.text if not line.comment else '\x00' + line.text
+            for line in _visible_lines(text)]
 
 
 def _token(text, token):
@@ -134,10 +227,22 @@ def _verdict_lines(item, merge=False):
     if merge:
         keys += ('MERGE_AUTHORIZATION', 'HUMAN_MERGE_AUTHORIZATION', 'MERGE_APPROVED')
     values = []
-    for line in _operational_lines(item.text):
-        match = re.match(r'^[ \t]*([^:]+):[ \t]*(.*)$', line)
-        if match and match[1].strip().upper() in keys:
-            values.append((match[1].strip().upper(), match[2].strip().lower()))
+    for line in _visible_lines(item.text):
+        match = re.match(r'^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?([^:]+):[ \t]*(.*)$', line.text)
+        if not match:
+            continue
+        key = match[1].strip().strip('*_').upper()
+        if key not in keys:
+            continue
+        raw_value = match[2].lstrip('*_').strip()
+        words = raw_value.split(maxsplit=1)
+        word = words[0].strip('*_.,;:!?').lower() if words else ''
+        value = word + (' ' + words[1].lower() if len(words) > 1 else '')
+        eligible = line.ordinary_indent and not line.comment
+        strict = (eligible and re.match(r'^ {0,3}' + re.escape(key) + r':[ \t]*',
+                                       line.text, re.IGNORECASE) is not None
+                  and not re.search(r'[*_]', match[2].split()[0] if match[2].split() else ''))
+        values.append(Verdict(key, value, strict, eligible))
     return values
 
 
@@ -146,8 +251,10 @@ def _word(value):
 
 
 def _approved(item):
-    values = {_word(value) for _, value in _verdict_lines(item)}
-    return len(values) == 1 and values <= {'approve', 'approved'}
+    lines = _verdict_lines(item)
+    values = {_word(line.value) for line in lines}
+    return (len(values) == 1 and values <= {'approve', 'approved'}
+            and any(line.approval_eligible for line in lines))
 
 
 def _same_seat(left, right):
@@ -404,11 +511,12 @@ def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     if targets != [seat] or not rules.is_implementer_address(seat):
         reasons.add('authority.not-addressee')
     verdict_lines = _verdict_lines(grant, merge=action == 'merge')
-    verdicts = [_word(value) for _, value in verdict_lines]
+    verdicts = [_word(line.value) for line in verdict_lines]
     if action=='merge':
-        positives=[rules.merge_authorization_positive(key, value) for key, value in verdict_lines]
+        positives=[rules.merge_authorization_positive(line.key, line.value) for line in verdict_lines]
         shape=(grant.fields.get('PHASE')=='MERGE-GATE'
-               and (_token(grant.text, 'DISPATCH MERGE') or any(positives)))
+               and (_token(grant.text, 'DISPATCH MERGE') or any(positive and line.strict
+                   for positive, line in zip(positives, verdict_lines))))
     else:
         positives=[word in {'approve', 'approved', 'granted', 'yes'} for word in verdicts]
         shape=grant.fields.get('PHASE')=='IMPL' and _token(grant.text, 'DISPATCH IMPL')
