@@ -159,6 +159,7 @@ class AdmissionContext:
     envelope: Envelope
     body: bytes
     edge_seq: int | None
+    rules_version: str | None = None
 
 
 def _hit(fault, point, committed=False):
@@ -541,12 +542,21 @@ def append_seat_events(ledger, entries):
         _insert_seat_events(ledger, entries)
 
 
+def judgment_fingerprint(root):
+    """One producer identity for the held root's daemon lifetime, including BOOT."""
+    value = getattr(root, "_judgment_rules_version", None)
+    if value is None:
+        value = version.fingerprint(Path(__file__).resolve().parents[1])
+        root._judgment_rules_version = value
+    return value
+
+
 def admit(ledger, root, envelope, body, submission_id, *,
           claimed_body_sha256=None, claimed_content_hash=None,
           admits_against=None, origin="daemon", stamp=None,
           rendered_path=None, occupancy_ref=None, advisories=(),
           cycle_events=(), supersession_edges=(), prechecks=(),
-          seat_events=(), judge=None, effects=None,
+          seat_events=(), judge=None, effects=None, rules_version=None,
           clock=time.time, fault=None):
     """Admit one relay and every derived effect in a single transaction."""
     if isinstance(envelope, str):
@@ -596,8 +606,10 @@ def admit(ledger, root, envelope, body, submission_id, *,
             advisory_values = (advisories(ledger, envelope)
                                if callable(advisories) else advisories)
             advisory_values = list(advisory_values)
+            if judge is not None and rules_version is None:
+                rules_version = judgment_fingerprint(root)
             ctx = AdmissionContext(ledger, seq, allocated_stamp, allocated_path,
-                                   envelope, body, edge_seq)
+                                   envelope, body, edge_seq, rules_version)
             judgment_status, findings = None, ()
             if judge is not None:
                 try:
@@ -633,7 +645,7 @@ def admit(ledger, root, envelope, body, submission_id, *,
             _hit(fault, "after-relay-insert")
             if judgment_status is not None:
                 record_judgment(ledger, seq, judgment_status,
-                                version.fingerprint(Path(__file__).resolve().parents[1]), findings)
+                                rules_version or judgment_fingerprint(root), findings)
             _hit(fault, "after-judgment")
             if effects is not None:
                 effects(ctx, findings)

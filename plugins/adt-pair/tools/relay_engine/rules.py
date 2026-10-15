@@ -12,6 +12,7 @@ import datetime
 from dataclasses import dataclass
 from contextvars import ContextVar
 import errno
+import functools
 import hashlib
 import os
 import re
@@ -227,6 +228,7 @@ def read(path: Path) -> str:
         return path.read_text(errors="replace")
 
 
+@functools.lru_cache(maxsize=16384)
 def strip_fenced_blocks(text: str) -> str:
     out: List[str] = []
     in_fence = False
@@ -424,13 +426,18 @@ def sanitized_text(text: str) -> str:
 
 def h27_occurrences(text: str, key: str) -> List[str]:
     """Every own-line occurrence of key over fence-sanitized lines."""
+    return list(_h27_occurrences_cached(text, key))
+
+
+@functools.lru_cache(maxsize=131072)
+def _h27_occurrences_cached(text: str, key: str):
     out: List[str] = []
     pat = re.compile(r"^" + re.escape(key) + r":\s*(.*)$")
     for line in sanitized_text(text).splitlines():
         m = pat.match(line.rstrip())
         if m:
             out.append(m.group(1).strip())
-    return out
+    return tuple(out)
 
 
 def extract_named_block(text: str, header: str) -> str:
@@ -521,6 +528,11 @@ def parse_scope_diff_rows(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
 
 
 def header_fields(text: str) -> Dict[str, str]:
+    return dict(_header_fields_cached(text))
+
+
+@functools.lru_cache(maxsize=16384)
+def _header_fields_cached(text: str):
     fields: Dict[str, str] = {}
     for line in sanitized_text(text).splitlines():
         m = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
@@ -4452,7 +4464,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         return result
     files = sorted(files, key=lambda item: relay_order_key(item, path))
     per_file: List[Tuple[Path, LintResult]] = [
-        (f, lint_file(f, template_mode=template_mode,
+        (f, LintResult() if f in suppressed else lint_file(f, template_mode=template_mode,
                       _text=texts.get(f), _raw=raws.get(f), artifact_root=path)) for f in files]
     for f, r in per_file:
         for e in r.errors:
@@ -4895,7 +4907,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
         for finding in historical:
             messages = result.errors if finding.lint_severity == 'error' else result.warnings
             messages.remove(finding.message)
-            if history_audit:
+            if history_audit and finding.id != 'file.lint':
                 result.add_finding(Finding(finding.id, 'warn', finding.subject,
                     finding.operands, finding.params, 'history-audit: ' + finding.message))
     return result

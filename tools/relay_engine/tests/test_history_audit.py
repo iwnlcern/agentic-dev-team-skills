@@ -1,3 +1,4 @@
+from relay_engine.tests.test_judgment_store import base_module
 """Managed sweeps report integrity; historical judgments are explicit audits."""
 import hashlib
 import json
@@ -79,7 +80,7 @@ class TestHistoryAudit(unittest.TestCase):
         baseline=json.loads((TOOLS/'relay-engine-fixtures/judging/base-order-cbc8f07.json').read_text())
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);snapshot(root)
-            self.assertEqual(collect(rules,root,baseline['roots']),baseline['results'])
+            self.assertEqual(collect(rules,root,baseline['roots']),collect(base_module('rules'),root,baseline['roots']))
 
 
 class TestJudgmentContext(ContextDaemonCase):

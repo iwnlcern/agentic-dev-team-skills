@@ -23,7 +23,7 @@ from pathlib import Path
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
                           rules, seats, strings, supersede, version, judging, roster, authority)
 from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
-from relay_engine.ledger import admit, epoch_state, ensure_additive_schema, judgment_for
+from relay_engine.ledger import admit, epoch_state, ensure_additive_schema, judgment_for, judgment_fingerprint
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
 from relay_engine.render import index_rows, render_index, render_relay
 from relay_engine.paths import Root, TempWrite, ensure_engine_dir
@@ -814,7 +814,7 @@ class _SocketService:
             thread.join(2.5)
 
 
-def _submit_handler(ledger, root, args):
+def _submit_handler(ledger, root, args, *, rules_version=None):
     try:
         body = base64.b64decode(args["body_b64"], validate=True)
         envelope = parse_draft(body.decode("utf-8"))
@@ -839,6 +839,7 @@ def _submit_handler(ledger, root, args):
             ctx.envelope, ctx.body, artifact_root=Path(root.path),
             deadline=time.monotonic() + 5.0)),
         effects=roster.notice_effect,
+        rules_version=rules_version,
         prechecks=(cycles.callback(),),
         cycle_events=cycle_events,
         supersession_edges=supersession_edges,
@@ -855,6 +856,9 @@ def _submit_handler(ledger, root, args):
         "SELECT advisories_json FROM relays WHERE seq=?",
         (admission.seq,)).fetchone()
     _status, findings = judgment_for(ledger, admission.seq)
+    if _status == "failed":
+        findings = (rules.Finding("judging.failed", "warn", admission.rendered_path,
+                                  (), {}, strings.render("judging.failed")),)
     result = {"path": admission.rendered_path,
             "render_state": ("rendered" if rendered.event == "rendered"
                              else "render-conflict"),
@@ -912,7 +916,10 @@ def _default_handler(ledger, root, state, handlers, request):
     if op in handlers:
         return handlers[op](request["args"])
     if op == "submit":
-        return _submit_handler(ledger, root, request["args"])
+        if "judging_rules_version" not in state:
+            state["judging_rules_version"] = judgment_fingerprint(root)
+        return _submit_handler(ledger, root, request["args"],
+                               rules_version=state["judging_rules_version"])
     if op == "authority.check":
         args = request["args"]
         return authority.check(ledger, root, args["relay"], args["seat"], args["action"])
@@ -1005,6 +1012,8 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
             did = _local_identity()
         else:
             did = dict(did)
+        if strings.valid_fp(did.get("fp")):
+            root._judgment_rules_version = did["fp"]
         state = {
             "pid": os.getpid(), "pid_start_time": _pid_start_time(os.getpid()),
             "nonce": str(uuid.uuid4()), "state": "starting",

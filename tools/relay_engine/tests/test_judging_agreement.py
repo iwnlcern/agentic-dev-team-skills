@@ -77,3 +77,68 @@ class TestJudgingAgreement(unittest.TestCase):
     def test_order_divergent_cases_assert_both_results(self):
         self.assert_temporal_cases('order-divergent')
         self.assertEqual(judging.partition_of({'order_divergent':True,'future_sensitive':True}),'order-divergent')
+
+
+def defect_observations():
+    """Independent sweep populations classify shared findings, never the candidate.
+
+    The shared surface includes file and lineage findings with all six fields.
+    Admission-only authority and routing notices have separate contract tests.
+    """
+    from unittest import mock
+    manifest=json.loads((ROOT/'defect-corpus.json').read_text())
+    for relative in manifest['roots']:
+        root=ROOT.parents[1]/'relay-lint-fixtures'/relative
+        files=sorted((p for p in root.rglob('*.md') if p.name!='INDEX.md' and p.is_file()),key=lambda p:rules.relay_order_key(p,root))
+        texts={p:rules.read(p) for p in files}
+        full=rules.lint_relay_root(root)
+        keys=[rules.relay_order_key(p,root) for p in files]
+        for index,path in enumerate(files):
+            subject=str(path.relative_to(root));prefix=files[:index+1]
+            per_file=rules.lint_file(path,freshness=False,artifact_root=root)
+            file_findings=[rules.Finding('file.lint',severity,subject,(),{},f'{subject}: {message}')
+                           for severity,messages in (('error',per_file.errors),('warn',per_file.warnings)) for message in messages]
+            def normalized(findings):
+                unique={json.dumps([f.id,f.lint_severity,f.subject,f.operands,f.params,f.message],sort_keys=True):f for f in findings}
+                return tuple(sorted(unique.values(),key=lambda f:(f.id,f.operands,f.message)))
+            def shared(result):
+                return normalized([f for f in result.findings if f.subject==subject and f.id.startswith('lineage.')]+file_findings)
+            population=(prefix,{p:texts[p] for p in prefix},{p:texts[p].encode() for p in prefix},set())
+            with mock.patch.object(rules,'_record_scoped_population',return_value=population):
+                before=rules.lint_relay_root(root,engine_root=True,record_context={'entries':[]},context_mode='daemon')
+            expected=shared(before);after=shared(full)
+            divergent=any(keys[i][:2]==keys[j][:2] for i in range(index+1) for j in range(i))
+            partition='order-divergent' if divergent else 'future-sensitive' if expected!=after else 'aligned'
+            corpus=judging.Corpus(tuple((i+1,str(p.relative_to(root)),texts[p].encode()) for i,p in enumerate(files[:index])))
+            actual=judging.judge_candidate(corpus,subject,envelope(texts[path].encode()),texts[path].encode(),artifact_root=root,deadline=time.monotonic()+5)
+            actual=normalized(f for f in actual if f.id.startswith('lineage.') or f.id=='file.lint')
+            yield relative+'/'+subject,partition,actual,expected,after
+
+
+class TestDefectCorpusAgreement(unittest.TestCase):
+    def test_defect_corpus_partition_and_full_structural_agreement(self):
+        from collections import Counter
+        from dataclasses import asdict
+        manifest=ROOT/'defect-corpus.json'
+        self.assertTrue(manifest.exists(), 'the aligned corpus must contain real defects')
+        manifest=json.loads(manifest.read_text())
+        base=ROOT.parents[1]/'relay-lint-fixtures'
+        self.assertEqual(manifest['roots'],sorted(str(p.relative_to(base)) for family in manifest['families'] for p in (base/family).iterdir() if p.is_dir()))
+        exceptions=manifest['exceptions'];seen=set();counts=Counter();families=Counter()
+        for key,partition,actual,expected,after in defect_observations():
+            self.assertNotIn(key,seen);seen.add(key);counts[partition]+=1
+            with self.subTest(subject=key,partition=partition):
+                if partition!='order-divergent':self.assertEqual(actual,expected)
+                if partition=='aligned':
+                    self.assertEqual(actual,after)
+                    self.assertNotIn(key,exceptions)
+                    families.update(f.id for f in expected)
+                else:
+                    recorded=exceptions[key]
+                    self.assertEqual(partition,recorded['partition'])
+                    self.assertEqual(json.loads(json.dumps([asdict(f) for f in actual])),recorded['admission'])
+                    self.assertEqual(json.loads(json.dumps([asdict(f) for f in after])),recorded['sweep'])
+        self.assertEqual(set(exceptions),{key for key,partition,*_ in defect_observations() if partition!='aligned'})
+        self.assertGreater(counts['aligned'],100)
+        self.assertGreater(families['lineage.lock-lifecycle'],0)
+        self.assertEqual(dict(counts),manifest['counts'])

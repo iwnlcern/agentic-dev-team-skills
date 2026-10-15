@@ -81,5 +81,5 @@ def notice_effect(ctx, findings) -> None:
     with Root(name) as root:
         notice = insert_engine_relay(ctx.ledger, root, parse_draft(body.decode()), body, clock=time.time)
     record_judgment(ctx.ledger, notice.seq, 'exempt',
-                    version.fingerprint(Path(__file__).resolve().parents[1]), ())
+                    ctx.rules_version or version.fingerprint(Path(__file__).resolve().parents[1]), ())
     ctx.ledger.execute('INSERT INTO routed_notices(relay_seq,notice_seq) VALUES(?,?)', (ctx.seq, notice.seq))

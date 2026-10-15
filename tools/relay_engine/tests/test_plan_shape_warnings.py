@@ -107,8 +107,12 @@ class TestPlanShapeWarnings(unittest.TestCase):
             self.assertEqual(result.warnings, [
                 'engine-root sweep: 1 record-known relays not re-judged; context source: daemon',
                 'engine-root admission: 0 judged at admission, 0 with findings, 0 judging failed, 1 never judged, 0 engine-authored'])
+            default_warnings = result.warnings
             result = self._raw_record_result(Path(temporary), self._raw_inline_body(crlf=True),
                                              history_audit=True)
+            self.assertEqual(result.warnings, default_warnings)
+            result = rules.lint_file(Path(temporary) / 'PLAN-pair-planner-20260914-000000.md',
+                                     artifact_root=Path(temporary))
             self.assertTrue(any('plan shape: relay body over threshold: bytes 65584 > 65536'
                                 in warning for warning in result.warnings), result.warnings)
 

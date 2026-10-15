@@ -159,7 +159,11 @@ class TestAdmissionJudging(LedgerFixture):
         raw = body('SITREP')
         with mock.patch.object(judging, 'judge_candidate', side_effect=RuntimeError('injected')):
             first = self.handler(raw)
-        self.assertEqual(first['findings'], [])
+        self.assertEqual(first['findings'], [{
+            'id': 'judging.failed', 'lint_severity': 'warn', 'subject': first['path'],
+            'operands': [], 'params': {},
+            'message': 'admission judging failed; the relay is admitted with judgment status failed',
+        }])
         self.assertIn('judging.failed', first['advisories'])
         self.assertEqual(store.judgment_for(self.ledger, self.seq(first['path'])), ('failed', ()))
         self.assertEqual(self.handler(raw)['advisories'], first['advisories'])

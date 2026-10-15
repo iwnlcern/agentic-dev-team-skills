@@ -2,12 +2,14 @@
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import json
+import os
 from pathlib import Path
 import re
 import time
 
 from relay_engine import cycles, errors, rules
-from relay_engine.paths import Root, _parts, _read_regular_at
+from relay_engine.paths import Root, _parts, _read_regular_at, _open_parent
 
 
 CRITICAL = ('PHASE', 'FROM', 'TO', 'DISPATCH_ID', 'PARENT_DISPATCH_ID',
@@ -24,6 +26,7 @@ class Evidence:
     fields: dict
     superseded: bool
     engine_authored: bool
+    header_conflict: bool = False
 
 
 def authorizations(ledger, seat: str, action: str):
@@ -39,35 +42,93 @@ def authorizations(ledger, seat: str, action: str):
     authored = {r[0] for r in ledger.execute(
         'SELECT boot_relay_seq FROM seat_events WHERE boot_relay_seq IS NOT NULL')}
     authored.update(r[0] for r in ledger.execute('SELECT notice_seq FROM routed_notices'))
-    for seq, path, raw in ledger.execute('SELECT seq,rendered_path,body FROM relays ORDER BY seq'):
+    for seq, path, raw, sender, targets, phase, dispatch, parent in ledger.execute(
+            'SELECT seq,rendered_path,body,from_seat,to_seats,phase,dispatch_id,'
+            'parent_dispatch_id FROM relays ORDER BY seq'):
         text = bytes(raw).decode('utf-8')
-        yield Evidence(seq, path, text, rules.header_fields(text),
-                       seq in superseded, seq in authored)
+        clean = rules.a5_sanitized_text(text)
+        fields = {}
+        for line in rules.a5_split_lines(clean):
+            match = re.match(r'^([A-Z][A-Z0-9_-]*):[ \t]*(.*)$', line)
+            if match:
+                fields.setdefault(match[1], match[2].strip())
+        envelope = {'FROM': sender, 'TO': ', '.join(json.loads(targets or '[]')),
+                    'PHASE': phase, 'DISPATCH_ID': dispatch,
+                    'PARENT_DISPATCH_ID': parent or ''}
+        conflict = False
+        for key, value in envelope.items():
+            actual = fields.get(key, '')
+            if key == 'TO':
+                differs = rules.split_addresses(actual) != rules.split_addresses(value)
+            elif key == 'FROM':
+                differs = rules.normalized_addr(actual) != rules.normalized_addr(value)
+            else:
+                differs = actual != value
+            conflict |= differs
+        # The authenticated header block itself must remain visible, even if
+        # another body block repeats the same values outside a fence.
+        started = False
+        for raw_line, clean_line in zip(rules.a5_split_lines(text), rules.a5_split_lines(clean)):
+            match = re.match(r'^([A-Z][A-Z0-9_]*):[ \t]*', raw_line)
+            if not started and match is None:
+                continue
+            if match is None:
+                break
+            started = True
+            if match[1] in envelope and raw_line != clean_line:
+                conflict = True
+        fields.update(envelope)
+        yield Evidence(seq, path, text, fields, seq in superseded,
+                       seq in authored, conflict)
+
+
+def _occurrences(text, key):
+    pattern = re.compile(r'^' + re.escape(key) + r':[ \t]*(.*)$')
+    return [match[1].strip() for line in rules.a5_split_lines(rules.a5_sanitized_text(text))
+            if (match := pattern.match(line))]
 
 
 def _conflict(item):
-    return any(rules.h27_resolved_discriminator(item.text, key)[1] for key in CRITICAL)
+    return item.header_conflict or any(
+        len(set(_occurrences(item.text, key))) > 1
+        or _occurrences(item.text, key) != rules.h27_occurrences(item.text, key)
+        for key in CRITICAL)
 
 
 def _sender(item):
-    return rules.h27_single_from(item.text)
+    addresses = rules.split_addresses(item.fields.get('FROM'))
+    return addresses[0] if len(addresses) == 1 else None
 
 
-def _review_verdicts(item):
+def _operational_lines(text):
+    return [re.sub(r'`[^`]*`', '', line)
+            for line in rules.a5_split_lines(rules.a5_sanitized_text(text))]
+
+
+def _token(text, token):
+    return any(line.rstrip(' \t') == token for line in _operational_lines(text))
+
+
+def _verdict_lines(item, merge=False):
     phase = item.fields.get('PHASE', '')
     keys = (phase.replace('-', '_')+'_VERDICT', phase+' VERDICT', 'VERDICT')
-    clean = rules.operational_token_text(item.text)
+    if merge:
+        keys += ('MERGE_AUTHORIZATION', 'HUMAN_MERGE_AUTHORIZATION', 'MERGE_APPROVED')
     values = []
-    for line in clean.splitlines():
-        match = re.match(r'^\s*([^:]+):\s*(.*)$', line)
+    for line in _operational_lines(item.text):
+        match = re.match(r'^[ \t]*([^:]+):[ \t]*(.*)$', line)
         if match and match[1].strip().upper() in keys:
-            values.append(match[2].strip().lower())
+            values.append((match[1].strip().upper(), match[2].strip().lower()))
     return values
 
 
+def _word(value):
+    return value.split()[0].rstrip('.,;:!?') if value.split() else ''
+
+
 def _approved(item):
-    values = _review_verdicts(item)
-    return bool(values) and len(set(values)) == 1 and re.match(r'^approve(?:d)?(?:\s*[—-].*)?$', values[0]) is not None
+    values = {_word(value) for _, value in _verdict_lines(item)}
+    return len(values) == 1 and values <= {'approve', 'approved'}
 
 
 def _same_seat(left, right):
@@ -93,17 +154,10 @@ def _lineage(rows, grant, seat, action, reasons):
         reasons.add('authority.issuer-not-permitted')
         return lineage
     if direct:
-        # A direct grant needs no pair chain, but any declared parent is evidence.
-        item = grant
-        while item.fields.get('PARENT_DISPATCH_ID'):
-            matches = [row for row in rows if row.seq < item.seq
-                       and row.fields.get('DISPATCH_ID') == item.fields['PARENT_DISPATCH_ID']]
-            parent = max(matches,key=lambda row:row.seq,default=None)
-            if parent is None:
-                reasons.add('authority.lineage-incomplete')
-                break
-            lineage.append(parent);item=parent
+        # A direct grant supplies its own authority, independent of ancestors.
         return lineage
+    if 'deviation-present' in _occurrences(grant.text, 'SCOPE_DIFF_RESULT'):
+        reasons.add('authority.issuer-not-permitted')
     review = _parent(rows, grant, 'PLAN-REVIEW', seat)
     if review is None:
         reasons.add('authority.lineage-incomplete');return lineage
@@ -171,8 +225,15 @@ def _declarations(item, reasons):
 
 def _required_artifacts(rows,lineage,seat,reasons):
     required = {}
-    for row in sorted(lineage,key=lambda row:row.seq):
+    grant = lineage[0]
+    direct = rules.from_is_direct_authority(grant.fields)
+    base_lineage = lineage if direct else lineage[1:]
+    for row in sorted(base_lineage,key=lambda row:row.seq):
         required.update(_declarations(row,reasons))
+    if not direct:
+        for locator, digest in _declarations(grant, reasons).items():
+            if required.get(locator) != digest:
+                reasons.add('authority.artifact-changed')
     base = dict(required)
     for origin in lineage:
         phase = origin.fields.get('PHASE')
@@ -210,13 +271,25 @@ def _required_artifacts(rows,lineage,seat,reasons):
 
 def read_artifact(root, locator):
     """Resolve a root/sprint artifact, reading a regular file without FIFO waits."""
-    candidates = (root/locator, root.parent.parent/locator)
-    for candidate in candidates:
-        # lexists behavior: dangling links/unreadable existing candidates fail.
-        if candidate.exists() or candidate.is_symlink():
-            with Root(candidate.parent) as directory:
-                return _read_regular_at(directory.dirfd,candidate.name)
-    raise FileNotFoundError(locator)
+    _parts(locator)
+    snapshots = []
+    for base in dict.fromkeys((root, root.parent.parent)):
+        # Root paths are canonical daemon roots; every artifact component is
+        # opened relative to a held descriptor, with no symlink following.
+        with Root(base) as directory:
+            try:
+                parent, name = _open_parent(directory.dirfd, locator)
+                try:
+                    snapshots.append(_read_regular_at(parent, name))
+                finally:
+                    os.close(parent)
+            except FileNotFoundError:
+                continue
+    if not snapshots:
+        raise FileNotFoundError(locator)
+    if any(data != snapshots[0] for data in snapshots[1:]):
+        raise OSError('artifact locations disagree')
+    return snapshots[0]
 
 
 def _external_evidence(root, lineage, reasons):
@@ -267,16 +340,16 @@ def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     targets = rules.split_addresses(grant.fields.get('TO'))
     if targets != [seat] or not rules.is_implementer_address(seat):
         reasons.add('authority.not-addressee')
+    verdict_lines = _verdict_lines(grant, merge=action == 'merge')
+    verdicts = [_word(value) for _, value in verdict_lines]
     if action=='merge':
-        verdicts=[value for _,_,value in rules.merge_authorization_verdict_lines(grant.text)]
-        positives=[rules.merge_authorization_positive(key,value) for _,key,value in rules.merge_authorization_verdict_lines(grant.text)]
+        positives=[rules.merge_authorization_positive(key, value) for key, value in verdict_lines]
         shape=(grant.fields.get('PHASE')=='MERGE-GATE'
-               and (rules.own_line_merge_present(grant.text) or any(positives)))
+               and (_token(grant.text, 'DISPATCH MERGE') or any(positives)))
     else:
-        verdicts=_review_verdicts(grant)
-        positives=[re.match(r'^(approve(?:d)?|granted|yes)\b',v,re.I) is not None for v in verdicts]
-        shape=grant.fields.get('PHASE')=='IMPL' and rules.own_line_dispatch_present(grant.text)
-    if len(verdicts)>1:reasons.add('authority.verdict-conflict')
+        positives=[word in {'approve', 'approved', 'granted', 'yes'} for word in verdicts]
+        shape=grant.fields.get('PHASE')=='IMPL' and _token(grant.text, 'DISPATCH IMPL')
+    if len(set(verdicts))>1:reasons.add('authority.verdict-conflict')
     if any(not positive for positive in positives):reasons.add('authority.denied')
     if not shape:reasons.add('authority.shape-absent')
     lineage=_lineage(rows,grant,seat,action,reasons)

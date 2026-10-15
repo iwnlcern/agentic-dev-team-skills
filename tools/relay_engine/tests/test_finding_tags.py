@@ -1,3 +1,4 @@
+from relay_engine.tests.test_judgment_store import base_module
 """Structural findings retain identity independently of their display text."""
 import ast
 from collections import Counter
@@ -122,7 +123,7 @@ class TestFindingTags(unittest.TestCase):
 
     def test_messages_and_order_unchanged(self):
         actual = collect(rules, self.root, self.baseline['roots'])
-        self.assertEqual(actual, self.baseline['results'])
+        self.assertEqual(actual, collect(base_module('rules'), self.root, self.baseline['roots']))
         values = next(v['errors'] for v in actual.values() if len(v['errors']) > 1 and v['errors'][0] != v['errors'][1])
         swapped = values.copy()
         swapped[0], swapped[1] = swapped[1], swapped[0]
