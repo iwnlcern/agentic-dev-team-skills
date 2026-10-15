@@ -932,8 +932,15 @@ def merge_authorization_verdict_lines(text: str) -> List[Tuple[int, str, str]]:
     return verdicts
 
 
+MERGE_AUTHORIZATION_KEYS = frozenset({
+    "MERGE_AUTHORIZATION", "HUMAN_MERGE_AUTHORIZATION", "MERGE_APPROVED", "VERDICT",
+})
+
+
 def merge_authorization_positive(key: str, value: str) -> bool:
     key = key.upper()
+    if key not in MERGE_AUTHORIZATION_KEYS:
+        return False
     if key in {"MERGE_AUTHORIZATION", "HUMAN_MERGE_AUTHORIZATION"}:
         return re.match(r"^(approved|granted|yes)\b", value, flags=re.IGNORECASE) is not None
     if key == "MERGE_APPROVED":

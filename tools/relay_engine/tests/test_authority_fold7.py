@@ -92,7 +92,7 @@ class TestAuthorityFold7(TestAuthorityFold5):
         self.review_case(content='```\nVERDICT: must-revise\n```')
 
     def test_rule3_key_inclusion_and_body_header_distinction(self):
-        keys=['VERDICT','MERGE_AUTHORIZATION','HUMAN_MERGE_AUTHORIZATION','MERGE_APPROVED']
+        keys=rules.MERGE_AUTHORIZATION_KEYS
         for key in keys:
             self.assertTrue(any(rules.merge_authorization_positive(key,v) for v in ['approved','yes','granted','true','merge-ready']))
             self.grant_case(key+': denied', reasons=['authority.denied'])

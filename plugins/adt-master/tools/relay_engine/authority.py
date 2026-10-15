@@ -182,9 +182,18 @@ def _header(item):
     return _parsed_header(item.text) or {}
 
 
+CONTROL_CHARACTERS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]')
+
+
+@_per_check
+def _control_refusal(text):
+    return CONTROL_CHARACTERS.search(text) is not None
+
+
 def _header_refusal(text):
     header = _parsed_header(text)
-    return header is None or any('<' in value for value in header.values())
+    return (_control_refusal(text) or header is None
+            or any('<' in value for value in header.values()))
 
 
 def _verdict_key(key):
@@ -213,8 +222,12 @@ def _token(text, token):
                for i, line in enumerate(original))
 
 
+def _verdict_words(value):
+    return re.split(r'[ \t]+', value.strip(' \t')) if value.strip(' \t') else []
+
+
 def _positive_value(value):
-    words = value.split()
+    words = _verdict_words(value)
     if not words:
         return False
     first = words[0].rstrip('.,;:!?').lower()
@@ -240,10 +253,15 @@ def _word(value):
     return value.split()[0].rstrip('.,;:!?') if value.split() else ''
 
 
+def _positive_review(value):
+    words = _verdict_words(value)
+    return bool(words and words[0].rstrip('.,;:!?').lower() in {'approve', 'approved'})
+
+
 def _approved(item):
     keys = {item.fields.get('PHASE', '').replace('-', '_')+'_VERDICT', 'VERDICT'}
     header = _header(item)
-    positive = any(key in keys and _word(value).lower() in {'approve', 'approved'}
+    positive = any(key in keys and _positive_review(value)
                    for key, value in header.items())
     return bool(positive and not _html_refusal(item.text)
                 and not _header_refusal(item.text)
@@ -529,6 +547,9 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
         reasons.add('authority.shape-absent')
     lineage=_lineage(rows,grant,seat,action,reasons,ledger)
     for row in lineage:
+        if (row is not grant and not rules.from_is_direct_authority(grant.fields)
+                and _control_refusal(row.text)):
+            reasons.add('authority.lineage-incomplete')
         if _conflict(row):reasons.add('authority.header-conflict')
         if row is grant or not rules.from_is_direct_authority(grant.fields):
             if row.superseded:reasons.add('authority.superseded')
