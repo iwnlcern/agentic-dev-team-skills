@@ -22,7 +22,7 @@ class TestAuthorityFold3(LedgerFixture):
         ident=f'p-{self.number}'
         self.add('PLAN',ident=ident,extra=declarations,content='')
         self.add('PLAN-REVIEW','p.implementer','p.planner',ident+'-review',
-                 'PARENT_DISPATCH_ID: '+ident+'\n'+review_declarations,'Verdict: approve')
+                 'PARENT_DISPATCH_ID: '+ident+'\nVERDICT: approve'+('\n'+review_declarations if review_declarations else ''), '')
         return self.add(extra='PARENT_DISPATCH_ID: '+ident+'-review')
 
     def test_R1_four_missing_digest_forms_refuse_pair_and_direct(self):
@@ -68,7 +68,7 @@ class TestAuthorityFold3(LedgerFixture):
         self.add('PLAN',ident='old',extra=old,content='')
         new=self.artifact('plans','latest',b'new')
         self.add('PLAN-REVIEW','p.implementer','p.planner','new',
-                 'PARENT_DISPATCH_ID: old\n'+new,'Verdict: approve')
+                 'PARENT_DISPATCH_ID: old\n'+new+'\nVERDICT: approve', '')
         grant=self.add(sender='operator',extra='PARENT_DISPATCH_ID: new\nPLAN_ARTIFACT: latest\nPLAN_LOCK_ID: plans/latest.md')
         self.assertTrue(self.check(grant)['allowed'],self.check(grant))
         self.files['latest'].write_bytes(b'old')

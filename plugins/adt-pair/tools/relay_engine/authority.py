@@ -1,14 +1,18 @@
 """Read-only current-use authority; admission findings are not permissions."""
+from contextvars import ContextVar
+from functools import wraps
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import html
+import unicodedata
 import json
 import os
 from pathlib import Path
 import re
 import time
 
-from relay_engine import cycles, errors, rules
+from relay_engine import cycles, envelope, errors, rules
 from relay_engine.paths import Root, _parts, _read_regular_at, _open_parent
 
 
@@ -16,6 +20,67 @@ CRITICAL = ('PHASE', 'FROM', 'TO', 'DISPATCH_ID', 'PARENT_DISPATCH_ID',
             'DESIGN_LOCK_ID', 'DESIGN_DOC_ID', 'PLAN_LOCK_ID',
             'DESIGN_ARTIFACT', 'DESIGN_SHA256', 'PLAN_ARTIFACT', 'PLAN_SHA256',
             'PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT') + rules.XROOT_TRIGGERS
+
+
+_PARSE_CACHE = ContextVar('authority_parse_cache', default=None)
+
+
+def _per_check(function):
+    @wraps(function)
+    def cached(*args):
+        cache = _PARSE_CACHE.get()
+        if cache is None:
+            return function(*args)
+        key = (function, args)
+        if key not in cache:
+            cache[key] = function(*args)
+        return cache[key]
+    return cached
+
+
+@_per_check
+def _lines(text):
+    return rules.a5_split_lines(text)
+
+
+@_per_check
+def _clean(text):
+    return rules.a5_sanitized_text(text)
+
+
+@_per_check
+def _field_map(text, legacy=False):
+    # Keep the two line and whitespace contracts distinct.
+    lines = ((rules.sanitized_text(text) if '```' in text else text).splitlines()
+             if legacy else _lines(text))
+    pattern = re.compile(r'^([A-Z][A-Z0-9_-]*):\s*(.*)$' if legacy
+                         else r'^([A-Z][A-Z0-9_-]*):[ \t]*(.*)$')
+    fields = {}
+    for line in lines:
+        match = pattern.match(line.rstrip() if legacy else line)
+        if match:
+            fields.setdefault(match[1], []).append(match[2].strip())
+    return fields
+
+
+def _h27(text, key):
+    if not re.fullmatch(r'[A-Z][A-Z0-9_-]*', key):
+        return rules.h27_occurrences(text, key)
+    return _field_map(text, True).get(key, [])
+
+
+@_per_check
+def _artifact_fields(text):
+    fields = _field_map(_clean(text))
+    return {key: fields.get(key, []) for key in
+            ('DESIGN_SHA256', 'PLAN_SHA256', 'DESIGN_ARTIFACT', 'PLAN_ARTIFACT')}
+
+
+@_per_check
+def _xroot_engaged(text):
+    fields = _field_map(text, True)
+    return (fields.get('PHASE', [''])[0] == 'PLAN'
+            and any(fields.get(key) for key in rules.XROOT_TRIGGERS))
 
 
 @dataclass(frozen=True)
@@ -46,12 +111,8 @@ def authorizations(ledger, seat: str, action: str):
             'SELECT seq,rendered_path,body,from_seat,to_seats,phase,dispatch_id,'
             'parent_dispatch_id FROM relays ORDER BY seq'):
         text = bytes(raw).decode('utf-8')
-        clean = rules.a5_sanitized_text(text)
-        fields = {}
-        for line in rules.a5_split_lines(clean):
-            match = re.match(r'^([A-Z][A-Z0-9_-]*):[ \t]*(.*)$', line)
-            if match:
-                fields.setdefault(match[1], match[2].strip())
+        clean = _clean(text)
+        fields = {key: values[0] for key, values in _field_map(clean).items()}
         envelope = {'FROM': sender, 'TO': ', '.join(json.loads(targets or '[]')),
                     'PHASE': phase, 'DISPATCH_ID': dispatch,
                     'PARENT_DISPATCH_ID': parent or ''}
@@ -68,7 +129,7 @@ def authorizations(ledger, seat: str, action: str):
         # The authenticated header block itself must remain visible, even if
         # another body block repeats the same values outside a fence.
         started = False
-        for raw_line, clean_line in zip(rules.a5_split_lines(text), rules.a5_split_lines(clean)):
+        for raw_line, clean_line in zip(_lines(text), _lines(clean)):
             match = re.match(r'^([A-Z][A-Z0-9_]*):[ \t]*', raw_line)
             if not started and match is None:
                 continue
@@ -83,16 +144,22 @@ def authorizations(ledger, seat: str, action: str):
 
 
 def _occurrences(text, key):
-    pattern = re.compile(r'^' + re.escape(key) + r':[ \t]*(.*)$')
-    return [match[1].strip() for line in rules.a5_split_lines(rules.a5_sanitized_text(text))
-            if (match := pattern.match(line))]
+    if not re.fullmatch(r'[A-Z][A-Z0-9_-]*', key):
+        pattern = re.compile(r'^' + re.escape(key) + r':[ \t]*(.*)$')
+        return [match[1].strip() for line in _lines(_clean(text))
+                if (match := pattern.match(line))]
+    return _field_map(_clean(text)).get(key, [])
 
 
 def _conflict(item):
-    return item.header_conflict or any(
-        len(set(_occurrences(item.text, key))) > 1
-        or _occurrences(item.text, key) != rules.h27_occurrences(rules.a5_sanitized_text(item.text), key)
-        for key in CRITICAL)
+    if item.header_conflict:
+        return True
+    clean = _clean(item.text)
+    fields = _field_map(clean)
+    legacy = _field_map(clean, True)
+    return any(len(set(fields.get(key, []))) > 1
+               or fields.get(key, []) != legacy.get(key, [])
+               for key in CRITICAL)
 
 
 def _sender(item):
@@ -100,150 +167,118 @@ def _sender(item):
     return addresses[0] if len(addresses) == 1 else None
 
 
-@dataclass(frozen=True)
-class VisibleLine:
-    text: str
-    ordinary_indent: bool
-    comment: bool
+HTML_OPEN = re.compile(r'<!--|<\?|<!\[|<![a-z]|<(?:script|pre|style|textarea)(?=[ \t\r\n\f\v>]|$)', re.I)
+VERDICT_KEY = re.compile(r'VERDICT|MERGE[ _-]AUTHORIZATION|MERGE[ _-]APPROVED', re.I)
+SEPARATOR = re.compile(r'[*_~`\]\) \t]*[:|]')
+PREFIX = re.compile(r'[ \t*_~]*')
+# Step 6 strips emphasis BEFORE punctuation at the word's trailing end.
+# Thus punctuation may precede trailing emphasis, but not vice versa.
+WORD_END = r'[.,;:!?]*[*_~]*(?=[ \t]|\Z)'
+POSITIVE = re.compile(r'(?:approved|approve|granted|yes|true|complete|merge-ready)' + WORD_END, re.I | re.ASCII)
+APPROVAL = re.compile(r'(?:approved|approve)' + WORD_END, re.I | re.ASCII)
+MERGE_WORD = re.compile(r'merge' + WORD_END, re.I | re.ASCII)
+READY_WORD = re.compile(r'ready' + WORD_END, re.I | re.ASCII)
 
 
-@dataclass(frozen=True)
-class Verdict:
-    key: str
-    value: str
-    strict: bool
-    approval_eligible: bool
+def _header(item):
+    try:
+        return envelope.parse_draft(item.text).headers
+    except (errors.EngineError, TypeError):
+        return {}
 
 
-def _visible_lines(text):
-    """Read original markers in order; deletion cannot create new syntax.
-
-    Comments disappear from the verdict view, including inline newlines.
-    Their provenance remains attached to the resulting line so neither a
-    bare token nor a positive field can be manufactured by deletion.
-    Fences and code spans are masked rather than deleted.
-    """
-    source = '\n'.join(rules.a5_split_lines(text))
-    out, chars = [], []
-    comment = False
-    ordinary = True
-    fence_char, fence_len = '', 0
-    i = 0
-
-    def append_visible(chunk):
-        nonlocal chars, comment, ordinary
-        for char in chunk:
-            if char == '\n':
-                out.append(VisibleLine(''.join(chars), ordinary, comment))
-                chars, comment, ordinary = [], False, True
-            else:
-                chars.append(char)
-
-    while i < len(source):
-        if source[i] == '\n':
-            append_visible('\n')
-            i += 1
-            continue
-        at_start = i == 0 or source[i-1] == '\n'
-        end = source.find('\n', i)
-        if end < 0:
-            end = len(source)
-        line = source[i:end]
-        if at_start:
-            ordinary = re.match(r' {0,3}[^ \t]', line) is not None
-            fence = rules.A5_FENCE_RE.match(line)
-            if fence_char:
-                if (fence and fence[2][0] == fence_char and len(fence[2]) >= fence_len
-                        and not fence[3].strip(' \t')):
-                    fence_char, fence_len = '', 0
-                append_visible('\x00' * len(line))
-                i = end
-                continue
-            if re.match(r'^[ \t]*>', line):
-                append_visible('\x00' * len(line))
-                i = end
-                continue
-            if fence and not (fence[2][0] == '`' and '`' in fence[3]):
-                fence_char, fence_len = fence[2][0], len(fence[2])
-                append_visible('\x00' * len(line))
-                i = end
-                continue
-            block = re.match(r' {0,3}<!--', line)
-            if block:
-                opening = i + block.end() - 4
-                closing = source.find('-->', opening + 2)
-                comment = True
-                append_visible(source[i:opening])
-                i = len(source) if closing < 0 else closing + 3
-                continue
-        if source.startswith('<!--', i):
-            # A backslash-escaped inline '<' is literal, unlike a block opener.
-            back = i - 1
-            while back >= 0 and source[back] == '\\':
-                back -= 1
-            escaped = (i - back - 1) % 2
-            blank = re.search(r'\n[ \t]*\n', source[i:])
-            limit = i + blank.start() if blank else len(source)
-            closing = source.find('-->', i + 2, limit)
-            if not escaped and closing >= 0:
-                comment = True
-                i = closing + 3
-                continue
-        if source[i] == '`':
-            opening = re.match(r'`+', source[i:])[0]
-            # Block boundaries interrupt paragraphs. A code span cannot hide
-            # a subsequent block opener, quote, or blank line.
-            boundary = re.search(r'\n(?:[ \t]*\n|[ \t]*>| {0,3}<!--| {0,3}(?:`{3,}[^`\n]*(?=\n|$)|~{3,}))',
-                                 source[i+len(opening):])
-            limit = (i + len(opening) + boundary.start()) if boundary else len(source)
-            close = next((m for m in re.finditer(r'`+', source[i+len(opening):limit])
-                          if len(m[0]) == len(opening)), None)
-            if close:
-                stop = i + len(opening) + close.end()
-                append_visible(''.join('\n' if c == '\n' else '\x00' for c in source[i:stop]))
-                i = stop
-                continue
-            append_visible(opening)
-            i += len(opening)
-            continue
-        append_visible(source[i])
-        i += 1
-    out.append(VisibleLine(''.join(chars), ordinary, comment))
-    return out
+HTML_START = re.compile(r'^ {0,3}<[A-Za-z/!?]')
+FENCE_RUN = re.compile(r'`{3,}|~{3,}')
 
 
-def _operational_lines(text):
-    return [line.text if not line.comment else '\x00' + line.text
-            for line in _visible_lines(text)]
+@_per_check
+def _html_refusal(text):
+    if '<' not in text:
+        return False
+    return any(HTML_START.match(line) or HTML_OPEN.search(line)
+               for line in _lines(text))
 
 
 def _token(text, token):
-    return any(line.rstrip(' \t') == token for line in _operational_lines(text))
+    original = _lines(text)
+    if FENCE_RUN.search(text) or _html_refusal(text):
+        return False
+    return any(line.rstrip(' \t') == token
+               and (i == 0 or not original[i-1].strip(' \t'))
+               and (i+1 == len(original) or not original[i+1].strip(' \t'))
+               for i, line in enumerate(original))
 
 
-def _verdict_lines(item, merge=False):
-    phase = item.fields.get('PHASE', '')
-    keys = (phase.replace('-', '_')+'_VERDICT', phase+' VERDICT', 'VERDICT')
-    if merge:
-        keys += ('MERGE_AUTHORIZATION', 'HUMAN_MERGE_AUTHORIZATION', 'MERGE_APPROVED')
-    values = []
-    for line in _visible_lines(item.text):
-        match = re.match(r'^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?([^:]+):[ \t]*(.*)$', line.text)
-        if not match:
+def _mask_same_line_spans(line):
+    runs = list(re.finditer(r'`+', line))
+    if not runs:
+        return line
+    next_run, following = {}, {}
+    for i in range(len(runs)-1, -1, -1):
+        size = len(runs[i][0])
+        if size in next_run:
+            following[i] = next_run[size]
+        next_run[size] = i
+    parts, offset, i = [], 0, 0
+    while i < len(runs):
+        opening = runs[i]
+        closing = following.get(i)
+        if (closing is None or (opening.start() and line[opening.start()-1] == '\\')):
+            i += 1
             continue
-        key = match[1].strip().strip('*_').upper()
-        if key not in keys:
+        end = runs[closing].end()
+        content = line[opening.end():runs[closing].start()]
+        if any(char.isalpha() for char in content):
+            parts.extend((line[offset:opening.start()], ' ' * (end-opening.start())))
+            offset = end
+        i = closing+1
+    parts.append(line[offset:])
+    return ''.join(parts)
+
+
+def _normalise(line):
+    line = html.unescape(line)
+    mapping = {ord('<'): ' ', ord('>'): ' ', ord('\\'): None}
+    if not line.isascii():
+        mapping.update({ord(c): None for c in set(line) if unicodedata.category(c) == 'Cf'})
+    return line.translate(mapping)
+
+
+def _positive_at(value, start=0):
+    start = PREFIX.match(value, start).end()
+    if POSITIVE.match(value, start):
+        return True
+    first = MERGE_WORD.match(value, start)
+    return bool(first and READY_WORD.match(value, PREFIX.match(value, first.end()).end()))
+
+
+@_per_check
+def _verdict_polarities(text):
+    """Union of both views, without copying each occurrence's value suffix."""
+    positive = negative = False
+    for line in dict.fromkeys(_lines(text)):
+        if not any(char in line for char in (':', '|', '&')):
             continue
-        raw_value = match[2].lstrip('*_').strip()
-        words = raw_value.split(maxsplit=1)
-        word = words[0].strip('*_.,;:!?').lower() if words else ''
-        value = word + (' ' + words[1].lower() if len(words) > 1 else '')
-        eligible = line.ordinary_indent and not line.comment
-        strict = (eligible and re.match(r'^ {0,3}' + re.escape(key) + r':[ \t]*',
-                                       line.text, re.IGNORECASE) is not None
-                  and not re.search(r'[*_]', match[2].split()[0] if match[2].split() else ''))
-        values.append(Verdict(key, value, strict, eligible))
-    return values
+        masked = _mask_same_line_spans(line)
+        retained = _normalise(masked)
+        removed = re.sub(r'<[^<>\r\n]*>', '', masked)
+        removed = re.sub(r'\]\([^()\r\n]*\)', ']', removed)
+        views = (retained,) if removed == masked else (retained, _normalise(removed))
+        for view in views:
+            for key in VERDICT_KEY.finditer(view):
+                if ((key.start() and view[key.start()-1].isalpha())
+                        or (key.end() < len(view) and view[key.end()].isalpha())):
+                    continue
+                separator = SEPARATOR.match(view, key.end())
+                if separator is None:
+                    continue
+                if _positive_at(view, separator.end()):
+                    positive = True
+                else:
+                    negative = True
+        if positive and negative:
+            return positive, negative
+    return positive, negative
 
 
 def _word(value):
@@ -251,10 +286,12 @@ def _word(value):
 
 
 def _approved(item):
-    lines = _verdict_lines(item)
-    values = {_word(line.value) for line in lines}
-    return (len(values) == 1 and values <= {'approve', 'approved'}
-            and any(line.approval_eligible for line in lines))
+    keys = {item.fields.get('PHASE', '').replace('-', '_')+'_VERDICT', 'VERDICT'}
+    header = _header(item)
+    positive = any(key in keys and APPROVAL.match(value, PREFIX.match(value).end())
+                   for key, value in header.items())
+    return bool(positive and not _html_refusal(item.text)
+                and not _verdict_polarities(item.text)[1])
 
 
 def _same_seat(left, right):
@@ -330,7 +367,7 @@ def _lineage(rows, grant, seat, action, reasons, ledger):
     if seat not in rules.split_addresses(plan.fields.get('TO')):
         reasons.add('authority.lineage-incomplete')
     lock = plan.fields.get('DESIGN_LOCK_ID')
-    if lock and not rules.xroot_design_engaged(plan.text):
+    if lock and not _xroot_engaged(plan.text):
         design_review = _parent(ledger, rows,plan,'DESIGN-REVIEW',seat)
         if design_review is None:
             reasons.add('authority.lineage-incomplete');return lineage
@@ -348,10 +385,10 @@ def _lineage(rows, grant, seat, action, reasons, ledger):
 
 def _declarations(item, reasons):
     declarations = {}
+    fields = _artifact_fields(item.text)
     for digest, locator, directory in rules.A5_LOCK_PAIRS:
-        fields = rules.a5_field_occurrences(item.text)
         digests, locators = fields[digest], fields[locator]
-        if digest == 'DESIGN_SHA256' and rules.xroot_design_engaged(item.text):
+        if digest == 'DESIGN_SHA256' and _xroot_engaged(item.text):
             continue  # The pinned source path is checked by _external_evidence.
         if not digests and not locators:continue
         if (len(set(locators)) != 1 or not rules.a5_stem_is_bare(locators[0])
@@ -362,10 +399,10 @@ def _declarations(item, reasons):
         declarations[f'{directory}/{locators[0]}.md'] = digests[0] if digests else None
     for key in ('PLAN_LOCK_ID', 'DESIGN_LOCK_ID'):
         # Foreign lock locators belong to the pinned Git source, not this root.
-        if any(rules.h27_occurrences(item.text, field)
+        if any(_h27(item.text, field)
                for field in ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT')):
             continue
-        if key == 'DESIGN_LOCK_ID' and rules.xroot_design_engaged(item.text):
+        if key == 'DESIGN_LOCK_ID' and _xroot_engaged(item.text):
             continue
         value = item.fields.get(key, '')
         locator, separator, digest = value.partition(' @ ')
@@ -468,7 +505,7 @@ def _external_evidence(root, lineage, reasons):
     seen = set()
     try:
         for item in lineage:
-            if rules.xroot_design_engaged(item.text):
+            if _xroot_engaged(item.text):
                 declaration = rules.xroot_declaration(item.fields,item.text)
                 identity = tuple((key,declaration.get(key)) for key in rules.XROOT_REQUIRED)
                 if identity in seen:
@@ -486,7 +523,7 @@ def _external_evidence(root, lineage, reasons):
                         reasons.add('authority.lineage-incomplete')
                     else:
                         reasons.add('authority.could-not-evaluate')
-            if any(rules.h27_occurrences(item.text,key) for key in ('PLAN_SOURCE_REPO','PLAN_SOURCE_COMMIT')):
+            if any(_h27(item.text,key) for key in ('PLAN_SOURCE_REPO','PLAN_SOURCE_COMMIT')):
                 result=rules.LintResult()
                 rules.xroot_plan_gate(root,root/item.path,item.fields,item.text,result)
                 if result.errors:
@@ -500,6 +537,14 @@ def _external_evidence(root, lineage, reasons):
 
 
 def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
+    token = _PARSE_CACHE.set({})
+    try:
+        return _check(ledger, root, relay_path, seat, action)
+    finally:
+        _PARSE_CACHE.reset(token)
+
+
+def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     try:_parts(relay_path)
     except (TypeError,ValueError):
         raise errors.error_for('E-HEADER', field='RELAY_PATH')
@@ -510,19 +555,22 @@ def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     targets = rules.split_addresses(grant.fields.get('TO'))
     if targets != [seat] or not rules.is_implementer_address(seat):
         reasons.add('authority.not-addressee')
-    verdict_lines = _verdict_lines(grant, merge=action == 'merge')
-    verdicts = [_word(line.value) for line in verdict_lines]
-    if action=='merge':
-        positives=[rules.merge_authorization_positive(line.key, line.value) for line in verdict_lines]
-        shape=(grant.fields.get('PHASE')=='MERGE-GATE'
-               and (_token(grant.text, 'DISPATCH MERGE') or any(positive and line.strict
-                   for positive, line in zip(positives, verdict_lines))))
+    positive, negative = _verdict_polarities(grant.text)
+    header_positive = (action == 'merge' and any(
+        rules.merge_authorization_positive(key, value) for key, value in _header(grant).items()))
+    if action == 'merge':
+        shape = (grant.fields.get('PHASE') == 'MERGE-GATE'
+                 and (_token(grant.text, 'DISPATCH MERGE') or header_positive))
     else:
-        positives=[word in {'approve', 'approved', 'granted', 'yes'} for word in verdicts]
-        shape=grant.fields.get('PHASE')=='IMPL' and _token(grant.text, 'DISPATCH IMPL')
-    if len(set(verdicts))>1:reasons.add('authority.verdict-conflict')
-    if any(not positive for positive in positives):reasons.add('authority.denied')
-    if not shape:reasons.add('authority.shape-absent')
+        shape = grant.fields.get('PHASE') == 'IMPL' and _token(grant.text, 'DISPATCH IMPL')
+    if _html_refusal(grant.text):
+        shape = False
+    if negative:
+        reasons.add('authority.denied')
+        if positive or header_positive:
+            reasons.add('authority.verdict-conflict')
+    if not shape:
+        reasons.add('authority.shape-absent')
     lineage=_lineage(rows,grant,seat,action,reasons,ledger)
     for row in lineage:
         if _conflict(row):reasons.add('authority.header-conflict')

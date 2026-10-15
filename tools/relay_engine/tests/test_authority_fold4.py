@@ -26,7 +26,7 @@ class TestAuthorityFold4(LedgerFixture):
             if deep:
                 parent='review-deep'
                 self.add('PLAN-REVIEW','p.implementer','p.planner',parent,
-                         'PARENT_DISPATCH_ID: '+ident,'Verdict: approve')
+                         'PARENT_DISPATCH_ID: '+ident+'\nVERDICT: approve', '')
             control=self.add(sender='operator',extra='PARENT_DISPATCH_ID: '+parent)
             self.assertTrue(self.check(control)['allowed'])
             pin_b=self.artifact('plans',ident,b'B')
@@ -45,7 +45,7 @@ class TestAuthorityFold4(LedgerFixture):
         self.add('PLAN',ident='plan',extra=pin_b,content='',
                  admits_against=plan.rendered_path,prechecks=(cycles.precheck,))
         self.add('PLAN-REVIEW','p.implementer','p.planner','review',
-                 'PARENT_DISPATCH_ID: plan\n'+pin_a,'Verdict: approve')
+                 'PARENT_DISPATCH_ID: plan\n'+pin_a+'\nVERDICT: approve', '')
         grant=self.add(extra='PARENT_DISPATCH_ID: review')
         self.assertEqual(self.check(grant)['reasons'],['authority.artifact-changed'])
         self.files['P'].write_bytes(b'A')
@@ -55,13 +55,13 @@ class TestAuthorityFold4(LedgerFixture):
         pin_a=self.artifact('plans','P',b'A')
         self.add('PLAN',ident='plan',extra=pin_a,content='')
         review=self.add('PLAN-REVIEW','p.implementer','p.planner','review',
-                        'PARENT_DISPATCH_ID: plan\n'+pin_a,'Verdict: approve')
+                        'PARENT_DISPATCH_ID: plan\n'+pin_a+'\nVERDICT: approve', '')
         control=self.add(extra='PARENT_DISPATCH_ID: review')
         self.assertTrue(self.check(control)['allowed'])
         pin_b=self.artifact('plans','P',b'B')
         self.add('PLAN',ident='other-plan',extra=pin_b,content='')
         self.add('PLAN-REVIEW','p.implementer','p.planner','review',
-                 'PARENT_DISPATCH_ID: plan\n'+pin_b,'Verdict: approve',
+                 'PARENT_DISPATCH_ID: plan\n'+pin_b+'\nVERDICT: approve', '',
                  admits_against=review.rendered_path,prechecks=(cycles.precheck,))
         grant=self.add(extra='PARENT_DISPATCH_ID: review')
         self.assertEqual(self.check(grant)['reasons'],['authority.lineage-incomplete'])
@@ -74,11 +74,11 @@ class TestAuthorityFold4(LedgerFixture):
         pin_a=self.artifact('designs','D',b'A')
         self.add('DESIGN',ident='design',extra='DESIGN_DOC_ID: DD\n'+pin_a,content='')
         self.add('DESIGN-REVIEW','p.implementer','p.planner','design',
-                 'PARENT_DISPATCH_ID: design\nDESIGN_DOC_ID: DD\n'+pin_a,'Verdict: must-revise')
+                 'PARENT_DISPATCH_ID: design\nDESIGN_DOC_ID: DD\n'+pin_a+'\nVERDICT: must-revise', '')
         pin_b=self.artifact('designs','D',b'B')
         self.add('DESIGN',ident='design',extra='DESIGN_DOC_ID: DD\n'+pin_b,content='')
         self.add('DESIGN-REVIEW','p.implementer','p.planner','design',
-                 'PARENT_DISPATCH_ID: design\nDESIGN_DOC_ID: DD\n'+pin_b,'Verdict: approve')
+                 'PARENT_DISPATCH_ID: design\nDESIGN_DOC_ID: DD\n'+pin_b+'\nVERDICT: approve', '')
         # A later revision is not the one the effective review approved.
         pin_c=self.artifact('designs','D',b'C')
         self.add('DESIGN',ident='design',extra='DESIGN_DOC_ID: DD\n'+pin_c,content='')
@@ -86,7 +86,7 @@ class TestAuthorityFold4(LedgerFixture):
         plan_pin=self.artifact('plans','P')
         self.add('PLAN',ident='plan',extra='PARENT_DISPATCH_ID: design\nDESIGN_LOCK_ID: DD\n'+plan_pin,content='')
         self.add('PLAN-REVIEW','p.implementer','p.planner','review',
-                 'PARENT_DISPATCH_ID: plan\n'+plan_pin,'Verdict: approve')
+                 'PARENT_DISPATCH_ID: plan\n'+plan_pin+'\nVERDICT: approve', '')
         grant=self.add(extra='PARENT_DISPATCH_ID: review')
         self.assertTrue(self.check(grant)['allowed'],self.check(grant))
         self.files['D'].write_bytes(b'C')
@@ -96,7 +96,7 @@ class TestAuthorityFold4(LedgerFixture):
         self.add('PLAN',ident='plan',extra=self.artifact('plans','P',b'A'),content='')
         self.add('PLAN',ident='plan',extra=self.artifact('plans','P',b'B'),content='')
         self.add('PLAN-REVIEW','p.implementer','p.planner','review',
-                 'PARENT_DISPATCH_ID: plan','Verdict: approve')
+                 'PARENT_DISPATCH_ID: plan'+'\nVERDICT: approve', '')
         grant=self.add(extra='PARENT_DISPATCH_ID: review')
         self.assertTrue(self.check(grant)['allowed'])
         self.files['P'].write_bytes(b'A')

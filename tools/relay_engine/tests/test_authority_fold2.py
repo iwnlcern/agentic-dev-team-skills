@@ -71,8 +71,10 @@ class TestAuthorityFold2(LedgerFixture):
 
     def test_S1_fenced_header_quotes_are_inert(self):
         for fence in ('```','~~~','````'):
-            g=self.add(sender='operator',content=f'{fence}\nFROM: other.implementer\n{fence}\nDISPATCH IMPL')
-            self.assertTrue(self.check(g)['allowed'],self.check(g))
+            g=self.add(sender='operator',content=f'{fence}\nFROM: other.implementer\n{fence}\n\nDISPATCH IMPL')
+            self.assertEqual(self.check(g)['reasons'],['authority.shape-absent'])
+            header_grant=self.add('MERGE-GATE','operator',extra='MERGE_AUTHORIZATION: approved',content=f'{fence}\nFROM: other.implementer\n{fence}')
+            self.assertEqual(self.check(header_grant,action='merge')['reasons'],[])
         self.denied('header-conflict',self.add(sender='operator',content='DISPATCH IMPL\nFROM: other.implementer'))
         self.denied('header-conflict',self.add(sender='operator',content='DISPATCH IMPL\nprose\u2028FROM: other.implementer'))
 

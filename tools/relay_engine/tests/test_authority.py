@@ -25,8 +25,8 @@ class TestAuthority(LedgerFixture):
     def add(self, phase='IMPL', sender='p.planner', target='p.implementer',
             ident=None, extra='', content='DISPATCH IMPL', **kwargs):
         self.number += 1
-        raw = body(phase, sender, target, ident or f'row-{self.number}', extra, content)
-        admitted = ledger.admit(self.ledger, self.root, envelope(raw), raw,
+        raw = body(phase, sender, target, ident or f'row-{self.number}', extra, '\n'+content)
+        admitted = ledger.admit(self.ledger, self.root, ledger._server_envelope(raw), raw,
                                 f'sid-{self.number}', clock=lambda: WALL+self.number, **kwargs)
         return admitted
 
@@ -49,7 +49,7 @@ class TestAuthority(LedgerFixture):
         self.plan_decl = self.artifact('plans','PL-base')
         self.plan = self.add('PLAN',ident='plan',extra=parent+'PLAN_LOCK_ID: PL\n'+self.plan_decl,content='')
         self.add('PLAN-REVIEW','p.implementer','p.planner','review',
-                 'PARENT_DISPATCH_ID: plan\nPLAN_LOCK_ID: PL\n'+self.plan_decl,'Verdict: approve')
+                 'PARENT_DISPATCH_ID: plan\nPLAN_LOCK_ID: PL\n'+self.plan_decl+'\nVERDICT: approve', '')
         self.grant = self.add(ident='grant',extra='PARENT_DISPATCH_ID: review\nPLAN_LOCK_ID: PL')
         return self.grant
 
@@ -326,7 +326,7 @@ class TestAuthority(LedgerFixture):
     def test_pair_role_aliases_remain_own_pair(self):
         self.add('PLAN','p.pair-planner','p.pair-implementer','alias-plan',content='')
         self.add('PLAN-REVIEW','p.pair-implementer','p.pair-planner','alias-review',
-                 'PARENT_DISPATCH_ID: alias-plan','Verdict: approve')
+                 'PARENT_DISPATCH_ID: alias-plan'+'\nVERDICT: approve', '')
         self.grant=self.add('IMPL','p.pair-planner','p.pair-implementer',extra='PARENT_DISPATCH_ID: alias-review')
         self.assertTrue(self.check(seat='p.pair-implementer')['allowed'])
 
@@ -341,7 +341,7 @@ class TestAuthority(LedgerFixture):
             extra='\n'.join(k+': '+v for k,v in fields if k.startswith('DESIGN_'))
             self.add('PLAN',ident='external-plan',extra=extra,content='')
             self.add('PLAN-REVIEW','p.implementer','p.planner','external-review',
-                     'PARENT_DISPATCH_ID: external-plan','Verdict: approve')
+                     'PARENT_DISPATCH_ID: external-plan'+'\nVERDICT: approve', '')
             self.grant=self.add(extra='PARENT_DISPATCH_ID: external-review')
             self.assertTrue(self.check()['allowed'])
             # Object unavailability is an evaluation failure, never a permission.

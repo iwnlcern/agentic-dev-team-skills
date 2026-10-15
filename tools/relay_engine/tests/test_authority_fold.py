@@ -12,7 +12,7 @@ class TestAuthorityFold(LedgerFixture):
     def add(self, phase='IMPL', sender='p.planner', target='p.implementer',
             ident=None, extra='', content='DISPATCH IMPL', **kwargs):
         self.number += 1
-        raw = helpers.body(phase, sender, target, ident or f'row-{self.number}', extra, content)
+        raw = helpers.body(phase, sender, target, ident or f'row-{self.number}', extra, '\n'+content)
         return ledger.admit(self.ledger, self.root, parse_draft(raw.decode()), raw,
                             f'sid-{self.number}', clock=lambda: WALL+self.number, **kwargs)
 
@@ -55,10 +55,10 @@ class TestAuthorityFold(LedgerFixture):
                         *('prose'+sep+'DISPATCH IMPL'+sep+'later' for sep in ('\u2028','\x85','\x0c'))):
             with self.subTest(content=content):
                 self.denied('shape-absent',self.add(sender='operator',content=content))
-        grant=self.add(sender='operator',content='~~~\nVERDICT: denied\n~~~\nDISPATCH IMPL')
-        self.assertTrue(self.check(grant)['allowed'])
-        grant=self.add(sender='operator',content='~~~\nFROM: p.implementer\n~~~\nDISPATCH IMPL')
-        self.assertTrue(self.check(grant)['allowed'])
+        grant=self.add(sender='operator',content='~~~\nVERDICT: denied\n~~~\n\nDISPATCH IMPL')
+        self.assertEqual(self.check(grant)['reasons'],['authority.denied','authority.shape-absent'])
+        grant=self.add(sender='operator',content='~~~\nFROM: p.implementer\n~~~\n\nDISPATCH IMPL')
+        self.assertEqual(self.check(grant)['reasons'],['authority.shape-absent'])
 
     def test_M2_pair_grant_cannot_repin_reviewed_artifacts(self):
         self.base(design=True)
@@ -129,7 +129,7 @@ class TestAuthorityFold(LedgerFixture):
                 extra='\n'.join(k+': '+v for k,v in fields if k.startswith('DESIGN_'))
                 self.add('PLAN',ident='external-plan-'+suffix,extra=extra,content='')
                 self.add('PLAN-REVIEW','p.implementer','p.planner','external-review-'+suffix,
-                         'PARENT_DISPATCH_ID: external-plan-'+suffix,'Verdict: approve')
+                         'PARENT_DISPATCH_ID: external-plan-'+suffix+'\nVERDICT: approve', '')
                 return self.add(extra='PARENT_DISPATCH_ID: external-review-'+suffix)
             valid=grant_for(commit,'valid')
             self.assertTrue(self.check(valid)['allowed'])
