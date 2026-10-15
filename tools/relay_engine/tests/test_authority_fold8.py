@@ -40,11 +40,11 @@ class TestAuthorityFold8(TestAuthorityFold5):
 
     def test_control_and_nbsp_verdict_reason_sets(self):
         self.grant_case('MERGE_AUTHORIZATION: approved\x1fdenied', content='', action='merge',
-                        reasons=['authority.denied', 'authority.shape-absent', 'authority.verdict-conflict'])
+                        reasons=['authority.denied', 'authority.shape-absent'])
         self.grant_case('VERDICT: approved\u00a0denied', reasons=['authority.denied'])
         for value in ['approve\u00a0denied', '\u00a0approve']:
             self.review_case(value, expected=['authority.lineage-incomplete'])
-        for value in ['approved\tcomment', 'approved comment']:
+        for value in ['\tapproved\t', ' approved ']:
             self.grant_case('VERDICT: '+value)
             self.review_case(value)
 

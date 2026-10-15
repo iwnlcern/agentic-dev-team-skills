@@ -222,18 +222,9 @@ def _token(text, token):
                for i, line in enumerate(original))
 
 
-def _verdict_words(value):
-    return re.split(r'[ \t]+', value.strip(' \t')) if value.strip(' \t') else []
-
-
-def _positive_value(value):
-    words = _verdict_words(value)
-    if not words:
-        return False
-    first = words[0].rstrip('.,;:!?').lower()
-    return (first in POSITIVE_WORDS or
-            (first == 'merge' and len(words) > 1
-             and words[1].rstrip('.,;:!?').lower() == 'ready'))
+def _positive_value(value, words=POSITIVE_WORDS):
+    value = value.strip(' \t')
+    return value.isascii() and value.lower() in words
 
 
 @_per_check
@@ -254,8 +245,7 @@ def _word(value):
 
 
 def _positive_review(value):
-    words = _verdict_words(value)
-    return bool(words and words[0].rstrip('.,;:!?').lower() in {'approve', 'approved'})
+    return _positive_value(value, {'approve', 'approved'})
 
 
 def _approved(item):
@@ -411,6 +401,17 @@ def _required_artifacts(rows,lineage,seat,reasons):
     for origin in lineage:
         phase = origin.fields.get('PHASE')
         if phase not in {'PLAN','DESIGN'}:continue
+        if not direct:
+            # PHASE/FROM in Evidence are the persisted admission envelope.
+            # Scan before lock, declaration, status and effective-review filters.
+            for candidate in rows:
+                if (candidate.seq > origin.seq and
+                        ((candidate.fields.get('PHASE') == phase
+                          and _same_seat(_sender(candidate), _sender(origin)))
+                         or (candidate.fields.get('PHASE') == phase+'-REVIEW'
+                             and _same_seat(_sender(candidate), seat)))
+                        and _control_refusal(candidate.text)):
+                    reasons.add('authority.lineage-incomplete')
         key = 'PLAN_LOCK_ID' if phase=='PLAN' else 'DESIGN_DOC_ID'
         lock = origin.fields.get(key)
         if not lock:continue
@@ -531,7 +532,8 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
         reasons.add('authority.not-addressee')
     positive, negative = _verdict_polarities(grant.text)
     header_positive = (action == 'merge' and any(
-        rules.merge_authorization_positive(key, value) for key, value in _header(grant).items()))
+        rules.merge_authorization_positive(key, value) and _positive_value(value)
+        for key, value in _header(grant).items()))
     if action == 'merge':
         shape = (grant.fields.get('PHASE') == 'MERGE-GATE'
                  and (_token(grant.text, 'DISPATCH MERGE') or header_positive))

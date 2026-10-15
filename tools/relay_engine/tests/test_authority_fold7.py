@@ -44,15 +44,15 @@ class TestAuthorityFold7(TestAuthorityFold5):
                     self.grant_case(key+': denied', reasons=['authority.denied'], action=action)
         for value in ['.approved', '~~approved~~ denied', '**approved**', '_approved', '&#97;pproved', 'yeſ', 'approved&#10;']:
             with self.subTest(value=value):
-                self.grant_case('MERGE_AUTHORIZATION: '+value, reasons=['authority.denied'] + (['authority.verdict-conflict'] if value in ['yeſ', 'approved&#10;'] else []), action='merge')
+                self.grant_case('MERGE_AUTHORIZATION: '+value, reasons=['authority.denied'], action='merge')
         self.grant_case('VERDICT: `approved`', reasons=['authority.denied'])
-        self.grant_case('MERGE_AUTHORIZATION: approved<x>', reasons=['authority.denied','authority.shape-absent','authority.verdict-conflict'], action='merge')
-        self.grant_case('MERGE_AUTHORIZATION: approved~~', reasons=['authority.denied','authority.verdict-conflict'], action='merge')
+        self.grant_case('MERGE_AUTHORIZATION: approved<x>', reasons=['authority.denied','authority.shape-absent'], action='merge')
+        self.grant_case('MERGE_AUTHORIZATION: approved~~', reasons=['authority.denied'], action='merge')
         self.grant_case('VERDICT: <denied>', reasons=['authority.denied','authority.shape-absent'])
-        self.grant_case('VERDICT: approved <note>', reasons=['authority.shape-absent'])
+        self.grant_case('VERDICT: approved <note>', reasons=['authority.denied','authority.shape-absent'])
         self.grant_case('SUBJECT: compare <tag> values', reasons=['authority.shape-absent'])
         self.grant_case('MERGE_AUTHORIZATION: denied\nVERDICT: approved', reasons=['authority.denied','authority.verdict-conflict'], action='merge')
-        for value in ['approve', 'APPROVED.', 'granted', 'YES', 'true', 'complete', 'merge-ready', 'merge ready']:
+        for value in ['approve', 'APPROVED', 'granted', 'YES', 'true', 'complete', 'merge-ready']:
             self.grant_case('VERDICT: '+value)
 
     def test_body_verdicts_do_not_participate(self):
@@ -84,7 +84,7 @@ class TestAuthorityFold7(TestAuthorityFold5):
         for value in ['yes','granted','true','complete','merge-ready','**approve**','approved~~','yeſ']:
             with self.subTest(value=value):
                 self.review_case(value, expected=['authority.lineage-incomplete'])
-        for value in ['approve','approved','APPROVED.']:
+        for value in ['approve','approved','APPROVED']:
             self.review_case(value)
         self.review_case(extra='SUBJECT: compare <tag> values', expected=['authority.lineage-incomplete'])
         self.review_case(extra='HUMAN_MERGE_AUTHORIZATION: denied', expected=['authority.lineage-incomplete'])
