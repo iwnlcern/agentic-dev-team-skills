@@ -21,7 +21,17 @@ class TestAuthorityFold7(TestAuthorityFold5):
 
     def grant_case(self, extra='', content='TOKEN', reasons=(), action='implement'):
         phase, token = ('IMPL', 'DISPATCH IMPL') if action == 'implement' else ('MERGE-GATE', 'DISPATCH MERGE')
-        grant = self.add(phase, 'operator', extra=extra, content=content.replace('TOKEN', token))
+        sender = 'operator'
+        if action == 'implement':
+            pin = self.artifact('plans', 'P')
+            plan = f'plan-{self.number}'
+            self.add('PLAN', ident=plan, extra=pin, content='')
+            review = f'review-{self.number}'
+            self.add('PLAN-REVIEW', 'p.implementer', 'p.planner', review,
+                     extra='PARENT_DISPATCH_ID: '+plan+'\n'+pin+'\nVERDICT: approve', content='')
+            extra = 'PARENT_DISPATCH_ID: '+review+('\n'+extra if extra else '')
+            sender = 'p.planner'
+        grant = self.add(phase, sender, extra=extra, content=content.replace('TOKEN', token))
         result = self.check(grant, action=action)
         self.assertEqual(result['reasons'], sorted(reasons), result)
         self.assertEqual(result['allowed'], not reasons, result)
@@ -54,12 +64,13 @@ class TestAuthorityFold7(TestAuthorityFold5):
     def test_duplicate_headers_keep_independent_reasons(self):
         # Admission rejects duplicates; imported historical rows may contain them.
         for key, expected in [('VERDICT', ['authority.shape-absent']), ('DISPATCH_ID', ['authority.header-conflict','authority.shape-absent'])]:
-            grant = self.add('MERGE-GATE','operator',extra='VERDICT: approved',content='DISPATCH MERGE')
+            action = 'merge' if key == 'VERDICT' else 'implement'
+            grant = self.grant_case('VERDICT: approved', action=action)
             raw = bytes(self.ledger.execute('SELECT body FROM relays WHERE seq=?',(grant.seq,)).fetchone()[0])
             original = 'VERDICT: approved' if key=='VERDICT' else next(x for x in raw.decode().splitlines() if x.startswith('DISPATCH_ID:'))
             replacement = original+'\n'+('VERDICT: approved' if key=='VERDICT' else 'DISPATCH_ID: different')
             self.ledger.execute('UPDATE relays SET body=? WHERE seq=?',(raw.replace(original.encode(),replacement.encode()),grant.seq))
-            self.assertEqual(self.check(grant, action='merge')['reasons'], expected)
+            self.assertEqual(self.check(grant, action=action)['reasons'], expected)
 
     def review_case(self, verdict='approve', extra='', content='', expected=()):
         pin=self.artifact('plans','P');ident=f'plan-{self.number}'
