@@ -1538,23 +1538,26 @@ def engine_client(plugin_root: str | None):
 def discover_root_like_cli(
     start: str | None, cwd: str, plugin_root: str | None = None
 ) -> str | None:
-    base = (
-        os.path.join(cwd, start) if start and not os.path.isabs(start) else start
-    ) or cwd
-    client = engine_client(plugin_root)
-    if client is not None:
-        try:
-            return client.discover_root(base)
-        except FileNotFoundError:
-            return None
-    current = os.path.realpath(base)
-    while True:
-        if os.path.isdir(os.path.join(current, ".engine")):
-            return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            return None
-        current = parent
+    try:
+        base = (
+            os.path.join(cwd, start) if start and not os.path.isabs(start) else start
+        ) or cwd
+        client = engine_client(plugin_root)
+        if client is not None:
+            try:
+                return client.discover_root(base)
+            except FileNotFoundError:
+                return None
+        current = os.path.realpath(base)
+        while True:
+            if os.path.isdir(os.path.join(current, ".engine")):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                return None
+            current = parent
+    except (OSError, ValueError):
+        return None
 
 
 def seat_from_key(key: str | None) -> str | None:
@@ -1568,10 +1571,13 @@ def seat_from_key(key: str | None) -> str | None:
 
 
 def path_under_root(root: str, rel: str) -> bool:
-    if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+    try:
+        if not rel or os.path.isabs(rel) or ".." in Path(rel).parts:
+            return False
+        target = os.path.realpath(os.path.join(root, rel))
+        return target.startswith(os.path.realpath(root) + os.sep) and os.path.isfile(target)
+    except (OSError, ValueError):
         return False
-    target = os.path.realpath(os.path.join(root, rel))
-    return target.startswith(os.path.realpath(root) + os.sep) and os.path.isfile(target)
 
 
 def call_identity(session: str, payload: dict) -> str | None:
@@ -1761,7 +1767,7 @@ def bind(args) -> int:
         return 0
     try:
         payload = json.load(sys.stdin)
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
         return 0
     if not isinstance(payload, dict):
         return 0
@@ -1772,13 +1778,15 @@ def bind(args) -> int:
         return 0
     tool_input = payload.get("tool_input")
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-    if not isinstance(command, str) or not names_submit_verb(command):
+    if not isinstance(command, str):
+        return 0
+    parsed = parse_submit_command(command)
+    if not parsed.ok and not names_submit_verb(command):
         return 0
     receipts = extract_receipts(payload.get("tool_response"))
     receipts = [r for r in receipts if isinstance(r.get("path"), str)]
     if not receipts:
         return 0
-    parsed = parse_submit_command(command)
     indications = root_indications(command)
     cwd = payload.get("cwd") or os.getcwd()
     if not isinstance(cwd, str):
@@ -1818,7 +1826,7 @@ MODES["bind"] = bind
 def read_payload() -> dict:
     try:
         return json.load(sys.stdin) or {}
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
         return {}
 
 
@@ -2026,6 +2034,11 @@ def tiers_mixed(note: dict) -> bool:
     return len(identities) > 1
 
 
+def printable_text(text: str) -> str:
+    """Render untrusted diagnostic text without terminal or line controls."""
+    return "".join(char if 32 <= ord(char) <= 126 else ascii(char)[1:-1] for char in text)
+
+
 def rebind_line(note: dict, session: str) -> str | None:
     record = note.get("bind_observation")
     if not record and not note.get("binding_degraded") and not note.get("submit_miss"):
@@ -2036,15 +2049,15 @@ def rebind_line(note: dict, session: str) -> str | None:
     if root and len(receipts) == 1 and provenance in ("command", "inferred"):
         prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
         command = shlex.join(["python3", str(Path(__file__).resolve()), "bind", "--manual", "--session", session, "--root", root, "--anchor", receipts[0]])
-        if len(prefix + command) <= 1024 and "\n" not in command and "\r" not in command:
+        if len(prefix + command) <= 1024 and all(32 <= ord(char) <= 126 for char in command):
             return prefix + command
-    prefix = "rebind: incomplete — supply --root <run root> --anchor <receipt path>"
-    seen = " seen=" + json.dumps(receipts, ensure_ascii=True) if receipts else ""
+    # A pasted incomplete diagnostic is a shell comment, never an instruction.
+    prefix = "# rebind: incomplete; supply --root and --anchor"
+    seen = " seen=" + shlex.join([printable_text(value) for value in receipts]) if receipts else ""
     text = prefix + seen
     operands = record.get("command_roots") or []
     if operands:
-        rendered = shlex.join(operands)
-        rendered = "".join(char if char.isprintable() else ascii(char)[1:-1] for char in rendered)
+        rendered = shlex.join([printable_text(value) for value in operands])
         text += " command text=" + rendered
     return text if len(text) <= 1024 else text[:1021] + "..."
 
@@ -2097,7 +2110,7 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
     if ident == "version-mismatch" and not remedy:
         remedy = "remedy: align the relay client and daemon installs before filing; delivery remains available"
     hint = rebind_line(note, store.session)
-    return "\n".join(text for text in (line, remedy, hint) if text)
+    return "\n".join(printable_text(text) for text in (line, remedy, hint) if text)
 
 
 def status(args) -> int:
@@ -2578,7 +2591,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     handler = MODES[args.mode]
-    return handler(args)
+    try:
+        return handler(args)
+    except Exception:
+        # Hooks consume untrusted payloads and must not interrupt their host.
+        # Other modes retain their ordinary error reporting.
+        if args.mode in ("bind", "drain", "session-start"):
+            return 0
+        raise
 
 
 if __name__ == "__main__":

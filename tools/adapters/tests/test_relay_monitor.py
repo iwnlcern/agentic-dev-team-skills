@@ -1697,6 +1697,98 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
 
 
 class BindTests(TmpEnv):
+    def _advance_stamps(self):
+        # A stray save must change persisted bytes even within one real second.
+        import itertools
+        ticks = itertools.count()
+        patcher = mock.patch.object(self.rm, "now_stamp", side_effect=lambda: f"test-stamp-{next(ticks):08d}")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+    def test_fd_duplication_before_submit_verb_binds(self):
+        command = f"tools/relay 2>&1 submit d.md --root {self.root} --key {self.key}"
+        self.assertTrue(self.rm.parse_submit_command(command).ok)
+        rc, out = self._hook_output(self.payload(command, self.receipt))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
+        self.assertEqual(self.store.load()["binding_gen"], 1)
+
+    def test_hook_context_escapes_non_ascii_and_control_receipts(self):
+        for char in ("\v", "\f", "\x85", "\u2028", "\x1b", "é"):
+            with self.subTest(char=repr(char)):
+                receipt = json.dumps(dict(path=f"lane/a{char}b.md", render_state="rendered", duplicate=False))
+                rc, out = self._hook_output(self.payload(f"tools/relay submit d.md --root {self.root}", receipt))
+                self.assertEqual(rc, 0)
+                hint = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+                self.assertEqual(len(hint.splitlines()), 1)
+                self.assertTrue(all(32 <= ord(c) <= 126 for c in hint))
+                self.assertNotIn("bind --manual", hint)
+                self.assertIn(ascii(char)[1:-1], hint)
+
+    def test_hook_context_escapes_non_ascii_and_control_roots(self):
+        import shlex
+        for char in ("\v", "\f", "\x85", "\u2028", "\x1b", "é"):
+            with self.subTest(char=repr(char)):
+                root = self.base / f"root{char}name"
+                (root / ".engine").mkdir(parents=True)
+                rc, out = self._hook_output(self.payload(f"tools/relay submit d.md --root {shlex.quote(str(root))}", self.receipt))
+                self.assertEqual(rc, 0)
+                self.assertEqual(self.store.load()["bind_observation"]["root"], str(root))
+                hint = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+                self.assertEqual(len(hint.splitlines()), 1)
+                self.assertTrue(all(32 <= ord(c) <= 126 for c in hint))
+                self.assertNotIn("bind --manual", hint)
+                self.assertIn(ascii(char)[1:-1], hint)
+
+    def _assert_hook_input_is_total(self, payload, mode="bind"):
+        result = subprocess.run([sys.executable, str(SCRIPT), mode, "--host", "codex"],
+                                input=payload, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        if result.stdout.strip():
+            self.assertIsInstance(json.loads(result.stdout), dict)
+
+    def test_hook_nul_receipt_exits_zero(self):
+        receipt = json.dumps(dict(path="lane/nu\0l.md", render_state="rendered", duplicate=False))
+        self._assert_hook_input_is_total(self.payload(f"tools/relay submit d.md --root {self.root}", receipt))
+
+    def test_hook_nul_root_and_cwd_exit_zero(self):
+        for field in ("root", "cwd"):
+            with self.subTest(field=field):
+                payload = json.loads(self.payload("tools/relay submit d.md", self.receipt))
+                if field == "root":
+                    payload["tool_input"]["command"] += " --root '/nu\0l'"
+                else:
+                    payload["cwd"] = "/nu\0l"
+                self._assert_hook_input_is_total(json.dumps(payload))
+
+    def test_hook_overlong_root_and_cwd_exit_zero(self):
+        for field in ("root", "cwd"):
+            with self.subTest(field=field):
+                payload = json.loads(self.payload("tools/relay submit d.md", self.receipt))
+                value = "/" + "x" * 300
+                if field == "root":
+                    payload["tool_input"]["command"] += " --root " + value
+                else:
+                    payload["cwd"] = value
+                self._assert_hook_input_is_total(json.dumps(payload))
+
+    def test_hook_deep_json_exits_zero(self):
+        for mode in ("bind", "drain", "session-start"):
+            with self.subTest(mode=mode):
+                self._assert_hook_input_is_total("[" * 2000 + "0" + "]" * 2000, mode)
+
+    def test_hook_deep_receipt_json_exits_zero(self):
+        response = '{"path":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+        self._assert_hook_input_is_total(self.payload("tools/relay submit d.md", response))
+
+    def test_quoted_equals_root_option_is_not_an_indication(self):
+        command = "tools/relay submit d.md '--root=/B' | cat"
+        self.assertEqual(self.rm.root_indications(command), ([], False))
+        self.assertEqual(self._indicated_miss(command)["root_provenance"], "inferred")
+
     def test_submit_ending_in_fd_duplication_parses(self):
         for suffix in ("2>&1", ">&2", "2>&-", "1>&-"):
             with self.subTest(suffix=suffix):
@@ -1938,6 +2030,7 @@ class BindTests(TmpEnv):
                     )
 
     def test_terminal_combined_and_launcher_data_stay_silent(self):
+        self._advance_stamps()
         commands = (
             "python3 -Bcpass tools/relay submit d.md",
             "python3 -Bmhttp.server tools/relay submit d.md",
@@ -2006,6 +2099,7 @@ class BindTests(TmpEnv):
                     self.assertIsNone(note["bind_observation"])
 
     def test_unrelated_commands_stay_silent(self):
+        self._advance_stamps()
         for command in (
             "git status",
             "tools/relay show d.md",
@@ -2342,6 +2436,7 @@ class BindTests(TmpEnv):
         self.assertEqual(n["binding_gen"], 1)
 
     def test_plain_submit_binds_and_initializes_progress_once(self):
+        self._advance_stamps()
         cmd = f"tools/relay submit d.md --key {self.key} --root {self.root}"
         self.assertEqual(self.run_bind(self.payload(cmd, self.receipt)), 0)
         n = self.store.load()
@@ -2581,6 +2676,7 @@ class BindTests(TmpEnv):
         )  # prior binding preserved
 
     def test_negatives_preserve_prior_binding(self):
+        self._advance_stamps()
         self.run_bind(
             self.payload(
                 f"tools/relay submit d.md --key {self.key} --root {self.root}",
@@ -2665,6 +2761,7 @@ class BindTests(TmpEnv):
                     self.assertEqual(n["bind_observation"]["reason"], reason)
 
     def test_non_submit_shell_commands_preserve_note_bytes(self):
+        self._advance_stamps()
         self.run_bind(
             self.payload(
                 f"tools/relay submit d.md --key {self.key} --root {self.root}",
@@ -2693,6 +2790,7 @@ class BindTests(TmpEnv):
                 self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_heredoc_data_preserves_binding_and_pending_stop_delivery(self):
+        self._advance_stamps()
         commands = (
             "cat <<'EOF'\ntools/relay submit draft.md\nEOF\n",
             "cat <<EOF\ntools/relay submit draft.md\nEOF\n",
@@ -2881,6 +2979,7 @@ class BindTests(TmpEnv):
         return value
 
     def test_help_piped_to_head_leaves_armed_note_unchanged(self):
+        self._advance_stamps()
         self._bound_following()
         before = self.store.path.read_bytes()
         self.assertEqual(self.run_bind(self.payload("tools/relay submit --help | head")), 0)
@@ -2888,6 +2987,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
 
     def test_refused_submit_records_nothing(self):
+        self._advance_stamps()
         for bound in (False, True):
             if bound:
                 self.run_bind(self._submit())
@@ -2988,9 +3088,9 @@ class BindTests(TmpEnv):
         self.assertEqual(record["command_roots"], [f'"{candidate}"'])
 
     def test_multiple_distinct_root_operands_withhold_inference(self):
-        record = self._indicated_miss(f"tools/relay submit d.md --root {self.root} --root /B | cat")
+        record = self._indicated_miss(f"tools/relay submit d.md --root {self.root} --root {self.root}/. | cat")
         self.assertEqual(record["root_provenance"], "none")
-        self.assertEqual(record["command_roots"], [str(self.root), "/B"])
+        self.assertEqual(record["command_roots"], [str(self.root), str(self.root) + "/."])
 
     def test_directory_word_withholds_inference(self):
         for word in ("cd", "pushd"):
@@ -3057,6 +3157,7 @@ class BindTests(TmpEnv):
         self.assertEqual(after["progress"], before["progress"])
 
     def test_delayed_duplicate_hook_leaves_newer_observation(self):
+        self._advance_stamps()
         payload = self._submit("file")
         self.run_bind(payload)
         self.run_bind(self._miss("miss"))
@@ -3065,6 +3166,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_repeat_r_then_s_then_delayed_repeat_keeps_s(self):
+        self._advance_stamps()
         write_index(self.index, row(1) + row(2))
         (self.root / "lane/r2.md").write_text("r2\n")
         self.run_bind(self._submit("initial"))
@@ -3090,6 +3192,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.store.load()["binding_gen"], 2)
 
     def test_repeat_sequence_across_root_change_keeps_new_binding(self):
+        self._advance_stamps()
         self.run_bind(self._submit("initial"))
         repeat = self._submit("repeat")
         self.run_bind(repeat)
@@ -3115,6 +3218,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.store.load(), expected)
 
     def test_same_anchor_without_identifier_is_byte_identical(self):
+        self._advance_stamps()
         self.run_bind(self._submit("initial"))
         self.run_bind(self._miss("observation"))
         before = self.store.path.read_bytes()
@@ -3122,6 +3226,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_identified_help_and_refused_submit_not_remembered(self):
+        self._advance_stamps()
         self.run_bind(self._submit("initial"))
         before = self.store.path.read_bytes()
         for command, response in (("tools/relay submit --help", "usage"),
@@ -3130,6 +3235,7 @@ class BindTests(TmpEnv):
             self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_eight_unrelated_identified_calls_do_not_evict(self):
+        self._advance_stamps()
         original = self._submit("initial")
         self.run_bind(original)
         before = self.store.path.read_bytes()
@@ -3140,6 +3246,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.store.path.read_bytes(), before)
 
     def test_r_then_s_then_delayed_r_keeps_s(self):
+        self._advance_stamps()
         write_index(self.index, row(1) + row(2))
         (self.root / "lane/r2.md").write_text("r2\n")
         first = self._submit("r")
@@ -3159,6 +3266,7 @@ class BindTests(TmpEnv):
         self.assertEqual(self.store.load()["binding_gen"], 3)
 
     def test_separate_call_same_display_records_again(self):
+        self._advance_stamps()
         self.run_bind(self._submit("file"))
         first = self._miss("first")
         self.run_bind(first)
@@ -3204,6 +3312,7 @@ class BindTests(TmpEnv):
 
     def test_no_call_id_only_consecutive_duplicates_collapse(self):
         # Deliberately exercise the weaker guarantee of hosts without a call id.
+        self._advance_stamps()
         self.run_bind(self._submit())
         before = self.store.path.read_bytes()
         self.run_bind(self._submit())
@@ -3242,6 +3351,34 @@ class BindTests(TmpEnv):
 
 
 class DrainTests(TmpEnv):
+
+    def test_recovered_empty_scan_restores_phase_with_observation(self):
+        for path in ("shared-follower", "codex-drain"):
+            with self.subTest(path=path):
+                self.store.path.unlink(missing_ok=True)
+                self.bind_and_rows(1)
+                leader = self.rm.leader_record()
+                lock = self.rm.LeaderLock("sess")
+                if path == "shared-follower":
+                    self.assertTrue(lock.acquire(blocking=False))
+                    lock.stamp(leader["instance"])
+                observation = {"reason": "submit-near-miss", "receipts": ["lane/seen.md"], "root_provenance": "none"}
+                self.store.update(lambda n: (n.update(phase="unavailable", reason="index-missing", leader=leader if path == "shared-follower" else None, bind_observation=observation), n["progress"].update({str(self.root): {"file": "lane/r1.md", "position": 1}})))
+                try:
+                    if path == "shared-follower":
+                        sink = self.rm.ByteSink()
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic()+2, leader_instance=leader["instance"])
+                        self.assertEqual(result.emitted, 0)
+                        self.assertEqual(bytes(sink.buf), b"")
+                    else:
+                        rc, out = self.run_drain(self.codex_stop())
+                        self.assertEqual(rc, 0)
+                        self.assertEqual(json.loads(out), {})
+                    self.assertEqual(self.store.load()["phase"], "following")
+                    self.assertEqual(self.store.load()["bind_observation"], observation)
+                finally:
+                    lock.release()
+
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
@@ -4000,7 +4137,7 @@ class SessionStartTests(TmpEnv):
         ctx = self.run_ss(self.FRESH_CODEX, {"ADT_HOST": "codex"})
         self.assertIn("binding=hook", ctx.splitlines()[0])
         self.assertIn("last-bind=unsupported-shell", ctx.splitlines()[0])
-        self.assertTrue(ctx.splitlines()[1].startswith("rebind: incomplete"))
+        self.assertTrue(ctx.splitlines()[1].startswith("# rebind: incomplete"))
 
     def test_fresh_codex_arms_under_plugin_route_env_and_under_launcher(self):
         ctx = self.run_ss(
@@ -4086,13 +4223,43 @@ class SessionStartTests(TmpEnv):
 
 
 class StatusTests(TmpEnv):
+
+    def test_incomplete_hint_is_inert_in_shell(self):
+        marker = self.base / "must-not-exist"
+        for value in (f"lane/`touch {marker}`.md", f"lane/$(touch {marker}).md", "lane/a\nb\x1b.md"):
+            with self.subTest(value=value):
+                self._record(provenance="none", receipts=[value])
+                hint = self.rm.rebind_line(self.store.load(), "sess")
+                parsed = subprocess.run(["sh", "-n"], input=hint, text=True, capture_output=True)
+                self.assertEqual(parsed.returncode, 0, parsed.stderr)
+                ran = subprocess.run(["sh", "-c", hint], cwd=self.base, text=True, capture_output=True)
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertFalse(marker.exists())
+                self.assertEqual(ran.stdout, "")
+                self.assertTrue(hint.startswith("#"))
+                self.assertEqual(len(hint.splitlines()), 1)
+
+    def test_status_escapes_non_ascii_and_control_arguments(self):
+        for char in ("\v", "\f", "\x85", "\u2028", "\x1b", "é"):
+            for provenance, field in ((p, f) for p in ("command", "inferred") for f in ("root", "receipt")):
+                with self.subTest(char=repr(char), provenance=provenance):
+                    root = f"/a{char}b" if field == "root" else "/a/b"
+                    receipt = f"lane/a{char}b.md" if field == "receipt" else "lane/r1.md"
+                    self._record(provenance=provenance, root=root, receipts=[receipt])
+                    self.store.update(lambda n: (n.update(root=root), n["progress"].update({root: {"file": receipt, "position": 1}})))
+                    status = self._status()
+                    self.assertEqual(len(status.splitlines()), 2)
+                    self.assertTrue(all(c == "\n" or 32 <= ord(c) <= 126 for c in status))
+                    self.assertNotIn("bind --manual", status)
+                    self.assertIn(ascii(char)[1:-1], status)
+
     def setUp(self):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
 
     def test_record_without_command_roots_renders_hint(self):
         self._record(provenance="none")
-        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind: incomplete"))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
 
     def test_incomplete_hint_shows_operands_as_command_text_on_one_line(self):
         self._record(provenance="none")
@@ -4187,7 +4354,7 @@ class StatusTests(TmpEnv):
         self.store.update(lambda n: n.update(anchor="lane/old-anchor.md"))
         self._record(provenance="none", receipts=["lane/seen.md"])
         line = self.rm.rebind_line(self.store.load(), "sess")
-        self.assertTrue(line.startswith("rebind: incomplete — supply "))
+        self.assertTrue(line.startswith("# rebind: incomplete; supply "))
         self.assertNotIn("lane/old-anchor.md", line)
         self.assertNotIn("--manual", line)
         self.assertIn("lane/seen.md", line)

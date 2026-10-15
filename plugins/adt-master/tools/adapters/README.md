@@ -181,9 +181,9 @@ A missing cursor and fallback anchor produce `unavailable: anchor-not-found`; a 
 The `binding=` cell reports only the binding source.
 A new near-miss observation supplies `miss=submit-near-miss`; another new reason supplies `last-bind=<reason>`.
 Legacy miss and bind-failure keys are displayed only, with the new record taking precedence in its cell; a legacy value in the other cell can coexist.
-An identity mismatch adds `identity=mismatch` and a remedy on every reading, preserving the readiness word and delivery while filing remains subject to the engine's identity check.
+An identity mismatch adds `identity=mismatch` and a remedy on every reading, preserving the readiness word and delivery; the seat must apply the remedy before submitting.
 
-A command containing adjacent unquoted relay and submit words outside a heredoc body, with a receipt in its response, records an observation when it cannot bind.
+A command that parses as a submit or contains adjacent unquoted relay and submit words outside a heredoc body, with a receipt in its response, records an observation when it cannot bind.
 No receipt means no observation or binding change, including help, refused submits and redirected output.
 A displayed receipt or an unexecuted branch can therefore produce a suspicion even when nothing was filed; this does not bind the seat.
 The hook emits a bounded `PostToolUse` additional-context hint with exit 0 when it records a new observation.
@@ -192,7 +192,7 @@ The three hint forms are:
 ```text
 rebind: python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
 rebind (root inferred, check it): python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
-rebind: incomplete — supply --root <run root> --anchor <receipt path> seen=[...]
+# rebind: incomplete; supply --root and --anchor seen=...
 ```
 
 The complete form uses the root parsed from the command and shell-quotes every argument as needed.
@@ -241,3 +241,7 @@ Operator notifications on macOS: run `python3 <plugin-root>/tools/adapters/relay
 ```
 
 The stdout log is the durable record of notified rows; the notification itself is best-effort.
+
+Incomplete hints are shell comments with shell-quoted, escaped receipt and operand text, so pasting the diagnostic cannot execute it.
+Complete and inferred commands are emitted only for printable ASCII arguments; other text falls back to an escaped incomplete hint.
+Status fields also escape terminal controls and non-ASCII characters.
