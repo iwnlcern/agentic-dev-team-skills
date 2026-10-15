@@ -1701,6 +1701,33 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
 
 
 class BindTests(TmpEnv):
+    def test_rebind_checks_observation_root_instead_of_bound_root(self):
+        import shlex
+        observed = self.other_root()
+        self.store.update(lambda note: note.update(root=str(self.root)))
+        for provenance in ("command", "inferred"):
+            for row_in_observation in (False, True):
+                with self.subTest(provenance=provenance, row_in_observation=row_in_observation):
+                    write_index(self.index, "" if row_in_observation else row(1))
+                    write_index(observed / "INDEX.md", row(1) if row_in_observation else "")
+                    self.store.update(lambda note: note.update(bind_observation={"root": str(observed), "root_provenance": provenance, "receipts": ["lane/r1.md"]}))
+                    line = self.rm.rebind_line(self.store.load(), "sess")
+                    if row_in_observation:
+                        prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
+                        self.assertTrue(line.startswith(prefix))
+                        words = shlex.split(line.removeprefix(prefix))
+                        self.assertEqual(words[words.index("--root") + 1], str(observed))
+                        self.assertEqual(words[words.index("--anchor") + 1], "lane/r1.md")
+                    else:
+                        self.assertTrue(line.startswith("# rebind: incomplete"))
+                        self.assertNotIn("bind --manual", line)
+                    self.assertEqual(self.store.load()["root"], str(self.root))
+
+    def test_lookup_rejects_nul_root_and_requires_exact_file_cell(self):
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root) + "\0", "lane/r1.md"), "unreadable")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "match")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/./r1.md"), "no-match")
+
     def test_nonrow_receipt_under_command_provenance_gets_incomplete_hint(self):
         (self.root / "lane/missing.md").write_text("not filed")
         rc, output = self._hook_output(self._submit(anchor="lane/missing.md"))
@@ -1775,21 +1802,26 @@ class BindTests(TmpEnv):
 
     def test_manual_bind_unexpected_error_is_not_swallowed(self):
         bootstrap = """import importlib.util, sys
+from pathlib import Path
 spec = importlib.util.spec_from_file_location('fault_adapter', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 def fail(*args, **kwargs):
+    Path(sys.argv[2]).write_text('bind fault reached')
     raise RuntimeError('injected bind fault')
 m.bind_from_receipt = fail
-raise SystemExit(m.main(sys.argv[2:]))
+raise SystemExit(m.main(sys.argv[3:]))
 """
         for manual in (False, True):
             with self.subTest(manual=manual):
+                marker = self.base / ("manual-fault" if manual else "hook-fault")
+                self.assertFalse(marker.exists())
                 args = ["bind", "--host", "codex"]
                 if manual:
                     args += ["--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"]
-                result = subprocess.run([sys.executable, "-c", bootstrap, str(SCRIPT), *args], input=self._submit(), capture_output=True, text=True, timeout=10)
+                result = subprocess.run([sys.executable, "-c", bootstrap, str(SCRIPT), str(marker), *args], input=self._submit(), capture_output=True, text=True, timeout=10)
+                self.assertEqual(marker.read_text(), "bind fault reached")
                 self.assertEqual(result.stdout, "")
                 if manual:
                     self.assertNotEqual(result.returncode, 0)
