@@ -58,7 +58,7 @@ class TestAuthorityFold(LedgerFixture):
         grant=self.add(sender='operator',content='~~~\nVERDICT: denied\n~~~\nDISPATCH IMPL')
         self.assertTrue(self.check(grant)['allowed'])
         grant=self.add(sender='operator',content='~~~\nFROM: p.implementer\n~~~\nDISPATCH IMPL')
-        self.denied('header-conflict',grant)
+        self.assertTrue(self.check(grant)['allowed'])
 
     def test_M2_pair_grant_cannot_repin_reviewed_artifacts(self):
         self.base(design=True)
@@ -112,7 +112,12 @@ class TestAuthorityFold(LedgerFixture):
         for parent in ('none','old'):
             with self.subTest(parent=parent):
                 grant=self.add('MERGE-GATE','operator',extra='PARENT_DISPATCH_ID: '+parent,content='DISPATCH MERGE')
-                self.assertTrue(self.check(grant,action='merge')['allowed'])
+                if parent == 'old':
+                    self.assertEqual(self.check(grant,action='merge')['reasons'],['authority.artifact-changed'])
+                    self.files['old'].write_bytes(b'original')
+                    self.assertTrue(self.check(grant,action='merge')['allowed'])
+                else:
+                    self.assertTrue(self.check(grant,action='merge')['allowed'])
 
     def test_M4_changed_cross_root_bytes_deny_with_unchanged_control(self):
         import xrootfixgen

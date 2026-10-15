@@ -91,7 +91,7 @@ def _occurrences(text, key):
 def _conflict(item):
     return item.header_conflict or any(
         len(set(_occurrences(item.text, key))) > 1
-        or _occurrences(item.text, key) != rules.h27_occurrences(item.text, key)
+        or _occurrences(item.text, key) != rules.h27_occurrences(rules.a5_sanitized_text(item.text), key)
         for key in CRITICAL)
 
 
@@ -101,8 +101,27 @@ def _sender(item):
 
 
 def _operational_lines(text):
-    return [re.sub(r'`[^`]*`', '', line)
-            for line in rules.a5_split_lines(rules.a5_sanitized_text(text))]
+    # Mask equal-length CommonMark code spans without creating a bare token
+    # from the text on either side, or splitting Unicode separators into lines.
+    clean = rules.a5_sanitized_text(text)
+    paragraphs = re.split(r'(\n[ \t]*\n)', clean)
+    for index in range(0, len(paragraphs), 2):
+        part = paragraphs[index]
+        runs = list(re.finditer(r'`+', part))
+        chars = list(part)
+        i = 0
+        while i < len(runs):
+            close = next((j for j in range(i + 1, len(runs))
+                          if len(runs[j][0]) == len(runs[i][0])), None)
+            if close is None:
+                i += 1
+                continue
+            for offset in range(runs[i].start(), runs[close].end()):
+                if chars[offset] not in '\r\n':
+                    chars[offset] = '\x00'
+            i = close + 1
+        paragraphs[index] = ''.join(chars)
+    return rules.a5_split_lines(''.join(paragraphs))
 
 
 def _token(text, token):
@@ -154,9 +173,21 @@ def _lineage(rows, grant, seat, action, reasons):
         reasons.add('authority.issuer-not-permitted')
         return lineage
     if direct:
-        # A direct grant supplies its own authority, independent of ancestors.
+        # Declared ancestors supply artifact evidence, not a permission gate.
+        item = grant
+        while (parent_id := item.fields.get('PARENT_DISPATCH_ID')):
+            if rules.STRUCTURED_ABSENT_RE.match(parent_id):
+                break
+            parent = max((row for row in rows if row.seq < item.seq
+                          and row.fields.get('DISPATCH_ID') == parent_id),
+                         key=lambda row: row.seq, default=None)
+            if parent is None:
+                break
+            lineage.append(parent)
+            item = parent
         return lineage
-    if 'deviation-present' in _occurrences(grant.text, 'SCOPE_DIFF_RESULT'):
+    if any(_word(value.lower()) != 'all-in'
+           for value in _occurrences(grant.text, 'SCOPE_DIFF_RESULT')):
         reasons.add('authority.issuer-not-permitted')
     review = _parent(rows, grant, 'PLAN-REVIEW', seat)
     if review is None:
@@ -193,7 +224,7 @@ def _declarations(item, reasons):
         digests, locators = fields[digest], fields[locator]
         if digest == 'DESIGN_SHA256' and rules.xroot_design_engaged(item.text):
             continue  # The pinned source path is checked by _external_evidence.
-        if not digests and not locators:continue
+        if not digests:continue
         if (len(set(digests)) != 1 or len(set(locators)) != 1
                 or rules.A5_SHA256_RE.fullmatch(digests[0]) is None
                 or not rules.a5_stem_is_bare(locators[0])):
@@ -230,10 +261,6 @@ def _required_artifacts(rows,lineage,seat,reasons):
     base_lineage = lineage if direct else lineage[1:]
     for row in sorted(base_lineage,key=lambda row:row.seq):
         required.update(_declarations(row,reasons))
-    if not direct:
-        for locator, digest in _declarations(grant, reasons).items():
-            if required.get(locator) != digest:
-                reasons.add('authority.artifact-changed')
     base = dict(required)
     for origin in lineage:
         phase = origin.fields.get('PHASE')
@@ -266,6 +293,10 @@ def _required_artifacts(rows,lineage,seat,reasons):
             if (effective is not None and _approved(effective) and not effective.superseded
                     and not effective.engine_authored and not _conflict(effective)):
                 required.update(amendments)
+    if not direct and 'authority.lineage-incomplete' not in reasons:
+        for locator, digest in _declarations(grant, reasons).items():
+            if required.get(locator) != digest:
+                reasons.add('authority.artifact-changed')
     return required
 
 
@@ -355,9 +386,10 @@ def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     lineage=_lineage(rows,grant,seat,action,reasons)
     for row in lineage:
         if _conflict(row):reasons.add('authority.header-conflict')
-        if row.superseded:reasons.add('authority.superseded')
-        if cycles.state(ledger,row.fields.get('DISPATCH_ID',''))=='closed':
-            reasons.add('authority.cycle-closed')
+        if row is grant or not rules.from_is_direct_authority(grant.fields):
+            if row.superseded:reasons.add('authority.superseded')
+            if cycles.state(ledger,row.fields.get('DISPATCH_ID',''))=='closed':
+                reasons.add('authority.cycle-closed')
     required=_required_artifacts(rows,lineage,seat,reasons)
     root_path=Path(root.path if isinstance(root,Root) else root)
     if not root_path.is_dir() or ledger.execute("SELECT value FROM meta WHERE key='run_id'").fetchone() is None:

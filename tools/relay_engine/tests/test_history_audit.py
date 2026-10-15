@@ -1,5 +1,5 @@
-from relay_engine.tests.test_judgment_store import base_module
 """Managed sweeps report integrity; historical judgments are explicit audits."""
+from relay_engine.tests.test_judgment_store import base_module
 import hashlib
 import json
 import os
@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import unittest
 
-from relay_engine import client, daemon, rules
+from relay_engine import client, daemon, rules, strings
 from relay_engine.ledger import open_ledger, record_judgment
 from relay_engine.rules import Finding
 from relay_engine.tests.capture_order_baseline import collect, snapshot
@@ -37,13 +37,26 @@ class TestHistoryAudit(unittest.TestCase):
         self.assertTrue(any('DISPATCH IMPL parent' in e for e in strict.errors))
 
     def test_history_audit_lists_exactly_the_base_findings(self):
-        baseline=json.loads((FIXTURE/'base-cbc8f07.json').read_text())
+        baseline=base_module('rules').lint_relay_root(
+            self.root,engine_root=True,record_context=self.context,context_mode='daemon')
         result=self.lint(history_audit=True)
         self.assertEqual(result.errors,[])
-        expected=sorted(baseline['errors']+baseline['warnings'])
+        summary=strings.render('engine-root-sweep-summary',count=len(self.context['entries']),mode='daemon')
+        self.assertEqual(baseline.warnings.count(summary),1)
+        self.assertIn(summary,result.warnings)
+        expected=sorted(baseline.errors+[w for w in baseline.warnings if w != summary])
         actual=sorted(w.removeprefix('history-audit: ') for w in result.warnings if w.startswith('history-audit: '))
         self.assertEqual(actual,expected)
         self.assertTrue(actual)
+
+    def test_history_oracle_tracks_expanded_managed_population(self):
+        source=next(self.root.rglob('IMPL-*.md'))
+        extra=source.with_name('IMPL-pair-planner-20260821-120002.md')
+        extra.write_bytes(source.read_bytes())
+        self.context['entries'].append({'path':str(extra.relative_to(self.root)),
+            'body_sha256':hashlib.sha256(extra.read_bytes()).hexdigest(),
+            'origin':'hand','judgment':'none','finding_count':0})
+        self.test_history_audit_lists_exactly_the_base_findings()
 
     def test_suppression_uses_subject_not_message_text(self):
         for p in self.root.rglob('*.md'):p.unlink()

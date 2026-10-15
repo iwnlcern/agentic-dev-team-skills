@@ -17,7 +17,10 @@ BASE = 'cbc8f071cd593af4c48994ec30b0775b3c919ad6'
 
 
 def base_module(name):
-    source = subprocess.check_output(['git', 'show', BASE + ':tools/relay_engine/' + name + '.py'], text=True)
+    try:
+        source = subprocess.check_output(['git', 'show', BASE + ':tools/relay_engine/' + name + '.py'], text=True)
+    except subprocess.CalledProcessError as exc:
+        raise AssertionError('base oracle requires commit ' + BASE + ' in repository history') from exc
     module = types.ModuleType('v297_test_base_' + name)
     module.__file__ = str(Path(ledger.__file__).with_name(name + '.py'))
     sys.modules[module.__name__] = module

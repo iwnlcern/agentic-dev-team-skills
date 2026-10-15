@@ -1,5 +1,5 @@
-from relay_engine.tests.test_judgment_store import base_module
 """Structural findings retain identity independently of their display text."""
+from relay_engine.tests.test_judgment_store import base_module
 import ast
 from collections import Counter
 from dataclasses import replace
