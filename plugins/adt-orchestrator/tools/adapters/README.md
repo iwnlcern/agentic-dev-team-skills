@@ -192,7 +192,7 @@ The three hint forms are:
 ```text
 rebind: python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
 rebind (root inferred, check it): python3 <adapter-path> bind --manual --session <session> --root <root> --anchor <receipt-path>
-# rebind: incomplete; supply --root and --anchor seen=...
+# rebind: incomplete, supply --root and --anchor seen=...
 ```
 
 The complete form uses the root parsed from the command and shell-quotes every argument as needed.
@@ -202,6 +202,7 @@ The index read is synchronous and has no timeout.
 The incomplete form is not runnable and never substitutes the existing binding anchor for the observed receipt.
 When lexical root indications contradict inference, the incomplete hint shows their bounded, shell-quoted operand spellings as command text; this optional stored text never drives binding or delivery.
 Hints are at most 1,024 characters; an oversized or multiline command uses the incomplete form.
+An oversized incomplete hint drops whole quoted values from the end and appends `dropped=N`, the number removed, so truncation never leaves an open quote.
 A manual bind clears observations even at the current anchor, without advancing the generation there; it preserves existing progress for the same seat and root.
 A hook reporting the current seat, root and anchor with progress already present is a no-op and clears nothing.
 A changed binding clears earlier observations inside its transaction; a later observation survives.

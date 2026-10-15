@@ -1854,6 +1854,67 @@ raise SystemExit(m.main(sys.argv[3:]))
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.splitlines(), words)
 
+    def _assert_incomplete_in_interactive_shells(self, hint):
+        import shlex
+        # Sentinel executables cover all fixed words, including an old separator
+        # mutant and the dropped-value marker, without defining a hash command.
+        sentinels = self.base / "hint-sentinels"
+        sentinels.mkdir(exist_ok=True)
+        names = ["rebind:", "incomplete", "incomplete,", "supply", "--root",
+                 "and", "--anchor", "seen=", "command", "text="]
+        names += [word for word in shlex.split(hint) if word.startswith("dropped=")]
+        for name in names:
+            executable = sentinels / name
+            executable.write_text("#!/bin/sh\nprintf 'FIXED_WORD_EXECUTED\\n'\n")
+            executable.chmod(0o755)
+        modes = [(["zsh", "-f", "-i"], "unsetopt interactivecomments"),
+                 (["zsh", "-f", "-i"], "setopt interactivecomments"),
+                 (["bash", "--noprofile", "--norc", "-i"], "shopt -u interactive_comments"),
+                 (["bash", "--noprofile", "--norc", "-i"], "shopt -s interactive_comments"),
+                 (["sh"], "")]
+        for shell, option in modes:
+            with self.subTest(shell=shell, option=option, hint=hint):
+                script = option + "\nPATH=" + shlex.quote(str(sentinels)) + ":$PATH\n"
+                script += hint + "\nprintf 'AFTER_HINT\\n'\nexit\n"
+                result = subprocess.run(shell, input=script, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.stdout, "AFTER_HINT\n", result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_incomplete_hint_fixed_words_are_inert_with_comments_disabled(self):
+        marker = self.base / "incomplete-hostile-marker"
+        cases = [(["lane/r1.md"], []),
+                 ([f"$(touch {marker})", f"`touch {marker}`", f"a'; touch {marker}; '"],
+                  [f"$(touch {marker})", "a|b&c;d<e>f(g)\nnext"])]
+        for receipts, operands in cases:
+            hint = self.rm.rebind_line({"bind_observation": dict(
+                receipts=receipts, command_roots=operands, root_provenance="none")}, "sess")
+            self._assert_incomplete_in_interactive_shells(hint)
+            self.assertFalse(marker.exists())
+            self.assertNotIn("\n", hint)
+
+    def test_incomplete_hint_truncation_keeps_complete_quoted_values(self):
+        import shlex
+        prefix = "# rebind: incomplete, supply --root and --anchor seen="
+        # A quoted value exactly fills the bound; the next value forces a cut.
+        value = "a b" + "x" * (1024 - len(prefix) - 2 - 3)
+        exact = self.rm.rebind_line({"bind_observation": dict(receipts=[value])}, "sess")
+        self.assertEqual(len(exact), 1024)
+        self.assertEqual(shlex.split(exact)[-1], "seen=" + value)
+        self._assert_incomplete_in_interactive_shells(exact)
+        for receipts, operands in [([value, "last"], []),
+                                    (["lane/r1.md", value], ["root with spaces"]),
+                                    (["lane/r1.md"], [value, "last"])]:
+            with self.subTest(receipts=receipts, operands=operands):
+                hint = self.rm.rebind_line({"bind_observation": dict(
+                    receipts=receipts, command_roots=operands)}, "sess")
+                self.assertLessEqual(len(hint), 1024)
+                try:
+                    words = shlex.split(hint)
+                except ValueError as error:
+                    self.fail(f"truncation left an open quote: {error}")
+                self.assertRegex(words[-1], r"^dropped=[1-9][0-9]*$")
+                self._assert_incomplete_in_interactive_shells(hint)
+
     def test_lookup_reports_match_no_match_and_unreadable(self):
         self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "match")
         self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/missing.md"), "no-match")
@@ -4613,7 +4674,7 @@ class StatusTests(TmpEnv):
         self.store.update(lambda n: n.update(anchor="lane/old-anchor.md"))
         self._record(provenance="none", receipts=["lane/seen.md"])
         line = self.rm.rebind_line(self.store.load(), "sess")
-        self.assertTrue(line.startswith("# rebind: incomplete; supply "))
+        self.assertTrue(line.startswith("# rebind: incomplete, supply "))
         self.assertNotIn("lane/old-anchor.md", line)
         self.assertNotIn("--manual", line)
         self.assertIn("lane/seen.md", line)

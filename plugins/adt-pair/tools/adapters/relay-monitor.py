@@ -2062,15 +2062,23 @@ def rebind_line(note: dict, session: str) -> str | None:
         command = shlex.join(["python3", str(Path(__file__).resolve()), "bind", "--manual", "--session", session, "--root", root, "--anchor", receipts[0]])
         if len(prefix + command) <= 1024 and all(32 <= ord(char) <= 126 for char in command):
             return prefix + command
-    # A pasted incomplete diagnostic is a shell comment, never an instruction.
-    prefix = "# rebind: incomplete; supply --root and --anchor"
-    seen = " seen=" + shlex.join([printable_text(value) for value in receipts]) if receipts else ""
-    text = prefix + seen
-    operands = record.get("command_roots") or []
+    # No command separator even when an interactive shell disables comments.
+    prefix = "# rebind: incomplete, supply --root and --anchor"
+    seen = [shlex.quote(printable_text(value)) for value in receipts]
+    operands = [shlex.quote(printable_text(value)) for value in record.get("command_roots") or []]
+    parts = [prefix]
+    if seen:
+        parts += [" seen=" + seen[0], *(" " + value for value in seen[1:])]
     if operands:
-        rendered = shlex.join([printable_text(value) for value in operands])
-        text += " command text=" + rendered
-    return text if len(text) <= 1024 else text[:1021] + "..."
+        parts += [" command text=" + operands[0], *(" " + value for value in operands[1:])]
+    length = sum(map(len, parts))
+    dropped = 0
+    suffix = ""
+    while length + len(suffix) > 1024:
+        length -= len(parts.pop())
+        dropped += 1
+        suffix = f" dropped={dropped}"
+    return "".join(parts) + suffix
 
 
 def status_line(store: NoteStore, plugin_root: str | None) -> str:
