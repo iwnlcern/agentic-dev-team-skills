@@ -156,14 +156,38 @@ def _same_seat(left, right):
             and rules.canonical_role(rules.address_role(left)) == rules.canonical_role(rules.address_role(right))))
 
 
-def _parent(rows, item, phase, sender):
-    matches = [row for row in rows if row.seq < item.seq
-               and row.fields.get('DISPATCH_ID') == item.fields.get('PARENT_DISPATCH_ID')
-               and row.fields.get('PHASE') == phase and _same_seat(_sender(row),sender)]
-    return max(matches, key=lambda row: row.seq, default=None)
+def _opener_parent(ledger, rows, item):
+    opener = cycles._opener(ledger, item.fields.get('PARENT_DISPATCH_ID'))
+    if opener is None:
+        return None
+    # Earlier-only edges also terminate self-parent and repeated-id cycles.
+    return next((row for row in rows if row.seq == opener[0]
+                 and row.seq < item.seq), None)
 
 
-def _lineage(rows, grant, seat, action, reasons):
+def _parent(ledger, rows, item, phase, sender):
+    candidates = [row for row in rows if row.seq < item.seq
+                  and row.fields.get('DISPATCH_ID') == item.fields.get('PARENT_DISPATCH_ID')
+                  and row.fields.get('PHASE') == phase
+                  and _same_seat(_sender(row), sender)]
+    if phase in ('PLAN', 'DESIGN'):
+        pins = _declarations(item, set())
+        declarations = {row.seq: _declarations(row, set()) for row in candidates}
+        # A review selects the planner revision it names. Where no planner
+        # supplied a digest, the review may supply it; a digestless review
+        # inherits the latest planner declaration. Final lineage validation
+        # still reports malformed or unresolved declarations.
+        constrained = {path: digest for path, digest in pins.items()
+                       if digest is not None and any(decl.get(path) is not None
+                                                     for decl in declarations.values())}
+        candidates = [row for row in candidates
+                      if all(declarations[row.seq].get(path) == digest
+                             for path, digest in constrained.items())]
+    # Select the effective review before checking its verdict.
+    return max(candidates, key=lambda row: row.seq, default=None)
+
+
+def _lineage(rows, grant, seat, action, reasons, ledger):
     lineage = [grant]
     sender = _sender(grant)
     direct = rules.from_is_direct_authority(grant.fields)
@@ -178,9 +202,7 @@ def _lineage(rows, grant, seat, action, reasons):
         while (parent_id := item.fields.get('PARENT_DISPATCH_ID')):
             if rules.STRUCTURED_ABSENT_RE.match(parent_id):
                 break
-            parent = max((row for row in rows if row.seq < item.seq
-                          and row.fields.get('DISPATCH_ID') == parent_id),
-                         key=lambda row: row.seq, default=None)
+            parent = _opener_parent(ledger, rows, item)
             if parent is None:
                 break
             lineage.append(parent)
@@ -189,12 +211,12 @@ def _lineage(rows, grant, seat, action, reasons):
     if any(_word(value.lower()) != 'all-in'
            for value in _occurrences(grant.text, 'SCOPE_DIFF_RESULT')):
         reasons.add('authority.issuer-not-permitted')
-    review = _parent(rows, grant, 'PLAN-REVIEW', seat)
+    review = _parent(ledger, rows, grant, 'PLAN-REVIEW', seat)
     if review is None:
         reasons.add('authority.lineage-incomplete');return lineage
     lineage.append(review)
     if not _approved(review):reasons.add('authority.lineage-incomplete')
-    plan = _parent(rows, review, 'PLAN', planner)
+    plan = _parent(ledger, rows, review, 'PLAN', planner)
     if plan is None:
         reasons.add('authority.lineage-incomplete');return lineage
     lineage.append(plan)
@@ -202,11 +224,11 @@ def _lineage(rows, grant, seat, action, reasons):
         reasons.add('authority.lineage-incomplete')
     lock = plan.fields.get('DESIGN_LOCK_ID')
     if lock and not rules.xroot_design_engaged(plan.text):
-        design_review = _parent(rows,plan,'DESIGN-REVIEW',seat)
+        design_review = _parent(ledger, rows,plan,'DESIGN-REVIEW',seat)
         if design_review is None:
             reasons.add('authority.lineage-incomplete');return lineage
         lineage.append(design_review)
-        design = _parent(rows,design_review,'DESIGN',planner)
+        design = _parent(ledger, rows,design_review,'DESIGN',planner)
         if not _approved(design_review) or design_review.fields.get('DESIGN_DOC_ID') != lock:
             reasons.add('authority.lineage-incomplete')
         if design is None:
@@ -393,7 +415,7 @@ def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     if len(set(verdicts))>1:reasons.add('authority.verdict-conflict')
     if any(not positive for positive in positives):reasons.add('authority.denied')
     if not shape:reasons.add('authority.shape-absent')
-    lineage=_lineage(rows,grant,seat,action,reasons)
+    lineage=_lineage(rows,grant,seat,action,reasons,ledger)
     for row in lineage:
         if _conflict(row):reasons.add('authority.header-conflict')
         if row is grant or not rules.from_is_direct_authority(grant.fields):
