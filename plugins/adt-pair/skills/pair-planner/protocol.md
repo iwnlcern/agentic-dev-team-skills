@@ -205,6 +205,8 @@ The following are intentionally out of scope: latest-non-superseded approve, sup
 
 When `relay-lint --relay-root` is available, every orchestrator authority relay in the broad SET must address the run's Orchestrator Reviewer in `TO` or `CC`, or the run root must contain an operator-authored no-reviewer waiver. This is a **visibility gate**, not an approval gate: the reviewer sees the relay and reviews on its own cadence; the Orchestrator Planner does not wait for an approval verdict before writing or routing the relay.
 
+For the adopted merge-checkpoint exception, see [Reviewer checkpoints](#reviewer-checkpoints).
+
 The gate applies only to relays whose single `FROM` is `orchestrator` or an orchestrator-planner-role address such as `<run>.orchestrator-planner`, and only when the relay is in the broad SET:
 
 ```text
@@ -219,6 +221,77 @@ PHASE: IMPL with a live bare own-line DISPATCH IMPL token
 Exempt relays include `FROM: operator`, pair-seat relays such as `<pair>.planner` or `<pair>.implementer`, `PHASE: SITREP` boot/onboarding relays, `PHASE: RECONCILE`, `PHASE: PLAN` with `DELEGATED_DISPATCH_AUTHORITY: no`, and `PHASE: IMPL` with no live dispatch token. Pair-Planner implementation-dispatch lineage remains governed by the existing pair-lineage gates; this gate must not double-fire on pair seats.
 
 A no-reviewer waiver is valid only when some relay in the run root has `FROM: operator` and a non-empty `ORCH_REVIEW_WAIVER` field. An orchestrator-planner-authored `ORCH_REVIEW_WAIVER` is not valid; self-waiver is the dodge this gate closes.
+
+### Reviewer checkpoints
+
+These checkpoints apply where an Orchestrator Planner and Reviewer operate; without an orchestrator seat, this lane is dormant.
+The merge checkpoint below is the exception to the visibility gate's general no-wait rule: in an adopting run, the Orchestrator Planner waits for an addressed reply before granting a merge.
+The audit-reconciliation checkpoint is defined in `sitrep-reconciliation.md` § Audit-reconciliation checkpoint in the Orchestrator Planner skill.
+
+A root adopts prospectively through one `GATE_REVIEW: on` line in a `PHASE: SITREP`, `AUTHORITY: report-only` relay from its Orchestrator Planner to exactly its Orchestrator Reviewer.
+The declaration can be the reviewer's boot relay or a later SITREP; an existing run need not replace or re-register its reviewer.
+Adoption applies only to grants after the declaration in the applicable order below.
+Repeated declarations are no-ops; another value or a second `GATE_REVIEW` field in one relay is not a declaration.
+There is no off value; a run that stops reviewing uses the existing operator-authored no-reviewer waiver.
+Each root adopts for itself; a parent root's declaration or credential does not adopt a commissioned root.
+
+After the pair Planner's MERGE-GATE record, the Orchestrator Planner files Template L to exactly the run's Orchestrator Reviewer and waits for the applicable review or disposition before filing Template K.
+The request parents to the gate record; the reply parents to the request; the grant parents to the gate record and addresses one Implementer.
+Each request and reply has a new handoff id; the grant and its eventual merge claim retain their existing shared handoff id.
+
+| Carrier | ROLE / FROM | PHASE / AUTHORITY | TO | Required checkpoint fields |
+|---|---|---|---|---|
+| Request | Orchestrator Planner / `<run>.orchestrator-planner` | MERGE-GATE / report-only | exactly `<run>.orchestrator-reviewer` | `GATE_HEAD`, `GATE_BASE`, `PLAN_LOCK_ID`, `PLAN_SHA256` |
+| Reply | Orchestrator Reviewer / `<run>.orchestrator-reviewer` | MERGE-GATE / review-only | exactly `<run>.orchestrator-planner` | `GATE_REVIEW_VERDICT`, `REVIEWED_HEAD`, `REVIEWED_BASE` |
+| Grant | existing Template K issuer and envelope | existing Template K phase and authority | exactly the named Implementer | `MERGE_HEAD`, `MERGE_BASE`; disposition below when applicable |
+
+`GATE_REVIEW_VERDICT` has exactly the values `approve`, `must-revise`, and `human-decision-required`.
+A source approval that leaves a merge condition open uses `human-decision-required`, never `approve`.
+Match every field as an exact key; the review field is never merge authority.
+
+For each evaluated grant, evidence must precede it: use ledger sequence at admission on a managed root, and `relay_order_key` in a sweep, including a hand-authored root.
+Select request candidates by the request's ROLE, FROM, exact TO, PHASE, AUTHORITY and parent gate record before validating any payload fields.
+The latest candidate is the effective request; a newer request supersedes all older requests and their replies.
+Select reply candidates by the reply's ROLE, FROM, exact TO, PHASE, AUTHORITY and parent effective request; the latest candidate is the effective reply, whatever it says.
+Another author, addressee, envelope or parent is not a candidate and supersedes nothing.
+
+Validate only those effective candidates; never fall back to an older carrier when validation fails.
+Require exactly one nonempty occurrence of every request and reply field in the table, both grant pins, and the gate record's `PLAN_LOCK_ID` and `PLAN_SHA256`.
+An absent, empty, repeated or conflicting field, or a verdict outside the enum, fails validation.
+An earlier approval cannot revive past a later same-request candidate that lacks a pin or verdict; an earlier request cannot revive past a later malformed same-gate candidate.
+Bind `MERGE_HEAD` = `GATE_HEAD` = `REVIEWED_HEAD` and `MERGE_BASE` = `GATE_BASE` = `REVIEWED_BASE`.
+Bind the request's `PLAN_LOCK_ID` and `PLAN_SHA256` to the gate record's corresponding fields; no additional plan fields are required on the grant or reply.
+An identical commit pin is unchanged source; a rebase with a new commit pin needs a new review even if its tree is identical.
+A changed plan at the same head needs a new gate record and request.
+
+For a validated, bound effective reply, `approve` is heard and permits the orchestrator to grant.
+`must-revise` is not heard: the orchestrator routes the fold and asks again at the new head before granting.
+`human-decision-required` needs the disposition below; the orchestrator obtains it or leaves the grant to the operator.
+No effective request or reply, failed validation, or failed binding means not heard.
+These are the orchestrator's behavioral obligations; they do not give the engine a refusal gate.
+
+After `human-decision-required`, an orchestrator grant records the operator's chat authorization in exactly one line:
+
+```text
+GATE_DISPOSITION: operator-in-chat <YYYYMMDD-HHMMSS> — "<the operator's words>"
+```
+
+The stamp records when the operator authorized; the quotation is the operator's own words, never a paraphrase, and the orchestrator writes it only when it has those words in its chat.
+The authorization must be positive, cover the effective held conditions and this grant's head, base and plan, and never be reused after any of them changes.
+A quoted refusal is not a disposition.
+The inline record is bound to this grant's pins and the effective held review; it carries no separate grant authority.
+The planned consumer checks only the exact key, `operator-in-chat`, a well-formed stamp and a nonempty quotation; it cannot verify chat authenticity or semantic authorization.
+Its silence is not proof that the operator actually disposed of the conditions.
+Without the well-formed line, an orchestrator grant after a held reply is not heard by that consumer.
+The Implementer still acts on the filed grant, not on the chat record alone.
+
+The engine consumer (B8) has not landed; no mechanical checkpoint warning is claimed here until it lands and is evidenced.
+Its specified rule is `review.gate-not-heard`: lint will warn on an orchestrator grant after adoption when the checkpoint is not heard.
+The warning's subject is the evaluated grant; the gate record, effective request, effective reply and disposition, where present, are its operands.
+A new grant's warning is not suppressed merely because its gate record is known history.
+The warning never changes exit status, refuses, or blocks a merge in any context.
+No new finding arises for a non-adopting root, an operator-authored grant in any topology, or a root with the existing operator-authored no-reviewer waiver before the grant in the applicable order.
+An operator-authored grant needs no disposition line; no new waiver shape is introduced.
 
 ## ROLE/FROM discipline
 
