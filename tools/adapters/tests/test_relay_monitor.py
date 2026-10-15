@@ -1778,10 +1778,10 @@ class BindTests(TmpEnv):
     def test_hook_deep_json_exits_zero(self):
         for mode in ("bind", "drain", "session-start"):
             with self.subTest(mode=mode):
-                self._assert_hook_input_is_total("[" * 2000 + "0" + "]" * 2000, mode)
+                self._assert_hook_input_is_total("[" * 10000 + "0" + "]" * 10000, mode)
 
     def test_hook_deep_receipt_json_exits_zero(self):
-        response = '{"path":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+        response = '{"path":' + '[' * 10000 + '0' + ']' * 10000 + '}'
         self._assert_hook_input_is_total(self.payload("tools/relay submit d.md", response))
 
     def test_quoted_equals_root_option_is_not_an_indication(self):
