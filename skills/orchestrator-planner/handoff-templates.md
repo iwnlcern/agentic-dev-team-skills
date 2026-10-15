@@ -521,9 +521,66 @@ Required before merge:
 - Boundary contract check: <satisfied/not satisfied + evidence>
 - Human merge authorization: required; valid IMPL dispatch + green tests is not merge authority
 - Merge-authorization relay: <Template K relay id/path or pending>
+- In an adopting run: gate review request per Template L and `protocol.md` § Reviewer checkpoints
 
 Recommendation:
 <merge-ready | merge-blocked | human-decision-required>
+```
+
+## Template L — addressed gate review
+
+Use the request and reply envelopes below with `protocol.md` § Reviewer checkpoints.
+That subsection owns adoption, selection, validation, binding, verdict handling and disposition.
+
+```text
+## Team <id> — <bundle>: GATE REVIEW REQUEST
+
+ROLE: Orchestrator Planner
+PHASE: MERGE-GATE
+AUTHORITY: report-only
+DISPATCH_ID: <new gate-review-request id>
+PARENT_DISPATCH_ID: <gate record dispatch id>
+RUN_ID: <run>
+CEREMONY_TIER: <tiny | small | medium | large | production-risk>
+EVIDENCE_TARGET: <E2 | E3 | E4>
+HUMAN_GATE_REQUIRED: no — review request only
+FROM: <run>.orchestrator-planner
+TO: <run>.orchestrator-reviewer
+CC: <team>.planner, <team>.implementer
+GATE_HEAD: <full commit pin>
+GATE_BASE: <full base commit pin>
+PLAN_LOCK_ID: <gate record's plan lock id>
+PLAN_ARTIFACT: <gate record's plan artifact filename stem>
+PLAN_SHA256: <gate record's lowercase-hex plan digest>
+
+Gate record: <relay path>
+Review scope and evidence: <pinned change, evidence paths, and open merge conditions>
+```
+
+Reviewer reply:
+
+```text
+## Team <id> — <bundle>: GATE REVIEW REPLY
+
+ROLE: Orchestrator Reviewer
+PHASE: MERGE-GATE
+AUTHORITY: review-only
+DISPATCH_ID: <new gate-review-reply id>
+PARENT_DISPATCH_ID: <gate-review-request dispatch id>
+RUN_ID: <run>
+CEREMONY_TIER: <tiny | small | medium | large | production-risk>
+EVIDENCE_TARGET: <E2 | E3 | E4>
+HUMAN_GATE_REQUIRED: <yes — held decision | no — review only>
+FROM: <run>.orchestrator-reviewer
+TO: <run>.orchestrator-planner
+CC: <team>.planner, <team>.implementer
+GATE_REVIEW_VERDICT: <approve | must-revise | human-decision-required>
+REVIEWED_HEAD: <full reviewed commit pin>
+REVIEWED_BASE: <full reviewed base commit pin>
+
+Findings and remaining conditions: <evidence and requested disposition, or none>
+ACTIONS_GIT_REF: none — read-only review
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 ```
 
 ## Template F2 — LIVE-VERIFY handoff
@@ -570,6 +627,8 @@ Completion verdict:
 
 Use this only after the merge-gate record exists. The operator or orchestrator authors the grant and addresses exactly one Implementer.
 
+In an adopting run, apply `protocol.md` § Reviewer checkpoints before this grant; disposition uses that subsection’s rule.
+
 ```text
 ## Team <id> — <bundle>: MERGE GRANT
 
@@ -584,6 +643,9 @@ HUMAN_GATE_REQUIRED: <yes|no — reason>
 FROM: operator | orchestrator | <run>.orchestrator-planner
 TO: <team>.implementer
 CC: <run>.orchestrator-reviewer
+MERGE_HEAD: <full commit pin authorized for merge>
+MERGE_BASE: <full base commit pin>
+GATE_DISPOSITION: operator-in-chat <YYYYMMDD-HHMMSS> — "<operator’s exact words; omit this entire line when inapplicable>"
 
 DISPATCH MERGE
 
@@ -595,6 +657,8 @@ This bare own-line token grants merge authority only to the named `TO` Implement
 Use this only during the orchestrator-planner `init` directive, after `sprint-doc-setup` has prepared the sprint tree and `.relays/<RUN_ID>/` substrate. Emit one relay per downstream seat and print the file pointer; the pointer is the operator's fallback for seats that are not yet armed, which every seat is before its boot acknowledgment binds it. This is an onboarding relay, not work authorization.
 
 Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the target address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted. Render the segment one way in the id, `TO`, heading, and `SUBJECT`.
+
+For the reviewer variant only, the optional `GATE_REVIEW: on` line below follows `protocol.md` § Reviewer checkpoints; omit it from other boots or when not adopting.
 
 ```text
 ## BOOT — initialize <owner>.<role> for RUN_ID <run>
@@ -612,6 +676,7 @@ FROM: <run>.orchestrator-planner
 TO: <pair>.<planner|implementer> | <run>.orchestrator-reviewer
 CC: operator
 SUBJECT: BOOT — initialize <owner>.<role> for RUN_ID <run>
+GATE_REVIEW: on
 
 You are <pair>.<role> or <run>.orchestrator-reviewer for RUN_ID <run>.
 Load <pair-planner | pair-implementer | orchestrator-reviewer>.
