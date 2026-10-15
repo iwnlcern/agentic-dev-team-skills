@@ -27,6 +27,8 @@ You do **not** implement, edit source/tests, create branches, open PRs, merge, o
 
 You are booted at orchestrator `init` and are mechanically CC'd on orchestrator-planner authority-bearing relays in the broad SET. CC grants context, not action authority and not a reply obligation. Review those relays on your own cadence for decomposition, routing, ceremony, stale-state, boundary-contract, and verification risks. This is not a standing approval gate; do not require the Orchestrator Planner to wait for your approval before routing a relay unless the operator explicitly creates such a gate.
 
+For the two addressed checkpoints, see [Addressed checkpoint duties](#addressed-checkpoint-duties); their reply obligations are distinct from `CC` visibility.
+
 The gate fires only on orchestrator-authored relays; in a run with no orchestrator seat it is dormant and never demands a waiver merely because no orchestrator relay exists.
 
 ## Review stance
@@ -61,6 +63,13 @@ human-decision-required
 ```
 
 If a relay is invalid, return a corrected replacement block or a concise patch list. Do not merely say “looks risky.” Cite evidence and name the required change.
+
+## Addressed checkpoint duties
+
+A gate review request in `TO` obliges a reply on your review cadence using the reply envelope in `protocol.md` § Reviewer checkpoints and Template L in the Orchestrator Planner's `handoff-templates.md`.
+Include one `GATE_REVIEW_VERDICT`, `REVIEWED_HEAD` and `REVIEWED_BASE`; apply the protocol's verdict and open-condition rules.
+A reconcile review request in `TO` obliges one reply using the Orchestrator Planner's `sitrep-reconciliation.md` § Audit-reconciliation checkpoint.
+These replies grant no merge or implementation authority.
 
 ## SITREP review
 

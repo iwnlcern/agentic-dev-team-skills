@@ -140,7 +140,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/SKILL.md",
-    "sha256": "a371ae8686097d765f1be5f9b8b2dee412e9958798626d20b4c181efb2f9948d",
+    "sha256": "338d351fd0e751f011c64edc4989eabc108f19030b32bac3f4940b8564f47ba4",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -188,13 +188,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/sitrep-reconciliation.md",
-    "sha256": "c6a1ba23e70bb00abb4ccf385557455bc4a6a6c50335822a67288f18cfd712f7",
+    "sha256": "e597cb927e532311e3880d00670ad41bb83c30946a315d51e27fce43d554506b",
     "source": "skills/orchestrator-planner/sitrep-reconciliation.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "057961efaaeb8e164361a2304d0b68e43a89c6811d07c0069164dbcfb2fa1b7c",
+    "sha256": "cacbfcab4dbc18ab25e7cde79484316414ee1da31644084e86f150aeffc85b46",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -10616,7 +10616,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/SKILL.md",
-    "sha256": "a371ae8686097d765f1be5f9b8b2dee412e9958798626d20b4c181efb2f9948d",
+    "sha256": "338d351fd0e751f011c64edc4989eabc108f19030b32bac3f4940b8564f47ba4",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -10664,13 +10664,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/sitrep-reconciliation.md",
-    "sha256": "c6a1ba23e70bb00abb4ccf385557455bc4a6a6c50335822a67288f18cfd712f7",
+    "sha256": "e597cb927e532311e3880d00670ad41bb83c30946a315d51e27fce43d554506b",
     "source": "skills/orchestrator-planner/sitrep-reconciliation.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "057961efaaeb8e164361a2304d0b68e43a89c6811d07c0069164dbcfb2fa1b7c",
+    "sha256": "cacbfcab4dbc18ab25e7cde79484316414ee1da31644084e86f150aeffc85b46",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
