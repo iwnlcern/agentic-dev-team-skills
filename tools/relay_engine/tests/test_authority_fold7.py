@@ -32,7 +32,7 @@ class TestAuthorityFold7(TestAuthorityFold5):
             for key in ['VERDICT', 'HUMAN_MERGE_AUTHORIZATION', 'CUSTOM_MERGE_APPROVED']:
                 with self.subTest(action=action, key=key):
                     self.grant_case(key+': denied', reasons=['authority.denied'], action=action)
-        for value in ['~~approved~~ denied', '**approved**', '_approved', '&#97;pproved', 'yeſ', 'approved&#10;']:
+        for value in ['.approved', '~~approved~~ denied', '**approved**', '_approved', '&#97;pproved', 'yeſ', 'approved&#10;']:
             with self.subTest(value=value):
                 self.grant_case('MERGE_AUTHORIZATION: '+value, reasons=['authority.denied'] + (['authority.verdict-conflict'] if value in ['yeſ', 'approved&#10;'] else []), action='merge')
         self.grant_case('VERDICT: `approved`', reasons=['authority.denied'])
