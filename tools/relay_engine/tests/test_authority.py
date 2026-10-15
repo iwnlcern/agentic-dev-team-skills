@@ -120,11 +120,11 @@ class TestAuthority(LedgerFixture):
         self.grant=self.add('MERGE-GATE','operator',extra='MERGE_AUTHORIZATION: approved\nVERDICT: denied',content='DISPATCH MERGE')
         self.denied('verdict-conflict',action='merge')
 
-    def test_spaced_verdict_denial_and_conflicting_review_deny(self):
+    def test_nonheader_verdict_is_inert_and_body_only_review_does_not_approve(self):
         for whitespace in (' ', '\t'):
             with self.subTest(whitespace=whitespace):
                 direct=self.add(sender='operator',extra=f'VERDICT{whitespace}: denied')
-                self.denied('denied',direct)
+                self.assertEqual(self.check(direct)['reasons'],[])
             with self.subTest(review_whitespace=whitespace):
                 ident=f'plan-{self.number}'
                 self.add('PLAN',ident=ident,content='')

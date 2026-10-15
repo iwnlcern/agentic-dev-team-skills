@@ -1,4 +1,4 @@
-"""Erratum 4: exact positive forms and conservative two-view refusal."""
+"""Original shape controls with body-verdict expectations amended by E23."""
 from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
 
 
@@ -25,26 +25,26 @@ class TestAuthorityFold6(TestAuthorityFold5):
         self.assert_case('TOKEN\n\n<textarea',['authority.shape-absent'])
         self.assert_case('prose <!--\n```\n-->\n\nTOKEN\n\n```',['authority.shape-absent'])
 
-    def test_rule4_negative_views_and_reasons(self):
+    def test_rule4_body_negative_forms_are_inert(self):
         for text in ['VERDICT: denied','**VERDICT:** denied','- VERDICT: denied','1. VERDICT: denied','## VERDICT: denied','~~VERDICT:~~ denied','[VERDICT](/u): denied','VERD&#73;CT: denied','VERD\\ICT: denied','VERD\u200bICT: denied','  - - VERDICT: denied','| VERDICT | denied |','&lt;VERDICT: denied&gt;','VERDICT: .approved','VERDICT::approved','VERDICT:','VERDICT: approved&#10;','VERDICT: yeſ','**VERDICT:** .approved','**VERDICT:** **','\\`VERDICT: denied`','`VERDICT: denied']:
-            self.assert_case('TOKEN\n\n'+text,['authority.denied'])
-        self.assert_case('TOKEN\n\n<!-- VERDICT: denied -->',['authority.denied','authority.shape-absent'])
+            self.assert_case('TOKEN\n\n'+text,[])
+        self.assert_case('TOKEN\n\n<!-- VERDICT: denied -->',['authority.shape-absent'])
         for text in ['VERDICT: <denied>approved','VERDICT: approved | VERDICT: denied','**VERDICT:** approved\nVERDICT: denied']:
-            self.assert_case('TOKEN\n\n'+text,['authority.denied','authority.verdict-conflict'])
+            self.assert_case('TOKEN\n\n'+text,[])
 
     def test_rule4_positive_and_inert_controls(self):
         for text in ['VERDICT: approved','**VERDICT:** approved','__VERDICT:__ approved','~~VERDICT:~~ approved','VERDICT: merge ready','VERDICT: **approved**','VERDICT: approved.','VERDICT: YES','VERDICT: approved\nordinary next line','`VERDICT: denied`']:
             self.assert_case('TOKEN\n\n'+text,[])
         self.assert_case('TOKEN\n\n``VERDICT: denied``',[])
-        self.assert_case('TOKEN\n\n`x\nVERDICT: denied\nx`',['authority.denied'])
+        self.assert_case('TOKEN\n\n`x\nVERDICT: denied\nx`',[])
 
     def test_rule3_merge_only_header(self):
         for extra,content,reasons in [
             ('MERGE_AUTHORIZATION: approved','',[]),
             ('','MERGE_AUTHORIZATION: approved',['authority.shape-absent']),
             ('','**MERGE_AUTHORIZATION:** approved',['authority.shape-absent']),
-            ('MERGE_AUTHORIZATION: approved','VERDICT: denied',['authority.denied','authority.verdict-conflict']),
-            ('MERGE_AUTHORIZATION: approved','<!-- VERDICT: denied -->',['authority.denied','authority.shape-absent','authority.verdict-conflict'])]:
+            ('MERGE_AUTHORIZATION: approved','VERDICT: denied',[]),
+            ('MERGE_AUTHORIZATION: approved','<!-- VERDICT: denied -->',['authority.shape-absent'])]:
             g=self.add('MERGE-GATE','operator',extra=extra,content=content)
             self.assertEqual(self.check(g,action='merge')['reasons'],reasons)
 
@@ -53,15 +53,15 @@ class TestAuthorityFold6(TestAuthorityFold5):
         for header,content,allowed in [
             ('VERDICT: approve','',True),('', 'VERDICT: approve',False),
             ('VERDICT: approve','<!-- VERDICT: must-revise -->',False),
-            ('VERDICT: approve','&lt;VERDICT: must-revise&gt;',False),
-            ('VERDICT: approve','VERDICT: <must-revise>approve',False),
-            ('VERDICT: approve','## VERDICT: denied',False),
-            ('VERDICT: approve','VERDICT: approved&#10;',False),
-            ('VERDICT: approve','VERDICT: yeſ',False),
+            ('VERDICT: approve','&lt;VERDICT: must-revise&gt;',True),
+            ('VERDICT: approve','VERDICT: <must-revise>approve',True),
+            ('VERDICT: approve','## VERDICT: denied',True),
+            ('VERDICT: approve','VERDICT: approved&#10;',True),
+            ('VERDICT: approve','VERDICT: yeſ',True),
             ('VERDICT: APPROVE','VERDICT: YES',True),
             ('VERDICT: approve','VERDICT: approved\nordinary next line',True),
             ('VERDICT: approve','`VERDICT: denied`',True),
-            ('VERDICT: approve','```\nVERDICT: denied\n```',False),
+            ('VERDICT: approve','```\nVERDICT: denied\n```',True),
             ('VERDICT: approve','<div>',False),
             ('VERDICT: approve','```\n<div>\n```',False)]:
             with self.subTest(header=header,content=content):
@@ -75,9 +75,9 @@ class TestAuthorityFold6(TestAuthorityFold5):
             self.assert_case(f'- {fence}\n  {fence}\n\n{fence}\n\nTOKEN\n\n{fence}', ['authority.shape-absent'])
             self.assert_case('TOKEN\n\n'+fence+'\nexample\n'+fence, ['authority.shape-absent'])
             self.assert_case('TOKEN\n\nmid '+fence+' run', ['authority.shape-absent'])
-            self.assert_case('TOKEN\n\n'+fence+'\nVERDICT: denied\n'+fence, ['authority.denied','authority.shape-absent'])
-        self.assert_case('TOKEN\n\n<b>VERDICT:</b> denied', ['authority.denied','authority.shape-absent'])
+            self.assert_case('TOKEN\n\n'+fence+'\nVERDICT: denied\n'+fence, ['authority.shape-absent'])
+        self.assert_case('TOKEN\n\n<b>VERDICT:</b> denied', ['authority.shape-absent'])
         self.assert_case('<div>\n```\n\nTOKEN\n\n```', ['authority.shape-absent'])
-        self.assert_case('<div>\n```\n\nTOKEN\n\n<p>VERDICT: denied</p>\n```', ['authority.denied','authority.shape-absent'])
+        self.assert_case('<div>\n```\n\nTOKEN\n\n<p>VERDICT: denied</p>\n```', ['authority.shape-absent'])
         g=self.add('MERGE-GATE','operator',extra='MERGE_AUTHORIZATION: approved',content='```\nexample\n```')
         self.assertEqual(self.check(g,action='merge')['reasons'],[])

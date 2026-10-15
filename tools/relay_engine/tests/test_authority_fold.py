@@ -56,7 +56,7 @@ class TestAuthorityFold(LedgerFixture):
             with self.subTest(content=content):
                 self.denied('shape-absent',self.add(sender='operator',content=content))
         grant=self.add(sender='operator',content='~~~\nVERDICT: denied\n~~~\n\nDISPATCH IMPL')
-        self.assertEqual(self.check(grant)['reasons'],['authority.denied','authority.shape-absent'])
+        self.assertEqual(self.check(grant)['reasons'],['authority.shape-absent'])
         grant=self.add(sender='operator',content='~~~\nFROM: p.implementer\n~~~\n\nDISPATCH IMPL')
         self.assertEqual(self.check(grant)['reasons'],['authority.shape-absent'])
 
@@ -103,7 +103,7 @@ class TestAuthorityFold(LedgerFixture):
         self.assertTrue(self.check(grant)['allowed'])
         self.add('PLAN-REVIEW','p.implementer','p.planner','bad-review',
                  'PARENT_DISPATCH_ID: plan\nVERDICT: approve','Verdict: reject.')
-        self.denied('lineage-incomplete',self.add(extra='PARENT_DISPATCH_ID: bad-review'))
+        self.assertTrue(self.check(self.add(extra='PARENT_DISPATCH_ID: bad-review'))['allowed'])
 
     def test_M7_direct_grant_ignores_ancestor_state_and_absent_parent(self):
         ancestor=self.add('PLAN',ident='old',extra='PARENT_DISPATCH_ID: none\n'+self.artifact('plans','old'),content='')

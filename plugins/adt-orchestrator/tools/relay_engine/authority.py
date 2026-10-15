@@ -4,8 +4,6 @@ from functools import wraps
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
-import html
-import unicodedata
 import json
 import os
 from pathlib import Path
@@ -168,23 +166,29 @@ def _sender(item):
 
 
 HTML_OPEN = re.compile(r'<!--|<\?|<!\[|<![a-z]|<(?:script|pre|style|textarea)(?=[ \t\r\n\f\v>]|$)', re.I)
-VERDICT_KEY = re.compile(r'VERDICT|MERGE[ _-]AUTHORIZATION|MERGE[ _-]APPROVED', re.I)
-SEPARATOR = re.compile(r'[*_~`\]\) \t]*[:|]')
-PREFIX = re.compile(r'[ \t*_~]*')
-# Step 6 strips emphasis BEFORE punctuation at the word's trailing end.
-# Thus punctuation may precede trailing emphasis, but not vice versa.
-WORD_END = r'[.,;:!?]*[*_~]*(?=[ \t]|\Z)'
-POSITIVE = re.compile(r'(?:approved|approve|granted|yes|true|complete|merge-ready)' + WORD_END, re.I | re.ASCII)
-APPROVAL = re.compile(r'(?:approved|approve)' + WORD_END, re.I | re.ASCII)
-MERGE_WORD = re.compile(r'merge' + WORD_END, re.I | re.ASCII)
-READY_WORD = re.compile(r'ready' + WORD_END, re.I | re.ASCII)
+VERDICT_KEYS = ('VERDICT', 'MERGE_AUTHORIZATION', 'MERGE_APPROVED')
+POSITIVE_WORDS = frozenset(('approved', 'approve', 'granted', 'yes', 'true', 'complete', 'merge-ready'))
+
+
+@_per_check
+def _parsed_header(text):
+    try:
+        return envelope.parse_draft(text).headers
+    except (errors.EngineError, TypeError):
+        return None
 
 
 def _header(item):
-    try:
-        return envelope.parse_draft(item.text).headers
-    except (errors.EngineError, TypeError):
-        return {}
+    return _parsed_header(item.text) or {}
+
+
+def _header_refusal(text):
+    header = _parsed_header(text)
+    return header is None or any('<' in value for value in header.values())
+
+
+def _verdict_key(key):
+    return any(key == suffix or key.endswith('_' + suffix) for suffix in VERDICT_KEYS)
 
 
 HTML_START = re.compile(r'^ {0,3}<[A-Za-z/!?]')
@@ -209,75 +213,26 @@ def _token(text, token):
                for i, line in enumerate(original))
 
 
-def _mask_same_line_spans(line):
-    runs = list(re.finditer(r'`+', line))
-    if not runs:
-        return line
-    next_run, following = {}, {}
-    for i in range(len(runs)-1, -1, -1):
-        size = len(runs[i][0])
-        if size in next_run:
-            following[i] = next_run[size]
-        next_run[size] = i
-    parts, offset, i = [], 0, 0
-    while i < len(runs):
-        opening = runs[i]
-        closing = following.get(i)
-        if (closing is None or (opening.start() and line[opening.start()-1] == '\\')):
-            i += 1
-            continue
-        end = runs[closing].end()
-        content = line[opening.end():runs[closing].start()]
-        if any(char.isalpha() for char in content):
-            parts.extend((line[offset:opening.start()], ' ' * (end-opening.start())))
-            offset = end
-        i = closing+1
-    parts.append(line[offset:])
-    return ''.join(parts)
-
-
-def _normalise(line):
-    line = html.unescape(line)
-    mapping = {ord('<'): ' ', ord('>'): ' ', ord('\\'): None}
-    if not line.isascii():
-        mapping.update({ord(c): None for c in set(line) if unicodedata.category(c) == 'Cf'})
-    return line.translate(mapping)
-
-
-def _positive_at(value, start=0):
-    start = PREFIX.match(value, start).end()
-    if POSITIVE.match(value, start):
-        return True
-    first = MERGE_WORD.match(value, start)
-    return bool(first and READY_WORD.match(value, PREFIX.match(value, first.end()).end()))
+def _positive_value(value):
+    words = value.split()
+    if not words:
+        return False
+    first = words[0].rstrip('.,;:!?').lower()
+    return (first in POSITIVE_WORDS or
+            (first == 'merge' and len(words) > 1
+             and words[1].rstrip('.,;:!?').lower() == 'ready'))
 
 
 @_per_check
 def _verdict_polarities(text):
-    """Union of both views, without copying each occurrence's value suffix."""
+    """Header-only verdict union; body prose never supplies a verdict."""
     positive = negative = False
-    for line in dict.fromkeys(_lines(text)):
-        if not any(char in line for char in (':', '|', '&')):
-            continue
-        masked = _mask_same_line_spans(line)
-        retained = _normalise(masked)
-        removed = re.sub(r'<[^<>\r\n]*>', '', masked)
-        removed = re.sub(r'\]\([^()\r\n]*\)', ']', removed)
-        views = (retained,) if removed == masked else (retained, _normalise(removed))
-        for view in views:
-            for key in VERDICT_KEY.finditer(view):
-                if ((key.start() and view[key.start()-1].isalpha())
-                        or (key.end() < len(view) and view[key.end()].isalpha())):
-                    continue
-                separator = SEPARATOR.match(view, key.end())
-                if separator is None:
-                    continue
-                if _positive_at(view, separator.end()):
-                    positive = True
-                else:
-                    negative = True
-        if positive and negative:
-            return positive, negative
+    for key, value in (_parsed_header(text) or {}).items():
+        if _verdict_key(key):
+            if _positive_value(value):
+                positive = True
+            else:
+                negative = True
     return positive, negative
 
 
@@ -288,9 +243,10 @@ def _word(value):
 def _approved(item):
     keys = {item.fields.get('PHASE', '').replace('-', '_')+'_VERDICT', 'VERDICT'}
     header = _header(item)
-    positive = any(key in keys and APPROVAL.match(value, PREFIX.match(value).end())
+    positive = any(key in keys and _word(value).lower() in {'approve', 'approved'}
                    for key, value in header.items())
     return bool(positive and not _html_refusal(item.text)
+                and not _header_refusal(item.text)
                 and not _verdict_polarities(item.text)[1])
 
 
@@ -563,7 +519,7 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
                  and (_token(grant.text, 'DISPATCH MERGE') or header_positive))
     else:
         shape = grant.fields.get('PHASE') == 'IMPL' and _token(grant.text, 'DISPATCH IMPL')
-    if _html_refusal(grant.text):
+    if _html_refusal(grant.text) or _header_refusal(grant.text):
         shape = False
     if negative:
         reasons.add('authority.denied')
