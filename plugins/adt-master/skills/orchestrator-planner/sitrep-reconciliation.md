@@ -313,6 +313,7 @@ FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 After appending an audit-disposing round to `RECONCILE.md`, file one request to exactly the Orchestrator Reviewer naming that round's section range in `RECONCILE_RANGE`, for example `R16-R17`.
 Use the request and reply envelopes below, with a new handoff id for each; the reply parents to the request.
+The request can parent to the last disposed audit return of the round; the round itself need not have a relay.
 The reviewer replies once per round with `DISPUTED: none` or the disputed item ids and a reason for each.
 An item unlisted in that one reply has no objection; absence of the reply is not completion.
 The reply is obliged and blocks nothing; answer disputes in a later reconcile round.
@@ -325,7 +326,7 @@ ROLE: Orchestrator Planner
 PHASE: RECONCILE
 AUTHORITY: report-only
 DISPATCH_ID: <new reconcile-review-request id>
-PARENT_DISPATCH_ID: <round's reconcile dispatch id>
+PARENT_DISPATCH_ID: <last disposed audit return dispatch id>
 RUN_ID: <run>
 FROM: <run>.orchestrator-planner
 TO: <run>.orchestrator-reviewer
@@ -334,6 +335,8 @@ CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: no — round review
 RECONCILE_RANGE: <section range>
+ACTIONS_GIT_REF: none — read-only round-review request
+FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 Record: <path to RECONCILE.md and supporting audit relays>
 ```

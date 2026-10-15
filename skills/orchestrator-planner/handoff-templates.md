@@ -521,7 +521,7 @@ Required before merge:
 - Boundary contract check: <satisfied/not satisfied + evidence>
 - Human merge authorization: required; valid IMPL dispatch + green tests is not merge authority
 - Merge-authorization relay: <Template K relay id/path or pending>
-- In an adopting run: gate review request per Template L and `protocol.md` § Reviewer checkpoints
+- In an adopting run: `PLAN_ARTIFACT` and `PLAN_SHA256` are required on this gate record; gate review request per Template L and `protocol.md` § Reviewer checkpoints
 
 Recommendation:
 <merge-ready | merge-blocked | human-decision-required>
@@ -531,6 +531,8 @@ Recommendation:
 
 Use the request and reply envelopes below with `protocol.md` § Reviewer checkpoints.
 That subsection owns adoption, selection, validation, binding, verdict handling and disposition.
+File the request against the latest gate record for the bundle.
+If that record lacks `PLAN_ARTIFACT` or `PLAN_SHA256`, return it to the pair Planner; do not compute the digest yourself.
 
 ```text
 ## Team <id> — <bundle>: GATE REVIEW REQUEST
@@ -547,8 +549,8 @@ HUMAN_GATE_REQUIRED: no — review request only
 FROM: <run>.orchestrator-planner
 TO: <run>.orchestrator-reviewer
 CC: <team>.planner, <team>.implementer
-GATE_HEAD: <full commit pin>
-GATE_BASE: <full base commit pin>
+GATE_HEAD: <full PR head commit pin observed when filing>
+GATE_BASE: <full PR base commit pin observed when filing>
 PLAN_LOCK_ID: <gate record's plan lock id>
 PLAN_ARTIFACT: <gate record's plan artifact filename stem>
 PLAN_SHA256: <gate record's lowercase-hex plan digest>
@@ -628,6 +630,7 @@ Completion verdict:
 Use this only after the merge-gate record exists. The operator or orchestrator authors the grant and addresses exactly one Implementer.
 
 In an adopting run, apply `protocol.md` § Reviewer checkpoints before this grant; disposition uses that subsection’s rule.
+In an adopting run, before granting, re-read the PR head and base; if either differs from the reviewed pins, file a new Template L request.
 
 ```text
 ## Team <id> — <bundle>: MERGE GRANT
@@ -645,7 +648,7 @@ TO: <team>.implementer
 CC: <run>.orchestrator-reviewer
 MERGE_HEAD: <full commit pin authorized for merge>
 MERGE_BASE: <full base commit pin>
-GATE_DISPOSITION: operator-in-chat <YYYYMMDD-HHMMSS> — "<operator’s exact words; omit this entire line when inapplicable>"
+GATE_DISPOSITION: <operator-in-chat YYYYMMDD-HHMMSS — "operator’s exact reply"; omit this line unless recording authorization for a held review>
 
 DISPATCH MERGE
 
@@ -676,7 +679,7 @@ FROM: <run>.orchestrator-planner
 TO: <pair>.<planner|implementer> | <run>.orchestrator-reviewer
 CC: operator
 SUBJECT: BOOT — initialize <owner>.<role> for RUN_ID <run>
-GATE_REVIEW: on
+GATE_REVIEW: <on for the reviewer boot when adopting; otherwise omit this line>
 
 You are <pair>.<role> or <run>.orchestrator-reviewer for RUN_ID <run>.
 Load <pair-planner | pair-implementer | orchestrator-reviewer>.

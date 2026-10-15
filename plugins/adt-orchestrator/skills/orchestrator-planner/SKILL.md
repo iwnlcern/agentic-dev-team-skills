@@ -21,7 +21,13 @@ Before any substantive output, apply `protocol.md`. In read-only/report-only pha
 
 You decompose, route, sequence, address relays with `FROM` / `TO` / `CC`, reconcile audits/sitreps, maintain task state, and plan verification. You do **not** implement production code. Your Orchestrator Reviewer partner reviews your decomposition, routing, relays, stale assumptions, ceremony choices, and verification plan.
 
-**Not your job:** do not panel ordinary routing relays or non-PR handoffs. Panels are for code/PR review and explicitly requested adversarial review; routing relays must still be written. Do not skip writing a relay because review feels pending — review happens on the relay, not instead of it. Do not spawn your own reviewer as a substitute for the `Orchestrator Reviewer` seat. Every authority-bearing relay you author in the broad SET (AUDIT, DESIGN, REVIEW-FOLD, MERGE-GATE, delegated PLAN, or override IMPL dispatch) must carry `<run>.orchestrator-reviewer` in `CC` unless the operator has filed an `ORCH_REVIEW_WAIVER`. This is reviewer visibility, not approval; never wait on an approve to write the relay. Do not proxy-author downstream relays with another seat's `FROM`.
+**Not your job:** do not panel ordinary routing relays or non-PR handoffs.
+Panels are for code/PR review and explicitly requested adversarial review; routing relays must still be written.
+Do not skip writing a relay because review feels pending — review happens on the relay, not instead of it.
+Do not spawn your own reviewer as a substitute for the `Orchestrator Reviewer` seat.
+Every authority-bearing relay you author in the broad SET (AUDIT, DESIGN, REVIEW-FOLD, MERGE-GATE, delegated PLAN, or override IMPL dispatch) must carry `<run>.orchestrator-reviewer` in `CC` unless the operator has filed an `ORCH_REVIEW_WAIVER`.
+This is reviewer visibility, not approval; the general no-wait rule has an adopting-run merge-grant exception in `protocol.md` § Reviewer checkpoints.
+Do not proxy-author downstream relays with another seat's `FROM`.
 
 **Do not spawn the team yourself.** You emit relays that reach separate downstream sessions by auto-delivery where a seat is armed, and by the operator's hand-relay of the pointer block otherwise; you never spawn subagents/agent-teams to fill the pair Planner, Implementer, or any downstream seat, or to follow, execute, or simulate the relay workflow. Those seats are independent operator-relayed sessions (distinct models/lanes); collapsing them into subagents you spawn destroys the cross-session, cross-model, judge-from-disk geometry the protocol depends on. The only sanctioned subagent spawn is read-only reviewer lenses for adversarial review — never seat-occupants or executors, and never a substitute for the addressed Orchestrator Reviewer seat.
 
@@ -48,7 +54,7 @@ Do not spawn the seats. Boot relays bring operator-relayed sessions online, incl
 8. **Adversarial review** — use local `review-panels.md`; use `reviewer-spawn-prompts.md` when agent teams/subagents are available. Pair PRs are paneled by the pair Planner; the orchestrator panels only explicitly requested adversarial review or its own-seat review duties.
 9. **REVIEW-FOLD** — route blockers/must-haves to the Implementer, then quick-check the fold. Do not rerun the full panel unless design/blast radius changed.
 10. **MERGE/LIVE-VERIFY** — human-gated merge, deploy artifact/SHA verification, then live verification when required.
-    Apply `protocol.md` § Reviewer checkpoints for the adopted merge-checkpoint exception and verdict handling.
+    In an adopting run, file Template L and wait for the reviewer’s reply before a merge grant; apply `protocol.md` § Reviewer checkpoints for verdict handling.
 11. **SITREP reconciliation** — incoming sitreps are E0 until checked against PRs, repo state, tasks, memory, deploy/runtime evidence.
 
 ## Standby after PROCEED-TO-PLAN / PLAN dispatch

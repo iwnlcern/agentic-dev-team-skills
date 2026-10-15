@@ -233,13 +233,13 @@ Repeated declarations are no-ops; another value or a second `GATE_REVIEW` field 
 There is no off value; a run that stops reviewing uses the existing operator-authored no-reviewer waiver.
 Each root adopts for itself; a parent root's declaration or credential does not adopt a commissioned root.
 
-After the pair Planner's MERGE-GATE record, the Orchestrator Planner files Template L to exactly the run's Orchestrator Reviewer and waits for the applicable review or disposition before filing Template K.
+In an adopting run, after the pair Planner's MERGE-GATE record, the Orchestrator Planner files Template L to exactly the run's Orchestrator Reviewer and waits for the reviewer's reply before filing Template K.
 The request parents to the gate record; the reply parents to the request; the grant parents to the gate record and addresses one Implementer.
 Each request and reply has a new handoff id; the grant and its eventual merge claim retain their existing shared handoff id.
 
 | Carrier | ROLE / FROM | PHASE / AUTHORITY | TO | Required checkpoint fields |
 |---|---|---|---|---|
-| Request | Orchestrator Planner / `<run>.orchestrator-planner` | MERGE-GATE / report-only | exactly `<run>.orchestrator-reviewer` | `GATE_HEAD`, `GATE_BASE`, `PLAN_LOCK_ID`, `PLAN_SHA256` |
+| Request | Orchestrator Planner / `<run>.orchestrator-planner` | MERGE-GATE / report-only | exactly `<run>.orchestrator-reviewer` | `GATE_HEAD`, `GATE_BASE`, `PLAN_LOCK_ID`, `PLAN_SHA256`, `PLAN_ARTIFACT` (the gate record’s locator, required by the digest rule and not compared) |
 | Reply | Orchestrator Reviewer / `<run>.orchestrator-reviewer` | MERGE-GATE / review-only | exactly `<run>.orchestrator-planner` | `GATE_REVIEW_VERDICT`, `REVIEWED_HEAD`, `REVIEWED_BASE` |
 | Grant | existing Template K issuer and envelope | existing Template K phase and authority | exactly the named Implementer | `MERGE_HEAD`, `MERGE_BASE`; disposition below when applicable |
 
@@ -258,14 +258,15 @@ Require exactly one nonempty occurrence of every request and reply field in the 
 An absent, empty, repeated or conflicting field, or a verdict outside the enum, fails validation.
 An earlier approval cannot revive past a later same-request candidate that lacks a pin or verdict; an earlier request cannot revive past a later malformed same-gate candidate.
 Bind `MERGE_HEAD` = `GATE_HEAD` = `REVIEWED_HEAD` and `MERGE_BASE` = `GATE_BASE` = `REVIEWED_BASE`.
-Bind the request's `PLAN_LOCK_ID` and `PLAN_SHA256` to the gate record's corresponding fields; no additional plan fields are required on the grant or reply.
+Bind the request's `PLAN_LOCK_ID` and `PLAN_SHA256` to the gate record's corresponding fields; the grant and the reply carry no plan fields.
 An identical commit pin is unchanged source; a rebase with a new commit pin needs a new review even if its tree is identical.
 A changed plan at the same head needs a new gate record and request.
 
-For a validated, bound effective reply, `approve` is heard and permits the orchestrator to grant.
+For a validated, bound effective reply, `approve` is heard; after `approve` the orchestrator may grant, but the verdict itself grants nothing.
 `must-revise` is not heard: the orchestrator routes the fold and asks again at the new head before granting.
 `human-decision-required` needs the disposition below; the orchestrator obtains it or leaves the grant to the operator.
 No effective request or reply, failed validation, or failed binding means not heard.
+If the reviewer does not reply, re-address the request or tell the operator, who may grant personally; never grant on silence.
 These are the orchestrator's behavioral obligations; they do not give the engine a refusal gate.
 
 After `human-decision-required`, an orchestrator grant records the operator's chat authorization in exactly one line:
@@ -274,13 +275,17 @@ After `human-decision-required`, an orchestrator grant records the operator's ch
 GATE_DISPOSITION: operator-in-chat <YYYYMMDD-HHMMSS> — "<the operator's words>"
 ```
 
+The stamp uses local time, as relay filenames do, and the separator before the quotation is an em dash.
 The stamp records when the operator authorized; the quotation is the operator's own words, never a paraphrase, and the orchestrator writes it only when it has those words in its chat.
 The authorization must be positive, cover the effective held conditions and this grant's head, base and plan, and never be reused after any of them changes.
+Ask the operator a question naming the effective held conditions, the grant’s head and base, and its plan.
+Quote only the operator’s reply to that question, and only if it says to merge.
+An acknowledgment, a conditional, an earlier general instruction, or an answer to a different question is not authorization.
 A quoted refusal is not a disposition.
 The inline record is bound to this grant's pins and the effective held review; it carries no separate grant authority.
 The planned consumer checks only the exact key, `operator-in-chat`, a well-formed stamp and a nonempty quotation; it cannot verify chat authenticity or semantic authorization.
 Its silence is not proof that the operator actually disposed of the conditions.
-Without the well-formed line, an orchestrator grant after a held reply is not heard by that consumer.
+Without the well-formed line, an orchestrator grant after a held reply is not heard.
 The Implementer still acts on the filed grant, not on the chat record alone.
 
 The engine consumer (B8) has not landed; no mechanical checkpoint warning is claimed here until it lands and is evidenced.
