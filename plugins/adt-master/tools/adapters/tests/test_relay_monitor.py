@@ -200,7 +200,11 @@ class SessionIdentityTests(TmpEnv):
                 ):
                     with self.subTest(mode=mode, session=session, source=source):
                         result = self.invalid_entry(mode, session, source)
-                        self.assertEqual(result.returncode, 0, result.stderr)
+                        if mode == "bind" and source != "payload":
+                            self.assertEqual(result.returncode, 2, result.stderr)
+                            self.assertIn("invalid-session-id", result.stderr)
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_invalid_cli_sessions_report_reason_and_refuse(self):
         for mode in ("status", "follow", "replay"):
@@ -1697,6 +1701,166 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
 
 
 class BindTests(TmpEnv):
+    def test_nonrow_receipt_under_command_provenance_gets_incomplete_hint(self):
+        (self.root / "lane/missing.md").write_text("not filed")
+        rc, output = self._hook_output(self._submit(anchor="lane/missing.md"))
+        self.assertEqual(rc, 0)
+        record = self.store.load()["bind_observation"]
+        self.assertEqual((record["reason"], record["root_provenance"]), ("receipt-mismatch", "command"))
+        hint = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(hint.startswith("# rebind: incomplete"))
+        self.assertNotIn("bind --manual", hint)
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            status = self.rm.status_line(self.store, None)
+        self.assertIn("# rebind: incomplete", status)
+        self.assertNotIn("bind --manual", status)
+
+    def test_complete_hint_appears_once_row_exists(self):
+        import shlex
+        self._hook_output(self._submit(anchor="lane/missing.md"))
+        before = self.store.load()["bind_observation"]
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+        with self.index.open("a") as stream:
+            stream.write(row(2, file="lane/missing.md"))
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            status = self.rm.status_line(self.store, None)
+        hint = next(line for line in status.splitlines() if line.startswith("rebind: "))
+        words = shlex.split(hint.removeprefix("rebind: "))
+        self.assertEqual(words[-4:], ["--root", str(self.root), "--anchor", "lane/missing.md"])
+        self.assertEqual(self.store.load()["bind_observation"], before)
+
+    def test_command_observation_with_unreadable_index_gets_incomplete_hint(self):
+        self._hook_output(self._submit(anchor="lane/missing.md"))
+        with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
+            hint = self.rm.rebind_line(self.store.load(), "sess")
+        self.assertTrue(hint.startswith("# rebind: incomplete"))
+        self.assertNotIn("bind --manual", hint)
+
+    def test_inferred_observation_follows_index_readability(self):
+        self._hook_output(self._miss())
+        record = self.store.load()["bind_observation"]
+        self.assertEqual(record["root_provenance"], "inferred")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
+        with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
+            self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
+        self.assertEqual(self.store.load()["bind_observation"], record)
+
+    def test_refused_manual_bind_exits_one_with_reason(self):
+        self._manual()
+        before = self.store.path.read_bytes()
+        (self.root / "lane/missing.md").write_text("not filed")
+        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/missing.md"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "relay-monitor: manual bind refused: receipt-mismatch\n")
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_manual_bind_usage_and_session_errors_exit_two(self):
+        before = set(self.base.rglob("*"))
+        for operands, reason in ((["--root", str(self.root)], "manual bind needs"), (["--anchor", "lane/r1.md"], "manual bind needs"), (["--root", str(self.root), "--anchor", "lane/r1.md", "--session", "../bad"], "invalid-session-id")):
+            with self.subTest(operands=operands):
+                result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", *operands], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(len(result.stderr.splitlines()), 1)
+                self.assertIn(reason, result.stderr)
+                self.assertEqual(set(self.base.rglob("*")), before)
+
+    def test_successful_manual_bind_is_silent(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"], capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
+        self.assertEqual(self.store.load()["seat"], "a.planner")
+
+    def test_manual_bind_unexpected_error_is_not_swallowed(self):
+        bootstrap = """import importlib.util, sys
+spec = importlib.util.spec_from_file_location('fault_adapter', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+def fail(*args, **kwargs):
+    raise RuntimeError('injected bind fault')
+m.bind_from_receipt = fail
+raise SystemExit(m.main(sys.argv[2:]))
+"""
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                args = ["bind", "--host", "codex"]
+                if manual:
+                    args += ["--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"]
+                result = subprocess.run([sys.executable, "-c", bootstrap, str(SCRIPT), *args], input=self._submit(), capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.stdout, "")
+                if manual:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("RuntimeError: injected bind fault", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_every_hint_form_is_inert_or_runnable_in_shells(self):
+        import shlex
+        marker = self.base / "must-not-exist"
+        shells = (["sh", "-c"], ["bash", "-c"], ["zsh", "-f", "-i", "-c"])
+        for provenance in ("none", "command", "inferred"):
+            record = dict(root=str(self.root), root_provenance=provenance, receipts=["lane/r1.md"])
+            if provenance == "none":
+                record["receipts"] = [f"$(touch {marker})", f"`touch {marker}`", "a'; touch nope; '"]
+            hint = self.rm.rebind_line({"bind_observation": record}, "sess")
+            if provenance == "none":
+                for shell in shells:
+                    result = subprocess.run([*shell, hint], capture_output=True, text=True, timeout=10)
+                    self.assertFalse(marker.exists())
+                    self.assertEqual(result.stdout, "")
+            else:
+                prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
+                words = shlex.split(hint.removeprefix(prefix))
+                self.assertEqual(words, ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"])
+                for shell in shells:
+                    # Shell parsing, without executing a real manual bind.
+                    result = subprocess.run([*shell, "printf '%s\\n' " + hint.removeprefix(prefix)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), words)
+
+    def test_lookup_reports_match_no_match_and_unreadable(self):
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "match")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/missing.md"), "no-match")
+        with mock.patch.object(self.rm, "read_index", side_effect=PermissionError("fixture unreadable")):
+            self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "unreadable")
+        self.index.unlink()
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "unreadable")
+        self.index.write_text("malformed index\n")
+        self.assertEqual(self.rm.receipt_row_lookup(str(self.root), "lane/r1.md"), "unreadable")
+
+    def test_inference_allows_readable_nonmatching_second_candidate(self):
+        other = self.other_root()
+        write_index(other / "INDEX.md", "")
+        with mock.patch.object(self.rm, "discover_root_like_cli", return_value=str(other)):
+            result = self.rm.attribute_root(self.rm.SubmitParse(False), str(other), {"root": str(self.root)}, [{"path": "lane/r1.md"}], None, ([], False))
+        self.assertEqual(result, (str(self.root), "inferred"))
+
+    def test_inference_withheld_when_second_candidate_unreadable_in_either_order(self):
+        other = self.other_root()
+        ordered = list({str(self.root), str(other)})
+        real_read = self.rm.read_index
+        for bad_position in (0, 1):
+            for malformed in (False, True):
+                with self.subTest(bad_position=bad_position, malformed=malformed):
+                    bad = ordered[bad_position]
+                    good = ordered[1 - bad_position]
+                    write_index(pathlib.Path(good) / "INDEX.md", row(1))
+                    pathlib.Path(bad, "INDEX.md").write_text("malformed\n")
+                    reads = []
+                    def read(path):
+                        reads.append(str(path.parent))
+                        if str(path.parent) == bad and not malformed:
+                            raise PermissionError("fixture unreadable")
+                        return real_read(path)
+                    with mock.patch.object(self.rm, "discover_root_like_cli", return_value=ordered[0]), mock.patch.object(self.rm, "read_index", side_effect=read):
+                        result = self.rm.attribute_root(self.rm.SubmitParse(False), ordered[0], {"root": ordered[1]}, [{"path": "lane/r1.md"}], None, ([], False))
+                    self.assertEqual(result, (None, "none"))
+                    self.assertEqual(reads, ordered[:bad_position + 1])
+
     def _advance_stamps(self):
         # A stray save must change persisted bytes even within one real second.
         import itertools
@@ -4386,7 +4550,13 @@ class StatusTests(TmpEnv):
         import shlex
         root = "/a space/it's-root"
         self._record(root=root, receipts=["lane/it's here.md"])
-        line = self.rm.rebind_line(self.store.load(), "session quoted")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "session quoted").startswith("# rebind: incomplete"))
+        fixture = self.base / "quoting-index.md"
+        write_index(fixture, row(1, file="lane/it's here.md"))
+        snapshot = self.rm.read_index(fixture)
+        with mock.patch.object(self.rm, "read_index", return_value=snapshot) as reader:
+            line = self.rm.rebind_line(self.store.load(), "session quoted")
+        reader.assert_called_once_with(pathlib.Path(root) / "INDEX.md")
         self.assertTrue(line.startswith("rebind: "))
         words = shlex.split(line[len("rebind: "):])
         self.assertEqual(words[words.index("--root") + 1], root)
@@ -4396,6 +4566,8 @@ class StatusTests(TmpEnv):
 
     def test_rebind_inferred_form_is_labelled(self):
         self._record(provenance="inferred")
+        self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("# rebind: incomplete"))
+        write_index(self.index, row(1))
         self.assertTrue(self.rm.rebind_line(self.store.load(), "sess").startswith("rebind (root inferred, check it): "))
 
     def test_rebind_incomplete_form_is_not_runnable_and_omits_anchor(self):

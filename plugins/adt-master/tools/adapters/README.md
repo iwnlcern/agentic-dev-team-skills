@@ -197,6 +197,8 @@ rebind (root inferred, check it): python3 <adapter-path> bind --manual --session
 
 The complete form uses the root parsed from the command and shell-quotes every argument as needed.
 The inferred form requires exactly one candidate root with the receipt's index row and asks the operator to check it.
+Both runnable forms recheck the stored root's index on every rendering; a missing row or unreadable index gives the incomplete form until the row can be read.
+The index read is synchronous and has no timeout.
 The incomplete form is not runnable and never substitutes the existing binding anchor for the observed receipt.
 When lexical root indications contradict inference, the incomplete hint shows their bounded, shell-quoted operand spellings as command text; this optional stored text never drives binding or delivery.
 Hints are at most 1,024 characters; an oversized or multiline command uses the incomplete form.
@@ -216,8 +218,10 @@ Inbound delivery needs no socket permission because the watcher reads the run's 
 A seat that also files its own relays needs a sandbox profile that permits the relay daemon's socket.
 A seat under a profile that refuses the socket binds its watcher once at setup with `python3 <plugin-root>/tools/adapters/relay-monitor.py bind --manual --session <session-id> --root <run-root> --anchor <relay-file>`, and every later delivery needs no action.
 The anchor is the root-relative `file` cell of an `INDEX.md` row this seat authored, because manual binding takes the seat from that row's `FROM` cell.
-Every manual-bind outcome exits 0, so confirm the binding with `python3 <plugin-root>/tools/adapters/relay-monitor.py status --session <session-id>`.
-Without `--session`, the command uses `CLAUDE_CODE_SESSION_ID` when set, otherwise `CODEX_THREAD_ID`, and does nothing when the resolved value is missing or invalid.
+A successful manual bind exits 0 with empty stdout and stderr; a refusal exits 1 with one reason line on stderr and leaves the note unchanged.
+Missing root or anchor arguments, or an invalid session, exit 2 with a diagnostic; unexpected errors are not swallowed.
+Confirm the binding with `python3 <plugin-root>/tools/adapters/relay-monitor.py status --session <session-id>`.
+Without `--session`, the command uses `CLAUDE_CODE_SESSION_ID` when set, otherwise `CODEX_THREAD_ID`, and reports an invalid session without writing when the resolved value is missing or invalid.
 A seat under such a profile that sees `E-DAEMON-DOWN` from its own `tools/relay` call is most likely hitting that socket refusal rather than a stopped daemon; confirm the daemon from a seat that permits the socket before anyone restarts it.
 
 Test instrumentation (read once at import, default off, never set in production): `ADT_TEST_CRASH_BEFORE_OUTPUT`, `ADT_TEST_CRASH_AFTER_FLUSH`, `ADT_TEST_CRASH_AFTER_OUTPUT` exit the process with status 9 at the named point; `ADT_TEST_SINK_ACCEPT` caps, process-wide, the total number of bytes the delivery sink accepts (a write is truncated to the remaining room and reports zero progress once the cap is spent), which the tests use to force an output stall; `ADT_TEST_PAUSE_BEFORE_CLEANUP` names a file that a Stop drain aborted by an output stall waits for, at most ten seconds, before its stall cleanup, which the tests use to hold the drain at that point; `ADT_PACE_LINES` and `ADT_PACE_WINDOW` override the pacing budget.

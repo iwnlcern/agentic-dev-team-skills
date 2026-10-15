@@ -1651,6 +1651,16 @@ def root_indications(command: str) -> tuple[list[tuple[str, str, bool]], bool]:
     return roots, directory
 
 
+def receipt_row_lookup(root: str, receipt: str) -> str:
+    try:
+        snap = read_index(Path(root) / "INDEX.md")
+    except (OSError, ValueError):
+        return "unreadable"
+    if snap.error:
+        return "unreadable"
+    return "match" if any(row.cells["file"] == receipt for row in snap.rows) else "no-match"
+
+
 def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dict], plugin_root: str | None, indications: tuple[list[tuple[str, str, bool]], bool]) -> tuple[str | None, str]:
     if parsed.cd_prefix:
         cwd = os.path.join(cwd, parsed.cd_prefix)
@@ -1664,13 +1674,10 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
     candidates = {root for root in (discover_root_like_cli(None, cwd, plugin_root), note.get("root")) if root}
     matches = []
     for root in candidates:
-        try:
-            snap = read_index(Path(root) / "INDEX.md")
-        except (OSError, ValueError):
+        lookup = receipt_row_lookup(root, receipts[0]["path"])
+        if lookup == "unreadable":
             return None, "none"
-        if snap.error:
-            return None, "none"
-        if any(row.cells["file"] == receipts[0]["path"] for row in snap.rows):
+        if lookup == "match":
             matches.append(root)
     if len(matches) != 1:
         return None, "none"
@@ -1758,12 +1765,16 @@ def bind(args) -> int:
     if getattr(args, "manual", False):
         session = resolve_session(args)
         if not valid_session_id(session):
-            return 0
+            print("relay-monitor: invalid-session-id", file=sys.stderr)
+            return 2
         if not args.root or not args.anchor:
             print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
-            return 0
+            return 2
         root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
-        bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
+        bound, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
+        if not bound:
+            print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
+            return 1
         return 0
     try:
         payload = json.load(sys.stdin)
@@ -2046,7 +2057,7 @@ def rebind_line(note: dict, session: str) -> str | None:
     record = record or {}
     receipts = record.get("receipts") or []
     root, provenance = record.get("root"), record.get("root_provenance")
-    if root and len(receipts) == 1 and provenance in ("command", "inferred"):
+    if root and len(receipts) == 1 and provenance in ("command", "inferred") and receipt_row_lookup(root, receipts[0]) == "match":
         prefix = "rebind: " if provenance == "command" else "rebind (root inferred, check it): "
         command = shlex.join(["python3", str(Path(__file__).resolve()), "bind", "--manual", "--session", session, "--root", root, "--anchor", receipts[0]])
         if len(prefix + command) <= 1024 and all(32 <= ord(char) <= 126 for char in command):
@@ -2596,7 +2607,7 @@ def main(argv=None) -> int:
     except Exception:
         # Hooks consume untrusted payloads and must not interrupt their host.
         # Other modes retain their ordinary error reporting.
-        if args.mode in ("bind", "drain", "session-start"):
+        if args.mode in ("drain", "session-start") or (args.mode == "bind" and not args.manual):
             return 0
         raise
 
