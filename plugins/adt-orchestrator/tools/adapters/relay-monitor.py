@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import contextvars
 import errno
 import fcntl
 import json
@@ -21,11 +22,15 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Iterator
 
+ROOT_BUDGET = 1.0
+INDEX_MAX_BYTES = 16 * 1024 * 1024
 NOTE_VERSION = 1
 RING_SIZE = 64
 FOLLOW_OUTPUT_DEADLINE = 2.0
@@ -442,6 +447,101 @@ class IndexSnapshot:
     rows: list = field(default_factory=list)
     error: str | None = None
     partial_tail: bool = False
+
+
+@dataclass(frozen=True)
+class RootResult:
+    kind: str
+    value: object = None
+    detail: str | None = None
+
+
+class RootBudget:
+    def __init__(self, seconds: float = ROOT_BUDGET, cap: float | None = None):
+        self._remaining = max(0.0, seconds)
+        self.cap = cap
+
+    def remaining(self) -> float:
+        return self._remaining
+
+    def spend(self, waited: float) -> None:
+        self._remaining = max(0.0, self._remaining - max(0.0, waited))
+
+
+_root_budget: contextvars.ContextVar[RootBudget | None] = contextvars.ContextVar(
+    "relay_root_budget", default=None
+)
+_root_gate = threading.Lock()
+_root_pending: tuple[threading.Event, list[RootResult]] | None = None
+
+
+def current_budget() -> RootBudget | None:
+    return _root_budget.get()
+
+
+@contextlib.contextmanager
+def use_budget(budget: RootBudget) -> Iterator[RootBudget]:
+    token = _root_budget.set(budget)
+    try:
+        yield budget
+    finally:
+        _root_budget.reset(token)
+
+
+@contextlib.contextmanager
+def root_budget(seconds: float = ROOT_BUDGET, cap: float | None = None) -> Iterator[RootBudget]:
+    budget = current_budget()
+    if budget is None:
+        with use_budget(RootBudget(seconds, cap)) as fresh:
+            yield fresh
+        return
+    previous_cap = budget.cap
+    if cap is not None:
+        budget.cap = cap if previous_cap is None else min(previous_cap, cap)
+    try:
+        yield budget
+    finally:
+        budget.cap = previous_cap
+
+
+def bounded_root_call(fn: Callable[[], object]) -> RootResult:
+    """Wait for raw root work without retaining a note or a state lock.
+
+    A completed event frees the single process-wide slot, even when its caller
+    has already timed out. Only the caller reads a worker's immutable result.
+    """
+    global _root_pending
+    budget = current_budget() or RootBudget()
+    now = time.monotonic()
+    deadline = now + budget.remaining()
+    if budget.cap is not None:
+        deadline = min(deadline, budget.cap)
+    if deadline <= now:
+        return RootResult("stalled")
+    with _root_gate:
+        if _root_pending is not None and not _root_pending[0].is_set():
+            return RootResult("stalled")
+        done = threading.Event()
+        result: list[RootResult] = []
+
+        def work():
+            try:
+                result.append(RootResult("ok", fn()))
+            except OSError as exc:
+                result.append(RootResult("failed", detail=errno.errorcode.get(exc.errno, type(exc).__name__)))
+            except BaseException as exc:
+                result.append(RootResult("failed", detail=type(exc).__name__))
+            finally:
+                done.set()
+
+        _root_pending = (done, result)
+        threading.Thread(target=work, daemon=True, name="relay-root-read").start()
+    started_wait = time.monotonic()
+    finished = done.wait(max(0.0, deadline - started_wait))
+    budget.spend(time.monotonic() - started_wait)
+    if not finished:
+        return RootResult("stalled")
+    return result[0]
 
 
 def read_index(path: Path) -> IndexSnapshot:

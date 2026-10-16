@@ -5756,3 +5756,179 @@ class CliSmokeTests(TmpEnv):
             env=dict(os.environ),
         )
         self.assertEqual(json.loads(p.stdout), {})
+
+
+class BoundedRootCallTests(TmpEnv):
+    """Catch unbounded waits, duplicate workers and budget resets using raw barriers."""
+
+    def _probe(self, body):
+        import textwrap
+        bootstrap = '''import importlib.util, sys, threading, time, unittest, errno
+spec = importlib.util.spec_from_file_location("budget_probe", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+t = unittest.TestCase()
+release = threading.Event()
+entered = threading.Event()
+def blocked():
+    entered.set()
+    release.wait()
+    return "late"
+def reap():
+    release.set()
+    for worker in threading.enumerate():
+        if worker is not threading.current_thread():
+            worker.join(2)
+            t.assertFalse(worker.is_alive(), "worker not reaped")
+'''
+        code = bootstrap + "\ntry:\n" + textwrap.indent(textwrap.dedent(body), "    ") + "\nfinally:\n    reap()\n"
+        try:
+            result = subprocess.run([sys.executable, "-c", code, str(SCRIPT)],
+                                    capture_output=True, text=True, timeout=10,
+                                    env=dict(os.environ))
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"blocked past SUPERVISOR_TIMEOUT; stdout={exc.stdout!r}; stderr={exc.stderr!r}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stalled_call_reports_and_starts_one_worker(self):
+        self._probe('''
+            start = time.monotonic()
+            result = m.bounded_root_call(blocked)
+            t.assertEqual(result.kind, "stalled")
+            t.assertTrue(entered.is_set())
+            t.assertLess(time.monotonic() - start, 1.25)
+            count = threading.active_count()
+            start = time.monotonic()
+            t.assertEqual(m.bounded_root_call(lambda: t.fail("second worker")).kind, "stalled")
+            t.assertLess(time.monotonic() - start, .05)
+            t.assertEqual(threading.active_count(), count)
+            reap()
+            t.assertEqual(m.bounded_root_call(lambda: 7).value, 7)
+        ''')
+
+    def test_late_result_is_discarded(self):
+        self._probe('''
+            store = m.NoteStore("late-result")
+            before = store.load()
+            with m.root_budget(.02):
+                result = m.bounded_root_call(blocked)
+            t.assertEqual(result.kind, "stalled")
+            reap()
+            t.assertIsNone(result.value)
+            t.assertEqual(store.load(), before)
+            t.assertEqual(m.bounded_root_call(lambda: "fresh").value, "fresh")
+        ''')
+
+    def test_immediate_stall_consumes_no_budget(self):
+        self._probe('''
+            with m.root_budget(.02):
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            with m.root_budget() as budget:
+                before = budget.remaining()
+                t.assertEqual(m.bounded_root_call(lambda: None).kind, "stalled")
+                t.assertEqual(budget.remaining(), before)
+            reap()
+            with m.root_budget() as budget:
+                before = budget.remaining()
+                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.3)).kind, "ok")
+                t.assertGreaterEqual(before - budget.remaining(), .3)
+        ''')
+
+    def test_spent_budget_returns_stalled_without_a_thread(self):
+        self._probe('''
+            with m.root_budget(0):
+                count = threading.active_count()
+                t.assertEqual(m.bounded_root_call(lambda: t.fail("started")).kind, "stalled")
+                t.assertEqual(threading.active_count(), count)
+        ''')
+
+    def test_cap_bounds_the_deadline(self):
+        self._probe('''
+            start = time.monotonic()
+            with m.root_budget(cap=start + .2):
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            t.assertLess(time.monotonic() - start, .45)
+        ''')
+
+    def test_failed_carries_errno_name(self):
+        self._probe('''
+            def denied(): raise PermissionError(errno.EACCES, "denied")
+            def invalid(): raise ValueError("invalid")
+            for fn, detail in [(denied, "EACCES"), (invalid, "ValueError")]:
+                result = m.bounded_root_call(fn)
+                t.assertEqual((result.kind, result.detail), ("failed", detail))
+        ''')
+
+    def test_scoped_budget_is_shared_across_calls(self):
+        self._probe('''
+            with m.root_budget():
+                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.6)).kind, "ok")
+                start = time.monotonic()
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+                t.assertLess(time.monotonic() - start, .55)
+            reap()
+            release.clear()
+            start = time.monotonic()
+            with m.root_budget():
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            t.assertGreaterEqual(time.monotonic() - start, .95)
+        ''')
+
+    def test_nested_scope_reuses_outer_budget(self):
+        self._probe('''
+            with m.root_budget() as outer:
+                outer.spend(.8)
+                with m.root_budget() as inner:
+                    t.assertIs(inner, outer)
+                    t.assertLessEqual(inner.remaining(), .2)
+            for outer_cap, inner_cap in [(1, .1), (.1, 1)]:
+                start = time.monotonic()
+                release.clear()
+                with m.root_budget(cap=start + outer_cap):
+                    with m.root_budget(cap=start + inner_cap):
+                        t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+                t.assertLess(time.monotonic() - start, .25)
+                reap()
+        ''')
+
+    def test_scope_resets_on_normal_and_exceptional_exit(self):
+        self._probe('''
+            t.assertIsNone(m.current_budget())
+            with m.root_budget() as outer:
+                for throw in [False, True]:
+                    try:
+                        with m.use_budget(m.RootBudget(.2)):
+                            t.assertIsNot(m.current_budget(), outer)
+                            if throw: raise ValueError("scope")
+                    except ValueError: pass
+                    t.assertIs(m.current_budget(), outer)
+            t.assertIsNone(m.current_budget())
+            try:
+                with m.root_budget(): raise ValueError("outer")
+            except ValueError: pass
+            t.assertIsNone(m.current_budget())
+        ''')
+
+    def test_use_budget_reactivates_a_retained_budget(self):
+        self._probe('''
+            a, b = m.RootBudget(), m.RootBudget()
+            with m.use_budget(a):
+                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.3)).kind, "ok")
+                remaining = a.remaining()
+            with m.use_budget(b):
+                t.assertEqual(b.remaining(), 1)
+                b.spend(.1)
+            with m.use_budget(a):
+                t.assertEqual(m.current_budget().remaining(), remaining)
+            t.assertAlmostEqual(b.remaining(), .9)
+        ''')
+
+    def test_no_scope_gives_one_call_budget(self):
+        self._probe('''
+            t.assertIsNone(m.current_budget())
+            start = time.monotonic()
+            t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            t.assertLess(time.monotonic() - start, 1.25)
+            t.assertIsNone(m.current_budget())
+        ''')
