@@ -7058,3 +7058,160 @@ t.assertGreater(budgets[str(other)].remaining(),.9)
 docs=[json.loads(line) for line in capture.getvalue().splitlines()]
 t.assertEqual([d['root'] for d in docs if 'file' in d],[str(other)])
 ''')
+
+class PanelFoldTests(TmpEnv):
+    """Regression witnesses for the PR #33 panel's six bounded folds."""
+
+    def test_failed_discovery_and_path_check_propagate(self):
+        # A fault at an earlier discovery must not mask the attribution sites.
+        for site in ('manual-discovery', 'manual-path', 'hook-discovery',
+                     'hook-path', 'command-attribution', 'inferred-attribution'):
+            with self.subTest(site=site):
+                write_index(self.index, row(1))
+                (self.root / 'lane/r1.md').write_text('relay')
+                marker = self.base / 'fault-reached'
+                marker.unlink(missing_ok=True)
+                store = self.rm.NoteStore('panel')
+                before = {k: store.load().get(k) for k in ('bind_observation', 'observation_seq', 'reason')}
+                code = f'''
+import importlib.util,sys,json,io
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('panel_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+site={site!r};root={str(self.root)!r};marker=Path({str(marker)!r})
+def fail(*a,**k):
+    marker.write_text(site)
+    raise RuntimeError('panel escaped fault')
+manual=site.startswith('manual')
+if site.endswith('path'):
+    m.discover_root_like_cli=lambda *a,**k:root
+    m.path_under_root=fail
+else:
+    m.discover_root_like_cli=fail
+command='tools/relay submit d.md --root '+root
+if site.endswith('attribution'):
+    # A named submit in a pipeline is a near miss: no initial discovery.
+    command=('tools/relay submit d.md --root '+root if site=='command-attribution' else 'tools/relay submit d.md')+' | cat'
+payload=dict(session_id='panel',cwd=root,hook_event_name='PostToolUse',tool_input=dict(command=command),tool_response=dict(stdout=json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))))
+sys.stdin=io.StringIO(json.dumps(payload))
+argv=['bind','--session','panel']+(['--manual','--root',root,'--anchor','lane/r1.md'] if manual else [])
+raise SystemExit(m.main(argv))
+'''
+                result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=10)
+                self.assertTrue(marker.exists(), result.stdout + result.stderr)
+                self.assertEqual(marker.read_text(), site)
+                if site.startswith('manual'):
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('RuntimeError: panel escaped fault', result.stderr)
+                    self.assertNotIn('refused', result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, '')
+                    self.assertEqual({k: store.load().get(k) for k in before}, before)
+
+    def test_unsearchable_root_bind_names_index_unreadable(self):
+        for form in ('mode', 'file', 'absent-receipt', 'removed-receipt'):
+            with self.subTest(form=form):
+                write_index(self.index, row(1))
+                receipt = self.root / 'lane/r1.md'
+                receipt.write_text('relay')
+                backup = self.root.with_name('saved-root')
+                anchor = 'lane/r1.md'
+                try:
+                    if form == 'mode': self.root.chmod(0)
+                    elif form == 'file':
+                        self.root.rename(backup)
+                        self.root.write_text('not a directory')
+                    elif form == 'absent-receipt': anchor = 'lane/absent.md'
+                    else: receipt.unlink()
+                    result = subprocess.run([sys.executable, str(SCRIPT), 'bind', '--manual', '--session', 'panel', '--root', str(self.root), '--anchor', anchor], capture_output=True, text=True, timeout=10)
+                finally:
+                    if form == 'mode': self.root.chmod(0o700)
+                    elif form == 'file':
+                        self.root.unlink()
+                        backup.rename(self.root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                token = 'index-unreadable' if form in ('mode', 'file') else 'receipt-mismatch'
+                self.assertEqual(result.stderr, 'relay-monitor: manual bind refused: '+token+'\n')
+                self.assertEqual(result.stdout, '')
+                self.assertIsNone(self.rm.NoteStore('panel').load().get('seat'))
+
+    def test_operator_budget_is_per_root(self):
+        # Sharing A's budget with B loses B's notification or shortens its wait.
+        for stalled in (False, True):
+            with self.subTest(stalled=stalled):
+                FifoCallersTests._child(self, f'''
+stalled={stalled!r}
+other=root/'other';other.mkdir(exist_ok=True)
+index.write_text(header+one);(other/'INDEX.md').write_text(header+two)
+store=m.NoteStore('operator')
+store.update(lambda n:n.update(progress={{str(root):dict(file=None,position=0),str(other):dict(file=None,position=0)}}))
+original=m.os.read;raw=m.os.open;paths={{}};timers=[];seen=[];notified=[];measure=[]
+def opened(path,*a,**k):
+    fd=raw(path,*a,**k)
+    if str(path) in (str(index),str(other/'INDEX.md')): paths[fd]=str(path)
+    return fd
+def delayed(fd,*a,**k):
+    path=paths.pop(fd,None)
+    if path:
+        seen.append(path)
+        if path==str(other/'INDEX.md') and stalled: release.wait()
+        else:
+            gate=threading.Event();timer=threading.Timer(0.6 if path==str(index) else 0.5,gate.set)
+            timers.append(timer);timer.start();gate.wait()
+    return original(fd,*a,**k)
+read_index=m.read_index
+def measured(path):
+    start=time.monotonic();snap=read_index(path)
+    measure.append((str(path),time.monotonic()-start,snap.error));return snap
+try:
+    with mock.patch.object(m.os,'open',opened),mock.patch.object(m.os,'read',delayed),mock.patch.object(m,'read_index',measured),mock.patch.object(m,'notify',side_effect=lambda title,text,notifier:notified.append(text)):
+        m.operator_scan([str(root),str(other)],notifier='none')
+    t.assertEqual(seen,[str(index),str(other/'INDEX.md')])
+    if stalled:
+        t.assertEqual(len(notified),1)
+        t.assertEqual(measure[1][2],'root-stalled')
+        t.assertGreaterEqual(measure[1][1],0.85)
+        t.assertLess(measure[1][1],1.5)
+        t.assertEqual(store.load()['progress'][str(other)],dict(file=None,position=0))
+    else:
+        t.assertEqual(len(notified),2)
+        t.assertIn('lane/r1.md',notified[0]);t.assertIn('lane/r2.md',notified[1])
+finally:
+    release.set()
+    for timer in timers: timer.join(2)
+''')
+
+    def test_healthy_drain_scan_clears_index_reason(self):
+        for delivering in (False, True):
+            for recorded_exit in (False, True):
+                with self.subTest(delivering=delivering, recorded_exit=recorded_exit):
+                    FifoCallersTests._child(self, f'''
+delivering={delivering!r};recorded_exit={recorded_exit!r}
+store=m.NoteStore('fifo')
+record=dict(reason='follower-error',detail='ValueError',at='20261015-000000',instance='old')
+store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',phase='following',leader=None,exit=record if recorded_exit else None,reason='follower-error' if recorded_exit else None,progress={{str(root):dict(file=None,position=0)}}))
+index.write_bytes(b'\\xff')
+with (root/'fault-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
+t.assertEqual(store.load()['reason'],'index-unreadable')
+# Two pending rows exercise the drain's one-row early return.
+index.write_text(header+(one+two if delivering else ''))
+with (root/'healthy-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
+output=(root/'healthy-output').read_text()
+note=store.load()
+t.assertIsNone(note['reason']);t.assertIsNone(note['reason_detail'])
+if delivering: t.assertIn('lane/r1.md',output)
+if recorded_exit:
+    t.assertEqual(note['exit'],record)
+    with mock.patch.object(m,'check_identity',return_value=('ok',{{}},{{}})):
+        t.assertIn('unavailable: follower-error',m.status_line(store,None))
+else: t.assertIsNone(note['exit'])
+''')
+
+    def test_failed_thread_start_leaves_no_outstanding_mark(self):
+        FifoCallersTests._child(self, '''
+with mock.patch.object(m.threading.Thread,'start',side_effect=RuntimeError('cannot start')):
+    with t.assertRaisesRegex(RuntimeError,'cannot start'): m.bounded_root_call(lambda: 'unused')
+result=m.bounded_root_call(lambda: 'next call')
+t.assertEqual(result.kind,'ok');t.assertEqual(result.value,'next call')
+''')

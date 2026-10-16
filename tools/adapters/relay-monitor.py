@@ -495,6 +495,7 @@ class RootResult:
     kind: str
     value: object = None
     detail: str | None = None
+    exc: BaseException | None = None
 
 
 class RootBudget:
@@ -569,14 +570,14 @@ def bounded_root_call(fn: Callable[[], object]) -> RootResult:
             try:
                 result.append(RootResult("ok", fn()))
             except OSError as exc:
-                result.append(RootResult("failed", detail=errno.errorcode.get(exc.errno, type(exc).__name__)))
+                result.append(RootResult("failed", detail=errno.errorcode.get(exc.errno, type(exc).__name__), exc=exc))
             except BaseException as exc:
-                result.append(RootResult("failed", detail=type(exc).__name__))
+                result.append(RootResult("failed", detail=type(exc).__name__, exc=exc))
             finally:
                 done.set()
 
-        _root_pending = (done, result)
         threading.Thread(target=work, daemon=True, name="relay-root-read").start()
+        _root_pending = (done, result)
     started_wait = time.monotonic()
     finished = done.wait(max(0.0, deadline - started_wait))
     budget.spend(time.monotonic() - started_wait)
@@ -1199,6 +1200,8 @@ def deliver_once(
             }
             if note.get("reason") in ("output-stalled", "anchor-not-found"):
                 set_reason(note, None)  # `rebased` stays visible until the next binding
+            if not snapshot.error and note.get("reason") in INDEX_UNAVAILABLE:
+                set_reason(note, None)
             note["phase"] = "following"
             store.save(note)
         except FrameBusy:
@@ -1239,9 +1242,11 @@ def deliver_once(
                     and live_seat == canonical(binding.seat)
                     and live_root == binding.root
                     and not foreign
-                    and n.get("phase") != "following"
+                    and (n.get("phase") != "following" or n.get("reason") in INDEX_UNAVAILABLE)
                 ):
                     n["phase"] = "following"
+                    if n.get("reason") in INDEX_UNAVAILABLE:
+                        set_reason(n, None)
                     store.save(n)
         except LockTimeout:
             result.aborted = "lock-timeout"
@@ -1873,6 +1878,8 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
         cwd = os.path.join(cwd, parsed.cd_prefix)
     if parsed.root_operand:
         discovered = discover_root_bounded(parsed.root_operand, cwd, plugin_root)
+        if discovered.kind == "failed":
+            raise discovered.exc
         root = discovered.value if discovered.kind == "ok" else None
         if root:
             return root, "command"
@@ -1880,6 +1887,8 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
     if len(receipts) != 1:
         return None, "none"
     discovered = discover_root_bounded(None, cwd, plugin_root)
+    if discovered.kind == "failed":
+        raise discovered.exc
     if discovered.kind != "ok":
         return None, "none"
     candidates = {root for root in (discovered.value, note.get("root")) if root}
@@ -1947,14 +1956,16 @@ def bind_from_receipt(
     checked = path_under_root_bounded(root, receipt_path)
     if checked.kind == "stalled":
         return False, "root-stalled"
-    if checked.kind != "ok" or not checked.value:
-        return False, "receipt-mismatch"
+    if checked.kind == "failed":
+        raise checked.exc
     try:
         snap = read_index(Path(root) / "INDEX.md")
     except (OSError, ValueError):
         return False, "receipt-mismatch"
     if snap.error in INDEX_UNAVAILABLE:
         return False, snap.error
+    if not checked.value:
+        return False, "receipt-mismatch"
     row_ = next((r for r in snap.rows if r.cells["file"] == receipt_path), None)
     if snap.error or row_ is None or not row_.cells["from"]:
         return False, "receipt-mismatch"
@@ -2002,6 +2013,8 @@ def bind(args) -> int:
                 print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
                 return 2
             discovered = discover_root_bounded(args.root, os.getcwd(), args.plugin_root)
+            if discovered.kind == "failed":
+                raise discovered.exc
             if discovered.kind != "ok":
                 reason = "root-stalled" if discovered.kind == "stalled" else "receipt-mismatch"
                 print("relay-monitor: manual bind refused: " + reason, file=sys.stderr)
@@ -2045,6 +2058,8 @@ def bind(args) -> int:
         if parsed.ok:
             base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
             discovered = discover_root_bounded(parsed.root_operand, base, args.plugin_root)
+            if discovered.kind == "failed":
+                raise discovered.exc
             root = discovered.value if discovered.kind == "ok" else None
             if discovered.kind == "stalled":
                 reason = "root-stalled"

@@ -201,7 +201,7 @@ Both runnable hints note that the command may need operator approval; the text a
 The complete form uses the root parsed from the command and shell-quotes every argument as needed.
 The inferred form requires exactly one candidate root with the receipt's index row and asks the operator to check it.
 Both runnable forms recheck the stored root's index on every rendering; a missing row or unreadable index gives the incomplete form until the row can be read.
-The index read is synchronous and has no timeout.
+The index read is a bound-root call within its operation’s 1 s budget and reports `root-stalled` if it does not finish within that budget.
 The incomplete form is not runnable and never substitutes the existing binding anchor for the observed receipt.
 When lexical root indications contradict inference, the incomplete hint shows their bounded, shell-quoted operand spellings as command text; this optional stored text never drives binding or delivery.
 Hints are at most 1,024 characters; an oversized or multiline command uses the incomplete form.
