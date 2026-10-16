@@ -605,7 +605,9 @@ def read_index(path: Path) -> IndexSnapshot:
             if size > INDEX_MAX_BYTES:
                 return IndexSnapshot(error="index-unreadable", detail="too-large")
             try:
-                return b"".join(chunks).decode("utf-8", errors="strict")
+                # Preserve Path.read_text's universal-newline handling after the byte cap.
+                text = b"".join(chunks).decode("utf-8", errors="strict")
+                return text.replace("\r\n", "\n").replace("\r", "\n")
             except UnicodeDecodeError:
                 return IndexSnapshot(error="index-unreadable", detail="not-utf-8")
         finally:

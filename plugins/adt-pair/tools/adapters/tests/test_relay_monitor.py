@@ -7215,3 +7215,71 @@ with mock.patch.object(m.threading.Thread,'start',side_effect=RuntimeError('cann
 result=m.bounded_root_call(lambda: 'next call')
 t.assertEqual(result.kind,'ok');t.assertEqual(result.value,'next call')
 ''')
+
+
+class NewlineCompatibilityTests(TmpEnv):
+    """Keep the text-mode reader's measured newline semantics after bounding IO."""
+
+    def test_index_line_endings_match_base(self):
+        # Literal answers measured at b8d87eb, independent of the new decoder.
+        complete = HEADER + row(1)
+        cases = [
+            ('LF', complete, None, ['lane/r1.md'], False),
+            ('CRLF', complete.replace('\n', '\r\n'), None, ['lane/r1.md'], False),
+            ('CR', complete.replace('\n', '\r'), None, ['lane/r1.md'], False),
+            ('LF-header-CRLF-row', HEADER + row(1).replace('\n', '\r\n'), None, ['lane/r1.md'], False),
+            ('CRLF-header-LF-row', HEADER.replace('\n', '\r\n') + row(1), None, ['lane/r1.md'], False),
+            ('partial-tail-LF', complete + row(2).rstrip('\n'), None, ['lane/r1.md'], True),
+            ('partial-tail-lone-CR', complete + row(2).rstrip('\n') + '\r', None, ['lane/r1.md', 'lane/r2.md'], False),
+            ('partial-tail-CRLF', (complete + row(2).rstrip('\n')).replace('\n', '\r\n'), None, ['lane/r1.md'], True),
+            ('CR-inside-cell', HEADER + row(1, file='lane/r\r1.md'), 'index-malformed-row:1', [], False),
+        ]
+        for name, text, error, files, partial in cases:
+            with self.subTest(case=name):
+                self.index.write_bytes(text.encode('utf-8'))
+                snap = self.rm.read_index(self.index)
+                self.assertEqual((snap.error, [r.cells['file'] for r in snap.rows], snap.partial_tail),
+                                 (error, files, partial))
+        # Normalizing first would shrink this below the cap and lose the refusal.
+        for name, raw, detail in [
+            ('raw-cap', b'\r\n' * (self.rm.INDEX_MAX_BYTES // 2) + b'\r', 'too-large'),
+            ('strict-utf8', complete.replace('\n', '\r\n').encode() + b'\xff\r\n', 'not-utf-8'),
+        ]:
+            with self.subTest(control=name):
+                self.index.write_bytes(raw)
+                snap = self.rm.read_index(self.index)
+                self.assertEqual((snap.error, snap.detail), ('index-unreadable', detail))
+
+    def test_crlf_and_cr_index_bind_and_deliver(self):
+        for label, ending in [('CRLF', '\r\n'), ('CR', '\r')]:
+            with self.subTest(ending=label):
+                session = 'newline-' + label.lower()
+                # The own receipt anchors binding; a separate addressed row is pending.
+                text = HEADER + row(1) + row(2, frm='b.implementer', to='a.planner')
+                self.index.write_bytes(text.replace('\n', ending).encode())
+                (self.root / 'lane/r1.md').write_text('receipt')
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), 'bind', '--manual', '--session', session,
+                     '--root', str(self.root), '--anchor', 'lane/r1.md'],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+                store = self.rm.NoteStore(session)
+                self.assertEqual(store.load()['seat'], 'a.planner')
+                self.assertEqual(store.load()['progress'][str(self.root)]['file'], 'lane/r1.md')
+                for scan in range(2):
+                    with tempfile.TemporaryFile(mode='w+') as output:
+                        with contextlib.redirect_stdout(output):
+                            self.assertEqual(self.rm.drain(ns(session=session, host='codex')), 0)
+                        output.seek(0)
+                        emitted = output.read()
+                    if scan == 0:
+                        lines = emitted.splitlines()
+                        self.assertEqual(len(lines), 1, emitted)
+                        document = json.loads(lines[0])
+                        self.assertEqual(document['decision'], 'block')
+                        self.assertEqual(json.loads(document['reason'].split('\n', 1)[1])['file'], 'lane/r2.md')
+                    else:
+                        self.assertEqual(json.loads(emitted), {})
+                    note = store.load()
+                    self.assertEqual(note['phase'], 'following')
+                    self.assertEqual(note['progress'][str(self.root)], dict(file='lane/r2.md', position=2))
