@@ -20,6 +20,7 @@ import re
 import select
 import shlex
 import subprocess
+import stat
 import sys
 import tempfile
 import threading
@@ -32,7 +33,8 @@ from typing import Callable, Iterator
 ROOT_BUDGET = 1.0
 INDEX_MAX_BYTES = 16 * 1024 * 1024
 FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error"})
-INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed"})
+INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed", "index-unreadable", "root-stalled"})
+SIGNATURE_STALLED = object()
 NOTE_VERSION = 1
 RING_SIZE = 64
 FOLLOW_OUTPUT_DEADLINE = 2.0
@@ -485,6 +487,7 @@ class IndexSnapshot:
     rows: list = field(default_factory=list)
     error: str | None = None
     partial_tail: bool = False
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -583,10 +586,40 @@ def bounded_root_call(fn: Callable[[], object]) -> RootResult:
 
 
 def read_index(path: Path) -> IndexSnapshot:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return IndexSnapshot(error="index-missing")
+    def read_raw():
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return IndexSnapshot(error="index-unreadable", detail="not-regular-file")
+            if info.st_size > INDEX_MAX_BYTES:
+                return IndexSnapshot(error="index-unreadable", detail="too-large")
+            chunks, size = [], 0
+            while size <= INDEX_MAX_BYTES:
+                chunk = os.read(fd, INDEX_MAX_BYTES + 1 - size)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            if size > INDEX_MAX_BYTES:
+                return IndexSnapshot(error="index-unreadable", detail="too-large")
+            try:
+                return b"".join(chunks).decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                return IndexSnapshot(error="index-unreadable", detail="not-utf-8")
+        finally:
+            os.close(fd)
+
+    result = bounded_root_call(read_raw)
+    if result.kind == "stalled":
+        return IndexSnapshot(error="root-stalled", detail="stalled")
+    if result.kind == "failed":
+        if result.detail == "ENOENT":
+            return IndexSnapshot(error="index-missing")
+        return IndexSnapshot(error="index-unreadable", detail=result.detail)
+    if isinstance(result.value, IndexSnapshot):
+        return result.value
+    text = result.value
     complete_last = text.endswith("\n")
     lines = text.split("\n")
     if complete_last:
@@ -972,10 +1005,10 @@ def deliver_once(
     if binding is None:
         return result
     root_key, encode = binding.root, encode or (lambda b: b)
-    if snapshot.error in ("index-missing", "index-malformed"):
+    if snapshot.error in INDEX_UNAVAILABLE:
         _bounded_update(
             store,
-            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error)),
+            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error, snapshot.detail)),
             end,
             result,
         )
@@ -1176,7 +1209,7 @@ def deliver_once(
     if snapshot.error:
         _bounded_update(
             store,
-            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error)),
+            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error, snapshot.detail)),
             end,
             result,
         )
@@ -1216,11 +1249,13 @@ def deliver_once(
 
 
 def index_signature(path: Path):
-    try:
-        st = path.stat()
+    result = bounded_root_call(path.stat)
+    if result.kind == "ok":
+        st = result.value
         return (st.st_mtime_ns, st.st_size, st.st_ino)
-    except FileNotFoundError:
+    if result.kind == "failed" and result.detail == "ENOENT":
         return None
+    return SIGNATURE_STALLED
 
 
 def follow(args) -> int:
@@ -2432,8 +2467,9 @@ def notify(title: str, text: str, notifier: str = "osascript") -> None:
 def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
     store, fired = NoteStore("operator"), 0
     for root in roots:
-        snap = read_index(Path(root) / "INDEX.md")
-        if snap.error in ("index-missing", "index-malformed"):
+        with root_budget():
+            snap = read_index(Path(root) / "INDEX.md")
+        if snap.error in INDEX_UNAVAILABLE:
             continue
         cursor = store.load()["progress"].get(root)
         if cursor is None:
@@ -2503,6 +2539,14 @@ def replay(args) -> int:
     if not valid_session_id(session):
         print("relay-monitor: invalid-session-id", file=sys.stderr)
         return 2
+    budgets: dict[str, RootBudget] = {}
+
+    def read_root(root: str) -> IndexSnapshot:
+        if root not in budgets:
+            budgets[root] = RootBudget()
+        with use_budget(budgets[root]):
+            return read_index(Path(root) / "INDEX.md")
+
     note = NoteStore(session).load()
     floors = list(note.get("floors") or [])
     if args.after:  # single-binding optimization: the current binding only
@@ -2510,10 +2554,10 @@ def replay(args) -> int:
         if not root or not seat:
             print(json.dumps({"error": "unbound"}))
             return 3
-        snap0 = read_index(Path(root) / "INDEX.md")
+        snap0 = read_root(root)
         hit = (
             None
-            if snap0.error in ("index-missing", "index-malformed")
+            if snap0.error in INDEX_UNAVAILABLE
             else next((r for r in snap0.rows if r.cells["file"] == args.after), None)
         )
         if hit is None:
@@ -2605,9 +2649,9 @@ def replay(args) -> int:
     else:
         plan, index, next_pos, carried_failed = [], 0, None, False
         for f in floors:  # fix every root's upper bound at the first call
-            snap = read_index(Path(f["root"]) / "INDEX.md")
+            snap = read_root(f["root"])
             upper = note["progress"].get(f["root"])
-            if snap.error in ("index-missing", "index-malformed"):
+            if snap.error in INDEX_UNAVAILABLE:
                 plan.append(
                     {
                         "root": f["root"],
@@ -2646,11 +2690,8 @@ def replay(args) -> int:
     while index < len(plan):
         entry = plan[index]
         root, seat = entry["root"], canonical(entry["seat"])
-        snap = read_index(Path(root) / "INDEX.md")
-        if entry.get("unavailable") or snap.error in (
-            "index-missing",
-            "index-malformed",
-        ):
+        snap = read_root(root)
+        if entry.get("unavailable") or snap.error in INDEX_UNAVAILABLE:
             _replay_error(root)
             failed = True
             index += 1

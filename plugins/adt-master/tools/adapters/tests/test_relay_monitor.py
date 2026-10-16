@@ -6287,3 +6287,275 @@ print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
         self.rm.clear_observations(note)
         self.assertEqual(note['observation_seq'], initial+2)
         self.assertIsNone(note['bind_observation'])
+
+
+class FifoCallersTests(FollowProcessMixin, TmpEnv):
+    def _child(self, body):
+        import textwrap
+        code = f'''
+import importlib.util,sys,os,io,json,time,threading,socket,stat
+from pathlib import Path
+from unittest import TestCase,mock
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+t=TestCase();root=Path({str(self.root)!r});index=root/'INDEX.md'
+header={HEADER!r};one={row(1, to='b.implementer, operator')!r};two={row(2, to='b.implementer, operator')!r}
+release=threading.Event();entered=threading.Event()
+def args(**kw):
+    values=dict(session='fifo',after=None,token=None,limit=50,host='codex',plugin_root=None,root=None,anchor=None,manual=False,deadline=5.0)
+    values.update(kw);return SimpleNamespace(**values)
+def blocked():
+    entered.set();release.wait();return None
+raw_open=os.open;raw_read=os.read;raw_io_open=io.open;fds=set()
+def track_open(path,*a,**k):
+    fd=raw_open(path,*a,**k)
+    if str(path)==str(index): fds.add(fd)
+    return fd
+def stalled_read(fd,*a,**k):
+    if fd in fds: blocked()
+    return raw_read(fd,*a,**k)
+def stalled_io(path,*a,**k):
+    if str(path)==str(index): blocked()
+    return raw_io_open(path,*a,**k)
+try:
+{textwrap.indent(textwrap.dedent(body), '    ')}
+finally:
+    release.set()
+    for worker in threading.enumerate():
+        if worker is not threading.current_thread(): worker.join(2)
+'''
+        try:
+            p = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f'blocked past SUPERVISOR_TIMEOUT: {exc.stdout!r} {exc.stderr!r}')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_each_unreadable_form_is_a_snapshot_error(self):
+        for form, detail in [('rename', 'EACCES'), ('inplace', 'EACCES'), ('directory', 'not-regular-file'), ('fifo', 'not-regular-file'), ('socket', 'ENXIO'), ('utf8', 'not-utf-8'), ('root', 'EACCES'), ('large', 'too-large')]:
+            with self.subTest(form=form):
+                if self.index.is_dir() and not self.index.is_symlink(): self.index.rmdir()
+                else: self.index.unlink(missing_ok=True)
+                self._child(f'''
+form={form!r};sock=None;expected_detail={detail!r}
+index.write_text(header+one)
+try:
+    if form=='rename':
+        replacement=root/'replacement';replacement.write_text(header);replacement.chmod(0);replacement.replace(index)
+    elif form=='inplace': index.chmod(0)
+    elif form=='directory': index.unlink();index.mkdir()
+    elif form=='fifo': index.unlink();os.mkfifo(index)
+    elif form=='socket':
+        index.unlink();sock=socket.socket(socket.AF_UNIX);os.chdir(root);sock.bind('INDEX.md')
+        # Socket-open errno differs by host; obtain the kernel's independent oracle.
+        try:
+            fd=raw_open(index,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC)
+        except OSError as exc: expected_detail=__import__('errno').errorcode[exc.errno]
+        else: os.close(fd);expected_detail='not-regular-file'
+    elif form=='utf8': index.write_bytes(b'\\xff')
+    elif form=='root': root.chmod(0)
+    elif form=='large': index.write_bytes(b'x'*(16*1024*1024+1))
+    start=time.monotonic();snap=m.read_index(index)
+    t.assertLess(time.monotonic()-start,1.0)
+    t.assertEqual(snap.error,'index-unreadable');t.assertEqual(snap.detail,expected_detail)
+finally:
+    root.chmod(0o700)
+    if form in ('rename','inplace'): index.chmod(0o600)
+    if sock: sock.close()
+    if form=='directory': index.rmdir()
+    else: index.unlink(missing_ok=True)
+''')
+
+    def test_symlink_to_fifo_or_directory_is_refused(self):
+        for form in ('fifo', 'directory', 'regular'):
+            with self.subTest(form=form):
+                if self.index.is_dir() and not self.index.is_symlink(): self.index.rmdir()
+                else: self.index.unlink(missing_ok=True)
+                self._child(f'''
+index.unlink(missing_ok=True);target=root/'target-{form}'
+if {form!r}=='fifo': os.mkfifo(target)
+elif {form!r}=='directory': target.mkdir()
+else: target.write_text(header+one)
+index.symlink_to(target)
+start=time.monotonic();snap=m.read_index(index)
+t.assertLess(time.monotonic()-start,.1)
+if {form!r}=='regular': t.assertIsNone(snap.error);t.assertEqual(len(snap.rows),1)
+else: t.assertEqual((snap.error,snap.detail),('index-unreadable','not-regular-file'))
+index.unlink()
+''')
+
+    def test_growth_past_cap_reports_too_large(self):
+        self._child('''
+index.write_bytes(b'x'*(m.INDEX_MAX_BYTES+2));actual_fstat=os.fstat;requests=[]
+def fstat(fd):
+    original=actual_fstat(fd)
+    return SimpleNamespace(st_mode=original.st_mode,st_size=m.INDEX_MAX_BYTES)
+def read(fd,n):
+    requests.append(n);return raw_read(fd,n)
+with mock.patch.object(m.os,'fstat',fstat),mock.patch.object(m.os,'read',read):
+    snap=m.read_index(index)
+t.assertEqual((snap.error,snap.detail),('index-unreadable','too-large'))
+t.assertTrue(requests);t.assertLessEqual(sum(requests),m.INDEX_MAX_BYTES+1)
+''')
+
+    def test_stalled_read_is_root_stalled(self):
+        self._child('''
+index.write_text(header+one)
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read),mock.patch.object(m.io if hasattr(m,'io') else io,'open',stalled_io):
+    start=time.monotonic();snap=m.read_index(index)
+    t.assertTrue(entered.is_set());t.assertLess(time.monotonic()-start,1.25)
+    t.assertEqual((snap.error,snap.detail),('root-stalled','stalled'))
+''')
+
+    def test_unavailable_snapshot_keeps_progress_and_frame(self):
+        self._child('''
+store=m.NoteStore('fifo')
+for token in ('index-missing','index-malformed','index-unreadable','root-stalled'):
+    store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',anchor='lane/r1.md',progress={str(root):dict(file='lane/r1.md',position=1)},printed={str(root):['lane/r1.md']},frame={'identity':{'leader':'old'},'sent':2}))
+    before=store.load();binding=m.resolve_binding(before,{},None)
+    snap=m.IndexSnapshot(error=token);snap.detail='diagnostic'
+    result=m.deliver_once(store,m.ByteSink(),binding,snap,end=time.monotonic()+2,leader_instance='new')
+    after=store.load()
+    for key in ('progress','anchor','printed','frame'): t.assertEqual(after[key],before[key])
+    t.assertEqual(after['phase'],'unavailable');t.assertEqual(after['reason'],token);t.assertEqual(after.get('reason_detail'),'diagnostic')
+    t.assertEqual(result.halted,token)
+''')
+
+    def test_fifo_index_never_blocks_any_caller(self):
+        # Each short-lived command gets an independent external supervisor.
+        for mode in ('status', 'session-start', 'bind-manual', 'bind-hook', 'drain'):
+            with self.subTest(mode=mode):
+                self.index.unlink(missing_ok=True)
+                os.mkfifo(self.index)
+                self._child(f'''
+store=m.NoteStore('fifo');store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',progress={{str(root):dict(file=None,position=0)}},bind_observation=dict(reason='unsupported-syntax',receipts=['lane/r1.md'],root=str(root),root_provenance='command')))
+(root/'lane'/'r1.md').write_text('relay')
+m.run_relay=lambda *a,**k:({{}},0)
+mode={mode!r};start=time.monotonic()
+if mode=='status': m.status_line(store,None)
+elif mode=='session-start':
+    m.read_payload=lambda:{{}};m.session_start(args())
+elif mode=='bind-manual': m.bind(args(manual=True,root=str(root),anchor='lane/r1.md'))
+elif mode=='bind-hook':
+    sys.stdin=io.StringIO(json.dumps(dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={{'command':'tools/relay submit d.md --root '+str(root)}},tool_response={{'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))}})))
+    m.bind(args())
+else: m.read_payload=lambda:{{}};m.drain(args())
+t.assertLess(time.monotonic()-start,1.25)
+''')
+                self.index.unlink()
+        self.index.unlink(missing_ok=True)
+        os.mkfifo(self.index)
+        # Established cursor exercises recovery without the later startup policy.
+        self.rm.NoteStore('psess').update(lambda n:n.update(seat='b.implementer',root=str(self.root),binding_source='hook',progress={str(self.root):dict(file=None,position=0)}))
+        p=self.spawn()
+        self.wait_note(lambda n:n.get('reason')=='index-unreadable',timeout=1.25)
+        time.sleep(self.rm.POLL_INDEX)
+        self.assertIsNone(p.poll())
+        write_index(self.index,row(1,to='b.implementer'))
+        self.assertEqual(len(self.read_lines(p,1,timeout=2)),1)
+        self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2)
+
+    def test_operator_and_replay_treat_new_tokens_as_unavailable(self):
+        setup = '''
+other=root.parent/'other';other.mkdir(exist_ok=True);other_index=other/'INDEX.md'
+index.write_text(header+one+two);other_index.write_text(header+one+two)
+roots=[str(root),str(other)];store=m.NoteStore('fifo');op=m.NoteStore('operator')
+store.update(lambda n:n.update(root=str(root),seat='b.implementer',floors=[dict(root=r,seat='b.implementer',file='lane/r1.md',position=1) for r in roots],progress={r:dict(file='lane/r2.md',position=2) for r in roots}))
+op.update(lambda n:n.update(progress={r:dict(file='lane/r1.md',position=1) for r in roots}))
+original=m.read_index;visits=[];counts={};notifications=[]
+m.notify=lambda *a,**k:notifications.append(a)
+def run_replay(after=None):
+    capture=io.StringIO()
+    with __import__('contextlib').redirect_stdout(capture): rc=m.replay(args(after=after))
+    return rc,[json.loads(line) for line in capture.getvalue().splitlines()]
+'''
+        for token in ('index-unreadable', 'root-stalled'):
+            for site in ('capture', 'page', 'after', 'operator'):
+                with self.subTest(variant='prompt', token=token, site=site):
+                    self._child(setup+f'''
+site={site!r}
+def read(path):
+    visits.append(str(path));counts[str(path)]=counts.get(str(path),0)+1
+    if path==index and (site!='page' or counts[str(path)]==2): return m.IndexSnapshot(error={token!r})
+    return original(path)
+m.read_index=read;before=store.path.read_bytes()
+if site=='operator':
+    with __import__('contextlib').redirect_stdout(io.StringIO()): fired=m.operator_scan(roots,notifier='none')
+    t.assertEqual(fired,1);t.assertEqual(len(notifications),1)
+    t.assertEqual(op.load()['progress'][str(root)]['file'],'lane/r1.md')
+    t.assertEqual(op.load()['progress'][str(other)]['file'],'lane/r2.md')
+else:
+    rc,docs=run_replay('lane/r1.md' if site=='after' else None)
+    t.assertEqual(rc,3);errors=[d for d in docs if 'error' in d]
+    t.assertEqual(errors,[dict(error='cannot-establish-recovery',root=str(root))]);t.assertEqual(docs[-1],dict(done=True))
+    if site=='after': t.assertEqual(len(docs),2);t.assertEqual(visits,[str(index)])
+    else: t.assertEqual([(d['root'],d['file']) for d in docs if 'file' in d],[(str(other),'lane/r2.md')])
+    t.assertEqual(store.path.read_bytes(),before)
+''')
+        for mode in ('operator', 'stored', 'after'):
+            with self.subTest(variant='held-released', mode=mode):
+                self._child(setup+f'''
+mode={mode!r};thread_counts=[]
+def read(path):
+    visits.append(str(path));thread_counts.append(threading.active_count())
+    return original(path)
+m.read_index=read;before=store.path.read_bytes();op_before=op.path.read_bytes()
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read),mock.patch.object(io,'open',stalled_io):
+    start=time.monotonic()
+    if mode=='operator':
+        with __import__('contextlib').redirect_stdout(io.StringIO()): fired=m.operator_scan(roots,notifier='none')
+        t.assertEqual(fired,0);t.assertEqual(notifications,[]);t.assertEqual(op.path.read_bytes(),op_before)
+    else:
+        rc,docs=run_replay('lane/r1.md' if mode=='after' else None)
+        t.assertEqual(rc,3);t.assertEqual([d['root'] for d in docs if 'error' in d],[str(root)] if mode=='after' else roots)
+        t.assertEqual(docs[-1],dict(done=True));t.assertEqual(store.path.read_bytes(),before)
+        if mode=='after': t.assertEqual(visits,[str(index)])
+    t.assertLess(time.monotonic()-start,1.3);t.assertTrue(entered.is_set())
+    t.assertLessEqual(max(thread_counts),thread_counts[0]+1)
+    release.set()
+    t.assertTrue(m._root_pending[0].wait(1))
+# A new operation after observed completion has a new budget and free slot.
+if mode=='operator':
+    with __import__('contextlib').redirect_stdout(io.StringIO()): fired=m.operator_scan(roots,notifier='none')
+    t.assertEqual(fired,2);t.assertEqual(len(notifications),2)
+else:
+    rc,docs=run_replay('lane/r1.md' if mode=='after' else None)
+    t.assertEqual(rc,0);t.assertEqual([d['root'] for d in docs if 'file' in d],[str(root)] if mode=='after' else roots)
+''')
+
+    def test_replay_budget_is_retained_per_root(self):
+        for delay in (0.6, 0.0):
+            with self.subTest(capture_delay=delay):
+                self._child(f'''
+other=root.parent/'other';other.mkdir(exist_ok=True);other_index=other/'INDEX.md'
+index.write_text(header+one+two);other_index.write_text(header+one+two)
+roots=[str(root),str(other)];store=m.NoteStore('fifo')
+store.update(lambda n:n.update(root=str(root),seat='b.implementer',floors=[dict(root=r,seat='b.implementer',file='lane/r1.md',position=1) for r in roots],progress={{r:dict(file='lane/r2.md',position=2) for r in roots}}))
+original=m.read_index;counts={{}};durations=[];seen=[];budgets={{}}
+def read(path):
+    key=str(path.parent);counts[key]=counts.get(key,0)+1
+    budget=m.current_budget();t.assertIsNotNone(budget)
+    if counts[key]==1:
+        budgets[key]=budget;t.assertGreater(budget.remaining(),.9)
+    else: t.assertIs(budget,budgets[key])
+    seen.append((key,counts[key]))
+    if path==index and counts[key]==1:
+        # Account real waiting through the production primitive.
+        result=m.bounded_root_call(lambda:threading.Event().wait({delay!r}))
+        t.assertEqual(result.kind,'ok')
+    if path==index and counts[key]==2:
+        start=time.monotonic();result=m.bounded_root_call(blocked);durations.append(time.monotonic()-start)
+        t.assertEqual(result.kind,'stalled')
+        release.set();t.assertTrue(m._root_pending[0].wait(1))
+        return m.IndexSnapshot(error='root-stalled')
+    return original(path)
+m.read_index=read
+capture=io.StringIO()
+with __import__('contextlib').redirect_stdout(capture): rc=m.replay(args())
+t.assertEqual(rc,3);t.assertEqual(seen,[(str(root),1),(str(other),1),(str(root),2),(str(other),2)])
+t.assertGreater(durations[0],(1-{delay!r})-.15);t.assertLess(durations[0],(1-{delay!r})+.15)
+t.assertIsNot(budgets[str(root)],budgets[str(other)])
+t.assertGreater(budgets[str(other)].remaining(),.9)
+docs=[json.loads(line) for line in capture.getvalue().splitlines()]
+t.assertEqual([d['root'] for d in docs if 'file' in d],[str(other)])
+''')
