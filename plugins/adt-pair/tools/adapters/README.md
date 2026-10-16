@@ -174,10 +174,12 @@ relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|man
 [rebind: <one line>]
 ```
 
-The six readiness words are `not-started` (no leader or live standby), `standby-only` (a live or unknown standby without a leader), `starting` (the lock holder and leader record do not yet agree), `waiting-for-binding` (a live leader without initialized binding progress), `armed` (a live leader following initialized progress), and `unavailable` (a recorded delivery fault).
+The six readiness words are `not-started` (no leader, live standby or recorded follower exit), `standby-only` (a live or unknown standby without a leader), `starting` (the lock holder and leader record do not yet agree), `waiting-for-binding` (a live leader without initialized binding progress), `armed` (a live leader following initialized progress), and `unavailable` (a recorded delivery fault or follower exit, with exit reason `transport-failed` or `follower-error`).
 A binding observation changes neither readiness nor delivery eligibility.
 Delivery requires a binding, a usable index and cursor or fallback anchor, an addressed row beyond that position, and an available output path; the Codex drain can deliver without a follower.
-A missing cursor and fallback anchor produce `unavailable: anchor-not-found`; a completed healthy scan restores following.
+A missing cursor and fallback anchor produce `unavailable: anchor-not-found`; index faults report `index-missing`, `index-malformed`, `index-unreadable` or `root-stalled`.
+A healthy scan clears an index fault, while only a new follower reaching following clears a recorded exit, so a successful drain does not clear that exit.
+A follower bound by environment with no anchor, starting on a root it has no progress for while that root's index exists but is unreadable, stalled or malformed, begins at the first readable moment, so rows filed during that outage are not delivered; a missing index, and an anchored start, keep their base delivery.
 The `binding=` cell reports only the binding source.
 A new near-miss observation supplies `miss=submit-near-miss`; another new reason supplies `last-bind=<reason>`.
 Legacy miss and bind-failure keys are displayed only, with the new record taking precedence in its cell; a legacy value in the other cell can coexist.
