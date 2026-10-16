@@ -1939,6 +1939,64 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
 
 
 class BindTests(TmpEnv):
+    def _b7_bind_probe(self, body):
+        setup="""
+index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
+store=m.NoteStore('fifo')
+payload=dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={'command':'tools/relay submit d.md --root '+str(root)},tool_response={'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))})
+output=io.StringIO();errors=io.StringIO()
+def invoke(mode):
+    with __import__('contextlib').redirect_stdout(output),__import__('contextlib').redirect_stderr(errors):
+        if mode=='manual': return m.bind(args(manual=True,root=str(root),anchor='lane/r1.md'))
+        sys.stdin=io.StringIO(json.dumps(payload));return m.bind(args())
+"""
+        FifoCallersTests._child(self,setup+body)
+
+    def test_bind_refusal_names_index_condition(self):
+        for token in ('index-unreadable','index-missing','index-malformed','root-stalled'):
+            for mode in ('manual','hook'):
+                with self.subTest(token=token,mode=mode):
+                    self._b7_bind_probe(f"""
+m.read_index=lambda path:m.IndexSnapshot(error={token!r})
+rc=invoke({mode!r})
+if {mode!r}=='manual':
+    t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: '+{token!r}+'\\n')
+else:
+    t.assertEqual(rc,0);t.assertEqual(store.load()['bind_observation']['reason'],{token!r})
+t.assertIsNone(store.load().get('seat'))
+""")
+
+    def test_discovery_stall_is_typed(self):
+        for mode in ('manual','hook'):
+            with self.subTest(mode=mode):
+                self._b7_bind_probe(f"""
+m.discover_root_like_cli=lambda operand,cwd,plugin_root:blocked()
+start=time.monotonic();rc=invoke({mode!r})
+t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+if {mode!r}=='manual':
+    t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: root-stalled\\n')
+else:
+    t.assertEqual(rc,0);t.assertEqual(store.load()['bind_observation']['reason'],'root-stalled')
+t.assertIsNone(store.load().get('seat'));t.assertIsNone(store.load().get('root'))
+""")
+
+    def test_path_check_stall_is_typed(self):
+        for mode,site in (('manual','path'),('hook','path'),('hook','read')):
+            with self.subTest(mode=mode,site=site):
+                self._b7_bind_probe(f"""
+site={site!r}
+if site=='path': m.path_under_root=lambda root,rel:blocked()
+with __import__('contextlib').ExitStack() as stack:
+    if site=='read':
+        stack.enter_context(mock.patch.object(m.os,'open',track_open));stack.enter_context(mock.patch.object(m.os,'read',stalled_read))
+    start=time.monotonic();rc=invoke({mode!r})
+    t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+    if {mode!r}=='manual':
+        t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: root-stalled\\n')
+    else:
+        t.assertEqual(rc,0);t.assertEqual(store.load()['bind_observation']['reason'],'root-stalled')
+""")
+
     def test_rebind_checks_observation_root_instead_of_bound_root(self):
         import shlex
         observed = self.other_root()
@@ -4825,6 +4883,77 @@ class SessionStartTests(TmpEnv):
 
 
 class StatusTests(TmpEnv):
+
+    def _b7_status_probe(self,body):
+        setup="""
+index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
+store=m.NoteStore('fifo');store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',bind_observation=dict(reason='unsupported-syntax',root=str(root),root_provenance='command',receipts=['lane/r1.md'])))
+commands=[];hint_calls=[];old_hint=m.rebind_line
+engine=str(root/'.engine');isdir=m.os.path.isdir
+def relay(plugin_root,*argv,**kw):
+    commands.append(argv[0])
+    return ({'kit':'v','fingerprint':'fp'} if argv[0]=='version' else {'daemon':{'identity':{'kit':'v','fp':'fp'}}}),0
+m.run_relay=relay
+def hint(note,session): hint_calls.append(session);return old_hint(note,session)
+m.rebind_line=hint;m.read_payload=lambda:{}
+def invoke(mode):
+    output=io.StringIO()
+    with __import__('contextlib').redirect_stdout(output):
+        if mode=='status': rc=m.status(args())
+        else: rc=m.session_start(args())
+    t.assertEqual(rc,0)
+    return output.getvalue() if mode=='status' else json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+"""
+        FifoCallersTests._child(self,setup+body)
+
+    def test_identity_engine_check_stall_is_bounded(self):
+        for mode in ('status','session'):
+            with self.subTest(mode=mode):
+                self._b7_status_probe(f"""
+def check(path):
+    if str(path)==engine: blocked()
+    return isdir(path)
+m.os.path.isdir=check
+start=time.monotonic();output=invoke({mode!r})
+t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+t.assertIn('daemon=-',output);t.assertNotIn('hand-root',output)
+t.assertEqual(commands,['version']);t.assertEqual(hint_calls,['fifo'])
+""")
+
+    def test_status_hint_lookup_stall_is_bounded(self):
+        for mode in ('status','session'):
+            for delay in (0.0,0.6):
+                with self.subTest(mode=mode,engine_delay=delay):
+                    self._b7_status_probe(f"""
+def check(path):
+    if str(path)==engine: threading.Event().wait({delay!r})
+    return isdir(path)
+m.os.path.isdir=check
+old_read=m.read_index;durations=[]
+def read(path):
+    start=time.monotonic();snap=old_read(path);durations.append(time.monotonic()-start);return snap
+m.read_index=read
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read):
+    start=time.monotonic();output=invoke({mode!r})
+    t.assertLess(time.monotonic()-start,1.5)
+t.assertIn('# rebind: incomplete',output);t.assertEqual(hint_calls,['fifo'])
+t.assertEqual(len(durations),1);t.assertLess(durations[0],1.0-{delay!r}+.15)
+t.assertGreater(durations[0],1.0-{delay!r}-.2)
+""")
+
+    def test_identity_subprocess_time_does_not_consume_budget(self):
+        for mode in ('status','session'):
+            with self.subTest(mode=mode):
+                self._b7_status_probe(f"""
+def slow_relay(plugin_root,*argv,**kw):
+    threading.Event().wait(1.5)
+    return relay(plugin_root,*argv,**kw)
+m.run_relay=slow_relay
+output=invoke({mode!r})
+t.assertIn('rebind, may need operator approval:',output)
+t.assertNotIn('# rebind: incomplete',output)
+t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
+""")
 
     def test_incomplete_hint_is_inert_in_shell(self):
         marker = self.base / "must-not-exist"

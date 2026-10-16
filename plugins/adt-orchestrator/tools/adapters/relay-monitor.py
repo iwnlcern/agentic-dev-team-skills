@@ -1779,6 +1779,14 @@ def path_under_root(root: str, rel: str) -> bool:
         return False
 
 
+def discover_root_bounded(operand: str | None, cwd: str, plugin_root: str | None) -> RootResult:
+    return bounded_root_call(lambda: discover_root_like_cli(operand, cwd, plugin_root))
+
+
+def path_under_root_bounded(root: str, rel: str) -> RootResult:
+    return bounded_root_call(lambda: path_under_root(root, rel))
+
+
 def call_identity(session: str, payload: dict) -> str | None:
     value = payload.get("tool_use_id")
     return json.dumps([session, value], separators=(",", ":")) if isinstance(value, str) and value else None
@@ -1864,13 +1872,17 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
     if parsed.cd_prefix:
         cwd = os.path.join(cwd, parsed.cd_prefix)
     if parsed.root_operand:
-        root = discover_root_like_cli(parsed.root_operand, cwd, plugin_root)
+        discovered = discover_root_bounded(parsed.root_operand, cwd, plugin_root)
+        root = discovered.value if discovered.kind == "ok" else None
         if root:
             return root, "command"
         return None, "none"
     if len(receipts) != 1:
         return None, "none"
-    candidates = {root for root in (discover_root_like_cli(None, cwd, plugin_root), note.get("root")) if root}
+    discovered = discover_root_bounded(None, cwd, plugin_root)
+    if discovered.kind != "ok":
+        return None, "none"
+    candidates = {root for root in (discovered.value, note.get("root")) if root}
     matches = []
     for root in candidates:
         lookup = receipt_row_lookup(root, receipts[0]["path"])
@@ -1925,12 +1937,19 @@ def clear_observations(note: dict) -> None:
 def bind_from_receipt(
     store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str, call: str | None = None
 ) -> tuple[bool, str]:
-    if not isinstance(receipt_path, str) or not path_under_root(root, receipt_path):
+    if not isinstance(receipt_path, str):
+        return False, "receipt-mismatch"
+    checked = path_under_root_bounded(root, receipt_path)
+    if checked.kind == "stalled":
+        return False, "root-stalled"
+    if checked.kind != "ok" or not checked.value:
         return False, "receipt-mismatch"
     try:
         snap = read_index(Path(root) / "INDEX.md")
     except (OSError, ValueError):
         return False, "receipt-mismatch"
+    if snap.error in INDEX_UNAVAILABLE:
+        return False, snap.error
     row_ = next((r for r in snap.rows if r.cells["file"] == receipt_path), None)
     if snap.error or row_ is None or not row_.cells["from"]:
         return False, "receipt-mismatch"
@@ -1969,19 +1988,25 @@ def hook_context(line: str) -> bytes:
 
 def bind(args) -> int:
     if getattr(args, "manual", False):
-        session = resolve_session(args)
-        if not valid_session_id(session):
-            print("relay-monitor: invalid-session-id", file=sys.stderr)
-            return 2
-        if not args.root or not args.anchor:
-            print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
-            return 2
-        root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
-        bound, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
-        if not bound:
-            print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
-            return 1
-        return 0
+        with root_budget():
+            session = resolve_session(args)
+            if not valid_session_id(session):
+                print("relay-monitor: invalid-session-id", file=sys.stderr)
+                return 2
+            if not args.root or not args.anchor:
+                print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
+                return 2
+            discovered = discover_root_bounded(args.root, os.getcwd(), args.plugin_root)
+            if discovered.kind != "ok":
+                reason = "root-stalled" if discovered.kind == "stalled" else "receipt-mismatch"
+                print("relay-monitor: manual bind refused: " + reason, file=sys.stderr)
+                return 1
+            root = discovered.value or args.root
+            bound, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
+            if not bound:
+                print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
+                return 1
+            return 0
     try:
         payload = json.load(sys.stdin)
     except (ValueError, OSError, RecursionError):
@@ -2013,8 +2038,11 @@ def bind(args) -> int:
     reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
     if parsed.ok:
         base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
-        root = discover_root_like_cli(parsed.root_operand, base, args.plugin_root)
-        if root is None:
+        discovered = discover_root_bounded(parsed.root_operand, base, args.plugin_root)
+        root = discovered.value if discovered.kind == "ok" else None
+        if discovered.kind == "stalled":
+            reason = "root-stalled"
+        elif root is None:
             reason = "no-root"
         elif len(receipts) != 1:
             reason = "ambiguous-receipt"
@@ -2190,7 +2218,12 @@ def check_identity(plugin_root: str | None, root: str | None):
         if rc == 0
         else {"kit": None, "fp": None}
     )
-    if not root or not os.path.isdir(os.path.join(root, ".engine")):
+    if not root:
+        return "hand-root", client_id, None
+    engine = bounded_root_call(lambda: os.path.isdir(os.path.join(root, ".engine")))
+    if engine.kind != "ok":
+        return "unchecked", client_id, None
+    if not engine.value:
         return "hand-root", client_id, None
     status_doc, rc = run_relay(plugin_root, "status", "--root", root)
     status_doc = status_doc if isinstance(status_doc, dict) else {}
@@ -2350,15 +2383,16 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
 
 
 def status(args) -> int:
-    session = resolve_session(args)
-    if not valid_session_id(session):
-        print("relay-monitor: invalid-session-id", file=sys.stderr)
-        return 2
-    store = NoteStore(session)
-    with store.state_lock():
-        sweep_owner_files(store)  # eventual cleanup; never the referenced file
-    print(status_line(store, args.plugin_root))
-    return 0
+    with root_budget():
+        session = resolve_session(args)
+        if not valid_session_id(session):
+            print("relay-monitor: invalid-session-id", file=sys.stderr)
+            return 2
+        store = NoteStore(session)
+        with store.state_lock():
+            sweep_owner_files(store)  # eventual cleanup; never the referenced file
+        print(status_line(store, args.plugin_root))
+        return 0
 
 
 FALLBACK_OVERRIDE_TEXT = (
@@ -2406,51 +2440,52 @@ def arming_text(plugin_root: str, session: str, resume: bool) -> str:
 
 
 def session_start(args) -> int:
-    payload = read_payload()
-    session = resolve_session(args, payload)
-    if not valid_session_id(session):
-        reason = "no-session-identity" if session is None else "invalid-session-id"
+    with root_budget():
+        payload = read_payload()
+        session = resolve_session(args, payload)
+        if not valid_session_id(session):
+            reason = "no-session-identity" if session is None else "invalid-session-id"
+            return emit_json(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": f"relay-monitor: {reason}",
+                    }
+                }
+            )
+        store = NoteStore(session)
+        host = decide_host(args, payload, os.environ)
+        plugin_root = (
+            args.plugin_root
+            or os.environ.get("CLAUDE_PLUGIN_ROOT")
+            or os.environ.get("PLUGIN_ROOT")
+            or str(Path(__file__).resolve().parents[2])
+        )
+        lines = [status_line(store, plugin_root)]
+        if host in ("host-ambiguous", "host-unknown"):
+            store.update(lambda n: set_reason(n, host))
+        elif host == "codex":
+            override = (
+                os.environ.get("ADT_CODEX_FORK") == "0"
+            )  # the only stock signal the kit honours (erratum-1 A)
+            store.update(
+                lambda n: n.update({"host": "codex", "codex_fork_override": override})
+            )
+            lines.append(
+                FALLBACK_OVERRIDE_TEXT
+                if override
+                else arming_text(plugin_root, session, payload.get("source") == "resume")
+            )
+        else:
+            store.update(lambda n: n.update({"host": "claude-code"}))
         return emit_json(
             {
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
-                    "additionalContext": f"relay-monitor: {reason}",
+                    "additionalContext": "\n".join(lines),
                 }
             }
         )
-    store = NoteStore(session)
-    host = decide_host(args, payload, os.environ)
-    plugin_root = (
-        args.plugin_root
-        or os.environ.get("CLAUDE_PLUGIN_ROOT")
-        or os.environ.get("PLUGIN_ROOT")
-        or str(Path(__file__).resolve().parents[2])
-    )
-    lines = [status_line(store, plugin_root)]
-    if host in ("host-ambiguous", "host-unknown"):
-        store.update(lambda n: set_reason(n, host))
-    elif host == "codex":
-        override = (
-            os.environ.get("ADT_CODEX_FORK") == "0"
-        )  # the only stock signal the kit honours (erratum-1 A)
-        store.update(
-            lambda n: n.update({"host": "codex", "codex_fork_override": override})
-        )
-        lines.append(
-            FALLBACK_OVERRIDE_TEXT
-            if override
-            else arming_text(plugin_root, session, payload.get("source") == "resume")
-        )
-    else:
-        store.update(lambda n: n.update({"host": "claude-code"}))
-    return emit_json(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(lines),
-            }
-        }
-    )
 
 
 MODES["session-start"] = session_start
