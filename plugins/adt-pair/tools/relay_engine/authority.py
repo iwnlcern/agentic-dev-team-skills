@@ -490,13 +490,11 @@ def _external_evidence(root, lineage, reasons, *, pair_lineage=True):
                     reasons.add('authority.could-not-evaluate')
                     continue
                 try:
-                    _origin, review = rules.xroot_verify(root,declaration)
+                    _origin, review, population = rules.xroot_verify(root,declaration)
                     if pair_lineage:
                         if not _approved(review):
                             reasons.add('authority.lineage-incomplete')
-                        repo, commit = rules.xroot_repository_and_commit(root, declaration)
-                        relay_tree, _blob = rules.xroot_paths(repo, commit, declaration)
-                        if any(_control_refusal(row.text) for row in rules.xroot_relays(repo, relay_tree)):
+                        if any(_control_refusal(row.text) for row in population):
                             reasons.add('authority.lineage-incomplete')
                 except rules.XrootAxisError as exc:
                     if exc.axis == 'byte' and 'does not match' in exc.detail:

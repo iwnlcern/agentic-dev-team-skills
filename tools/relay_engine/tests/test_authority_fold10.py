@@ -63,7 +63,9 @@ class TestAuthorityFold10(TestAuthorityFold5):
                 (repo/'relays/DESIGN-planner-20260801-100000.md').write_text(origin)
                 (repo/'relays/DESIGN-REVIEW-implementer-20260801-110000.md').write_text(review)
                 if unrelated is not None:
-                    (repo/'relays/SITREP-planner-20260801-120000.md').write_text(unrelated)
+                    entries = unrelated.items() if isinstance(unrelated, dict) else [('SITREP-planner-20260801-120000.md', unrelated)]
+                    for name, text in entries:
+                        (repo/'relays'/name).write_text(text)
                 (repo/'designs/d1.md').write_bytes(b'design')
                 self.git(repo, 'add', '-A'); self.git(repo, 'commit', '-qm', 'fixture')
                 commit = self.git(repo, 'rev-parse', 'HEAD')
@@ -129,17 +131,14 @@ class TestAuthorityFold10(TestAuthorityFold5):
                 self.assertEqual(f.check(g)['reasons'], expected)
 
     def test_population_read_failure_and_budget_refuse(self):
-        # The verifier's first read succeeds; fail only the new population acquisition.
+        # E29 reads the population once, inside the shared verifier.
         for failure in [OSError('read'), ValueError('decode'), KeyError('missing'), 'budget']:
             with self.subTest(failure=failure), self.foreign_case() as (f,g,_,_):
                 original = rules.xroot_relays
-                calls = []
                 def population(*args):
-                    calls.append(args)
-                    if len(calls)>1:
-                        if failure == 'budget':
-                            rules._XROOT_BUDGET.set((0, rules._XROOT_BUDGET.get()[1]))
-                        else:raise failure
+                    if failure == 'budget':
+                        rules._XROOT_BUDGET.set((0, rules._XROOT_BUDGET.get()[1]))
+                    else:raise failure
                     return original(*args)
                 with mock.patch.object(rules, 'xroot_relays', side_effect=population):
                     self.assertEqual(f.check(g)['reasons'], ['authority.could-not-evaluate'])

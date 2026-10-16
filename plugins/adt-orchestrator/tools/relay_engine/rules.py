@@ -3909,7 +3909,7 @@ def xroot_authority(
     repo: Path,
     root_tree: str,
     declaration: Dict[str, str],
-) -> tuple[XrootRelay, XrootRelay]:
+) -> tuple[XrootRelay, XrootRelay, List[XrootRelay]]:
     relays = xroot_relays(repo, root_tree)
     doc_id = declaration["DESIGN_DOC_ID"]
     origins = [
@@ -3965,7 +3965,7 @@ def xroot_authority(
             "authority-verdict",
             f"selected review {review.name} verdict {verdict} is not approve",
         )
-    return origin, review
+    return origin, review, relays
 
 
 def xroot_plan_gate(
@@ -4035,7 +4035,7 @@ def xroot_plan_gate(
     return True
 
 
-def xroot_verify(path: Path, declaration: Dict[str, str]) -> tuple[XrootRelay, XrootRelay]:
+def xroot_verify(path: Path, declaration: Dict[str, str]) -> tuple[XrootRelay, XrootRelay, List[XrootRelay]]:
     repo, commit = xroot_repository_and_commit(path, declaration)
     relay_tree, blob_oid = xroot_paths(repo, commit, declaration)
     declared_digest = declaration["DESIGN_SHA256"]
