@@ -1407,6 +1407,244 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
     pacing, note-refresh recovery.
     """
 
+    def _b7_stop(self, p):
+        if p.poll() is None:
+            p.kill()
+        p.wait(timeout=10)
+        for stream in (p.stdin, p.stdout, p.stderr):
+            if stream and not stream.closed:
+                stream.close()
+
+    def _b7_spawn(self, fault=None, anchor=None):
+        marker=self.base/'fault-entered';gate=self.base/'fault-release';counts=self.base/'signature-count'
+        marker.unlink(missing_ok=True);gate.unlink(missing_ok=True);counts.unlink(missing_ok=True)
+        code=f'''
+import importlib.util,sys,os,threading
+from pathlib import Path
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+index=Path({str(self.index)!r});marker=Path({str(marker)!r});gate=Path({str(gate)!r});counts=Path({str(counts)!r});fault={fault!r};used=False;fds=set()
+raw_open=os.open;raw_read=os.read;raw_close=os.close;raw_stat=Path.stat;signature=m.index_signature
+waiter=threading.Event()
+def barrier():
+    global used
+    if not used:
+        used=True;marker.write_text('entered')
+        while not gate.exists(): waiter.wait(.01)
+def opening(path,*a,**k):
+    fd=raw_open(path,*a,**k)
+    if str(path)==str(index): fds.add(fd)
+    return fd
+def reading(fd,*a,**k):
+    if fd in fds: barrier()
+    return raw_read(fd,*a,**k)
+def closing(fd):
+    fds.discard(fd);return raw_close(fd)
+def stating(path,*a,**k):
+    if path==index: barrier()
+    return raw_stat(path,*a,**k)
+def counted(path):
+    with counts.open('a') as f: f.write('scan\\n')
+    return signature(path)
+if fault=='read': m.os.open=opening;m.os.read=reading;m.os.close=closing
+elif fault=='stat': Path.stat=stating
+elif fault=='count': m.index_signature=counted
+m.follow(SimpleNamespace(session='psess',host='claude-code',root=None,anchor={anchor!r},plugin_root=None))
+'''
+        env=dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(self.root))
+        if anchor: env['ADT_RELAY_ANCHOR']=anchor
+        p=subprocess.Popen([sys.executable,'-c',code],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
+        self.addCleanup(self._b7_stop,p)
+        return p,gate,marker,counts
+
+    def _b7_seed(self, file='lane/r1.md', position=1):
+        self.rm.NoteStore('psess').update(lambda n:n.update(seat='b.implementer',root=str(self.root),binding_source='hook',anchor=file,progress={str(self.root):dict(file=file,position=position)}))
+
+    def _b7_status(self):
+        with mock.patch.object(self.rm,'check_identity',return_value=('ok',{},{})):
+            return self.rm.status_line(self.rm.NoteStore('psess'),None)
+
+    def _b7_unavailable(self, token='index-unreadable', timeout=1.5):
+        return self.wait_note(lambda n:n.get('phase')=='unavailable' and n.get('reason')==token,timeout=timeout)
+
+    def test_follower_seed_signature_and_scan_share_one_budget(self):
+        FifoCallersTests._child(self, """
+index.write_text(header)
+original=m.read_index;calls=[]
+def read(path):
+    calls.append('read')
+    if len(calls)==1:
+        t.assertEqual(m.bounded_root_call(lambda:threading.Event().wait(.6)).kind,'ok')
+    return original(path)
+def signature(path):
+    calls.append('signature');m.bounded_root_call(blocked);return m.SIGNATURE_STALLED
+class End(BaseException): pass
+def stop(seconds): raise End()
+m.read_index=read;m.index_signature=signature
+with mock.patch.dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(root)),mock.patch.object(m.time,'sleep',stop):
+    start=time.monotonic()
+    try: m.follow(args())
+    except End: pass
+    t.assertLess(time.monotonic()-start,1.25)
+t.assertEqual(calls,['read','signature','read'])
+t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
+""")
+
+    def test_healthy_follower_retains_idle_polling(self):
+        write_index(self.index,'');self._b7_seed(None,0)
+        p,gate,marker,counts=self._b7_spawn('count')
+        try:
+            self.wait_note(lambda n:n.get('phase')=='following',timeout=2)
+            before=len(counts.read_text().splitlines())
+            threading.Event().wait(self.rm.POLL_INDEX*1.2)
+            after=len(counts.read_text().splitlines())
+            self.assertLessEqual(after-before,3,'healthy empty scans spin instead of polling')
+        finally: self._b7_stop(p)
+
+    def test_follower_survives_each_unreadable_form(self):
+        import socket
+        for form in ('rename','inplace','directory','fifo','socket','utf8','root','large'):
+            with self.subTest(form=form):
+                self.rm.NoteStore('psess').path.unlink(missing_ok=True)
+                self._b7_seed();write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'))
+                sock=None;p=None;detail='EACCES'
+                try:
+                    if form=='rename':
+                        replacement=self.root/'replacement';replacement.write_text(HEADER);replacement.chmod(0);replacement.replace(self.index)
+                    elif form=='inplace': self.index.chmod(0)
+                    elif form=='directory': self.index.unlink();self.index.mkdir();detail='not-regular-file'
+                    elif form=='fifo': self.index.unlink();os.mkfifo(self.index);detail='not-regular-file'
+                    elif form=='socket':
+                        self.index.unlink();sock=socket.socket(socket.AF_UNIX)
+                        # A short relative socket path avoids the Darwin address limit.
+                        old=os.getcwd()
+                        try: os.chdir(self.root);sock.bind('INDEX.md')
+                        finally: os.chdir(old)
+                        try: fd=os.open(self.index,os.O_RDONLY|os.O_NONBLOCK)
+                        except OSError as exc: detail=errno.errorcode[exc.errno]
+                        else: os.close(fd);detail='not-regular-file'
+                    elif form=='utf8': self.index.write_bytes(b'\xff');detail='not-utf-8'
+                    elif form=='root': self.root.chmod(0)
+                    elif form=='large': self.index.write_bytes(b'x'*(16*1024*1024+1));detail='too-large'
+                    p,_,_,_=self._b7_spawn()
+                    note=self._b7_unavailable()
+                    self.assertEqual(note['reason_detail'],detail)
+                    threading.Event().wait(3*self.rm.POLL_INDEX)
+                    self.assertIsNone(p.poll())
+                finally:
+                    self.root.chmod(0o700)
+                    if p: self._b7_stop(p)
+                    if sock: sock.close()
+                    if form=='directory': self.index.rmdir()
+                    else: self.index.chmod(0o600);self.index.unlink()
+
+    def test_follower_stall_reports_root_stalled_and_stays_alive(self):
+        for fault in ('read','stat'):
+            with self.subTest(fault=fault):
+                self.rm.NoteStore('psess').path.unlink(missing_ok=True)
+                write_index(self.index,row(1,to='b.implementer'));self._b7_seed()
+                p,gate,marker,_=self._b7_spawn(fault)
+                try:
+                    self._b7_unavailable('root-stalled',timeout=1.5)
+                    self.assertTrue(marker.exists())
+                    threading.Event().wait(self.rm.POLL_INDEX)
+                    self.assertIsNone(p.poll())
+                    gate.touch()
+                    self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2.5)
+                    self.assertIn('relay-monitor: armed',self._b7_status())
+                finally: gate.touch();self._b7_stop(p)
+
+    def test_follower_recovers_after_restore_including_in_place_chmod(self):
+        write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'));self._b7_seed()
+        signature=self.rm.index_signature(self.index);self.index.chmod(0)
+        p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable();self.index.chmod(0o644)
+            self.assertEqual(self.rm.index_signature(self.index),signature)
+            self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2*self.rm.POLL_INDEX)
+            self.assertIn('relay-monitor: armed',self._b7_status())
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=1)],['lane/r2.md'])
+            self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_recovery_on_empty_scan_clears_reason_and_detail(self):
+        write_index(self.index,row(1,to='b.implementer'));self._b7_seed();self.index.chmod(0)
+        p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable();self.index.chmod(0o644)
+            note=self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2*self.rm.POLL_INDEX)
+            self.assertIsNone(note.get('reason_detail'));self.assertIn('relay-monitor: armed',self._b7_status())
+            self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_with_anchor_defers_seed(self):
+        write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'));self.index.chmod(0)
+        p,_,_,_=self._b7_spawn(anchor='lane/r1.md')
+        try:
+            note=self._b7_unavailable();self.assertNotIn(str(self.root),note['progress']);self.assertIsNone(note.get('anchor'))
+            self.index.chmod(0o644)
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r2.md'])
+            self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_without_anchor_seeds_at_first_readable_tail(self):
+        for token in ('index-unreadable','root-stalled','index-malformed'):
+            with self.subTest(token=token):
+                self.rm.NoteStore('psess').path.unlink(missing_ok=True)
+                write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'))
+                if token=='index-unreadable': self.index.chmod(0)
+                elif token=='index-malformed': self.index.write_text('bad header\n'+row(1)+row(2))
+                p,gate,_,_=self._b7_spawn('read' if token=='root-stalled' else None)
+                try:
+                    note=self._b7_unavailable(token)
+                    self.assertNotIn(str(self.root),note['progress']);self.assertIsNone(note.get('anchor'))
+                    self.index.chmod(0o644)
+                    write_index(self.index,''.join(row(i,to='b.implementer') for i in (1,2,3)))
+                    gate.touch()
+                    note=self.wait_note(lambda n:n.get('phase')=='following',timeout=2.5)
+                    self.assertEqual(note['progress'][str(self.root)],dict(file='lane/r3.md',position=3))
+                    self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+                    write_index(self.index,''.join(row(i,to='b.implementer') for i in (1,2,3,4)))
+                    self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r4.md'])
+                finally: gate.touch();self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_empty_readable_index_seeds_none(self):
+        write_index(self.index,'');self.index.chmod(0);p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable();self.index.chmod(0o644)
+            note=self.wait_note(lambda n:n.get('phase')=='following',timeout=2.5)
+            self.assertEqual(note['progress'][str(self.root)],dict(file=None,position=0))
+            write_index(self.index,row(1,to='b.implementer'))
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r1.md'])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_missing_index_keeps_base_seed(self):
+        p,_,_,_=self._b7_spawn()
+        try:
+            note=self._b7_unavailable('index-missing')
+            self.assertEqual(note['progress'][str(self.root)],dict(file=None,position=0))
+            write_index(self.index,row(1,to='b.implementer'))
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r1.md'])
+        finally: self._b7_stop(p)
+
+    def test_restored_index_replay_is_pinned(self):
+        write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'))
+        saved=self.root/'saved-index';self.index.rename(saved);p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable('index-missing');saved.rename(self.index)
+            self.assertEqual([d['file'] for d in self.read_lines(p,2,timeout=2)],['lane/r1.md','lane/r2.md'])
+        finally: self._b7_stop(p)
+
+    def test_established_progress_is_not_reseeded(self):
+        self._b7_seed();write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'));self.index.chmod(0)
+        p,_,_,_=self._b7_spawn()
+        try:
+            note=self._b7_unavailable();self.assertEqual(note['progress'][str(self.root)],dict(file='lane/r1.md',position=1))
+            self.index.chmod(0o644)
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r2.md'])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
     def test_note_written_during_scan_wakes_without_index_change(self):
         self._assert_note_wake()
 

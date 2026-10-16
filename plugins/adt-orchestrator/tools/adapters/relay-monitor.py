@@ -1294,120 +1294,135 @@ def follow(args) -> int:
         sweep_owner_files(store)  # eventual cleanup of unreferenced owner files (P5-R1)
     sink, pacer = FdSink(sys.stdout.fileno()), Pacer()
     last_sig = last_note = None
+    last_error = None
     pending = True
     backoff_until = 0.0
     try:
         while True:
-            note = store.load()
-            binding = resolve_binding(note, os.environ, args)
-            if binding is None:
-                store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
-                time.sleep(POLL_NOTE)
-                continue
-            if binding.source == "env":
-                if (
-                    binding.root not in note["progress"]
-                ):  # per-root progress initialization (once per root)
-                    snap = read_index(Path(binding.root) / "INDEX.md")
-                    anchor = (
-                        binding.anchor
-                        if binding.anchor
-                        else (snap.rows[-1].cells["file"] if snap.rows else None)
-                    )
-                    pos = next(
-                        (r.position for r in snap.rows if r.cells["file"] == anchor), 0
-                    )
-                    cur = {"file": anchor, "position": pos}
-                    store.update(
-                        lambda n: (
-                            n["progress"].__setitem__(binding.root, dict(cur)),
-                            n.update({"anchor": anchor}),
+            with root_budget():
+                note = store.load()
+                binding = resolve_binding(note, os.environ, args)
+                if binding is None:
+                    store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
+                    time.sleep(POLL_NOTE)
+                    continue
+                if binding.source == "env":
+                    if (
+                        binding.root not in note["progress"]
+                    ):  # per-root progress initialization (once per root)
+                        snap = read_index(Path(binding.root) / "INDEX.md")
+                        if snap.error in INDEX_UNAVAILABLE and (binding.anchor or snap.error != "index-missing"):
+                            last_error = snap.error
+                            store.update(lambda n: (n.update(phase="unavailable"), set_reason(n, snap.error, snap.detail)))
+                            time.sleep(POLL_INDEX)
+                            continue
+                        anchor = (
+                            binding.anchor
+                            if binding.anchor
+                            else (snap.rows[-1].cells["file"] if snap.rows else None)
                         )
+                        pos = next(
+                            (r.position for r in snap.rows if r.cells["file"] == anchor), 0
+                        )
+                        cur = {"file": anchor, "position": pos}
+                        store.update(
+                            lambda n: (
+                                n["progress"].__setitem__(binding.root, dict(cur)),
+                                n.update({"anchor": anchor}),
+                            )
+                        )
+                        note = store.load()
+                        pending = True
+                    env_seat = canonical(
+                        binding.seat
+                    )  # per-pair floor and binding metadata (once per pair; D8-R1)
+                    has_floor = any(
+                        f["root"] == binding.root and f["seat"] == env_seat
+                        for f in note.get("floors", [])
                     )
-                    note = store.load()
-                    pending = True
-                env_seat = canonical(
-                    binding.seat
-                )  # per-pair floor and binding metadata (once per pair; D8-R1)
-                has_floor = any(
-                    f["root"] == binding.root and f["seat"] == env_seat
-                    for f in note.get("floors", [])
+                    if (
+                        not has_floor
+                        or canonical(note.get("seat")) != env_seat
+                        or note.get("root") != binding.root
+                        or note.get("binding_source") != "env"
+                    ):
+                        cur = dict(
+                            note["progress"][binding.root]
+                            # existing progress is preserved; the new pair's floor is the
+                            # current cursor
+                        )
+                        store.update(
+                            lambda n: (
+                                record_floor(n, binding.root, binding.seat, cur),
+                                n.update(
+                                    {
+                                        "seat": binding.seat,
+                                        "root": binding.root,
+                                        "binding_source": "env",
+                                        "anchor": binding.anchor or n.get("anchor"),
+                                    }
+                                ),
+                            )
+                        )
+                        note = store.load()
+                        pending = True
+                sig, nsig = index_signature(Path(binding.root) / "INDEX.md"), store.mtime()
+                wake = (
+                    pending
+                    or last_error in INDEX_UNAVAILABLE
+                    or sig is SIGNATURE_STALLED
+                    or sig != last_sig
+                    or nsig != last_note
+                    or bool(note.get("frame"))
+                    or (backoff_until and time.monotonic() >= backoff_until)
                 )
-                if (
-                    not has_floor
-                    or canonical(note.get("seat")) != env_seat
-                    or note.get("root") != binding.root
-                    or note.get("binding_source") != "env"
-                ):
-                    cur = dict(
-                        note["progress"][binding.root]
-                        # existing progress is preserved; the new pair's floor is the
-                        # current cursor
-                    )
-                    store.update(
-                        lambda n: (
-                            record_floor(n, binding.root, binding.seat, cur),
-                            n.update(
-                                {
-                                    "seat": binding.seat,
-                                    "root": binding.root,
-                                    "binding_source": "env",
-                                    "anchor": binding.anchor or n.get("anchor"),
-                                }
-                            ),
-                        )
-                    )
-                    note = store.load()
+                if not wake:
+                    time.sleep(min(POLL_INDEX, max(0.05, pacer.wait_time() or POLL_INDEX)))
+                    continue
+                if time.monotonic() < backoff_until:
+                    time.sleep(min(POLL_INDEX, backoff_until - time.monotonic()))
+                    continue
+                last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
+                snap = read_index(Path(binding.root) / "INDEX.md")
+                last_error = snap.error
+                result = deliver_once(
+                    store,
+                    sink,
+                    binding,
+                    snap,
+                    end=time.monotonic() + FOLLOW_OUTPUT_DEADLINE,
+                    leader_instance=me["instance"],
+                    pacer=pacer,
+                )
+                with store.state_lock():
+                    recovered = store.load()
+                    if (
+                        recovered.get("phase") == "following"
+                        and (recovered.get("leader") or {}).get("instance") == me["instance"]
+                        and (recovered.get("exit") or recovered.get("reason") in FOLLOWER_EXIT | INDEX_UNAVAILABLE)
+                    ):
+                        clear_exit(recovered)
+                        store.save(recovered)
+                if result.aborted == "paced":
                     pending = True
-            sig, nsig = index_signature(Path(binding.root) / "INDEX.md"), store.mtime()
-            wake = (
-                pending
-                or sig != last_sig
-                or nsig != last_note
-                or bool(note.get("frame"))
-                or (backoff_until and time.monotonic() >= backoff_until)
-            )
-            if not wake:
-                time.sleep(min(POLL_INDEX, max(0.05, pacer.wait_time() or POLL_INDEX)))
-                continue
-            if time.monotonic() < backoff_until:
-                time.sleep(min(POLL_INDEX, backoff_until - time.monotonic()))
-                continue
-            last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
-            snap = read_index(Path(binding.root) / "INDEX.md")
-            result = deliver_once(
-                store,
-                sink,
-                binding,
-                snap,
-                end=time.monotonic() + FOLLOW_OUTPUT_DEADLINE,
-                leader_instance=me["instance"],
-                pacer=pacer,
-            )
-            def recovered(n):
-                if n.get("phase") == "following" and (n.get("leader") or {}).get("instance") == me["instance"]:
-                    clear_exit(n)
-            store.update(recovered)
-            if result.aborted == "paced":
-                pending = True
-                time.sleep(min(POLL_INDEX, pacer.wait_time()))
-            elif result.aborted == "output-stalled":
-                pending = True
-                sink.wait_writable(
-                    BACKOFF
-                )  # wait for the sink outside the lock, then retry the same frame
-            elif result.aborted in (
-                "binding-changed",
-                "progress-moved",
-                "snapshot-order",
-                "lock-timeout",
-                "frame-busy",
-                "deadline",
-            ):
-                pending = True
-                time.sleep(0.1)
-            elif result.halted:
-                time.sleep(POLL_INDEX)
+                    time.sleep(min(POLL_INDEX, pacer.wait_time()))
+                elif result.aborted == "output-stalled":
+                    pending = True
+                    sink.wait_writable(
+                        BACKOFF
+                    )  # wait for the sink outside the lock, then retry the same frame
+                elif result.aborted in (
+                    "binding-changed",
+                    "progress-moved",
+                    "snapshot-order",
+                    "lock-timeout",
+                    "frame-busy",
+                    "deadline",
+                ):
+                    pending = True
+                    time.sleep(0.1)
+                elif result.halted:
+                    time.sleep(POLL_INDEX)
     except TransportFailed as exc:
         store.update(
             lambda n: record_exit(n, reason="transport-failed", detail=str(exc), instance=me["instance"])
