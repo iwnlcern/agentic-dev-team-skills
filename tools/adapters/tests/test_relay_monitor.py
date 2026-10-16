@@ -3331,10 +3331,15 @@ raise SystemExit(m.main(sys.argv[3:]))
     def _miss(self, call=None):
         return self.payload("env tools/relay submit d.md", self.receipt, call_id=call)
 
-    def _observation(self):
+    def _observation(self, *, include_seq=False):
         value = self.store.load().get("bind_observation")
         self.assertIsInstance(value, dict)
-        self.assertEqual(set(value), {"reason", "stamp", "receipts", "root", "root_provenance", "call"})
+        expected = {"reason", "stamp", "receipts", "root", "root_provenance", "call"}
+        if include_seq:
+            expected.add("seq")
+            self.assertIsInstance(value["seq"], int)
+            self.assertGreater(value["seq"], 0)
+        self.assertEqual(set(value), expected)
         return value
 
     def test_help_piped_to_head_leaves_armed_note_unchanged(self):
@@ -3359,7 +3364,7 @@ raise SystemExit(m.main(sys.argv[3:]))
             with self.subTest(command=command):
                 self.store.path.unlink(missing_ok=True)
                 self.run_bind(self.payload(command, self.receipt))
-                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertEqual(self._observation(include_seq=True)["reason"], "submit-near-miss")
                 self.assertIsNone(self.store.load()["seat"])
 
     def test_verb_in_heredoc_body_is_not_a_verb(self):
@@ -3374,20 +3379,20 @@ raise SystemExit(m.main(sys.argv[3:]))
 
     def test_unterminated_quote_naming_verb_exits_zero(self):
         self.assertEqual(self.run_bind(self.payload("tools/relay submit d.md 'unfinished", self.receipt)), 0)
-        self.assertEqual(self._observation()["reason"], "unsupported-syntax")
+        self.assertEqual(self._observation(include_seq=True)["reason"], "unsupported-syntax")
         self.store.path.unlink()
         self.run_bind(self.payload("echo 'tools/relay submit unfinished", self.receipt))
         self.assertFalse(self.store.path.exists())
 
     def test_echo_with_fabricated_receipt_records_suspicion_only(self):
         self.run_bind(self.payload("echo tools/relay submit d.md", self.receipt.replace("r1.md", "fake.md")))
-        record = self._observation()
+        record = self._observation(include_seq=True)
         self.assertEqual((record["root"], record["root_provenance"], record["receipts"]), (None, "none", ["lane/fake.md"]))
         self.assertIsNone(self.store.load()["seat"])
 
     def test_unexecuted_branch_beside_receipt_binds_nothing(self):
         self.run_bind(self.payload("if false; then tools/relay submit d.md; fi; echo receipt", self.receipt))
-        self.assertEqual(self._observation()["reason"], "submit-near-miss")
+        self.assertEqual(self._observation(include_seq=True)["reason"], "submit-near-miss")
         self.assertIsNone(self.store.load()["seat"])
 
     def _indicated_miss(self, command, cwd=None):
@@ -3479,7 +3484,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         self.run_bind(self._submit())
         before = self.store.load()
         self.run_bind(self.payload("ssh elsewhere tools/relay submit d.md", self.receipt.replace("r1.md", "r99.md")))
-        record = self._observation()
+        record = self._observation(include_seq=True)
         self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
         self.assertEqual(self.store.load()["anchor"], before["anchor"])
 
@@ -3489,7 +3494,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         payload = json.loads(self._miss())
         payload["cwd"] = str(other)
         self.run_bind(json.dumps(payload))
-        record = self._observation()
+        record = self._observation(include_seq=True)
         self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
         self.assertEqual(self.store.load()["root"], str(self.root))
 
@@ -3502,12 +3507,12 @@ raise SystemExit(m.main(sys.argv[3:]))
                 else:
                     write_index(self.index, "")
                 self.run_bind(self._miss())
-                self.assertEqual(self._observation()["root_provenance"], "none")
+                self.assertEqual(self._observation(include_seq=True)["root_provenance"], "none")
 
     def test_manual_bind_to_current_anchor_clears_without_advancing(self):
         self.run_bind(self._submit("file"))
         self.run_bind(self._miss("miss"))
-        self._observation()
+        self._observation(include_seq=True)
         before = self.store.load()
         self.assertEqual(self._manual(), 0)
         after = self.store.load()
@@ -3634,7 +3639,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         self.run_bind(first)
         self.assertEqual(self.store.path.read_bytes(), before)
         self.run_bind(self._miss("second"))
-        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "second"}))
+        self.assertEqual(self._observation(include_seq=True)["call"], self.rm.call_identity("sess", {"tool_use_id": "second"}))
 
     def test_same_anchor_absent_progress_establishes_progress(self):
         self.run_bind(self._submit())
@@ -3652,7 +3657,7 @@ raise SystemExit(m.main(sys.argv[3:]))
                 else:
                     self._manual()
                 self.run_bind(self._miss())
-                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertEqual(self._observation(include_seq=True)["reason"], "submit-near-miss")
                 self.assertEqual(self.store.load()["binding_source"], source)
 
     def test_three_concurrent_hooks_one_call_advance_once(self):
@@ -3682,7 +3687,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         self.assertEqual(self.store.path.read_bytes(), before)
         self._manual()
         self.run_bind(self._miss())
-        self._observation()
+        self._observation(include_seq=True)
         self.assertEqual(self.store.load()["handled_calls"], [])
 
     def test_ninth_call_evicts_oldest(self):
@@ -3690,7 +3695,7 @@ raise SystemExit(m.main(sys.argv[3:]))
             self.run_bind(self._miss(str(i)))
         self.assertEqual(self.store.load()["handled_calls"], [self.rm.call_identity("sess", {"tool_use_id": str(i)}) for i in range(1, 9)])
         self.run_bind(self._miss("0"))
-        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "0"}))
+        self.assertEqual(self._observation(include_seq=True)["call"], self.rm.call_identity("sess", {"tool_use_id": "0"}))
 
     def test_receipt_with_findings_and_routed_notice_binds_author_relay(self):
         output = '{"findings":[{"path":"other.md"}]}\n' + self.receipt + '\nMONITOR-NOTICE: {"file":"lane/notice.md"}'
@@ -6126,3 +6131,158 @@ finally:
                 self.assertIsNotNone(after.get("bind_observation"))
             self.assertEqual(after["reason"], before["reason"])
             self.assertEqual(after["exit"], before["exit"])
+
+
+class BindOrderTests(TmpEnv):
+    def setUp(self):
+        super().setUp()
+        write_index(self.index, row(1) + row(2))
+        for n in (1, 2):
+            (self.root / 'lane' / f'r{n}.md').write_text('relay\n')
+        self.store = self.rm.NoteStore('order')
+        self.store.update(lambda n: n.update(seat='a.planner', root=str(self.root), anchor='lane/r1.md', binding_source='hook', binding_gen=1))
+
+    def _ready(self, child):
+        ready, _, _ = select.select([child.stderr], [], [], 3)
+        self.assertTrue(ready, 'child did not reach barrier')
+        self.assertEqual(child.stderr.readline(), b'READY\n')
+
+    def _race(self, stage, change=None, call=None):
+        # Child setup is outside the measured interval. Raw root operations are
+        # stalled individually; their callers and the real flock remain intact.
+        code = f'''
+import importlib.util,sys,os,io,json
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+root={str(self.root)!r}; stage={stage!r}; active=None; used=False
+old_attr=m.attribute_root; old_hint=m.rebind_line; old_discover=m.discover_root_like_cli; old_lookup=m.receipt_row_lookup; old_real=m.os.path.realpath
+def barrier():
+    global used
+    if not used:
+        used=True
+        os.write(2,b'READY\\n')
+        assert os.read(0,1)==b'x'
+def attr(*a,**k):
+    global active
+    active='attr'
+    try:
+        if stage=='attr': barrier()
+        return old_attr(*a,**k)
+    finally: active=None
+def hint(*a,**k):
+    global active
+    active='hint'
+    try: return old_hint(*a,**k)
+    finally: active=None
+def discover(*a,**k):
+    if (stage=='discover' and active=='attr') or (stage=='initial' and active is None): barrier()
+    return old_discover(*a,**k)
+def lookup(*a,**k):
+    if (stage=='lookup' and active=='attr') or (stage=='hint' and active=='hint'): barrier()
+    return old_lookup(*a,**k)
+def real(path,*a,**k):
+    if stage=='realpath' and active=='attr' and str(path)==root: barrier()
+    return old_real(path,*a,**k)
+m.attribute_root=attr;m.rebind_line=hint;m.discover_root_like_cli=discover;m.receipt_row_lookup=lookup;m.os.path.realpath=real
+m.now_stamp=lambda:'20261015-000000'
+command='tools/relay submit d.md' + (' --root '+root if stage=='initial' else ' | cat')
+payload=dict(session_id='order',cwd=root,hook_event_name='PostToolUse',tool_input={{'command':command}},tool_response={{'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))}})
+if {call!r}: payload['tool_use_id']={call!r}
+sys.stdin=io.StringIO(json.dumps(payload))
+m.bind(SimpleNamespace(manual=False,session=None,plugin_root=None,host='auto',root=None,anchor=None))
+'''
+        probe_code = r'''
+import fcntl,os,sys,time,json
+f=open(sys.argv[1],'a');os.write(2,b'READY\n');sys.stdin.readline();start=time.monotonic();ok=False
+while time.monotonic()-start < .18:
+    try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);ok=True;break
+    except BlockingIOError: time.sleep(.001)
+print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
+'''
+        probe = subprocess.Popen([sys.executable, '-c', probe_code, str(self.store._state_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = None
+        try:
+            self._ready(probe)
+            child = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self._ready(child)
+            signalled = time.monotonic()
+            probe_out, probe_err = probe.communicate(b'go\n', timeout=1)
+            elapsed = time.monotonic() - signalled
+            result = json.loads(probe_out)
+            self.assertTrue(result['ok'], 'state_lock held across raw root call')
+            self.assertLess(elapsed, .2)
+            if change:
+                change()
+            out, err = child.communicate(b'x', timeout=5)
+            self.assertEqual(child.returncode, 0, err.decode())
+            return out.decode()
+        finally:
+            for process in (child, probe):
+                if process is None:
+                    continue
+                if process.poll() is None:
+                    try:
+                        process.communicate(b'x\n', timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=2)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream and not stream.closed:
+                        stream.close()
+
+    def test_bind_hook_stall_points_hold_no_lock(self):
+        for stage in ('initial', 'discover', 'lookup', 'realpath', 'hint'):
+            with self.subTest(stage=stage):
+                self.store.update(lambda n: n.update(bind_observation=None))
+                self._race(stage)
+
+    def _change(self, kind):
+        if kind == 'manual':
+            ok, why = self.rm.bind_from_receipt(self.store, root=str(self.root), receipt_path='lane/r2.md', key_seat=None, source='manual')
+            self.assertTrue(ok, why)
+        elif kind == 'env':
+            self.store.update(lambda n: n.update(root=str(self.base/'another'), binding_source='env'))
+        elif kind == 'observation':
+            with mock.patch.object(self.rm, 'now_stamp', return_value='20261015-000000'):
+                self.store.update(lambda n: self.rm.record_observation(n, reason='unsupported-syntax', receipts=['lane/r2.md'], root=str(self.root), provenance='inferred', call=None))
+        elif kind == 'legacy':
+            self.store.update(lambda n: n['bind_observation'].pop('seq', None))
+
+    def _reset(self):
+        self.store.update(lambda n: n.update(seat='a.planner',root=str(self.root),anchor='lane/r1.md',binding_source='hook',binding_gen=1,bind_observation=None,handled_calls=[]))
+
+    def test_superseded_hint_is_not_emitted(self):
+        for kind in ('manual', 'env', 'observation'):
+            with self.subTest(kind=kind):
+                self._reset()
+                self.assertEqual(self._race('hint', lambda: self._change(kind)), '')
+
+    def test_superseded_attribution_is_not_recorded(self):
+        for kind in ('manual', 'env'):
+            with self.subTest(kind=kind):
+                self._reset()
+                self.assertEqual(self._race('attr', lambda: self._change(kind), call='a'), '')
+                note = self.store.load()
+                self.assertIsNone(note.get('bind_observation'))
+                self.assertIn('["order","a"]', note['handled_calls'])
+
+    def test_observation_without_seq_suppresses_hint(self):
+        self.assertEqual(self._race('hint', lambda: self._change('legacy')), '')
+
+    def test_observation_seq_changes_only_on_replace_or_clear(self):
+        args = dict(reason='unsupported-syntax',receipts=['lane/r1.md'],root=str(self.root),provenance='inferred',call=None)
+        note = self.store.load()
+        initial = note.get('observation_seq', 0)
+        self.assertTrue(self.rm.record_observation(note, **args))
+        self.assertEqual(note['observation_seq'], initial+1)
+        self.assertEqual(note['bind_observation']['seq'], initial+1)
+        self.assertFalse(self.rm.record_observation(note, **args))
+        self.assertEqual(note['observation_seq'], initial+1)
+        args['call']='handled'
+        note['handled_calls']=['handled']
+        self.assertFalse(self.rm.record_observation(note, **args))
+        self.assertEqual(note['observation_seq'], initial+1)
+        self.rm.clear_observations(note)
+        self.assertEqual(note['observation_seq'], initial+2)
+        self.assertIsNone(note['bind_observation'])

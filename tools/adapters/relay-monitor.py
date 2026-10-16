@@ -104,6 +104,7 @@ def default_note() -> dict:
         "bound_at": None,
         "binding_source": None,
         "bind_observation": None,
+        "observation_seq": 0,
         "handled_calls": [],
         "binding_gen": 0,
         "leader": None,
@@ -1844,6 +1845,11 @@ def _remember_call(note: dict, call: str | None) -> None:
         note["handled_calls"] = (note.get("handled_calls", []) + [call])[-8:]
 
 
+def binding_key(note: dict) -> tuple:
+    return (canonical(note.get("seat")), note.get("root"), note.get("anchor"),
+            note.get("binding_source"), int(note.get("binding_gen") or 0))
+
+
 def record_observation(note: dict, *, reason: str, receipts: list[str], root: str | None, provenance: str, call: str | None, command_roots: list[str] | None = None) -> bool:
     if call and call in note.get("handled_calls", []):
         return False
@@ -1853,12 +1859,14 @@ def record_observation(note: dict, *, reason: str, receipts: list[str], root: st
     old = note.get("bind_observation") or {}
     if call is None and all(old.get(k) == v for k, v in record.items()) and old.get("command_roots", []) == record.get("command_roots", []):
         return False
-    note["bind_observation"] = dict(record, stamp=now_stamp())
+    note["observation_seq"] = int(note.get("observation_seq") or 0) + 1
+    note["bind_observation"] = dict(record, stamp=now_stamp(), seq=note["observation_seq"])
     _remember_call(note, call)
     return True
 
 
 def clear_observations(note: dict) -> None:
+    note["observation_seq"] = int(note.get("observation_seq") or 0) + 1
     note["bind_observation"] = None
     for key in ("binding_degraded", "submit_miss", "submit_miss_binding_gen"):
         note.pop(key, None)
@@ -1964,15 +1972,26 @@ def bind(args) -> int:
             ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
             if ok:
                 return 0
-    hint = None
+    observed = store.load()
+    before = binding_key(observed)
+    root, provenance = attribute_root(parsed, cwd, observed, receipts, args.plugin_root, indications)
     with store.state_lock():
         note = store.load()
         if call and call in note.get("handled_calls", []):
             return 0
-        root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root, indications)
-        if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
+        if binding_key(note) != before:
+            _remember_call(note, call)
             store.save(note)
-            hint = rebind_line(note, session)
+            return 0
+        if not record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
+            return 0
+        store.save(note)
+        seq = note["observation_seq"]
+    hint = rebind_line(note, session)
+    with store.state_lock():
+        current = store.load()
+        if binding_key(current) != before or (current.get("bind_observation") or {}).get("seq") != seq:
+            return 0
     if hint:
         print(hook_context(hint).decode("utf-8"), flush=True)
     return 0
