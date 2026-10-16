@@ -1472,6 +1472,12 @@ m.follow(SimpleNamespace(session='psess',host='claude-code',root=None,anchor={an
         FifoCallersTests._child(self, """
 index.write_text(header)
 original=m.read_index;calls=[]
+original_start=m.process_start_time
+def startup_poll(pid):
+    # subprocess timeout polling may sleep before the follower's first wake.
+    time.sleep(.001)
+    return original_start(pid)
+m.process_start_time=startup_poll
 def read(path):
     calls.append('read')
     if len(calls)==1:
@@ -1482,7 +1488,7 @@ def signature(path):
 class End(BaseException): pass
 def stop(seconds): raise End()
 m.read_index=read;m.index_signature=signature
-with mock.patch.dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(root)),mock.patch.object(m.time,'sleep',stop):
+with mock.patch.dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(root)),mock.patch.object(m,'time',SimpleNamespace(**{**vars(time),'sleep':stop})):
     start=time.monotonic()
     try: m.follow(args())
     except End: pass
