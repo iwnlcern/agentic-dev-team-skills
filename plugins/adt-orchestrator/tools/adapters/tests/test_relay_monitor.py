@@ -4012,6 +4012,37 @@ raise SystemExit(m.main(sys.argv[3:]))
 
 class DrainTests(TmpEnv):
 
+    def test_drain_cap_is_computed_once(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                FifoCallersTests._child(self, f"""
+expired={expired!r}
+index.write_text(header+one)
+store=m.NoteStore('fifo');store.path.unlink(missing_ok=True)
+store.update(lambda n:n.update(seat='b.implementer',root=str(root),anchor='lane/r1.md',binding_source='hook'))
+sys.stdin=io.StringIO(json.dumps(dict(session_id='fifo')))
+clock=time.monotonic;times=[];ends=[];documents=[];reads=[];old_read=m.read_index
+m.emit_json=lambda doc:documents.append(doc) or 0
+m.stream_owner=lambda store,end:ends.append(end)
+def tick():
+    value=clock();times.append(value);return value
+def read(path):
+    budget=m.current_budget();reads.append((clock(),budget.cap if budget else None))
+    return old_read(path)
+m.read_index=read
+with mock.patch.object(m.time,'monotonic',tick),mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read):
+    start=clock();rc=m.drain(args(deadline=-1.0 if expired else 1.0));elapsed=clock()-start
+t.assertEqual(rc,0);t.assertEqual(documents,[{{}}])
+if expired:
+    t.assertEqual(reads,[]);t.assertFalse(entered.is_set());t.assertEqual(ends,[])
+else:
+    t.assertTrue(entered.is_set());t.assertLess(elapsed,.75)
+    t.assertEqual(len(reads),1);t.assertEqual(len(ends),1)
+    t.assertAlmostEqual(ends[0],times[0]+1.0,places=6)
+    t.assertIsNotNone(reads[0][1]);t.assertLessEqual(reads[0][1],reads[0][0]+.5)
+    t.assertGreater(reads[0][1],times[0]+.45)
+""")
+
     def test_recovered_empty_scan_restores_phase_with_observation(self):
         for path in ("shared-follower", "codex-drain"):
             with self.subTest(path=path):

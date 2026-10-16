@@ -2125,19 +2125,22 @@ def drain(args) -> int:
     store = NoteStore(session)
     note = store.load()
     binding = resolve_binding(note, os.environ, args)
-    if binding is None or time.monotonic() >= end:
+    now = time.monotonic()
+    if binding is None or now >= end:
         return emit_json({})
-    snap = read_index(Path(binding.root) / "INDEX.md")
-    if time.monotonic() >= end:
-        return emit_json({})
-    sink = FdSink(sys.stdout.fileno())
-    me = stream_owner(store, end)
-    if me is None:
-        return emit_json({})
-    try:
-        return _drain_locked(store, sink, binding, snap, end, me)
-    finally:
-        me["_lock"].release(unlink=me.get("cleared", True))
+    cap = now + min(ROOT_BUDGET, (end - now) / 2)
+    with root_budget(cap=cap):
+        snap = read_index(Path(binding.root) / "INDEX.md")
+        if time.monotonic() >= end:
+            return emit_json({})
+        sink = FdSink(sys.stdout.fileno())
+        me = stream_owner(store, end)
+        if me is None:
+            return emit_json({})
+        try:
+            return _drain_locked(store, sink, binding, snap, end, me)
+        finally:
+            me["_lock"].release(unlink=me.get("cleared", True))
 
 
 def _drain_locked(
