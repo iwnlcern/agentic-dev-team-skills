@@ -14,3 +14,12 @@ Fixture partition flags describe the actual input ordering, not a directory-name
 
 The `record-root/history-only/` fixture holds recorded lineage defects and their frozen cbc8f07 sweep diagnostics.
 Default managed sweeps suppress those defects; history audits report the exact frozen messages as warnings.
+
+## B9 cross-root baseline
+
+`xroot/baseline-b8d87eb.json` records measured pair and direct-issuer authority reason sets, verifier axes/details and successful selections at `b8d87ebe15fbd3f5e06f1d0112fccad832acd1b1`.
+Its source hashes and capture interpreter/load records bind the results to the old implementation.
+Each case was measured once per path; the transition and supplemental differential captures cover disjoint inputs.
+`relay_engine/tests/capture_xroot_baseline.py` loads explicit pinned source files and `relay_engine/tests/xroot_b9_cases.py` builds the foreign repositories.
+Deadline fault cases expire the selected real Git query; capacity shapes use the real five-second budget and the OS page cache is uncontrolled.
+These old measurements are a differential oracle, not proof of B9 performance.

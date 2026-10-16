@@ -501,6 +501,29 @@ def _authority_cases(dest: Path) -> list[Case]:
             detail=f"selected review {REVIEW_NAME} is not a peer for selected origin role {reported_origin_role}",
         )
 
+    # B9: one admitted peer row and the six explicitly unadmitted pairs.
+    b9_pairs = [
+        ("orchestrator-planner", "orchestrator-reviewer", True),
+        ("orchestrator-planner", "implementer", False),
+        ("planner", "orchestrator-reviewer", False),
+        ("orchestrator-reviewer", "orchestrator-reviewer", False),
+        ("planner", "master-reviewer", False),
+        ("planner", "planner", False),
+        ("planner", "orchestrator-planner", False),
+        ("orchestrator-planner", "planner", False),
+    ]
+    for origin, review, allowed in b9_pairs:
+        values = (origin.replace("-", " ").title(), "m-1." + origin,
+                  review.replace("-", " ").title(), "m-1." + review)
+        cases.append(_build_case(
+            dest, f"B9-peer-{origin}-{review}",
+            mutate_foreign=lambda repo, values=values: tier(repo, *values),
+            expected_exit=0 if allowed else 1,
+            expected_errors=[] if allowed else [_xerror(
+                "authority-population",
+                f"selected review {REVIEW_NAME} is not a peer for selected origin role {origin}")],
+        ))
+
     add(
         "X29-origin-tie",
         lambda repo: _copy_relay(repo, ORIGIN_NAME, "ALT-DESIGN-planner-20260801-100000.md"),

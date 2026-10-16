@@ -3946,6 +3946,7 @@ def xroot_authority(
         "pair-planner": {"implementer", "pair-implementer"},
         "domain-planner": {"domain-reviewer"},
         "master-planner": {"master-reviewer"},
+        "orchestrator-planner": {"orchestrator-reviewer"},
     }
     if review_role not in peer_roles.get(origin_role, set()):
         raise XrootAxisError(
