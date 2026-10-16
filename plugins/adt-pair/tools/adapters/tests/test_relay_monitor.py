@@ -1407,6 +1407,250 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
     pacing, note-refresh recovery.
     """
 
+    def _b7_stop(self, p):
+        if p.poll() is None:
+            p.kill()
+        p.wait(timeout=10)
+        for stream in (p.stdin, p.stdout, p.stderr):
+            if stream and not stream.closed:
+                stream.close()
+
+    def _b7_spawn(self, fault=None, anchor=None):
+        marker=self.base/'fault-entered';gate=self.base/'fault-release';counts=self.base/'signature-count'
+        marker.unlink(missing_ok=True);gate.unlink(missing_ok=True);counts.unlink(missing_ok=True)
+        code=f'''
+import importlib.util,sys,os,threading
+from pathlib import Path
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+index=Path({str(self.index)!r});marker=Path({str(marker)!r});gate=Path({str(gate)!r});counts=Path({str(counts)!r});fault={fault!r};used=False;fds=set()
+raw_open=os.open;raw_read=os.read;raw_close=os.close;raw_stat=Path.stat;signature=m.index_signature
+waiter=threading.Event()
+def barrier():
+    global used
+    if not used:
+        used=True;marker.write_text('entered')
+        while not gate.exists(): waiter.wait(.01)
+def opening(path,*a,**k):
+    fd=raw_open(path,*a,**k)
+    if str(path)==str(index): fds.add(fd)
+    return fd
+def reading(fd,*a,**k):
+    if fd in fds: barrier()
+    return raw_read(fd,*a,**k)
+def closing(fd):
+    fds.discard(fd);return raw_close(fd)
+def stating(path,*a,**k):
+    if path==index: barrier()
+    return raw_stat(path,*a,**k)
+def counted(path):
+    with counts.open('a') as f: f.write('scan\\n')
+    return signature(path)
+if fault=='read': m.os.open=opening;m.os.read=reading;m.os.close=closing
+elif fault=='stat': Path.stat=stating
+elif fault=='count': m.index_signature=counted
+m.follow(SimpleNamespace(session='psess',host='claude-code',root=None,anchor={anchor!r},plugin_root=None))
+'''
+        env=dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(self.root))
+        if anchor: env['ADT_RELAY_ANCHOR']=anchor
+        p=subprocess.Popen([sys.executable,'-c',code],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
+        self.addCleanup(self._b7_stop,p)
+        return p,gate,marker,counts
+
+    def _b7_seed(self, file='lane/r1.md', position=1):
+        self.rm.NoteStore('psess').update(lambda n:n.update(seat='b.implementer',root=str(self.root),binding_source='hook',anchor=file,progress={str(self.root):dict(file=file,position=position)}))
+
+    def _b7_status(self):
+        with mock.patch.object(self.rm,'check_identity',return_value=('ok',{},{})):
+            return self.rm.status_line(self.rm.NoteStore('psess'),None)
+
+    def _b7_unavailable(self, token='index-unreadable', timeout=1.5):
+        return self.wait_note(lambda n:n.get('phase')=='unavailable' and n.get('reason')==token,timeout=timeout)
+
+    def test_follower_seed_signature_and_scan_share_one_budget(self):
+        FifoCallersTests._child(self, """
+index.write_text(header)
+original=m.read_index;calls=[]
+original_start=m.process_start_time
+def startup_poll(pid):
+    # subprocess timeout polling may sleep before the follower's first wake.
+    time.sleep(.001)
+    return original_start(pid)
+m.process_start_time=startup_poll
+def read(path):
+    calls.append('read')
+    if len(calls)==1:
+        t.assertEqual(m.bounded_root_call(lambda:threading.Event().wait(.6)).kind,'ok')
+    return original(path)
+def signature(path):
+    calls.append('signature');m.bounded_root_call(blocked);return m.SIGNATURE_STALLED
+class End(BaseException): pass
+def stop(seconds): raise End()
+m.read_index=read;m.index_signature=signature
+with mock.patch.dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(root)),mock.patch.object(m,'time',SimpleNamespace(**{**vars(time),'sleep':stop})):
+    start=time.monotonic()
+    try: m.follow(args())
+    except End: pass
+    t.assertLess(time.monotonic()-start,1.25)
+t.assertEqual(calls,['read','signature','read'])
+t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
+""")
+
+    def test_healthy_follower_retains_idle_polling(self):
+        write_index(self.index,'');self._b7_seed(None,0)
+        p,gate,marker,counts=self._b7_spawn('count')
+        try:
+            self.wait_note(lambda n:n.get('phase')=='following',timeout=2)
+            before=len(counts.read_text().splitlines())
+            threading.Event().wait(self.rm.POLL_INDEX*1.2)
+            after=len(counts.read_text().splitlines())
+            self.assertLessEqual(after-before,3,'healthy empty scans spin instead of polling')
+        finally: self._b7_stop(p)
+
+    def test_follower_survives_each_unreadable_form(self):
+        import socket
+        for form in ('rename','inplace','directory','fifo','socket','utf8','root','large'):
+            with self.subTest(form=form):
+                self.rm.NoteStore('psess').path.unlink(missing_ok=True)
+                self._b7_seed();write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'))
+                sock=None;p=None;detail='EACCES'
+                try:
+                    if form=='rename':
+                        replacement=self.root/'replacement';replacement.write_text(HEADER);replacement.chmod(0);replacement.replace(self.index)
+                    elif form=='inplace': self.index.chmod(0)
+                    elif form=='directory': self.index.unlink();self.index.mkdir();detail='not-regular-file'
+                    elif form=='fifo': self.index.unlink();os.mkfifo(self.index);detail='not-regular-file'
+                    elif form=='socket':
+                        self.index.unlink();sock=socket.socket(socket.AF_UNIX)
+                        # A short relative socket path avoids the Darwin address limit.
+                        old=os.getcwd()
+                        try: os.chdir(self.root);sock.bind('INDEX.md')
+                        finally: os.chdir(old)
+                        try: fd=os.open(self.index,os.O_RDONLY|os.O_NONBLOCK)
+                        except OSError as exc: detail=errno.errorcode[exc.errno]
+                        else: os.close(fd);detail='not-regular-file'
+                    elif form=='utf8': self.index.write_bytes(b'\xff');detail='not-utf-8'
+                    elif form=='root': self.root.chmod(0)
+                    elif form=='large': self.index.write_bytes(b'x'*(16*1024*1024+1));detail='too-large'
+                    p,_,_,_=self._b7_spawn()
+                    note=self._b7_unavailable()
+                    self.assertEqual(note['reason_detail'],detail)
+                    threading.Event().wait(3*self.rm.POLL_INDEX)
+                    self.assertIsNone(p.poll())
+                finally:
+                    self.root.chmod(0o700)
+                    if p: self._b7_stop(p)
+                    if sock: sock.close()
+                    if form=='directory': self.index.rmdir()
+                    else: self.index.chmod(0o600);self.index.unlink()
+
+    def test_follower_stall_reports_root_stalled_and_stays_alive(self):
+        for fault in ('read','stat'):
+            with self.subTest(fault=fault):
+                self.rm.NoteStore('psess').path.unlink(missing_ok=True)
+                write_index(self.index,row(1,to='b.implementer'));self._b7_seed()
+                p,gate,marker,_=self._b7_spawn(fault)
+                try:
+                    self._b7_unavailable('root-stalled',timeout=1.5)
+                    self.assertTrue(marker.exists())
+                    threading.Event().wait(self.rm.POLL_INDEX)
+                    self.assertIsNone(p.poll())
+                    gate.touch()
+                    self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2.5)
+                    self.assertIn('relay-monitor: armed',self._b7_status())
+                finally: gate.touch();self._b7_stop(p)
+
+    def test_follower_recovers_after_restore_including_in_place_chmod(self):
+        write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'));self._b7_seed()
+        signature=self.rm.index_signature(self.index);self.index.chmod(0)
+        p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable();self.index.chmod(0o644)
+            self.assertEqual(self.rm.index_signature(self.index),signature)
+            self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2*self.rm.POLL_INDEX)
+            self.assertIn('relay-monitor: armed',self._b7_status())
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=1)],['lane/r2.md'])
+            self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_recovery_on_empty_scan_clears_reason_and_detail(self):
+        write_index(self.index,row(1,to='b.implementer'));self._b7_seed();self.index.chmod(0)
+        p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable();self.index.chmod(0o644)
+            note=self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2*self.rm.POLL_INDEX)
+            self.assertIsNone(note.get('reason_detail'));self.assertIn('relay-monitor: armed',self._b7_status())
+            self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_with_anchor_defers_seed(self):
+        write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'));self.index.chmod(0)
+        p,_,_,_=self._b7_spawn(anchor='lane/r1.md')
+        try:
+            note=self._b7_unavailable();self.assertNotIn(str(self.root),note['progress']);self.assertIsNone(note.get('anchor'))
+            self.index.chmod(0o644)
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r2.md'])
+            self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_without_anchor_seeds_at_first_readable_tail(self):
+        for token in ('index-unreadable','root-stalled','index-malformed'):
+            with self.subTest(token=token):
+                self.rm.NoteStore('psess').path.unlink(missing_ok=True)
+                write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'))
+                if token=='index-unreadable': self.index.chmod(0)
+                elif token=='index-malformed': self.index.write_text('bad header\n'+row(1)+row(2))
+                p,gate,_,_=self._b7_spawn('read' if token=='root-stalled' else None)
+                try:
+                    note=self._b7_unavailable(token)
+                    self.assertNotIn(str(self.root),note['progress']);self.assertIsNone(note.get('anchor'))
+                    self.index.chmod(0o644)
+                    write_index(self.index,''.join(row(i,to='b.implementer') for i in (1,2,3)))
+                    gate.touch()
+                    note=self.wait_note(lambda n:n.get('phase')=='following',timeout=2.5)
+                    self.assertEqual(note['progress'][str(self.root)],dict(file='lane/r3.md',position=3))
+                    self.assertEqual(self.read_lines(p,1,timeout=.2),[])
+                    write_index(self.index,''.join(row(i,to='b.implementer') for i in (1,2,3,4)))
+                    self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r4.md'])
+                finally: gate.touch();self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_empty_readable_index_seeds_none(self):
+        write_index(self.index,'');self.index.chmod(0);p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable();self.index.chmod(0o644)
+            note=self.wait_note(lambda n:n.get('phase')=='following',timeout=2.5)
+            self.assertEqual(note['progress'][str(self.root)],dict(file=None,position=0))
+            write_index(self.index,row(1,to='b.implementer'))
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r1.md'])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
+    def test_first_read_missing_index_keeps_base_seed(self):
+        p,_,_,_=self._b7_spawn()
+        try:
+            note=self._b7_unavailable('index-missing')
+            self.assertEqual(note['progress'][str(self.root)],dict(file=None,position=0))
+            write_index(self.index,row(1,to='b.implementer'))
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r1.md'])
+        finally: self._b7_stop(p)
+
+    def test_restored_index_replay_is_pinned(self):
+        write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'))
+        saved=self.root/'saved-index';self.index.rename(saved);p,_,_,_=self._b7_spawn()
+        try:
+            self._b7_unavailable('index-missing');saved.rename(self.index)
+            self.assertEqual([d['file'] for d in self.read_lines(p,2,timeout=2)],['lane/r1.md','lane/r2.md'])
+        finally: self._b7_stop(p)
+
+    def test_established_progress_is_not_reseeded(self):
+        self._b7_seed();write_index(self.index,row(1,to='b.implementer')+row(2,to='b.implementer'));self.index.chmod(0)
+        p,_,_,_=self._b7_spawn()
+        try:
+            note=self._b7_unavailable();self.assertEqual(note['progress'][str(self.root)],dict(file='lane/r1.md',position=1))
+            self.index.chmod(0o644)
+            self.assertEqual([d['file'] for d in self.read_lines(p,1,timeout=2)],['lane/r2.md'])
+        finally: self.index.chmod(0o600);self._b7_stop(p)
+
     def test_note_written_during_scan_wakes_without_index_change(self):
         self._assert_note_wake()
 
@@ -1701,6 +1945,64 @@ class FollowProcessTests(FollowProcessMixin, TmpEnv):
 
 
 class BindTests(TmpEnv):
+    def _b7_bind_probe(self, body):
+        setup="""
+index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
+store=m.NoteStore('fifo')
+payload=dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={'command':'tools/relay submit d.md --root '+str(root)},tool_response={'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))})
+output=io.StringIO();errors=io.StringIO()
+def invoke(mode):
+    with __import__('contextlib').redirect_stdout(output),__import__('contextlib').redirect_stderr(errors):
+        if mode=='manual': return m.bind(args(manual=True,root=str(root),anchor='lane/r1.md'))
+        sys.stdin=io.StringIO(json.dumps(payload));return m.bind(args())
+"""
+        FifoCallersTests._child(self,setup+body)
+
+    def test_bind_refusal_names_index_condition(self):
+        for token in ('index-unreadable','index-missing','index-malformed','root-stalled'):
+            for mode in ('manual','hook'):
+                with self.subTest(token=token,mode=mode):
+                    self._b7_bind_probe(f"""
+m.read_index=lambda path:m.IndexSnapshot(error={token!r})
+rc=invoke({mode!r})
+if {mode!r}=='manual':
+    t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: '+{token!r}+'\\n')
+else:
+    t.assertEqual(rc,0);t.assertEqual(store.load()['bind_observation']['reason'],{token!r})
+t.assertIsNone(store.load().get('seat'))
+""")
+
+    def test_discovery_stall_is_typed(self):
+        for mode in ('manual','hook'):
+            with self.subTest(mode=mode):
+                self._b7_bind_probe(f"""
+m.discover_root_like_cli=lambda operand,cwd,plugin_root:blocked()
+start=time.monotonic();rc=invoke({mode!r})
+t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+if {mode!r}=='manual':
+    t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: root-stalled\\n')
+else:
+    t.assertEqual(rc,0);t.assertEqual(store.load()['bind_observation']['reason'],'root-stalled')
+t.assertIsNone(store.load().get('seat'));t.assertIsNone(store.load().get('root'))
+""")
+
+    def test_path_check_stall_is_typed(self):
+        for mode,site in (('manual','path'),('hook','path'),('hook','read')):
+            with self.subTest(mode=mode,site=site):
+                self._b7_bind_probe(f"""
+site={site!r}
+if site=='path': m.path_under_root=lambda root,rel:blocked()
+with __import__('contextlib').ExitStack() as stack:
+    if site=='read':
+        stack.enter_context(mock.patch.object(m.os,'open',track_open));stack.enter_context(mock.patch.object(m.os,'read',stalled_read))
+    start=time.monotonic();rc=invoke({mode!r})
+    t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+    if {mode!r}=='manual':
+        t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: root-stalled\\n')
+    else:
+        t.assertEqual(rc,0);t.assertEqual(store.load()['bind_observation']['reason'],'root-stalled')
+""")
+
     def test_rebind_checks_observation_root_instead_of_bound_root(self):
         import shlex
         observed = self.other_root()
@@ -3331,10 +3633,15 @@ raise SystemExit(m.main(sys.argv[3:]))
     def _miss(self, call=None):
         return self.payload("env tools/relay submit d.md", self.receipt, call_id=call)
 
-    def _observation(self):
+    def _observation(self, *, include_seq=False):
         value = self.store.load().get("bind_observation")
         self.assertIsInstance(value, dict)
-        self.assertEqual(set(value), {"reason", "stamp", "receipts", "root", "root_provenance", "call"})
+        expected = {"reason", "stamp", "receipts", "root", "root_provenance", "call"}
+        if include_seq:
+            expected.add("seq")
+            self.assertIsInstance(value["seq"], int)
+            self.assertGreater(value["seq"], 0)
+        self.assertEqual(set(value), expected)
         return value
 
     def test_help_piped_to_head_leaves_armed_note_unchanged(self):
@@ -3359,7 +3666,7 @@ raise SystemExit(m.main(sys.argv[3:]))
             with self.subTest(command=command):
                 self.store.path.unlink(missing_ok=True)
                 self.run_bind(self.payload(command, self.receipt))
-                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertEqual(self._observation(include_seq=True)["reason"], "submit-near-miss")
                 self.assertIsNone(self.store.load()["seat"])
 
     def test_verb_in_heredoc_body_is_not_a_verb(self):
@@ -3374,20 +3681,20 @@ raise SystemExit(m.main(sys.argv[3:]))
 
     def test_unterminated_quote_naming_verb_exits_zero(self):
         self.assertEqual(self.run_bind(self.payload("tools/relay submit d.md 'unfinished", self.receipt)), 0)
-        self.assertEqual(self._observation()["reason"], "unsupported-syntax")
+        self.assertEqual(self._observation(include_seq=True)["reason"], "unsupported-syntax")
         self.store.path.unlink()
         self.run_bind(self.payload("echo 'tools/relay submit unfinished", self.receipt))
         self.assertFalse(self.store.path.exists())
 
     def test_echo_with_fabricated_receipt_records_suspicion_only(self):
         self.run_bind(self.payload("echo tools/relay submit d.md", self.receipt.replace("r1.md", "fake.md")))
-        record = self._observation()
+        record = self._observation(include_seq=True)
         self.assertEqual((record["root"], record["root_provenance"], record["receipts"]), (None, "none", ["lane/fake.md"]))
         self.assertIsNone(self.store.load()["seat"])
 
     def test_unexecuted_branch_beside_receipt_binds_nothing(self):
         self.run_bind(self.payload("if false; then tools/relay submit d.md; fi; echo receipt", self.receipt))
-        self.assertEqual(self._observation()["reason"], "submit-near-miss")
+        self.assertEqual(self._observation(include_seq=True)["reason"], "submit-near-miss")
         self.assertIsNone(self.store.load()["seat"])
 
     def _indicated_miss(self, command, cwd=None):
@@ -3479,7 +3786,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         self.run_bind(self._submit())
         before = self.store.load()
         self.run_bind(self.payload("ssh elsewhere tools/relay submit d.md", self.receipt.replace("r1.md", "r99.md")))
-        record = self._observation()
+        record = self._observation(include_seq=True)
         self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
         self.assertEqual(self.store.load()["anchor"], before["anchor"])
 
@@ -3489,7 +3796,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         payload = json.loads(self._miss())
         payload["cwd"] = str(other)
         self.run_bind(json.dumps(payload))
-        record = self._observation()
+        record = self._observation(include_seq=True)
         self.assertEqual((record["root"], record["root_provenance"]), (None, "none"))
         self.assertEqual(self.store.load()["root"], str(self.root))
 
@@ -3502,12 +3809,12 @@ raise SystemExit(m.main(sys.argv[3:]))
                 else:
                     write_index(self.index, "")
                 self.run_bind(self._miss())
-                self.assertEqual(self._observation()["root_provenance"], "none")
+                self.assertEqual(self._observation(include_seq=True)["root_provenance"], "none")
 
     def test_manual_bind_to_current_anchor_clears_without_advancing(self):
         self.run_bind(self._submit("file"))
         self.run_bind(self._miss("miss"))
-        self._observation()
+        self._observation(include_seq=True)
         before = self.store.load()
         self.assertEqual(self._manual(), 0)
         after = self.store.load()
@@ -3634,7 +3941,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         self.run_bind(first)
         self.assertEqual(self.store.path.read_bytes(), before)
         self.run_bind(self._miss("second"))
-        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "second"}))
+        self.assertEqual(self._observation(include_seq=True)["call"], self.rm.call_identity("sess", {"tool_use_id": "second"}))
 
     def test_same_anchor_absent_progress_establishes_progress(self):
         self.run_bind(self._submit())
@@ -3652,7 +3959,7 @@ raise SystemExit(m.main(sys.argv[3:]))
                 else:
                     self._manual()
                 self.run_bind(self._miss())
-                self.assertEqual(self._observation()["reason"], "submit-near-miss")
+                self.assertEqual(self._observation(include_seq=True)["reason"], "submit-near-miss")
                 self.assertEqual(self.store.load()["binding_source"], source)
 
     def test_three_concurrent_hooks_one_call_advance_once(self):
@@ -3682,7 +3989,7 @@ raise SystemExit(m.main(sys.argv[3:]))
         self.assertEqual(self.store.path.read_bytes(), before)
         self._manual()
         self.run_bind(self._miss())
-        self._observation()
+        self._observation(include_seq=True)
         self.assertEqual(self.store.load()["handled_calls"], [])
 
     def test_ninth_call_evicts_oldest(self):
@@ -3690,7 +3997,7 @@ raise SystemExit(m.main(sys.argv[3:]))
             self.run_bind(self._miss(str(i)))
         self.assertEqual(self.store.load()["handled_calls"], [self.rm.call_identity("sess", {"tool_use_id": str(i)}) for i in range(1, 9)])
         self.run_bind(self._miss("0"))
-        self.assertEqual(self._observation()["call"], self.rm.call_identity("sess", {"tool_use_id": "0"}))
+        self.assertEqual(self._observation(include_seq=True)["call"], self.rm.call_identity("sess", {"tool_use_id": "0"}))
 
     def test_receipt_with_findings_and_routed_notice_binds_author_relay(self):
         output = '{"findings":[{"path":"other.md"}]}\n' + self.receipt + '\nMONITOR-NOTICE: {"file":"lane/notice.md"}'
@@ -3710,6 +4017,37 @@ raise SystemExit(m.main(sys.argv[3:]))
 
 
 class DrainTests(TmpEnv):
+
+    def test_drain_cap_is_computed_once(self):
+        for expired in (False, True):
+            with self.subTest(expired=expired):
+                FifoCallersTests._child(self, f"""
+expired={expired!r}
+index.write_text(header+one)
+store=m.NoteStore('fifo');store.path.unlink(missing_ok=True)
+store.update(lambda n:n.update(seat='b.implementer',root=str(root),anchor='lane/r1.md',binding_source='hook'))
+sys.stdin=io.StringIO(json.dumps(dict(session_id='fifo')))
+clock=time.monotonic;times=[];ends=[];documents=[];reads=[];old_read=m.read_index
+m.emit_json=lambda doc:documents.append(doc) or 0
+m.stream_owner=lambda store,end:ends.append(end)
+def tick():
+    value=clock();times.append(value);return value
+def read(path):
+    budget=m.current_budget();reads.append((clock(),budget.cap if budget else None))
+    return old_read(path)
+m.read_index=read
+with mock.patch.object(m.time,'monotonic',tick),mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read):
+    start=clock();rc=m.drain(args(deadline=-1.0 if expired else 1.0));elapsed=clock()-start
+t.assertEqual(rc,0);t.assertEqual(documents,[{{}}])
+if expired:
+    t.assertEqual(reads,[]);t.assertFalse(entered.is_set());t.assertEqual(ends,[])
+else:
+    t.assertTrue(entered.is_set());t.assertLess(elapsed,.75)
+    t.assertEqual(len(reads),1);t.assertEqual(len(ends),1)
+    t.assertAlmostEqual(ends[0],times[0]+1.0,places=6)
+    t.assertIsNotNone(reads[0][1]);t.assertLessEqual(reads[0][1],reads[0][0]+.5)
+    t.assertGreater(reads[0][1],times[0]+.45)
+""")
 
     def test_recovered_empty_scan_restores_phase_with_observation(self):
         for path in ("shared-follower", "codex-drain"):
@@ -4582,6 +4920,77 @@ class SessionStartTests(TmpEnv):
 
 
 class StatusTests(TmpEnv):
+
+    def _b7_status_probe(self,body):
+        setup="""
+index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
+store=m.NoteStore('fifo');store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',bind_observation=dict(reason='unsupported-syntax',root=str(root),root_provenance='command',receipts=['lane/r1.md'])))
+commands=[];hint_calls=[];old_hint=m.rebind_line
+engine=str(root/'.engine');isdir=m.os.path.isdir
+def relay(plugin_root,*argv,**kw):
+    commands.append(argv[0])
+    return ({'kit':'v','fingerprint':'fp'} if argv[0]=='version' else {'daemon':{'identity':{'kit':'v','fp':'fp'}}}),0
+m.run_relay=relay
+def hint(note,session): hint_calls.append(session);return old_hint(note,session)
+m.rebind_line=hint;m.read_payload=lambda:{}
+def invoke(mode):
+    output=io.StringIO()
+    with __import__('contextlib').redirect_stdout(output):
+        if mode=='status': rc=m.status(args())
+        else: rc=m.session_start(args())
+    t.assertEqual(rc,0)
+    return output.getvalue() if mode=='status' else json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+"""
+        FifoCallersTests._child(self,setup+body)
+
+    def test_identity_engine_check_stall_is_bounded(self):
+        for mode in ('status','session'):
+            with self.subTest(mode=mode):
+                self._b7_status_probe(f"""
+def check(path):
+    if str(path)==engine: blocked()
+    return isdir(path)
+m.os.path.isdir=check
+start=time.monotonic();output=invoke({mode!r})
+t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+t.assertIn('daemon=-',output);t.assertNotIn('hand-root',output)
+t.assertEqual(commands,['version']);t.assertEqual(hint_calls,['fifo'])
+""")
+
+    def test_status_hint_lookup_stall_is_bounded(self):
+        for mode in ('status','session'):
+            for delay in (0.0,0.6):
+                with self.subTest(mode=mode,engine_delay=delay):
+                    self._b7_status_probe(f"""
+def check(path):
+    if str(path)==engine: threading.Event().wait({delay!r})
+    return isdir(path)
+m.os.path.isdir=check
+old_read=m.read_index;durations=[]
+def read(path):
+    start=time.monotonic();snap=old_read(path);durations.append(time.monotonic()-start);return snap
+m.read_index=read
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read):
+    start=time.monotonic();output=invoke({mode!r})
+    t.assertLess(time.monotonic()-start,1.5)
+t.assertIn('# rebind: incomplete',output);t.assertEqual(hint_calls,['fifo'])
+t.assertEqual(len(durations),1);t.assertLess(durations[0],1.0-{delay!r}+.15)
+t.assertGreater(durations[0],1.0-{delay!r}-.2)
+""")
+
+    def test_identity_subprocess_time_does_not_consume_budget(self):
+        for mode in ('status','session'):
+            with self.subTest(mode=mode):
+                self._b7_status_probe(f"""
+def slow_relay(plugin_root,*argv,**kw):
+    threading.Event().wait(1.5)
+    return relay(plugin_root,*argv,**kw)
+m.run_relay=slow_relay
+output=invoke({mode!r})
+t.assertIn('rebind, may need operator approval:',output)
+t.assertNotIn('# rebind: incomplete',output)
+t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
+""")
 
     def test_incomplete_hint_is_inert_in_shell(self):
         marker = self.base / "must-not-exist"
@@ -5756,3 +6165,1125 @@ class CliSmokeTests(TmpEnv):
             env=dict(os.environ),
         )
         self.assertEqual(json.loads(p.stdout), {})
+
+
+class BoundedRootCallTests(TmpEnv):
+    """Catch unbounded waits, duplicate workers and budget resets using raw barriers."""
+
+    def _probe(self, body):
+        import textwrap
+        bootstrap = '''import importlib.util, sys, threading, time, unittest, errno
+spec = importlib.util.spec_from_file_location("budget_probe", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+t = unittest.TestCase()
+release = threading.Event()
+entered = threading.Event()
+def blocked():
+    entered.set()
+    release.wait()
+    return "late"
+def reap():
+    release.set()
+    for worker in threading.enumerate():
+        if worker is not threading.current_thread():
+            worker.join(2)
+            t.assertFalse(worker.is_alive(), "worker not reaped")
+'''
+        code = bootstrap + "\ntry:\n" + textwrap.indent(textwrap.dedent(body), "    ") + "\nfinally:\n    reap()\n"
+        try:
+            result = subprocess.run([sys.executable, "-c", code, str(SCRIPT)],
+                                    capture_output=True, text=True, timeout=10,
+                                    env=dict(os.environ))
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"blocked past SUPERVISOR_TIMEOUT; stdout={exc.stdout!r}; stderr={exc.stderr!r}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_stalled_call_reports_and_starts_one_worker(self):
+        self._probe('''
+            start = time.monotonic()
+            result = m.bounded_root_call(blocked)
+            t.assertEqual(result.kind, "stalled")
+            t.assertTrue(entered.is_set())
+            t.assertLess(time.monotonic() - start, 1.25)
+            count = threading.active_count()
+            start = time.monotonic()
+            t.assertEqual(m.bounded_root_call(lambda: t.fail("second worker")).kind, "stalled")
+            t.assertLess(time.monotonic() - start, .05)
+            t.assertEqual(threading.active_count(), count)
+            reap()
+            t.assertEqual(m.bounded_root_call(lambda: 7).value, 7)
+        ''')
+
+    def test_late_result_is_discarded(self):
+        self._probe('''
+            store = m.NoteStore("late-result")
+            before = store.load()
+            with m.root_budget(.02):
+                result = m.bounded_root_call(blocked)
+            t.assertEqual(result.kind, "stalled")
+            reap()
+            t.assertIsNone(result.value)
+            t.assertEqual(store.load(), before)
+            t.assertEqual(m.bounded_root_call(lambda: "fresh").value, "fresh")
+        ''')
+
+    def test_immediate_stall_consumes_no_budget(self):
+        self._probe('''
+            with m.root_budget(.02):
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            with m.root_budget() as budget:
+                before = budget.remaining()
+                t.assertEqual(m.bounded_root_call(lambda: None).kind, "stalled")
+                t.assertEqual(budget.remaining(), before)
+            reap()
+            with m.root_budget() as budget:
+                before = budget.remaining()
+                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.3)).kind, "ok")
+                t.assertGreaterEqual(before - budget.remaining(), .3)
+        ''')
+
+    def test_spent_budget_returns_stalled_without_a_thread(self):
+        self._probe('''
+            with m.root_budget(0):
+                count = threading.active_count()
+                t.assertEqual(m.bounded_root_call(lambda: t.fail("started")).kind, "stalled")
+                t.assertEqual(threading.active_count(), count)
+        ''')
+
+    def test_cap_bounds_the_deadline(self):
+        self._probe('''
+            start = time.monotonic()
+            with m.root_budget(cap=start + .2):
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            t.assertLess(time.monotonic() - start, .45)
+        ''')
+
+    def test_failed_carries_errno_name(self):
+        self._probe('''
+            def denied(): raise PermissionError(errno.EACCES, "denied")
+            def invalid(): raise ValueError("invalid")
+            for fn, detail in [(denied, "EACCES"), (invalid, "ValueError")]:
+                result = m.bounded_root_call(fn)
+                t.assertEqual((result.kind, result.detail), ("failed", detail))
+        ''')
+
+    def test_scoped_budget_is_shared_across_calls(self):
+        self._probe('''
+            with m.root_budget():
+                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.6)).kind, "ok")
+                start = time.monotonic()
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+                t.assertLess(time.monotonic() - start, .55)
+            reap()
+            release.clear()
+            start = time.monotonic()
+            with m.root_budget():
+                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            t.assertGreaterEqual(time.monotonic() - start, .95)
+        ''')
+
+    def test_nested_scope_reuses_outer_budget(self):
+        self._probe('''
+            with m.root_budget() as outer:
+                outer.spend(.8)
+                with m.root_budget() as inner:
+                    t.assertIs(inner, outer)
+                    t.assertLessEqual(inner.remaining(), .2)
+            for outer_cap, inner_cap in [(1, .1), (.1, 1)]:
+                start = time.monotonic()
+                release.clear()
+                with m.root_budget(cap=start + outer_cap):
+                    with m.root_budget(cap=start + inner_cap):
+                        t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+                t.assertLess(time.monotonic() - start, .25)
+                reap()
+        ''')
+
+    def test_scope_resets_on_normal_and_exceptional_exit(self):
+        self._probe('''
+            t.assertIsNone(m.current_budget())
+            with m.root_budget() as outer:
+                for throw in [False, True]:
+                    try:
+                        with m.use_budget(m.RootBudget(.2)):
+                            t.assertIsNot(m.current_budget(), outer)
+                            if throw: raise ValueError("scope")
+                    except ValueError: pass
+                    t.assertIs(m.current_budget(), outer)
+            t.assertIsNone(m.current_budget())
+            try:
+                with m.root_budget(): raise ValueError("outer")
+            except ValueError: pass
+            t.assertIsNone(m.current_budget())
+        ''')
+
+    def test_use_budget_reactivates_a_retained_budget(self):
+        self._probe('''
+            a, b = m.RootBudget(), m.RootBudget()
+            with m.use_budget(a):
+                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.3)).kind, "ok")
+                remaining = a.remaining()
+            with m.use_budget(b):
+                t.assertEqual(b.remaining(), 1)
+                b.spend(.1)
+            with m.use_budget(a):
+                t.assertEqual(m.current_budget().remaining(), remaining)
+            t.assertAlmostEqual(b.remaining(), .9)
+        ''')
+
+    def test_no_scope_gives_one_call_budget(self):
+        self._probe('''
+            t.assertIsNone(m.current_budget())
+            start = time.monotonic()
+            t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+            t.assertLess(time.monotonic() - start, 1.25)
+            t.assertIsNone(m.current_budget())
+        ''')
+
+
+class ExitRecordTests(FollowProcessMixin, TmpEnv):
+    """Exit durability, legacy interoperation, and follower-only recovery."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.rm.NoteStore("psess")
+        write_index(self.index, "")
+        self.store.update(lambda n: n.update(
+            seat="b.implementer", root=str(self.root), binding_source="hook",
+            progress={str(self.root): {"file": None, "position": 0}}))
+
+    def _status(self):
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            return self.rm.status_line(self.store, None)
+
+    def _seed_exit(self, reason="follower-error"):
+        # A persisted B7 record is a fixture, not a call to the helper under test.
+        record = dict(reason=reason, detail="ValueError", at="20261015-000000", instance="b7")
+        self.store.update(lambda n: n.update(exit=record, reason=reason, leader=None, phase="unavailable"))
+        return record
+
+    def _legacy_exit(self):
+        self.store.update(lambda n: n.update(phase="unavailable", reason="transport-failed", leader=None))
+
+    def _child_error(self, lock_failure=False):
+        # Inject at the raw signature boundary, after follower leader setup.
+        code = f'''
+import importlib.util, sys, os, subprocess
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("relay_monitor", {str(SCRIPT)!r})
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+holder = None
+def fail(path):
+    global holder
+    if {lock_failure!r}:
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()", str(m.NoteStore('psess').path.parent / 'psess.state')], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        assert holder.stdout.readline() == b'ready\\n'
+    raise ValueError("original-loop-error")
+m.index_signature = fail
+try:
+    m.follow(SimpleNamespace(session="psess", host="claude-code", root=None, anchor=None, plugin_root=None))
+finally:
+    if holder:
+        holder.communicate(timeout=3)
+'''
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
+
+    def test_recorded_exit_is_shown_and_cleared(self):
+        p = self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following")
+        p.stdout.close()
+        write_index(self.index, row(1, to="b.implementer"))
+        p.wait(timeout=10)
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+        self.assertEqual(self.store.load()["exit"]["reason"], "transport-failed")
+        self.assertIn("Broken pipe", self.store.load()["exit"]["detail"] or "")
+        # Empty scan, with established progress, must also clear a prior exit.
+        write_index(self.index, "")
+        self.store.update(lambda n: n["progress"].update({str(self.root): dict(file=None, position=0)}))
+        q = self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following" and not n.get("exit"))
+        q.kill()
+        q.wait(timeout=10)
+        failed = self._child_error()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("ValueError: original-loop-error", failed.stderr)
+        self.assertEqual(self.store.load()["exit"]["detail"], "ValueError")
+        self.assertIn("relay-monitor: unavailable: follower-error", self._status())
+        self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following" and not n.get("exit"))
+        self.assertIsNone(self.store.load().get("reason"))
+
+    def _drain(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "codex", "--session", "psess"], input="{}", text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def test_drain_scan_does_not_hide_or_clear_follower_exit(self):
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable):
+                record = self._seed_exit()
+                if unavailable:
+                    self.index.unlink()
+                self._drain()
+                self.assertEqual(self.store.load()["exit"], record)
+                self.assertIn("relay-monitor: unavailable: follower-error", self._status())
+
+    def test_last_resort_record_failure_keeps_original(self):
+        failed = self._child_error(lock_failure=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("follower error: ValueError (not recorded:", failed.stderr)
+        self.assertIn("ValueError: original-loop-error", failed.stderr)
+        self.assertNotIn("raise LockTimeout", failed.stderr)
+
+    def test_legacy_leader_sequence_follows_contract(self):
+        self._seed_exit()
+        lock = self.rm.LeaderLock("psess")
+        self.assertTrue(lock.acquire(blocking=False))
+        legacy = self.rm.leader_record()
+        lock.stamp(legacy["instance"])
+        try:
+            self.store.update(lambda n: n.update(leader=legacy, phase="following", reason=None))
+            self.assertIn("relay-monitor: armed", self._status())
+            self.assertNotIn("follower-error", self._status())
+            self._legacy_exit()
+        finally:
+            lock.release()
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+
+    def test_reason_writer_preserves_later_exit(self):
+        for writer in ("drain", "operator", "session"):
+            with self.subTest(writer=writer):
+                self.store = self.rm.NoteStore("operator" if writer == "operator" else "psess")
+                write_index(self.index, "")
+                self._seed_exit()
+                self._legacy_exit()
+                if writer == "drain":
+                    self.index.unlink()
+                    self._drain()
+                elif writer == "operator":
+                    self.store.update(lambda n: n["progress"].update({str(self.root): dict(file="gone.md", position=9)}))
+                    self.rm.operator_scan([str(self.root)], notifier="none")
+                else:
+                    with mock.patch.object(self.rm, "read_payload", return_value={}), mock.patch.object(self.rm, "decide_host", return_value="host-unknown"), mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})), contextlib.redirect_stdout(io.StringIO()):
+                        self.rm.session_start(ns(session="psess"))
+                self.assertEqual(self.store.load()["exit"], dict(reason="transport-failed", detail=None, at=None, instance=None, inferred=True))
+                self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+
+    def test_legacy_writer_residual_is_pinned(self):
+        self._seed_exit()
+        self._legacy_exit()
+        self.store.update(lambda n: n.update(reason="index-missing"))
+        self.assertIn("relay-monitor: unavailable: follower-error", self._status())
+
+    def test_same_reason_exit_keeps_reason(self):
+        self._seed_exit("transport-failed")
+        self._legacy_exit()
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+        self.assertEqual(self.store.load()["exit"]["instance"], "b7")
+
+    def test_uninferred_same_reason_record_is_not_latest_provenance(self):
+        self._seed_exit("transport-failed")
+        self._legacy_exit()
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+        record = self.store.load()["exit"]
+        self.assertNotIn("inferred", record)
+        self.assertEqual(record["instance"], "b7")
+        self.assertNotEqual(record["instance"], "legacy")
+
+    def test_signal_killed_follower_still_not_started(self):
+        p = self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following")
+        p.kill()
+        p.wait(timeout=10)
+        self.assertFalse(self.store.load().get("exit"))
+        self.assertIn("relay-monitor: not-started", self._status())
+
+    def _bind(self, receipt=False):
+        if receipt:
+            write_index(self.index, row(1))
+            (self.root / "lane" / "r1.md").write_text("relay\n")
+        payload = dict(session_id="psess", cwd=str(self.root), hook_event_name="PostToolUse", tool_name="Bash", prompt_id="p", tool_input={"command": f"tools/relay submit d.md --root {self.root}"}, tool_response={"stdout": json.dumps(dict(path="lane/r1.md" if receipt else "lane/missing.md", render_state="rendered", duplicate=False)), "stderr": "", "interrupted": False})
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            self.rm.bind(ns())
+
+    def test_legacy_note_loads_in_every_mode(self):
+        note = self.store.load()
+        for key in ("exit", "reason_detail", "observation_seq", "seq"):
+            note.pop(key, None)
+        self.store.save(note)
+        self._status()
+        with mock.patch.object(self.rm, "read_payload", return_value={}), mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})), contextlib.redirect_stdout(io.StringIO()):
+            self.rm.session_start(ns(session="psess", host="claude-code"))
+        self._drain()
+        self._bind()
+        self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following")
+
+    def test_bind_hook_never_writes_top_level_reason(self):
+        for receipt in (False, True):
+            self._seed_exit()
+            self._legacy_exit()
+            before = self.store.load()
+            self._bind(receipt)
+            after = self.store.load()
+            if receipt:
+                self.assertEqual(after["anchor"], "lane/r1.md")
+            else:
+                self.assertIsNotNone(after.get("bind_observation"))
+            self.assertEqual(after["reason"], before["reason"])
+            self.assertEqual(after["exit"], before["exit"])
+
+
+class BindOrderTests(TmpEnv):
+    def _b7_hook_probe(self,body):
+        setup="""
+index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
+store=m.NoteStore('fifo');store.path.unlink(missing_ok=True)
+store.update(lambda n:n.update(seat='a.planner',root=str(root),anchor='lane/r1.md',binding_source='hook',binding_gen=1))
+payload=dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={'command':'tools/relay submit d.md | cat'},tool_response={'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))})
+active=None;old_attr=m.attribute_root;old_hint=m.rebind_line
+m.discover_root_like_cli=lambda operand,cwd,plugin_root:str(root)
+def attribute(*a,**k):
+    global active
+    active='attribute'
+    try: return old_attr(*a,**k)
+    finally: active=None
+def hint(*a,**k):
+    global active
+    active='hint'
+    try: return old_hint(*a,**k)
+    finally: active=None
+m.attribute_root=attribute;m.rebind_line=hint
+output=io.StringIO()
+def invoke():
+    sys.stdin=io.StringIO(json.dumps(payload))
+    with __import__('contextlib').redirect_stdout(output): rc=m.bind(args())
+    t.assertEqual(rc,0)
+    return store.load()['bind_observation']
+"""
+        FifoCallersTests._child(self,setup+body)
+
+    def test_hook_stall_points_return_within_bound(self):
+        for stage in ('discovery','lookup','realpath','hint'):
+            with self.subTest(stage=stage):
+                self._b7_hook_probe(f"""
+stage={stage!r};realpath=m.os.path.realpath
+if stage=='discovery': m.discover_root_like_cli=lambda operand,cwd,plugin_root:blocked()
+def real(path,*a,**k):
+    if stage=='realpath' and active=='attribute' and str(path)==str(root): blocked()
+    return realpath(path,*a,**k)
+def reading(fd,*a,**k):
+    if fd in fds and ((stage=='lookup' and active=='attribute') or (stage=='hint' and active=='hint')): blocked()
+    return raw_read(fd,*a,**k)
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',reading),mock.patch.object(m.os.path,'realpath',real):
+    start=time.monotonic();observation=invoke()
+    t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+if stage=='hint':
+    t.assertIn('# rebind: incomplete',json.loads(output.getvalue())['hookSpecificOutput']['additionalContext'])
+    t.assertEqual(observation['root_provenance'],'inferred')
+else:
+    t.assertIsNone(observation['root']);t.assertEqual(observation['root_provenance'],'none')
+""")
+
+    def test_hook_budget_is_shared_across_stall_points(self):
+        first_case = """
+first=True;old_read=m.read_index;durations=[]
+def discover(operand,cwd,plugin_root):
+    global first
+    if first: first=False;threading.Event().wait(.6)
+    return str(root)
+def reading(fd,*a,**k):
+    if fd in fds and active=='hint': blocked()
+    return raw_read(fd,*a,**k)
+def read(path):
+    start=time.monotonic();snap=old_read(path)
+    if active=='hint': durations.append(time.monotonic()-start)
+    return snap
+m.discover_root_like_cli=discover;m.read_index=read
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',reading):
+    start=time.monotonic();invoke();t.assertLess(time.monotonic()-start,1.25)
+t.assertEqual(len(durations),1);t.assertLess(durations[0],.55);t.assertGreater(durations[0],.2)
+t.assertIn('# rebind: incomplete',output.getvalue())
+"""
+        second_case = """
+other=root.parent/'candidate-b';other.mkdir();(other/'INDEX.md').write_text(header+one)
+m.discover_root_like_cli=lambda operand,cwd,plugin_root:str(other)
+by_fd={};delayed=set();original=m.read_index;results=[]
+def opening(path,*a,**k):
+    fd=raw_open(path,*a,**k)
+    if str(path) in (str(index),str(other/'INDEX.md')): by_fd[fd]=str(path);delayed.discard(fd)
+    return fd
+def reading(fd,*a,**k):
+    if fd in by_fd and fd not in delayed: delayed.add(fd);threading.Event().wait(.6)
+    return raw_read(fd,*a,**k)
+def read(path):
+    snap=original(path);results.append((str(path),snap.error));return snap
+m.read_index=read
+with mock.patch.object(m.os,'open',opening),mock.patch.object(m.os,'read',reading):
+    start=time.monotonic();observation=invoke();t.assertLess(time.monotonic()-start,1.15)
+t.assertEqual(len(results),2);t.assertEqual([error for _,error in results],[None,'root-stalled'])
+t.assertEqual({path for path,_ in results},{str(index),str(other/'INDEX.md')})
+t.assertIsNone(observation['root']);t.assertEqual(observation['root_provenance'],'none')
+"""
+
+        for name, body in (("discovery-hint", first_case), ("two-candidates", second_case)):
+            with self.subTest(case=name):
+                self._b7_hook_probe(body)
+
+    def setUp(self):
+        super().setUp()
+        write_index(self.index, row(1) + row(2))
+        for n in (1, 2):
+            (self.root / 'lane' / f'r{n}.md').write_text('relay\n')
+        self.store = self.rm.NoteStore('order')
+        self.store.update(lambda n: n.update(seat='a.planner', root=str(self.root), anchor='lane/r1.md', binding_source='hook', binding_gen=1))
+
+    def _ready(self, child):
+        ready, _, _ = select.select([child.stderr], [], [], 3)
+        self.assertTrue(ready, 'child did not reach barrier')
+        self.assertEqual(child.stderr.readline(), b'READY\n')
+
+    def _race(self, stage, change=None, call=None):
+        # Child setup is outside the measured interval. Raw root operations are
+        # stalled individually; their callers and the real flock remain intact.
+        code = f'''
+import importlib.util,sys,os,io,json
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+root={str(self.root)!r}; stage={stage!r}; active=None; used=False
+old_attr=m.attribute_root; old_hint=m.rebind_line; old_discover=m.discover_root_like_cli; old_lookup=m.receipt_row_lookup; old_real=m.os.path.realpath
+def barrier():
+    global used
+    if not used:
+        used=True
+        os.write(2,b'READY\\n')
+        assert os.read(0,1)==b'x'
+def attr(*a,**k):
+    global active
+    active='attr'
+    try:
+        if stage=='attr': barrier()
+        return old_attr(*a,**k)
+    finally: active=None
+def hint(*a,**k):
+    global active
+    active='hint'
+    try: return old_hint(*a,**k)
+    finally: active=None
+def discover(*a,**k):
+    if (stage=='discover' and active=='attr') or (stage=='initial' and active is None): barrier()
+    return old_discover(*a,**k)
+def lookup(*a,**k):
+    if (stage=='lookup' and active=='attr') or (stage=='hint' and active=='hint'): barrier()
+    return old_lookup(*a,**k)
+def real(path,*a,**k):
+    if stage=='realpath' and active=='attr' and str(path)==root: barrier()
+    return old_real(path,*a,**k)
+m.attribute_root=attr;m.rebind_line=hint;m.discover_root_like_cli=discover;m.receipt_row_lookup=lookup;m.os.path.realpath=real
+m.now_stamp=lambda:'20261015-000000'
+command='tools/relay submit d.md' + (' --root '+root if stage=='initial' else ' | cat')
+payload=dict(session_id='order',cwd=root,hook_event_name='PostToolUse',tool_input={{'command':command}},tool_response={{'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))}})
+if {call!r}: payload['tool_use_id']={call!r}
+sys.stdin=io.StringIO(json.dumps(payload))
+m.bind(SimpleNamespace(manual=False,session=None,plugin_root=None,host='auto',root=None,anchor=None))
+'''
+        probe_code = r'''
+import fcntl,os,sys,time,json
+f=open(sys.argv[1],'a');os.write(2,b'READY\n');sys.stdin.readline();start=time.monotonic();ok=False
+while time.monotonic()-start < .18:
+    try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);ok=True;break
+    except BlockingIOError: time.sleep(.001)
+print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
+'''
+        probe = subprocess.Popen([sys.executable, '-c', probe_code, str(self.store._state_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = None
+        try:
+            self._ready(probe)
+            child = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self._ready(child)
+            signalled = time.monotonic()
+            probe_out, probe_err = probe.communicate(b'go\n', timeout=1)
+            elapsed = time.monotonic() - signalled
+            result = json.loads(probe_out)
+            self.assertTrue(result['ok'], 'state_lock held across raw root call')
+            self.assertLess(elapsed, .2)
+            if change:
+                change()
+            out, err = child.communicate(b'x', timeout=5)
+            self.assertEqual(child.returncode, 0, err.decode())
+            return out.decode()
+        finally:
+            for process in (child, probe):
+                if process is None:
+                    continue
+                if process.poll() is None:
+                    try:
+                        process.communicate(b'x\n', timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=2)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream and not stream.closed:
+                        stream.close()
+
+    def test_bind_hook_stall_points_hold_no_lock(self):
+        for stage in ('initial', 'discover', 'lookup', 'realpath', 'hint'):
+            with self.subTest(stage=stage):
+                self.store.update(lambda n: n.update(bind_observation=None))
+                self._race(stage)
+
+    def _change(self, kind):
+        if kind == 'manual':
+            ok, why = self.rm.bind_from_receipt(self.store, root=str(self.root), receipt_path='lane/r2.md', key_seat=None, source='manual')
+            self.assertTrue(ok, why)
+        elif kind == 'env':
+            self.store.update(lambda n: n.update(root=str(self.base/'another'), binding_source='env'))
+        elif kind == 'observation':
+            with mock.patch.object(self.rm, 'now_stamp', return_value='20261015-000000'):
+                self.store.update(lambda n: self.rm.record_observation(n, reason='unsupported-syntax', receipts=['lane/r2.md'], root=str(self.root), provenance='inferred', call=None))
+        elif kind == 'legacy':
+            self.store.update(lambda n: n['bind_observation'].pop('seq', None))
+
+    def _reset(self):
+        self.store.update(lambda n: n.update(seat='a.planner',root=str(self.root),anchor='lane/r1.md',binding_source='hook',binding_gen=1,bind_observation=None,handled_calls=[]))
+
+    def test_superseded_hint_is_not_emitted(self):
+        for kind in ('manual', 'env', 'observation'):
+            with self.subTest(kind=kind):
+                self._reset()
+                self.assertEqual(self._race('hint', lambda: self._change(kind)), '')
+
+    def test_superseded_attribution_is_not_recorded(self):
+        for kind in ('manual', 'env'):
+            with self.subTest(kind=kind):
+                self._reset()
+                self.assertEqual(self._race('attr', lambda: self._change(kind), call='a'), '')
+                note = self.store.load()
+                self.assertIsNone(note.get('bind_observation'))
+                self.assertIn('["order","a"]', note['handled_calls'])
+
+    def test_observation_without_seq_suppresses_hint(self):
+        self.assertEqual(self._race('hint', lambda: self._change('legacy')), '')
+
+    def test_observation_seq_changes_only_on_replace_or_clear(self):
+        args = dict(reason='unsupported-syntax',receipts=['lane/r1.md'],root=str(self.root),provenance='inferred',call=None)
+        note = self.store.load()
+        initial = note.get('observation_seq', 0)
+        self.assertTrue(self.rm.record_observation(note, **args))
+        self.assertEqual(note['observation_seq'], initial+1)
+        self.assertEqual(note['bind_observation']['seq'], initial+1)
+        self.assertFalse(self.rm.record_observation(note, **args))
+        self.assertEqual(note['observation_seq'], initial+1)
+        args['call']='handled'
+        note['handled_calls']=['handled']
+        self.assertFalse(self.rm.record_observation(note, **args))
+        self.assertEqual(note['observation_seq'], initial+1)
+        self.rm.clear_observations(note)
+        self.assertEqual(note['observation_seq'], initial+2)
+        self.assertIsNone(note['bind_observation'])
+
+
+class FifoCallersTests(FollowProcessMixin, TmpEnv):
+    def _child(self, body):
+        import textwrap
+        code = f'''
+import importlib.util,sys,os,io,json,time,threading,socket,stat
+from pathlib import Path
+from unittest import TestCase,mock
+from types import SimpleNamespace
+spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+t=TestCase();root=Path({str(self.root)!r});index=root/'INDEX.md'
+header={HEADER!r};one={row(1, to='b.implementer, operator')!r};two={row(2, to='b.implementer, operator')!r}
+release=threading.Event();entered=threading.Event()
+def args(**kw):
+    values=dict(session='fifo',after=None,token=None,limit=50,host='codex',plugin_root=None,root=None,anchor=None,manual=False,deadline=5.0)
+    values.update(kw);return SimpleNamespace(**values)
+def blocked():
+    entered.set();release.wait();return None
+raw_open=os.open;raw_read=os.read;raw_io_open=io.open;fds=set()
+def track_open(path,*a,**k):
+    fd=raw_open(path,*a,**k)
+    if str(path)==str(index): fds.add(fd)
+    return fd
+def stalled_read(fd,*a,**k):
+    if fd in fds: blocked()
+    return raw_read(fd,*a,**k)
+def stalled_io(path,*a,**k):
+    if str(path)==str(index): blocked()
+    return raw_io_open(path,*a,**k)
+try:
+{textwrap.indent(textwrap.dedent(body), '    ')}
+finally:
+    release.set()
+    for worker in threading.enumerate():
+        if worker is not threading.current_thread(): worker.join(2)
+'''
+        try:
+            p = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f'blocked past SUPERVISOR_TIMEOUT: {exc.stdout!r} {exc.stderr!r}')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_each_unreadable_form_is_a_snapshot_error(self):
+        for form, detail in [('rename', 'EACCES'), ('inplace', 'EACCES'), ('directory', 'not-regular-file'), ('fifo', 'not-regular-file'), ('socket', 'ENXIO'), ('utf8', 'not-utf-8'), ('root', 'EACCES'), ('large', 'too-large')]:
+            with self.subTest(form=form):
+                if self.index.is_dir() and not self.index.is_symlink(): self.index.rmdir()
+                else: self.index.unlink(missing_ok=True)
+                self._child(f'''
+form={form!r};sock=None;expected_detail={detail!r}
+index.write_text(header+one)
+try:
+    if form=='rename':
+        replacement=root/'replacement';replacement.write_text(header);replacement.chmod(0);replacement.replace(index)
+    elif form=='inplace': index.chmod(0)
+    elif form=='directory': index.unlink();index.mkdir()
+    elif form=='fifo': index.unlink();os.mkfifo(index)
+    elif form=='socket':
+        index.unlink();sock=socket.socket(socket.AF_UNIX);os.chdir(root);sock.bind('INDEX.md')
+        # Socket-open errno differs by host; obtain the kernel's independent oracle.
+        try:
+            fd=raw_open(index,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC)
+        except OSError as exc: expected_detail=__import__('errno').errorcode[exc.errno]
+        else: os.close(fd);expected_detail='not-regular-file'
+    elif form=='utf8': index.write_bytes(b'\\xff')
+    elif form=='root': root.chmod(0)
+    elif form=='large': index.write_bytes(b'x'*(16*1024*1024+1))
+    start=time.monotonic();snap=m.read_index(index)
+    t.assertLess(time.monotonic()-start,1.0)
+    t.assertEqual(snap.error,'index-unreadable');t.assertEqual(snap.detail,expected_detail)
+finally:
+    root.chmod(0o700)
+    if form in ('rename','inplace'): index.chmod(0o600)
+    if sock: sock.close()
+    if form=='directory': index.rmdir()
+    else: index.unlink(missing_ok=True)
+''')
+
+    def test_symlink_to_fifo_or_directory_is_refused(self):
+        for form in ('fifo', 'directory', 'regular'):
+            with self.subTest(form=form):
+                if self.index.is_dir() and not self.index.is_symlink(): self.index.rmdir()
+                else: self.index.unlink(missing_ok=True)
+                self._child(f'''
+index.unlink(missing_ok=True);target=root/'target-{form}'
+if {form!r}=='fifo': os.mkfifo(target)
+elif {form!r}=='directory': target.mkdir()
+else: target.write_text(header+one)
+index.symlink_to(target)
+start=time.monotonic();snap=m.read_index(index)
+t.assertLess(time.monotonic()-start,.1)
+if {form!r}=='regular': t.assertIsNone(snap.error);t.assertEqual(len(snap.rows),1)
+else: t.assertEqual((snap.error,snap.detail),('index-unreadable','not-regular-file'))
+index.unlink()
+''')
+
+    def test_growth_past_cap_reports_too_large(self):
+        self._child('''
+index.write_bytes(b'x'*(m.INDEX_MAX_BYTES+2));actual_fstat=os.fstat;requests=[]
+def fstat(fd):
+    original=actual_fstat(fd)
+    return SimpleNamespace(st_mode=original.st_mode,st_size=m.INDEX_MAX_BYTES)
+def read(fd,n):
+    requests.append(n);return raw_read(fd,n)
+with mock.patch.object(m.os,'fstat',fstat),mock.patch.object(m.os,'read',read):
+    snap=m.read_index(index)
+t.assertEqual((snap.error,snap.detail),('index-unreadable','too-large'))
+t.assertTrue(requests);t.assertLessEqual(sum(requests),m.INDEX_MAX_BYTES+1)
+''')
+
+    def test_stalled_read_is_root_stalled(self):
+        self._child('''
+index.write_text(header+one)
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read),mock.patch.object(m.io if hasattr(m,'io') else io,'open',stalled_io):
+    start=time.monotonic();snap=m.read_index(index)
+    t.assertTrue(entered.is_set());t.assertLess(time.monotonic()-start,1.25)
+    t.assertEqual((snap.error,snap.detail),('root-stalled','stalled'))
+''')
+
+    def test_unavailable_snapshot_keeps_progress_and_frame(self):
+        self._child('''
+store=m.NoteStore('fifo')
+for token in ('index-missing','index-malformed','index-unreadable','root-stalled'):
+    store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',anchor='lane/r1.md',progress={str(root):dict(file='lane/r1.md',position=1)},printed={str(root):['lane/r1.md']},frame={'identity':{'leader':'old'},'sent':2}))
+    before=store.load();binding=m.resolve_binding(before,{},None)
+    snap=m.IndexSnapshot(error=token);snap.detail='diagnostic'
+    result=m.deliver_once(store,m.ByteSink(),binding,snap,end=time.monotonic()+2,leader_instance='new')
+    after=store.load()
+    for key in ('progress','anchor','printed','frame'): t.assertEqual(after[key],before[key])
+    t.assertEqual(after['phase'],'unavailable');t.assertEqual(after['reason'],token);t.assertEqual(after.get('reason_detail'),'diagnostic')
+    t.assertEqual(result.halted,token)
+''')
+
+    def test_fifo_index_never_blocks_any_caller(self):
+        # Each short-lived command gets an independent external supervisor.
+        for mode in ('status', 'session-start', 'bind-manual', 'bind-hook', 'drain'):
+            with self.subTest(mode=mode):
+                self.index.unlink(missing_ok=True)
+                os.mkfifo(self.index)
+                self._child(f'''
+store=m.NoteStore('fifo');store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',progress={{str(root):dict(file=None,position=0)}},bind_observation=dict(reason='unsupported-syntax',receipts=['lane/r1.md'],root=str(root),root_provenance='command')))
+(root/'lane'/'r1.md').write_text('relay')
+m.run_relay=lambda *a,**k:({{}},0)
+mode={mode!r};start=time.monotonic()
+if mode=='status': m.status_line(store,None)
+elif mode=='session-start':
+    m.read_payload=lambda:{{}};m.session_start(args())
+elif mode=='bind-manual': m.bind(args(manual=True,root=str(root),anchor='lane/r1.md'))
+elif mode=='bind-hook':
+    sys.stdin=io.StringIO(json.dumps(dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={{'command':'tools/relay submit d.md --root '+str(root)}},tool_response={{'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))}})))
+    m.bind(args())
+else: m.read_payload=lambda:{{}};m.drain(args())
+t.assertLess(time.monotonic()-start,1.25)
+''')
+                self.index.unlink()
+        self.index.unlink(missing_ok=True)
+        os.mkfifo(self.index)
+        # Established cursor exercises recovery without the later startup policy.
+        self.rm.NoteStore('psess').update(lambda n:n.update(seat='b.implementer',root=str(self.root),binding_source='hook',progress={str(self.root):dict(file=None,position=0)}))
+        p=self.spawn()
+        self.wait_note(lambda n:n.get('reason')=='index-unreadable',timeout=1.25)
+        time.sleep(self.rm.POLL_INDEX)
+        self.assertIsNone(p.poll())
+        write_index(self.index,row(1,to='b.implementer'))
+        self.assertEqual(len(self.read_lines(p,1,timeout=2)),1)
+        self.wait_note(lambda n:n.get('phase')=='following' and not n.get('reason'),timeout=2)
+
+    def test_operator_and_replay_treat_new_tokens_as_unavailable(self):
+        setup = '''
+other=root.parent/'other';other.mkdir(exist_ok=True);other_index=other/'INDEX.md'
+index.write_text(header+one+two);other_index.write_text(header+one+two)
+roots=[str(root),str(other)];store=m.NoteStore('fifo');op=m.NoteStore('operator')
+store.update(lambda n:n.update(root=str(root),seat='b.implementer',floors=[dict(root=r,seat='b.implementer',file='lane/r1.md',position=1) for r in roots],progress={r:dict(file='lane/r2.md',position=2) for r in roots}))
+op.update(lambda n:n.update(progress={r:dict(file='lane/r1.md',position=1) for r in roots}))
+original=m.read_index;visits=[];counts={};notifications=[]
+m.notify=lambda *a,**k:notifications.append(a)
+def run_replay(after=None):
+    capture=io.StringIO()
+    with __import__('contextlib').redirect_stdout(capture): rc=m.replay(args(after=after))
+    return rc,[json.loads(line) for line in capture.getvalue().splitlines()]
+'''
+        for token in ('index-unreadable', 'root-stalled'):
+            for site in ('capture', 'page', 'after', 'operator'):
+                with self.subTest(variant='prompt', token=token, site=site):
+                    self._child(setup+f'''
+site={site!r}
+def read(path):
+    visits.append(str(path));counts[str(path)]=counts.get(str(path),0)+1
+    if path==index and (site!='page' or counts[str(path)]==2): return m.IndexSnapshot(error={token!r})
+    return original(path)
+m.read_index=read;before=store.path.read_bytes()
+if site=='operator':
+    with __import__('contextlib').redirect_stdout(io.StringIO()): fired=m.operator_scan(roots,notifier='none')
+    t.assertEqual(fired,1);t.assertEqual(len(notifications),1)
+    t.assertEqual(op.load()['progress'][str(root)]['file'],'lane/r1.md')
+    t.assertEqual(op.load()['progress'][str(other)]['file'],'lane/r2.md')
+else:
+    rc,docs=run_replay('lane/r1.md' if site=='after' else None)
+    t.assertEqual(rc,3);errors=[d for d in docs if 'error' in d]
+    t.assertEqual(errors,[dict(error='cannot-establish-recovery',root=str(root))]);t.assertEqual(docs[-1],dict(done=True))
+    if site=='after': t.assertEqual(len(docs),2);t.assertEqual(visits,[str(index)])
+    else: t.assertEqual([(d['root'],d['file']) for d in docs if 'file' in d],[(str(other),'lane/r2.md')])
+    t.assertEqual(store.path.read_bytes(),before)
+''')
+        for mode in ('operator', 'stored', 'after'):
+            with self.subTest(variant='held-released', mode=mode):
+                self._child(setup+f'''
+mode={mode!r};thread_counts=[]
+def read(path):
+    visits.append(str(path));thread_counts.append(threading.active_count())
+    return original(path)
+m.read_index=read;before=store.path.read_bytes();op_before=op.path.read_bytes()
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',stalled_read),mock.patch.object(io,'open',stalled_io):
+    start=time.monotonic()
+    if mode=='operator':
+        with __import__('contextlib').redirect_stdout(io.StringIO()): fired=m.operator_scan(roots,notifier='none')
+        t.assertEqual(fired,0);t.assertEqual(notifications,[]);t.assertEqual(op.path.read_bytes(),op_before)
+    else:
+        rc,docs=run_replay('lane/r1.md' if mode=='after' else None)
+        t.assertEqual(rc,3);t.assertEqual([d['root'] for d in docs if 'error' in d],[str(root)] if mode=='after' else roots)
+        t.assertEqual(docs[-1],dict(done=True));t.assertEqual(store.path.read_bytes(),before)
+        if mode=='after': t.assertEqual(visits,[str(index)])
+    t.assertLess(time.monotonic()-start,1.3);t.assertTrue(entered.is_set())
+    t.assertLessEqual(max(thread_counts),thread_counts[0]+1)
+    release.set()
+    t.assertTrue(m._root_pending[0].wait(1))
+# A new operation after observed completion has a new budget and free slot.
+if mode=='operator':
+    with __import__('contextlib').redirect_stdout(io.StringIO()): fired=m.operator_scan(roots,notifier='none')
+    t.assertEqual(fired,2);t.assertEqual(len(notifications),2)
+else:
+    rc,docs=run_replay('lane/r1.md' if mode=='after' else None)
+    t.assertEqual(rc,0);t.assertEqual([d['root'] for d in docs if 'file' in d],[str(root)] if mode=='after' else roots)
+''')
+
+    def test_replay_budget_is_retained_per_root(self):
+        for delay in (0.6, 0.0):
+            with self.subTest(capture_delay=delay):
+                self._child(f'''
+other=root.parent/'other';other.mkdir(exist_ok=True);other_index=other/'INDEX.md'
+index.write_text(header+one+two);other_index.write_text(header+one+two)
+roots=[str(root),str(other)];store=m.NoteStore('fifo')
+store.update(lambda n:n.update(root=str(root),seat='b.implementer',floors=[dict(root=r,seat='b.implementer',file='lane/r1.md',position=1) for r in roots],progress={{r:dict(file='lane/r2.md',position=2) for r in roots}}))
+original=m.read_index;counts={{}};durations=[];seen=[];budgets={{}}
+def read(path):
+    key=str(path.parent);counts[key]=counts.get(key,0)+1
+    budget=m.current_budget();t.assertIsNotNone(budget)
+    if counts[key]==1:
+        budgets[key]=budget;t.assertGreater(budget.remaining(),.9)
+    else: t.assertIs(budget,budgets[key])
+    seen.append((key,counts[key]))
+    if path==index and counts[key]==1:
+        # Account real waiting through the production primitive.
+        result=m.bounded_root_call(lambda:threading.Event().wait({delay!r}))
+        t.assertEqual(result.kind,'ok')
+    if path==index and counts[key]==2:
+        start=time.monotonic();result=m.bounded_root_call(blocked);durations.append(time.monotonic()-start)
+        t.assertEqual(result.kind,'stalled')
+        release.set();t.assertTrue(m._root_pending[0].wait(1))
+        return m.IndexSnapshot(error='root-stalled')
+    return original(path)
+m.read_index=read
+capture=io.StringIO()
+with __import__('contextlib').redirect_stdout(capture): rc=m.replay(args())
+t.assertEqual(rc,3);t.assertEqual(seen,[(str(root),1),(str(other),1),(str(root),2),(str(other),2)])
+t.assertGreater(durations[0],(1-{delay!r})-.15);t.assertLess(durations[0],(1-{delay!r})+.15)
+t.assertIsNot(budgets[str(root)],budgets[str(other)])
+t.assertGreater(budgets[str(other)].remaining(),.9)
+docs=[json.loads(line) for line in capture.getvalue().splitlines()]
+t.assertEqual([d['root'] for d in docs if 'file' in d],[str(other)])
+''')
+
+class PanelFoldTests(TmpEnv):
+    """Regression witnesses for the PR #33 panel's six bounded folds."""
+
+    def test_failed_discovery_and_path_check_propagate(self):
+        # A fault at an earlier discovery must not mask the attribution sites.
+        for site in ('manual-discovery', 'manual-path', 'hook-discovery',
+                     'hook-path', 'command-attribution', 'inferred-attribution'):
+            with self.subTest(site=site):
+                write_index(self.index, row(1))
+                (self.root / 'lane/r1.md').write_text('relay')
+                marker = self.base / 'fault-reached'
+                marker.unlink(missing_ok=True)
+                store = self.rm.NoteStore('panel')
+                before = {k: store.load().get(k) for k in ('bind_observation', 'observation_seq', 'reason')}
+                code = f'''
+import importlib.util,sys,json,io
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('panel_monitor',{str(SCRIPT)!r})
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+site={site!r};root={str(self.root)!r};marker=Path({str(marker)!r})
+def fail(*a,**k):
+    marker.write_text(site)
+    raise RuntimeError('panel escaped fault')
+manual=site.startswith('manual')
+if site.endswith('path'):
+    m.discover_root_like_cli=lambda *a,**k:root
+    m.path_under_root=fail
+else:
+    m.discover_root_like_cli=fail
+command='tools/relay submit d.md --root '+root
+if site.endswith('attribution'):
+    # A named submit in a pipeline is a near miss: no initial discovery.
+    command=('tools/relay submit d.md --root '+root if site=='command-attribution' else 'tools/relay submit d.md')+' | cat'
+payload=dict(session_id='panel',cwd=root,hook_event_name='PostToolUse',tool_input=dict(command=command),tool_response=dict(stdout=json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))))
+sys.stdin=io.StringIO(json.dumps(payload))
+argv=['bind','--session','panel']+(['--manual','--root',root,'--anchor','lane/r1.md'] if manual else [])
+raise SystemExit(m.main(argv))
+'''
+                result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=10)
+                self.assertTrue(marker.exists(), result.stdout + result.stderr)
+                self.assertEqual(marker.read_text(), site)
+                if site.startswith('manual'):
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('RuntimeError: panel escaped fault', result.stderr)
+                    self.assertNotIn('refused', result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, '')
+                    self.assertEqual({k: store.load().get(k) for k in before}, before)
+
+    def test_unsearchable_root_bind_names_index_unreadable(self):
+        for form in ('mode', 'file', 'absent-receipt', 'removed-receipt'):
+            with self.subTest(form=form):
+                write_index(self.index, row(1))
+                receipt = self.root / 'lane/r1.md'
+                receipt.write_text('relay')
+                backup = self.root.with_name('saved-root')
+                anchor = 'lane/r1.md'
+                try:
+                    if form == 'mode': self.root.chmod(0)
+                    elif form == 'file':
+                        self.root.rename(backup)
+                        self.root.write_text('not a directory')
+                    elif form == 'absent-receipt': anchor = 'lane/absent.md'
+                    else: receipt.unlink()
+                    result = subprocess.run([sys.executable, str(SCRIPT), 'bind', '--manual', '--session', 'panel', '--root', str(self.root), '--anchor', anchor], capture_output=True, text=True, timeout=10)
+                finally:
+                    if form == 'mode': self.root.chmod(0o700)
+                    elif form == 'file':
+                        self.root.unlink()
+                        backup.rename(self.root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                token = 'index-unreadable' if form in ('mode', 'file') else 'receipt-mismatch'
+                self.assertEqual(result.stderr, 'relay-monitor: manual bind refused: '+token+'\n')
+                self.assertEqual(result.stdout, '')
+                self.assertIsNone(self.rm.NoteStore('panel').load().get('seat'))
+
+    def test_operator_budget_is_per_root(self):
+        # Sharing A's budget with B loses B's notification or shortens its wait.
+        for stalled in (False, True):
+            with self.subTest(stalled=stalled):
+                FifoCallersTests._child(self, f'''
+stalled={stalled!r}
+other=root/'other';other.mkdir(exist_ok=True)
+index.write_text(header+one);(other/'INDEX.md').write_text(header+two)
+store=m.NoteStore('operator')
+store.update(lambda n:n.update(progress={{str(root):dict(file=None,position=0),str(other):dict(file=None,position=0)}}))
+original=m.os.read;raw=m.os.open;paths={{}};timers=[];seen=[];notified=[];measure=[]
+def opened(path,*a,**k):
+    fd=raw(path,*a,**k)
+    if str(path) in (str(index),str(other/'INDEX.md')): paths[fd]=str(path)
+    return fd
+def delayed(fd,*a,**k):
+    path=paths.pop(fd,None)
+    if path:
+        seen.append(path)
+        if path==str(other/'INDEX.md') and stalled: release.wait()
+        else:
+            gate=threading.Event();timer=threading.Timer(0.6 if path==str(index) else 0.5,gate.set)
+            timers.append(timer);timer.start();gate.wait()
+    return original(fd,*a,**k)
+read_index=m.read_index
+def measured(path):
+    start=time.monotonic();snap=read_index(path)
+    measure.append((str(path),time.monotonic()-start,snap.error));return snap
+try:
+    with mock.patch.object(m.os,'open',opened),mock.patch.object(m.os,'read',delayed),mock.patch.object(m,'read_index',measured),mock.patch.object(m,'notify',side_effect=lambda title,text,notifier:notified.append(text)):
+        m.operator_scan([str(root),str(other)],notifier='none')
+    t.assertEqual(seen,[str(index),str(other/'INDEX.md')])
+    if stalled:
+        t.assertEqual(len(notified),1)
+        t.assertEqual(measure[1][2],'root-stalled')
+        t.assertGreaterEqual(measure[1][1],0.85)
+        t.assertLess(measure[1][1],1.5)
+        t.assertEqual(store.load()['progress'][str(other)],dict(file=None,position=0))
+    else:
+        t.assertEqual(len(notified),2)
+        t.assertIn('lane/r1.md',notified[0]);t.assertIn('lane/r2.md',notified[1])
+finally:
+    release.set()
+    for timer in timers: timer.join(2)
+''')
+
+    def test_healthy_drain_scan_clears_index_reason(self):
+        for delivering in (False, True):
+            for recorded_exit in (False, True):
+                with self.subTest(delivering=delivering, recorded_exit=recorded_exit):
+                    FifoCallersTests._child(self, f'''
+delivering={delivering!r};recorded_exit={recorded_exit!r}
+store=m.NoteStore('fifo')
+record=dict(reason='follower-error',detail='ValueError',at='20261015-000000',instance='old')
+store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',phase='following',leader=None,exit=record if recorded_exit else None,reason='follower-error' if recorded_exit else None,progress={{str(root):dict(file=None,position=0)}}))
+index.write_bytes(b'\\xff')
+with mock.patch('sys.stdin',io.StringIO(json.dumps(dict(session_id='fifo',hook_event_name='Stop')))), (root/'fault-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
+t.assertEqual(store.load()['reason'],'index-unreadable')
+# Two pending rows exercise the drain's one-row early return.
+index.write_text(header+(one+two if delivering else ''))
+with mock.patch('sys.stdin',io.StringIO(json.dumps(dict(session_id='fifo',hook_event_name='Stop')))), (root/'healthy-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
+output=(root/'healthy-output').read_text()
+note=store.load()
+t.assertIsNone(note['reason']);t.assertIsNone(note['reason_detail'])
+if delivering: t.assertIn('lane/r1.md',output)
+if recorded_exit:
+    t.assertEqual(note['exit'],record)
+    with mock.patch.object(m,'check_identity',return_value=('ok',{{}},{{}})):
+        t.assertIn('unavailable: follower-error',m.status_line(store,None))
+else: t.assertIsNone(note['exit'])
+''')
+
+    def test_failed_thread_start_leaves_no_outstanding_mark(self):
+        FifoCallersTests._child(self, '''
+with mock.patch.object(m.threading.Thread,'start',side_effect=RuntimeError('cannot start')):
+    with t.assertRaisesRegex(RuntimeError,'cannot start'): m.bounded_root_call(lambda: 'unused')
+result=m.bounded_root_call(lambda: 'next call')
+t.assertEqual(result.kind,'ok');t.assertEqual(result.value,'next call')
+''')
+
+
+class NewlineCompatibilityTests(TmpEnv):
+    """Keep the text-mode reader's measured newline semantics after bounding IO."""
+
+    def test_index_line_endings_match_base(self):
+        # Literal answers measured at b8d87eb, independent of the new decoder.
+        complete = HEADER + row(1)
+        cases = [
+            ('LF', complete, None, ['lane/r1.md'], False),
+            ('CRLF', complete.replace('\n', '\r\n'), None, ['lane/r1.md'], False),
+            ('CR', complete.replace('\n', '\r'), None, ['lane/r1.md'], False),
+            ('LF-header-CRLF-row', HEADER + row(1).replace('\n', '\r\n'), None, ['lane/r1.md'], False),
+            ('CRLF-header-LF-row', HEADER.replace('\n', '\r\n') + row(1), None, ['lane/r1.md'], False),
+            ('partial-tail-LF', complete + row(2).rstrip('\n'), None, ['lane/r1.md'], True),
+            ('partial-tail-lone-CR', complete + row(2).rstrip('\n') + '\r', None, ['lane/r1.md', 'lane/r2.md'], False),
+            ('partial-tail-CRLF', (complete + row(2).rstrip('\n')).replace('\n', '\r\n'), None, ['lane/r1.md'], True),
+            ('CR-inside-cell', HEADER + row(1, file='lane/r\r1.md'), 'index-malformed-row:1', [], False),
+        ]
+        for name, text, error, files, partial in cases:
+            with self.subTest(case=name):
+                self.index.write_bytes(text.encode('utf-8'))
+                snap = self.rm.read_index(self.index)
+                self.assertEqual((snap.error, [r.cells['file'] for r in snap.rows], snap.partial_tail),
+                                 (error, files, partial))
+        # Normalizing first would shrink this below the cap and lose the refusal.
+        for name, raw, detail in [
+            ('raw-cap', b'\r\n' * (self.rm.INDEX_MAX_BYTES // 2) + b'\r', 'too-large'),
+            ('strict-utf8', complete.replace('\n', '\r\n').encode() + b'\xff\r\n', 'not-utf-8'),
+        ]:
+            with self.subTest(control=name):
+                self.index.write_bytes(raw)
+                snap = self.rm.read_index(self.index)
+                self.assertEqual((snap.error, snap.detail), ('index-unreadable', detail))
+
+    def test_crlf_and_cr_index_bind_and_deliver(self):
+        for label, ending in [('CRLF', '\r\n'), ('CR', '\r')]:
+            with self.subTest(ending=label):
+                session = 'newline-' + label.lower()
+                # The own receipt anchors binding; a separate addressed row is pending.
+                text = HEADER + row(1) + row(2, frm='b.implementer', to='a.planner')
+                self.index.write_bytes(text.replace('\n', ending).encode())
+                (self.root / 'lane/r1.md').write_text('receipt')
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), 'bind', '--manual', '--session', session,
+                     '--root', str(self.root), '--anchor', 'lane/r1.md'],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+                store = self.rm.NoteStore(session)
+                self.assertEqual(store.load()['seat'], 'a.planner')
+                self.assertEqual(store.load()['progress'][str(self.root)]['file'], 'lane/r1.md')
+                for scan in range(2):
+                    with tempfile.TemporaryFile(mode='w+') as output:
+                        with (
+                            mock.patch('sys.stdin', io.StringIO(json.dumps(
+                                dict(session_id=session, hook_event_name='Stop')))),
+                            contextlib.redirect_stdout(output),
+                        ):
+                            self.assertEqual(self.rm.drain(ns(session=session, host='codex')), 0)
+                        output.seek(0)
+                        emitted = output.read()
+                    if scan == 0:
+                        lines = emitted.splitlines()
+                        self.assertEqual(len(lines), 1, emitted)
+                        document = json.loads(lines[0])
+                        self.assertEqual(document['decision'], 'block')
+                        self.assertEqual(json.loads(document['reason'].split('\n', 1)[1])['file'], 'lane/r2.md')
+                    else:
+                        self.assertEqual(json.loads(emitted), {})
+                    note = store.load()
+                    self.assertEqual(note['phase'], 'following')
+                    self.assertEqual(note['progress'][str(self.root)], dict(file='lane/r2.md', position=2))

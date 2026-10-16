@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import contextvars
 import errno
 import fcntl
 import json
@@ -19,13 +20,21 @@ import re
 import select
 import shlex
 import subprocess
+import stat
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Iterator
 
+ROOT_BUDGET = 1.0
+INDEX_MAX_BYTES = 16 * 1024 * 1024
+FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error"})
+INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed", "index-unreadable", "root-stalled"})
+SIGNATURE_STALLED = object()
 NOTE_VERSION = 1
 RING_SIZE = 64
 FOLLOW_OUTPUT_DEADLINE = 2.0
@@ -97,12 +106,15 @@ def default_note() -> dict:
         "bound_at": None,
         "binding_source": None,
         "bind_observation": None,
+        "observation_seq": 0,
         "handled_calls": [],
         "binding_gen": 0,
         "leader": None,
         "standbys": [],
         "phase": "not-started",
         "reason": None,
+        "reason_detail": None,
+        "exit": None,
         "progress": {},
         "floors": [],
         "printed": {},
@@ -115,6 +127,39 @@ def default_note() -> dict:
 
 def now_stamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime())
+
+
+def set_reason(note: dict, reason: str | None, detail: str | None = None) -> None:
+    previous = note.get("exit")
+    current = note.get("reason")
+    if previous and current in FOLLOWER_EXIT and current != previous.get("reason"):
+        note["exit"] = dict(reason=current, detail=None, at=None, instance=None, inferred=True)
+    note["reason"] = reason
+    note["reason_detail"] = detail
+
+
+def record_exit(note: dict, *, reason: str, detail: str | None, instance: str) -> None:
+    # Only follow originates an exit; this bypasses legacy-reason inference.
+    note["exit"] = dict(reason=reason, detail=detail, at=now_stamp(), instance=instance)
+    note.update(phase="unavailable", reason=reason, reason_detail=None, leader=None)
+
+
+def clear_exit(note: dict) -> None:
+    # Only the follower that has reached following clears its prior exit.
+    note["exit"] = None
+    if note.get("reason") in FOLLOWER_EXIT | INDEX_UNAVAILABLE:
+        note["reason"] = None
+        note["reason_detail"] = None
+
+
+def shown_exit_reason(note: dict) -> str | None:
+    previous = note.get("exit")
+    if not previous:
+        return None
+    current = note.get("reason")
+    if current in FOLLOWER_EXIT and current != previous.get("reason"):
+        return current
+    return previous.get("reason")
 
 
 class NoteStore:
@@ -442,13 +487,142 @@ class IndexSnapshot:
     rows: list = field(default_factory=list)
     error: str | None = None
     partial_tail: bool = False
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class RootResult:
+    kind: str
+    value: object = None
+    detail: str | None = None
+    exc: BaseException | None = None
+
+
+class RootBudget:
+    def __init__(self, seconds: float = ROOT_BUDGET, cap: float | None = None):
+        self._remaining = max(0.0, seconds)
+        self.cap = cap
+
+    def remaining(self) -> float:
+        return self._remaining
+
+    def spend(self, waited: float) -> None:
+        self._remaining = max(0.0, self._remaining - max(0.0, waited))
+
+
+_root_budget: contextvars.ContextVar[RootBudget | None] = contextvars.ContextVar(
+    "relay_root_budget", default=None
+)
+_root_gate = threading.Lock()
+_root_pending: tuple[threading.Event, list[RootResult]] | None = None
+
+
+def current_budget() -> RootBudget | None:
+    return _root_budget.get()
+
+
+@contextlib.contextmanager
+def use_budget(budget: RootBudget) -> Iterator[RootBudget]:
+    token = _root_budget.set(budget)
+    try:
+        yield budget
+    finally:
+        _root_budget.reset(token)
+
+
+@contextlib.contextmanager
+def root_budget(seconds: float = ROOT_BUDGET, cap: float | None = None) -> Iterator[RootBudget]:
+    budget = current_budget()
+    if budget is None:
+        with use_budget(RootBudget(seconds, cap)) as fresh:
+            yield fresh
+        return
+    previous_cap = budget.cap
+    if cap is not None:
+        budget.cap = cap if previous_cap is None else min(previous_cap, cap)
+    try:
+        yield budget
+    finally:
+        budget.cap = previous_cap
+
+
+def bounded_root_call(fn: Callable[[], object]) -> RootResult:
+    """Wait for raw root work without retaining a note or a state lock.
+
+    A completed event frees the single process-wide slot, even when its caller
+    has already timed out. Only the caller reads a worker's immutable result.
+    """
+    global _root_pending
+    budget = current_budget() or RootBudget()
+    now = time.monotonic()
+    deadline = now + budget.remaining()
+    if budget.cap is not None:
+        deadline = min(deadline, budget.cap)
+    if deadline <= now:
+        return RootResult("stalled")
+    with _root_gate:
+        if _root_pending is not None and not _root_pending[0].is_set():
+            return RootResult("stalled")
+        done = threading.Event()
+        result: list[RootResult] = []
+
+        def work():
+            try:
+                result.append(RootResult("ok", fn()))
+            except OSError as exc:
+                result.append(RootResult("failed", detail=errno.errorcode.get(exc.errno, type(exc).__name__), exc=exc))
+            except BaseException as exc:
+                result.append(RootResult("failed", detail=type(exc).__name__, exc=exc))
+            finally:
+                done.set()
+
+        threading.Thread(target=work, daemon=True, name="relay-root-read").start()
+        _root_pending = (done, result)
+    started_wait = time.monotonic()
+    finished = done.wait(max(0.0, deadline - started_wait))
+    budget.spend(time.monotonic() - started_wait)
+    if not finished:
+        return RootResult("stalled")
+    return result[0]
 
 
 def read_index(path: Path) -> IndexSnapshot:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return IndexSnapshot(error="index-missing")
+    def read_raw():
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return IndexSnapshot(error="index-unreadable", detail="not-regular-file")
+            if info.st_size > INDEX_MAX_BYTES:
+                return IndexSnapshot(error="index-unreadable", detail="too-large")
+            chunks, size = [], 0
+            while size <= INDEX_MAX_BYTES:
+                chunk = os.read(fd, INDEX_MAX_BYTES + 1 - size)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            if size > INDEX_MAX_BYTES:
+                return IndexSnapshot(error="index-unreadable", detail="too-large")
+            try:
+                # Preserve Path.read_text's universal-newline handling after the byte cap.
+                text = b"".join(chunks).decode("utf-8", errors="strict")
+                return text.replace("\r\n", "\n").replace("\r", "\n")
+            except UnicodeDecodeError:
+                return IndexSnapshot(error="index-unreadable", detail="not-utf-8")
+        finally:
+            os.close(fd)
+
+    result = bounded_root_call(read_raw)
+    if result.kind == "stalled":
+        return IndexSnapshot(error="root-stalled", detail="stalled")
+    if result.kind == "failed":
+        if result.detail == "ENOENT":
+            return IndexSnapshot(error="index-missing")
+        return IndexSnapshot(error="index-unreadable", detail=result.detail)
+    if isinstance(result.value, IndexSnapshot):
+        return result.value
+    text = result.value
     complete_last = text.endswith("\n")
     lines = text.split("\n")
     if complete_last:
@@ -559,7 +733,7 @@ def resolve_binding(note: dict, environ, args) -> Binding | None:
             "env",
         )
     if (seat or root) and not (seat and root):
-        note["reason"] = "override-incomplete"
+        set_reason(note, "override-incomplete")
     if note.get("seat") and note.get("root"):
         return Binding(
             note["seat"],
@@ -834,10 +1008,10 @@ def deliver_once(
     if binding is None:
         return result
     root_key, encode = binding.root, encode or (lambda b: b)
-    if snapshot.error in ("index-missing", "index-malformed"):
+    if snapshot.error in INDEX_UNAVAILABLE:
         _bounded_update(
             store,
-            lambda n: n.update({"phase": "unavailable", "reason": snapshot.error}),
+            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error, snapshot.detail)),
             end,
             result,
         )
@@ -877,9 +1051,7 @@ def deliver_once(
         if start is None:
             _bounded_update(
                 store,
-                lambda n: n.update(
-                    {"phase": "unavailable", "reason": "anchor-not-found"}
-                ),
+                lambda n: (n.update(phase="unavailable"), set_reason(n, "anchor-not-found")),
                 end,
                 result,
             )
@@ -923,7 +1095,7 @@ def deliver_once(
                     result.aborted = "progress-moved"
                     return result
                 n["progress"][root_key] = dict(cursor)
-                n["reason"] = "rebased"
+                set_reason(n, "rebased")
                 store.save(n)
         except LockTimeout:
             result.aborted = "lock-timeout"
@@ -1009,7 +1181,8 @@ def deliver_once(
                     encode(row_to_line(row_, binding.root).encode("utf-8")),
                     end,
                 ):
-                    note.update({"phase": "unavailable", "reason": "output-stalled"})
+                    note.update(phase="unavailable")
+                    set_reason(note, "output-stalled")
                     store.save(note)
                     result.aborted = "output-stalled"
                     return result
@@ -1028,7 +1201,9 @@ def deliver_once(
                 "position": row_.position,
             }
             if note.get("reason") in ("output-stalled", "anchor-not-found"):
-                note["reason"] = None  # `rebased` stays visible until the next binding
+                set_reason(note, None)  # `rebased` stays visible until the next binding
+            if not snapshot.error and note.get("reason") in INDEX_UNAVAILABLE:
+                set_reason(note, None)
             note["phase"] = "following"
             store.save(note)
         except FrameBusy:
@@ -1039,7 +1214,7 @@ def deliver_once(
     if snapshot.error:
         _bounded_update(
             store,
-            lambda n: n.update({"phase": "unavailable", "reason": snapshot.error}),
+            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error, snapshot.detail)),
             end,
             result,
         )
@@ -1069,9 +1244,11 @@ def deliver_once(
                     and live_seat == canonical(binding.seat)
                     and live_root == binding.root
                     and not foreign
-                    and n.get("phase") != "following"
+                    and (n.get("phase") != "following" or n.get("reason") in INDEX_UNAVAILABLE)
                 ):
                     n["phase"] = "following"
+                    if n.get("reason") in INDEX_UNAVAILABLE:
+                        set_reason(n, None)
                     store.save(n)
         except LockTimeout:
             result.aborted = "lock-timeout"
@@ -1079,11 +1256,13 @@ def deliver_once(
 
 
 def index_signature(path: Path):
-    try:
-        st = path.stat()
+    result = bounded_root_call(path.stat)
+    if result.kind == "ok":
+        st = result.value
         return (st.st_mtime_ns, st.st_size, st.st_ino)
-    except FileNotFoundError:
+    if result.kind == "failed" and result.detail == "ENOENT":
         return None
+    return SIGNATURE_STALLED
 
 
 def follow(args) -> int:
@@ -1122,125 +1301,152 @@ def follow(args) -> int:
         sweep_owner_files(store)  # eventual cleanup of unreferenced owner files (P5-R1)
     sink, pacer = FdSink(sys.stdout.fileno()), Pacer()
     last_sig = last_note = None
+    last_error = None
     pending = True
     backoff_until = 0.0
     try:
         while True:
-            note = store.load()
-            binding = resolve_binding(note, os.environ, args)
-            if binding is None:
-                store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
-                time.sleep(POLL_NOTE)
-                continue
-            if binding.source == "env":
-                if (
-                    binding.root not in note["progress"]
-                ):  # per-root progress initialization (once per root)
-                    snap = read_index(Path(binding.root) / "INDEX.md")
-                    anchor = (
-                        binding.anchor
-                        if binding.anchor
-                        else (snap.rows[-1].cells["file"] if snap.rows else None)
-                    )
-                    pos = next(
-                        (r.position for r in snap.rows if r.cells["file"] == anchor), 0
-                    )
-                    cur = {"file": anchor, "position": pos}
-                    store.update(
-                        lambda n: (
-                            n["progress"].__setitem__(binding.root, dict(cur)),
-                            n.update({"anchor": anchor}),
+            with root_budget():
+                note = store.load()
+                binding = resolve_binding(note, os.environ, args)
+                if binding is None:
+                    store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
+                    time.sleep(POLL_NOTE)
+                    continue
+                if binding.source == "env":
+                    if (
+                        binding.root not in note["progress"]
+                    ):  # per-root progress initialization (once per root)
+                        snap = read_index(Path(binding.root) / "INDEX.md")
+                        if snap.error in INDEX_UNAVAILABLE and (binding.anchor or snap.error != "index-missing"):
+                            last_error = snap.error
+                            store.update(lambda n: (n.update(phase="unavailable"), set_reason(n, snap.error, snap.detail)))
+                            time.sleep(POLL_INDEX)
+                            continue
+                        anchor = (
+                            binding.anchor
+                            if binding.anchor
+                            else (snap.rows[-1].cells["file"] if snap.rows else None)
                         )
+                        pos = next(
+                            (r.position for r in snap.rows if r.cells["file"] == anchor), 0
+                        )
+                        cur = {"file": anchor, "position": pos}
+                        store.update(
+                            lambda n: (
+                                n["progress"].__setitem__(binding.root, dict(cur)),
+                                n.update({"anchor": anchor}),
+                            )
+                        )
+                        note = store.load()
+                        pending = True
+                    env_seat = canonical(
+                        binding.seat
+                    )  # per-pair floor and binding metadata (once per pair; D8-R1)
+                    has_floor = any(
+                        f["root"] == binding.root and f["seat"] == env_seat
+                        for f in note.get("floors", [])
                     )
-                    note = store.load()
-                    pending = True
-                env_seat = canonical(
-                    binding.seat
-                )  # per-pair floor and binding metadata (once per pair; D8-R1)
-                has_floor = any(
-                    f["root"] == binding.root and f["seat"] == env_seat
-                    for f in note.get("floors", [])
+                    if (
+                        not has_floor
+                        or canonical(note.get("seat")) != env_seat
+                        or note.get("root") != binding.root
+                        or note.get("binding_source") != "env"
+                    ):
+                        cur = dict(
+                            note["progress"][binding.root]
+                            # existing progress is preserved; the new pair's floor is the
+                            # current cursor
+                        )
+                        store.update(
+                            lambda n: (
+                                record_floor(n, binding.root, binding.seat, cur),
+                                n.update(
+                                    {
+                                        "seat": binding.seat,
+                                        "root": binding.root,
+                                        "binding_source": "env",
+                                        "anchor": binding.anchor or n.get("anchor"),
+                                    }
+                                ),
+                            )
+                        )
+                        note = store.load()
+                        pending = True
+                sig, nsig = index_signature(Path(binding.root) / "INDEX.md"), store.mtime()
+                wake = (
+                    pending
+                    or last_error in INDEX_UNAVAILABLE
+                    or sig is SIGNATURE_STALLED
+                    or sig != last_sig
+                    or nsig != last_note
+                    or bool(note.get("frame"))
+                    or (backoff_until and time.monotonic() >= backoff_until)
                 )
-                if (
-                    not has_floor
-                    or canonical(note.get("seat")) != env_seat
-                    or note.get("root") != binding.root
-                    or note.get("binding_source") != "env"
-                ):
-                    cur = dict(
-                        note["progress"][binding.root]
-                        # existing progress is preserved; the new pair's floor is the
-                        # current cursor
-                    )
-                    store.update(
-                        lambda n: (
-                            record_floor(n, binding.root, binding.seat, cur),
-                            n.update(
-                                {
-                                    "seat": binding.seat,
-                                    "root": binding.root,
-                                    "binding_source": "env",
-                                    "anchor": binding.anchor or n.get("anchor"),
-                                }
-                            ),
-                        )
-                    )
-                    note = store.load()
+                if not wake:
+                    time.sleep(min(POLL_INDEX, max(0.05, pacer.wait_time() or POLL_INDEX)))
+                    continue
+                if time.monotonic() < backoff_until:
+                    time.sleep(min(POLL_INDEX, backoff_until - time.monotonic()))
+                    continue
+                last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
+                snap = read_index(Path(binding.root) / "INDEX.md")
+                last_error = snap.error
+                result = deliver_once(
+                    store,
+                    sink,
+                    binding,
+                    snap,
+                    end=time.monotonic() + FOLLOW_OUTPUT_DEADLINE,
+                    leader_instance=me["instance"],
+                    pacer=pacer,
+                )
+                with store.state_lock():
+                    recovered = store.load()
+                    if (
+                        recovered.get("phase") == "following"
+                        and (recovered.get("leader") or {}).get("instance") == me["instance"]
+                        and (recovered.get("exit") or recovered.get("reason") in FOLLOWER_EXIT | INDEX_UNAVAILABLE)
+                    ):
+                        clear_exit(recovered)
+                        store.save(recovered)
+                if result.aborted == "paced":
                     pending = True
-            sig, nsig = index_signature(Path(binding.root) / "INDEX.md"), store.mtime()
-            wake = (
-                pending
-                or sig != last_sig
-                or nsig != last_note
-                or bool(note.get("frame"))
-                or (backoff_until and time.monotonic() >= backoff_until)
-            )
-            if not wake:
-                time.sleep(min(POLL_INDEX, max(0.05, pacer.wait_time() or POLL_INDEX)))
-                continue
-            if time.monotonic() < backoff_until:
-                time.sleep(min(POLL_INDEX, backoff_until - time.monotonic()))
-                continue
-            last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
-            snap = read_index(Path(binding.root) / "INDEX.md")
-            result = deliver_once(
-                store,
-                sink,
-                binding,
-                snap,
-                end=time.monotonic() + FOLLOW_OUTPUT_DEADLINE,
-                leader_instance=me["instance"],
-                pacer=pacer,
-            )
-            if result.aborted == "paced":
-                pending = True
-                time.sleep(min(POLL_INDEX, pacer.wait_time()))
-            elif result.aborted == "output-stalled":
-                pending = True
-                sink.wait_writable(
-                    BACKOFF
-                )  # wait for the sink outside the lock, then retry the same frame
-            elif result.aborted in (
-                "binding-changed",
-                "progress-moved",
-                "snapshot-order",
-                "lock-timeout",
-                "frame-busy",
-                "deadline",
-            ):
-                pending = True
-                time.sleep(0.1)
-            elif result.halted:
-                time.sleep(POLL_INDEX)
+                    time.sleep(min(POLL_INDEX, pacer.wait_time()))
+                elif result.aborted == "output-stalled":
+                    pending = True
+                    sink.wait_writable(
+                        BACKOFF
+                    )  # wait for the sink outside the lock, then retry the same frame
+                elif result.aborted in (
+                    "binding-changed",
+                    "progress-moved",
+                    "snapshot-order",
+                    "lock-timeout",
+                    "frame-busy",
+                    "deadline",
+                ):
+                    pending = True
+                    time.sleep(0.1)
+                elif result.halted:
+                    time.sleep(POLL_INDEX)
     except TransportFailed as exc:
         store.update(
-            lambda n: n.update(
-                {"phase": "unavailable", "reason": "transport-failed", "leader": None}
-            )
+            lambda n: record_exit(n, reason="transport-failed", detail=str(exc), instance=me["instance"])
         )
         leader.release()
         print(f"relay-monitor: transport failed: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:
+        try:
+            store.update(lambda n: record_exit(n, reason="follower-error", detail=type(exc).__name__, instance=me["instance"]), timeout=2.0)
+        except Exception as failure:
+            print(f"relay-monitor: follower error: {type(exc).__name__} (not recorded: {type(failure).__name__})", file=sys.stderr)
+        else:
+            print(f"relay-monitor: follower error: {type(exc).__name__}", file=sys.stderr)
+        finally:
+            leader.release()
+        raise
 
 
 MODES["follow"] = follow
@@ -1580,6 +1786,14 @@ def path_under_root(root: str, rel: str) -> bool:
         return False
 
 
+def discover_root_bounded(operand: str | None, cwd: str, plugin_root: str | None) -> RootResult:
+    return bounded_root_call(lambda: discover_root_like_cli(operand, cwd, plugin_root))
+
+
+def path_under_root_bounded(root: str, rel: str) -> RootResult:
+    return bounded_root_call(lambda: path_under_root(root, rel))
+
+
 def call_identity(session: str, payload: dict) -> str | None:
     value = payload.get("tool_use_id")
     return json.dumps([session, value], separators=(",", ":")) if isinstance(value, str) and value else None
@@ -1665,13 +1879,21 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
     if parsed.cd_prefix:
         cwd = os.path.join(cwd, parsed.cd_prefix)
     if parsed.root_operand:
-        root = discover_root_like_cli(parsed.root_operand, cwd, plugin_root)
+        discovered = discover_root_bounded(parsed.root_operand, cwd, plugin_root)
+        if discovered.kind == "failed":
+            raise discovered.exc
+        root = discovered.value if discovered.kind == "ok" else None
         if root:
             return root, "command"
         return None, "none"
     if len(receipts) != 1:
         return None, "none"
-    candidates = {root for root in (discover_root_like_cli(None, cwd, plugin_root), note.get("root")) if root}
+    discovered = discover_root_bounded(None, cwd, plugin_root)
+    if discovered.kind == "failed":
+        raise discovered.exc
+    if discovered.kind != "ok":
+        return None, "none"
+    candidates = {root for root in (discovered.value, note.get("root")) if root}
     matches = []
     for root in candidates:
         lookup = receipt_row_lookup(root, receipts[0]["path"])
@@ -1684,9 +1906,14 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
     operands, directory = indications
     if directory or len({value for _, value, _ in operands}) > 1:
         return None, "none"
-    candidate = os.path.realpath(matches[0])
+    candidate = bounded_root_call(lambda: os.path.realpath(matches[0]))
+    if candidate.kind != "ok":
+        return None, "none"
     for _, value, dynamic in operands:
-        if dynamic or not value or os.path.realpath(os.path.join(cwd, value)) != candidate:
+        if dynamic or not value:
+            return None, "none"
+        normalized = bounded_root_call(lambda value=value: os.path.realpath(os.path.join(cwd, value)))
+        if normalized.kind != "ok" or normalized.value != candidate.value:
             return None, "none"
     return matches[0], "inferred"
 
@@ -1694,6 +1921,11 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
 def _remember_call(note: dict, call: str | None) -> None:
     if call:
         note["handled_calls"] = (note.get("handled_calls", []) + [call])[-8:]
+
+
+def binding_key(note: dict) -> tuple:
+    return (canonical(note.get("seat")), note.get("root"), note.get("anchor"),
+            note.get("binding_source"), int(note.get("binding_gen") or 0))
 
 
 def record_observation(note: dict, *, reason: str, receipts: list[str], root: str | None, provenance: str, call: str | None, command_roots: list[str] | None = None) -> bool:
@@ -1705,12 +1937,14 @@ def record_observation(note: dict, *, reason: str, receipts: list[str], root: st
     old = note.get("bind_observation") or {}
     if call is None and all(old.get(k) == v for k, v in record.items()) and old.get("command_roots", []) == record.get("command_roots", []):
         return False
-    note["bind_observation"] = dict(record, stamp=now_stamp())
+    note["observation_seq"] = int(note.get("observation_seq") or 0) + 1
+    note["bind_observation"] = dict(record, stamp=now_stamp(), seq=note["observation_seq"])
     _remember_call(note, call)
     return True
 
 
 def clear_observations(note: dict) -> None:
+    note["observation_seq"] = int(note.get("observation_seq") or 0) + 1
     note["bind_observation"] = None
     for key in ("binding_degraded", "submit_miss", "submit_miss_binding_gen"):
         note.pop(key, None)
@@ -1719,11 +1953,20 @@ def clear_observations(note: dict) -> None:
 def bind_from_receipt(
     store: NoteStore, *, root: str, receipt_path: str, key_seat: str | None, source: str, call: str | None = None
 ) -> tuple[bool, str]:
-    if not isinstance(receipt_path, str) or not path_under_root(root, receipt_path):
+    if not isinstance(receipt_path, str):
         return False, "receipt-mismatch"
+    checked = path_under_root_bounded(root, receipt_path)
+    if checked.kind == "stalled":
+        return False, "root-stalled"
+    if checked.kind == "failed":
+        raise checked.exc
     try:
         snap = read_index(Path(root) / "INDEX.md")
     except (OSError, ValueError):
+        return False, "receipt-mismatch"
+    if snap.error in INDEX_UNAVAILABLE:
+        return False, snap.error
+    if not checked.value:
         return False, "receipt-mismatch"
     row_ = next((r for r in snap.rows if r.cells["file"] == receipt_path), None)
     if snap.error or row_ is None or not row_.cells["from"]:
@@ -1763,71 +2006,96 @@ def hook_context(line: str) -> bytes:
 
 def bind(args) -> int:
     if getattr(args, "manual", False):
-        session = resolve_session(args)
-        if not valid_session_id(session):
-            print("relay-monitor: invalid-session-id", file=sys.stderr)
-            return 2
-        if not args.root or not args.anchor:
-            print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
-            return 2
-        root = discover_root_like_cli(args.root, os.getcwd(), args.plugin_root) or args.root
-        bound, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
-        if not bound:
-            print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
-            return 1
-        return 0
-    try:
-        payload = json.load(sys.stdin)
-    except (ValueError, OSError, RecursionError):
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-    session = resolve_session(args, payload)
-    if not valid_session_id(session):
-        return 0
-    if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
-        return 0
-    tool_input = payload.get("tool_input")
-    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-    if not isinstance(command, str):
-        return 0
-    parsed = parse_submit_command(command)
-    if not parsed.ok and not names_submit_verb(command):
-        return 0
-    receipts = extract_receipts(payload.get("tool_response"))
-    receipts = [r for r in receipts if isinstance(r.get("path"), str)]
-    if not receipts:
-        return 0
-    indications = root_indications(command)
-    cwd = payload.get("cwd") or os.getcwd()
-    if not isinstance(cwd, str):
-        cwd = os.getcwd()
-    store = NoteStore(session)
-    call = call_identity(session, payload)
-    reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
-    if parsed.ok:
-        base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
-        root = discover_root_like_cli(parsed.root_operand, base, args.plugin_root)
-        if root is None:
-            reason = "no-root"
-        elif len(receipts) != 1:
-            reason = "ambiguous-receipt"
-        else:
-            ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
-            if ok:
-                return 0
-    hint = None
-    with store.state_lock():
-        note = store.load()
-        if call and call in note.get("handled_calls", []):
+        with root_budget():
+            session = resolve_session(args)
+            if not valid_session_id(session):
+                print("relay-monitor: invalid-session-id", file=sys.stderr)
+                return 2
+            if not args.root or not args.anchor:
+                print("relay-monitor: manual bind needs --session/--root/--anchor", file=sys.stderr)
+                return 2
+            discovered = discover_root_bounded(args.root, os.getcwd(), args.plugin_root)
+            if discovered.kind == "failed":
+                raise discovered.exc
+            if discovered.kind != "ok":
+                reason = "root-stalled" if discovered.kind == "stalled" else "receipt-mismatch"
+                print("relay-monitor: manual bind refused: " + reason, file=sys.stderr)
+                return 1
+            root = discovered.value or args.root
+            bound, reason = bind_from_receipt(NoteStore(session), root=root, receipt_path=args.anchor, key_seat=None, source="manual")
+            if not bound:
+                print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
+                return 1
             return 0
-        root, provenance = attribute_root(parsed, cwd, note, receipts, args.plugin_root, indications)
-        if record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
+    with root_budget():
+        try:
+            payload = json.load(sys.stdin)
+        except (ValueError, OSError, RecursionError):
+            return 0
+        if not isinstance(payload, dict):
+            return 0
+        session = resolve_session(args, payload)
+        if not valid_session_id(session):
+            return 0
+        if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
+            return 0
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+        if not isinstance(command, str):
+            return 0
+        parsed = parse_submit_command(command)
+        if not parsed.ok and not names_submit_verb(command):
+            return 0
+        receipts = extract_receipts(payload.get("tool_response"))
+        receipts = [r for r in receipts if isinstance(r.get("path"), str)]
+        if not receipts:
+            return 0
+        indications = root_indications(command)
+        cwd = payload.get("cwd") or os.getcwd()
+        if not isinstance(cwd, str):
+            cwd = os.getcwd()
+        store = NoteStore(session)
+        call = call_identity(session, payload)
+        reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
+        if parsed.ok:
+            base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
+            discovered = discover_root_bounded(parsed.root_operand, base, args.plugin_root)
+            if discovered.kind == "failed":
+                raise discovered.exc
+            root = discovered.value if discovered.kind == "ok" else None
+            if discovered.kind == "stalled":
+                reason = "root-stalled"
+            elif root is None:
+                reason = "no-root"
+            elif len(receipts) != 1:
+                reason = "ambiguous-receipt"
+            else:
+                ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
+                if ok:
+                    return 0
+        observed = store.load()
+        before = binding_key(observed)
+        root, provenance = attribute_root(parsed, cwd, observed, receipts, args.plugin_root, indications)
+        with store.state_lock():
+            note = store.load()
+            if call and call in note.get("handled_calls", []):
+                return 0
+            if binding_key(note) != before:
+                _remember_call(note, call)
+                store.save(note)
+                return 0
+            if not record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
+                return 0
             store.save(note)
-            hint = rebind_line(note, session)
-    if hint:
-        print(hook_context(hint).decode("utf-8"), flush=True)
-    return 0
+            seq = note["observation_seq"]
+        hint = rebind_line(note, session)
+        with store.state_lock():
+            current = store.load()
+            if binding_key(current) != before or (current.get("bind_observation") or {}).get("seq") != seq:
+                return 0
+        if hint:
+            print(hook_context(hint).decode("utf-8"), flush=True)
+        return 0
 
 
 
@@ -1874,19 +2142,22 @@ def drain(args) -> int:
     store = NoteStore(session)
     note = store.load()
     binding = resolve_binding(note, os.environ, args)
-    if binding is None or time.monotonic() >= end:
+    now = time.monotonic()
+    if binding is None or now >= end:
         return emit_json({})
-    snap = read_index(Path(binding.root) / "INDEX.md")
-    if time.monotonic() >= end:
-        return emit_json({})
-    sink = FdSink(sys.stdout.fileno())
-    me = stream_owner(store, end)
-    if me is None:
-        return emit_json({})
-    try:
-        return _drain_locked(store, sink, binding, snap, end, me)
-    finally:
-        me["_lock"].release(unlink=me.get("cleared", True))
+    cap = now + min(ROOT_BUDGET, (end - now) / 2)
+    with root_budget(cap=cap):
+        snap = read_index(Path(binding.root) / "INDEX.md")
+        if time.monotonic() >= end:
+            return emit_json({})
+        sink = FdSink(sys.stdout.fileno())
+        me = stream_owner(store, end)
+        if me is None:
+            return emit_json({})
+        try:
+            return _drain_locked(store, sink, binding, snap, end, me)
+        finally:
+            me["_lock"].release(unlink=me.get("cleared", True))
 
 
 def _drain_locked(
@@ -1924,7 +2195,7 @@ def _drain_locked(
                 and n["frame"].get("identity", {}).get("leader") == me["instance"]
             ):
                 n["frame"] = None
-                n["reason"] = None
+                set_reason(n, None)
 
         try:
             store.update(
@@ -1973,7 +2244,12 @@ def check_identity(plugin_root: str | None, root: str | None):
         if rc == 0
         else {"kit": None, "fp": None}
     )
-    if not root or not os.path.isdir(os.path.join(root, ".engine")):
+    if not root:
+        return "hand-root", client_id, None
+    engine = bounded_root_call(lambda: os.path.isdir(os.path.join(root, ".engine")))
+    if engine.kind != "ok":
+        return "unchecked", client_id, None
+    if not engine.value:
         return "hand-root", client_id, None
     status_doc, rc = run_relay(plugin_root, "status", "--root", root)
     status_doc = status_doc if isinstance(status_doc, dict) else {}
@@ -2014,7 +2290,7 @@ def readiness(store: NoteStore, _between=None):
         return (
             "standby-only"
             if any(process_liveness(s) != PROC_DEAD for s in note.get("standbys", []))
-            else "not-started"
+            else "unavailable" if note.get("leader") is None and note.get("exit") else "not-started"
         ), note
     leader = note.get("leader")
     if (
@@ -2091,7 +2367,7 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
                 {"client_identity": client_id, "daemon_identity": daemon}
             )
         )
-    reason = note.get("reason")
+    reason = shown_exit_reason(note) if state == "unavailable" and note.get("leader") is None and note.get("exit") else note.get("reason")
     suffix = f": {reason}" if state == "unavailable" and reason else ""
     binding = note.get("binding_source") or "none"
     cur = (note["progress"].get(note.get("root") or "") or {}).get("file") or "-"
@@ -2133,15 +2409,16 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
 
 
 def status(args) -> int:
-    session = resolve_session(args)
-    if not valid_session_id(session):
-        print("relay-monitor: invalid-session-id", file=sys.stderr)
-        return 2
-    store = NoteStore(session)
-    with store.state_lock():
-        sweep_owner_files(store)  # eventual cleanup; never the referenced file
-    print(status_line(store, args.plugin_root))
-    return 0
+    with root_budget():
+        session = resolve_session(args)
+        if not valid_session_id(session):
+            print("relay-monitor: invalid-session-id", file=sys.stderr)
+            return 2
+        store = NoteStore(session)
+        with store.state_lock():
+            sweep_owner_files(store)  # eventual cleanup; never the referenced file
+        print(status_line(store, args.plugin_root))
+        return 0
 
 
 FALLBACK_OVERRIDE_TEXT = (
@@ -2189,51 +2466,52 @@ def arming_text(plugin_root: str, session: str, resume: bool) -> str:
 
 
 def session_start(args) -> int:
-    payload = read_payload()
-    session = resolve_session(args, payload)
-    if not valid_session_id(session):
-        reason = "no-session-identity" if session is None else "invalid-session-id"
+    with root_budget():
+        payload = read_payload()
+        session = resolve_session(args, payload)
+        if not valid_session_id(session):
+            reason = "no-session-identity" if session is None else "invalid-session-id"
+            return emit_json(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": f"relay-monitor: {reason}",
+                    }
+                }
+            )
+        store = NoteStore(session)
+        host = decide_host(args, payload, os.environ)
+        plugin_root = (
+            args.plugin_root
+            or os.environ.get("CLAUDE_PLUGIN_ROOT")
+            or os.environ.get("PLUGIN_ROOT")
+            or str(Path(__file__).resolve().parents[2])
+        )
+        lines = [status_line(store, plugin_root)]
+        if host in ("host-ambiguous", "host-unknown"):
+            store.update(lambda n: set_reason(n, host))
+        elif host == "codex":
+            override = (
+                os.environ.get("ADT_CODEX_FORK") == "0"
+            )  # the only stock signal the kit honours (erratum-1 A)
+            store.update(
+                lambda n: n.update({"host": "codex", "codex_fork_override": override})
+            )
+            lines.append(
+                FALLBACK_OVERRIDE_TEXT
+                if override
+                else arming_text(plugin_root, session, payload.get("source") == "resume")
+            )
+        else:
+            store.update(lambda n: n.update({"host": "claude-code"}))
         return emit_json(
             {
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
-                    "additionalContext": f"relay-monitor: {reason}",
+                    "additionalContext": "\n".join(lines),
                 }
             }
         )
-    store = NoteStore(session)
-    host = decide_host(args, payload, os.environ)
-    plugin_root = (
-        args.plugin_root
-        or os.environ.get("CLAUDE_PLUGIN_ROOT")
-        or os.environ.get("PLUGIN_ROOT")
-        or str(Path(__file__).resolve().parents[2])
-    )
-    lines = [status_line(store, plugin_root)]
-    if host in ("host-ambiguous", "host-unknown"):
-        store.update(lambda n: n.update({"reason": host}))
-    elif host == "codex":
-        override = (
-            os.environ.get("ADT_CODEX_FORK") == "0"
-        )  # the only stock signal the kit honours (erratum-1 A)
-        store.update(
-            lambda n: n.update({"host": "codex", "codex_fork_override": override})
-        )
-        lines.append(
-            FALLBACK_OVERRIDE_TEXT
-            if override
-            else arming_text(plugin_root, session, payload.get("source") == "resume")
-        )
-    else:
-        store.update(lambda n: n.update({"host": "claude-code"}))
-    return emit_json(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": "\n".join(lines),
-            }
-        }
-    )
 
 
 MODES["session-start"] = session_start
@@ -2265,8 +2543,9 @@ def notify(title: str, text: str, notifier: str = "osascript") -> None:
 def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
     store, fired = NoteStore("operator"), 0
     for root in roots:
-        snap = read_index(Path(root) / "INDEX.md")
-        if snap.error in ("index-missing", "index-malformed"):
+        with root_budget():
+            snap = read_index(Path(root) / "INDEX.md")
+        if snap.error in INDEX_UNAVAILABLE:
             continue
         cursor = store.load()["progress"].get(root)
         if cursor is None:
@@ -2291,7 +2570,7 @@ def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
             store.update(lambda n: n["progress"].__setitem__(root, cursor))
         start = locate(snap, cursor)
         if start is None:
-            store.update(lambda n: n.update({"reason": f"cursor-not-found:{root}"}))
+            store.update(lambda n: set_reason(n, f"cursor-not-found:{root}"))
             continue
         for row_ in snap.rows[start + 1 :]:
             if names_seat(row_, "operator"):
@@ -2307,7 +2586,7 @@ def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
                     )
                 except (OSError, subprocess.SubprocessError) as exc:
                     reason = f"notify-failed: {exc}"
-                    store.update(lambda n: n.update({"reason": reason}))
+                    store.update(lambda n: set_reason(n, reason))
                 fired += 1
             store.update(
                 lambda n: n["progress"].__setitem__(
@@ -2336,6 +2615,14 @@ def replay(args) -> int:
     if not valid_session_id(session):
         print("relay-monitor: invalid-session-id", file=sys.stderr)
         return 2
+    budgets: dict[str, RootBudget] = {}
+
+    def read_root(root: str) -> IndexSnapshot:
+        if root not in budgets:
+            budgets[root] = RootBudget()
+        with use_budget(budgets[root]):
+            return read_index(Path(root) / "INDEX.md")
+
     note = NoteStore(session).load()
     floors = list(note.get("floors") or [])
     if args.after:  # single-binding optimization: the current binding only
@@ -2343,10 +2630,10 @@ def replay(args) -> int:
         if not root or not seat:
             print(json.dumps({"error": "unbound"}))
             return 3
-        snap0 = read_index(Path(root) / "INDEX.md")
+        snap0 = read_root(root)
         hit = (
             None
-            if snap0.error in ("index-missing", "index-malformed")
+            if snap0.error in INDEX_UNAVAILABLE
             else next((r for r in snap0.rows if r.cells["file"] == args.after), None)
         )
         if hit is None:
@@ -2438,9 +2725,9 @@ def replay(args) -> int:
     else:
         plan, index, next_pos, carried_failed = [], 0, None, False
         for f in floors:  # fix every root's upper bound at the first call
-            snap = read_index(Path(f["root"]) / "INDEX.md")
+            snap = read_root(f["root"])
             upper = note["progress"].get(f["root"])
-            if snap.error in ("index-missing", "index-malformed"):
+            if snap.error in INDEX_UNAVAILABLE:
                 plan.append(
                     {
                         "root": f["root"],
@@ -2479,11 +2766,8 @@ def replay(args) -> int:
     while index < len(plan):
         entry = plan[index]
         root, seat = entry["root"], canonical(entry["seat"])
-        snap = read_index(Path(root) / "INDEX.md")
-        if entry.get("unavailable") or snap.error in (
-            "index-missing",
-            "index-malformed",
-        ):
+        snap = read_root(root)
+        if entry.get("unavailable") or snap.error in INDEX_UNAVAILABLE:
             _replay_error(root)
             failed = True
             index += 1
