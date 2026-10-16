@@ -7192,11 +7192,11 @@ store=m.NoteStore('fifo')
 record=dict(reason='follower-error',detail='ValueError',at='20261015-000000',instance='old')
 store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',phase='following',leader=None,exit=record if recorded_exit else None,reason='follower-error' if recorded_exit else None,progress={{str(root):dict(file=None,position=0)}}))
 index.write_bytes(b'\\xff')
-with (root/'fault-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
+with mock.patch('sys.stdin',io.StringIO(json.dumps(dict(session_id='fifo',hook_event_name='Stop')))), (root/'fault-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
 t.assertEqual(store.load()['reason'],'index-unreadable')
 # Two pending rows exercise the drain's one-row early return.
 index.write_text(header+(one+two if delivering else ''))
-with (root/'healthy-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
+with mock.patch('sys.stdin',io.StringIO(json.dumps(dict(session_id='fifo',hook_event_name='Stop')))), (root/'healthy-output').open('w+') as out, __import__('contextlib').redirect_stdout(out): m.drain(args())
 output=(root/'healthy-output').read_text()
 note=store.load()
 t.assertIsNone(note['reason']);t.assertIsNone(note['reason_detail'])
@@ -7268,7 +7268,11 @@ class NewlineCompatibilityTests(TmpEnv):
                 self.assertEqual(store.load()['progress'][str(self.root)]['file'], 'lane/r1.md')
                 for scan in range(2):
                     with tempfile.TemporaryFile(mode='w+') as output:
-                        with contextlib.redirect_stdout(output):
+                        with (
+                            mock.patch('sys.stdin', io.StringIO(json.dumps(
+                                dict(session_id=session, hook_event_name='Stop')))),
+                            contextlib.redirect_stdout(output),
+                        ):
                             self.assertEqual(self.rm.drain(ns(session=session, host='codex')), 0)
                         output.seek(0)
                         emitted = output.read()
