@@ -4937,6 +4937,28 @@ class SessionStartTests(TmpEnv):
             self.assertIn("action `start`", ctx.splitlines()[1])
         self.assertEqual(contexts[0].splitlines()[1], contexts[1].splitlines()[1])
 
+    def test_override_falls_back_on_every_non_boot_source(self):
+        for fields, label in self.B11_CASES:
+            if label is None:
+                continue
+            with self.subTest(fields=fields):
+                ctx = self.run_ss(
+                    self.b11_payload(fields),
+                    {"ADT_HOST": "codex", "ADT_CODEX_FORK": "0"},
+                )
+                self.assertIn("fallback: pointer (ADT_CODEX_FORK=0)", ctx)
+                self.assertNotIn("action `start`", ctx)
+
+    def test_source_spelling_must_match_exactly(self):
+        for source in ("STARTUP", " startup", "startup\n", "x startup y"):
+            with self.subTest(source=source):
+                ctx = self.run_ss(
+                    self.b11_payload({"source": source}), {"ADT_HOST": "codex"}
+                )
+                self.assertEqual(
+                    ctx.splitlines()[1], self.B11_NON_BOOT.replace("<label>", "restart")
+                )
+
     def run_ss(self, payload, env):
         out = io.StringIO()
         with (
