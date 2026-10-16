@@ -31,6 +31,8 @@ from typing import Callable, Iterator
 
 ROOT_BUDGET = 1.0
 INDEX_MAX_BYTES = 16 * 1024 * 1024
+FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error"})
+INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed"})
 NOTE_VERSION = 1
 RING_SIZE = 64
 FOLLOW_OUTPUT_DEADLINE = 2.0
@@ -108,6 +110,8 @@ def default_note() -> dict:
         "standbys": [],
         "phase": "not-started",
         "reason": None,
+        "reason_detail": None,
+        "exit": None,
         "progress": {},
         "floors": [],
         "printed": {},
@@ -120,6 +124,39 @@ def default_note() -> dict:
 
 def now_stamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime())
+
+
+def set_reason(note: dict, reason: str | None, detail: str | None = None) -> None:
+    previous = note.get("exit")
+    current = note.get("reason")
+    if previous and current in FOLLOWER_EXIT and current != previous.get("reason"):
+        note["exit"] = dict(reason=current, detail=None, at=None, instance=None, inferred=True)
+    note["reason"] = reason
+    note["reason_detail"] = detail
+
+
+def record_exit(note: dict, *, reason: str, detail: str | None, instance: str) -> None:
+    # Only follow originates an exit; this bypasses legacy-reason inference.
+    note["exit"] = dict(reason=reason, detail=detail, at=now_stamp(), instance=instance)
+    note.update(phase="unavailable", reason=reason, reason_detail=None, leader=None)
+
+
+def clear_exit(note: dict) -> None:
+    # Only the follower that has reached following clears its prior exit.
+    note["exit"] = None
+    if note.get("reason") in FOLLOWER_EXIT | INDEX_UNAVAILABLE:
+        note["reason"] = None
+        note["reason_detail"] = None
+
+
+def shown_exit_reason(note: dict) -> str | None:
+    previous = note.get("exit")
+    if not previous:
+        return None
+    current = note.get("reason")
+    if current in FOLLOWER_EXIT and current != previous.get("reason"):
+        return current
+    return previous.get("reason")
 
 
 class NoteStore:
@@ -659,7 +696,7 @@ def resolve_binding(note: dict, environ, args) -> Binding | None:
             "env",
         )
     if (seat or root) and not (seat and root):
-        note["reason"] = "override-incomplete"
+        set_reason(note, "override-incomplete")
     if note.get("seat") and note.get("root"):
         return Binding(
             note["seat"],
@@ -937,7 +974,7 @@ def deliver_once(
     if snapshot.error in ("index-missing", "index-malformed"):
         _bounded_update(
             store,
-            lambda n: n.update({"phase": "unavailable", "reason": snapshot.error}),
+            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error)),
             end,
             result,
         )
@@ -977,9 +1014,7 @@ def deliver_once(
         if start is None:
             _bounded_update(
                 store,
-                lambda n: n.update(
-                    {"phase": "unavailable", "reason": "anchor-not-found"}
-                ),
+                lambda n: (n.update(phase="unavailable"), set_reason(n, "anchor-not-found")),
                 end,
                 result,
             )
@@ -1023,7 +1058,7 @@ def deliver_once(
                     result.aborted = "progress-moved"
                     return result
                 n["progress"][root_key] = dict(cursor)
-                n["reason"] = "rebased"
+                set_reason(n, "rebased")
                 store.save(n)
         except LockTimeout:
             result.aborted = "lock-timeout"
@@ -1109,7 +1144,8 @@ def deliver_once(
                     encode(row_to_line(row_, binding.root).encode("utf-8")),
                     end,
                 ):
-                    note.update({"phase": "unavailable", "reason": "output-stalled"})
+                    note.update(phase="unavailable")
+                    set_reason(note, "output-stalled")
                     store.save(note)
                     result.aborted = "output-stalled"
                     return result
@@ -1128,7 +1164,7 @@ def deliver_once(
                 "position": row_.position,
             }
             if note.get("reason") in ("output-stalled", "anchor-not-found"):
-                note["reason"] = None  # `rebased` stays visible until the next binding
+                set_reason(note, None)  # `rebased` stays visible until the next binding
             note["phase"] = "following"
             store.save(note)
         except FrameBusy:
@@ -1139,7 +1175,7 @@ def deliver_once(
     if snapshot.error:
         _bounded_update(
             store,
-            lambda n: n.update({"phase": "unavailable", "reason": snapshot.error}),
+            lambda n: (n.update(phase="unavailable"), set_reason(n, snapshot.error)),
             end,
             result,
         )
@@ -1312,6 +1348,10 @@ def follow(args) -> int:
                 leader_instance=me["instance"],
                 pacer=pacer,
             )
+            def recovered(n):
+                if n.get("phase") == "following" and (n.get("leader") or {}).get("instance") == me["instance"]:
+                    clear_exit(n)
+            store.update(recovered)
             if result.aborted == "paced":
                 pending = True
                 time.sleep(min(POLL_INDEX, pacer.wait_time()))
@@ -1334,13 +1374,21 @@ def follow(args) -> int:
                 time.sleep(POLL_INDEX)
     except TransportFailed as exc:
         store.update(
-            lambda n: n.update(
-                {"phase": "unavailable", "reason": "transport-failed", "leader": None}
-            )
+            lambda n: record_exit(n, reason="transport-failed", detail=None, instance=me["instance"])
         )
         leader.release()
         print(f"relay-monitor: transport failed: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:
+        try:
+            store.update(lambda n: record_exit(n, reason="follower-error", detail=type(exc).__name__, instance=me["instance"]), timeout=2.0)
+        except Exception as failure:
+            print(f"relay-monitor: follower error: {type(exc).__name__} (not recorded: {type(failure).__name__})", file=sys.stderr)
+        else:
+            print(f"relay-monitor: follower error: {type(exc).__name__}", file=sys.stderr)
+        finally:
+            leader.release()
+        raise
 
 
 MODES["follow"] = follow
@@ -2024,7 +2072,7 @@ def _drain_locked(
                 and n["frame"].get("identity", {}).get("leader") == me["instance"]
             ):
                 n["frame"] = None
-                n["reason"] = None
+                set_reason(n, None)
 
         try:
             store.update(
@@ -2114,7 +2162,7 @@ def readiness(store: NoteStore, _between=None):
         return (
             "standby-only"
             if any(process_liveness(s) != PROC_DEAD for s in note.get("standbys", []))
-            else "not-started"
+            else "unavailable" if note.get("leader") is None and note.get("exit") else "not-started"
         ), note
     leader = note.get("leader")
     if (
@@ -2191,7 +2239,7 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
                 {"client_identity": client_id, "daemon_identity": daemon}
             )
         )
-    reason = note.get("reason")
+    reason = shown_exit_reason(note) if state == "unavailable" and note.get("leader") is None and note.get("exit") else note.get("reason")
     suffix = f": {reason}" if state == "unavailable" and reason else ""
     binding = note.get("binding_source") or "none"
     cur = (note["progress"].get(note.get("root") or "") or {}).get("file") or "-"
@@ -2311,7 +2359,7 @@ def session_start(args) -> int:
     )
     lines = [status_line(store, plugin_root)]
     if host in ("host-ambiguous", "host-unknown"):
-        store.update(lambda n: n.update({"reason": host}))
+        store.update(lambda n: set_reason(n, host))
     elif host == "codex":
         override = (
             os.environ.get("ADT_CODEX_FORK") == "0"
@@ -2391,7 +2439,7 @@ def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
             store.update(lambda n: n["progress"].__setitem__(root, cursor))
         start = locate(snap, cursor)
         if start is None:
-            store.update(lambda n: n.update({"reason": f"cursor-not-found:{root}"}))
+            store.update(lambda n: set_reason(n, f"cursor-not-found:{root}"))
             continue
         for row_ in snap.rows[start + 1 :]:
             if names_seat(row_, "operator"):
@@ -2407,7 +2455,7 @@ def operator_scan(roots, *, notifier: str, since: str | None = None) -> int:
                     )
                 except (OSError, subprocess.SubprocessError) as exc:
                     reason = f"notify-failed: {exc}"
-                    store.update(lambda n: n.update({"reason": reason}))
+                    store.update(lambda n: set_reason(n, reason))
                 fired += 1
             store.update(
                 lambda n: n["progress"].__setitem__(

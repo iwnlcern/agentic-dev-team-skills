@@ -5932,3 +5932,197 @@ def reap():
             t.assertLess(time.monotonic() - start, 1.25)
             t.assertIsNone(m.current_budget())
         ''')
+
+
+class ExitRecordTests(FollowProcessMixin, TmpEnv):
+    """Exit durability, legacy interoperation, and follower-only recovery."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.rm.NoteStore("psess")
+        write_index(self.index, "")
+        self.store.update(lambda n: n.update(
+            seat="b.implementer", root=str(self.root), binding_source="hook",
+            progress={str(self.root): {"file": None, "position": 0}}))
+
+    def _status(self):
+        with mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})):
+            return self.rm.status_line(self.store, None)
+
+    def _seed_exit(self, reason="follower-error"):
+        # A persisted B7 record is a fixture, not a call to the helper under test.
+        record = dict(reason=reason, detail="ValueError", at="20261015-000000", instance="b7")
+        self.store.update(lambda n: n.update(exit=record, reason=reason, leader=None, phase="unavailable"))
+        return record
+
+    def _legacy_exit(self):
+        self.store.update(lambda n: n.update(phase="unavailable", reason="transport-failed", leader=None))
+
+    def _child_error(self, lock_failure=False):
+        # Inject at the raw signature boundary, after follower leader setup.
+        code = f'''
+import importlib.util, sys, os, subprocess
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("relay_monitor", {str(SCRIPT)!r})
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+holder = None
+def fail(path):
+    global holder
+    if {lock_failure!r}:
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()", str(m.NoteStore('psess').path.parent / 'psess.state')], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        assert holder.stdout.readline() == b'ready\\n'
+    raise ValueError("original-loop-error")
+m.index_signature = fail
+try:
+    m.follow(SimpleNamespace(session="psess", host="claude-code", root=None, anchor=None, plugin_root=None))
+finally:
+    if holder:
+        holder.communicate(timeout=3)
+'''
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=10)
+
+    def test_recorded_exit_is_shown_and_cleared(self):
+        p = self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following")
+        p.stdout.close()
+        write_index(self.index, row(1, to="b.implementer"))
+        p.wait(timeout=10)
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+        self.assertEqual(self.store.load()["exit"]["reason"], "transport-failed")
+        # Empty scan, with established progress, must also clear a prior exit.
+        write_index(self.index, "")
+        self.store.update(lambda n: n["progress"].update({str(self.root): dict(file=None, position=0)}))
+        q = self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following" and not n.get("exit"))
+        q.kill()
+        q.wait(timeout=10)
+        failed = self._child_error()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("ValueError: original-loop-error", failed.stderr)
+        self.assertEqual(self.store.load()["exit"]["detail"], "ValueError")
+        self.assertIn("relay-monitor: unavailable: follower-error", self._status())
+        self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following" and not n.get("exit"))
+        self.assertIsNone(self.store.load().get("reason"))
+
+    def _drain(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), "drain", "--host", "codex", "--session", "psess"], input="{}", text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def test_drain_scan_does_not_hide_or_clear_follower_exit(self):
+        for unavailable in (False, True):
+            with self.subTest(unavailable=unavailable):
+                record = self._seed_exit()
+                if unavailable:
+                    self.index.unlink()
+                self._drain()
+                self.assertEqual(self.store.load()["exit"], record)
+                self.assertIn("relay-monitor: unavailable: follower-error", self._status())
+
+    def test_last_resort_record_failure_keeps_original(self):
+        failed = self._child_error(lock_failure=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("follower error: ValueError (not recorded:", failed.stderr)
+        self.assertIn("ValueError: original-loop-error", failed.stderr)
+        self.assertNotIn("raise LockTimeout", failed.stderr)
+
+    def test_legacy_leader_sequence_follows_contract(self):
+        self._seed_exit()
+        lock = self.rm.LeaderLock("psess")
+        self.assertTrue(lock.acquire(blocking=False))
+        legacy = self.rm.leader_record()
+        lock.stamp(legacy["instance"])
+        try:
+            self.store.update(lambda n: n.update(leader=legacy, phase="following", reason=None))
+            self.assertIn("relay-monitor: armed", self._status())
+            self.assertNotIn("follower-error", self._status())
+            self._legacy_exit()
+        finally:
+            lock.release()
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+
+    def test_reason_writer_preserves_later_exit(self):
+        for writer in ("drain", "operator", "session"):
+            with self.subTest(writer=writer):
+                self.store = self.rm.NoteStore("operator" if writer == "operator" else "psess")
+                write_index(self.index, "")
+                self._seed_exit()
+                self._legacy_exit()
+                if writer == "drain":
+                    self.index.unlink()
+                    self._drain()
+                elif writer == "operator":
+                    self.store.update(lambda n: n["progress"].update({str(self.root): dict(file="gone.md", position=9)}))
+                    self.rm.operator_scan([str(self.root)], notifier="none")
+                else:
+                    with mock.patch.object(self.rm, "read_payload", return_value={}), mock.patch.object(self.rm, "decide_host", return_value="host-unknown"), mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})), contextlib.redirect_stdout(io.StringIO()):
+                        self.rm.session_start(ns(session="psess"))
+                self.assertEqual(self.store.load()["exit"], dict(reason="transport-failed", detail=None, at=None, instance=None, inferred=True))
+                self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+
+    def test_legacy_writer_residual_is_pinned(self):
+        self._seed_exit()
+        self._legacy_exit()
+        self.store.update(lambda n: n.update(reason="index-missing"))
+        self.assertIn("relay-monitor: unavailable: follower-error", self._status())
+
+    def test_same_reason_exit_keeps_reason(self):
+        self._seed_exit("transport-failed")
+        self._legacy_exit()
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+        self.assertEqual(self.store.load()["exit"]["instance"], "b7")
+
+    def test_uninferred_same_reason_record_is_not_latest_provenance(self):
+        self._seed_exit("transport-failed")
+        self._legacy_exit()
+        self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
+        record = self.store.load()["exit"]
+        self.assertNotIn("inferred", record)
+        self.assertEqual(record["instance"], "b7")
+        self.assertNotEqual(record["instance"], "legacy")
+
+    def test_signal_killed_follower_still_not_started(self):
+        p = self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following")
+        p.kill()
+        p.wait(timeout=10)
+        self.assertFalse(self.store.load().get("exit"))
+        self.assertIn("relay-monitor: not-started", self._status())
+
+    def _bind(self, receipt=False):
+        if receipt:
+            write_index(self.index, row(1))
+            (self.root / "lane" / "r1.md").write_text("relay\n")
+        payload = dict(session_id="psess", cwd=str(self.root), hook_event_name="PostToolUse", tool_name="Bash", prompt_id="p", tool_input={"command": f"tools/relay submit d.md --root {self.root}"}, tool_response={"stdout": json.dumps(dict(path="lane/r1.md" if receipt else "lane/missing.md", render_state="rendered", duplicate=False)), "stderr": "", "interrupted": False})
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
+            self.rm.bind(ns())
+
+    def test_legacy_note_loads_in_every_mode(self):
+        note = self.store.load()
+        for key in ("exit", "reason_detail", "observation_seq", "seq"):
+            note.pop(key, None)
+        self.store.save(note)
+        self._status()
+        with mock.patch.object(self.rm, "read_payload", return_value={}), mock.patch.object(self.rm, "check_identity", return_value=("ok", {}, {})), contextlib.redirect_stdout(io.StringIO()):
+            self.rm.session_start(ns(session="psess", host="claude-code"))
+        self._drain()
+        self._bind()
+        self.spawn()
+        self.wait_note(lambda n: n.get("phase") == "following")
+
+    def test_bind_hook_never_writes_top_level_reason(self):
+        for receipt in (False, True):
+            self._seed_exit()
+            self._legacy_exit()
+            before = self.store.load()
+            self._bind(receipt)
+            after = self.store.load()
+            if receipt:
+                self.assertEqual(after["anchor"], "lane/r1.md")
+            else:
+                self.assertIsNotNone(after.get("bind_observation"))
+            self.assertEqual(after["reason"], before["reason"])
+            self.assertEqual(after["exit"], before["exit"])
