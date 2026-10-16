@@ -1375,7 +1375,7 @@ def follow(args) -> int:
                 time.sleep(POLL_INDEX)
     except TransportFailed as exc:
         store.update(
-            lambda n: record_exit(n, reason="transport-failed", detail=None, instance=me["instance"])
+            lambda n: record_exit(n, reason="transport-failed", detail=str(exc), instance=me["instance"])
         )
         leader.release()
         print(f"relay-monitor: transport failed: {exc}", file=sys.stderr)

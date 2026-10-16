@@ -5996,6 +5996,7 @@ finally:
         p.wait(timeout=10)
         self.assertIn("relay-monitor: unavailable: transport-failed", self._status())
         self.assertEqual(self.store.load()["exit"]["reason"], "transport-failed")
+        self.assertIn("Broken pipe", self.store.load()["exit"]["detail"] or "")
         # Empty scan, with established progress, must also clear a prior exit.
         write_index(self.index, "")
         self.store.update(lambda n: n["progress"].update({str(self.root): dict(file=None, position=0)}))
