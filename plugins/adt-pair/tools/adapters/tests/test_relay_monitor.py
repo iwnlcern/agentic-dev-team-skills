@@ -6502,6 +6502,101 @@ finally:
 
 
 class BindOrderTests(TmpEnv):
+    def _b7_hook_probe(self,body):
+        setup="""
+index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
+store=m.NoteStore('fifo');store.path.unlink(missing_ok=True)
+store.update(lambda n:n.update(seat='a.planner',root=str(root),anchor='lane/r1.md',binding_source='hook',binding_gen=1))
+payload=dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={'command':'tools/relay submit d.md | cat'},tool_response={'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))})
+active=None;old_attr=m.attribute_root;old_hint=m.rebind_line
+m.discover_root_like_cli=lambda operand,cwd,plugin_root:str(root)
+def attribute(*a,**k):
+    global active
+    active='attribute'
+    try: return old_attr(*a,**k)
+    finally: active=None
+def hint(*a,**k):
+    global active
+    active='hint'
+    try: return old_hint(*a,**k)
+    finally: active=None
+m.attribute_root=attribute;m.rebind_line=hint
+output=io.StringIO()
+def invoke():
+    sys.stdin=io.StringIO(json.dumps(payload))
+    with __import__('contextlib').redirect_stdout(output): rc=m.bind(args())
+    t.assertEqual(rc,0)
+    return store.load()['bind_observation']
+"""
+        FifoCallersTests._child(self,setup+body)
+
+    def test_hook_stall_points_return_within_bound(self):
+        for stage in ('discovery','lookup','realpath','hint'):
+            with self.subTest(stage=stage):
+                self._b7_hook_probe(f"""
+stage={stage!r};realpath=m.os.path.realpath
+if stage=='discovery': m.discover_root_like_cli=lambda operand,cwd,plugin_root:blocked()
+def real(path,*a,**k):
+    if stage=='realpath' and active=='attribute' and str(path)==str(root): blocked()
+    return realpath(path,*a,**k)
+def reading(fd,*a,**k):
+    if fd in fds and ((stage=='lookup' and active=='attribute') or (stage=='hint' and active=='hint')): blocked()
+    return raw_read(fd,*a,**k)
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',reading),mock.patch.object(m.os.path,'realpath',real):
+    start=time.monotonic();observation=invoke()
+    t.assertLess(time.monotonic()-start,1.5);t.assertTrue(entered.is_set())
+if stage=='hint':
+    t.assertIn('# rebind: incomplete',json.loads(output.getvalue())['hookSpecificOutput']['additionalContext'])
+    t.assertEqual(observation['root_provenance'],'inferred')
+else:
+    t.assertIsNone(observation['root']);t.assertEqual(observation['root_provenance'],'none')
+""")
+
+    def test_hook_budget_is_shared_across_stall_points(self):
+        first_case = """
+first=True;old_read=m.read_index;durations=[]
+def discover(operand,cwd,plugin_root):
+    global first
+    if first: first=False;threading.Event().wait(.6)
+    return str(root)
+def reading(fd,*a,**k):
+    if fd in fds and active=='hint': blocked()
+    return raw_read(fd,*a,**k)
+def read(path):
+    start=time.monotonic();snap=old_read(path)
+    if active=='hint': durations.append(time.monotonic()-start)
+    return snap
+m.discover_root_like_cli=discover;m.read_index=read
+with mock.patch.object(m.os,'open',track_open),mock.patch.object(m.os,'read',reading):
+    start=time.monotonic();invoke();t.assertLess(time.monotonic()-start,1.25)
+t.assertEqual(len(durations),1);t.assertLess(durations[0],.55);t.assertGreater(durations[0],.2)
+t.assertIn('# rebind: incomplete',output.getvalue())
+"""
+        second_case = """
+other=root.parent/'candidate-b';other.mkdir();(other/'INDEX.md').write_text(header+one)
+m.discover_root_like_cli=lambda operand,cwd,plugin_root:str(other)
+by_fd={};delayed=set();original=m.read_index;results=[]
+def opening(path,*a,**k):
+    fd=raw_open(path,*a,**k)
+    if str(path) in (str(index),str(other/'INDEX.md')): by_fd[fd]=str(path);delayed.discard(fd)
+    return fd
+def reading(fd,*a,**k):
+    if fd in by_fd and fd not in delayed: delayed.add(fd);threading.Event().wait(.6)
+    return raw_read(fd,*a,**k)
+def read(path):
+    snap=original(path);results.append((str(path),snap.error));return snap
+m.read_index=read
+with mock.patch.object(m.os,'open',opening),mock.patch.object(m.os,'read',reading):
+    start=time.monotonic();observation=invoke();t.assertLess(time.monotonic()-start,1.15)
+t.assertEqual(len(results),2);t.assertEqual([error for _,error in results],[None,'root-stalled'])
+t.assertEqual({path for path,_ in results},{str(index),str(other/'INDEX.md')})
+t.assertIsNone(observation['root']);t.assertEqual(observation['root_provenance'],'none')
+"""
+
+        for name, body in (("discovery-hint", first_case), ("two-candidates", second_case)):
+            with self.subTest(case=name):
+                self._b7_hook_probe(body)
+
     def setUp(self):
         super().setUp()
         write_index(self.index, row(1) + row(2))

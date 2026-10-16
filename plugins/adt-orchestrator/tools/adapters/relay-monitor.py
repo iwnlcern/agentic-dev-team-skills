@@ -1895,9 +1895,14 @@ def attribute_root(parsed: SubmitParse, cwd: str, note: dict, receipts: list[dic
     operands, directory = indications
     if directory or len({value for _, value, _ in operands}) > 1:
         return None, "none"
-    candidate = os.path.realpath(matches[0])
+    candidate = bounded_root_call(lambda: os.path.realpath(matches[0]))
+    if candidate.kind != "ok":
+        return None, "none"
     for _, value, dynamic in operands:
-        if dynamic or not value or os.path.realpath(os.path.join(cwd, value)) != candidate:
+        if dynamic or not value:
+            return None, "none"
+        normalized = bounded_root_call(lambda value=value: os.path.realpath(os.path.join(cwd, value)))
+        if normalized.kind != "ok" or normalized.value != candidate.value:
             return None, "none"
     return matches[0], "inferred"
 
@@ -2007,72 +2012,73 @@ def bind(args) -> int:
                 print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
                 return 1
             return 0
-    try:
-        payload = json.load(sys.stdin)
-    except (ValueError, OSError, RecursionError):
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-    session = resolve_session(args, payload)
-    if not valid_session_id(session):
-        return 0
-    if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
-        return 0
-    tool_input = payload.get("tool_input")
-    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
-    if not isinstance(command, str):
-        return 0
-    parsed = parse_submit_command(command)
-    if not parsed.ok and not names_submit_verb(command):
-        return 0
-    receipts = extract_receipts(payload.get("tool_response"))
-    receipts = [r for r in receipts if isinstance(r.get("path"), str)]
-    if not receipts:
-        return 0
-    indications = root_indications(command)
-    cwd = payload.get("cwd") or os.getcwd()
-    if not isinstance(cwd, str):
-        cwd = os.getcwd()
-    store = NoteStore(session)
-    call = call_identity(session, payload)
-    reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
-    if parsed.ok:
-        base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
-        discovered = discover_root_bounded(parsed.root_operand, base, args.plugin_root)
-        root = discovered.value if discovered.kind == "ok" else None
-        if discovered.kind == "stalled":
-            reason = "root-stalled"
-        elif root is None:
-            reason = "no-root"
-        elif len(receipts) != 1:
-            reason = "ambiguous-receipt"
-        else:
-            ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
-            if ok:
+    with root_budget():
+        try:
+            payload = json.load(sys.stdin)
+        except (ValueError, OSError, RecursionError):
+            return 0
+        if not isinstance(payload, dict):
+            return 0
+        session = resolve_session(args, payload)
+        if not valid_session_id(session):
+            return 0
+        if payload.get("hook_event_name") != "PostToolUse" or "tool_response" not in payload:
+            return 0
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+        if not isinstance(command, str):
+            return 0
+        parsed = parse_submit_command(command)
+        if not parsed.ok and not names_submit_verb(command):
+            return 0
+        receipts = extract_receipts(payload.get("tool_response"))
+        receipts = [r for r in receipts if isinstance(r.get("path"), str)]
+        if not receipts:
+            return 0
+        indications = root_indications(command)
+        cwd = payload.get("cwd") or os.getcwd()
+        if not isinstance(cwd, str):
+            cwd = os.getcwd()
+        store = NoteStore(session)
+        call = call_identity(session, payload)
+        reason = parsed.reason if parsed.reason != "no-submit" else "submit-near-miss"
+        if parsed.ok:
+            base = os.path.join(cwd, parsed.cd_prefix) if parsed.cd_prefix else cwd
+            discovered = discover_root_bounded(parsed.root_operand, base, args.plugin_root)
+            root = discovered.value if discovered.kind == "ok" else None
+            if discovered.kind == "stalled":
+                reason = "root-stalled"
+            elif root is None:
+                reason = "no-root"
+            elif len(receipts) != 1:
+                reason = "ambiguous-receipt"
+            else:
+                ok, reason = bind_from_receipt(store, root=root, receipt_path=receipts[0]["path"], key_seat=seat_from_key(parsed.key), source="hook", call=call)
+                if ok:
+                    return 0
+        observed = store.load()
+        before = binding_key(observed)
+        root, provenance = attribute_root(parsed, cwd, observed, receipts, args.plugin_root, indications)
+        with store.state_lock():
+            note = store.load()
+            if call and call in note.get("handled_calls", []):
                 return 0
-    observed = store.load()
-    before = binding_key(observed)
-    root, provenance = attribute_root(parsed, cwd, observed, receipts, args.plugin_root, indications)
-    with store.state_lock():
-        note = store.load()
-        if call and call in note.get("handled_calls", []):
-            return 0
-        if binding_key(note) != before:
-            _remember_call(note, call)
+            if binding_key(note) != before:
+                _remember_call(note, call)
+                store.save(note)
+                return 0
+            if not record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
+                return 0
             store.save(note)
-            return 0
-        if not record_observation(note, reason=reason, receipts=[r["path"] for r in receipts], root=root, provenance=provenance, call=call, command_roots=[raw for raw, _, _ in indications[0]]):
-            return 0
-        store.save(note)
-        seq = note["observation_seq"]
-    hint = rebind_line(note, session)
-    with store.state_lock():
-        current = store.load()
-        if binding_key(current) != before or (current.get("bind_observation") or {}).get("seq") != seq:
-            return 0
-    if hint:
-        print(hook_context(hint).decode("utf-8"), flush=True)
-    return 0
+            seq = note["observation_seq"]
+        hint = rebind_line(note, session)
+        with store.state_lock():
+            current = store.load()
+            if binding_key(current) != before or (current.get("bind_observation") or {}).get("seq") != seq:
+                return 0
+        if hint:
+            print(hook_context(hint).decode("utf-8"), flush=True)
+        return 0
 
 
 
