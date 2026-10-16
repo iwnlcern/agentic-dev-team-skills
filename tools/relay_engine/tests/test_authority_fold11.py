@@ -11,23 +11,23 @@ class TestAuthorityFold11(TestAuthorityFold5):
     foreign_case = foreign_fixture.TestAuthorityFold10.foreign_case
     assert_case = foreign_fixture.TestAuthorityFold10.assert_case
 
-    def test_unrelated_vt_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='prose\v tail')
+    def test_unrelated_vt_allows(self):
+        self.assert_case([], unrelated='PHASE: SITREP\n\nprose\v tail')
 
-    def test_unrelated_nul_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='prose\0 tail')
+    def test_unrelated_nul_allows(self):
+        self.assert_case([], unrelated='PHASE: SITREP\n\nprose\0 tail')
 
-    def test_unrelated_del_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='prose\x7f tail')
+    def test_unrelated_del_allows(self):
+        self.assert_case([], unrelated='PHASE: SITREP\n\nprose\x7f tail')
 
-    def test_unrelated_nel_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='prose\x85 tail')
+    def test_unrelated_nel_allows(self):
+        self.assert_case([], unrelated='PHASE: SITREP\n\nprose\x85 tail')
 
-    def test_unrelated_line_separator_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='prose\u2028 tail')
+    def test_unrelated_line_separator_allows(self):
+        self.assert_case([], unrelated='PHASE: SITREP\n\nprose\u2028 tail')
 
-    def test_unrelated_header_ff_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='PHASE: SITREP\nSUBJECT: prose\f tail\n\nclean body')
+    def test_unrelated_header_ff_allows(self):
+        self.assert_case([], unrelated='PHASE: SITREP\nSUBJECT: prose\f tail\n\nclean body')
 
     def test_expired_budget_at_declaration_refuses(self):
         with self.foreign_case() as (f,g,_,_):

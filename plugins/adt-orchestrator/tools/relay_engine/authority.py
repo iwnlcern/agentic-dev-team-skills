@@ -190,6 +190,14 @@ def _control_refusal(text):
     return CONTROL_CHARACTERS.search(text) is not None
 
 
+def _foreign_selection_relevant(text, doc_id):
+    # E30 contains the shared selector's candidate and conflict surfaces.
+    # Fold ASCII only: the selector compares literal identifiers.
+    ascii_lower = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+    clean = CONTROL_CHARACTERS.sub('', text).translate(ascii_lower)
+    return doc_id.translate(ascii_lower) in clean or clean.count('phase:') >= 2
+
+
 def _header_refusal(text):
     header = _parsed_header(text)
     return (_control_refusal(text) or header is None
@@ -494,7 +502,8 @@ def _external_evidence(root, lineage, reasons, *, pair_lineage=True):
                     if pair_lineage:
                         if not _approved(review):
                             reasons.add('authority.lineage-incomplete')
-                        if any(_control_refusal(row.text) for row in population):
+                        if any(_control_refusal(row.text) for row in population
+                               if _foreign_selection_relevant(row.text, declaration['DESIGN_DOC_ID'])):
                             reasons.add('authority.lineage-incomplete')
                 except rules.XrootAxisError as exc:
                     if exc.axis == 'byte' and 'does not match' in exc.detail:

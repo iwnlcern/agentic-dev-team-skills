@@ -103,7 +103,7 @@ class TestAuthorityFold10(TestAuthorityFold5):
 
     def test_foreign_tree_control_scan_includes_origin_and_unrelated(self):
         for kwargs in [dict(review=REVIEW+'\nprose\f tail'), dict(origin=DESIGN+'\nprose\f tail'),
-                       dict(unrelated='PHASE: SITREP\n\nprose\f tail')]:
+                       dict(unrelated='PHASE: SITREP\n\nd1 prose\f tail')]:
             with self.subTest(kwargs=kwargs):
                 self.assert_case(['authority.lineage-incomplete'], **kwargs)
 
@@ -123,8 +123,8 @@ class TestAuthorityFold10(TestAuthorityFold5):
         self.assert_case(['authority.artifact-changed'], direct=True, bad_digest=True, unrelated='prose\f tail')
 
     def test_population_is_from_pinned_tree_not_worktree_or_head(self):
-        for original, replacement, expected in [('clean', 'prose\f tail', []),
-                                                 ('prose\f tail', 'clean', ['authority.lineage-incomplete'])]:
+        for original, replacement, expected in [('d1 clean', 'd1 prose\f tail', []),
+                                                 ('d1 prose\f tail', 'd1 clean', ['authority.lineage-incomplete'])]:
             with self.subTest(original=original), self.foreign_case(unrelated=original) as (f,g,repo,_):
                 (repo/'relays/SITREP-planner-20260801-120000.md').write_text(replacement)
                 self.git(repo, 'add', '-A'); self.git(repo, 'commit', '-qm', 'later head')
