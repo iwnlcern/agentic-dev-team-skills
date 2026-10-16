@@ -2428,7 +2428,16 @@ FALLBACK_OVERRIDE_TEXT = (
 )
 
 
-def arming_text(plugin_root: str, session: str, resume: bool) -> str:
+CODEX_SOURCES: tuple[str, ...] = ("startup", "resume", "clear", "compact", "fork")
+
+
+def source_label(source: object) -> str | None:
+    if not isinstance(source, str) or source not in CODEX_SOURCES:
+        return "restart"
+    return None if source == "startup" else source
+
+
+def arming_text(plugin_root: str, session: str, label: str | None) -> str:
     cmd = (
         f"python3 "
         f'"{plugin_root}/tools/adapters/relay-monitor.py" '
@@ -2436,32 +2445,40 @@ def arming_text(plugin_root: str, session: str, resume: bool) -> str:
         f"--plugin-root "
         f'"{plugin_root}"'
     )
-    head = (
-        "This session resumed. First call the `monitor` tool "
-        "with action `list`; only if no watch is running the "
-        "relay-monitor command below, "
-        if resume
-        else "On this boot turn, "
+    arming = (
+        "If the `monitor` tool is present in your advertised tool surface "
+        "(the complete capability surface exposed to you, including nested "
+        "code-mode definitions): "
+        + ("On this boot turn, first " if label is None else "")
+        + "call the `monitor` tool with action `list`; only if no watch is "
+        "running a `relay-monitor.py` "
+        f"`follow --host codex --session {session}` command, "
+        "call the `monitor` tool with action `start`, "
+        f"command `{cmd}`, and description "
+        "`Relay arrivals for the seat bound to this session`"
     )
+    if label is None:
+        return (
+            arming
+            + "; then call the `monitor` tool with action `list` to confirm "
+            "the watch id; then run `python3 "
+            f'"{plugin_root}/tools/adapters/relay-monitor.py" '
+            f"status --session {session}` through the shell and quote its "
+            "line as the delivery state in your acknowledgment. "
+            "If `monitor` is absent from your advertised tool surface, make "
+            "no call against it: report `unavailable: monitor-tool` as the "
+            "delivery state and `fallback: pointer` in your acknowledgment, "
+            "and rely on the operator's pointer block."
+        )
     return (
-        "If the `monitor` tool is present in your advertised "
-        "tool surface (the complete capability surface expose"
-        "d to you, including nested code-mode definitions): "
-        + head
-        + f"call the `monitor` tool with action `start`, "
-        f"command `{cmd}`, and description `Relay arrivals "
-        f"for the seat bound to this session`; "
-        f"then call the `monitor` tool with action `list` to "
-        f"confirm the watch id; then run `python3 "
-        f'"{plugin_root}/tools/adapters/relay-monitor.py" '
-        f"status --session {session}` "
-        "through the shell and quote its line as the delivery"
-        " state in your acknowledgment. "
-        "If `monitor` is absent from your advertised tool sur"
-        "face, make no call against it: report `unavailable: "
-        "monitor-tool` as the delivery state and `fallback: p"
-        "ointer` in your acknowledgment, and rely on the oper"
-        "ator's pointer block."
+        f"This session continues after `{label}`; it is not a new boot, "
+        "and it needs no acknowledgment. "
+        + arming
+        + ". If `monitor` is absent from your advertised tool surface, "
+        "make no call against it; delivery stays `unavailable: monitor-tool`, "
+        "with the operator's pointer block as the fallback. "
+        "Then carry on with the work that was in progress before this point, "
+        "in this same turn; if nothing was in progress, wait as before."
     )
 
 
@@ -2500,7 +2517,7 @@ def session_start(args) -> int:
             lines.append(
                 FALLBACK_OVERRIDE_TEXT
                 if override
-                else arming_text(plugin_root, session, payload.get("source") == "resume")
+                else arming_text(plugin_root, session, source_label(payload.get("source")))
             )
         else:
             store.update(lambda n: n.update({"host": "claude-code"}))
