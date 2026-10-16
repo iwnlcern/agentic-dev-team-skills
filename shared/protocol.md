@@ -40,14 +40,18 @@ Addressing fields:
 ```text
 FROM: <OWNER>.<role> | orchestrator | operator
 TO:   <OWNER>.<role> [, ...]    # acting addressee(s); owns the reply; replies address FROM
-CC:   <OWNER>.<role> [, ...]    # context only; no phase authority, no action, no reply obligation
+CC:   <OWNER>.<role> [, ...]    # context only; no phase authority, no reply obligation; never pauses work in progress
 ```
 
 Roles in addresses are lowercase: `master-planner`, `master-reviewer`, `domain-planner`, `domain-reviewer`, `orchestrator-planner`, `orchestrator-reviewer`, `pair-planner`, `pair-implementer`, plus legacy `planner`, `implementer`, and `reviewer` (pair-tier-equivalent, accepted permanently). The tier lives in the role word; there is no tier header field. Review panels are not addressable roles; they report inline to the planner that spawned them. `operator` and `orchestrator` are special addresses. In a standalone run with no orchestrator seat, `FROM: orchestrator` is not a valid authoring address; a relay claiming it grants nothing. Addresses are compared case-insensitively and normalized to lowercase canonical form; non-canonical case may lint as a warning, but it must not split lineage ownership. Use `TO: operator` when a relay is explicitly asking for a human/operator judgment.
 
 `TO` is required on orchestrator-tier or multi-pair relays and on any relay containing a live dispatch token. A missing `TO` means legacy phase-implied routing; such relays may lint dirty when a tool needs explicit routing.
 
-Only the `TO` addressee may act on or treat a relay as binding. A CC'd relay never changes your phase, authority, or scope. A relay where your address appears in neither `TO` nor `CC` is not yours: it grants no context obligation, no phase change, no authority, and no action. If a CC'd or non-addressed relay seems to require action from you, relay a question to its `FROM` instead of acting.
+Only the `TO` addressee may act on or treat a relay as binding.
+A CC'd relay never changes your phase, authority, or scope, you owe it no reply, and reading one never stops or pauses the work you have in progress.
+A CC'd relay can still be evidence: if it shows that a stop condition of your own current dispatch has been met, apply that stop under that dispatch, as you would for any other evidence.
+A relay where your address appears in neither `TO` nor `CC` is not yours: it grants no context obligation, no phase change, and no authority, and it asks nothing of you.
+If a CC'd or non-addressed relay seems to require action from you, relay a question to its `FROM` instead of acting; that question is yours to raise, not a reply the relay is owed.
 
 `TO` cardinality depends on relay class:
 
@@ -485,7 +489,7 @@ When a task is under operator or schedule pressure, explicitly reject these obse
 | `It is tiny / one file / obvious.` | Size does not override hard escalation triggers, phase scope, evidence target, or operator judgment categories. |
 | `The out-of-scope file is just a small integration hook the acceptance criterion needs.` | Deviation. Run SCOPE_DIFF, mark it OUT, relay to the orchestrator (or the operator when no orchestrator seat exists) with the justification; do not self-dispatch. |
 | `Tests are green and the dispatch was valid, so I can merge.` | No. Merge has its own human/operator gate and its own addressee. IMPL exits with branch/PR/report unless a separate merge-authorization relay exists. |
-| `I was CC'd, so this is my task.` | CC grants nothing: no phase change, no authority, no action. Act only on relays whose `TO` includes your address; if a CC'd relay seems to require action from you, relay a question to its `FROM` instead. |
+| `I was CC'd, so this is my task.` | CC grants nothing: no phase change, no authority, no reply obligation. Act only on relays whose `TO` includes your address, and carry on with your own work in progress; if a CC'd relay seems to require action from you, relay a question to its `FROM` instead. |
 | `I saw the relay in context, so it is mine.` | No. Address membership is the only thing that makes a relay yours. If your address is absent from both `TO` and `CC`, do not interpret, approve, dispatch, or act; ask `FROM` where it should be routed. |
 | `The operator asked me to write this on behalf of someone else.` | Do not proxy-author. Keep `FROM` as your own seat and route the request to the grantor/operator/orchestrator to write their own authorization. |
 
@@ -680,15 +684,22 @@ The lint exemption is stated as a rule, not "normally": the INDEX is exempt from
 
 Where a seat's host is armed, an admitted relay that names the seat in `TO` or `CC` is delivered to the session as one event line carrying the index row for that relay; the line is a pointer with exactly the standing of a hand-relayed pointer block.
 An arrival is E0.
-The row is a locator, not proof that the file is available: on an engine root the seat reads the relay through `tools/relay show --body <file>`, and on a hand root reads the file; if the read fails, the seat reports the arrival as `unavailable-file` in its next relay and does not act.
+The row is a locator, not proof that the file is available: on an engine root the seat reads the relay through `tools/relay show --body <file>`, and on a hand root reads the file.
+If the read fails, the seat reports the arrival as `unavailable-file` in its next relay and does not act on that relay.
 The event line is never an authority carrier and cannot widen a phase or authorize implementation.
 On the fork host a notification may carry a `MONITOR-NOTICE: loss` line (records the host dropped, with counts and no locator); the seat then runs `relay-monitor.py replay` through the shell tool, which re-prints every addressed row after each retained floor for every root and seat this session has bound, up to a bound fixed at the first call, without moving progress; the seat checks whether each replayed row's work has already been handled before acting.
 Only lines that parse as a JSON object carrying the ten index cells plus `root` are rows; a `MONITOR-NOTICE:` line and the tagged stderr block are never rows.
 A row over 4 KiB of text is unsupported for monitor delivery on the fork host and is recovered through `replay`.
-A `TO` addressee acts immediately under the relay's own authority; a `CC` arrival is context: read it and end the turn with nothing filed.
+A relay arrival never ends work in progress: read the relay file, then carry on with what you were doing; a seat with nothing in progress ends its turn as usual.
+A `TO` addressee acts under the relay's own authority: an idle seat acts at once, and a seat busy on other addressed work applies at once a relay that halts or changes that work and takes any other relay up at its next safe checkpoint (a finished command, a commit, or a filed relay).
+For a `TO` addressee, a relay that names the dispatch, bundle, branch or PR of the work in progress always counts as changing that work, and when the new relay and the work in progress compete, the seat asks its governing seat which comes first.
+A `CC` arrival is context only: it grants no authority and asks for no reply, so nothing is filed in response to it.
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
 A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it, and every later filing refreshes the binding without moving delivery progress.
-Arming is automatic on Claude Code through the plugin monitor at every session start and resume; on Codex the SessionStart hook always supplies the arming context unless `ADT_CODEX_FORK=0`, the boot turn arms only when the `monitor` tool is in its advertised surface, and otherwise reports `unavailable: monitor-tool` and falls back to the pointer.
+Arming is automatic on Claude Code through the plugin monitor at every session start and resume.
+On Codex the SessionStart hook supplies the arming context unless `ADT_CODEX_FORK=0`.
+At `startup` that context is the boot wording: the boot turn arms only when the `monitor` tool is in its advertised surface, and otherwise reports `unavailable: monitor-tool` and falls back to the pointer.
+After `resume`, `clear`, `compact` or `fork` it is the non-boot wording: the session is not a new boot and needs no acknowledgment, a watch starts only if none of this session's is running (without the `monitor` tool, delivery stays `unavailable: monitor-tool` with the pointer as fallback), and the seat carries on with the work in progress in the same turn.
 The boot acknowledgment states the delivery state as a measured claim.
 The boot acknowledgment reuses the boot relay's own `DISPATCH_ID` verbatim and sets `IN_REPLY_TO` to the boot relay's root-relative path.
 On an engine root, submit it with `--admits-against <root-relative path of the boot relay>`; the engine refuses the acknowledgment without that edge.
