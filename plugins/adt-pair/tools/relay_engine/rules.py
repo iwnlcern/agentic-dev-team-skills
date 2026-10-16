@@ -3909,7 +3909,7 @@ def xroot_authority(
     repo: Path,
     root_tree: str,
     declaration: Dict[str, str],
-) -> None:
+) -> tuple[XrootRelay, XrootRelay]:
     relays = xroot_relays(repo, root_tree)
     doc_id = declaration["DESIGN_DOC_ID"]
     origins = [
@@ -3965,6 +3965,7 @@ def xroot_authority(
             "authority-verdict",
             f"selected review {review.name} verdict {verdict} is not approve",
         )
+    return origin, review
 
 
 def xroot_plan_gate(
@@ -4034,7 +4035,7 @@ def xroot_plan_gate(
     return True
 
 
-def xroot_verify(path: Path, declaration: Dict[str, str]) -> None:
+def xroot_verify(path: Path, declaration: Dict[str, str]) -> tuple[XrootRelay, XrootRelay]:
     repo, commit = xroot_repository_and_commit(path, declaration)
     relay_tree, blob_oid = xroot_paths(repo, commit, declaration)
     declared_digest = declaration["DESIGN_SHA256"]
@@ -4045,7 +4046,7 @@ def xroot_verify(path: Path, declaration: Dict[str, str]) -> None:
     blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
     if hashlib.sha256(blob).hexdigest() != declared_digest:
         raise XrootAxisError("byte", "DESIGN_SHA256 does not match pinned blob bytes")
-    xroot_authority(repo, relay_tree, declaration)
+    return xroot_authority(repo, relay_tree, declaration)
 
 
 def xroot_design_gate(

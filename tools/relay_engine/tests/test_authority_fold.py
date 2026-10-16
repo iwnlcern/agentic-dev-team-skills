@@ -122,7 +122,10 @@ class TestAuthorityFold(LedgerFixture):
     def test_M4_changed_cross_root_bytes_deny_with_unchanged_control(self):
         import xrootfixgen
         with tempfile.TemporaryDirectory() as foreign:
-            repo,commit,digest=xrootfixgen._foreign_repo(Path(foreign))
+            def complete_review(repo):
+                path = repo/'relays'/xrootfixgen.REVIEW_NAME
+                path.write_text(path.read_text()+'RUN_ID: fixture\nSUBJECT: foreign review\n')
+            repo,commit,digest=xrootfixgen._foreign_repo(Path(foreign), complete_review)
             xrootfixgen._init_repo(Path(self.root.path))
             def grant_for(commit, suffix):
                 fields=xrootfixgen._plan_fields(repo,commit,digest)

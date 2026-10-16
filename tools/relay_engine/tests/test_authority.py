@@ -335,7 +335,10 @@ class TestAuthority(LedgerFixture):
         import xrootfixgen
         from relay_engine import paths
         with tempfile.TemporaryDirectory() as foreign:
-            repo,commit,digest=xrootfixgen._foreign_repo(Path(foreign))
+            def complete_review(repo):
+                path = repo/'relays'/xrootfixgen.REVIEW_NAME
+                path.write_text(path.read_text()+'RUN_ID: fixture\nSUBJECT: foreign review\n')
+            repo,commit,digest=xrootfixgen._foreign_repo(Path(foreign), complete_review)
             xrootfixgen._init_repo(Path(self.root.path))
             fields=xrootfixgen._plan_fields(repo,commit,digest)
             extra='\n'.join(k+': '+v for k,v in fields if k.startswith('DESIGN_'))

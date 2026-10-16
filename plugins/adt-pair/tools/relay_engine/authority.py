@@ -474,7 +474,7 @@ def read_artifact(root, locator):
     return snapshots[0]
 
 
-def _external_evidence(root, lineage, reasons):
+def _external_evidence(root, lineage, reasons, *, pair_lineage=True):
     # One deadline covers every Git query across every declared external edge.
     token = rules._XROOT_BUDGET.set((time.monotonic()+5, []))
     seen = set()
@@ -490,7 +490,14 @@ def _external_evidence(root, lineage, reasons):
                     reasons.add('authority.could-not-evaluate')
                     continue
                 try:
-                    rules.xroot_verify(root,declaration)
+                    _origin, review = rules.xroot_verify(root,declaration)
+                    if pair_lineage:
+                        if not _approved(review):
+                            reasons.add('authority.lineage-incomplete')
+                        repo, commit = rules.xroot_repository_and_commit(root, declaration)
+                        relay_tree, _blob = rules.xroot_paths(repo, commit, declaration)
+                        if any(_control_refusal(row.text) for row in rules.xroot_relays(repo, relay_tree)):
+                            reasons.add('authority.lineage-incomplete')
                 except rules.XrootAxisError as exc:
                     if exc.axis == 'byte' and 'does not match' in exc.detail:
                         reasons.add('authority.artifact-changed')
@@ -562,7 +569,8 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     if not root_path.is_dir() or ledger.execute("SELECT value FROM meta WHERE key='run_id'").fetchone() is None:
         reasons.add('authority.could-not-evaluate')
     else:
-        _external_evidence(root_path,lineage,reasons)
+        _external_evidence(root_path,lineage,reasons,
+                           pair_lineage=not rules.from_is_direct_authority(grant.fields))
         for locator,digest in sorted(required.items()):
             try:actual=hashlib.sha256(read_artifact(root_path,locator)).hexdigest()
             except (OSError,ValueError):reasons.add('authority.could-not-evaluate');continue
