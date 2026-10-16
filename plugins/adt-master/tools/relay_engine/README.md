@@ -102,9 +102,11 @@ Do not use the administrative compatibility as a record-operation downgrade or a
    `relay verify`.
 5. Stop the designated writer with `relay daemon stop --root <root>`.
 
-Use `relay lint --relay-root <root>` to check an engine-rendered relay tree. It
-considers only paths matching the engine's rendered filename grammar and is not
-a substitute for the standalone `relay-lint` when checking hand-authored trees.
+Use `relay lint --relay-root <root>` for the managed root integrity report.
+Record-known relays are not re-judged by the report.
+Use `--history-audit` to see current sweep findings about that history as warnings.
+Stored admission judgments and current authority checks are separate.
+The report checks recorded bytes, foreign entries and indexes, while keeping recorded relays available as lineage operands.
 Migration commands inventory legacy material before any explicit cutover, and
 reconcile marks bypassed material without presenting it as a supported creation
 path.

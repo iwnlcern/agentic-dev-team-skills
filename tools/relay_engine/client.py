@@ -274,7 +274,7 @@ def _context_snapshot(value):
 
 def _context_entry(value):
     if not isinstance(value, dict) or set(value) != {
-            "path", "body_sha256", "origin"}:
+            "path", "body_sha256", "origin", "judgment", "finding_count"}:
         raise ValueError("malformed context page")
     path = value["path"]
     if (not isinstance(path, str) or not path or path.startswith("/") or
@@ -287,6 +287,12 @@ def _context_entry(value):
         raise ValueError("malformed context page") from exc
     if (not strings.valid_fp(value["body_sha256"]) or
             value["origin"] not in {"daemon", "hand", "adopted"}):
+        raise ValueError("malformed context page")
+    count = value["finding_count"]
+    if (not isinstance(value["judgment"], str) or
+            value["judgment"] not in {"none", "judged", "failed", "exempt"} or
+            not isinstance(count, int) or isinstance(count, bool) or count < 0 or
+            (value["judgment"] != "judged" and count != 0)):
         raise ValueError("malformed context page")
     return dict(value)
 

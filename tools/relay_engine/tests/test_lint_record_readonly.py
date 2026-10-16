@@ -79,10 +79,13 @@ def _insert_population(root_name):
     return entries
 
 
-def _stopped_root(root_name, *, populated=False):
+def _stopped_root(root_name, *, populated=False, include_judgment=False):
     running = RunningDaemon(root_name, DID).start()
     try:
         expected_entries = _insert_population(root_name) if populated else []
+        if include_judgment:
+            expected_entries = [dict(entry, judgment="none", finding_count=0)
+                                for entry in expected_entries]
         live = client.lint_context(
             root_name, cid=dict(DID, install="/readonly-client"))
         if populated:
@@ -142,7 +145,7 @@ class TestLintRecordReadonly(unittest.TestCase):
 
     def test_stopped_daemon_matches_live_population_without_mutation(self):
         with tempfile.TemporaryDirectory() as root_name:
-            live = _stopped_root(root_name, populated=True)
+            live = _stopped_root(root_name, populated=True, include_judgment=True)
             before = _tree_digest(root_name)
 
             stopped = self._read(root_name)
@@ -152,7 +155,7 @@ class TestLintRecordReadonly(unittest.TestCase):
 
     def test_success_opens_record_read_only(self):
         with tempfile.TemporaryDirectory() as root_name:
-            live = _stopped_root(root_name, populated=True)
+            live = _stopped_root(root_name, populated=True, include_judgment=True)
             record = Path(root_name, ".engine/ledger.db")
             record.chmod(0o400)
             before = _tree_digest(root_name)

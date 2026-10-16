@@ -35,6 +35,14 @@ class ExistingTargets:
 
 
 INVENTORY = {
+    "engine-root-admission-summary": "engine-root admission: {judged} judged at admission, {with_findings} with findings, {failed} judging failed, {unevaluated} never judged, {exempt} engine-authored",
+    "notice-name-caution": "caution: this name is also an engine notice label; registration or declaration grants no authority",
+    "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
+    "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
+    "authority.grant-shape-absent": "MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing",
+    "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
+    "external.could-not-evaluate": "{gate} could not be evaluated: {cause}",
+    "routing.unknown-address": "address not on this root's roster: {addresses}; known: {known}; notice to the top seat: {notice}",
     "explain-heading": "{code}",
     "explain-cause": "cause: {cause}",
     "explain-remedy": "remedy: {remedy}",
@@ -60,14 +68,14 @@ _CODE_VALUES = {
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
     "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN",
     "E-VERSION-MISMATCH",
-    "seat-occupied", "commission-conflict", "commission-late",
+    "no-top-seat", "seat-occupied", "commission-conflict", "commission-late",
     "run-id-mismatch", "run-id-uninitialized", "run-id-invalid",
     "E-FRAMING", "E-WIRE-VERSION", "E-WIRE-OP", "E-WIRE-ARGS",
     "E-DAEMON-STOPPING",
     "E-CONTEXT-BUDGET",
 }
 _OPS = {
-    "submit", "seat.register", "seat.replace", "seat.stand_down",
+    "seat.declare", "submit", "seat.register", "seat.replace", "seat.stand_down",
     "seat.show", "show", "status", "roster", "commission", "adopt_commission",
     "export_ruling", "adopt_ruling", "render", "verify", "reconcile",
     "migrate.check", "lint.context", "daemon.stop",
@@ -185,6 +193,19 @@ _VALIDATORS.update({
                                  "root escape"}),
     ("engine-root-outside-the-record", "path"): _is_root_relative_path,
 })
+
+
+_VALIDATORS.update({
+    ("external.could-not-evaluate", "gate"): lambda value: isinstance(value, str),
+    ("external.could-not-evaluate", "cause"): lambda value: isinstance(value, str),
+    ("routing.unknown-address", "addresses"): lambda value: isinstance(value, str),
+    ("routing.unknown-address", "known"): lambda value: isinstance(value, str),
+    ("routing.unknown-address", "notice"): lambda value: isinstance(value, str),
+})
+
+
+_VALIDATORS.update({('engine-root-admission-summary', field): _is_count
+                    for field in ('judged', 'with_findings', 'failed', 'unevaluated', 'exempt')})
 
 
 def register_inventory(entries, validators):

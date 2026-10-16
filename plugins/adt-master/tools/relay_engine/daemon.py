@@ -21,9 +21,9 @@ import uuid
 from pathlib import Path
 
 from relay_engine import (commission, cycles, errors, migrate, reconcile,
-                          rules, seats, strings, supersede, version)
+                          rules, seats, strings, supersede, version, judging, roster, authority)
 from relay_engine.ledger import SCHEMA_VERSION, init_schema, open_ledger
-from relay_engine.ledger import admit, epoch_state
+from relay_engine.ledger import admit, epoch_state, ensure_additive_schema, judgment_for, judgment_fingerprint
 from relay_engine.envelope import body_sha256, content_hash, parse_draft
 from relay_engine.render import index_rows, render_index, render_relay
 from relay_engine.paths import Root, TempWrite, ensure_engine_dir
@@ -125,6 +125,8 @@ def _rejected(value):
 _SCHEMAS = {
     "submit": ({"envelope", "body_b64", "body_sha256", "content_hash",
                 "submission_id", "tag"}, {"admits_against"}),
+    "authority.check": ({"relay", "seat", "action"}, set()),
+    "seat.declare": ({"entries", "tag"}, set()),
     "seat.register": ({"address", "role_word"},
                       {"dispatch_ref", "replace"}),
     "seat.replace": ({"address", "role_word"},
@@ -163,6 +165,10 @@ def _validate_args(op, args):
         if key == "envelope":
             if not isinstance(value, dict):
                 raise _args_fault(op, "envelope:object")
+        elif key == "entries":
+            if (not isinstance(value, list) or any(not isinstance(entry, list)
+                    or len(entry) != 2 or any(not isinstance(v, str) for v in entry) for entry in value)):
+                raise _args_fault(op, "entries:array")
         elif key in {"replace", "body"}:
             if not isinstance(value, bool):
                 raise _args_fault(op, "replace:boolean")
@@ -443,6 +449,27 @@ def _readonly_entry(row):
     return {"path": path, "body_sha256": digest, "origin": origin}
 
 
+def _context_entries(ledger, rows):
+    tables = {row[0] for row in ledger.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    has_judgments = {'admission_judgments', 'admission_findings'} <= tables
+    entries = []
+    for seq, path, digest, origin in rows:
+        entry = _readonly_entry((path, digest, origin))
+        judgment = None
+        if has_judgments:
+            judgment = ledger.execute(
+                "SELECT status,(SELECT COUNT(*) FROM admission_findings WHERE relay_seq=?) "
+                "FROM admission_judgments WHERE relay_seq=?", (seq, seq)).fetchone()
+        status, count = judgment if judgment else ('none', 0)
+        if (status not in {'none', 'judged', 'failed', 'exempt'} or
+                not isinstance(count, int) or count < 0 or
+                (status != 'judged' and count != 0)):
+            raise ValueError("malformed judgment context")
+        entry.update(judgment=status, finding_count=count)
+        entries.append(entry)
+    return entries
+
+
 def _record_identity(info):
     return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
             stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid,
@@ -498,10 +525,10 @@ def read_lint_context(root_name):
                 snapshot < 0):
             raise ValueError("malformed record snapshot")
         rows = record.execute(
-            "SELECT rendered_path,body_sha256,origin FROM relays "
+            "SELECT seq,rendered_path,body_sha256,origin FROM relays "
             "WHERE seq<=? ORDER BY CAST(rendered_path AS BLOB)",
             (snapshot,)).fetchall()
-        entries = [_readonly_entry(row) for row in rows]
+        entries = _context_entries(record, rows)
         previous = None
         for entry in entries:
             current = entry["path"].encode("utf-8")
@@ -787,7 +814,7 @@ class _SocketService:
             thread.join(2.5)
 
 
-def _submit_handler(ledger, root, args):
+def _submit_handler(ledger, root, args, *, rules_version=None):
     try:
         body = base64.b64decode(args["body_b64"], validate=True)
         envelope = parse_draft(body.decode("utf-8"))
@@ -807,21 +834,42 @@ def _submit_handler(ledger, root, args):
         claimed_body_sha256=args["body_sha256"],
         claimed_content_hash=args["content_hash"],
         admits_against=args.get("admits_against"),
+        judge=lambda ctx: ("judged", judging.judge_candidate(
+            judging.corpus_before(ctx.ledger, ctx.seq), ctx.rendered_path,
+            ctx.envelope, ctx.body, artifact_root=Path(root.path),
+            deadline=time.monotonic() + 5.0)),
+        effects=roster.notice_effect,
+        rules_version=rules_version,
         prechecks=(cycles.callback(),),
         cycle_events=cycle_events,
         supersession_edges=supersession_edges,
         advisories=tuple(cycle_advisories) + tuple(
             supersession_advisories) + rules.advisories_for(envelope))
+    notice = ledger.execute(
+        "SELECT r.seq,r.rendered_path FROM routed_notices n JOIN relays r ON r.seq=n.notice_seq WHERE n.relay_seq=?",
+        (admission.seq,)).fetchone()
     rendered = render_relay(ledger, root, admission.seq)
+    if notice is not None:
+        render_relay(ledger, root, notice[0])
     render_index(root, index_rows(ledger), 10, epoch_state(ledger))
     advisory_row = ledger.execute(
         "SELECT advisories_json FROM relays WHERE seq=?",
         (admission.seq,)).fetchone()
-    return {"path": admission.rendered_path,
+    _status, findings = judgment_for(ledger, admission.seq)
+    if _status == "failed":
+        findings = (rules.Finding("judging.failed", "warn", admission.rendered_path,
+                                  (), {}, strings.render("judging.failed")),)
+    result = {"path": admission.rendered_path,
             "render_state": ("rendered" if rendered.event == "rendered"
                              else "render-conflict"),
             "advisories": json.loads(advisory_row[0]),
-            "duplicate": admission.replay}
+            "duplicate": admission.replay,
+            "findings": [{"id": f.id, "lint_severity": f.lint_severity,
+                          "subject": f.subject, "operands": list(f.operands),
+                          "params": f.params, "message": f.message} for f in findings]}
+    if notice is not None:
+        result["routed_notice"] = notice[1]
+    return result
 
 
 def _lint_context_position(ledger, cursor):
@@ -848,13 +896,12 @@ def _lint_context_position(ledger, cursor):
 def _lint_context_handler(ledger, args, request_id, did):
     snapshot, offset = _lint_context_position(ledger, args.get("cursor"))
     rows = ledger.execute(
-        "SELECT rendered_path,body_sha256,origin FROM relays WHERE seq<=? "
+        "SELECT seq,rendered_path,body_sha256,origin FROM relays WHERE seq<=? "
         "ORDER BY CAST(rendered_path AS BLOB) LIMIT ? OFFSET ?",
         (snapshot, strings.CONTEXT_ENTRY_CAP + 1, offset)).fetchall()
     more = len(rows) > strings.CONTEXT_ENTRY_CAP
     rows = rows[:strings.CONTEXT_ENTRY_CAP]
-    entries = [{"path": row[0], "body_sha256": row[1], "origin": row[2]}
-               for row in rows]
+    entries = _context_entries(ledger, rows)
     page = {"snapshot": str(snapshot), "entries": entries}
     if more:
         page["cursor"] = "%d:%d" % (snapshot, offset + len(entries))
@@ -869,7 +916,16 @@ def _default_handler(ledger, root, state, handlers, request):
     if op in handlers:
         return handlers[op](request["args"])
     if op == "submit":
-        return _submit_handler(ledger, root, request["args"])
+        if "judging_rules_version" not in state:
+            state["judging_rules_version"] = judgment_fingerprint(root)
+        return _submit_handler(ledger, root, request["args"],
+                               rules_version=state["judging_rules_version"])
+    if op == "authority.check":
+        args = request["args"]
+        return authority.check(ledger, root, args["relay"], args["seat"], args["action"])
+    if op == "seat.declare":
+        args = request["args"]
+        return {"results": roster.declare(ledger, root, args["entries"], args["tag"])}
     if op in {"seat.register", "seat.replace"}:
         args = request["args"]
         replacing = op == "seat.replace" or args.get("replace", False)
@@ -956,6 +1012,8 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
             did = _local_identity()
         else:
             did = dict(did)
+        if strings.valid_fp(did.get("fp")):
+            root._judgment_rules_version = did["fp"]
         state = {
             "pid": os.getpid(), "pid_start_time": _pid_start_time(os.getpid()),
             "nonce": str(uuid.uuid4()), "state": "starting",
@@ -980,6 +1038,7 @@ def _run_daemon(root_path, ready_fd, handlers, trace, socket_override,
             fresh_ledger = True
         else:
             ledger = open_ledger(lease.engine_dirfd)
+            ensure_additive_schema(ledger)
         holder["ledger"] = ledger
         _trace(trace, "schema-init")
         context = {"root": root, "lease": lease, "ledger": ledger,

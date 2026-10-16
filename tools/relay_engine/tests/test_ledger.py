@@ -84,7 +84,8 @@ class TestSchemaAndEpoch(LedgerFixture):
                 "SELECT name FROM sqlite_master WHERE type='table'")},
             {"relays", "seat_events", "cycle_events",
              "supersession_edges", "projection_events",
-             "migration_events", "runs", "commissions", "meta"},
+             "migration_events", "runs", "commissions", "meta",
+             "admission_judgments", "admission_findings", "roster", "routed_notices"},
         )
         relay_columns = [row[1] for row in ledger.execute(
             "PRAGMA table_info(relays)")]

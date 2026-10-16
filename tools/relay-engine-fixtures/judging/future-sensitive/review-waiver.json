@@ -1,0 +1,23 @@
+{
+  "case": "review-waiver",
+  "order_divergent": false,
+  "future_sensitive": true,
+  "partition": "future-sensitive",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Pair Planner\nPHASE: DESIGN\nAUTHORITY: design-only\nDISPATCH_ID: candidate\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: r.orchestrator-planner\nTO: p.implementer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\n\n\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Pair Planner\nPHASE: SITREP\nAUTHORITY: report-only\nDISPATCH_ID: waiver\nRUN_ID: r\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: operator\nTO: p.planner\nCC: r.orchestrator-reviewer\nSUBJECT: test candidate\nFINAL_GIT_STATUS_SHORT: clean\nORCH_REVIEW_WAIVER: no reviewer\n\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120100.md",
+  "family": "lineage.review-visibility",
+  "admission_messages": [
+    "must CC"
+  ],
+  "sweep_messages": [],
+  "artifacts": {}
+}

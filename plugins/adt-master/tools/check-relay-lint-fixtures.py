@@ -645,6 +645,8 @@ EXPECTED = A5_EXPECTED + LIFECYCLE_EXPECTED + COMMISSION_EXPECTED + PLANCONTRACT
     ("root", "merge-token/MT7-duplicate-authorization-decoy", 1),
     ("root", "merge-token/MT8-denied-only-no-auth", 1),
     ("root", "merge-token/MT9-cross-dispatch-runroot", 1),
+    ("root", "merge-token/MT10-field-grant-to-planner", 1),
+    ("root", "merge-token/MT11-token-beside-denial", 1),
     ("file", "content/E1-empty-final-git-status.md", 1),
     ("file", "content/E2-empty-actions-git-ref.md", 1),
     ("file", "content/E3-empty-scopediff-live-dispatch.md", 1),
@@ -1045,6 +1047,12 @@ EXPECTED_ERROR_SET = {
     ],
     "merge-token/MT9-cross-dispatch-runroot": [
         "d1/IMPL-report-20260611-121000.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "merge-token/MT10-field-grant-to-planner": [
+        "IMPL-20260611-110001.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
+    ],
+    "merge-token/MT11-token-beside-denial": [
+        "IMPL-20260611-110001.md: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID",
     ],
     "content/E3-empty-scopediff-live-dispatch.md": [
         "FINAL_GIT_STATUS_SHORT carries a placeholder, not content; placeholders are valid only in --templates mode",

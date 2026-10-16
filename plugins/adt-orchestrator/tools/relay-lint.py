@@ -883,6 +883,10 @@ def merge_token_authorized(text: str, fields: Dict[str, str]) -> bool:
         return False
     if not own_line_merge_present(text):
         return False
+    verdicts = merge_authorization_verdict_lines(text)
+    if len(verdicts) > 1 or any(not merge_authorization_positive(key, value)
+                                for _line, key, value in verdicts):
+        return False
     from_addrs = split_addresses(fields.get("FROM"))
     if len(from_addrs) != 1:
         return False
@@ -960,6 +964,9 @@ def merge_authorized(text: str, fields: Dict[str, str]) -> bool:
     if from_low not in {"operator", "orchestrator"} and address_role(from_addr) != "orchestrator-planner":
         # Prevent self-authorization: an Implementer-authored MERGE-GATE relay
         # does not satisfy the gate that polices that Implementer's merge claim.
+        return False
+    to_addrs = split_addresses(fields.get("TO"))
+    if len(to_addrs) != 1 or not is_implementer_address(to_addrs[0]):
         return False
     verdicts = merge_authorization_verdict_lines(text)
     if len(verdicts) > 1:

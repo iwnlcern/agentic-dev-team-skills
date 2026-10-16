@@ -28,7 +28,7 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `lockpath/` | 4 | PLAN_LOCK_ID grammar: old path form, new form, bare id, missing |
 | `mastertier/` | 316 | Master-tier authority chains: charters, commissions, grants, receipts, seat and parent legitimacy |
 | `merge/` | 13 | Merge claims: authorization, canonical machine forms, continuation and whitespace evasions |
-| `merge-token/` | 9 | Merge-token grants: phase binding, grantor and addressee restrictions, inert quoted forms |
+| `merge-token/` | 11 | Merge-token grants: phase binding, grantor and addressee restrictions, inert quoted forms |
 | `orch-review/` | 22 | Orchestrator-reviewer visibility gate over the broad SET, waivers, and exemptions |
 | `p9/` | 2 | P9 block-boundary regressions |
 | `plancontract/` | 18 | plan-shape and revision-ordinal warnings: thresholds, missing locators, inline bodies, explicit-root drafts, ordinal grammar, fence evasion, non-pair carriers |
@@ -39,7 +39,7 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `rowtruth/` | 5 | ROW_TRUTH_CHECK evidence hooks for FOLD_SCOPE and SCOPE_DIFF rows |
 | `xroot/` | 121 | Declared cross-root design edge: both axes, fail-closed, plan-path symmetry, carrier engagement, and hostile-object containment; generated at harness runtime by tools/xrootfixgen.py |
 
-**775 harness-asserted outcomes** across 27 families.
+**777 harness-asserted outcomes** across 27 families.
 
 Two notes on the corpus shape.
 An outcome is one harness assertion, not one file: the lineage-bearing families (`mastertier/`, `design-review/`, `lockdigest/`, and others) stage whole relay-root scenarios — several relay files plus an INDEX per case — because the rules under test judge chains, not single relays.
@@ -206,3 +206,5 @@ The orchestrator-review visibility gate fixtures under `orch-review/` cover the 
 ```
 
 A2 and EX1 currently fail before their waiver/operator-authority assertions: the operator-authored relay in each fixture declares `ROLE: Reviewer`, so the ROLE/FROM anti-proxy check rejects it. Their fixture bytes therefore do not currently demonstrate those positive paths.
+
+MT10 and MT11 reject a field grant addressed to a Planner and a bare merge token beside an explicit denial.

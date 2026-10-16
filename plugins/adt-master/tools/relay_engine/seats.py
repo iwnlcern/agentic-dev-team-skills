@@ -233,3 +233,5 @@ def startup_top_seat(context):
         register(context["ledger"], context["root"], address,
                  context.get("top_role", "Orchestrator Planner"),
                  context.get("top_dispatch"), top=True)
+        from relay_engine import roster
+        roster.designate_top_seat(context["ledger"], address)

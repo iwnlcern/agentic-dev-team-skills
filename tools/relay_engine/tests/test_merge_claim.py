@@ -85,3 +85,34 @@ class TestMergeClaim(unittest.TestCase):
                         merge_errors = [error for error in module.lint_relay_root(root).errors
                                         if MERGE_ERROR in error]
                         self.assertIs(bool(merge_errors), expected)
+
+
+class TestMergeAuthorityCorrection(unittest.TestCase):
+    def test_merge_predicate_both_linters(self):
+        tools = SCRIPT.parent
+        for module in (rules, _standalone()):
+            for fixture, expected in (('merge-token/MT10-field-grant-to-planner', False),
+                                      ('merge-token/MT11-token-beside-denial', False),
+                                      ('merge-token/MT1-valid-token-grant', True),
+                                      ('merge/M2-merge-claim-with-auth', True)):
+                path = next((tools/'relay-lint-fixtures'/fixture).glob('MERGE-GATE*'))
+                text = path.read_text()
+                with self.subTest(module=module.__name__, fixture=fixture):
+                    self.assertEqual(module.merge_authorized(text,module.header_fields(text)),expected)
+            text = 'PHASE: MERGE-GATE\nFROM: operator\nTO: p.implementer\nMERGE_AUTHORIZATION: approved\n'
+            self.assertTrue(module.merge_authorized(text,module.header_fields(text)))
+
+    def test_corrected_predicate_changes_no_existing_verdict(self):
+        import json
+        from relay_engine.tests.capture_order_baseline import snapshot
+        baseline = json.loads((SCRIPT.parent/'relay-engine-fixtures/judging/base-merge-cbc8f07.json').read_text())
+        with TemporaryDirectory() as directory:
+            root=Path(directory);snapshot(root)
+            for module in (rules,_standalone()):
+                accepted=[]
+                for rel in baseline['population']:
+                    text=(root/rel).read_text()
+                    if module.merge_authorized(text,module.header_fields(text)):
+                        accepted.append(rel)
+                self.assertEqual(accepted,baseline['accepted'])
+        self.assertFalse(any('MT10-' in p or 'MT11-' in p for p in baseline['population']))

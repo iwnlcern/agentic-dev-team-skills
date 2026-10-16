@@ -104,9 +104,36 @@ def _emit_result(result):
 
 
 def _cmd_seat_register(args):
+    if args.address.lower().endswith("-engine-notice.planner"):
+        strings.emit("stderr", "notice-name-caution")
     return _emit_result(client.seat_register(
         _command_root(args), args.address, args.role, args.dispatch,
         replace=args.seat_command == "replace", timeout=args.timeout))
+
+
+def _cmd_seat_declare(args):
+    if args.from_file:
+        if args.address is not None or args.role is not None:
+            raise errors.error_for("E-HEADER", field="ADDRESS")
+        try:
+            lines = Path(args.from_file).read_text().splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise errors.error_for("E-HEADER", field="ADDRESS") from exc
+        entries = [line.split(maxsplit=1) for line in lines if line.strip()]
+        if any(len(entry) != 2 for entry in entries):
+            raise errors.error_for("E-HEADER", field="ROLE")
+    else:
+        if args.address is None or args.role is None:
+            raise errors.error_for("E-HEADER", field="ADDRESS")
+        entries = [[args.address, args.role]]
+    root_name = _command_root(args)
+    with Root(root_name) as root:
+        key = client._relative(root, args.key)
+        tag = client._open_required(root, key, "key").decode("utf-8").strip()
+    result = client.request(root_name, "seat.declare", {"entries": entries, "tag": tag}, timeout=args.timeout)
+    if any(entry[0].lower().endswith("-engine-notice.planner") for entry in entries):
+        strings.emit("stderr", "notice-name-caution")
+    return _emit_result(result)
 
 
 def _cmd_seat_stand_down(args):
@@ -174,7 +201,8 @@ def _cmd_lint(args):
         result = rules.lint_relay_root(
             relay_root, template_mode=args.templates, engine_root=True,
             projection_digests=projection_digests,
-            record_context=record_context, context_mode=context_mode)
+            record_context=record_context, context_mode=context_mode,
+            history_audit=args.history_audit)
         results[args.relay_root] = {
             "errors": result.errors, "warnings": result.warnings}
     if args.index is not None:
@@ -234,6 +262,16 @@ def _index_projection_digests(root: Path) -> dict[Path, str]:
         return {}
     digest = latest.get("digest")
     return {root / "INDEX.md": digest} if isinstance(digest, str) else {}
+
+
+def _cmd_authority_check(args):
+    result = client.request(_command_root(args), "authority.check",
+                            {"relay": args.relay, "seat": args.seat, "action": args.action},
+                            timeout=args.timeout)
+    _emit_result(result)
+    if "authority.could-not-evaluate" in result["reasons"]:
+        return 2
+    return 0 if result["allowed"] else 1
 
 
 def cmd_show(args):
@@ -329,6 +367,14 @@ def build_parser():
         _root_option(command)
         _timeout_option(command)
         command.set_defaults(handler=_cmd_seat_register)
+    declare = seat_commands.add_parser("declare")
+    declare.add_argument("address", nargs="?")
+    declare.add_argument("--role")
+    declare.add_argument("--from-file")
+    declare.add_argument("--key", required=True)
+    _root_option(declare)
+    _timeout_option(declare)
+    declare.set_defaults(handler=_cmd_seat_declare)
     stand_down = seat_commands.add_parser("stand-down")
     stand_down.add_argument("address")
     _root_option(stand_down)
@@ -377,10 +423,21 @@ def build_parser():
     lint.add_argument("--index")
     lint.add_argument("--templates", action="store_true")
     lint.add_argument("--index-audit", action="store_true")
+    lint.add_argument("--history-audit", action="store_true")
     lint.add_argument("--no-freshness", action="store_true")
     lint.add_argument("--max-drift-minutes", type=int,
                       default=rules.DEFAULT_MAX_DRIFT_MINUTES)
     lint.set_defaults(handler=_cmd_lint)
+
+    authority = commands.add_parser("authority")
+    authority_commands = authority.add_subparsers(dest="authority_command", required=True)
+    authority_check = authority_commands.add_parser("check")
+    authority_check.add_argument("relay")
+    authority_check.add_argument("--seat", required=True)
+    authority_check.add_argument("--action", choices=("implement", "merge"), required=True)
+    _root_option(authority_check)
+    _timeout_option(authority_check)
+    authority_check.set_defaults(handler=_cmd_authority_check)
 
     show = commands.add_parser("show")
     show.add_argument("target")

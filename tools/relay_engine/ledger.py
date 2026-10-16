@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import fcntl
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -12,7 +13,9 @@ import sys
 import time
 import uuid
 
-from relay_engine import errors, strings
+from relay_engine import errors, strings, version
+from pathlib import Path
+from relay_engine.rules import Finding
 from relay_engine.envelope import (Envelope, body_sha256, content_hash,
                                    parse_draft, valid_run_id)
 from relay_engine.jcs import commissioned_by_value, jcs_encode, parse_record
@@ -62,6 +65,75 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
+_ADDITIVE_DDL = """
+CREATE TABLE IF NOT EXISTS admission_judgments(
+  relay_seq INTEGER PRIMARY KEY REFERENCES relays(seq),
+  status TEXT NOT NULL CHECK(status IN ('judged','exempt','failed')),
+  rules_version TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admission_findings(
+  relay_seq INTEGER NOT NULL REFERENCES admission_judgments(relay_seq),
+  ord INTEGER NOT NULL, check_id TEXT NOT NULL,
+  lint_severity TEXT NOT NULL CHECK(lint_severity IN ('error','warn')),
+  operands_json TEXT NOT NULL, params_json TEXT NOT NULL, message TEXT NOT NULL,
+  PRIMARY KEY(relay_seq,ord));
+CREATE TABLE IF NOT EXISTS roster(
+  address TEXT PRIMARY KEY, role TEXT NOT NULL, declared_by TEXT NOT NULL,
+  declared_at_seq INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS routed_notices(
+  relay_seq INTEGER PRIMARY KEY REFERENCES relays(seq),
+  notice_seq INTEGER NOT NULL UNIQUE REFERENCES relays(seq));
+"""
+
+
+def ensure_additive_schema(ledger):
+    """Install additive tables without rewriting existing state or epochs."""
+    for statement in _ADDITIVE_DDL.split(";"):
+        if statement.strip():
+            ledger.execute(statement)
+
+
+def record_judgment(ledger, relay_seq: int, status: str,
+                    rules_version: str, findings) -> None:
+    if not ledger.in_transaction:
+        raise ValueError("judgment requires an open transaction")
+    findings = tuple(findings)
+    if status not in ("judged", "exempt", "failed"):
+        raise ValueError("unknown judgment status")
+    if status != "judged" and findings:
+        raise ValueError("only judged rows may carry findings")
+    if any(not isinstance(finding, Finding) for finding in findings):
+        raise TypeError("judgment requires Finding values")
+    ledger.execute(
+        "INSERT INTO admission_judgments(relay_seq,status,rules_version) VALUES(?,?,?)",
+        (relay_seq, status, rules_version))
+    ledger.executemany(
+        "INSERT INTO admission_findings(relay_seq,ord,check_id,lint_severity,"
+        "operands_json,params_json,message) VALUES(?,?,?,?,?,?,?)",
+        ((relay_seq, order, finding.id, finding.lint_severity,
+          jcs_encode(list(finding.operands)).decode("utf-8"),
+          jcs_encode(finding.params).decode("utf-8"), finding.message)
+         for order, finding in enumerate(findings)))
+
+
+def judgment_for(ledger, relay_seq: int) -> tuple[str, tuple[Finding, ...]]:
+    if not ledger.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='admission_judgments'").fetchone():
+        return "none", ()
+    row = ledger.execute(
+        "SELECT j.status,r.rendered_path FROM admission_judgments j "
+        "JOIN relays r ON r.seq=j.relay_seq WHERE j.relay_seq=?",
+        (relay_seq,)).fetchone()
+    if row is None:
+        return "none", ()
+    entries = ledger.execute(
+        "SELECT check_id,lint_severity,operands_json,params_json,message "
+        "FROM admission_findings WHERE relay_seq=? ORDER BY ord",
+        (relay_seq,)).fetchall()
+    return row[0], tuple(Finding(check_id, severity, row[1],
+                                tuple(json.loads(operands)), json.loads(params), message)
+                         for check_id, severity, operands, params, message in entries)
+
+
 class InjectedFault(RuntimeError):
     def __init__(self, point, committed=False):
         self.point = point
@@ -76,6 +148,18 @@ class Admission:
     rendered_path: str
     replay: bool
     render_state: str = "render-pending"
+
+
+@dataclass(frozen=True)
+class AdmissionContext:
+    ledger: sqlite3.Connection
+    seq: int
+    stamp: str
+    rendered_path: str
+    envelope: Envelope
+    body: bytes
+    edge_seq: int | None
+    rules_version: str | None = None
 
 
 def _hit(fault, point, committed=False):
@@ -154,6 +238,7 @@ def init_schema(engine_dirfd, canonical_root, fault=None):
             for statement in _DDL.split(";"):
                 if statement.strip():
                     ledger.execute(statement)
+            ensure_additive_schema(ledger)
             _hit(fault, "after-ddl")
             seeds = (("schema_version", SCHEMA_VERSION),
                      ("canonical_root", canonical_root),
@@ -457,12 +542,21 @@ def append_seat_events(ledger, entries):
         _insert_seat_events(ledger, entries)
 
 
+def judgment_fingerprint(root):
+    """One producer identity for the held root's daemon lifetime, including BOOT."""
+    value = getattr(root, "_judgment_rules_version", None)
+    if value is None:
+        value = version.fingerprint(Path(__file__).resolve().parents[1])
+        root._judgment_rules_version = value
+    return value
+
+
 def admit(ledger, root, envelope, body, submission_id, *,
           claimed_body_sha256=None, claimed_content_hash=None,
           admits_against=None, origin="daemon", stamp=None,
           rendered_path=None, occupancy_ref=None, advisories=(),
           cycle_events=(), supersession_edges=(), prechecks=(),
-          seat_events=(),
+          seat_events=(), judge=None, effects=None, rules_version=None,
           clock=time.time, fault=None):
     """Admit one relay and every derived effect in a single transaction."""
     if isinstance(envelope, str):
@@ -511,7 +605,26 @@ def admit(ledger, root, envelope, body, submission_id, *,
                 callback(ledger, envelope, edge_seq)
             advisory_values = (advisories(ledger, envelope)
                                if callable(advisories) else advisories)
-            advisory_json = jcs_encode(list(advisory_values)).decode("utf-8")
+            advisory_values = list(advisory_values)
+            if judge is not None and rules_version is None:
+                rules_version = judgment_fingerprint(root)
+            ctx = AdmissionContext(ledger, seq, allocated_stamp, allocated_path,
+                                   envelope, body, edge_seq, rules_version)
+            judgment_status, findings = None, ()
+            if judge is not None:
+                try:
+                    judgment_status, findings = judge(ctx)
+                    findings = tuple(findings)
+                except Exception:
+                    judgment_status, findings = "failed", ()
+                advisory_values.extend(finding.id for finding in findings)
+                if judgment_status == "failed":
+                    advisory_values.append("judging.failed")
+            elif any(event.get("boot_relay_seq") == "current-relay"
+                     for event in seat_events):
+                # This caller-created seat event is the provenance, never FROM.
+                judgment_status = "exempt"
+            advisory_json = jcs_encode(advisory_values).decode("utf-8")
             ledger.execute(
                 "INSERT INTO relays("
                 "seq,submission_id,stamp,rendered_path,admits_against_seq,"
@@ -530,6 +643,13 @@ def admit(ledger, root, envelope, body, submission_id, *,
                  actual_body_hash, actual_content_hash, origin,
                  occupancy_ref, advisory_json))
             _hit(fault, "after-relay-insert")
+            if judgment_status is not None:
+                record_judgment(ledger, seq, judgment_status,
+                                rules_version or judgment_fingerprint(root), findings)
+            _hit(fault, "after-judgment")
+            if effects is not None:
+                effects(ctx, findings)
+            _hit(fault, "after-effects")
             _insert_projection_divergences(ledger, foreign)
             _insert_cycle_events(ledger, cycle_events, seq)
             _hit(fault, "after-cycle-events")
@@ -541,3 +661,34 @@ def admit(ledger, root, envelope, body, submission_id, *,
             answer = Admission(seq, allocated_stamp, allocated_path, False)
     _hit(fault, "post-commit-pre-response", committed=True)
     return answer
+
+
+def insert_engine_relay(ledger, root, envelope: Envelope, body: bytes, *, clock) -> Admission:
+    if not ledger.in_transaction:
+        raise ValueError("engine relay requires an open transaction")
+    seq = _next_seq(ledger, "relays")
+    allocated_stamp, allocated_path, foreign = _daemon_slot(ledger, root, envelope, clock)
+    submission_id = None
+    edge_seq = None
+    actual_body_hash = body_sha256(body)
+    actual_content_hash = content_hash(envelope, body, None)
+    origin, occupancy_ref, advisory_json = "daemon", None, "[]"
+    ledger.execute(
+        "INSERT INTO relays("
+        "seq,submission_id,stamp,rendered_path,admits_against_seq,"
+        "phase,role,dispatch_id,parent_dispatch_id,run_id,from_seat,"
+        "to_seats,cc_seats,status,subject,headers_json,body,"
+        "body_sha256,content_hash,origin,occupancy_ref,advisories_json"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (seq, submission_id, allocated_stamp, allocated_path,
+         edge_seq, envelope.phase, envelope.role,
+         envelope.dispatch_id, envelope.parent_dispatch_id,
+         envelope.run_id, envelope.from_seat,
+         jcs_encode(list(envelope.to_seats)).decode("utf-8"),
+         jcs_encode(list(envelope.cc_seats)).decode("utf-8"),
+         envelope.status, envelope.subject,
+         jcs_encode(envelope.headers).decode("utf-8"), body,
+         actual_body_hash, actual_content_hash, origin,
+         occupancy_ref, advisory_json))
+    _insert_projection_divergences(ledger, foreign)
+    return Admission(seq, allocated_stamp, allocated_path, False)

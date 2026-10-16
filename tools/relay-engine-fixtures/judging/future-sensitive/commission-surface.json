@@ -1,0 +1,35 @@
+{
+  "case": "commission-surface",
+  "order_divergent": true,
+  "future_sensitive": true,
+  "partition": "order-divergent",
+  "relays": [
+    {
+      "path": "PLAN-pair-planner-20261013-120400.md",
+      "text": "ROLE: Master Planner\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: cm77-grant\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: alpha.master-planner\nTO: beta.pair-planner\nPARENT_DISPATCH_ID: cm77-approval\nDELEGATED_DISPATCH_AUTHORITY: yes\nCOMMISSION_ID: cm77\nCOMMISSION_SCOPE: scope-cm77\nCOMMISSION_TO: beta.pair-planner\nCHARTER_DOC_ID: CH-cm77\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120100.md",
+      "text": "ROLE: Operator\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: cm77-auth\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: operator\nTO: alpha.master-planner\nCOMMISSION_AUTHORIZATION: yes\nCOMMISSION_ID: cm77\nCOMMISSION_SCOPE: scope-cm77\nCOMMISSION_TO: beta.pair-planner\nCHARTER_DOC_ID: CH-cm77\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120200.md",
+      "text": "ROLE: Master Planner\nPHASE: DESIGN\nAUTHORITY: design-only\nDISPATCH_ID: cm77-charter\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: alpha.master-planner\nTO: alpha.master-reviewer\nPARENT_DISPATCH_ID: cm77-auth\nDESIGN_DOC_ID: CH-cm77\nDESIGN_RECORD_KIND: design-doc\nCOMMISSION_ID: cm77\nCOMMISSION_SCOPE: scope-cm77\nCOMMISSION_TO: beta.pair-planner\nCHARTER_DOC_ID: CH-cm77\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120300.md",
+      "text": "ROLE: Master Reviewer\nPHASE: DESIGN-REVIEW\nAUTHORITY: review-only\nDISPATCH_ID: cm77-approval\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: alpha.master-reviewer\nTO: alpha.master-planner\nPARENT_DISPATCH_ID: cm77-charter\nDESIGN_DOC_ID: CH-cm77\nDESIGN_RECORD_KIND: design-doc\nDESIGN_REVIEW_VERDICT: approve\nCOMMISSION_ID: cm77\nCOMMISSION_SCOPE: scope-cm77\nCOMMISSION_TO: beta.pair-planner\nCHARTER_DOC_ID: CH-cm77\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    },
+    {
+      "path": "PLAN-pair-planner-20261013-120500.md",
+      "text": "ROLE: Pair Planner\nPHASE: PLAN\nAUTHORITY: plan-only\nDISPATCH_ID: cm77-receipt\nCEREMONY_TIER: medium\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: yes\nFROM: beta.pair-planner\nTO: beta.pair-implementer\nCOMMISSION_ID: cm77\nCOMMISSION_SCOPE: scope-cm77\nCOMMISSION_TO: beta.pair-planner\nCHARTER_DOC_ID: CH-cm77\nFINAL_GIT_STATUS_SHORT: none \u2014 generated lifecycle fixture\n"
+    }
+  ],
+  "focus": "PLAN-pair-planner-20261013-120400.md",
+  "family": "lineage.commission",
+  "admission_messages": [
+    "grant lacks an earlier charter revision"
+  ],
+  "sweep_messages": [],
+  "artifacts": {}
+}

@@ -346,7 +346,7 @@ class TestSubmitE2E(unittest.TestCase):
         self.assertEqual(status, 0)
         result = json.loads(stdout.getvalue())
         self.assertEqual(set(result),
-                         {"path", "advisories", "render_state", "duplicate"})
+                         {"path", "advisories", "render_state", "duplicate", "findings"})
         self.assertFalse(result["duplicate"])
 
     def test_cli_status_and_stop_route_over_daemon(self):
