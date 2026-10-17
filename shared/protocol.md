@@ -691,8 +691,13 @@ On the fork host a notification may carry a `MONITOR-NOTICE: loss` line (records
 Only lines that parse as a JSON object carrying the ten index cells plus `root` are rows; a `MONITOR-NOTICE:` line and the tagged stderr block are never rows.
 A row over 4 KiB of text is unsupported for monitor delivery on the fork host and is recovered through `replay`.
 A relay arrival never ends work in progress: read the relay file, then carry on with what you were doing; a seat with nothing in progress ends its turn as usual.
-A `TO` addressee acts under the relay's own authority: an idle seat acts at once, and a seat busy on other addressed work applies at once a relay that halts or changes that work and takes any other relay up at its next safe checkpoint (a finished command, a commit, or a filed relay).
-For a `TO` addressee, a relay that names the dispatch, bundle, branch or PR of the work in progress always counts as changing that work, and when the new relay and the work in progress compete, the seat asks its governing seat which comes first.
+A `TO` addressee acts under the relay's own authority, and a seat with nothing in progress acts on it at once.
+For a seat busy on other addressed work, a `TO` relay that names the dispatch, bundle, branch or PR of that work, or that halts it, applies at once and is never turned into a question.
+For that seat, any other `TO` relay waits for its next safe checkpoint: a finished command, a commit, or a filed relay.
+The seat asks its governing seat which comes first only when such a relay says, or plainly needs, that it go first, and it carries on with the work in progress while it waits for the answer.
+Here the governing seat is the seat whose addressed relay authorized the work in progress, or the operator when that seat is the operator or when there is none.
+Before taking up another relay at a checkpoint, the seat records where the interrupted work stands and its next step.
+Once that relay is handled, the seat returns to the interrupted work unless that relay halted or replaced it.
 A `CC` arrival is context only: it grants no authority and asks for no reply, so nothing is filed in response to it.
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
 A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it, and every later filing refreshes the binding without moving delivery progress.
