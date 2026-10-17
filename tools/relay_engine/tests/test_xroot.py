@@ -44,7 +44,7 @@ class TestXroot(unittest.TestCase):
         cls.live = _standalone()
 
     def test_truth_matches_full_generator_census(self):
-        self.assertEqual(129, len(self.cases))
+        self.assertEqual(130, len(self.cases))
         for label, root, expected_exit, expected_errors in self.cases:
             with self.subTest(label=label):
                 result = rules.lint_relay_root(root)

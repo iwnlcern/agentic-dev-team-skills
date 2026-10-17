@@ -795,6 +795,23 @@ def _plan_source_cases(dest: Path) -> list[Case]:
     return cases
 
 
+def _b9_capacity_case(dest: Path) -> Case:
+    expected = []
+    def prepare(_case_root, foreign, fields):
+        blob = _literal_object(foreign, "blob", b"PHASE: SITREP\n")
+        raw = b"".join(_tree_entry(b"100644", f"relay-{i:05d}.md".encode(), blob)
+                       for i in range(20001))
+        relays = _literal_object(foreign, "tree", raw)
+        designs = _git(foreign, "rev-parse", "HEAD:designs")
+        root = _literal_object(foreign, "tree", _tree_entry(b"40000", b"designs", designs)
+                               + _tree_entry(b"40000", b"relays", relays))
+        commit = _literal_commit(foreign, root)
+        _replace(fields, "DESIGN_SOURCE_COMMIT", commit)
+        expected.append(_xerror("capacity", f"{relays} exceeds the supported XROOT_MAX_RELAYS of 20000; this is a capacity limit, not a lineage gap"))
+    return _build_case(dest, "B9-capacity-relays-one-over", prepare=prepare,
+                       expected_exit=1, expected_errors=expected)
+
+
 def materialize(dest: Path) -> list[Case]:
     """Create all Git-backed cases under dest and return their expectations."""
     dest.mkdir(parents=True, exist_ok=True)
@@ -1051,7 +1068,7 @@ def materialize(dest: Path) -> list[Case]:
             "X43-fifo-object-timeout",
             prepare=_fifo_object,
             expected_exit=1,
-            expected_errors=[_xerror("commit", "Git object query timed out")],
+            expected_errors=[_xerror("capacity", "Git object query timed out at the 5 s bound during cat-file; this is a capacity limit, not a lineage gap")],
         ),
         _build_case(
             dest,
@@ -1070,6 +1087,7 @@ def materialize(dest: Path) -> list[Case]:
             ],
         ),
     ]
+    cases.append(_b9_capacity_case(dest))
     cases.extend(_authority_cases(dest))
     cases.extend(_plan_source_cases(dest))
     return cases

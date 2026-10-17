@@ -23,3 +23,9 @@ Each case was measured once per path; the transition and supplemental differenti
 `relay_engine/tests/capture_xroot_baseline.py` loads explicit pinned source files and `relay_engine/tests/xroot_b9_cases.py` builds the foreign repositories.
 Deadline fault cases expire the selected real Git query; capacity shapes use the real five-second budget and the OS page cache is uncontrolled.
 These old measurements are a differential oracle, not proof of B9 performance.
+
+`xroot/baseline-b8d87eb-lifted.json` is the separate revision-4 oracle for the four natural bounded timeouts: B1-complete-within-envelope, C1-over-count-20001, F-depth-2500 and M1-over-trees-20001.
+The `--lift-budget` harness loads the same pinned old source bytes, lifts their internal budget to 600 seconds, injects no fault, and retains each original bounded answer beside its lifted measurement.
+Injected deadline cases T1, T1b, T2 and T3 remain bounded controls and have no lifted entry.
+Declared changed rows take precedence over both captures; other natural-timeout rows use the lifted structural answer, and all remaining rows use the bounded answer.
+Neither committed capture may be overwritten or retried to obtain a preferred result.
