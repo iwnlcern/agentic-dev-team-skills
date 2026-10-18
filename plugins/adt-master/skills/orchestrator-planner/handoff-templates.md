@@ -214,6 +214,7 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <team>.implementer
 TO: <team>.planner
 CC: <operator | orchestrator | boundary-adjacent owner.role | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <DESIGN relay dispatch id>
 DESIGN_DOC_ID: <logical design id>
@@ -380,6 +381,7 @@ Use this for operator/orchestrator-issued implementation dispatch, or when deleg
 
 ROLE: <Orchestrator Planner | Operator | Planner>
 PHASE: IMPL
+RUN_ID: <run id>
 AUTHORITY: implementation
 DISPATCH_ID: <id>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
@@ -388,6 +390,7 @@ HUMAN_GATE_REQUIRED: no — downstream: merge requires human/operator gate
 FROM: orchestrator | operator | <team>.planner
 TO: <team>.implementer
 CC: <team>.planner, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
+SUBJECT: <summary>
 PARENT_DISPATCH_ID: <approving PLAN-REVIEW dispatch id for pair-Planner delegated dispatch; plan/parent id for direct operator/orchestrator dispatch>
 DESIGN_LOCK_ID: <logical design id | none>
 DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
@@ -591,6 +594,7 @@ HUMAN_GATE_REQUIRED: <yes — held decision | no — review only>
 FROM: <run>.orchestrator-reviewer
 TO: <run>.orchestrator-planner
 CC: <team>.planner, <team>.implementer
+SUBJECT: <review summary>
 GATE_REVIEW_VERDICT: <approve | must-revise | human-decision-required>
 REVIEWED_HEAD: <full reviewed commit pin>
 REVIEWED_BASE: <full reviewed base commit pin>
@@ -654,6 +658,7 @@ In an adopting run, before granting, re-read the PR head and base; if either dif
 
 ROLE: <Operator | Orchestrator Planner>
 PHASE: MERGE-GATE
+RUN_ID: <run id>
 AUTHORITY: merge-gated
 DISPATCH_ID: <merge-handoff id>
 PARENT_DISPATCH_ID: <merge-gate record dispatch id>
@@ -663,6 +668,7 @@ HUMAN_GATE_REQUIRED: <yes|no — reason>
 FROM: operator | orchestrator | <run>.orchestrator-planner
 TO: <team>.implementer
 CC: <run>.orchestrator-reviewer
+SUBJECT: <summary>
 MERGE_HEAD: <full commit pin authorized for merge>
 MERGE_BASE: <full base commit pin>
 GATE_DISPOSITION: <operator-in-chat YYYYMMDD-HHMMSS — "operator’s exact reply"; omit this line unless recording authorization for a held review>

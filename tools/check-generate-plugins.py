@@ -1081,10 +1081,68 @@ FINAL_GIT_STATUS_SHORT: unavailable — fictional corpus
     expect(not citation_matches(different), f"{plugin} citation_mutations_fail: wrong dispatch")
 
 
+def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path) -> None:
+    """Judge the grants users actually copy, including extraction and fill failures."""
+    skill = scratch / "skills/orchestrator-planner"
+    if plugin == "adt-pair":
+        expect(not skill.exists(), "adt-pair unexpectedly installs orchestrator-planner")
+        return
+    source = (skill / "handoff-templates.md").read_text(encoding="utf-8")
+    templates = []
+    for label, token in (("E", "DISPATCH IMPL"), ("K", "DISPATCH MERGE")):
+        bodies = re.findall(rf"^## Template {label} —[^\n]*\n.*?^```text\n(.*?)^```$",
+                            source, re.MULTILINE | re.DOTALL)
+        expect(len(bodies) == 1, f"{plugin} Template {label}: expected one installed body")
+        templates.append((label, token, bodies[0]))
+    expect(len(templates) == 2, f"{plugin} installed_grant_templates_checked: empty population")
+    fictional = {"RUN_ID": "v0", "TO": "v0-x.implementer", "default": "example"}
+    def fill(body: str) -> str:
+        body = re.sub(r"<([^<>\n]*)>",
+                      lambda m: m[1].split(" | ")[0] if " | " in m[1] else m[0], body)
+        lines = []
+        for line in body.splitlines():
+            header = re.fullmatch(r"([A-Z][A-Z0-9_]*):[ \t]*(.*)", line)
+            if header:
+                key, value = header.groups()
+                value = value.split(" | ")[0]
+                if key == "TO":
+                    value = fictional[key]
+                else:
+                    value = re.sub(r"<[^<>\n]*>", fictional.get(key, fictional["default"]), value)
+                line = f"{key}: {value}"
+            lines.append(line)
+        return re.sub(r"<[^<>\n]*>", fictional["default"], "\n".join(lines))
+    # A fresh isolated interpreter binds every judgment to this installed tier.
+    judge = """import json, sys
+sys.path.insert(0, sys.argv[1])
+from relay_engine import authority
+for row in json.load(sys.stdin):
+    text, token = row
+    print(json.dumps([authority._token(text, token), authority._html_refusal(text), authority._header_refusal(text)]))
+"""
+    filled = [(label, token, fill(body)) for label, token, body in templates]
+    e = filled[0][2]
+    subject_mutation = re.sub(r"^SUBJECT:.*$", "SUBJECT: <unfilled>", e, flags=re.MULTILINE)
+    cases = [[body, token] for _, token, body in filled]
+    cases += [[e + "\n```\n", "DISPATCH IMPL"], [subject_mutation, "DISPATCH IMPL"]]
+    result = subprocess.run([PYTHON, "-I", "-c", judge, str(scratch / "tools")],
+                            input=json.dumps(cases), cwd=scratch_base, text=True, capture_output=True)
+    expect_success(result, f"{plugin} installed authority predicates")
+    judgments = [json.loads(line) for line in result.stdout.splitlines()]
+    expect(len(judgments) == 4, f"{plugin} predicate population")
+    for (label, _, _), verdict in zip(filled, judgments[:2]):
+        expect(verdict == [True, False, False],
+               f"{plugin} Template {label}: expected token/no HTML/no header refusal, got {verdict}")
+    expect("SUBJECT:" in e, f"{plugin} Template E needs SUBJECT for its header mutation")
+    expect(judgments[2] == [False, False, False], f"{plugin} template_mutations_fail: fence")
+    expect(judgments[3][2] is True, f"{plugin} template_mutations_fail: SUBJECT placeholder")
+
+
 def check_protocol_linter_coherence(installations: dict[str, Path], scratch_base: Path) -> None:
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     for plugin, scratch in installations.items():
         check_implementation_report_example(plugin, scratch, scratch_base)
+        check_shipped_grant_examples(plugin, scratch, scratch_base)
         for skill in PLUGINS[plugin] & ROLE_SKILLS:
             protocol = (scratch / "skills" / skill / "protocol.md").read_text(encoding="utf-8")
             for role, address in VOCABULARY:
