@@ -7,6 +7,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -997,9 +998,93 @@ def relay_text(role: str, address: str) -> str:
     )
 
 
+def check_implementation_report_example(plugin: str, scratch: Path, scratch_base: Path) -> None:
+    """Catch copied report parents and citations in the actual installed example."""
+    skill = (scratch / "skills/pair-implementer/SKILL.md").read_text(encoding="utf-8")
+    examples = re.findall(r"```text\n(.*?)\n```", skill, re.DOTALL)
+    examples = [body for body in examples if "PHASE: IMPL\n" in body]
+    expect(len(examples) == 1, f"{plugin} example_extracted_per_tier: expected one filled IMPL example")
+    example = examples[0]
+    def field(name: str) -> str:
+        matches = re.findall(rf"^{name}: (.+)$", example, re.MULTILINE)
+        expect(len(matches) == 1, f"{plugin} example needs one {name}")
+        return matches[0]
+    dispatch_path = field("IN_REPLY_TO")
+    parent = field("PARENT_DISPATCH_ID")
+    actor = field("FROM")
+    corpus = scratch_base / f"impl-example-{plugin}"
+    corpus.mkdir()
+    dispatch = corpus / dispatch_path
+    dispatch.parent.mkdir(parents=True)
+    dispatch.write_text(f"""ROLE: Orchestrator Planner
+PHASE: IMPL
+AUTHORITY: implementation
+DISPATCH_ID: {parent}
+RUN_ID: example
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no — fictional test dispatch
+FROM: example.orchestrator-planner
+TO: {actor}
+CC: example.orchestrator-reviewer
+SUBJECT: Fictional authorizing dispatch
+
+DISPATCH IMPL
+
+Implement the fictional report example only.
+""", encoding="utf-8")
+    wrong_id = "example-not-a-dispatch"
+    wrong = dispatch.parent / "SITREP-orchestrator-planner-20261013-055900.md"
+    wrong.write_text(f"""ROLE: Orchestrator Planner
+PHASE: SITREP
+AUTHORITY: report-only
+DISPATCH_ID: {wrong_id}
+RUN_ID: example
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no — fictional context
+FROM: example.orchestrator-planner
+TO: {actor}
+SUBJECT: Context, not a grant
+
+ACTIONS_GIT_REF: none — fictional report-only context
+FINAL_GIT_STATUS_SHORT: unavailable — fictional corpus
+""", encoding="utf-8")
+    report = dispatch.parent / "IMPL-pair-implementer-20261013-060100.md"
+    commands = (
+        [PYTHON, str(scratch / "tools/relay-lint.py"), "--relay-root", str(corpus)],
+        [PYTHON, str(scratch / "tools/relay"), "lint", "--relay-root", str(corpus)],
+    )
+    for command in commands:
+        report.write_text(example, encoding="utf-8")
+        expect_success(run_linter(scratch / "tools/relay-lint.py", report, scratch_base, no_freshness=True),
+                       f"{plugin} example file lint")
+        positive = subprocess.run(command, cwd=scratch_base, text=True, capture_output=True)
+        expect_success(positive, f"{plugin} example_lints_against_generated_dispatch {command[1]}")
+        report.write_text(example.replace(f"PARENT_DISPATCH_ID: {parent}",
+                                          f"PARENT_DISPATCH_ID: {wrong_id}", 1), encoding="utf-8")
+        negative = subprocess.run(command, cwd=scratch_base, text=True, capture_output=True)
+        expect(negative.returncode != 0 and any(reason in output(negative) for reason in (
+                   "none is an earlier DISPATCH IMPL relay", "IMPL report parent must be a DISPATCH IMPL relay"))
+               and "does not resolve to a relay" not in output(negative),
+               f"{plugin} copied_parent_fails_by_reason: {output(negative)}")
+    report.write_text(example, encoding="utf-8")
+    def citation_matches(body: str) -> bool:
+        citations = re.findall(r"^AUTHORITY_CHECK: (.+)$", body, re.MULTILINE)
+        return (len(citations) == 1 and re.fullmatch(
+            r"allowed implement " + re.escape(dispatch_path) + r" [0-9]{8}-[0-9]{6}", citations[0]) is not None)
+    expect(citation_matches(example), f"{plugin} example_citation_names_its_own_dispatch")
+    missing = re.sub(r"^AUTHORITY_CHECK: .*\n", "", example, flags=re.MULTILINE)
+    different = re.sub(r"^AUTHORITY_CHECK: .*", "AUTHORITY_CHECK: allowed implement wrong/IMPL.md 20261013-060000",
+                       example, flags=re.MULTILINE)
+    expect(not citation_matches(missing), f"{plugin} citation_mutations_fail: missing")
+    expect(not citation_matches(different), f"{plugin} citation_mutations_fail: wrong dispatch")
+
+
 def check_protocol_linter_coherence(installations: dict[str, Path], scratch_base: Path) -> None:
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     for plugin, scratch in installations.items():
+        check_implementation_report_example(plugin, scratch, scratch_base)
         for skill in PLUGINS[plugin] & ROLE_SKILLS:
             protocol = (scratch / "skills" / skill / "protocol.md").read_text(encoding="utf-8")
             for role, address in VOCABULARY:
