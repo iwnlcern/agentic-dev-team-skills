@@ -1,0 +1,37 @@
+{
+  "case": "gate-review-reply-before-request",
+  "order_divergent": true,
+  "future_sensitive": false,
+  "partition": "order-divergent",
+  "relays": [
+    {
+      "path": "01-adopt.md",
+      "text": "ROLE: Orchestrator Planner\nPHASE: SITREP\nAUTHORITY: report-only\nDISPATCH_ID: adopt\nRUN_ID: b8\nCEREMONY_TIER: small\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: a.orchestrator-planner\nTO: a.orchestrator-reviewer\nCC: a.orchestrator-reviewer\nSUBJECT: checkpoint test\nFINAL_GIT_STATUS_SHORT: clean\nGATE_REVIEW: on\n\n"
+    },
+    {
+      "path": "02-gate.md",
+      "text": "ROLE: Pair Planner\nPHASE: MERGE-GATE\nAUTHORITY: report-only\nDISPATCH_ID: gate\nRUN_ID: b8\nCEREMONY_TIER: small\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\nTO: a.orchestrator-planner\nCC: a.orchestrator-reviewer\nSUBJECT: checkpoint test\nFINAL_GIT_STATUS_SHORT: clean\nPLAN_LOCK_ID: PL-b8\nPLAN_SHA256: 8266951f1d2284fcfd35d7d0c2f39fb799cd73cf32d92f55b840afb7820183ac\nPLAN_ARTIFACT: P\n\n"
+    },
+    {
+      "path": "04-request.md",
+      "text": "ROLE: Orchestrator Planner\nPHASE: MERGE-GATE\nAUTHORITY: report-only\nDISPATCH_ID: request\nRUN_ID: b8\nCEREMONY_TIER: small\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: a.orchestrator-planner\nTO: a.orchestrator-reviewer\nCC: a.orchestrator-reviewer\nSUBJECT: checkpoint test\nFINAL_GIT_STATUS_SHORT: clean\nPARENT_DISPATCH_ID: gate\nGATE_HEAD: abc123\nGATE_BASE: def456\nPLAN_LOCK_ID: PL-b8\nPLAN_SHA256: 8266951f1d2284fcfd35d7d0c2f39fb799cd73cf32d92f55b840afb7820183ac\nPLAN_ARTIFACT: P\n\n"
+    },
+    {
+      "path": "03-reply.md",
+      "text": "ROLE: Orchestrator Reviewer\nPHASE: MERGE-GATE\nAUTHORITY: review-only\nDISPATCH_ID: reply\nRUN_ID: b8\nCEREMONY_TIER: small\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: a.orchestrator-reviewer\nTO: a.orchestrator-planner\nCC: a.orchestrator-reviewer\nSUBJECT: checkpoint test\nFINAL_GIT_STATUS_SHORT: clean\nPARENT_DISPATCH_ID: request\nGATE_REVIEW_VERDICT: approve\nREVIEWED_HEAD: abc123\nREVIEWED_BASE: def456\n\n"
+    },
+    {
+      "path": "05-grant.md",
+      "text": "ROLE: Orchestrator Planner\nPHASE: MERGE-GATE\nAUTHORITY: merge-gated\nDISPATCH_ID: grant\nRUN_ID: b8\nCEREMONY_TIER: small\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: a.orchestrator-planner\nTO: p.implementer\nCC: a.orchestrator-reviewer\nSUBJECT: checkpoint test\nFINAL_GIT_STATUS_SHORT: clean\nPARENT_DISPATCH_ID: gate\nMERGE_HEAD: abc123\nMERGE_BASE: def456\n\nDISPATCH MERGE\n"
+    }
+  ],
+  "artifacts": {
+    "plans/P.md": "B8 plan\n"
+  },
+  "focus": "05-grant.md",
+  "family": "review.gate-not-heard",
+  "admission_messages": [],
+  "sweep_messages": [
+    "no-reply"
+  ]
+}

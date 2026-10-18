@@ -10538,7 +10538,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/judging.py",
-    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
+    "sha256": "18cc1a8f217b1df82d433308eb1cde51aebbb151b2b4055b9bde6881a7e89ccc",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -21056,7 +21056,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/judging.py",
-    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
+    "sha256": "18cc1a8f217b1df82d433308eb1cde51aebbb151b2b4055b9bde6881a7e89ccc",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -31502,7 +31502,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/judging.py",
-    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
+    "sha256": "18cc1a8f217b1df82d433308eb1cde51aebbb151b2b4055b9bde6881a7e89ccc",
     "source": "tools/relay_engine/judging.py"
   },
   {

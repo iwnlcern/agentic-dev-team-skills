@@ -243,3 +243,169 @@ class TestGateReview(unittest.TestCase):
         changed=copy.deepcopy(actual)
         group=next(iter(changed['verdicts'].values())); row=next(iter(group.values())); row['warnings'].append('planted change')
         self.assertFalse(same(changed))
+
+
+# Real daemon/CLI transport keeps these tests independent of the helper's caller.
+import io
+import os
+import threading
+import time
+from contextlib import redirect_stdout, redirect_stderr
+from relay_engine import cli, client, daemon, judging, ledger
+from relay_engine.envelope import parse_draft
+from relay_engine.paths import Root, ensure_engine_dir
+from relay_engine.tests.test_identity_matrix import cid_did
+
+
+class ManagedRoot:
+    def __enter__(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='b8-managed-')
+        self.root = Path(self.temp.name)/'.relays/b8'
+        self.root.mkdir(parents=True)
+        (self.root.parent.parent/'plans').mkdir()
+        (self.root.parent.parent/'plans/P.md').write_text(PLAN)
+        with Root(self.root) as root:
+            fd = ensure_engine_dir(root.dirfd)
+            try:
+                connection = ledger.init_schema(fd, root.path)
+                connection.execute("INSERT INTO meta(key,value) VALUES('run_id','b8')")
+                connection.close()
+            finally:
+                os.close(fd)
+        read_fd, write_fd = os.pipe()
+        _, did = cid_did()
+        self.thread = threading.Thread(target=daemon.start, args=(str(self.root),),
+            kwargs=dict(ready_fd=write_fd, socket_override=str(Path(self.temp.name)/'s'), did=did))
+        self.thread.start()
+        try:
+            if os.read(read_fd, 1) != b'R':
+                raise AssertionError('daemon did not become ready')
+        finally:
+            os.close(read_fd)
+        self.keys = {}
+        self.paths = {}
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            client.request(str(self.root), 'daemon.stop', {})
+        finally:
+            self.thread.join(10)
+            self.temp.cleanup()
+        if self.thread.is_alive():
+            raise AssertionError('daemon did not stop')
+
+    def command(self, args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(args)
+        if code:
+            raise AssertionError((args, code, out.getvalue(), err.getvalue()))
+        return json.loads(out.getvalue())
+
+    def submit(self, item):
+        fields = item['fields']; sender = fields['FROM']; ident = fields['DISPATCH_ID']
+        if sender not in self.keys:
+            registered = self.command(['seat','register',sender,'--role',fields['ROLE'],'--root',str(self.root)])
+            self.keys[sender] = registered['key_path']
+        path = '.engine/drafts/' + ident + '.md'
+        target=self.root/path; target.parent.mkdir(parents=True,exist_ok=True); target.write_text(text_for(item))
+        receipt = self.command(['submit',path,'--key',self.keys[sender],'--root',str(self.root)])
+        self.paths[ident] = receipt['path']
+        return receipt
+
+    def stored(self, ident):
+        with Root(self.root) as root:
+            fd=ensure_engine_dir(root.dirfd)
+            try:
+                connection=ledger.open_ledger(fd)
+                try:
+                    seq=connection.execute('SELECT seq FROM relays WHERE rendered_path=?',(self.paths[ident],)).fetchone()[0]
+                    return ledger.judgment_for(connection,seq)
+                finally:
+                    connection.close()
+            finally:
+                os.close(fd)
+
+    def sweep(self, audit=False):
+        args=['lint','--relay-root',str(self.root)]
+        if audit: args.append('--history-audit')
+        return self.command(args)[str(self.root)]
+
+
+class TestGateAdmission(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.old_rules=pre_b8_module('tools/relay_engine/rules.py')
+
+    def direct(self, case, root):
+        materialize(case,root)
+        grant_index=next(i for i,r in enumerate(case['rows']) if r['fields']['DISPATCH_ID']=='grant')
+        grant=case['rows'][grant_index]; raw=text_for(grant).encode()
+        corpus=judging.Corpus(tuple((i+1,r['path'],text_for(r).encode()) for i,r in enumerate(case['rows'][:grant_index])))
+        found=judging.judge_candidate(corpus,grant['path'],parse_draft(raw.decode()),raw,artifact_root=root,deadline=time.monotonic()+10)
+        return [f for f in found if f.id==FAMILY]
+
+    def assert_answer(self, found, case, paths=None):
+        reason=case['admission']
+        if reason is None:
+            self.assertEqual(found,[]); return
+        self.assertEqual(len(found),1)
+        self.assertEqual(found[0].lint_severity,'warn')
+        self.assertEqual(found[0].params,dict(reason=reason,disposition=case['disposition']))
+        if paths is not None:
+            self.assertEqual(found[0].subject,paths['grant'])
+            self.assertEqual(found[0].message,message(paths['grant'],reason,case['disposition']))
+
+    def test_direct_admission_case_table(self):
+        for case in CASES:
+            with self.subTest(case=case['name']),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)/'.relays/b8'; found=self.direct(case,root)
+                self.assert_answer(found,case,{r['fields']['DISPATCH_ID']:r['path'] for r in case['rows']})
+                if case['admission']==case['reason']:
+                    expected=[f for f in rules.lint_relay_root(root).findings if f.id==FAMILY]
+                    self.assertEqual(found,expected)
+
+    def test_managed_admission_case_table(self):
+        for case in CASES:
+            with self.subTest(case=case['name']),ManagedRoot() as managed:
+                for item in case['rows']: managed.submit(item)
+                status,findings=managed.stored('grant')
+                self.assertEqual(status,'judged')
+                found=[f for f in findings if f.id==FAMILY]
+                self.assert_answer(found,case,managed.paths)
+                if not case['dirty']:
+                    self.assertFalse([f for f in findings if f.lint_severity=='error'])
+
+    def test_managed_sweep_suppresses_and_history_audit_shows(self):
+        for case in CASES:
+            with self.subTest(case=case['name']),ManagedRoot() as managed:
+                for item in case['rows']: managed.submit(item)
+                plain=managed.sweep(); history=managed.sweep(audit=True)
+                self.assertFalse([w for w in plain['warnings'] if FAMILY in w])
+                expected=[] if case['admission'] is None else ['history-audit: '+message(managed.paths['grant'],case['admission'],case['disposition'])]
+                self.assertEqual([w for w in history['warnings'] if FAMILY in w],expected)
+                context=client.lint_context(str(managed.root))
+                projections=cli._index_projection_digests(managed.root)
+                baseline=self.old_rules.lint_relay_root(managed.root,engine_root=True,
+                    record_context=context,context_mode='daemon',projection_digests=projections)
+                self.assertEqual(plain['errors'],baseline.errors)
+
+    def test_record_known_gate_record_warns_at_admission(self):
+        case=next(c for c in CASES if c['name']=='W23')
+        with ManagedRoot() as managed:
+            for item in case['rows'][:-1]: managed.submit(item)
+            self.assertIn(managed.paths['gate'],{e['path'] for e in client.lint_context(str(managed.root))['entries']})
+            managed.submit(case['rows'][-1])
+            status,findings=managed.stored('grant')
+            self.assertEqual(status,'judged')
+            self.assert_answer([f for f in findings if f.id==FAMILY],case,managed.paths)
+
+    def test_tie_contexts_differ_as_declared(self):
+        for case in CASES:
+            if not (case['name'].startswith('W22') or case['name']=='S5-tie'): continue
+            with self.subTest(case=case['name']),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)/'.relays/b8'
+                self.assert_answer(self.direct(case,root),case)
+                sweep=[f.params['reason'] for f in rules.lint_relay_root(root).findings if f.id==FAMILY]
+                self.assertEqual(sweep,[] if case['reason'] is None else [case['reason']])
