@@ -370,7 +370,8 @@ The declared cross-root design edge and the `direct-override` record kind remain
 
 Grant authors: see "What the check reads" in [Authority check before acting](#authority-check-before-acting).
 
-Merge is a separate human/operator gate. A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority. The protocol layers the addressed merge token on top of the field-form merge authorization. Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`. A field-form grant is addressed to exactly one Implementer.
+Merge is a separate human/operator gate. A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority. The protocol layers the addressed merge token on top of the field-form merge authorization. Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`.
+A field-form grant is addressed to exactly one Implementer.
 A negative verdict line or conflicting verdict lines defeats a token in the same relay.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
 The canonical token path is:
