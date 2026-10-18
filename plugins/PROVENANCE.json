@@ -152,7 +152,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "f27d19fa3199a9564c62c181823766b3bc866b911eec22c949a11e7757ad6343",
+    "sha256": "2b6c6ca59c74f2b7e51313700267e17810cf134ee88b5b07c282229d317efafe",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -10670,7 +10670,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "f27d19fa3199a9564c62c181823766b3bc866b911eec22c949a11e7757ad6343",
+    "sha256": "2b6c6ca59c74f2b7e51313700267e17810cf134ee88b5b07c282229d317efafe",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
