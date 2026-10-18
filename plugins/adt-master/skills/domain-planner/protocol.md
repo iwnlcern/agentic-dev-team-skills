@@ -71,12 +71,15 @@ The predicate is re-evaluated at each relay, not latched. Variant field spelling
 
 Tier/risk-dependent/local fields:
 
+For writing verdicts, see "What the check reads" in [Authority check before acting](#authority-check-before-acting).
+
 ```text
 IN_REPLY_TO:
 DESIGN_DOC_ID:
 DESIGN_LOCK_ID:
 DESIGN_RECORD_KIND:
 DESIGN_REVIEW_VERDICT:
+AUTHORITY_CHECK: allowed <action> <relay path> <checked_at> | unavailable — <reason>
 PLAN_LOCK_ID:
 TASK_ID:
 BUNDLE_ID:
@@ -135,6 +138,7 @@ At lint scope, an acknowledging relay is any later relay carrying shape-valid lo
 The limit is named rather than discoverable: a later shape-valid carrier therefore silences a digest mismatch at lint — including a carrier that is foreign, rejected, or structurally dirty under other checks.
 Lint acknowledges; it does not judge legitimacy.
 Legitimacy is reviewer- and reader-owned: for a design or plan artifact, a digest change is legitimate only when its acknowledging carrier belongs to the protocol-valid approval or direct-override lineage for that artifact — the matching approving DESIGN-REVIEW/PLAN-REVIEW lineage, or a valid operator/orchestrator direct override.
+For the acting seat's current permission, use [Authority check before acting](#authority-check-before-acting).
 The owning register records the history and supplies reviewer evidence; it does not substitute for required approval or override.
 An acknowledgment outside that lineage is a reviewer flag, never a digest-lint error.
 Forward practice: an amendment's carriers — the amending relay and its approving review — declare the locator beside the digest so the amendment governs its own stem; Amendment 2's own carriers predate this rule and stand as the register's fired example of the digest-without-locator class.
@@ -184,7 +188,9 @@ DESIGN_RECORD_KIND: design-doc | audit-record | direct-override
 DESIGN_REVIEW_VERDICT: approve | must-revise | reject-narrow | human-decision-required
 ```
 
-When `--relay-root` is available, a pair-Planner `PHASE: PLAN` with `DESIGN_LOCK_ID` and `DESIGN_RECORD_KIND: design-doc` must parent to an earlier Implementer `PHASE: DESIGN-REVIEW` relay whose `DESIGN_REVIEW_VERDICT` is `approve`, whose `DESIGN_DOC_ID` equals the plan's `DESIGN_LOCK_ID`, and whose parent is the same-owner Planner `PHASE: DESIGN` relay carrying that same `DESIGN_DOC_ID`. The PLAN relay's parent edge points to the approving DESIGN-REVIEW; the DESIGN-REVIEW's parent edge points to the DESIGN relay.
+When `--relay-root` is available, a pair-Planner `PHASE: PLAN` with `DESIGN_LOCK_ID` and `DESIGN_RECORD_KIND: design-doc` must parent to an earlier Implementer `PHASE: DESIGN-REVIEW` relay whose `DESIGN_REVIEW_VERDICT` is `approve`, whose `DESIGN_DOC_ID` equals the plan's `DESIGN_LOCK_ID`, and whose parent is the same-owner Planner `PHASE: DESIGN` relay carrying that same `DESIGN_DOC_ID`.
+The PLAN relay's parent edge points to the approving DESIGN-REVIEW; the DESIGN-REVIEW's parent edge points to the DESIGN relay.
+On a managed root, distinguish the root integrity report and history audit from the current authority check; see [Relay lint](#relay-lint) and [Authority check before acting](#authority-check-before-acting).
 
 On any PLAN-phase relay, occurrence of any `DESIGN_SOURCE_*` or `DESIGN_OWNER` field engages the cross-root design-edge gate; carrier-shape validation then requires a canonical pair-Planner ROLE and exactly one pair-Planner-class FROM address, and shape failure refuses on the declaration axis rather than falling back to local discovery.
 A conforming declaration carries all seven fields `DESIGN_SOURCE_REPO`, `DESIGN_SOURCE_COMMIT`, `DESIGN_SOURCE_ROOT`, `DESIGN_SOURCE_PATH`, `DESIGN_OWNER`, `DESIGN_DOC_ID`, and `DESIGN_SHA256`, together with a non-empty `DESIGN_LOCK_ID` and `DESIGN_RECORD_KIND: design-doc`.
@@ -207,7 +213,9 @@ The following are intentionally out of scope: latest-non-superseded approve, sup
 
 ## Orchestrator-review visibility gate
 
-When `relay-lint --relay-root` is available, every orchestrator authority relay in the broad SET must address the run's Orchestrator Reviewer in `TO` or `CC`, or the run root must contain an operator-authored no-reviewer waiver. This is a **visibility gate**, not an approval gate: the reviewer sees the relay and reviews on its own cadence; the Orchestrator Planner does not wait for an approval verdict before writing or routing the relay.
+When `relay-lint --relay-root` is available, every orchestrator authority relay in the broad SET must address the run's Orchestrator Reviewer in `TO` or `CC`, or the run root must contain an operator-authored no-reviewer waiver.
+This is a **visibility gate**, not an approval gate: the reviewer sees the relay and reviews on its own cadence; the Orchestrator Planner does not wait for an approval verdict before writing or routing the relay.
+On a managed root, distinguish the root integrity report and history audit from the current authority check; see [Relay lint](#relay-lint) and [Authority check before acting](#authority-check-before-acting).
 
 For the adopted merge-checkpoint exception, see [Reviewer checkpoints](#reviewer-checkpoints).
 
@@ -308,6 +316,8 @@ Do not proxy-author relays. You may not write a relay whose `FROM` is not your o
 
 ## Literal dispatch token
 
+Grant authors: see "What the check reads" in [Authority check before acting](#authority-check-before-acting).
+
 Implementation authority in relay files is granted only by the literal token `DISPATCH IMPL` when all of these are true:
 
 1. The token appears bare, unfenced, un-backticked, and alone on its own line.
@@ -315,9 +325,13 @@ Implementation authority in relay files is granted only by the literal token `DI
 3. The reader's address is in `TO`.
 4. For an implementation dispatch, `TO` is exactly one implementer-role address.
 
-A direct message addressed to a single agent is implicitly `TO`'d to that agent; the `TO` requirement binds relay files. Direct-message dispatch still requires the same bare, unfenced, un-backticked, own-line token and does not override any higher-priority tool, safety, or operator boundary.
+A direct message addressed to a single agent is implicitly `TO`'d to that agent; the `TO` requirement binds relay files.
+Direct-message dispatch still requires the same bare, unfenced, un-backticked, own-line token and does not override any higher-priority tool, safety, or operator boundary.
+For the managed-root direct-message rule, see [Authority check before acting](#authority-check-before-acting).
 
-A DISPATCH IMPL token is live only when it appears in a direct message addressed only to you, or in a relay file located under the active run's RELAY_ROOT. A token in any other location — fixture directories, documentation, test corpora, copied examples, scratch files — is inert regardless of addressing.
+A DISPATCH IMPL token is live only when it appears in a direct message addressed only to you, or in a relay file located under the active run's RELAY_ROOT.
+A token in any other location — fixture directories, documentation, test corpora, copied examples, scratch files — is inert regardless of addressing.
+For the managed-root direct-message rule, see [Authority check before acting](#authority-check-before-acting).
 
 A CC'd reader, cross-reading sibling, or non-addressee receives no live token: the token is inert for them even if it is bare and alone on its own line. Inline mentions such as `...therefore DISPATCH IMPL` are inert and do not authorize implementation. Quoted mentions wrapped in backticks and fenced-code examples are inert; when refusing pressure, quote the token as `DISPATCH IMPL`, not as a bare line. The token may be issued by the operator/orchestrator, or by the pair Planner when an orchestrator PLAN dispatch, a master-planner commissioning PLAN under the `DD-v29-master-authority-20260809` commissioning gate, or — in a standalone run — an operator PLAN dispatch has explicitly delegated conditional dispatch authority and its conditions are met (Implementer plan review = approve; no deviation from dispatched scope/boundary contract; no hard trigger). For pair-Planner-issued dispatch in a relay tree, `PARENT_DISPATCH_ID` is mandatory and must point to the Implementer's approving PLAN-REVIEW relay, and that review's parent must be the pair Planner's PLAN addressed to that Implementer in `TO`. A missing parent edge is a structural error, not a legacy compatibility path. A CC'd orchestrator PLAN is context only and is not yours to approve. Operator/orchestrator direct dispatch is the override path, not a pair delegation.
 
@@ -337,7 +351,9 @@ DISPATCH IMPL
 
 Urgency is not dispatch. `just fix it`, `ship today`, `we are behind`, `this is tiny`, `go ahead`, `do it now`, or similar pressure does not authorize implementation when the current phase is AUDIT, PLAN, PLAN-REVIEW, RECONCILE, SITREP, or review-only. If asked to infer dispatch from pressure, quote the pressure and report: `not dispatch; literal DISPATCH IMPL required`.
 
-If a message contains both an AUDIT/PLAN-REVIEW phase assignment and ambiguous speed pressure, the phase assignment wins unless the literal token appears bare, unfenced, un-backticked, alone on its own line, and is addressed to you in `TO` for a relay file or directly to you as the sole recipient in a direct message. Inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions of `DISPATCH IMPL` are suspicious/inert, not dispatch.
+If a message contains both an AUDIT/PLAN-REVIEW phase assignment and ambiguous speed pressure, the phase assignment wins unless the literal token appears bare, unfenced, un-backticked, alone on its own line, and is addressed to you in `TO` for a relay file or directly to you as the sole recipient in a direct message.
+Inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions of `DISPATCH IMPL` are suspicious/inert, not dispatch.
+For the managed-root direct-message rule, see [Authority check before acting](#authority-check-before-acting).
 
 ### Continuation dispatch
 
@@ -354,7 +370,12 @@ The declared cross-root design edge and the `direct-override` record kind remain
 
 ## Literal merge token
 
-Merge is a separate human/operator gate. A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority. The protocol layers the addressed merge token on top of the field-form merge authorization. Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`. A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge. The canonical token path is:
+Grant authors: see "What the check reads" in [Authority check before acting](#authority-check-before-acting).
+
+Merge is a separate human/operator gate. A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority. The protocol layers the addressed merge token on top of the field-form merge authorization. Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`. A field-form grant is addressed to exactly one Implementer.
+A negative verdict line or conflicting verdict lines defeats a token in the same relay.
+A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
+The canonical token path is:
 
 ```text
 DISPATCH MERGE
@@ -366,11 +387,66 @@ DISPATCH MERGE
 2. Lexical liveness: bare, unfenced, un-backticked, and alone on its own line; inline, quoted, fenced, or backticked mentions are inert.
 3. Addressing: the relay has `TO` exactly one implementer-role address, and the reader is that addressee; CC-only/cross-read/non-addressee readers receive no merge authority.
 4. Location-binding: the token is in a direct message addressed only to the Implementer or in a relay file under the active run's `RELAY_ROOT`; fixture directories, docs, copied corpora, sibling relay trees, and scratch files are inert.
+For the managed-root direct-message rule, see [Authority check before acting](#authority-check-before-acting).
 5. Phase-binding: relay-file tokens are live only in `PHASE: MERGE-GATE`; a bare located token in SITREP, IMPL, REVIEW-FOLD, PLAN, PLAN-REVIEW, docs, fixtures, or copied corpora is a structural error.
 
 The token path and field-form path use the same grantor set: `FROM` must be `operator`, `orchestrator`, or an orchestrator-planner-role address. An Implementer-authored `MERGE-GATE` relay cannot authorize that Implementer's own merge claim, whether by field form or token.
 
-If a relay claims a merge commit in `ACTIONS_GIT_REF`, relay-lint lineage mode expects an earlier `MERGE-GATE` relay with the same `DISPATCH_ID` that authorizes under the layered rule. Otherwise the merge claim is structurally dirty. Hidden continuation claims, canonical `merge=<sha>` machine forms, and field-form grants remain linted; the token branch is part of `merge_authorized()`.
+If a relay claims a merge commit in `ACTIONS_GIT_REF`, the current act's own authorization chain requires an earlier `MERGE-GATE` relay with the same `DISPATCH_ID` that authorizes under the layered rule.
+Otherwise the current merge claim lacks the required chain.
+Hidden continuation claims, canonical `merge=<sha>` machine forms, and field-form grants remain linted; the token branch is part of `merge_authorized()`.
+
+### Authority check before acting
+
+On a managed root, before starting implementation on a dispatch and always before merging on a grant, the acting seat runs `tools/relay authority check <relay> --seat <own address> --action implement|merge --root <root>`.
+Permission is exit status 0 with `allowed` true and returned `relay`, `seat` and `action` equal to the act in hand; nothing else is permission.
+A denial (exit 1), a result that could not be evaluated (exit 2), no result at all, and a client without this command each stop the act and are relayed as a blocker to the governing seat.
+Quote the returned result object when one exists, including `external` when it is not empty; when there is no result, retain and quote the stderr code instead.
+An `external` entry on the `capacity` axis reports a limit of the cross-root read, not a gap in the lineage; it still stops the act and goes to the governing seat.
+Do not retry into a pass or fall back to reading the relay by eye.
+A command failure never turns a managed root into a hand-authored root.
+
+Ask again before resuming after a stop in which anything the answer is computed from changed.
+Examples include changed plan or design bytes, an approved amendment or its later review, supersession in the lineage, or a change in the cycle's state.
+A resume is unchanged only when the seat establishes all three conditions:
+- Every plan and design artifact the last answer rested on, the base and every approved amendment, hashes as it did at that check.
+- Since that check no relay was filed by the pair's Planner, the operator or an orchestrator seat, and this seat filed no review; this test is by author, not by the presence of lock headers.
+- The cycle's actual current state is open, established from the root's record rather than inferred from authors or the absence of particular relay kinds.
+Anything the seat cannot establish is unknown, and unknown asks again.
+With all three established, an unchanged resume needs no new check.
+A changed artifact always requires a fresh answer; an approved erratum can make that answer yes.
+The check answers for a closed cycle through `authority.cycle-closed`; no supported cycle-state read is prescribed here.
+
+Retain the command, its output or stderr code, and exit status for every check actually run.
+The report carries exactly one `AUTHORITY_CHECK` header line for the latest check before the act reported: `AUTHORITY_CHECK: allowed <action> <relay path> <checked_at>`.
+Copy its three values from that check's output; earlier checks stay in retained evidence and add no second header line.
+On a managed root, a dispatch or merge go-ahead is live only as a filed relay; a seat receiving one by direct message asks its sender to file it and does not act.
+On a hand-authored root there is no daemon to ask: apply the literal-token conditions by reading the relay and cite `AUTHORITY_CHECK: unavailable — <reason>`.
+A managed-root seat whose check failed, was denied, could not evaluate or was not run may not use that absence form.
+
+**What the check reads.**
+The engine's code governs; these predicates describe the release this text ships with, with routes and relay kinds kept explicit.
+Reason identifiers below are identifiers only, not display messages.
+
+- R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with a blank or whitespace-only line on each side or the corresponding file edge.
+- R2, token route only (`authority.shape-absent`): any run of three or more backticks or tildes anywhere in the grant voids its token.
+  A field-form merge grant's independent positive-header route does not reject fences on this basis.
+- R3, grants on either route and reviews (`authority.shape-absent` for grants; `authority.lineage-incomplete` for an unusable review): no HTML-like line with at most three leading spaces and then `<` followed by a letter, `/`, `!` or `?`, nor a line containing `<!--`, `<?`, `<![`, `<!` followed by a letter, or an opening script, pre, style or textarea tag.
+- R4, grant/review header parsing (`authority.shape-absent` or `authority.lineage-incomplete`): the header starts at the first uppercase `KEY: value` line with the colon adjacent to the key and ends at the first blank or nonmatching line.
+  Lowercase keys, a space before the colon and a hyphen in a key end it; required fields occur once each.
+- R5, grants on either route and reviews (`authority.shape-absent` or `authority.lineage-incomplete`): no header value contains `<`, including SUBJECT; fill every header placeholder.
+- R6, grants and reviews (`authority.denied` for a denied grant; `authority.lineage-incomplete` for an unusable review): verdicts and denials are read from the header only.
+  Verdict keys are VERDICT, MERGE_AUTHORIZATION, MERGE_APPROVED, or a key ending in an underscore plus one of those names.
+  The whole value is positive only when it is exactly approved, approve, granted, yes, true, complete or merge-ready, case-insensitively in ASCII; any other value under a verdict key denies, including an approval followed by commentary.
+  A denial in body prose neither grants nor denies.
+- R7, approving reviews (`authority.lineage-incomplete`): PHASE_VERDICT, with the phase's hyphens changed to underscores, or VERDICT equals approve or approved, with no denial key.
+- R8, a grant or any relay in its pair lineage (`authority.shape-absent` or `authority.lineage-incomplete`): no control characters other than tab, line feed and carriage return, including U+0085, U+2028 and U+2029.
+- R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header, including the strict/legacy parsed-field comparison.
+  Critical fields are PHASE, FROM, TO, DISPATCH_ID, PARENT_DISPATCH_ID, DESIGN_LOCK_ID, DESIGN_DOC_ID, PLAN_LOCK_ID, DESIGN_ARTIFACT, DESIGN_SHA256, PLAN_ARTIFACT, PLAN_SHA256, PLAN_SOURCE_REPO, PLAN_SOURCE_COMMIT and the cross-root trigger fields.
+  Differing body repeats of noncritical fields such as SUBJECT or CC are not conflicts detected by this rule; fenced repeats are not read.
+- R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer.
+
+Two authoring conventions are stricter than those predicates and are not engine refusals: write grants with no fenced block so they remain readable if reissued in token form, and never repeat any header field in the body with a different value, critical or not.
 
 ## Claim-evidence ladder
 
@@ -770,7 +846,11 @@ declining to hand-relay a relay that arrives without one.
 
 ## Relay lint
 
-When `relay-lint` is available, run it on substantive relay files before handing them off, before delegated dispatch, or before an adapter/CI job consumes them. The linter resolves as `tools/relay-lint.py` within the same skills root the loaded skill was resolved from — each plugin ships it — else as `relay-lint` on `PATH`. If neither exists, write `RELAY_LINT: unavailable — <reason>`. The linter is truth-agnostic: it checks structure, enums, address grammar, ROLE/FROM consistency, phase/authority consistency, downgrade-field ordering, action-reference substance, final-status proof substance, contiguous field-block grammar, row-shaped detached rows, delegated-dispatch shape, mandatory pair-Planner parent-lineage shape, addressed merge-token shape, merge-claim lineage, and REVIEW-FOLD FOLD_SCOPE shape. It does not prove that claims are true.
+When `relay-lint` is available, lint each candidate substantive relay file before handing them off, before delegated dispatch, or before an adapter/CI job consumes them.
+The linter resolves as `tools/relay-lint.py` within the same skills root the loaded skill was resolved from — each plugin ships it — else as `relay-lint` on `PATH`.
+If neither exists, write `RELAY_LINT: unavailable — <reason>`.
+The linter is truth-agnostic: it checks structure, enums, address grammar, ROLE/FROM consistency, phase/authority consistency, downgrade-field ordering, action-reference substance, final-status proof substance, contiguous field-block grammar, row-shaped detached rows, delegated-dispatch shape, mandatory pair-Planner parent-lineage shape, addressed merge-token shape, merge-claim lineage, and REVIEW-FOLD FOLD_SCOPE shape.
+It does not prove that claims are true.
 
 The relay file is the report of record for linted relays. Terminal summaries are not enough for `FINAL_GIT_STATUS_SHORT`, `ACTIONS_GIT_REF`, scan fields, or dispatch authority; put them in the relay file. Older relay files may lint dirty because this report-of-record rule was not yet in force.
 
@@ -780,7 +860,15 @@ Structured absence forms for `FINAL_GIT_STATUS_SHORT` and `ACTIONS_GIT_REF` must
 
 `SCOPE_DIFF` and `FOLD_SCOPE` lint is structural and truth-agnostic. A row such as `- none -> in` parses and may lint clean unless a reconciliation-layer `ROW_TRUTH_CHECK` is required. When `ROW_TRUTH_CHECK: required` is present, each IN row must have a matching `SCOPE_ROW_EVIDENCE` or `FOLD_SCOPE_EVIDENCE` entry so a reconciler can check row truth against file/scope evidence instead of accepting row shape. Across a relay root, an OUT→IN flip for the same path under `ROW_TRUTH_CHECK` is structural drift and must be escalated. Without the row-truth hook, reconciliation must treat rows as E0 context and verify them against evidence. A REVIEW-FOLD report that claims edits or carries substantive `ACTIONS_GIT_REF` content requires `FOLD_SCOPE` above `ACTIONS_GIT_REF` plus `FOLD_SCOPE_RESULT: all-in`; an OUT row requires a deviation relay before edit. A single-line structured absence such as `ACTIONS_GIT_REF: none — no edits made` is not a fold action; multi-line absence-prefixed refs are substantive and require scope. The ordering check proves report layout, not world-time ordering; the behavioral value comes from writing the artifact before the fold.
 
-A relay-lint error blocks delegated dispatch, merge, or automated adapter consumption unless the operator explicitly waives the structural error. This blocking rule assumes the current `relay-lint` has passed the bundled tool-correctness fixture matrix. If the linter is unavailable, write `RELAY_LINT: unavailable — <reason>` and continue with the normal protocol; do not claim lint passed. To make it available for host adapters, install the whole `tools/` directory from the same generated `plugins/adt-<tier>/` bundle as the loaded skill; the first shipped adapter lives at `tools/adapters/claude-code/`; its setup guide is `tools/adapters/README.md`.
+Lint of a candidate relay before hand-off is distinct from a managed root's root integrity report, its history audit, and the existing sweep of a hand-authored root.
+On a managed root, the default sweep reports root integrity: record-known relays are not re-judged, which does not mean they were validated.
+Root integrity errors remain errors however old the relay.
+The managed-root history audit reports findings on record-known relays as warnings; a history-audit finding blocks nothing and needs no waiver.
+On a hand-authored root, a lint error on the relays an act rests on blocks that act unless the operator waives the named error.
+No waiver changes an authority answer: a denial requires a valid grant or a direct override by an operator or orchestrator seat, followed by a fresh check under [Authority check before acting](#authority-check-before-acting).
+These lint rules assume the current linter has passed its bundled tool-correctness fixture matrix.
+If the linter is unavailable, write `RELAY_LINT: unavailable — <reason>` and continue with the normal protocol; do not claim lint passed.
+To make it available for host adapters, install the whole `tools/` directory from the same generated `plugins/adt-<tier>/` bundle as the loaded skill; the first shipped adapter lives at `tools/adapters/claude-code/`; its setup guide is `tools/adapters/README.md`.
 
 Structured YAML relay bodies remain rejected. This protocol adopts header/structure/address/substance/scope/lineage/design-review lint only; it still does not verify truth.
 
@@ -798,7 +886,13 @@ scope before actions is lint-enforced report layout, not style.
 
 ## Merge/live-verification verdicts
 
-Merge is a separate human/operator gate. A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority. If a relay claims a merge commit in `ACTIONS_GIT_REF`, relay-lint lineage mode expects an earlier merge-authorization relay with the same `DISPATCH_ID`; otherwise the merge claim is structurally dirty. A hidden indented continuation after a blank-closed `ACTIONS_GIT_REF` block is also structurally dirty. Canonical machine-form merge claims such as `merge=<sha>` are also checked anywhere in operational relay text outside fenced blocks, inline code spans, and `ESCALATION_SCAN` blocks. A merge-authorization relay counts only when `FROM` is `operator`, `orchestrator`, or an orchestrator-planner-role address; an Implementer-authored `MERGE-GATE` relay cannot authorize that Implementer's own merge claim. The protocol provides the symmetric addressed `DISPATCH MERGE` token as the canonical forward path while preserving field-form grants for compatibility. relay-lint makes continuation-hidden claims, canonical merge forms, and token grants structurally visible at the relay layer; free-prose flush-left claims remain reconciliation's job, not truth-agnostic lint's scope.
+Merge is a separate human/operator gate.
+A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority.
+If a relay claims a merge commit in `ACTIONS_GIT_REF`, the current act's own authorization chain requires an earlier merge-authorization relay with the same `DISPATCH_ID`; otherwise the current merge claim lacks the required chain.
+A hidden indented continuation after a blank-closed `ACTIONS_GIT_REF` block is also structurally dirty.
+Canonical machine-form merge claims such as `merge=<sha>` are also checked anywhere in operational relay text outside fenced blocks, inline code spans, and `ESCALATION_SCAN` blocks.
+A merge-authorization relay counts only when `FROM` is `operator`, `orchestrator`, or an orchestrator-planner-role address; an Implementer-authored `MERGE-GATE` relay cannot authorize that Implementer's own merge claim.
+The protocol provides the symmetric addressed `DISPATCH MERGE` token as the canonical forward path while preserving field-form grants for compatibility. relay-lint makes continuation-hidden claims, canonical merge forms, and token grants structurally visible at the relay layer; free-prose flush-left claims remain reconciliation's job, not truth-agnostic lint's scope.
 
 Use one of:
 
