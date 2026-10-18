@@ -86,13 +86,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/master-planner/SKILL.md",
-    "sha256": "78479066b5d02f7331fa3213df526a29faf6e00b9107b93b71d9a1953d588bf1",
+    "sha256": "121942e3001954d934a96ae09fc49fab203479cd7f5936180736e91c3b633c92",
     "source": "skills/master-planner/SKILL.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/master-planner/charter-template.md",
-    "sha256": "15db7335897203c67c353c0a1621dcfc7c29ff7670c675db1419be4967b1d3a8",
+    "sha256": "7b422b2b2804712f54f2a3dcd206d1b76db5a35b588e010f05ed8a7ecfb2566c",
     "source": "skills/master-planner/charter-template.md"
   },
   {
@@ -140,7 +140,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/SKILL.md",
-    "sha256": "466a5609d9df9309b4d1a3d85d4bd715d12ec6263ff58c0554541ed143c8614a",
+    "sha256": "aaf8a904493a4057e612bcec0e17332a2b8586673dbb5a857449b465dc989199",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -152,7 +152,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "2537bb5216c1cbbc2d42399572bdae0c89820bb68d05cdca61db2f5c8f99a0ed",
+    "sha256": "521370bf0e7c72d0507284dc54858cfc761b8021fff8bb50f1263148ba266c7b",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -230,7 +230,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-planner/SKILL.md",
-    "sha256": "75cdbc794929fe4bba4cdb192b8d1686312eebdc9fcdc354cc1d04fb82369b78",
+    "sha256": "fa66d2e8e7b5523156adf1fe33ffc6f01af8a2b94ab08e5d025897312798ff98",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -266,7 +266,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "1c156543a87b420edc143e409096a0367167104636cd40ad73482475ad6c9f48",
+    "sha256": "d296fb272c49df0b415cda6c15ccf4b94781ea7cb2e3341e4ff26e5be5a12564",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
@@ -10658,7 +10658,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/SKILL.md",
-    "sha256": "466a5609d9df9309b4d1a3d85d4bd715d12ec6263ff58c0554541ed143c8614a",
+    "sha256": "aaf8a904493a4057e612bcec0e17332a2b8586673dbb5a857449b465dc989199",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -10670,7 +10670,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "2537bb5216c1cbbc2d42399572bdae0c89820bb68d05cdca61db2f5c8f99a0ed",
+    "sha256": "521370bf0e7c72d0507284dc54858cfc761b8021fff8bb50f1263148ba266c7b",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -10748,7 +10748,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-planner/SKILL.md",
-    "sha256": "75cdbc794929fe4bba4cdb192b8d1686312eebdc9fcdc354cc1d04fb82369b78",
+    "sha256": "fa66d2e8e7b5523156adf1fe33ffc6f01af8a2b94ab08e5d025897312798ff98",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -10784,7 +10784,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "1c156543a87b420edc143e409096a0367167104636cd40ad73482475ad6c9f48",
+    "sha256": "d296fb272c49df0b415cda6c15ccf4b94781ea7cb2e3341e4ff26e5be5a12564",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
@@ -21194,7 +21194,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-planner/SKILL.md",
-    "sha256": "bb81af4797d67292583acffc5694b50240dea7b5f6ce624ba6b3aa932e675ba6",
+    "sha256": "dbd05dd8d16922292864e878bf71db94b1c095d90f4eb219468c8a8532a783cc",
     "source": "skills/pair-planner/SKILL.md"
   },
   {
@@ -21230,7 +21230,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "1c156543a87b420edc143e409096a0367167104636cd40ad73482475ad6c9f48",
+    "sha256": "d296fb272c49df0b415cda6c15ccf4b94781ea7cb2e3341e4ff26e5be5a12564",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {

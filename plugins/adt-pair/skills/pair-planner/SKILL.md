@@ -57,6 +57,8 @@ See `protocol.md` § Continuation dispatch for continuations.
 
 ## Standalone pair (no orchestrator)
 
+For managed roots, follow the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup).
+
 - Operator-authored intake.
 - Report-and-hold to the operator after approving `DESIGN-REVIEW`.
 - Operator as dispatch grantor — delegated conditional dispatch under the existing conditions or direct dispatch.

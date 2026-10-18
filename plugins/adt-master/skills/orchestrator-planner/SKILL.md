@@ -36,6 +36,8 @@ Do not proxy-author downstream relays with another seat's `FROM`.
 On `init`:
 
 1. Run the `sprint-doc-setup` skill to create the sprint tree, `.relays/<RUN_ID>/` substrate, and seed `INDEX.md`.
+For managed roots, first follow the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup), between substrate setup and these boot hand-offs.
+
 2. Emit one lint-clean boot relay per seat: `<pair>.planner` and `<pair>.implementer` for every Agent Pair in the sprint, plus one boot relay for your Orchestrator Reviewer partner at `<run>.orchestrator-reviewer`. Use existing schema: `PHASE: SITREP`, `AUTHORITY: report-only`, `ROLE: Orchestrator Planner`, `FROM: <run>.orchestrator-planner`, and `TO` exactly one seat. Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted; render that segment one way.
 3. Print the per-seat relay pointers; armed seats receive the arrival automatically, and the pointer is the operator's fallback for the rest.
 
