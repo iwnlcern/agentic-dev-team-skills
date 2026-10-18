@@ -19,8 +19,8 @@ FAMILIES = frozenset(('file.lint', 'lineage.lock-lifecycle', 'lineage.receiving-
                      'lineage.commission', 'lineage.cross-root-design', 'lineage.design-review',
                      'lineage.dispatch', 'lineage.impl-report-parent', 'lineage.merge-claim',
                      'lineage.row-truth', 'lineage.review-visibility', 'lineage.lock-path',
-                     'lineage.governing-digest'))
-HELPERS = {'orchestrator_review_gate_errors', 'h27_receiving_seat_errors',
+                     'lineage.governing-digest', 'review.gate-not-heard'))
+HELPERS = {'gate_checkpoint_findings', 'orchestrator_review_gate_errors', 'h27_receiving_seat_errors',
            'h27_foreign_lock_errors', 'h27_lock_lifecycle_precompute',
            'h27_commission_precompute', 'xroot_plan_gate', 'xroot_design_gate'}
 
