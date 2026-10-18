@@ -109,8 +109,8 @@ def cases():
         elif variant=='duplicate': rows[0]['body']='GATE_REVIEW: on\n'
         else:
             del rows[0]['fields']['GATE_REVIEW']; rows[0]['body']='```text\nGATE_REVIEW: on\n```\n'
-        add('S8-'+variant,rows)
-    rows=scenario(); rows[0]['fields']['TO']='operator'; add('S9',rows)
+        add('S8-'+variant,rows[:2]+[rows[-1]])
+    rows=scenario(); rows[0]['fields']['TO']='operator'; add('S9',rows[:2]+[rows[-1]])
     rows=scenario(); add('W1',rows[:3]+[rows[-1]],'no-reply',('gate','request'))
     rows=scenario(); rows[3]['fields']['GATE_REVIEW_VERDICT']='must-revise'; add('W2',rows,'must-revise')
     rows=scenario(); newer=copy.deepcopy(rows[3]); newer['fields'].update(DISPATCH_ID='reply2',GATE_REVIEW_VERDICT='must-revise')
@@ -141,6 +141,11 @@ def cases():
     rows=scenario(); rows[-1]['fields']['FROM']='b.orchestrator-planner'; add('W15',rows,'grant-owner-mismatch',())
     for parent in ('missing','grant'):
         rows=scenario(); rows[-1]['fields']['PARENT_DISPATCH_ID']=parent; add('W17-'+parent,rows,'no-gate-record',())
+    rows=scenario()
+    rows[1]['fields'].update(FROM='operator', TO='p.implementer', ROLE='Operator', AUTHORITY='merge-gated',
+                             MERGE_HEAD='abc123', MERGE_BASE='def456')
+    rows[1]['body']='DISPATCH MERGE\n'
+    add('W17-earlier-grant',rows,'no-gate-record',())
     rows=scenario(); rows[2]['body']='PLAN_ARTIFACT: P\n'; add('W20-duplicate',rows,'request-invalid')
     rows=scenario(); add('W21',rows[:2]+[rows[-1],waiver],'no-request',('gate',))
     rows=scenario(); newer=copy.deepcopy(rows[2]); newer['fields']['DISPATCH_ID']='request2'; rows[2]['path']='left/03-same.md'; newer['path']='right/03-same.md'; rows[3]['fields']['PARENT_DISPATCH_ID']='request2'
