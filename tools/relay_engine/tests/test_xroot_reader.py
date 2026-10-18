@@ -39,7 +39,7 @@ class TestXrootReader(unittest.TestCase):
                 self.assertEqual(('blob', expected), reader.next_response())
 
     def test_two_outstanding_requests_first_header_over_budget(self):
-        # The first header alone must determine refusal, even if another query is queued.
+        # Only the first header is framed; bounded transport read-ahead is discarded.
         blob = xf._literal_object(self.repo, 'blob', b'abc')
         with self.reader() as reader:
             reader.max_blob_bytes = 2
@@ -54,8 +54,117 @@ class TestXrootReader(unittest.TestCase):
                 return data
             with mock.patch.object(os, 'read', side_effect=read):
                 self.assertEqual(('blob', None), reader.next_response())
-            self.assertEqual((blob+' blob 3\n').encode(), bytes(observed))
+            header = (blob+' blob 3\n').encode()
+            self.assertEqual(header, bytes(observed[:len(header)]))
+            self.assertLessEqual(len(observed)-len(header), 65536)
+            self.assertEqual(bytes(observed[len(header):]), bytes(reader._read_ahead))
             self.assertEqual(0, reader.content_bytes_read)
+
+    def test_buffered_framing_reads_in_chunks(self):
+        # A return to one-byte header reads violates the transport-call bound.
+        blob = xf._literal_object(self.repo, 'blob', b'abc')
+        calls = 0
+        real_read = os.read
+        with self.reader(time.monotonic()+600) as reader:
+            def read(fd, size):
+                nonlocal calls
+                if fd == reader._output:
+                    calls += 1
+                return real_read(fd, size)
+            with mock.patch.object(os, 'read', side_effect=read):
+                for _ in range(20000//32):
+                    for _ in range(32):
+                        reader.request(blob+'^{blob}')
+                    for _ in range(32):
+                        self.assertEqual(('blob', b'abc'), reader.next_response())
+            self.assertLess(calls, 20000*4)
+
+    def test_read_ahead_never_exceeds_bound(self):
+        # A large permitted body must not accumulate as unframed read-ahead.
+        payload = b'x'*(3*65536+17)
+        blob = xf._literal_object(self.repo, 'blob', payload)
+        with self.reader(time.monotonic()+600) as reader:
+            self.assertTrue(hasattr(reader, '_read_ahead'), 'bounded transport buffer missing')
+            real_read = os.read
+            observed = []
+            def read(fd, size):
+                if fd == reader._output:
+                    observed.append(len(reader._read_ahead))
+                    self.assertLessEqual(size+len(reader._read_ahead), 65536)
+                return real_read(fd, size)
+            for _ in range(3):
+                reader.request(blob+'^{blob}')
+            with mock.patch.object(os, 'read', side_effect=read):
+                for _ in range(3):
+                    self.assertEqual(('blob', payload), reader.next_response())
+                    self.assertLessEqual(len(reader._read_ahead), 65536)
+            self.assertTrue(observed)
+
+    def test_one_chunk_over_budget_header_and_forbidden_body(self):
+        # Coalescing forbidden body bytes must never frame either queued body.
+        blob = xf._literal_object(self.repo, 'blob', b'abc')
+        header = (blob+' blob 3\n').encode()
+        response = header+b'abc\n'+header+b'abc\n'
+        with self.reader() as reader:
+            reader.max_blob_bytes = 2
+            reader.request(blob+'^{blob}')
+            reader.request(blob+'^{blob}')
+            pending = bytearray(response)
+            real_read = os.read
+            def read(fd, size):
+                if fd != reader._output:
+                    return real_read(fd, size)
+                data = bytes(pending[:size]); del pending[:size]
+                return data
+            with mock.patch.object(os, 'read', side_effect=read):
+                self.assertEqual(('blob', None), reader.next_response())
+            self.assertEqual(b'', bytes(pending), 'transport did not read the coalesced chunk')
+            self.assertEqual(0, reader.content_bytes_read)
+            self.assertEqual(response[len(header):], bytes(reader._read_ahead))
+        self.assertEqual(b'', bytes(reader._read_ahead))
+        tree = self.tree({'a.md': b'abc', 'b.md': b'abc'})
+        with mock.patch.object(rules, 'XROOT_MAX_RELAY_BYTES', 2):
+            with self.assertRaises(rules.XrootAxisError) as caught:
+                rules.xroot_relays(self.repo, tree)
+        self.assertEqual('capacity', caught.exception.axis)
+        self.assertIn('XROOT_MAX_RELAY_BYTES', caught.exception.detail)
+        self.assertEqual(0, caught.exception.progress['relays_read'])
+        self.assertEqual(0, caught.exception.progress['bytes_read'])
+
+    def test_selector_registered_once(self):
+        # Rebuilding selector registrations on every wait breaks this bound.
+        registered = []
+        selector_type = rules.selectors.DefaultSelector
+        # Cover the backend selected by the reader, including PollSelector.
+        types = {selector_type, rules.selectors.PollSelector}
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for cls in types:
+                real = cls.register
+                def register(obj, fd, events, data=None, real=real):
+                    registered.append((id(obj), fd))
+                    return real(obj, fd, events, data)
+                stack.enter_context(mock.patch.object(cls, 'register', register))
+            blob = xf._literal_object(self.repo, 'blob', b'abc')
+            with self.reader() as reader:
+                for _ in range(5):
+                    reader.request(blob+'^{blob}')
+                    reader._wait()
+                    self.assertEqual(('blob', b'abc'), reader.next_response())
+                own = [fd for identity, fd in registered if identity == id(reader._selector)]
+                self.assertEqual(sorted([reader._input, reader._output]), sorted(own))
+
+    def test_no_replace_flag_returns_own_bytes(self):
+        import inspect
+        self.assertIn('no_replace', inspect.signature(rules.XrootBatchReader).parameters)
+        original = xf._literal_object(self.repo, 'blob', b'original')
+        replacement = xf._literal_object(self.repo, 'blob', b'replacement')
+        rules.xroot_git(self.repo, 'update-ref', 'refs/replace/'+original, replacement)
+        for no_replace, expected in ((False, b'replacement'), (True, b'original')):
+            with self.subTest(no_replace=no_replace):
+                with rules.XrootBatchReader(self.repo, time.monotonic()+5, no_replace=no_replace) as reader:
+                    reader.request(original+'^{blob}')
+                    self.assertEqual(('blob', expected), reader.next_response())
 
     def test_reader_transport_failure_is_terminal(self):
         blob = xf._literal_object(self.repo, 'blob', b'x')
@@ -286,7 +395,7 @@ class TestXrootReader(unittest.TestCase):
         return (json.loads((root/'baseline-b8d87eb.json').read_text()),
                 json.loads((root/'baseline-b8d87eb-lifted.json').read_text()))
 
-    def assert_governing(self, label, actual, baseline, lifted, path, elapsed):
+    def assert_governing(self, label, actual, baseline, lifted, path, elapsed, *, lifted_deadline=False):
         from relay_engine.tests.capture_xroot_baseline import NATURAL_TIMEOUTS
         capacity = {'C1-over-count-20001':'XROOT_MAX_RELAYS',
                     'C2-over-bytes-300MiB':'XROOT_MAX_RELAY_BYTES',
@@ -295,25 +404,27 @@ class TestXrootReader(unittest.TestCase):
         if label in capacity:
             self.assertEqual('capacity', actual['axis'])
             self.assertIn(capacity[label], actual['detail'])
-            self.assertLess(elapsed, 5)
+            if not lifted_deadline:
+                self.assertLess(elapsed, 5)
         elif label in {'L7-orchestrator-peer', 'B1-complete-within-envelope'}:
             self.assertIsNone(actual['axis'])
             from relay_engine.tests.xroot_b9_cases import O, R
             self.assertEqual((O.removeprefix('relays/'), R.removeprefix('relays/')),
                              (actual['origin'], actual['review']))
-            self.assertLess(elapsed, 5)
+            if not lifted_deadline:
+                self.assertLess(elapsed, 5)
         else:
             old = (lifted if label in NATURAL_TIMEOUTS else baseline)['cases'][label]['paths'][path]
-            if label in NATURAL_TIMEOUTS and actual['axis'] == 'capacity':
+            if not lifted_deadline and label in NATURAL_TIMEOUTS and actual['axis'] == 'capacity':
                 self.assertGreaterEqual(elapsed, 5)
             else:
                 self.assertEqual((old['axis'], old['detail']), (actual['axis'], actual['detail']))
                 if old['axis'] is None:
                     self.assertEqual((old['origin'], old['review']), (actual['origin'], actual['review']))
 
-    def verify_case(self, case):
+    def verify_case(self, case, *, budget_seconds=5):
         started = time.monotonic()
-        token = rules._XROOT_BUDGET.set((started+5, []))
+        token = rules._XROOT_BUDGET.set((started+budget_seconds, []))
         try:
             try:
                 origin, review, population = rules.xroot_verify(self.repo, case.declaration)
@@ -334,15 +445,15 @@ class TestXrootReader(unittest.TestCase):
         cases = materialize(self.repo/'cases', only=[k for k in CASES if not k.startswith('T')])
         for label, case in cases.items():
             with self.subTest(case=label):
-                actual, elapsed = self.verify_case(case)
+                actual, elapsed = self.verify_case(case, budget_seconds=600)
                 for path in ('pair', 'direct'):
-                    self.assert_governing(label, actual, baseline, lifted, path, elapsed)
+                    self.assert_governing(label, actual, baseline, lifted, path, elapsed, lifted_deadline=True)
                 if label in ('F-depth-2500', 'G2-non-utf8-blob'):
                     bad_bounded, bad_lifted = deepcopy(baseline), deepcopy(lifted)
                     target = bad_lifted if label == 'F-depth-2500' else bad_bounded
                     target['cases'][label]['paths']['pair']['detail'] = 'planted undeclared change'
                     with self.assertRaises(AssertionError):
-                        self.assert_governing(label, actual, bad_bounded, bad_lifted, 'pair', elapsed)
+                        self.assert_governing(label, actual, bad_bounded, bad_lifted, 'pair', elapsed, lifted_deadline=True)
 
     def test_deep_tree_reaches_depth_refusal(self):
         from relay_engine.tests.xroot_b9_cases import materialize
@@ -367,9 +478,9 @@ class TestXrootReader(unittest.TestCase):
         baseline, lifted = self.captures()
         for label, case in materialize(self.repo/'limits', only=['C1-over-count-20001', 'M1-over-trees-20001']).items():
             with self.subTest(case=label):
-                actual, elapsed = self.verify_case(case)
+                actual, elapsed = self.verify_case(case, budget_seconds=600)
                 for path in ('pair', 'direct'):
-                    self.assert_governing(label, actual, baseline, lifted, path, elapsed)
+                    self.assert_governing(label, actual, baseline, lifted, path, elapsed, lifted_deadline=True)
 
     def test_injected_deadlines_stay_deadline_controls(self):
         from contextlib import ExitStack

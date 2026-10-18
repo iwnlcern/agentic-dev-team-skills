@@ -3755,6 +3755,7 @@ XROOT_MAX_RELAY_BYTES = 256 * 1024 * 1024
 XROOT_MAX_RETAINED_BYTES = 256 * 1024 * 1024
 XROOT_EDGE_SECONDS = 5
 XROOT_REQUEST_WINDOW = 64
+XROOT_READ_AHEAD = 64 * 1024
 _XROOT_CONTROLS = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]')
 _XROOT_ASCII_LOWER = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 
@@ -3773,7 +3774,7 @@ def xroot_selection_relevant(text: str, doc_id: str) -> bool:
 
 class XrootBatchReader:
     """One nonblocking batch process; consume exactly one framed response at a time."""
-    def __init__(self, repo: Path, deadline: float):
+    def __init__(self, repo: Path, deadline: float, *, no_replace: bool = False):
         self.deadline = deadline
         self.max_blob_bytes = XROOT_MAX_RELAY_BYTES
         self.content_bytes_read = 0
@@ -3781,7 +3782,11 @@ class XrootBatchReader:
         self._fds = set()
         self._pending = bytearray()
         self._closed = False
-        self._selector = selectors.DefaultSelector()
+        self._read_ahead = bytearray()
+        # poll.modify keeps both descriptors registered while write interest
+        # changes. Read interest on the write-only pipe is inert until closure.
+        self._selector = selectors.PollSelector()
+        self._write_interest = False
         try:
             incoming, self._input = os.pipe()
             self._fds.update((incoming, self._input))
@@ -3793,13 +3798,19 @@ class XrootBatchReader:
                        (os.POSIX_SPAWN_DUP2, outgoing, 1),
                        (os.POSIX_SPAWN_DUP2, stderr, 2)]
             actions.extend((os.POSIX_SPAWN_CLOSE, fd) for fd in self._fds)
-            self.pid = os.posix_spawnp('git', ['git', '-C', str(repo), 'cat-file', '--batch'],
+            command = ['git', '-C', str(repo)]
+            if no_replace:
+                command.append('--no-replace-objects')
+            command.extend(['cat-file', '--batch'])
+            self.pid = os.posix_spawnp('git', command,
                                        os.environ, file_actions=actions)
             for fd in (incoming, outgoing, stderr):
                 os.close(fd)
                 self._fds.remove(fd)
             os.set_blocking(self._input, False)
             os.set_blocking(self._output, False)
+            self._selector.register(self._output, selectors.EVENT_READ)
+            self._selector.register(self._input, selectors.EVENT_READ)
         except OSError as exc:
             self.close()
             raise XrootAxisError('repository', 'Git batch reader failed') from exc
@@ -3821,11 +3832,14 @@ class XrootBatchReader:
             if self.pid is not None:
                 _xroot_kill_and_reap(self.pid)
         finally:
+            for key in list(self._selector.get_map().values()):
+                self._selector.unregister(key.fd)
             self._selector.close()
             for fd in self._fds:
                 os.close(fd)
             self._fds.clear()
             self._pending.clear()
+            self._read_ahead.clear()
 
     def _check_deadline(self):
         if time.monotonic() >= self.deadline:
@@ -3851,9 +3865,11 @@ class XrootBatchReader:
 
     def _wait(self):
         try:
-            self._selector.register(self._output, selectors.EVENT_READ)
-            if self._pending:
-                self._selector.register(self._input, selectors.EVENT_WRITE)
+            writing = bool(self._pending)
+            if writing != self._write_interest:
+                self._selector.modify(self._input, selectors.EVENT_READ |
+                                      (selectors.EVENT_WRITE if writing else 0))
+                self._write_interest = writing
             self._check_deadline()
             events = self._selector.select(max(0, self.deadline-time.monotonic()))
             if not events:
@@ -3863,45 +3879,51 @@ class XrootBatchReader:
                     self._flush()
         except OSError as exc:
             raise XrootAxisError('repository', 'Git batch reader failed') from exc
-        finally:
-            for key in list(self._selector.get_map().values()):
-                self._selector.unregister(key.fd)
+
+    def _transport_read(self, size):
+        while True:
+            self._check_deadline()
+            self._flush()
+            try:
+                chunk = os.read(self._output, size)
+            except BlockingIOError:
+                self._wait()
+                continue
+            except OSError as exc:
+                raise XrootAxisError('repository', 'Git batch reader failed') from exc
+            if not chunk:
+                raise XrootAxisError('repository', 'Git batch reader failed')
+            return chunk
 
     def _read(self, size):
         data = bytearray()
         while len(data) < size:
-            self._check_deadline()
-            self._flush()
-            try:
-                chunk = os.read(self._output, min(size-len(data), 65536))
-            except BlockingIOError:
-                self._wait()
-                continue
-            except OSError as exc:
-                raise XrootAxisError('repository', 'Git batch reader failed') from exc
-            if not chunk:
-                raise XrootAxisError('repository', 'Git batch reader failed')
-            data.extend(chunk)
+            if self._read_ahead:
+                count = min(size-len(data), len(self._read_ahead))
+                data.extend(self._read_ahead[:count])
+                del self._read_ahead[:count]
+            elif size-len(data) >= XROOT_READ_AHEAD:
+                data.extend(self._transport_read(XROOT_READ_AHEAD))
+            else:
+                self._read_ahead.extend(self._transport_read(XROOT_READ_AHEAD))
         return bytes(data)
 
     def next_response(self) -> tuple[str, bytes | None]:
-        # Read the header without prefetching even one forbidden content byte.
+        # Only the current header is framed. Coalesced body/later-response
+        # bytes stay unframed until this response passes its size check.
         self._check_deadline()
         self._flush()
-        header = bytearray()
-        while not header.endswith(b'\n'):
-            if len(header) > 256:
+        while True:
+            end = self._read_ahead.find(b'\n')
+            if end >= 0:
+                if end > 256:
+                    raise XrootAxisError('repository', 'Git batch reader failed')
+                header = bytes(self._read_ahead[:end+1])
+                del self._read_ahead[:end+1]
+                break
+            if len(self._read_ahead) > 256:
                 raise XrootAxisError('repository', 'Git batch reader failed')
-            try:
-                chunk = os.read(self._output, 1)
-            except BlockingIOError:
-                self._wait()
-                continue
-            except OSError as exc:
-                raise XrootAxisError('repository', 'Git batch reader failed') from exc
-            if not chunk:
-                raise XrootAxisError('repository', 'Git batch reader failed')
-            header.extend(chunk)
+            self._read_ahead.extend(self._transport_read(XROOT_READ_AHEAD-len(self._read_ahead)))
         self._check_deadline()
         fields = bytes(header[:-1]).split(b' ')
         if len(fields) == 2 and fields[1] == b'missing':
