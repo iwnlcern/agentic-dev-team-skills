@@ -30,6 +30,15 @@ def load_script():
     return module
 
 
+def run_detached_shell(argv: list[str], script: str | None = None, timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    """Keep interactive probes from opening the caller's controlling terminal."""
+    stdin = {"input": script} if script is not None else {"stdin": subprocess.DEVNULL}
+    return subprocess.run(
+        argv, **stdin, capture_output=True, text=True, timeout=timeout,
+        start_new_session=True,
+    )
+
+
 def ns(**kw):
     """Argument namespace for mode functions (no class-scope lookups)."""
     base = dict(
@@ -2132,6 +2141,136 @@ raise SystemExit(m.main(sys.argv[3:]))
                     self.assertEqual(result.returncode, 0)
                     self.assertNotIn("Traceback", result.stderr)
 
+    def test_probe_shells_report_interactive(self):
+        # Dropping -i would make the comment probes vacuous.
+        self.assertTrue(callable(globals().get("run_detached_shell")), "missing run_detached_shell")
+        check = "case $- in *i*) printf 'INTERACTIVE\\n';; *) printf 'NOT_INTERACTIVE\\n';; esac\nexit\n"
+        shapes = (["zsh", "-f", "-i"], ["bash", "--noprofile", "--norc", "-i"], ["zsh", "-f", "-i", "-c"])
+        for shell in shapes:
+            for interactive in (True, False):
+                with self.subTest(shell=shell, interactive=interactive):
+                    argv = shell if interactive else [arg for arg in shell if arg != "-i"]
+                    result = run_detached_shell([*argv, check]) if "-c" in argv else run_detached_shell(argv, check)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "INTERACTIVE\n" if interactive else "NOT_INTERACTIVE\n", result.stderr)
+
+    def test_probe_launch_completes_under_a_controlling_terminal(self):
+        # Removing detachment must fail even when the outer runner has no tty.
+        self.assertTrue(callable(globals().get("run_detached_shell")), "missing run_detached_shell")
+        report = self.base / "pty-probe.json"
+        harness = r'''
+import errno, importlib.util, json, os, pathlib, pty, select, signal, subprocess, sys, time
+report = pathlib.Path(sys.argv[2])
+state = {}
+def interrupted(signum, frame):
+    raise RuntimeError("harness interrupted")
+signal.signal(signal.SIGTERM, interrupted)
+pid, fd = pty.fork()
+if pid == 0:
+    children = []
+    real_popen = subprocess.Popen
+    class ObservedPopen(real_popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+    try:
+        state["isatty"] = os.isatty(0)
+        tty = os.open("/dev/tty", os.O_RDWR)
+        os.close(tty)
+        state["controlling_terminal"] = True
+        assert state["isatty"]
+        spec = importlib.util.spec_from_file_location("b12_probe_tests", sys.argv[1])
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        subprocess.Popen = ObservedPopen  # observe real child handles for reaping proof
+        script = "printf 'AFTER_HINT\\n'\nexit\n"
+        try:
+            result = module.run_detached_shell(["zsh", "-f", "-i"], script)
+            state["main"] = {"stdout": result.stdout, "returncode": result.returncode}
+        except subprocess.TimeoutExpired:
+            state["main"] = {"error": "TimeoutExpired"}
+        state["control_launch_reached"] = True
+        report.write_text(json.dumps(state))
+        try:
+            subprocess.run(["zsh", "-f", "-i"], input=script, capture_output=True, text=True, timeout=3)
+            state["control"] = "unexpected completion"
+        except subprocess.TimeoutExpired:
+            state["control"] = "TimeoutExpired from shell launch"
+    except BaseException as exc:
+        state["error"] = repr(exc)
+    finally:
+        subprocess.Popen = real_popen
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+        state["children"] = [{"pid": child.pid, "returncode": child.returncode} for child in children]
+        state["shells_reaped"] = all(child.returncode is not None for child in children)
+        report.write_text(json.dumps(state))
+    os._exit(0 if "error" not in state else 1)
+status = None
+try:
+    deadline = time.monotonic() + 25
+    while status is None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("pty harness budget expired")
+        if select.select([fd], [], [], .1)[0]:
+            try:
+                os.read(fd, 65536)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+        done, value = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = value
+finally:
+    if status is None:
+        os.kill(pid, signal.SIGTERM)  # grandchild finally kills and waits for its shells
+        deadline = time.monotonic() + 5
+        while status is None and time.monotonic() < deadline:
+            done, value = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = value
+            else:
+                time.sleep(.05)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+    os.close(fd)
+state = json.loads(report.read_text())
+state["pty_child_reaped"] = True
+state["pty_child_exit"] = os.waitstatus_to_exitcode(status)
+report.write_text(json.dumps(state))
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", harness, str(pathlib.Path(__file__).resolve()), str(report)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=40)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertEqual(stdout, "")
+        result = json.loads(report.read_text())
+        self.assertNotIn("error", result)
+        self.assertTrue(result["isatty"])
+        self.assertTrue(result["controlling_terminal"])
+        self.assertTrue(result["control_launch_reached"])
+        self.assertEqual(result["control"], "TimeoutExpired from shell launch")
+        self.assertTrue(result["pty_child_reaped"])
+        self.assertEqual(result["pty_child_exit"], 0)
+        self.assertTrue(result["shells_reaped"])
+        self.assertEqual(len(result["children"]), 2)
+        self.assertEqual(result["main"], {"stdout": "AFTER_HINT\n", "returncode": 0})
+
     def test_every_hint_form_is_inert_or_runnable_in_shells(self):
         import shlex
         marker = self.base / "must-not-exist"
@@ -2143,7 +2282,7 @@ raise SystemExit(m.main(sys.argv[3:]))
             hint = self.rm.rebind_line({"bind_observation": record}, "sess")
             if provenance == "none":
                 for shell in shells:
-                    result = subprocess.run([*shell, hint], capture_output=True, text=True, timeout=10)
+                    result = run_detached_shell([*shell, hint], timeout=10)
                     self.assertFalse(marker.exists())
                     self.assertEqual(result.stdout, "")
             else:
@@ -2152,7 +2291,7 @@ raise SystemExit(m.main(sys.argv[3:]))
                 self.assertEqual(words, ["python3", str(SCRIPT.resolve()), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"])
                 for shell in shells:
                     # Shell parsing, without executing a real manual bind.
-                    result = subprocess.run([*shell, "printf '%s\\n' " + hint.removeprefix(prefix)], capture_output=True, text=True, timeout=10)
+                    result = run_detached_shell([*shell, "printf '%s\\n' " + hint.removeprefix(prefix)], timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.splitlines(), words)
 
@@ -2178,7 +2317,7 @@ raise SystemExit(m.main(sys.argv[3:]))
             with self.subTest(shell=shell, option=option, hint=hint):
                 script = option + "\nPATH=" + shlex.quote(str(sentinels)) + ":$PATH\n"
                 script += hint + "\nprintf 'AFTER_HINT\\n'\nexit\n"
-                result = subprocess.run(shell, input=script, capture_output=True, text=True, timeout=10)
+                result = run_detached_shell(shell, script, timeout=10)
                 self.assertEqual(result.stdout, "AFTER_HINT\n", result.stderr)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
