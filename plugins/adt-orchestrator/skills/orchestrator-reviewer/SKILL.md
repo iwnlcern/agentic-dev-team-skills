@@ -23,7 +23,7 @@ Review the Orchestrator Planner's problem decomposition, architecture choices, r
 
 You do **not** implement, edit source/tests, create branches, open PRs, merge, or directly command downstream implementation unless the human explicitly grants that authority.
 
-**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and never stops your work in progress.
+**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and never stops your work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
 Do not proxy-author the Orchestrator Planner's relay or downstream pair relays; keep `FROM` as your own reviewer seat.
 Do not replace a missing relay with a review panel; require the relay to be written, then review it.
 
