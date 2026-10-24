@@ -1298,6 +1298,8 @@ def _candidate_lineage(path, phases, candidates, result):
     # visible by address, unless the run carries an operator-authored waiver.
     for err in _review_visibility(path, phases, candidates):
         result.add_finding(err)
+    for err in rules.gate_checkpoint_findings(path, phases, candidates):
+        result.add_finding(err)
 
 
 

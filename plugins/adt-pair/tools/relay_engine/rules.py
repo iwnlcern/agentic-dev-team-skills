@@ -165,7 +165,7 @@ FAMILY_IDS = frozenset((
     "lineage.commission", "lineage.cross-root-design", "lineage.design-review",
     "lineage.dispatch", "lineage.impl-report-parent", "lineage.merge-claim",
     "lineage.row-truth", "lineage.review-visibility", "lineage.lock-path",
-    "lineage.governing-digest",
+    "lineage.governing-digest", "review.gate-not-heard",
 ))
 
 
@@ -1539,6 +1539,148 @@ def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[i
             continue
         errors.append(_structural('lineage.review-visibility', f.relative_to(path), f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)", operands=()))
     return errors
+
+
+GATE_REVIEW_REASONS = (
+    'run-pair-ambiguous', 'grant-owner-mismatch', 'no-gate-record',
+    'gate-record-ambiguous', 'no-request', 'request-ambiguous',
+    'no-reply', 'reply-ambiguous', 'gate-record-invalid', 'grant-invalid',
+    'request-invalid', 'reply-invalid', 'binding-mismatch', 'must-revise',
+    'held-without-disposition',
+)
+GATE_DISPOSITION_RE = re.compile(
+    r'operator-in-chat ([0-9]{8}-[0-9]{6}) — "([^\r\n]+)"'
+)
+
+
+def _gate_addresses(fields, key):
+    return [normalized_addr(value) for value in split_addresses(fields.get(key))]
+
+
+def _gate_disposition(text):
+    values = h27_occurrences(text, 'GATE_DISPOSITION')
+    if not values:
+        return 'absent'
+    if len(values) == 1:
+        match = GATE_DISPOSITION_RE.fullmatch(values[0])
+        if match and match[2].strip() and parse_stamp(match[1]) is not None:
+            return 'well-formed'
+    return 'malformed'
+
+
+def _gate_payload(item, keys):
+    values = {key: h27_occurrences(item[4], key) for key in keys}
+    if any(len(v) != 1 or not v[0] for v in values.values()):
+        return None
+    return {key: value[0] for key, value in values.items()}
+
+
+def _gate_latest(items):
+    if not items:
+        return None, False
+    order = max(item[1] for item in items)
+    latest = [item for item in items if item[1] == order]
+    return (latest[0], False) if len(latest) == 1 else (None, True)
+
+
+def gate_checkpoint_findings(path: Path, phases: list, candidates: list) -> List[Finding]:
+    """Judge each grant against preceding evidence, without granting authority."""
+    findings = []
+    by_id = dispatch_id_map(phases)
+    for grant in candidates:
+        fields, text = grant[3], grant[4]
+        senders = _gate_addresses(fields, 'FROM')
+        if not merge_authorized(text, fields) or senders == ['operator']:
+            continue
+        earlier = [item for item in phases if item[1] < grant[1]]
+        owners = set()
+        for item in earlier:
+            own = _gate_addresses(item[3], 'FROM')
+            if (item[2] == 'SITREP' and item[3].get('AUTHORITY') == 'report-only'
+                    and len(own) == 1 and address_role(own[0]) == 'orchestrator-planner'
+                    and _gate_addresses(item[3], 'TO') == [same_owner_addr(address_owner(own[0]), 'orchestrator-reviewer')]
+                    and h27_occurrences(item[4], 'GATE_REVIEW') == ['on']):
+                owners.add(address_owner(own[0]))
+        if not owners or run_has_operator_orch_review_waiver(earlier):
+            continue
+        gate = request = reply = None
+        reason = None
+        if len(owners) != 1:
+            reason = 'run-pair-ambiguous'
+        else:
+            owner = next(iter(owners))
+            planner = same_owner_addr(owner, 'orchestrator-planner')
+            reviewer = same_owner_addr(owner, 'orchestrator-reviewer')
+            if senders not in ([planner], ['orchestrator']):
+                reason = 'grant-owner-mismatch'
+        if reason is None:
+            gate, tied = _gate_latest([
+                item for item in by_id.get(fields.get('PARENT_DISPATCH_ID'), [])
+                if fields.get('PARENT_DISPATCH_ID')
+                and item[1] < grant[1] and item[2] == 'MERGE-GATE'
+                and not merge_authorized(item[4], item[3])
+            ])
+            if gate is None:
+                reason = 'gate-record-ambiguous' if tied else 'no-gate-record'
+        if reason is None:
+            request, tied = _gate_latest([
+                item for item in earlier
+                if item[2] == 'MERGE-GATE'
+                and item[3].get('ROLE') == 'Orchestrator Planner'
+                and item[3].get('AUTHORITY') == 'report-only'
+                and _gate_addresses(item[3], 'FROM') == [planner]
+                and _gate_addresses(item[3], 'TO') == [reviewer]
+                and item[3].get('PARENT_DISPATCH_ID')
+                and item[3].get('PARENT_DISPATCH_ID') == gate[3].get('DISPATCH_ID')
+            ])
+            if request is None:
+                reason = 'request-ambiguous' if tied else 'no-request'
+        if reason is None:
+            reply, tied = _gate_latest([
+                item for item in earlier
+                if request[1] < item[1] and item[2] == 'MERGE-GATE'
+                and item[3].get('ROLE') == 'Orchestrator Reviewer'
+                and item[3].get('AUTHORITY') == 'review-only'
+                and _gate_addresses(item[3], 'FROM') == [reviewer]
+                and _gate_addresses(item[3], 'TO') == [planner]
+                and item[3].get('PARENT_DISPATCH_ID')
+                and item[3].get('PARENT_DISPATCH_ID') == request[3].get('DISPATCH_ID')
+            ])
+            if reply is None:
+                reason = 'reply-ambiguous' if tied else 'no-reply'
+        if reason is None:
+            gate_values = _gate_payload(gate, ('PLAN_LOCK_ID', 'PLAN_SHA256'))
+            grant_values = _gate_payload(grant, ('MERGE_HEAD', 'MERGE_BASE'))
+            request_values = _gate_payload(request, ('GATE_HEAD', 'GATE_BASE', 'PLAN_LOCK_ID', 'PLAN_SHA256', 'PLAN_ARTIFACT'))
+            reply_values = _gate_payload(reply, ('GATE_REVIEW_VERDICT', 'REVIEWED_HEAD', 'REVIEWED_BASE'))
+            if gate_values is None:
+                reason = 'gate-record-invalid'
+            elif grant_values is None:
+                reason = 'grant-invalid'
+            elif request_values is None:
+                reason = 'request-invalid'
+            elif reply_values is None or reply_values['GATE_REVIEW_VERDICT'] not in ('approve', 'must-revise', 'human-decision-required'):
+                reason = 'reply-invalid'
+            elif not (
+                grant_values['MERGE_HEAD'] == request_values['GATE_HEAD'] == reply_values['REVIEWED_HEAD']
+                and grant_values['MERGE_BASE'] == request_values['GATE_BASE'] == reply_values['REVIEWED_BASE']
+                and all(request_values[k] == gate_values[k] for k in ('PLAN_LOCK_ID', 'PLAN_SHA256'))
+            ):
+                reason = 'binding-mismatch'
+            elif reply_values['GATE_REVIEW_VERDICT'] == 'must-revise':
+                reason = 'must-revise'
+            elif reply_values['GATE_REVIEW_VERDICT'] == 'human-decision-required' and _gate_disposition(text) != 'well-formed':
+                reason = 'held-without-disposition'
+        if reason is not None:
+            disposition = _gate_disposition(text)
+            subject = str(grant[0].relative_to(path))
+            message = (f'{subject}: review.gate-not-heard: orchestrator merge grant after '
+                       f'GATE_REVIEW adoption has no heard reviewer checkpoint '
+                       f'({reason}; disposition {disposition})')
+            findings.append(_structural('review.gate-not-heard', subject, message,
+                operands=(item[0].relative_to(path) for item in (gate, request, reply) if item is not None),
+                params={'reason': reason, 'disposition': disposition}, severity='warn'))
+    return findings
 
 
 def split_index_cells(stripped: str) -> list[str]:
@@ -4857,6 +4999,8 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
     # authority-bearing relay in the broad SET must make the reviewer seat
     # visible by address, unless the run carries an operator-authored waiver.
     for err in orchestrator_review_gate_errors(path, phases):
+        result.add_finding(err)
+    for err in gate_checkpoint_findings(path, phases, phases):
         result.add_finding(err)
 
     # Lock references that look like paths should exist.
