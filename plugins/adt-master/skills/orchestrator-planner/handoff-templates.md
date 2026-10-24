@@ -226,7 +226,6 @@ DESIGN_REVIEW_VERDICT: <approve | must-revise | reject-narrow | human-decision-r
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 
-
 Current scope: read-only design review only.
 Check: target entity, boundary contract, acceptance criteria draft, rejected alternatives, operator decisions/defaults, and unresolved questions.
 Return one verdict: approve / must-revise / reject-narrow / human-decision-required.
@@ -415,7 +414,6 @@ DISPATCH IMPL
 
 Before acting, run the check and cite its answer as instructed in `protocol.md` § Authority check before acting.
 
-
 This bare own-line token grants implementation to the `TO` addressee only, for the locked plan only. CC'd, non-addressed, or cross-reading agents treat it as inert. Pair-Planner-issued dispatches must parent to the Implementer's approving PLAN-REVIEW relay; absence of the parent edge is a structural error. Direct operator/orchestrator dispatch is the override path.
 
 Required:
@@ -603,7 +601,6 @@ GATE_REVIEW_VERDICT: <approve | must-revise | human-decision-required>
 REVIEWED_HEAD: <full reviewed commit pin>
 REVIEWED_BASE: <full reviewed base commit pin>
 
-
 Findings and remaining conditions: <evidence and requested disposition, or none>
 ACTIONS_GIT_REF: none — read-only review
 FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
@@ -681,7 +678,6 @@ GATE_DISPOSITION: <operator-in-chat YYYYMMDD-HHMMSS — "operator’s exact repl
 DISPATCH MERGE
 
 Before acting, run the check and cite its answer as instructed in `protocol.md` § Authority check before acting.
-
 
 This bare own-line token grants merge authority only to the named `TO` Implementer for the parented gate record. Record the resulting merge claim under the same merge-handoff id.
 ```

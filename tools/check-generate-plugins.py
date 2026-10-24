@@ -1140,14 +1140,30 @@ def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path)
         if label == "E":
             implementation_region = region
         templates.append((label, token, body))
+    # Read the actual installed judge's patterns, including flags, in isolation.
+    pattern_reader = """import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from relay_engine import authority
+assert Path(authority.__file__).resolve().parent == (Path(sys.argv[1]) / "relay_engine").resolve()
+print(json.dumps({name: [getattr(authority, name).pattern, getattr(authority, name).flags]
+                  for name in ('HTML_OPEN', 'HTML_START', 'CONTROL_CHARACTERS')}))
+"""
+    result = subprocess.run([PYTHON, "-I", "-c", pattern_reader, str(scratch / "tools")],
+                            cwd=scratch_base, text=True, capture_output=True)
+    expect_success(result, f"{plugin} installed authority patterns")
+    patterns = {name: re.compile(pattern, flags)
+                for name, (pattern, flags) in json.loads(result.stdout).items()}
     fictional = {"RUN_ID": "v0", "TO": "v0-x.implementer", "default": "example"}
     def fill(body: str) -> str:
         # Preserve markup before ANY substitution or header alternative handling.
         # Keeping an entire markup-bearing line also protects partial/unclosed forms.
-        html_open = re.compile(r"<!--|<\?|<!\[|<![a-z]|<(?:script|pre|style|textarea)(?=[ \t\r\n\f\v>]|$)", re.I)
         lines = []
         for line in body.split("\n"):
-            if re.match(r"^ {0,3}<", line) or html_open.search(line):
+            if re.match(r"^[A-Z][A-Z0-9_]*:", line):
+                expect(not patterns["CONTROL_CHARACTERS"].search(line),
+                       f"{plugin} raw template header contains a refused character: {line!r}")
+            if patterns["HTML_START"].match(line) or patterns["HTML_OPEN"].search(line):
                 lines.append(line)
                 continue
             line = re.sub(r"<([^<>\n]*)>",
