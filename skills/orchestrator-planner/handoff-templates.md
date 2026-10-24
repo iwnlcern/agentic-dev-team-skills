@@ -199,6 +199,8 @@ Design lock via Superpowers brainstorming, recorded as DESIGN_DOC_ID, with selec
 
 Use this when a pair Planner has produced a real design doc. The Implementer reviews the design before any design-doc-backed PLAN consumes it.
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: DESIGN-REVIEW
 
@@ -222,7 +224,6 @@ DESIGN_REVIEW_VERDICT: <approve | must-revise | reject-narrow | human-decision-r
 BUNDLE_ID: <bundle>
 OWNER: <team/agent pair>
 
-Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
 
 Current scope: read-only design review only.
 Check: target entity, boundary contract, acceptance criteria draft, rejected alternatives, operator decisions/defaults, and unresolved questions.
@@ -374,6 +375,8 @@ Written plan via Superpowers writing-plans + Implementer plan review + SCOPE_DIF
 
 Use this for operator/orchestrator-issued implementation dispatch, or when delegation is disabled. When delegation is enabled and conditions are met, the pair Planner may issue the exact token as a bare, unfenced, un-backticked own line after SCOPE_DIFF all-in and Implementer approve. Retain and fill the delegated-authority field block only for the delegated pair-Planner path; direct operator/orchestrator dispatches omit that block.
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: implementation dispatch
 
@@ -410,7 +413,6 @@ DISPATCH IMPL
 
 Before acting, run the check and cite its answer as instructed in `protocol.md` § Authority check before acting.
 
-Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
 
 This bare own-line token grants implementation to the `TO` addressee only, for the locked plan only. CC'd, non-addressed, or cross-reading agents treat it as inert. Pair-Planner-issued dispatches must parent to the Implementer's approving PLAN-REVIEW relay; absence of the parent edge is a structural error. Direct operator/orchestrator dispatch is the override path.
 
@@ -577,6 +579,8 @@ Review scope and evidence: <pinned change, evidence paths, and open merge condit
 
 Reviewer reply:
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: GATE REVIEW REPLY
 
@@ -597,7 +601,6 @@ GATE_REVIEW_VERDICT: <approve | must-revise | human-decision-required>
 REVIEWED_HEAD: <full reviewed commit pin>
 REVIEWED_BASE: <full reviewed base commit pin>
 
-Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
 
 Findings and remaining conditions: <evidence and requested disposition, or none>
 ACTIONS_GIT_REF: none — read-only review
@@ -651,6 +654,8 @@ Use this only after the merge-gate record exists. The operator or orchestrator a
 In an adopting run, apply `protocol.md` § Reviewer checkpoints before this grant; disposition uses that subsection’s rule.
 In an adopting run, before granting, re-read the PR head and base; if either differs from the reviewed pins, file a new Template L request.
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: MERGE GRANT
 
@@ -675,7 +680,6 @@ DISPATCH MERGE
 
 Before acting, run the check and cite its answer as instructed in `protocol.md` § Authority check before acting.
 
-Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
 
 This bare own-line token grants merge authority only to the named `TO` Implementer for the parented gate record. Record the resulting merge claim under the same merge-handoff id.
 ```

@@ -36,7 +36,7 @@ For the managed-root direct-message rule, see `protocol.md` § Authority check b
 **Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing.
 The acknowledgment reuses the boot relay's `DISPATCH_ID` and is submitted with `--admits-against` the boot relay, following the template in `protocol.md` § Delivery mode.
 An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; if the read fails, report `unavailable-file` and do not act on that relay).
-Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress.
+Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
 
 ## Phase behavior
 
@@ -71,7 +71,7 @@ Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
 ### IMPL
 
 Before starting implementation on a managed root, run `tools/relay authority check <relay> --seat <own address> --action implement --root <root>` with this grant and this seat, and cite the answer in the report.
-Permission requires exit 0, `allowed` true and matching relay, seat and action; a denial, an unevaluable answer, absent output or missing command stops the act and is reported with its result or stderr, including nonempty `external` and its `capacity` limit when present.
+Permission requires exit 0, `allowed` true and matching relay, seat and action; a denial, an unevaluable answer, absent output or missing command stops the act and is relayed as a blocker to the governing seat with its result or stderr, including nonempty `external` and its `capacity` limit when present.
 Keep the command, output or stderr code and exit status for every check; follow `protocol.md` § Authority check before acting for the complete rule, resume conditions and citation forms.
 
 Begin only after a current relay/message contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and either addressed to you in `TO` as the sole implementer addressee from a relay file under the active run's RELAY_ROOT or sent to you as the sole recipient in a direct message.
@@ -88,7 +88,7 @@ Edit only the existing PR branch to address review findings, and only after writ
 ### MERGE/LIVE-VERIFY
 
 Always before merging on a managed root, run `tools/relay authority check <relay> --seat <own address> --action merge --root <root>` with this grant and this seat, and cite the answer in the report.
-Permission requires exit 0, `allowed` true and matching relay, seat and action; a denial, an unevaluable answer, absent output or missing command stops the act and is reported with its result or stderr, including nonempty `external` and its `capacity` limit when present.
+Permission requires exit 0, `allowed` true and matching relay, seat and action; a denial, an unevaluable answer, absent output or missing command stops the act and is relayed as a blocker to the governing seat with its result or stderr, including nonempty `external` and its `capacity` limit when present.
 Keep the command, output or stderr code and exit status for every check; follow `protocol.md` § Authority check before acting for the complete rule, resume conditions and citation forms.
 
 Merge is human/operator gated. Tests green plus valid dispatch is not merge authority; merge has its own gate and its own addressee. Exit IMPL with branch/PR/report unless a separate merge-authorization relay exists. The canonical merge grant is a bare, unfenced, un-backticked own-line `DISPATCH MERGE` in a `MERGE-GATE` relay addressed to exactly one Implementer, or a valid field-form merge authorization from operator/orchestrator/orchestrator-planner with exactly one operational authorization-verdict line. Report evidence honestly: tests are E2; runtime checks are E3; deployed tenant proof is E4. Do not label work complete before the required evidence level is reached.

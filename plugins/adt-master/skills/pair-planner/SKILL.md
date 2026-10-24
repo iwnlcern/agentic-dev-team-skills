@@ -41,7 +41,7 @@ Use qualified role nouns (`pair Planner`, `Implementer`, `Orchestrator Planner`,
 **Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing.
 The acknowledgment reuses the boot relay's `DISPATCH_ID` and is submitted with `--admits-against` the boot relay, following the template in `protocol.md` § Delivery mode.
 An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; if the read fails, report `unavailable-file` and do not act on that relay).
-Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress.
+Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
 
 ## Pair lifecycle
 
