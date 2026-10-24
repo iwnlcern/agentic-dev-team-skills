@@ -13,6 +13,8 @@ CARDINAL_RULES:
 
 ## Org chart + addressing
 
+For managed-root initialization, follow the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup).
+
 Name every seat and record the canonical addresses used for `FROM`, `TO`, and `CC`.
 
 ```text

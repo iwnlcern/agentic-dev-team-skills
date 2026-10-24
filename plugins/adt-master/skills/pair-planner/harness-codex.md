@@ -24,6 +24,8 @@ Claude Code is this kit's default harness and has no such file.
 
 ## relay-lint
 
+The procedure in `protocol.md` § Authority check before acting is the same on Codex and does not depend on hooks.
+
 - Plugin-route installs ship the relay-write adapter through `hooks/hooks.json`; Codex presents a one-time content-hash trust prompt when the hook or its script bytes are first encountered or change.
 - Manual installs and users who decline that prompt run the linter before every handoff: `python3 <skills-root>/tools/relay-lint.py <relay>`, where `<skills-root>` is the directory the skills were installed into.
 
@@ -34,9 +36,9 @@ Claude Code is this kit's default harness and has no such file.
 ## Relay auto-delivery
 
 - The supported host for auto-delivery is the kit's Codex fork (`iwnlcern/codex`, DD-v295-b3): the `monitor` tool carries `relay-monitor.py follow` for the seat.
-  The kit never probes for the fork: on every Codex seat the SessionStart hook supplies the arming context.
+  The kit never probes for the fork: the SessionStart hook supplies the arming context when it resolves the host as Codex.
   At `startup` that is the boot wording, and the boot turn arms only if `monitor` is in its advertised tool surface, otherwise reporting `unavailable: monitor-tool` with the pointer fallback.
-  After `resume`, `clear`, `compact` or `fork` it is the non-boot wording: no acknowledgment, a watch started only if this session has none running, and the work in progress continues in the same turn.
+  For every SessionStart source other than `startup`, including an unrecognised source, it is the non-boot wording: no acknowledgment, a watch started only if this session has none running, and the work in progress continues in the same turn.
   Set `ADT_CODEX_FORK=0` in a seat's environment to suppress the arming context on a seat you know is stock.
 - Install per the fork's recipe in DD-v295-b3 6.11 (the npm vendor slot); `codex features list` and the recorded sha256 are install evidence for the operator and never gate arming.
 - The fork forwards at most 4 KiB of text per record; a row over that size is unsupported for monitor delivery and is recovered through `relay-monitor.py replay`, which reads the index directly.

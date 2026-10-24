@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import io
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -14,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 from relay_engine import version
 
@@ -997,9 +1001,228 @@ def relay_text(role: str, address: str) -> str:
     )
 
 
+def section_example_blocks(region: str, label: str) -> tuple[list[str], list[int]]:
+    """Read all outer fenced blocks and filled-example markers in one section."""
+    blocks = []
+    markers = []
+    body = []
+    fence = None
+    for line in region.split("\n"):
+        if fence is None and line.startswith("## "):
+            break
+        delimiter = re.fullmatch(r" {0,3}(`{3,}|~{3,})([^`~]*)", line)
+        fence_start = re.match(r" {0,3}(?:`{3,}|~{3,})", line)
+        if fence is None:
+            if line.startswith("Filled example using fictional"):
+                markers.append(len(blocks))
+            if delimiter:
+                expect(delimiter[2].strip() in {"", "text"}, f"{label}: unexpected fence language")
+                fence = delimiter[1]
+                body = []
+            else:
+                expect(not fence_start, f"{label}: malformed opening fence")
+        elif delimiter and delimiter[1] == fence and not delimiter[2].strip():
+            blocks.append("\n".join(body))
+            fence = None
+        else:
+            expect(not fence_start, f"{label}: unmatched or nested fence")
+            body.append(line)
+    expect(fence is None, f"{label}: unclosed fenced block")
+    return blocks, markers
+
+
+def single_example_block(region: str, label: str) -> str:
+    blocks, _ = section_example_blocks(region, label)
+    expect(len(blocks) == 1, f"{label}: expected exactly one fenced block")
+    return blocks[0]
+
+
+def check_implementation_report_example(plugin: str, scratch: Path, scratch_base: Path) -> None:
+    """Catch copied report parents and citations in the actual installed example."""
+    skill = (scratch / "skills/pair-implementer/SKILL.md").read_text(encoding="utf-8")
+    headings = list(re.finditer(r"^## Implementation report$", skill, re.MULTILINE))
+    expect(len(headings) == 1, f"{plugin} example_extracted_per_tier: expected one report section")
+    blocks, markers = section_example_blocks(skill[headings[0].end():], f"{plugin} IMPL report section")
+    expect(len(blocks) == 2 and markers == [1],
+           f"{plugin} example_extracted_per_tier: expected skeleton, one marker, then example")
+    example = blocks[1]
+    def field(name: str) -> str:
+        matches = re.findall(rf"^{name}: (.+)$", example, re.MULTILINE)
+        expect(len(matches) == 1, f"{plugin} example needs one {name}")
+        return matches[0]
+    dispatch_path = field("IN_REPLY_TO")
+    parent = field("PARENT_DISPATCH_ID")
+    actor = field("FROM")
+    corpus = scratch_base / f"impl-example-{plugin}"
+    corpus.mkdir()
+    dispatch = corpus / dispatch_path
+    dispatch.parent.mkdir(parents=True)
+    dispatch.write_text(f"""ROLE: Orchestrator Planner
+PHASE: IMPL
+AUTHORITY: implementation
+DISPATCH_ID: {parent}
+RUN_ID: example
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no — fictional test dispatch
+FROM: example.orchestrator-planner
+TO: {actor}
+CC: example.orchestrator-reviewer
+SUBJECT: Fictional authorizing dispatch
+
+DISPATCH IMPL
+
+Implement the fictional report example only.
+""", encoding="utf-8")
+    wrong_id = "example-not-a-dispatch"
+    wrong = dispatch.parent / "SITREP-orchestrator-planner-20261013-055900.md"
+    wrong.write_text(f"""ROLE: Orchestrator Planner
+PHASE: SITREP
+AUTHORITY: report-only
+DISPATCH_ID: {wrong_id}
+RUN_ID: example
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no — fictional context
+FROM: example.orchestrator-planner
+TO: {actor}
+SUBJECT: Context, not a grant
+
+ACTIONS_GIT_REF: none — fictional report-only context
+FINAL_GIT_STATUS_SHORT: unavailable — fictional corpus
+""", encoding="utf-8")
+    report = dispatch.parent / "IMPL-pair-implementer-20261013-060100.md"
+    commands = (
+        [PYTHON, str(scratch / "tools/relay-lint.py"), "--relay-root", str(corpus)],
+        [PYTHON, str(scratch / "tools/relay"), "lint", "--relay-root", str(corpus)],
+    )
+    for command in commands:
+        report.write_text(example, encoding="utf-8")
+        expect_success(run_linter(scratch / "tools/relay-lint.py", report, scratch_base, no_freshness=True),
+                       f"{plugin} example file lint")
+        positive = subprocess.run(command, cwd=scratch_base, text=True, capture_output=True)
+        expect_success(positive, f"{plugin} example_lints_against_generated_dispatch {command[1]}")
+        report.write_text(example.replace(f"PARENT_DISPATCH_ID: {parent}",
+                                          f"PARENT_DISPATCH_ID: {wrong_id}", 1), encoding="utf-8")
+        negative = subprocess.run(command, cwd=scratch_base, text=True, capture_output=True)
+        expect(negative.returncode != 0 and any(reason in output(negative) for reason in (
+                   "none is an earlier DISPATCH IMPL relay", "IMPL report parent must be a DISPATCH IMPL relay"))
+               and "does not resolve to a relay" not in output(negative),
+               f"{plugin} copied_parent_fails_by_reason: {output(negative)}")
+    report.write_text(example, encoding="utf-8")
+    def citation_matches(body: str) -> bool:
+        citations = re.findall(r"^AUTHORITY_CHECK: (.+)$", body, re.MULTILINE)
+        return (len(citations) == 1 and re.fullmatch(
+            r"allowed implement " + re.escape(dispatch_path) + r" [0-9]{8}-[0-9]{6}", citations[0]) is not None)
+    expect(citation_matches(example), f"{plugin} example_citation_names_its_own_dispatch")
+    # These mutations check our citation pattern; neither installed linter enforces it.
+    missing = re.sub(r"^AUTHORITY_CHECK: .*\n", "", example, flags=re.MULTILINE)
+    different = re.sub(r"^AUTHORITY_CHECK: .*", "AUTHORITY_CHECK: allowed implement wrong/IMPL.md 20261013-060000",
+                       example, flags=re.MULTILINE)
+    expect(not citation_matches(missing), f"{plugin} citation_mutations_fail: missing")
+    expect(not citation_matches(different), f"{plugin} citation_mutations_fail: wrong dispatch")
+
+
+def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path) -> None:
+    """Judge the grants users actually copy, including extraction and fill failures."""
+    skill = scratch / "skills/orchestrator-planner"
+    if plugin == "adt-pair":
+        expect(not skill.exists(), "adt-pair unexpectedly installs orchestrator-planner")
+        return
+    source = (skill / "handoff-templates.md").read_text(encoding="utf-8")
+    templates = []
+    for label, token in (("E", "DISPATCH IMPL"), ("K", "DISPATCH MERGE")):
+        headings = list(re.finditer(rf"^## Template {label} —[^\n]*$", source, re.MULTILINE))
+        expect(len(headings) == 1, f"{plugin} Template {label}: expected one installed section")
+        start = headings[0].end()
+        region = source[start:]
+        body = single_example_block(region, f"{plugin} Template {label}")
+        if label == "E":
+            implementation_region = region
+        templates.append((label, token, body))
+    # Read the actual installed judge's patterns, including flags, in isolation.
+    pattern_reader = """import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from relay_engine import authority
+assert Path(authority.__file__).resolve().parent == (Path(sys.argv[1]) / "relay_engine").resolve()
+print(json.dumps({name: [getattr(authority, name).pattern, getattr(authority, name).flags]
+                  for name in ('HTML_OPEN', 'HTML_START', 'CONTROL_CHARACTERS')}))
+"""
+    result = subprocess.run([PYTHON, "-I", "-c", pattern_reader, str(scratch / "tools")],
+                            cwd=scratch_base, text=True, capture_output=True)
+    expect_success(result, f"{plugin} installed authority patterns")
+    patterns = {name: re.compile(pattern, flags)
+                for name, (pattern, flags) in json.loads(result.stdout).items()}
+    fictional = {"RUN_ID": "v0", "TO": "v0-x.implementer", "default": "example"}
+    def fill(body: str) -> str:
+        # Preserve markup before ANY substitution or header alternative handling.
+        # Keeping an entire markup-bearing line also protects partial/unclosed forms.
+        lines = []
+        for line in body.split("\n"):
+            if re.match(r"^[A-Z][A-Z0-9_]*:", line):
+                expect(not patterns["CONTROL_CHARACTERS"].search(line),
+                       f"{plugin} raw template header contains a refused character: {line!r}")
+            if patterns["HTML_START"].match(line) or patterns["HTML_OPEN"].search(line):
+                lines.append(line)
+                continue
+            line = re.sub(r"<([^<>\n]*)>",
+                          lambda m: m[1].split(" | ")[0] if " | " in m[1] else m[0], line)
+            header = re.fullmatch(r"([A-Z][A-Z0-9_]*):[ \t]*(.*)", line)
+            if header:
+                key, value = header.groups()
+                value = value.split(" | ")[0]
+                if key == "TO":
+                    value = fictional[key]
+                else:
+                    value = re.sub(r"<[^<>\n]*>", fictional.get(key, fictional["default"]), value)
+                line = f"{key}: {value}"
+            lines.append(re.sub(r"<[^<>\n]*>", fictional["default"], line))
+        return "\n".join(lines)
+    # A fresh isolated interpreter binds every judgment to this installed tier.
+    judge = """import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from relay_engine import authority, envelope, rules
+expected = (Path(sys.argv[1]) / "relay_engine").resolve()
+for module in (authority, envelope, rules):
+    assert Path(module.__file__).resolve().parent == expected, module.__file__
+for row in json.load(sys.stdin):
+    text, token = row
+    print(json.dumps([authority._token(text, token), authority._html_refusal(text), authority._header_refusal(text)]))
+"""
+    filled = [(label, token, fill(body)) for label, token, body in templates]
+    e = filled[0][2]
+    subject_mutation = re.sub(r"^SUBJECT:.*$", "SUBJECT: <unfilled>", e, flags=re.MULTILINE)
+    cases = [[body, token] for _, token, body in filled]
+    cases += [[e + "\n```\n", "DISPATCH IMPL"], [subject_mutation, "DISPATCH IMPL"]]
+    # Mutate installed source before extraction and filling: neither may erase
+    # separators that the engine refuses in the bytes a user would copy.
+    for character in ("\x0b", "\x0c", "\x85", "\u2028", "\u2029"):
+        mutated = implementation_region.replace(
+            "\nDISPATCH IMPL\n", "\nDISPATCH IMPL\n\ncontrol" + character + "marker\n", 1)
+        expect(mutated != implementation_region, f"{plugin} missing token for control mutation")
+        cases.append([fill(single_example_block(mutated, f"{plugin} control mutation")), "DISPATCH IMPL"])
+    result = subprocess.run([PYTHON, "-I", "-c", judge, str(scratch / "tools")],
+                            input=json.dumps(cases), cwd=scratch_base, text=True, capture_output=True)
+    expect_success(result, f"{plugin} installed authority predicates")
+    judgments = [json.loads(line) for line in result.stdout.splitlines()]
+    expect(len(judgments) == 9, f"{plugin} predicate population")
+    for (label, _, _), verdict in zip(filled, judgments[:2]):
+        expect(verdict == [True, False, False],
+               f"{plugin} Template {label}: expected token/no HTML/no header refusal, got {verdict}")
+    expect("SUBJECT:" in e, f"{plugin} Template E needs SUBJECT for its header mutation")
+    expect(judgments[2] == [False, False, False], f"{plugin} template_mutations_fail: fence")
+    expect(judgments[3][2] is True, f"{plugin} template_mutations_fail: SUBJECT placeholder")
+    for verdict in judgments[4:]:
+        expect(verdict[2] is True, f"{plugin} template_mutations_fail: raw control character")
+
+
 def check_protocol_linter_coherence(installations: dict[str, Path], scratch_base: Path) -> None:
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     for plugin, scratch in installations.items():
+        check_implementation_report_example(plugin, scratch, scratch_base)
+        check_shipped_grant_examples(plugin, scratch, scratch_base)
         for skill in PLUGINS[plugin] & ROLE_SKILLS:
             protocol = (scratch / "skills" / skill / "protocol.md").read_text(encoding="utf-8")
             for role, address in VOCABULARY:
@@ -1024,20 +1247,104 @@ def check_no_json_banner() -> None:
         expect(first not in {b"<", b"#"}, f"comment banner found in {path.relative_to(ROOT)}")
 
 
+def check_validator_diagnostics(value: object, label: str) -> None:
+    """Inspect diagnostic fields everywhere, including manifest and directory checks."""
+    if isinstance(value, list):
+        for item in value:
+            check_validator_diagnostics(item, label)
+    elif isinstance(value, dict):
+        if "severity" in value:
+            severity = value["severity"]
+            expect(severity in ("info", "note", "warning"), f"{label}: refused diagnostic {value}")
+            if severity == "warning":
+                expect(value.get("code") == "ICON_MISSING", f"{label}: refused warning {value}")
+        for key, item in value.items():
+            if key in ("error", "errors", "failure"):
+                expect(not item, f"{label}: {key}: {item}")
+            elif key == "warnings":
+                expect(isinstance(item, list), f"{label}: malformed warnings: {item}")
+                for warning in item:
+                    expect(isinstance(warning, dict) and warning.get("code") == "ICON_MISSING",
+                           f"{label}: refused warning {warning}")
+            check_validator_diagnostics(item, label)
+
+
 def check_claude_plugin_validation() -> None:
-    claude = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-    expect(bool(claude), "Claude Code validator not found; set CLAUDE_BIN to its executable")
+    selected = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+    expect(bool(selected), "Claude Code validator not found; set CLAUDE_BIN to its executable")
+    executable = shutil.which(str(selected))
+    expect(bool(executable), f"Claude Code validator is not executable: {selected}")
+    claude = Path(str(executable)).resolve()
+    identity = subprocess.run([str(claude), "--version"], cwd=ROOT, text=True, capture_output=True)
+    expect_success(identity, "Claude validator version")
+    expect(bool(identity.stdout.strip()) and not identity.stderr.strip(), "Invalid Claude validator identity output")
+    print(f"Claude plugin validator: {claude} — {identity.stdout.strip()}")
     for plugin in sorted(PLUGINS):
         result = subprocess.run(
-            [str(claude), "plugin", "validate", str(PLUGINS_ROOT / plugin)],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
+            [str(claude), "plugin", "validate", "--json", str(PLUGINS_ROOT / plugin)],
+            cwd=ROOT, text=True, capture_output=True,
         )
-        expect_success(result, f"{plugin} Claude plugin validation")
-        validation_output = output(result).lower()
-        expect("warning" not in validation_output, f"{plugin} Claude plugin validation emitted warnings: {output(result)}")
-        expect("error" not in validation_output, f"{plugin} Claude plugin validation emitted errors: {output(result)}")
+        label = f"{plugin} Claude plugin validation"
+        expect_success(result, label)
+        expect(not result.stderr.strip(), f"{label}: unexpected stderr: {result.stderr}")
+        report = json.loads(result.stdout)
+        expect(isinstance(report, dict) and report.get("success") is True, f"{label}: unsuccessful report")
+        expect(isinstance(report.get("manifest"), dict) and isinstance(report.get("contents"), list)
+               and isinstance(report.get("directory"), dict), f"{label}: unrecognized report shape")
+        check_validator_diagnostics(report, label)
+
+
+def check_validator_controls() -> None:
+    # Exercise the real gate through a controlled external executable.
+    # Removing the code restriction, error check, or exit check breaks a case.
+    icon = {"code": "ICON_MISSING", "severity": "warning", "message": "No icon"}
+    other = {"code": "OTHER_WARNING", "severity": "warning", "message": "Different warning"}
+    error = {"code": "ICON_MISSING", "severity": "error", "message": "An error"}
+    cases = (
+        ("only allowed code", [icon], 0, True),
+        ("different warning", [other], 0, False),
+        ("mixed warnings", [icon, other], 0, False),
+        ("error with allowed code", [error], 0, False),
+        ("nonzero exit", [icon], 1, False),
+        ("clean report", [], 0, True),
+    )
+    with tempfile.TemporaryDirectory(prefix="validator-controls-") as temporary:
+        root = Path(temporary)
+        validator = root / "claude"
+        fixture = root / "result.json"
+        validator.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\nfrom pathlib import Path\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('test-validator 1.0'); raise SystemExit(0)\n"
+            "assert sys.argv[1:3] == ['plugin', 'validate']\n"
+            "case = json.loads(Path(__file__).with_name('result.json').read_text())\n"
+            "print(json.dumps(case['report']))\n"
+            "raise SystemExit(case['exit'])\n", encoding="utf-8")
+        validator.chmod(0o755)
+        failures = []
+        for name, findings, exit_code, allowed in cases:
+            report = {"success": True, "strict": False, "target": "fixture/plugin.json",
+                      "manifest": {"file": "fixture/plugin.json", "type": "plugin",
+                                   "errors": [], "warnings": [], "notes": [], "gatingHooks": []},
+                      "contents": [], "advice": [],
+                      "directory": {"profile": None, "findings": findings, "undecided": [],
+                                    "incomplete": False, "failure": None, "notes": []}}
+            fixture.write_text(json.dumps({"report": report, "exit": exit_code}), encoding="utf-8")
+            capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, {"CLAUDE_BIN": str(validator)}), contextlib.redirect_stdout(capture):
+                    check_claude_plugin_validation()
+            except AssertionError:
+                observed = False
+            else:
+                observed = True
+            if observed != allowed:
+                failures.append(f"{name}: expected allowed={allowed}, got {observed}")
+            if observed and (str(validator.resolve()) not in capture.getvalue()
+                             or "test-validator 1.0" not in capture.getvalue()):
+                failures.append(f"{name}: missing resolved validator path/version")
+        expect(not failures, "; ".join(failures))
 
 
 def run_check(name: str, check: Callable[[], object]) -> tuple[bool, object | None]:
@@ -1057,6 +1364,7 @@ def main() -> int:
 
     failures = 0
     for name, check in (
+        ("validator controls", check_validator_controls),
         ("determinism", check_determinism),
         ("clean --check", check_clean),
         ("monitors declaration", check_monitors_declaration),

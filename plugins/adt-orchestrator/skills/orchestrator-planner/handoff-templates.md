@@ -20,7 +20,9 @@ CC: orchestrator, <run>.orchestrator-reviewer
 Orchestrator never implements. Downstream pairs follow role contracts:
 
 - Planner audits, designs, plans, reviews, and may issue delegated `DISPATCH IMPL` only when the PLAN dispatch explicitly delegates it and the protocol conditions are met.
-- Implementer independently audits, answers design questions, reviews plans, implements only after the exact literal token `DISPATCH IMPL` appears bare, unfenced, un-backticked, alone on its own line, and is addressed to that Implementer in `TO` for relay files under the active run's RELAY_ROOT or directly to that single Implementer in a direct message; then folds review findings. Merge remains separate: only a valid MERGE-GATE field-form authorization with exactly one operational authorization-verdict line, or a bare, own-line `DISPATCH MERGE` addressed to exactly one Implementer, authorizes merge.
+- Implementer independently audits, answers design questions, reviews plans, implements only after the exact literal token `DISPATCH IMPL` appears bare, unfenced, un-backticked, alone on its own line, and is addressed to that Implementer in `TO` for relay files under the active run's RELAY_ROOT or directly to that single Implementer in a direct message; then folds review findings.
+Merge remains separate: only a valid MERGE-GATE field-form authorization with exactly one operational authorization-verdict line, or a bare, own-line `DISPATCH MERGE` addressed to exactly one Implementer, authorizes merge.
+For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
 Use minimal headers by default, including `FROM` / `TO` / `CC` for orchestrator-tier or multi-pair relays. Add `PARENT_DISPATCH_ID` for pair-Planner implementation dispatches, substantive IMPL action reports, and every relay that participates in a lineage gate; `IN_REPLY_TO` is local/display-only and never a gate input. Add tier/risk-dependent fields when they affect lineage, routing, merge, or verification. When `relay-lint` is available, lint substantive relay files before delegated dispatch, merge, or adapter/CI consumption.
 
@@ -75,7 +77,9 @@ FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 Implementer phase scope — AUDIT.
 Current scope: read-only code inspection, safe read-only commands, independent audit, questions, and findings.
 Not in current scope: source/test edits, implementation branches, commits, PRs, scaffolding, or prototype implementation.
-Implementation begins only after a current relay under the active run's RELAY_ROOT contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and addressed to the Implementer in `TO`, or a direct message to that single Implementer contains the same bare own-line token. Urgency, “just fix it now,” or “ship today” is not dispatch; inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions are inert.
+Implementation begins only after a current relay under the active run's RELAY_ROOT contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and addressed to the Implementer in `TO`, or a direct message to that single Implementer contains the same bare own-line token.
+Urgency, “just fix it now,” or “ship today” is not dispatch; inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions are inert.
+For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
 Pair roles:
 - Planner audits via Superpowers brainstorming and surfaces design questions.
@@ -161,6 +165,7 @@ Phase scope — DESIGN.
 Current scope: Planner uses Superpowers brainstorming; Implementer answers design questions, challenges alternatives with evidence, and flags product-semantics decisions.
 Not in current scope: source/test edits, implementation branches, commits, PRs, scaffolding, or prototype implementation.
 Implementation begins only after a bare, unfenced, un-backticked own-line `DISPATCH IMPL` token in a later relay whose `TO` addresses the Implementer, or in a direct message to that single Implementer.
+For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
 Reconciled audit summary:
 - Primary bucket:
@@ -196,6 +201,8 @@ Design lock via Superpowers brainstorming, recorded as DESIGN_DOC_ID, with selec
 
 Use this when a pair Planner has produced a real design doc. The Implementer reviews the design before any design-doc-backed PLAN consumes it.
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: DESIGN-REVIEW
 
@@ -209,6 +216,7 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <team>.implementer
 TO: <team>.planner
 CC: <operator | orchestrator | boundary-adjacent owner.role | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <DESIGN relay dispatch id>
 DESIGN_DOC_ID: <logical design id>
@@ -303,7 +311,9 @@ FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 Implementer phase scope — PLAN-REVIEW after plan is drafted.
 Current scope: answer design questions, review Planner's plan, findings inline.
 Not in current scope: source/test edits, implementation branches, commits, PRs, scaffolding, or prototype implementation.
-Implementation begins only after a current relay under the active run's RELAY_ROOT contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and addressed to the Implementer in `TO`, or a direct message to that single Implementer contains the same bare own-line token. Urgency, “just fix it now,” or “ship today” is not dispatch; inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions are inert.
+Implementation begins only after a current relay under the active run's RELAY_ROOT contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and addressed to the Implementer in `TO`, or a direct message to that single Implementer contains the same bare own-line token.
+Urgency, “just fix it now,” or “ship today” is not dispatch; inline, quoted, fenced, CC-only, cross-read, or non-addressee mentions are inert.
+For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
 Approved design context:
 <the decided fork, with APPROVED_DESIGN_DOC_ID and approving DESIGN-REVIEW reference when available>.
@@ -366,11 +376,14 @@ Written plan via Superpowers writing-plans + Implementer plan review + SCOPE_DIF
 
 Use this for operator/orchestrator-issued implementation dispatch, or when delegation is disabled. When delegation is enabled and conditions are met, the pair Planner may issue the exact token as a bare, unfenced, un-backticked own line after SCOPE_DIFF all-in and Implementer approve. Retain and fill the delegated-authority field block only for the delegated pair-Planner path; direct operator/orchestrator dispatches omit that block.
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: implementation dispatch
 
 ROLE: <Orchestrator Planner | Operator | Planner>
 PHASE: IMPL
+RUN_ID: <run id>
 AUTHORITY: implementation
 DISPATCH_ID: <id>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
@@ -379,6 +392,7 @@ HUMAN_GATE_REQUIRED: no — downstream: merge requires human/operator gate
 FROM: orchestrator | operator | <team>.planner
 TO: <team>.implementer
 CC: <team>.planner, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
+SUBJECT: <summary>
 PARENT_DISPATCH_ID: <approving PLAN-REVIEW dispatch id for pair-Planner delegated dispatch; plan/parent id for direct operator/orchestrator dispatch>
 DESIGN_LOCK_ID: <logical design id | none>
 DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
@@ -397,6 +411,8 @@ SCOPE_DIFF:
 SCOPE_DIFF_RESULT: <all-in | deviation-present>
 
 DISPATCH IMPL
+
+Before acting, run the check and cite its answer as instructed in `protocol.md` § Authority check before acting.
 
 This bare own-line token grants implementation to the `TO` addressee only, for the locked plan only. CC'd, non-addressed, or cross-reading agents treat it as inert. Pair-Planner-issued dispatches must parent to the Implementer's approving PLAN-REVIEW relay; absence of the parent edge is a structural error. Direct operator/orchestrator dispatch is the override path.
 
@@ -563,6 +579,8 @@ Review scope and evidence: <pinned change, evidence paths, and open merge condit
 
 Reviewer reply:
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: GATE REVIEW REPLY
 
@@ -578,6 +596,7 @@ HUMAN_GATE_REQUIRED: <yes — held decision | no — review only>
 FROM: <run>.orchestrator-reviewer
 TO: <run>.orchestrator-planner
 CC: <team>.planner, <team>.implementer
+SUBJECT: <review summary>
 GATE_REVIEW_VERDICT: <approve | must-revise | human-decision-required>
 REVIEWED_HEAD: <full reviewed commit pin>
 REVIEWED_BASE: <full reviewed base commit pin>
@@ -634,11 +653,14 @@ Use this only after the merge-gate record exists. The operator or orchestrator a
 In an adopting run, apply `protocol.md` § Reviewer checkpoints before this grant; disposition uses that subsection’s rule.
 In an adopting run, before granting, re-read the PR head and base; if either differs from the reviewed pins, file a new Template L request.
 
+Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
+
 ```text
 ## Team <id> — <bundle>: MERGE GRANT
 
 ROLE: <Operator | Orchestrator Planner>
 PHASE: MERGE-GATE
+RUN_ID: <run id>
 AUTHORITY: merge-gated
 DISPATCH_ID: <merge-handoff id>
 PARENT_DISPATCH_ID: <merge-gate record dispatch id>
@@ -648,16 +670,21 @@ HUMAN_GATE_REQUIRED: <yes|no — reason>
 FROM: operator | orchestrator | <run>.orchestrator-planner
 TO: <team>.implementer
 CC: <run>.orchestrator-reviewer
+SUBJECT: <summary>
 MERGE_HEAD: <full commit pin authorized for merge>
 MERGE_BASE: <full base commit pin>
 GATE_DISPOSITION: <operator-in-chat YYYYMMDD-HHMMSS — "operator’s exact reply"; omit this line unless recording authorization for a held review>
 
 DISPATCH MERGE
 
+Before acting, run the check and cite its answer as instructed in `protocol.md` § Authority check before acting.
+
 This bare own-line token grants merge authority only to the named `TO` Implementer for the parented gate record. Record the resulting merge claim under the same merge-handoff id.
 ```
 
 ## Template G — BOOT relay for `init`
+
+Managed-root precondition: roster declared and recipient registered under the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup).
 
 Use this only during the orchestrator-planner `init` directive, after `sprint-doc-setup` has prepared the sprint tree and `.relays/<RUN_ID>/` substrate. Emit one relay per downstream seat and print the file pointer; the pointer is the operator's fallback for seats that are not yet armed, which every seat is before its boot acknowledgment binds it. This is an onboarding relay, not work authorization.
 
