@@ -1616,7 +1616,8 @@ def gate_checkpoint_findings(path: Path, phases: list, candidates: list) -> List
         if reason is None:
             gate, tied = _gate_latest([
                 item for item in by_id.get(fields.get('PARENT_DISPATCH_ID'), [])
-                if item[1] < grant[1] and item[2] == 'MERGE-GATE'
+                if fields.get('PARENT_DISPATCH_ID')
+                and item[1] < grant[1] and item[2] == 'MERGE-GATE'
                 and not merge_authorized(item[4], item[3])
             ])
             if gate is None:
@@ -1629,6 +1630,7 @@ def gate_checkpoint_findings(path: Path, phases: list, candidates: list) -> List
                 and item[3].get('AUTHORITY') == 'report-only'
                 and _gate_addresses(item[3], 'FROM') == [planner]
                 and _gate_addresses(item[3], 'TO') == [reviewer]
+                and item[3].get('PARENT_DISPATCH_ID')
                 and item[3].get('PARENT_DISPATCH_ID') == gate[3].get('DISPATCH_ID')
             ])
             if request is None:
@@ -1641,6 +1643,7 @@ def gate_checkpoint_findings(path: Path, phases: list, candidates: list) -> List
                 and item[3].get('AUTHORITY') == 'review-only'
                 and _gate_addresses(item[3], 'FROM') == [reviewer]
                 and _gate_addresses(item[3], 'TO') == [planner]
+                and item[3].get('PARENT_DISPATCH_ID')
                 and item[3].get('PARENT_DISPATCH_ID') == request[3].get('DISPATCH_ID')
             ])
             if reply is None:
