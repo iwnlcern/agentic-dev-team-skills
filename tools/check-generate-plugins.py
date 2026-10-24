@@ -1003,7 +1003,10 @@ def single_example_block(region: str, label: str) -> str:
     body = []
     fence = None
     closed = False
-    for line in region.splitlines():
+    for line in region.split("\n"):
+        # Only an outer heading ends the section; headings inside the fence are data.
+        if fence is None and line.startswith("## "):
+            break
         delimiter = re.fullmatch(r"(`{3,}|~{3,})([^`~]*)", line)
         if fence is None:
             if delimiter:
@@ -1027,7 +1030,7 @@ def check_implementation_report_example(plugin: str, scratch: Path, scratch_base
     skill = (scratch / "skills/pair-implementer/SKILL.md").read_text(encoding="utf-8")
     markers = list(re.finditer(r"^Filled example using fictional[^\n]*$", skill, re.MULTILINE))
     expect(len(markers) == 1, f"{plugin} example_extracted_per_tier: expected one filled-example region")
-    # The filled example is the final region, separate from the report skeleton.
+    # Start after the filled-example marker, separate from the report skeleton.
     example = single_example_block(skill[markers[0].end():], f"{plugin} filled IMPL example")
     def field(name: str) -> str:
         matches = re.findall(rf"^{name}: (.+)$", example, re.MULTILINE)
@@ -1117,18 +1120,18 @@ def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path)
     for label, token in (("E", "DISPATCH IMPL"), ("K", "DISPATCH MERGE")):
         headings = list(re.finditer(rf"^## Template {label} —[^\n]*$", source, re.MULTILINE))
         expect(len(headings) == 1, f"{plugin} Template {label}: expected one installed section")
-        # Template headings delimit the outer regions; ## Team inside a fence is data.
         start = headings[0].end()
-        following = re.search(r"^## Template ", source[start:], re.MULTILINE)
-        end = start + following.start() if following else len(source)
-        body = single_example_block(source[start:end], f"{plugin} Template {label}")
+        region = source[start:]
+        body = single_example_block(region, f"{plugin} Template {label}")
+        if label == "E":
+            implementation_region = region
         templates.append((label, token, body))
     fictional = {"RUN_ID": "v0", "TO": "v0-x.implementer", "default": "example"}
     def fill(body: str) -> str:
         body = re.sub(r"<([^<>\n]*)>",
                       lambda m: m[1].split(" | ")[0] if " | " in m[1] else m[0], body)
         lines = []
-        for line in body.splitlines():
+        for line in body.split("\n"):
             header = re.fullmatch(r"([A-Z][A-Z0-9_]*):[ \t]*(.*)", line)
             if header:
                 key, value = header.groups()
@@ -1157,17 +1160,26 @@ for row in json.load(sys.stdin):
     subject_mutation = re.sub(r"^SUBJECT:.*$", "SUBJECT: <unfilled>", e, flags=re.MULTILINE)
     cases = [[body, token] for _, token, body in filled]
     cases += [[e + "\n```\n", "DISPATCH IMPL"], [subject_mutation, "DISPATCH IMPL"]]
+    # Mutate installed source before extraction and filling: neither may erase
+    # separators that the engine refuses in the bytes a user would copy.
+    for character in ("\x0b", "\x0c", "\x85", "\u2028", "\u2029"):
+        mutated = implementation_region.replace(
+            "\nDISPATCH IMPL\n", "\nDISPATCH IMPL\n\ncontrol" + character + "marker\n", 1)
+        expect(mutated != implementation_region, f"{plugin} missing token for control mutation")
+        cases.append([fill(single_example_block(mutated, f"{plugin} control mutation")), "DISPATCH IMPL"])
     result = subprocess.run([PYTHON, "-I", "-c", judge, str(scratch / "tools")],
                             input=json.dumps(cases), cwd=scratch_base, text=True, capture_output=True)
     expect_success(result, f"{plugin} installed authority predicates")
     judgments = [json.loads(line) for line in result.stdout.splitlines()]
-    expect(len(judgments) == 4, f"{plugin} predicate population")
+    expect(len(judgments) == 9, f"{plugin} predicate population")
     for (label, _, _), verdict in zip(filled, judgments[:2]):
         expect(verdict == [True, False, False],
                f"{plugin} Template {label}: expected token/no HTML/no header refusal, got {verdict}")
     expect("SUBJECT:" in e, f"{plugin} Template E needs SUBJECT for its header mutation")
     expect(judgments[2] == [False, False, False], f"{plugin} template_mutations_fail: fence")
     expect(judgments[3][2] is True, f"{plugin} template_mutations_fail: SUBJECT placeholder")
+    for verdict in judgments[4:]:
+        expect(verdict[2] is True, f"{plugin} template_mutations_fail: raw control character")
 
 
 def check_protocol_linter_coherence(installations: dict[str, Path], scratch_base: Path) -> None:
