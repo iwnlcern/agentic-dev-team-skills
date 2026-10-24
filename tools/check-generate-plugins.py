@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
+import io
 import hashlib
 import json
 import os
@@ -15,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 from relay_engine import version
 
@@ -1228,20 +1231,104 @@ def check_no_json_banner() -> None:
         expect(first not in {b"<", b"#"}, f"comment banner found in {path.relative_to(ROOT)}")
 
 
+def check_validator_diagnostics(value: object, label: str) -> None:
+    """Inspect diagnostic fields everywhere, including manifest and directory checks."""
+    if isinstance(value, list):
+        for item in value:
+            check_validator_diagnostics(item, label)
+    elif isinstance(value, dict):
+        if "severity" in value:
+            severity = value["severity"]
+            expect(severity in ("info", "note", "warning"), f"{label}: refused diagnostic {value}")
+            if severity == "warning":
+                expect(value.get("code") == "ICON_MISSING", f"{label}: refused warning {value}")
+        for key, item in value.items():
+            if key in ("error", "errors", "failure"):
+                expect(not item, f"{label}: {key}: {item}")
+            elif key == "warnings":
+                expect(isinstance(item, list), f"{label}: malformed warnings: {item}")
+                for warning in item:
+                    expect(isinstance(warning, dict) and warning.get("code") == "ICON_MISSING",
+                           f"{label}: refused warning {warning}")
+            check_validator_diagnostics(item, label)
+
+
 def check_claude_plugin_validation() -> None:
-    claude = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-    expect(bool(claude), "Claude Code validator not found; set CLAUDE_BIN to its executable")
+    selected = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+    expect(bool(selected), "Claude Code validator not found; set CLAUDE_BIN to its executable")
+    executable = shutil.which(str(selected))
+    expect(bool(executable), f"Claude Code validator is not executable: {selected}")
+    claude = Path(str(executable)).resolve()
+    identity = subprocess.run([str(claude), "--version"], cwd=ROOT, text=True, capture_output=True)
+    expect_success(identity, "Claude validator version")
+    expect(bool(identity.stdout.strip()) and not identity.stderr.strip(), "Invalid Claude validator identity output")
+    print(f"Claude plugin validator: {claude} — {identity.stdout.strip()}")
     for plugin in sorted(PLUGINS):
         result = subprocess.run(
-            [str(claude), "plugin", "validate", str(PLUGINS_ROOT / plugin)],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
+            [str(claude), "plugin", "validate", "--json", str(PLUGINS_ROOT / plugin)],
+            cwd=ROOT, text=True, capture_output=True,
         )
-        expect_success(result, f"{plugin} Claude plugin validation")
-        validation_output = output(result).lower()
-        expect("warning" not in validation_output, f"{plugin} Claude plugin validation emitted warnings: {output(result)}")
-        expect("error" not in validation_output, f"{plugin} Claude plugin validation emitted errors: {output(result)}")
+        label = f"{plugin} Claude plugin validation"
+        expect_success(result, label)
+        expect(not result.stderr.strip(), f"{label}: unexpected stderr: {result.stderr}")
+        report = json.loads(result.stdout)
+        expect(isinstance(report, dict) and report.get("success") is True, f"{label}: unsuccessful report")
+        expect(isinstance(report.get("manifest"), dict) and isinstance(report.get("contents"), list)
+               and isinstance(report.get("directory"), dict), f"{label}: unrecognized report shape")
+        check_validator_diagnostics(report, label)
+
+
+def check_validator_controls() -> None:
+    # Exercise the real gate through a controlled external executable.
+    # Removing the code restriction, error check, or exit check breaks a case.
+    icon = {"code": "ICON_MISSING", "severity": "warning", "message": "No icon"}
+    other = {"code": "OTHER_WARNING", "severity": "warning", "message": "Different warning"}
+    error = {"code": "ICON_MISSING", "severity": "error", "message": "An error"}
+    cases = (
+        ("only allowed code", [icon], 0, True),
+        ("different warning", [other], 0, False),
+        ("mixed warnings", [icon, other], 0, False),
+        ("error with allowed code", [error], 0, False),
+        ("nonzero exit", [icon], 1, False),
+        ("clean report", [], 0, True),
+    )
+    with tempfile.TemporaryDirectory(prefix="validator-controls-") as temporary:
+        root = Path(temporary)
+        validator = root / "claude"
+        fixture = root / "result.json"
+        validator.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\nfrom pathlib import Path\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            "    print('test-validator 1.0'); raise SystemExit(0)\n"
+            "assert sys.argv[1:3] == ['plugin', 'validate']\n"
+            "case = json.loads(Path(__file__).with_name('result.json').read_text())\n"
+            "print(json.dumps(case['report']))\n"
+            "raise SystemExit(case['exit'])\n", encoding="utf-8")
+        validator.chmod(0o755)
+        failures = []
+        for name, findings, exit_code, allowed in cases:
+            report = {"success": True, "strict": False, "target": "fixture/plugin.json",
+                      "manifest": {"file": "fixture/plugin.json", "type": "plugin",
+                                   "errors": [], "warnings": [], "notes": [], "gatingHooks": []},
+                      "contents": [], "advice": [],
+                      "directory": {"profile": None, "findings": findings, "undecided": [],
+                                    "incomplete": False, "failure": None, "notes": []}}
+            fixture.write_text(json.dumps({"report": report, "exit": exit_code}), encoding="utf-8")
+            capture = io.StringIO()
+            try:
+                with patch.dict(os.environ, {"CLAUDE_BIN": str(validator)}), contextlib.redirect_stdout(capture):
+                    check_claude_plugin_validation()
+            except AssertionError:
+                observed = False
+            else:
+                observed = True
+            if observed != allowed:
+                failures.append(f"{name}: expected allowed={allowed}, got {observed}")
+            if observed and (str(validator.resolve()) not in capture.getvalue()
+                             or "test-validator 1.0" not in capture.getvalue()):
+                failures.append(f"{name}: missing resolved validator path/version")
+        expect(not failures, "; ".join(failures))
 
 
 def run_check(name: str, check: Callable[[], object]) -> tuple[bool, object | None]:
@@ -1261,6 +1348,7 @@ def main() -> int:
 
     failures = 0
     for name, check in (
+        ("validator controls", check_validator_controls),
         ("determinism", check_determinism),
         ("clean --check", check_clean),
         ("monitors declaration", check_monitors_declaration),
