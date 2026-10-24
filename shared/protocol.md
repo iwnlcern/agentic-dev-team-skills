@@ -370,7 +370,10 @@ The declared cross-root design edge and the `direct-override` record kind remain
 
 Grant authors: see "What the check reads" in [Authority check before acting](#authority-check-before-acting).
 
-Merge is a separate human/operator gate. A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority. The protocol layers the addressed merge token on top of the field-form merge authorization. Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`.
+Merge is a separate human/operator gate.
+A valid implementation dispatch, passing tests, a clean PR, or a finished branch is not merge authority.
+The protocol layers the addressed merge token on top of the field-form merge authorization.
+Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`.
 A field-form grant is addressed to exactly one Implementer.
 A negative verdict line or conflicting verdict lines defeats a token in the same relay.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
@@ -398,6 +401,7 @@ Hidden continuation claims, canonical `merge=<sha>` machine forms, and field-for
 ### Authority check before acting
 
 On a managed root, before starting implementation on a dispatch and always before merging on a grant, the acting seat runs `tools/relay authority check <relay> --seat <own address> --action implement|merge --root <root>`.
+The relay argument is its root-relative recorded path, without a leading `./` or an absolute prefix.
 Permission is exit status 0 with `allowed` true and returned `relay`, `seat` and `action` equal to the act in hand; nothing else is permission.
 A denial (exit 1), a result that could not be evaluated (exit 2), no result at all, and a client without this command each stop the act and are relayed as a blocker to the governing seat.
 Quote the returned result object when one exists, including `external` when it is not empty; when there is no result, retain and quote the stderr code instead.
@@ -432,20 +436,27 @@ Reason identifiers below are identifiers only, not display messages.
   A field-form merge grant's independent positive-header route does not reject fences on this basis.
 - R3, grants on either route and reviews (`authority.shape-absent` for grants; `authority.lineage-incomplete` for an unusable review): no HTML-like line with at most three leading spaces and then `<` followed by a letter, `/`, `!` or `?`, nor a line containing `<!--`, `<?`, `<![`, `<!` followed by a letter, or an opening script, pre, style or textarea tag.
 - R4, grant/review header parsing (`authority.shape-absent` or `authority.lineage-incomplete`): the header starts at the first uppercase `KEY: value` line with the colon adjacent to the key and ends at the first blank or nonmatching line.
-  Lowercase keys, a space before the colon and a hyphen in a key end it; required fields occur once each.
+  Lowercase keys, a space before the colon and a hyphen in a key end it.
+  Every required field must be present, and no key may appear twice, required or not; any repeated header key fails the parse, voiding a grant and stopping a review from approving.
 - R5, grants on either route and reviews (`authority.shape-absent` or `authority.lineage-incomplete`): no header value contains `<`, including SUBJECT; fill every header placeholder.
 - R6, grants and reviews (`authority.denied` for a denied grant; `authority.lineage-incomplete` for an unusable review): verdicts and denials are read from the header only.
   Verdict keys are VERDICT, MERGE_AUTHORIZATION, MERGE_APPROVED, or a key ending in an underscore plus one of those names.
   The whole value is positive only when it is exactly approved, approve, granted, yes, true, complete or merge-ready, case-insensitively in ASCII; any other value under a verdict key denies, including an approval followed by commentary.
+  For a field-form merge grant, the value must also satisfy the engine's per-key lists in `tools/relay_engine/rules.py` (`merge_authorization_positive`), while remaining exactly one whole positive value under the rule above: MERGE_AUTHORIZATION and HUMAN_MERGE_AUTHORIZATION accept approved, granted or yes; MERGE_APPROVED accepts yes, true or approved; VERDICT accepts merge-ready, approved or complete.
+  A prefixed key never supplies this merge-grant shape; `MERGE_AUTHORIZATION: approve` neither grants nor denies, and without another granting route yields `authority.shape-absent`.
+  An approval followed by commentary, such as `approved — notes`, or `merge ready` with a space fails the whole-value rule.
   A denial in body prose neither grants nor denies.
 - R7, approving reviews (`authority.lineage-incomplete`): PHASE_VERDICT, with the phase's hyphens changed to underscores, or VERDICT equals approve or approved, with no denial key.
-- R8, a grant or any relay in its pair lineage (`authority.shape-absent` or `authority.lineage-incomplete`): no control characters other than tab, line feed and carriage return, including U+0085, U+2028 and U+2029.
+- R8, a grant or any relay in its pair lineage (`authority.shape-absent` or `authority.lineage-incomplete`): refused characters are C0 controls except tab, line feed and carriage return, DEL, U+0085, U+2028 and U+2029; other C1 controls are not refused.
+  In pair lineage, a later PLAN or DESIGN by the same Planner, or a later review of that phase by the acting Implementer, after the corresponding lineage origin also denies the earlier grant with `authority.lineage-incomplete` if it contains one of these characters.
 - R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header, including the strict/legacy parsed-field comparison.
   Critical fields are PHASE, FROM, TO, DISPATCH_ID, PARENT_DISPATCH_ID, DESIGN_LOCK_ID, DESIGN_DOC_ID, PLAN_LOCK_ID, DESIGN_ARTIFACT, DESIGN_SHA256, PLAN_ARTIFACT, PLAN_SHA256, PLAN_SOURCE_REPO, PLAN_SOURCE_COMMIT and the cross-root trigger fields.
   Differing body repeats of noncritical fields such as SUBJECT or CC are not conflicts detected by this rule; fenced repeats are not read.
 - R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer.
 
-Two authoring conventions are stricter than those predicates and are not engine refusals: write grants with no fenced block so they remain readable if reissued in token form, and never repeat any header field in the body with a different value, critical or not.
+Two authoring conventions go beyond those predicates: write grants with no fenced block so they remain readable if reissued in token form, and never repeat any header field in the body with a different value, critical or not.
+For a token grant, R2 already refuses a fence; the broader fence-free convention also covers field-form grants.
+The convention against differing body repeats also covers noncritical fields that R9 does not refuse.
 
 ## Claim-evidence ladder
 
@@ -864,7 +875,8 @@ Structured absence forms for `FINAL_GIT_STATUS_SHORT` and `ACTIONS_GIT_REF` must
 Lint of a candidate relay before hand-off is distinct from a managed root's root integrity report, its history audit, and the existing sweep of a hand-authored root.
 On a managed root, the default sweep reports root integrity: record-known relays are not re-judged, which does not mean they were validated.
 Root integrity errors remain errors however old the relay.
-The managed-root history audit reports findings on record-known relays as warnings; a history-audit finding blocks nothing and needs no waiver.
+The managed-root history audit reports findings on record-known relays as warnings, except per-file lint findings, which it leaves out; a history-audit finding blocks nothing and needs no waiver.
+A clean history audit therefore does not establish a clean structural record.
 On a hand-authored root, a lint error on the relays an act rests on blocks that act unless the operator waives the named error.
 No waiver changes an authority answer: a denial requires a valid grant or a direct override by an operator or orchestrator seat, followed by a fresh check under [Authority check before acting](#authority-check-before-acting).
 These lint rules assume the current linter has passed its bundled tool-correctness fixture matrix.
@@ -893,7 +905,8 @@ If a relay claims a merge commit in `ACTIONS_GIT_REF`, the current act's own aut
 A hidden indented continuation after a blank-closed `ACTIONS_GIT_REF` block is also structurally dirty.
 Canonical machine-form merge claims such as `merge=<sha>` are also checked anywhere in operational relay text outside fenced blocks, inline code spans, and `ESCALATION_SCAN` blocks.
 A merge-authorization relay counts only when `FROM` is `operator`, `orchestrator`, or an orchestrator-planner-role address; an Implementer-authored `MERGE-GATE` relay cannot authorize that Implementer's own merge claim.
-The protocol provides the symmetric addressed `DISPATCH MERGE` token as the canonical forward path while preserving field-form grants for compatibility. relay-lint makes continuation-hidden claims, canonical merge forms, and token grants structurally visible at the relay layer; free-prose flush-left claims remain reconciliation's job, not truth-agnostic lint's scope.
+The protocol provides the symmetric addressed `DISPATCH MERGE` token as the canonical forward path while preserving field-form grants for compatibility.
+relay-lint makes continuation-hidden claims, canonical merge forms, and token grants structurally visible at the relay layer; free-prose flush-left claims remain reconciliation's job, not truth-agnostic lint's scope.
 
 Use one of:
 

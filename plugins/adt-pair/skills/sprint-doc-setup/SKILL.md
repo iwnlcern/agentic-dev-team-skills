@@ -78,7 +78,14 @@ Do not assume `.relays/` is shared across worktrees or sessions. If a receiver c
 
 ## Standalone pair runs
 
-For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree. Operator quickstart: open one session per seat and load its role skill; boot the standalone Planner and Implementer sessions directly, or for an orchestrator-team run boot the Orchestrator Planner and trigger `init`. Armed seats receive each filed relay automatically (protocol Delivery mode); carry the returned hand-off pointer to any seat whose acknowledgment said `waiting-for-binding`, `unavailable`, or `fallback`, and treat `CC` as context only. Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise. The artifacts are never optional; who writes them depends on the root's mode. In an engine-managed root (a daemon has cut over and serves it), seats file through `.engine/drafts/` + `relay submit` and only the daemon writes `INDEX.md`. In a hand-authored root (pre-cutover, or rolled back), the D7 ceremony floor still files relays, maintains `INDEX.md` under the gated-append rule below, and produces the full auditable trail. The root's mode is an OPERATOR CHOICE made before the first boot relay: at init (or before booting standalone seats), the booting seat asks the operator whether this run's root is engine-managed or hand-authored and records the answer in its first relay — never infer the mode from a document or a default.
+For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree.
+Operator quickstart: open one session per seat and load its role skill; boot the standalone Planner and Implementer sessions directly, or for an orchestrator-team run boot the Orchestrator Planner and trigger `init`.
+Armed seats receive each filed relay automatically (protocol Delivery mode); carry the returned hand-off pointer to any seat whose acknowledgment said `waiting-for-binding`, `unavailable`, or `fallback`, and treat `CC` as context only.
+Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise.
+The artifacts are never optional; who writes them depends on the root's mode.
+In an engine-managed root (a daemon has cut over and serves it), seats file through `.engine/drafts/` + `relay submit` and only the daemon writes `INDEX.md`.
+In a hand-authored root (pre-cutover, or rolled back), the D7 ceremony floor still files relays, maintains `INDEX.md` under the gated-append rule below, and produces the full auditable trail.
+The root's mode is an OPERATOR CHOICE made before the first boot relay: at init (or before booting standalone seats), the booting seat asks the operator whether this run's root is engine-managed or hand-authored and records the answer in its first relay — never infer the mode from a document or a default.
 For an engine-managed root, follow [Managed-root setup](#managed-root-setup) before the top Planner's hand-offs.
 A root never changes mode implicitly (`relay migrate` is the only path between the modes).
 
@@ -87,17 +94,23 @@ A root never changes mode implicitly (`relay migrate` is the only path between t
 The operator chooses the root's mode before its first boot relay, as described in [Standalone pair runs](#standalone-pair-runs).
 For the managed mode, follow this order:
 
-1. Start the daemon naming the top seat; the start records and occupies that seat and issues its key.
-2. Declare the roster with `seat declare`: every seat the run will address, the reviewer included, and for a commissioned team its members on the receiving root.
+1. The operator names the top seat at every daemon start, including a fresh root; the starting seat never chooses itself.
+   The start records and occupies that seat and issues its key under the root’s seat directory.
+2. The top seat declares the roster with `seat declare` using its own key issued by that start: every seat the run will address, the reviewer included, and for a commissioned team its members on the receiving root.
    Check that each declaration result is `added` or `exists`.
-3. Register each downstream seat once, at first occupancy; that registration files its engine boot record and issues its key.
+3. The top seat registers each downstream seat once, at first occupancy; that registration files its engine boot record and issues its key.
+   Leave each key under the root’s seat directory where the booted seat reads it.
+   Register the `operator` seat whenever the operator will file go-aheads or overrides as relays; this is always required in a standalone managed pair, where the operator’s merge grant must be filed.
 4. Only then does the top Planner file its own hand-offs.
 
 The top seat does not register separately.
 A root without a top seat on record needs an operator-authorized start naming it; do not choose the first registrant as top seat and do not stop or restart a daemon without the operator.
-A resumed or re-booted seat uses its existing key; a boot recipient does not register again.
+A resumed or re-booted seat uses its existing key; a boot recipient that finds its key does not register again.
+A `seat-occupied` refusal means the seat is already registered, not that it needs replacement.
+Replacing an occupant with `seat replace` is operator-directed only.
 A roster declaration recognises names only: it occupies no seat, issues no key, grants no authority, delivers nothing across roots and follows no later changes in another root.
-For command flags and the maintained command procedure, see `tools/relay_engine/README.md` § Typical flow.
+For the maintained start/register/submit procedure, see `tools/relay_engine/README.md` § Typical flow.
+For roster declaration flags, which that flow does not cover, see `tools/relay seat declare --help`.
 
 ## Header convention
 

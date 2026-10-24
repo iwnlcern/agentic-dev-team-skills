@@ -998,13 +998,37 @@ def relay_text(role: str, address: str) -> str:
     )
 
 
+def single_example_block(region: str, label: str) -> str:
+    """Require one complete outer fence, without discarded blocks or body text."""
+    body = []
+    fence = None
+    closed = False
+    for line in region.splitlines():
+        delimiter = re.fullmatch(r"(`{3,}|~{3,})([^`~]*)", line)
+        if fence is None:
+            if delimiter:
+                expect(not closed, f"{label}: additional fence after closing fence")
+                expect(delimiter[2].strip() in {"", "text"}, f"{label}: unexpected fence language")
+                fence = delimiter[1]
+            else:
+                expect(not re.search(r"`{3,}|~{3,}", line), f"{label}: malformed opening fence")
+        elif line == fence:
+            fence = None
+            closed = True
+        else:
+            expect(not re.search(r"`{3,}|~{3,}", line), f"{label}: unmatched or nested fence")
+            body.append(line)
+    expect(closed and fence is None, f"{label}: expected one complete fenced block")
+    return "\n".join(body)
+
+
 def check_implementation_report_example(plugin: str, scratch: Path, scratch_base: Path) -> None:
     """Catch copied report parents and citations in the actual installed example."""
     skill = (scratch / "skills/pair-implementer/SKILL.md").read_text(encoding="utf-8")
-    examples = re.findall(r"```text\n(.*?)\n```", skill, re.DOTALL)
-    examples = [body for body in examples if "PHASE: IMPL\n" in body]
-    expect(len(examples) == 1, f"{plugin} example_extracted_per_tier: expected one filled IMPL example")
-    example = examples[0]
+    markers = list(re.finditer(r"^Filled example using fictional[^\n]*$", skill, re.MULTILINE))
+    expect(len(markers) == 1, f"{plugin} example_extracted_per_tier: expected one filled-example region")
+    # The filled example is the final region, separate from the report skeleton.
+    example = single_example_block(skill[markers[0].end():], f"{plugin} filled IMPL example")
     def field(name: str) -> str:
         matches = re.findall(rf"^{name}: (.+)$", example, re.MULTILINE)
         expect(len(matches) == 1, f"{plugin} example needs one {name}")
@@ -1074,6 +1098,7 @@ FINAL_GIT_STATUS_SHORT: unavailable — fictional corpus
         return (len(citations) == 1 and re.fullmatch(
             r"allowed implement " + re.escape(dispatch_path) + r" [0-9]{8}-[0-9]{6}", citations[0]) is not None)
     expect(citation_matches(example), f"{plugin} example_citation_names_its_own_dispatch")
+    # These mutations check our citation pattern; neither installed linter enforces it.
     missing = re.sub(r"^AUTHORITY_CHECK: .*\n", "", example, flags=re.MULTILINE)
     different = re.sub(r"^AUTHORITY_CHECK: .*", "AUTHORITY_CHECK: allowed implement wrong/IMPL.md 20261013-060000",
                        example, flags=re.MULTILINE)
@@ -1090,11 +1115,14 @@ def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path)
     source = (skill / "handoff-templates.md").read_text(encoding="utf-8")
     templates = []
     for label, token in (("E", "DISPATCH IMPL"), ("K", "DISPATCH MERGE")):
-        bodies = re.findall(rf"^## Template {label} —[^\n]*\n.*?^```text\n(.*?)^```$",
-                            source, re.MULTILINE | re.DOTALL)
-        expect(len(bodies) == 1, f"{plugin} Template {label}: expected one installed body")
-        templates.append((label, token, bodies[0]))
-    expect(len(templates) == 2, f"{plugin} installed_grant_templates_checked: empty population")
+        headings = list(re.finditer(rf"^## Template {label} —[^\n]*$", source, re.MULTILINE))
+        expect(len(headings) == 1, f"{plugin} Template {label}: expected one installed section")
+        # Template headings delimit the outer regions; ## Team inside a fence is data.
+        start = headings[0].end()
+        following = re.search(r"^## Template ", source[start:], re.MULTILINE)
+        end = start + following.start() if following else len(source)
+        body = single_example_block(source[start:end], f"{plugin} Template {label}")
+        templates.append((label, token, body))
     fictional = {"RUN_ID": "v0", "TO": "v0-x.implementer", "default": "example"}
     def fill(body: str) -> str:
         body = re.sub(r"<([^<>\n]*)>",
@@ -1114,8 +1142,12 @@ def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path)
         return re.sub(r"<[^<>\n]*>", fictional["default"], "\n".join(lines))
     # A fresh isolated interpreter binds every judgment to this installed tier.
     judge = """import json, sys
+from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from relay_engine import authority
+from relay_engine import authority, envelope, rules
+expected = (Path(sys.argv[1]) / "relay_engine").resolve()
+for module in (authority, envelope, rules):
+    assert Path(module.__file__).resolve().parent == expected, module.__file__
 for row in json.load(sys.stdin):
     text, token = row
     print(json.dumps([authority._token(text, token), authority._html_refusal(text), authority._header_refusal(text)]))

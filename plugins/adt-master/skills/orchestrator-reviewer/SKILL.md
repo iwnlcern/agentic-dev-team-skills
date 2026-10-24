@@ -23,7 +23,7 @@ Review the Orchestrator Planner's problem decomposition, architecture choices, r
 
 You do **not** implement, edit source/tests, create branches, open PRs, merge, or directly command downstream implementation unless the human explicitly grants that authority.
 
-**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and never stops your work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
+**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
 Do not proxy-author the Orchestrator Planner's relay or downstream pair relays; keep `FROM` as your own reviewer seat.
 Do not replace a missing relay with a review panel; require the relay to be written, then review it.
 
@@ -115,4 +115,5 @@ A clean managed sweep's root integrity report establishes that the record is int
 For each authority citation, check that the path is the relay actually acted on and that checked_at precedes the act the report covers: initial work, resumed work or the merge.
 A re-run answers for now and cannot prove that the earlier check ran.
 See `protocol.md` § Authority check before acting.
-As the Orchestrator Reviewer, perform a lightweight behavioral honesty check: flag suspicious `DESIGN_RECORD_KIND: audit-record` labels on obviously new design-doc work, pair Planner `direct-override` attempts, missing Implementer design review for design-doc-backed plans, and stale/mismatched `DESIGN_LOCK_ID` references. Ask for correction or route to the linter gate rather than approving by vibes.
+As the Orchestrator Reviewer, perform a lightweight behavioral honesty check: flag suspicious `DESIGN_RECORD_KIND: audit-record` labels on obviously new design-doc work, pair Planner `direct-override` attempts, missing Implementer design review for design-doc-backed plans, and stale/mismatched `DESIGN_LOCK_ID` references.
+Ask for correction or route to the linter gate rather than approving by vibes.
