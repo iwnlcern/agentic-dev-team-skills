@@ -385,14 +385,14 @@ def _latest_origin(repo: Path, mutate) -> None:
 def _authority_cases(dest: Path) -> list[Case]:
     cases: list[Case] = []
 
-    def add(name: str, mutate_foreign=None, mutate_plan=None, axis="authority-population", detail=""):
+    def add(name: str, mutate_foreign=None, mutate_plan=None, axis="authority-population", detail="", expected_exit=1):
         cases.append(_build_case(
             dest,
             name,
             mutate_foreign=mutate_foreign,
             mutate_plan=mutate_plan,
-            expected_exit=1,
-            expected_errors=[_xerror(axis, detail)],
+            expected_exit=expected_exit,
+            expected_errors=[_xerror(axis, detail)] if expected_exit else [],
         ))
 
     add(
@@ -527,14 +527,12 @@ def _authority_cases(dest: Path) -> list[Case]:
     add(
         "X29-origin-tie",
         lambda repo: _copy_relay(repo, ORIGIN_NAME, "ALT-DESIGN-planner-20260801-100000.md"),
-        axis="ambiguity",
-        detail="multiple latest DESIGN origins share timestamp 20260801-100000",
+        expected_exit=0,
     )
     add(
         "X30-review-tie",
         lambda repo: _copy_relay(repo, REVIEW_NAME, "ALT-DESIGN-REVIEW-reviewer-20260801-110000.md"),
-        axis="ambiguity",
-        detail="multiple latest DESIGN-REVIEW carriers share timestamp 20260801-110000",
+        expected_exit=0,
     )
 
     def rename(repo: Path, source: str, target: str) -> None:
@@ -807,7 +805,7 @@ def _b9_capacity_case(dest: Path) -> Case:
                                + _tree_entry(b"40000", b"relays", relays))
         commit = _literal_commit(foreign, root)
         _replace(fields, "DESIGN_SOURCE_COMMIT", commit)
-        expected.append(_xerror("capacity", f"{relays} exceeds the supported XROOT_MAX_RELAYS of 20000; this is a capacity limit, not a lineage gap"))
+        expected.append(_xerror("authority-population", "no DESIGN origin found for DESIGN_DOC_ID d1"))
     return _build_case(dest, "B9-capacity-relays-one-over", prepare=prepare,
                        expected_exit=1, expected_errors=expected)
 

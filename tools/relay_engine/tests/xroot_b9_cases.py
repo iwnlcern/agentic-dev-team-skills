@@ -60,6 +60,19 @@ CASES = {
 # Expected reason sets transcribed from DD r5 section 6.2 plus erratum 1.
 C = ('authority.could-not-evaluate',)
 L = ('authority.lineage-incomplete',)
+# R181/R183 narrow-population witnesses; OLD remains the immutable capture contract.
+NARROW_ALLOWS = {
+    'G1-symlink', 'G2-non-utf8-blob', 'G3-non-utf8-name',
+    'G4-phase-conflict-unrelated', 'G6-gitlink-md',
+    'C1-over-count-20001', 'C2-over-bytes-300MiB',
+    'F-stage1-before-stage2', 'F-phase-before-origin', 'F-phase-after-origin',
+    'F-early-symlink-over-count',
+}
+NARROW_TREE_FAILURES = {
+    'F-early-invalid-later-missing': ('repository', 'Git object query failed'),
+    'F-early-invalid-later-malformed': ('repository', 'pinned tree object has malformed entry bytes'),
+    'F-early-invalid-later-deep': ('repository', 'DESIGN_SOURCE_ROOT exceeds maximum tree depth 256'),
+}
 OLD = {
     'control-allow': (), 'T1-timeout-blob': C, 'T1b-timeout-population-blob': C + L,
     'T2-timeout-tree': C, 'T3-timeout-commit': C,

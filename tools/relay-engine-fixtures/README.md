@@ -29,3 +29,14 @@ The `--lift-budget` harness loads the same pinned old source bytes, lifts their 
 Injected deadline cases T1, T1b, T2 and T3 remain bounded controls and have no lifted entry.
 Declared changed rows take precedence over both captures; other natural-timeout rows use the lifted structural answer, and all remaining rows use the bounded answer.
 Neither committed capture may be overwritten or retried to obtain a preferred result.
+
+`xroot/baseline-b8d87eb-narrow.json` retains 23 old-reader narrow-read controls captured from an isolated b8d87eb worktree with a lifted 600-second budget.
+The capture covers candidate and noncandidate hygiene forms, directory-position changes, an ordinary directory containing a candidate, and structural faults.
+The original bounded and lifted captures remain unchanged.
+
+`xroot/baseline-b8d87eb-corpus.json` records the old verifier's own answers over 130 shared cases and 43 synthetic cases at the same pinned commit.
+It uses a 600-second diagnostic budget except for the shared FIFO deadline control, which keeps five seconds.
+Population bodies are represented by SHA-256 hashes; names, parsed fields, timestamps, selected origin and review, and refusal axes and details remain intact.
+The capture records the SHA-256 of the complete raw producer output retained under `$HOME/.adt-evidence/v297-b9/impl/task-2n/baseline-b8d87eb-corpus-raw.json`.
+The corpus test compares old-reader answers only within the explicitly classified old-reader domain, with the named established budget, peer and envelope changes stated in the test.
+The independent serial-reference comparison covers every corpus case without those exceptions and compares complete retained text and both authority paths.

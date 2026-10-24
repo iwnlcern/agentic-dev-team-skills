@@ -105,7 +105,7 @@ class TestAuthorityFold10(TestAuthorityFold5):
         for kwargs in [dict(review=REVIEW+'\nprose\f tail'), dict(origin=DESIGN+'\nprose\f tail'),
                        dict(unrelated='PHASE: SITREP\n\nd1 prose\f tail')]:
             with self.subTest(kwargs=kwargs):
-                self.assert_case(['authority.lineage-incomplete'], **kwargs)
+                self.assert_case([] if 'unrelated' in kwargs else ['authority.lineage-incomplete'], **kwargs)
 
     def test_foreign_clean_and_whitespace_controls(self):
         for kwargs in [{}, dict(review=REVIEW.replace('VERDICT: approve','VERDICT: approve ')),
@@ -124,7 +124,7 @@ class TestAuthorityFold10(TestAuthorityFold5):
 
     def test_population_is_from_pinned_tree_not_worktree_or_head(self):
         for original, replacement, expected in [('d1 clean', 'd1 prose\f tail', []),
-                                                 ('d1 prose\f tail', 'd1 clean', ['authority.lineage-incomplete'])]:
+                                                 ('d1 prose\f tail', 'd1 clean', [])]:
             with self.subTest(original=original), self.foreign_case(unrelated=original) as (f,g,repo,_):
                 (repo/'relays/SITREP-planner-20260801-120000.md').write_text(replacement)
                 self.git(repo, 'add', '-A'); self.git(repo, 'commit', '-qm', 'later head')

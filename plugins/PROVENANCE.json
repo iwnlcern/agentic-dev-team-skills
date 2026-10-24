@@ -10466,7 +10466,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay-lint.py",
-    "sha256": "8b4bac8f8b9bba680c89dabb714f5a461a47d7ae2470ff75a579bc2160d42130",
+    "sha256": "11351b0e93758fbf71cf9a9806f57b6f7143fb700187e9683823626d46e92570",
     "source": "tools/relay-lint.py"
   },
   {
@@ -10580,7 +10580,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/rules.py",
-    "sha256": "2a35ae717cd02026475b6e2d5826d2f999b3051be211f4a73031c2e4779c9476",
+    "sha256": "d98572017d379231aac22d550d151ba25029cb05df1749c92f9195fd61317249",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -10610,7 +10610,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/xrootfixgen.py",
-    "sha256": "0961b79919b49e4b6e5d70a06829ba6b20027edf7be07a3d3b11670731b43643",
+    "sha256": "fa250f3c87a911bdf3a0158af157550230331e5ca1db8500b7ff6663dd94d1c9",
     "source": "tools/xrootfixgen.py"
   },
   {
@@ -20984,7 +20984,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay-lint.py",
-    "sha256": "8b4bac8f8b9bba680c89dabb714f5a461a47d7ae2470ff75a579bc2160d42130",
+    "sha256": "11351b0e93758fbf71cf9a9806f57b6f7143fb700187e9683823626d46e92570",
     "source": "tools/relay-lint.py"
   },
   {
@@ -21098,7 +21098,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/rules.py",
-    "sha256": "2a35ae717cd02026475b6e2d5826d2f999b3051be211f4a73031c2e4779c9476",
+    "sha256": "d98572017d379231aac22d550d151ba25029cb05df1749c92f9195fd61317249",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -21128,7 +21128,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/xrootfixgen.py",
-    "sha256": "0961b79919b49e4b6e5d70a06829ba6b20027edf7be07a3d3b11670731b43643",
+    "sha256": "fa250f3c87a911bdf3a0158af157550230331e5ca1db8500b7ff6663dd94d1c9",
     "source": "tools/xrootfixgen.py"
   },
   {
@@ -31430,7 +31430,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay-lint.py",
-    "sha256": "8b4bac8f8b9bba680c89dabb714f5a461a47d7ae2470ff75a579bc2160d42130",
+    "sha256": "11351b0e93758fbf71cf9a9806f57b6f7143fb700187e9683823626d46e92570",
     "source": "tools/relay-lint.py"
   },
   {
@@ -31544,7 +31544,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/rules.py",
-    "sha256": "2a35ae717cd02026475b6e2d5826d2f999b3051be211f4a73031c2e4779c9476",
+    "sha256": "d98572017d379231aac22d550d151ba25029cb05df1749c92f9195fd61317249",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -31574,7 +31574,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/xrootfixgen.py",
-    "sha256": "0961b79919b49e4b6e5d70a06829ba6b20027edf7be07a3d3b11670731b43643",
+    "sha256": "fa250f3c87a911bdf3a0158af157550230331e5ca1db8500b7ff6663dd94d1c9",
     "source": "tools/xrootfixgen.py"
   },
   {

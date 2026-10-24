@@ -3870,9 +3870,14 @@ def _xroot_capacity(root_tree, progress, limit=None):
     return XrootAxisError('capacity', detail, progress=progress)
 
 
+def xroot_is_candidate(name: bytes) -> bool:
+    return name.startswith(b'DESIGN-') and name.endswith(b'.md')
+
+
 def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
     relays: List[XrootRelay] = []
-    stack = [('tree', root_tree, '', b'', 0)]
+    stack = [('tree', root_tree, b'', b'', 0)]
+    retained_bytes = 0
     queued = set()
     barrier = False
     scanned = 0
@@ -3886,7 +3891,7 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
                 while not barrier and scanned < len(stack):
                     event = stack[-1-scanned]
                     kind, oid, relname, name_bytes, depth = event
-                    needs = kind == 'tree' or (kind != 'symlink' and name_bytes != b'INDEX.md' and name_bytes.endswith(b'.md'))
+                    needs = kind == 'tree' or (kind != 'symlink' and xroot_is_candidate(name_bytes))
                     if needs:
                         if len(queued) >= XROOT_REQUEST_WINDOW:
                             break
@@ -3898,7 +3903,7 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
                 event = stack.pop()
                 scanned -= 1
                 kind, oid, relname, name_bytes, depth = event
-                progress['stopped_at'] = f'{kind} {relname}'
+                progress['stopped_at'] = kind+' '+relname.decode('utf-8', 'surrogateescape')
                 if time.monotonic() >= deadline:
                     raise _xroot_capacity(root_tree, progress)
                 if kind == 'tree':
@@ -3913,23 +3918,26 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
                     entries = _xroot_parse_tree(raw, progress, root_tree)
                     children = []
                     for child_name, (child_kind, child_oid) in sorted(entries.items(), reverse=True):
-                        try:
-                            decoded = child_name.decode('utf-8')
-                        except UnicodeDecodeError as exc:
-                            raise XrootAxisError('authority-population', 'DESIGN_SOURCE_ROOT contains a non-UTF-8 filename') from exc
-                        child_relname = f'{relname}/{decoded}' if relname else decoded
+                        if xroot_is_candidate(child_name):
+                            try:
+                                child_name.decode('utf-8')
+                            except UnicodeDecodeError as exc:
+                                raise XrootAxisError('authority-population', 'DESIGN_SOURCE_ROOT contains a non-UTF-8 filename') from exc
+                        child_relname = relname+b'/'+child_name if relname else child_name
                         children.append((child_kind, child_oid, child_relname, child_name, depth+1))
                     progress['trees_read'] += 1
                     stack.extend(children)
                     barrier = False
                     scanned = 0
                 else:
-                    if name_bytes == b'INDEX.md':
+                    if not xroot_is_candidate(name_bytes):
                         continue
+                    try:
+                        relname = relname.decode('utf-8')
+                    except UnicodeDecodeError as exc:
+                        raise XrootAxisError('authority-population', 'DESIGN_SOURCE_ROOT contains a non-UTF-8 filename') from exc
                     if kind == 'symlink':
                         raise XrootAxisError('authority-population', f'DESIGN_SOURCE_ROOT contains symlink carrier {relname}')
-                    if not name_bytes.endswith(b'.md'):
-                        continue
                     if progress['relays_read'] >= XROOT_MAX_RELAYS:
                         raise _xroot_capacity(root_tree, progress, 'XROOT_MAX_RELAYS')
                     reader.max_blob_bytes = XROOT_MAX_RELAY_BYTES-progress['bytes_read']
@@ -3948,6 +3956,9 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
                     progress['relays_read'] += 1
                     progress['bytes_read'] += len(blob)
                     if xroot_retained(text):
+                        retained_bytes += len(blob)
+                        if retained_bytes > XROOT_MAX_RETAINED_BYTES:
+                            raise _xroot_capacity(root_tree, progress, 'XROOT_MAX_RETAINED_BYTES')
                         status, stamp, raw_stamp, _ = filename_timestamp(name_bytes.decode('utf-8'))
                         relays.append(XrootRelay(relname, header_fields(text), text,
                                                  stamp if status == 'ok' else None,

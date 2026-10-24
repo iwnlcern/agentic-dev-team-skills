@@ -124,12 +124,14 @@ class TestXrootReader(unittest.TestCase):
         self.assertEqual(b'', bytes(reader._read_ahead))
         tree = self.tree({'a.md': b'abc', 'b.md': b'abc'})
         with mock.patch.object(rules, 'XROOT_MAX_RELAY_BYTES', 2):
+            self.assertEqual([], rules.xroot_relays(self.repo, tree))
+            candidate_tree = self.tree({'DESIGN-a.md': b'abc', 'DESIGN-b.md': b'abc'})
             with self.assertRaises(rules.XrootAxisError) as caught:
-                rules.xroot_relays(self.repo, tree)
-        self.assertEqual('capacity', caught.exception.axis)
-        self.assertIn('XROOT_MAX_RELAY_BYTES', caught.exception.detail)
-        self.assertEqual(0, caught.exception.progress['relays_read'])
-        self.assertEqual(0, caught.exception.progress['bytes_read'])
+                rules.xroot_relays(self.repo, candidate_tree)
+            self.assertEqual('capacity', caught.exception.axis)
+            self.assertIn('XROOT_MAX_RELAY_BYTES', caught.exception.detail)
+            self.assertEqual(0, caught.exception.progress['relays_read'])
+            self.assertEqual(0, caught.exception.progress['bytes_read'])
 
     def test_selector_registered_once(self):
         # Rebuilding selector registrations on every wait breaks this bound.
@@ -240,12 +242,15 @@ class TestXrootReader(unittest.TestCase):
         files = {'a.md':'PHASE: SITREP\n', 'b.md':'DESIGN_DOC_ID: d1\n',
                  'c.md':'PHASE: DESIGN\nPHASE: SITREP\n', 'd.md':'DESIGN_\x00DOC_ID: D2\n',
                  'e.md':'hello\x85world', 'f.md':'PHASE: DESIGN\nDESIGN_DOC_ID: d2\n'}
-        self.assertEqual(['b.md','c.md','d.md','e.md','f.md'], [r.name for r in self.read(files)])
+        self.assertEqual([], [r.name for r in self.read(files)])
+        candidates = {'DESIGN-'+name: text for name, text in files.items()}
+        self.assertEqual(['DESIGN-b.md','DESIGN-c.md','DESIGN-d.md','DESIGN-e.md','DESIGN-f.md'],
+                         [r.name for r in self.read(candidates)])
 
     def test_reader_deep_single_child_chain_within_bound(self):
         tree = self.tree({'/'.join(['d']*256)+'/x.md':'DESIGN_DOC_ID: d1\n'})
         started = time.monotonic()
-        self.assertEqual(1, len(rules.xroot_relays(self.repo, tree)))
+        self.assertEqual(0, len(rules.xroot_relays(self.repo, tree)))
         self.assertLess(time.monotonic()-started, 5)
 
     def test_mixed_faults_give_first_error_in_walk_order(self):
@@ -254,7 +259,8 @@ class TestXrootReader(unittest.TestCase):
             with self.subTest(later=later):
                 with self.assertRaises(rules.XrootAxisError) as caught:
                     self.read({'a.md':b'\xff', 'z':(b'40000',later)})
-                self.assertEqual(('authority-population','authority carrier a.md is not UTF-8'),
+                detail = 'Git object query failed' if later == '3'*40 else 'pinned tree object has malformed entry bytes'
+                self.assertEqual(('repository', detail),
                                  (caught.exception.axis,caught.exception.detail))
         with self.assertRaises(rules.XrootAxisError) as caught:
             self.read({'a':(b'40000','3'*40), 'z.md':b'\xff'})
@@ -264,20 +270,14 @@ class TestXrootReader(unittest.TestCase):
         invalid = xf._literal_object(self.repo, 'blob', b'\xff')
         raw = xf._tree_entry(b'100644', b'a.md', invalid)+xf._tree_entry(b'100644', b'z\xff.md', invalid)
         tree = xf._literal_object(self.repo, 'tree', raw)
-        with self.assertRaises(rules.XrootAxisError) as caught:
-            rules.xroot_relays(self.repo, tree)
-        self.assertEqual('DESIGN_SOURCE_ROOT contains a non-UTF-8 filename', caught.exception.detail)
-        with self.assertRaises(rules.XrootAxisError) as caught:
-            self.read({'a.md':b'\xff','z':(b'40000',tree)})
-        self.assertEqual('authority carrier a.md is not UTF-8',caught.exception.detail)
+        self.assertEqual([], rules.xroot_relays(self.repo, tree))
+        self.assertEqual([], self.read({'a.md':b'\xff','z':(b'40000',tree)}))
 
     def test_index_md_tree_symlink_and_md_gitlink(self):
         blob = xf._literal_object(self.repo,'blob',b'not a path')
         self.assertEqual([], self.read({'INDEX.md':(b'120000',blob)}))
-        self.assertEqual(['INDEX.md/x.md'],[r.name for r in self.read({'INDEX.md/x.md':'DESIGN_DOC_ID: d1\n'})])
-        with self.assertRaises(rules.XrootAxisError) as caught:
-            self.read({'x.md':(b'160000','3'*40)})
-        self.assertEqual(('authority-population','Git object query failed'),(caught.exception.axis,caught.exception.detail))
+        self.assertEqual([],[r.name for r in self.read({'INDEX.md/x.md':'DESIGN_DOC_ID: d1\n'})])
+        self.assertEqual([], self.read({'x.md':(b'160000','3'*40)}))
 
     def test_limits_at_and_one_over(self):
         # Small exact-boundary controls use the same counters as the full retained capacity proof.
@@ -292,6 +292,11 @@ class TestXrootReader(unittest.TestCase):
                 self.assertTrue(hasattr(rules,name),name+' missing')
                 with mock.patch.object(rules,name,value):
                     self.read(at)
+                    if name in ('XROOT_MAX_RELAYS', 'XROOT_MAX_RELAY_BYTES'):
+                        self.assertEqual([], self.read(over))
+                        at = {'DESIGN-'+key: value for key, value in at.items()}
+                        over = {'DESIGN-'+key: value for key, value in over.items()}
+                        self.read(at)
                     with self.assertRaises(rules.XrootAxisError) as caught:
                         self.read(over)
                     self.assertEqual('capacity',caught.exception.axis)
@@ -300,15 +305,17 @@ class TestXrootReader(unittest.TestCase):
     def test_past_limit_later_error_answers_capacity(self):
         self.assertTrue(hasattr(rules,'XROOT_MAX_RELAYS'))
         with mock.patch.object(rules,'XROOT_MAX_RELAYS',1):
+            self.assertEqual([], self.read({'a.md':'x','b.md':b'\xff'}))
             with self.assertRaises(rules.XrootAxisError) as caught:
-                self.read({'a.md':'x','b.md':b'\xff'})
+                self.read({'DESIGN-a.md':'x','DESIGN-b.md':b'\xff'})
             self.assertEqual('capacity',caught.exception.axis)
 
     def test_in_envelope_error_beats_limit(self):
         self.assertTrue(hasattr(rules,'XROOT_MAX_RELAYS'))
         with mock.patch.object(rules,'XROOT_MAX_RELAYS',1):
+            self.assertEqual([], self.read({'a.md':b'\xff','b.md':'x'}))
             with self.assertRaises(rules.XrootAxisError) as caught:
-                self.read({'a.md':b'\xff','b.md':'x'})
+                self.read({'DESIGN-a.md':b'\xff','DESIGN-b.md':'x'})
             self.assertEqual('authority-population',caught.exception.axis)
 
     def test_pre_reader_deadline_is_capacity(self):
@@ -359,7 +366,7 @@ class TestXrootReader(unittest.TestCase):
         with mock.patch.object(rules,'XrootBatchReader',Observed):
             with self.assertRaises(rules.XrootAxisError) as caught:
                 self.read({'a.md':b'\xff', 'z':(b'40000',subtree)})
-        self.assertEqual('authority carrier a.md is not UTF-8',caught.exception.detail)
+        self.assertEqual('capacity',caught.exception.axis)
 
     def test_selector_os_error_is_transport_failure(self):
         before = set(os.listdir('/dev/fd'))
@@ -397,22 +404,28 @@ class TestXrootReader(unittest.TestCase):
 
     def assert_governing(self, label, actual, baseline, lifted, path, elapsed, *, lifted_deadline=False):
         from relay_engine.tests.capture_xroot_baseline import NATURAL_TIMEOUTS
-        capacity = {'C1-over-count-20001':'XROOT_MAX_RELAYS',
-                    'C2-over-bytes-300MiB':'XROOT_MAX_RELAY_BYTES',
-                    'M1-over-trees-20001':'XROOT_MAX_TREES',
-                    'M2-over-entries-200001':'XROOT_MAX_ENTRIES'}
+        capacity = {'M1-over-trees-20001':'XROOT_MAX_TREES',
+                    'M2-over-entries-200001':'XROOT_MAX_ENTRIES',
+                    'F-invalid-before-metadata':'XROOT_MAX_TREES'}
+        from relay_engine.tests.xroot_b9_cases import NARROW_ALLOWS, NARROW_TREE_FAILURES
+        # Keep the planted historical-capture corruption control meaningful.
+        if label == 'G2-non-utf8-blob':
+            self.assertEqual('authority carrier SITREP-x-20260801-120000.md is not UTF-8',
+                             baseline['cases'][label]['paths'][path]['detail'])
         if label in capacity:
             self.assertEqual('capacity', actual['axis'])
             self.assertIn(capacity[label], actual['detail'])
             if not lifted_deadline:
                 self.assertLess(elapsed, 5)
-        elif label in {'L7-orchestrator-peer', 'B1-complete-within-envelope'}:
+        elif label in NARROW_ALLOWS | {'L7-orchestrator-peer', 'B1-complete-within-envelope'}:
             self.assertIsNone(actual['axis'])
             from relay_engine.tests.xroot_b9_cases import O, R
             self.assertEqual((O.removeprefix('relays/'), R.removeprefix('relays/')),
                              (actual['origin'], actual['review']))
             if not lifted_deadline:
                 self.assertLess(elapsed, 5)
+        elif label in NARROW_TREE_FAILURES:
+            self.assertEqual(NARROW_TREE_FAILURES[label], (actual['axis'], actual['detail']))
         else:
             old = (lifted if label in NATURAL_TIMEOUTS else baseline)['cases'][label]['paths'][path]
             if not lifted_deadline and label in NATURAL_TIMEOUTS and actual['axis'] == 'capacity':
