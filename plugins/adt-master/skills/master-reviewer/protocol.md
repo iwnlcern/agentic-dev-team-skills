@@ -426,6 +426,7 @@ Retain the command, its output or stderr code, and exit status for every check a
 The report carries exactly one `AUTHORITY_CHECK` header line for the latest check before the act reported: `AUTHORITY_CHECK: allowed <action> <relay path> <checked_at>`.
 Copy its three values from that check's output; earlier checks stay in retained evidence and add no second header line.
 On a managed root, a dispatch or merge go-ahead is live only as a filed relay; a seat receiving one by direct message asks its sender to file it and does not act.
+This rule governs the seat that would act on the go-ahead; an Orchestrator Planner recording the operator's words as `GATE_DISPOSITION` in its own filed grant under § Reviewer checkpoints is filing the go-ahead.
 On a hand-authored root there is no daemon to ask: apply the literal-token conditions by reading the relay and cite `AUTHORITY_CHECK: unavailable — <reason>`.
 A managed-root seat whose check failed, was denied, could not evaluate or was not run may not use that absence form.
 
@@ -439,13 +440,13 @@ Reason identifiers below are identifiers only, not display messages.
 - R3, grants on either route and reviews (`authority.shape-absent` for grants; `authority.lineage-incomplete` for an unusable review): no HTML-like line with at most three leading spaces and then `<` followed by a letter, `/`, `!` or `?`, nor a line containing `<!--`, `<?`, `<![`, `<!` followed by a letter, or an opening script, pre, style or textarea tag.
 - R4, grant/review header parsing (`authority.shape-absent` or `authority.lineage-incomplete`): the header starts at the first uppercase `KEY: value` line with the colon adjacent to the key and ends at the first blank or nonmatching line.
   Lowercase keys, a space before the colon and a hyphen in a key end it.
-  Every required field must be present, and no key may appear twice, required or not; any repeated header key fails the parse, voiding a grant and stopping a review from approving.
+  Every required field must be present with a nonempty value, and no key may appear twice, required or not; any repeated header key fails the parse, voiding a grant and stopping a review from approving.
 - R5, grants on either route and reviews (`authority.shape-absent` or `authority.lineage-incomplete`): no header value contains `<`, including SUBJECT; fill every header placeholder.
 - R6, grants and reviews (`authority.denied` for a denied grant; `authority.lineage-incomplete` for an unusable review): verdicts and denials are read from the header only.
   Verdict keys are VERDICT, MERGE_AUTHORIZATION, MERGE_APPROVED, or a key ending in an underscore plus one of those names.
   The whole value is positive only when it is exactly approved, approve, granted, yes, true, complete or merge-ready, case-insensitively in ASCII; any other value under a verdict key denies, including an approval followed by commentary.
   For a field-form merge grant, the value must also satisfy the engine's per-key lists in `tools/relay_engine/rules.py` (`merge_authorization_positive`), while remaining exactly one whole positive value under the rule above: MERGE_AUTHORIZATION and HUMAN_MERGE_AUTHORIZATION accept approved, granted or yes; MERGE_APPROVED accepts yes, true or approved; VERDICT accepts merge-ready, approved or complete.
-  A prefixed key never supplies this merge-grant shape; `MERGE_AUTHORIZATION: approve` neither grants nor denies, and without another granting route yields `authority.shape-absent`.
+  Of the prefixed verdict keys, only HUMAN_MERGE_AUTHORIZATION can supply this field-form merge-grant shape; `MERGE_AUTHORIZATION: approve` neither grants nor denies, and without another granting route yields `authority.shape-absent`.
   An approval followed by commentary, such as `approved — notes`, or `merge ready` with a space fails the whole-value rule.
   A denial in body prose neither grants nor denies.
 - R7, approving reviews (`authority.lineage-incomplete`): PHASE_VERDICT, with the phase's hyphens changed to underscores, or VERDICT equals approve or approved, with no denial key.

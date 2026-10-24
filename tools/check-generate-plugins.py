@@ -998,40 +998,51 @@ def relay_text(role: str, address: str) -> str:
     )
 
 
-def single_example_block(region: str, label: str) -> str:
-    """Require one complete outer fence, without discarded blocks or body text."""
+def section_example_blocks(region: str, label: str) -> tuple[list[str], list[int]]:
+    """Read all outer fenced blocks and filled-example markers in one section."""
+    blocks = []
+    markers = []
     body = []
     fence = None
-    closed = False
     for line in region.split("\n"):
-        # Only an outer heading ends the section; headings inside the fence are data.
         if fence is None and line.startswith("## "):
             break
-        delimiter = re.fullmatch(r"(`{3,}|~{3,})([^`~]*)", line)
+        delimiter = re.fullmatch(r" {0,3}(`{3,}|~{3,})([^`~]*)", line)
+        fence_start = re.match(r" {0,3}(?:`{3,}|~{3,})", line)
         if fence is None:
+            if line.startswith("Filled example using fictional"):
+                markers.append(len(blocks))
             if delimiter:
-                expect(not closed, f"{label}: additional fence after closing fence")
                 expect(delimiter[2].strip() in {"", "text"}, f"{label}: unexpected fence language")
                 fence = delimiter[1]
+                body = []
             else:
-                expect(not re.search(r"`{3,}|~{3,}", line), f"{label}: malformed opening fence")
-        elif line == fence:
+                expect(not fence_start, f"{label}: malformed opening fence")
+        elif delimiter and delimiter[1] == fence and not delimiter[2].strip():
+            blocks.append("\n".join(body))
             fence = None
-            closed = True
         else:
-            expect(not re.search(r"`{3,}|~{3,}", line), f"{label}: unmatched or nested fence")
+            expect(not fence_start, f"{label}: unmatched or nested fence")
             body.append(line)
-    expect(closed and fence is None, f"{label}: expected one complete fenced block")
-    return "\n".join(body)
+    expect(fence is None, f"{label}: unclosed fenced block")
+    return blocks, markers
+
+
+def single_example_block(region: str, label: str) -> str:
+    blocks, _ = section_example_blocks(region, label)
+    expect(len(blocks) == 1, f"{label}: expected exactly one fenced block")
+    return blocks[0]
 
 
 def check_implementation_report_example(plugin: str, scratch: Path, scratch_base: Path) -> None:
     """Catch copied report parents and citations in the actual installed example."""
     skill = (scratch / "skills/pair-implementer/SKILL.md").read_text(encoding="utf-8")
-    markers = list(re.finditer(r"^Filled example using fictional[^\n]*$", skill, re.MULTILINE))
-    expect(len(markers) == 1, f"{plugin} example_extracted_per_tier: expected one filled-example region")
-    # Start after the filled-example marker, separate from the report skeleton.
-    example = single_example_block(skill[markers[0].end():], f"{plugin} filled IMPL example")
+    headings = list(re.finditer(r"^## Implementation report$", skill, re.MULTILINE))
+    expect(len(headings) == 1, f"{plugin} example_extracted_per_tier: expected one report section")
+    blocks, markers = section_example_blocks(skill[headings[0].end():], f"{plugin} IMPL report section")
+    expect(len(blocks) == 2 and markers == [1],
+           f"{plugin} example_extracted_per_tier: expected skeleton, one marker, then example")
+    example = blocks[1]
     def field(name: str) -> str:
         matches = re.findall(rf"^{name}: (.+)$", example, re.MULTILINE)
         expect(len(matches) == 1, f"{plugin} example needs one {name}")
@@ -1128,10 +1139,16 @@ def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path)
         templates.append((label, token, body))
     fictional = {"RUN_ID": "v0", "TO": "v0-x.implementer", "default": "example"}
     def fill(body: str) -> str:
-        body = re.sub(r"<([^<>\n]*)>",
-                      lambda m: m[1].split(" | ")[0] if " | " in m[1] else m[0], body)
+        # Preserve markup before ANY substitution or header alternative handling.
+        # Keeping an entire markup-bearing line also protects partial/unclosed forms.
+        html_open = re.compile(r"<!--|<\?|<!\[|<![a-z]|<(?:script|pre|style|textarea)(?=[ \t\r\n\f\v>]|$)", re.I)
         lines = []
         for line in body.split("\n"):
+            if re.match(r"^ {0,3}<", line) or html_open.search(line):
+                lines.append(line)
+                continue
+            line = re.sub(r"<([^<>\n]*)>",
+                          lambda m: m[1].split(" | ")[0] if " | " in m[1] else m[0], line)
             header = re.fullmatch(r"([A-Z][A-Z0-9_]*):[ \t]*(.*)", line)
             if header:
                 key, value = header.groups()
@@ -1141,8 +1158,8 @@ def check_shipped_grant_examples(plugin: str, scratch: Path, scratch_base: Path)
                 else:
                     value = re.sub(r"<[^<>\n]*>", fictional.get(key, fictional["default"]), value)
                 line = f"{key}: {value}"
-            lines.append(line)
-        return re.sub(r"<[^<>\n]*>", fictional["default"], "\n".join(lines))
+            lines.append(re.sub(r"<[^<>\n]*>", fictional["default"], line))
+        return "\n".join(lines)
     # A fresh isolated interpreter binds every judgment to this installed tier.
     judge = """import json, sys
 from pathlib import Path

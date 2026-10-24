@@ -94,23 +94,29 @@ A root never changes mode implicitly (`relay migrate` is the only path between t
 The operator chooses the root's mode before its first boot relay, as described in [Standalone pair runs](#standalone-pair-runs).
 For the managed mode, follow this order:
 
-1. The operator names the top seat at every daemon start, including a fresh root; the starting seat never chooses itself.
-   The start records and occupies that seat and issues its key under the root’s seat directory.
+1. The operator names the top seat for the root's first start; every later start names the top seat already on record.
+   The eligible starter runs the start: the master Planner where a master tier exists, else the Orchestrator Planner, else the operator; in a standalone pair, the operator.
+   The starter passes the designated seat, including itself if the operator named it, and never picks a top seat on its own.
+   A first designation records the top-seat name; stand-down leaves that record in place.
+   Starting with that recorded name reuses its existing key only while its occupancy remains active; after stand-down, startup issues a fresh occupancy and key under the same name.
+   The recorded name alone does not make an earlier key current; after a start, use the key that start left under the root's seat directory.
 2. The top seat declares the roster with `seat declare` using its own key issued by that start: every seat the run will address, the reviewer included, and for a commissioned team its members on the receiving root.
-   Check that each declaration result is `added` or `exists`.
+   Check that each declaration result is `added` or `exists`; otherwise stop setup and report the result to the operator.
 3. The top seat registers each downstream seat once, at first occupancy; that registration files its engine boot record and issues its key.
-   Leave each key under the root’s seat directory where the booted seat reads it.
-   Register the `operator` seat whenever the operator will file go-aheads or overrides as relays; this is always required in a standalone managed pair, where the operator’s merge grant must be filed.
+   Leave each key under the root's seat directory where the booted seat reads it.
+   Register the `operator` seat whenever the operator will file go-aheads or overrides as relays; this is always required in a standalone managed pair, where the operator's merge grant must be filed.
 4. Only then does the top Planner file its own hand-offs.
 
 The top seat does not register separately.
 A root without a top seat on record needs an operator-authorized start naming it; do not choose the first registrant as top seat and do not stop or restart a daemon without the operator.
-A resumed or re-booted seat uses its existing key; a boot recipient that finds its key does not register again.
+A resumed or re-booted seat uses the key for its current occupancy; a booted seat never registers itself, because the top seat registered it.
+A seat that cannot find its key under the root's seat directory asks the top seat or the operator for it.
 A `seat-occupied` refusal means the seat is already registered, not that it needs replacement.
 Replacing an occupant with `seat replace` is operator-directed only.
 A roster declaration recognises names only: it occupies no seat, issues no key, grants no authority, delivers nothing across roots and follows no later changes in another root.
 For the maintained start/register/submit procedure, see `tools/relay_engine/README.md` § Typical flow.
 For roster declaration flags, which that flow does not cover, see `tools/relay seat declare --help`.
+The two input forms not described there are defined in `tools/relay_engine/cli.py` (`_cmd_seat_declare`): `--key` takes the top seat's key file resolved against the root, as a root-relative path or an absolute path inside it, and `--from-file` takes one `<address> <role>` pair per line.
 
 ## Header convention
 
