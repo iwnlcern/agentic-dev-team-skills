@@ -528,7 +528,8 @@ def _external_evidence(root, lineage, reasons, *, pair_lineage=True):
 def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     token = _PARSE_CACHE.set({})
     try:
-        return _check(ledger, root, relay_path, seat, action)
+        with rules.xroot_operation():
+            return _check(ledger, root, relay_path, seat, action)
     finally:
         _PARSE_CACHE.reset(token)
 

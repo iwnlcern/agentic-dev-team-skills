@@ -1066,7 +1066,7 @@ def materialize(dest: Path) -> list[Case]:
             "X43-fifo-object-timeout",
             prepare=_fifo_object,
             expected_exit=1,
-            expected_errors=[_xerror("capacity", "Git object query timed out at the 5 s bound during cat-file; this is a capacity limit, not a lineage gap")],
+            expected_errors=[_xerror("capacity", "Git object query timed out at the 5 s bound during cat-file; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")],
         ),
         _build_case(
             dest,

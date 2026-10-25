@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+from contextlib import contextmanager
 from contextvars import ContextVar
 import selectors
 import signal
@@ -3302,6 +3303,7 @@ class XrootAxisError(Exception):
         self.axis = axis
         self.detail = detail
         self.progress = progress
+        self.established_at = time.monotonic()
 
 
 def xroot_error(axis: str, detail: str) -> str:
@@ -3383,8 +3385,8 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
         deadline = budget[0] if deadline is None else min(deadline, budget[0])
     if deadline is not None and deadline <= time.monotonic():
         if budget is not None:
-            budget[1].append("Git object query timed out")
-        raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a capacity limit, not a lineage gap")
+            budget[1].append(f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
+        raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
     argv = ["git", "-C", str(repo), *args]
     stdout_chunks: List[bytes] = []
     stderr_chunks: List[bytes] = []
@@ -3438,15 +3440,15 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
             if remaining <= 0:
                 timed_out = True
                 if budget is not None:
-                    budget[1].append("Git object query timed out")
-                raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a capacity limit, not a lineage gap")
+                    budget[1].append(f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
+                raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
             if selector.get_map():
                 events = selector.select(remaining)
                 if not events:
                     timed_out = True
                     if budget is not None:
-                        budget[1].append("Git object query timed out")
-                    raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a capacity limit, not a lineage gap")
+                        budget[1].append(f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
+                    raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
                 for key, _mask in events:
                     fd = key.fd
                     try:
@@ -3674,15 +3676,175 @@ _XROOT_ASCII_LOWER = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmn
 
 
 def xroot_retained(text: str) -> bool:
-    if _XROOT_CONTROLS.search(text):
-        return True
-    clean = text.translate(_XROOT_ASCII_LOWER)
-    return 'design_doc_id:' in clean or clean.count('phase:') >= 2
+    controlled = _XROOT_CONTROLS.search(text) is not None
+    clean = text.translate(_XROOT_ASCII_LOWER) if not controlled else ''
+    retained = controlled or 'design_doc_id:' in clean or clean.count('phase:') >= 2
+    _xroot_checkpoint()
+    return retained
+
 
 
 def xroot_selection_relevant(text: str, doc_id: str) -> bool:
     clean = _XROOT_CONTROLS.sub('', text).translate(_XROOT_ASCII_LOWER)
-    return doc_id.translate(_XROOT_ASCII_LOWER) in clean or clean.count('phase:') >= 2
+    relevant = doc_id.translate(_XROOT_ASCII_LOWER) in clean or clean.count('phase:') >= 2
+    _xroot_checkpoint()
+    return relevant
+
+
+
+_XROOT_READERS = ContextVar('xroot_operation_readers', default=None)
+_XROOT_EVENT = ContextVar('xroot_edge_event', default=None)
+
+
+@contextmanager
+def xroot_operation():
+    readers = {}
+    reader_token = _XROOT_READERS.set(readers)
+    event_token = _XROOT_EVENT.set(None)
+    try:
+        yield
+    finally:
+        try:
+            for reader in readers.values():
+                reader.close()
+        finally:
+            _XROOT_EVENT.reset(event_token)
+            _XROOT_READERS.reset(reader_token)
+
+
+
+@contextmanager
+def _xroot_edge():
+    token = None
+    if _XROOT_BUDGET.get() is None:
+        token = _XROOT_BUDGET.set((time.monotonic()+XROOT_EDGE_SECONDS, []))
+    event_token = _XROOT_EVENT.set({}) if _XROOT_EVENT.get() is None else None
+    try:
+        yield
+    finally:
+        if event_token is not None:
+            _XROOT_EVENT.reset(event_token)
+        if token is not None:
+            _XROOT_BUDGET.reset(token)
+
+
+
+def _xroot_progress():
+    return dict(stopped_at='query', source='read', relays_read=0,
+                trees_read=0, bytes_read=0, entries_read=0)
+
+
+
+def _xroot_set_event(root_tree, progress):
+    event = _XROOT_EVENT.get()
+    if event is not None:
+        event.update(root_tree=root_tree, progress=progress)
+
+
+
+def _xroot_stage(name):
+    event = _XROOT_EVENT.get()
+    if event is not None and 'progress' in event:
+        event['progress']['stopped_at'] = name
+
+
+
+def _xroot_checkpoint(root_tree=None, progress=None, deadline=None):
+    budget = _XROOT_BUDGET.get()
+    if deadline is None and budget is not None:
+        deadline = budget[0]
+    if deadline is not None and time.monotonic() >= deadline:
+        event = _XROOT_EVENT.get() or {}
+        raise _xroot_capacity(root_tree or event.get('root_tree', 'foreign root'),
+                              progress if progress is not None else event.get('progress', _xroot_progress()))
+
+
+
+def _xroot_error_deadline(exc, root_tree=None, progress=None, deadline=None):
+    budget = _XROOT_BUDGET.get()
+    if deadline is None and budget is not None:
+        deadline = budget[0]
+    if (deadline is not None and exc.established_at >= deadline
+            and (exc.axis != 'capacity' or getattr(exc, 'limit', None) is not None)):
+        event = _XROOT_EVENT.get() or {}
+        return _xroot_capacity(root_tree or event.get('root_tree', 'foreign root'),
+                               progress if progress is not None else event.get('progress', _xroot_progress()))
+    return exc
+
+
+
+@contextmanager
+def _xroot_reader(repo, deadline):
+    _xroot_checkpoint(deadline=deadline)
+    readers = _XROOT_READERS.get()
+    if readers is None:
+        with XrootBatchReader(repo, deadline) as reader:
+            yield reader
+        return
+    key = os.path.realpath(repo)
+    reader = readers.get(key)
+    if reader is None:
+        reader = readers[key] = XrootBatchReader(repo, deadline)
+    reader.deadline = deadline
+    try:
+        yield reader
+    except BaseException:
+        reader.close()
+        readers.pop(key, None)
+        raise
+
+
+
+def _xroot_reframe(exc, declaration):
+    if exc.axis != 'capacity' or exc.progress is None:
+        return exc
+    root = declaration.get('DESIGN_SOURCE_ROOT', 'foreign root')
+    commit = declaration.get('DESIGN_SOURCE_COMMIT', '')[:12]
+    label = f'{root} at {commit}'
+    limit = getattr(exc, 'limit', None)
+    if limit is not None:
+        detail = f'{label} exceeds the supported {limit} of {globals()[limit]}; this is a capacity limit, not a lineage gap'
+    else:
+        progress = exc.progress
+        detail = (f'foreign read of {label} stopped at the {XROOT_EDGE_SECONDS} s bound at '
+                  f'{progress["stopped_at"]}, after {progress["relays_read"]} relays and {progress["trees_read"]} trees; '
+                  'this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine')
+    result = XrootAxisError('capacity', detail, progress=dict(exc.progress))
+    result.limit = limit
+    result.established_at = exc.established_at
+    return result
+
+
+
+def _xroot_external_entry(exc, declaration, gate, relays=(), lock=None):
+    prefix = 'DESIGN_SOURCE_' if gate == 'cross-root-design' else 'PLAN_SOURCE_'
+    progress = None
+    if exc.axis == 'capacity':
+        raw = dict(exc.progress) if exc.progress is not None else _xroot_progress()
+        raw.setdefault('bound_seconds', XROOT_EDGE_SECONDS)
+        raw.setdefault('limits', dict(trees=XROOT_MAX_TREES, entries=XROOT_MAX_ENTRIES,
+                                      relays=XROOT_MAX_RELAYS, relay_bytes=XROOT_MAX_RELAY_BYTES))
+        progress = {key: raw[key] for key in ('stopped_at','source','relays_read','trees_read','bytes_read','bound_seconds','limits')}
+    entry = dict(relays=list(relays), gate=gate, reason='authority.could-not-evaluate',
+                 axis=exc.axis, detail=exc.detail, repository=declaration.get(prefix+'REPO'),
+                 commit=declaration.get(prefix+'COMMIT'),
+                 root=declaration.get(prefix+'ROOT') if gate == 'cross-root-design' else None,
+                 progress=progress)
+    if gate == 'plan-source':
+        entry['lock'] = lock
+    return entry
+
+
+
+def _xroot_gate_error(result, rel, exc, declaration, gate, lock=None):
+    entry = _xroot_external_entry(exc, declaration, gate, [str(rel)], lock)
+    if not hasattr(result, 'external'):
+        result.external = []
+    result.external.append(entry)
+    budget = _XROOT_BUDGET.get()
+    if exc.axis == 'capacity' and budget is not None:
+        budget[1].append(entry)
+
 
 
 class XrootBatchReader:
@@ -3756,7 +3918,7 @@ class XrootBatchReader:
 
     def _check_deadline(self):
         if time.monotonic() >= self.deadline:
-            raise XrootAxisError('capacity', 'Git batch reader timed out at the 5 s bound; this is a capacity limit, not a lineage gap')
+            raise XrootAxisError('capacity', 'Git batch reader timed out at the 5 s bound; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine')
 
     def _flush(self):
         while self._pending:
@@ -3857,7 +4019,7 @@ class XrootBatchReader:
 
 def _xroot_capacity(root_tree, progress, limit=None):
     progress = dict(progress)
-    progress['source'] = 'read'
+    progress.setdefault('source', 'read')
     progress['bound_seconds'] = XROOT_EDGE_SECONDS
     progress['limits'] = dict(trees=XROOT_MAX_TREES, entries=XROOT_MAX_ENTRIES,
                               relays=XROOT_MAX_RELAYS, relay_bytes=XROOT_MAX_RELAY_BYTES)
@@ -3865,9 +4027,12 @@ def _xroot_capacity(root_tree, progress, limit=None):
         detail = f'{root_tree} exceeds the supported {limit} of {globals()[limit]}; this is a capacity limit, not a lineage gap'
     else:
         detail = (f'foreign read of {root_tree} stopped at the {XROOT_EDGE_SECONDS} s bound at '
-                  f'{progress["stopped_at"]}; this is a capacity limit, not a lineage gap '
-                  f'after {progress["relays_read"]} relays and {progress["trees_read"]} trees')
-    return XrootAxisError('capacity', detail, progress=progress)
+                  f'{progress["stopped_at"]}, after {progress["relays_read"]} relays and {progress["trees_read"]} trees; '
+                  'this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine')
+    error = XrootAxisError('capacity', detail, progress=progress)
+    error.limit = limit
+    return error
+
 
 
 def xroot_is_candidate(name: bytes) -> bool:
@@ -3881,11 +4046,12 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
     queued = set()
     barrier = False
     scanned = 0
-    progress = dict(stopped_at='tree ', relays_read=0, trees_read=0, bytes_read=0, entries_read=0)
+    progress = dict(stopped_at='tree ', source='read', relays_read=0, trees_read=0, bytes_read=0, entries_read=0)
+    _xroot_set_event(root_tree, progress)
     budget = _XROOT_BUDGET.get()
     deadline = budget[0] if budget is not None else time.monotonic()+XROOT_EDGE_SECONDS
     try:
-        with XrootBatchReader(repo, deadline) as reader:
+        with _xroot_reader(repo, deadline) as reader:
             while stack:
                 # Scan each known event once; a tree blocks all later speculation.
                 while not barrier and scanned < len(stack):
@@ -3966,13 +4132,16 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
                 if time.monotonic() >= deadline:
                     raise _xroot_capacity(root_tree, progress)
     except XrootAxisError as exc:
-        if exc.axis == 'capacity' and exc.progress is None:
-            raise _xroot_capacity(root_tree, progress) from exc
-        raise
+        answer = _xroot_error_deadline(exc, root_tree, progress, deadline)
+        if answer.axis == 'capacity' and answer.progress is None:
+            answer = _xroot_capacity(root_tree, progress)
+        answer.read_progress = dict(progress)
+        raise answer
     return relays
 
 def xroot_target_ok(relay: XrootRelay, key: str, expected: str) -> bool:
     values = [value.strip() for value in h27_occurrences(relay.text, key)]
+    _xroot_checkpoint()
     if expected not in values:
         return False
     if len(set(values)) > 1:
@@ -3980,6 +4149,7 @@ def xroot_target_ok(relay: XrootRelay, key: str, expected: str) -> bool:
             "authority-population", f"conflicting {key} occurrences in {relay.name}"
         )
     return True
+
 
 
 def xroot_unique_latest(
@@ -4085,6 +4255,8 @@ def xroot_authority(
 ) -> None:
     relays = xroot_relays(repo, root_tree)
     doc_id = declaration["DESIGN_DOC_ID"]
+    _xroot_stage(f"selection {doc_id}")
+    _xroot_checkpoint()
     origins = [
         relay for relay in relays
         if xroot_target_ok(relay, "PHASE", "DESIGN")
@@ -4141,6 +4313,8 @@ def xroot_authority(
         )
 
 
+
+@_xroot_edge()
 def xroot_plan_gate(
     path: Path,
     f: Path,
@@ -4172,6 +4346,7 @@ def xroot_plan_gate(
         locks.append((key, lock_path, separator, annotation))
     if not locks:
         return True
+    failed_lock = dict(key=locks[0][0], path=locks[0][1])
     try:
         repo, commit = xroot_repository_and_commit(
             path,
@@ -4181,6 +4356,7 @@ def xroot_plan_gate(
         )
         commit_tree = xroot_commit_tree(repo, commit)
         for key, lock_path, separator, annotation in locks:
+            failed_lock = dict(key=key, path=lock_path)
             if not xroot_valid_relpath(lock_path):
                 raise XrootAxisError(
                     "declaration", f"{key} path must be a literal relative path"
@@ -4201,7 +4377,10 @@ def xroot_plan_gate(
                     raise XrootAxisError(
                         "byte", f"{key} annotation digest does not match pinned blob bytes"
                     )
+        _xroot_checkpoint()
     except XrootAxisError as exc:
+        exc = _xroot_error_deadline(exc)
+        _xroot_gate_error(result, rel, exc, declaration, 'plan-source', failed_lock)
         result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
     except Exception:
         result.error(
@@ -4210,16 +4389,24 @@ def xroot_plan_gate(
     return True
 
 
+
+@_xroot_edge()
 def xroot_verify(path: Path, declaration: Dict[str, str]) -> None:
-    repo, commit = xroot_repository_and_commit(path, declaration)
-    relay_tree, blob_oid = xroot_paths(repo, commit, declaration)
-    declared_digest = declaration["DESIGN_SHA256"]
-    if re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None:
-        raise XrootAxisError("byte", "DESIGN_SHA256 must be a full lowercase 64-hex digest")
-    blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
-    if hashlib.sha256(blob).hexdigest() != declared_digest:
-        raise XrootAxisError("byte", "DESIGN_SHA256 does not match pinned blob bytes")
-    xroot_authority(repo, relay_tree, declaration)
+    try:
+        repo, commit = xroot_repository_and_commit(path, declaration)
+        relay_tree, blob_oid = xroot_paths(repo, commit, declaration)
+        declared_digest = declaration["DESIGN_SHA256"]
+        if re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None:
+            raise XrootAxisError("byte", "DESIGN_SHA256 must be a full lowercase 64-hex digest")
+        blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
+        if hashlib.sha256(blob).hexdigest() != declared_digest:
+            raise XrootAxisError("byte", "DESIGN_SHA256 does not match pinned blob bytes")
+        answer = xroot_authority(repo, relay_tree, declaration)
+        _xroot_checkpoint()
+        return answer
+    except XrootAxisError as exc:
+        raise _xroot_reframe(_xroot_error_deadline(exc), declaration)
+
 
 
 def xroot_design_gate(
@@ -4282,6 +4469,7 @@ def xroot_design_gate(
     try:
         xroot_verify(path, declaration)
     except XrootAxisError as exc:
+        _xroot_gate_error(result, rel, exc, declaration, 'cross-root-design')
         result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}")
     except Exception:
         result.error(
@@ -4290,6 +4478,8 @@ def xroot_design_gate(
     return True
 
 
+
+@xroot_operation()
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
     result = LintResult()
     all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),

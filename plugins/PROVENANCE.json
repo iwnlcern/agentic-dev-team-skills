@@ -10466,7 +10466,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay-lint.py",
-    "sha256": "11351b0e93758fbf71cf9a9806f57b6f7143fb700187e9683823626d46e92570",
+    "sha256": "84c6924d97c202a153b18cfec34b97833132ea8812f8b8e552562b9c75db483b",
     "source": "tools/relay-lint.py"
   },
   {
@@ -10484,7 +10484,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/authority.py",
-    "sha256": "131746d2aeed862e27925f97ae13aa2deed6f081c13c87e41e636c2f20b9a8aa",
+    "sha256": "b01f780c60d355fb0150912da2c55ed6f51558780a93247a8d5ac7c96df899c5",
     "source": "tools/relay_engine/authority.py"
   },
   {
@@ -10538,7 +10538,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/judging.py",
-    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
+    "sha256": "99a03ebe112937c3e6b4b0e0108cb2e6886144c7d47de3dcd58ae245ae2ebc53",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -10580,7 +10580,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/rules.py",
-    "sha256": "d98572017d379231aac22d550d151ba25029cb05df1749c92f9195fd61317249",
+    "sha256": "be64e8ccf7752bdf75f6403283aa5dca4ac113d91a283b02b0bef697f2d8f2df",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -10610,7 +10610,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/xrootfixgen.py",
-    "sha256": "fa250f3c87a911bdf3a0158af157550230331e5ca1db8500b7ff6663dd94d1c9",
+    "sha256": "69168786622df0dffa0083bc3638ef0b38f317058a40216d97ef95d86eb6d28d",
     "source": "tools/xrootfixgen.py"
   },
   {
@@ -20984,7 +20984,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay-lint.py",
-    "sha256": "11351b0e93758fbf71cf9a9806f57b6f7143fb700187e9683823626d46e92570",
+    "sha256": "84c6924d97c202a153b18cfec34b97833132ea8812f8b8e552562b9c75db483b",
     "source": "tools/relay-lint.py"
   },
   {
@@ -21002,7 +21002,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/authority.py",
-    "sha256": "131746d2aeed862e27925f97ae13aa2deed6f081c13c87e41e636c2f20b9a8aa",
+    "sha256": "b01f780c60d355fb0150912da2c55ed6f51558780a93247a8d5ac7c96df899c5",
     "source": "tools/relay_engine/authority.py"
   },
   {
@@ -21056,7 +21056,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/judging.py",
-    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
+    "sha256": "99a03ebe112937c3e6b4b0e0108cb2e6886144c7d47de3dcd58ae245ae2ebc53",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -21098,7 +21098,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/rules.py",
-    "sha256": "d98572017d379231aac22d550d151ba25029cb05df1749c92f9195fd61317249",
+    "sha256": "be64e8ccf7752bdf75f6403283aa5dca4ac113d91a283b02b0bef697f2d8f2df",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -21128,7 +21128,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/xrootfixgen.py",
-    "sha256": "fa250f3c87a911bdf3a0158af157550230331e5ca1db8500b7ff6663dd94d1c9",
+    "sha256": "69168786622df0dffa0083bc3638ef0b38f317058a40216d97ef95d86eb6d28d",
     "source": "tools/xrootfixgen.py"
   },
   {
@@ -31430,7 +31430,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay-lint.py",
-    "sha256": "11351b0e93758fbf71cf9a9806f57b6f7143fb700187e9683823626d46e92570",
+    "sha256": "84c6924d97c202a153b18cfec34b97833132ea8812f8b8e552562b9c75db483b",
     "source": "tools/relay-lint.py"
   },
   {
@@ -31448,7 +31448,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/authority.py",
-    "sha256": "131746d2aeed862e27925f97ae13aa2deed6f081c13c87e41e636c2f20b9a8aa",
+    "sha256": "b01f780c60d355fb0150912da2c55ed6f51558780a93247a8d5ac7c96df899c5",
     "source": "tools/relay_engine/authority.py"
   },
   {
@@ -31502,7 +31502,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/judging.py",
-    "sha256": "4926b0b0973445bf98ab67ce233806954aa0893b0568aff82edecec7c2344783",
+    "sha256": "99a03ebe112937c3e6b4b0e0108cb2e6886144c7d47de3dcd58ae245ae2ebc53",
     "source": "tools/relay_engine/judging.py"
   },
   {
@@ -31544,7 +31544,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/rules.py",
-    "sha256": "d98572017d379231aac22d550d151ba25029cb05df1749c92f9195fd61317249",
+    "sha256": "be64e8ccf7752bdf75f6403283aa5dca4ac113d91a283b02b0bef697f2d8f2df",
     "source": "tools/relay_engine/rules.py"
   },
   {
@@ -31574,7 +31574,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/xrootfixgen.py",
-    "sha256": "fa250f3c87a911bdf3a0158af157550230331e5ca1db8500b7ff6663dd94d1c9",
+    "sha256": "69168786622df0dffa0083bc3638ef0b38f317058a40216d97ef95d86eb6d28d",
     "source": "tools/xrootfixgen.py"
   },
   {
