@@ -97,7 +97,7 @@ class TestXrootDeadline(unittest.TestCase):
             commit = xf._literal_commit(self.repo, _object_tree(self.repo, graph))
             base = dict(self.case.declaration, DESIGN_SOURCE_REPO=str(self.repo), DESIGN_SOURCE_COMMIT=commit)
             for order in (('d1','d2'), ('d2','d1')):
-                with self.subTest(conflict=conflict, order=order), self.operation(), self.budget(time.monotonic()+5), \
+                with self.subTest(conflict=conflict, order=order), rules.xroot_fact_cache(rules.XrootFactCache()), self.operation(), self.budget(time.monotonic()+5), \
                      mock.patch.object(rules, 'XrootBatchReader', wraps=rules.XrootBatchReader) as reader:
                     for doc in order:
                         declaration = dict(base, DESIGN_DOC_ID=doc)
@@ -126,7 +126,7 @@ class TestXrootDeadline(unittest.TestCase):
                     now[0] = 6
                 return super().next_response()
         before = set(os.listdir('/dev/fd'))
-        with self.operation(), self.budget(5), mock.patch.object(rules.time,'monotonic',side_effect=lambda:now[0]), \
+        with rules.xroot_fact_cache(rules.XrootFactCache()), self.operation(), self.budget(5), mock.patch.object(rules.time,'monotonic',side_effect=lambda:now[0]), \
              mock.patch.object(rules,'XrootBatchReader',Observed):
             self.verify()
             with self.assertRaises(rules.XrootAxisError) as caught:
@@ -159,7 +159,7 @@ class TestXrootDeadline(unittest.TestCase):
                     if len(deadlines) == 1:
                         now[0] = 6
                     return super().next_response()
-            with self.subTest(module=module.__name__), mock.patch.object(module.time,'monotonic',side_effect=lambda:now[0]), \
+            with self.subTest(module=module.__name__), module.xroot_fact_cache(module.XrootFactCache()), mock.patch.object(module.time,'monotonic',side_effect=lambda:now[0]), \
                  mock.patch.object(module,'XrootBatchReader',FirstExpired):
                 answer = module.lint_relay_root(self.repo)
             failures = [e for e in answer.errors if 'declared design edge failed verification:' in e]
@@ -180,7 +180,7 @@ class TestXrootDeadline(unittest.TestCase):
         self.assertEqual(self.case.declaration['DESIGN_SOURCE_ROOT'],item.params['root'])
         self.assertIn(self.case.commit[:12],item.params['detail'])
         self.assertIn('XROOT_MAX_RELAYS',item.params['detail'])
-        self.assertEqual('read',item.params['progress']['source'])
+        self.assertNotIn('source',item.params['progress'])
 
     def test_post_verification_deadline_keeps_read_progress(self):
         now = [0]
@@ -232,7 +232,7 @@ class TestXrootDeadline(unittest.TestCase):
                         now[0] = 6
                     return answer
                 target,replacement = ('XrootBatchReader',Reader) if stage=='decode' else ('xroot_retained',relevance)
-                with self.subTest(stage=stage,late=late), self.budget(5), \
+                with self.subTest(stage=stage,late=late), rules.xroot_fact_cache(rules.XrootFactCache()), self.budget(5), \
                      mock.patch.object(rules.time,'monotonic',side_effect=lambda:now[0]), \
                      mock.patch.object(rules,target,replacement):
                     if late:
@@ -268,7 +268,7 @@ class TestXrootDeadline(unittest.TestCase):
         original_git = module.xroot_git
         original_reader = module.XrootBatchReader
         def git(*args, **kwargs):
-            if stage == 'classification':
+            if stage == 'classification' or (stage == 'classification-query' and len(args)>1 and args[1]=='config'):
                 now[0] = 6
             return original_git(*args, **kwargs)
         class Reader(original_reader):
@@ -291,19 +291,21 @@ class TestXrootDeadline(unittest.TestCase):
         label = root+' at '+self.case.commit[:12]
         (self.repo/'PLAN-pair-planner-20261013-120000.md').write_bytes(self.raw())
         for module in (rules, _standalone()):
-            for stage in ('classification', 'batch', 'event', 'limit'):
+            for stage in ('classification', 'classification-query', 'batch', 'event', 'limit'):
                 expected = ('Git object query timed out at the 5 s bound during rev-parse; '+tail
                             if stage == 'classification' else
                             f'foreign read of {label} stopped at the 5 s bound at tree , after 0 relays and 0 trees; '+tail)
+                if stage == 'classification-query':
+                    expected = 'Git object query timed out at the 5 s bound during classification; '+tail
                 if stage == 'limit':
                     expected = label+' exceeds the supported XROOT_MAX_RELAYS of 1; this is a capacity limit, not a lineage gap'
-                with self.subTest(module=module.__name__, stage=stage), self.injected_deadline(module, stage), \
+                with self.subTest(module=module.__name__, stage=stage), module.xroot_fact_cache(module.XrootFactCache()), self.injected_deadline(module, stage), \
                      mock.patch.object(module, 'XROOT_MAX_RELAYS', 1 if stage == 'limit' else 20000):
                     result = module.lint_relay_root(self.repo)
                     self.assertEqual(['PLAN-pair-planner-20261013-120000.md: '+rules.xroot_error('capacity', expected)], result.errors)
                     self.assertNotRegex(expected, r'retry|again')
                 if module is rules:
-                    with self.subTest(caller='submit', stage=stage), self.injected_deadline(module, stage), \
+                    with self.subTest(caller='submit', stage=stage), module.xroot_fact_cache(module.XrootFactCache()), self.injected_deadline(module, stage), \
                          mock.patch.object(module, 'XROOT_MAX_RELAYS', 1 if stage == 'limit' else 20000):
                         external = [f for f in self.judge(self.raw()) if f.id == 'external.could-not-evaluate']
                         self.assertEqual(1, len(external))

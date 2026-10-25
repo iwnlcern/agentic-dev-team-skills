@@ -44,7 +44,7 @@ class TestInjectedReference(unittest.TestCase):
                         fault = (mock.patch.object(rules, 'XrootBatchReader', ExpiredReview)
                                  if label=='T1b-timeout-population-blob' and not use_reference
                                  else cases.deadline_fault(case, rules))
-                        with corpus.budget(rules), fault:
+                        with rules.xroot_fact_cache(rules.XrootFactCache()), corpus.budget(rules), fault:
                             with reference.xroot_reference_walk() if use_reference else nullcontext():
                                 answer = dict(verify=corpus.verify(rules, case.repository, case.declaration),
                                               authority=corpus.authority_answers(case.declaration))

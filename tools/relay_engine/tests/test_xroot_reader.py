@@ -531,6 +531,7 @@ class TestXrootReader(unittest.TestCase):
                                     self.deadline = time.monotonic()-1
                                 return super().request(spec)
                         with ExitStack() as stack:
+                            stack.enter_context(rules.xroot_fact_cache(rules.XrootFactCache()))
                             stack.enter_context(mock.patch.object(rules, 'xroot_verify', side_effect=verify))
                             if label == 'T1b-timeout-population-blob':
                                 stack.enter_context(mock.patch.object(rules, 'XrootBatchReader', ExpiredReview))
