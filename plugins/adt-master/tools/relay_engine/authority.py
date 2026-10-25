@@ -281,6 +281,24 @@ def _opener_parent(ledger, rows, item):
                  and row.seq < item.seq), None)
 
 
+
+def _walked_ancestors(ledger, rows, plan) -> tuple[list[Evidence], bool]:
+    """Walk historical edges, stopping before any ambiguous declaration."""
+    ancestors = []
+    item = plan
+    while (parent_id := item.fields.get('PARENT_DISPATCH_ID')):
+        if rules.STRUCTURED_ABSENT_RE.match(parent_id):
+            break
+        parent = _opener_parent(ledger, rows, item)
+        if parent is None:
+            break
+        if _conflict(parent):
+            return ancestors, True
+        ancestors.append(parent)
+        item = parent
+    return ancestors, False
+
+
 def _parent(ledger, rows, item, phase, sender):
     candidates = [row for row in rows if row.seq < item.seq
                   and row.fields.get('DISPATCH_ID') == item.fields.get('PARENT_DISPATCH_ID')
@@ -608,6 +626,19 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     if not shape:
         reasons.add('authority.shape-absent')
     lineage=_lineage(rows,grant,seat,action,reasons,ledger)
+    ancestors = []
+    if not rules.from_is_direct_authority(grant.fields):
+        plan = next((row for row in lineage if row.fields.get('PHASE') == 'PLAN'), None)
+        if plan is not None:
+            walked, conflict = _walked_ancestors(ledger, rows, plan)
+            if conflict:
+                reasons.add('authority.header-conflict')
+            # Local design rows can already belong to the approval lineage.
+            lineage_seqs = {row.seq for row in lineage}
+            ancestors = [row for row in walked if row.seq not in lineage_seqs]
+            for row in ancestors:
+                if _control_refusal(row.text):
+                    reasons.add('authority.lineage-incomplete')
     for row in lineage:
         if (row is not grant and not rules.from_is_direct_authority(grant.fields)
                 and _control_refusal(row.text)):
@@ -623,7 +654,8 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
         reasons.add('authority.could-not-evaluate')
     else:
         _external_evidence(root_path,lineage,reasons,
-                           pair_lineage=not rules.from_is_direct_authority(grant.fields), external=external)
+                           pair_lineage=not rules.from_is_direct_authority(grant.fields),
+                           ancestors=ancestors, external=external)
         for locator,digest in sorted(required.items()):
             try:actual=hashlib.sha256(read_artifact(root_path,locator)).hexdigest()
             except (OSError,ValueError):reasons.add('authority.could-not-evaluate');continue
