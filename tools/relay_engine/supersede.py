@@ -70,6 +70,7 @@ def export_ruling(ledger, ruling_path, child_run_id):
 
 
 def adopt_ruling(ledger, root, bundle):
+    from relay_engine.envelope import draft_shape, shape_error
     fields, bundle_digest = parse_record(bundle)
     required = {
         "v", "parent_root_uuid", "child_run_id", "commissioning_path",
@@ -94,7 +95,14 @@ def adopt_ruling(ledger, root, bundle):
             raise errors.error_for("commission-conflict")
     try:
         body = base64.b64decode(fields["ruling_body_b64"], validate=True)
-        envelope = parse_draft(body.decode("utf-8"))
+        text = body.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise errors.error_for("E-ENVELOPE") from exc
+    shape = draft_shape(text)
+    if shape is not None:
+        raise shape_error(shape)
+    try:
+        envelope = parse_draft(text)
     except (ValueError, UnicodeDecodeError, errors.EngineError) as exc:
         raise errors.error_for("E-ENVELOPE") from exc
     digest = hashlib.sha256(body).hexdigest()
