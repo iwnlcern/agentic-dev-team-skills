@@ -86,24 +86,64 @@ def gate_violations(paths):
 
         for node in ast.walk(tree):
             fn = function_name(node)
+            if (module == "rules" and isinstance(node, ast.Name) and
+                    node.id == "subprocess" and
+                    not (isinstance(parents.get(node), ast.Attribute) and
+                         parents[node].value is node)):
+                violations.append((module, node.lineno,
+                                   "bare subprocess reference"))
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = ([a.name.split(".")[0] for a in node.names]
                          if isinstance(node, ast.Import) else
                          [str(node.module).split(".")[0]])
                 for name in names:
-                    if name in FORBIDDEN_IMPORTS:
+                    git_import = (name == "subprocess" and module == "rules" and
+                                  isinstance(node, ast.Import) and
+                                  all(alias.name == "subprocess" and alias.asname is None
+                                      for alias in node.names if alias.name.split(".")[0] == "subprocess"))
+                    if name in FORBIDDEN_IMPORTS and not git_import:
                         violations.append((module, node.lineno,
                                            "forbidden import " + name))
             if isinstance(node, ast.Call):
+                if (module == "rules" and isinstance(node.func, ast.Name) and
+                        node.func.id == "_xroot_start_git"):
+                    keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+                    for stream in ("stdout", "stderr"):
+                        value = keywords.get(stream)
+                        if not (isinstance(value, ast.Attribute) and
+                                isinstance(value.value, ast.Name) and
+                                value.value.id == "subprocess" and
+                                value.attr in {"PIPE", "DEVNULL"}):
+                            violations.append((module, node.lineno,
+                                               "unrouted Git " + stream))
                 if isinstance(node.func, ast.Name) and node.func.id == "print":
                     violations.append((module, node.lineno, "print call"))
                 if isinstance(node.func, ast.Attribute):
                     base = node.func.value
+                    if (module == "rules" and isinstance(base, ast.Name) and
+                            base.id == "subprocess" and node.func.attr == "Popen"):
+                        if fn != "_xroot_start_git":
+                            violations.append((module, node.lineno,
+                                               "Popen outside Git seam"))
+                        else:
+                            keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+                            for stream in ("stdout", "stderr"):
+                                value = keywords.get(stream)
+                                if not (isinstance(value, ast.Name) and value.id == stream):
+                                    violations.append((module, node.lineno,
+                                                       "unforwarded Git " + stream))
+                    git_pipe_write = (
+                        module == "rules" and fn == "_flush" and
+                        node.func.attr == "write" and node.args and
+                        isinstance(node.args[0], ast.Attribute) and
+                        node.args[0].attr == "_input" and
+                        isinstance(node.args[0].value, ast.Name) and
+                        node.args[0].value.id == "self")
                     if (isinstance(base, ast.Name) and
                             base.id in os_aliases and
                             node.func.attr in {"write", "fdopen"} and
                             not (module == "daemon" and
-                                 fn == "_log_diagnostic")):
+                                 fn == "_log_diagnostic") and not git_pipe_write):
                         violations.append((module, node.lineno,
                                            "raw os sink"))
                     if (isinstance(base, ast.Name) and
@@ -139,6 +179,20 @@ def gate_violations(paths):
                         violations.append((module, node.lineno,
                                            "non-inventory emission key"))
             if isinstance(node, ast.Attribute):
+                if (module == "rules" and isinstance(node.value, ast.Name) and
+                        node.value.id == "subprocess" and
+                        node.attr not in {"Popen", "PIPE", "DEVNULL"}):
+                    violations.append((module, node.lineno,
+                                       "forbidden subprocess attribute"))
+                if (module == "rules" and isinstance(node.value, ast.Name) and
+                        node.value.id == "subprocess" and node.attr == "Popen"):
+                    parent = parents.get(node)
+                    if not ((isinstance(parent, ast.Call) and parent.func is node) or
+                            (isinstance(parent, ast.arg) and parent.annotation is node) or
+                            (isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and
+                             parent.returns is node)):
+                        violations.append((module, node.lineno,
+                                           "indirect Popen reference"))
                 if node.attr in FORBIDDEN_ATTRS:
                     violations.append((module, node.lineno,
                                        "reflective attribute"))
@@ -222,6 +276,37 @@ class TestGate(unittest.TestCase):
         self.check_bad("print ('x')\n", "print call")
         self.check_bad("import logging\n", "forbidden import")
         self.check_bad("import subprocess\n", "forbidden import")
+
+    def test_git_stream_allowances_are_site_bound(self):
+        good = (
+            "import os\nimport subprocess\n"
+            "def _xroot_start_git(command, *, stdin, stdout, stderr):\n"
+            "    return subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr)\n"
+            "def query():\n"
+            "    return _xroot_start_git(['git'], stdin=subprocess.DEVNULL, "
+            "stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)\n"
+            "def _flush(self):\n"
+            "    os.write(self._input, b'x')\n")
+        controls = (
+            (good + "subprocess.run(['git'])\n", "forbidden subprocess attribute"),
+            (good + "from subprocess import Popen\n", "forbidden import subprocess"),
+            (good + "subprocess.Popen(['git'])\n", "Popen outside Git seam"),
+            (good.replace(", stderr=subprocess.DEVNULL", ""), "unrouted Git stderr"),
+            (good.replace("stderr=subprocess.DEVNULL", "stderr=None"), "unrouted Git stderr"),
+            (good.replace("stderr=stderr", "stderr=None"), "unforwarded Git stderr"),
+            (good + "launcher = subprocess\n", "bare subprocess reference"),
+            (good + "launch = subprocess.Popen\n", "indirect Popen reference"),
+            (good.replace("os.write(self._input", "os.write(1"), "raw os sink"),
+            (good.replace("def _flush(self):", "def elsewhere(self):"), "raw os sink"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "rules.py")
+            path.write_text(good)
+            self.assertEqual(gate_violations([str(path)]), [])
+            for source, expected in controls:
+                with self.subTest(expected=expected, source=source):
+                    path.write_text(source)
+                    self.assertEqual([v[2] for v in gate_violations([str(path)])], [expected])
 
     def test_function_reflection_is_detected(self):
         self.check_bad("from relay_engine import strings\nx = strings.emit.__closure__\n",

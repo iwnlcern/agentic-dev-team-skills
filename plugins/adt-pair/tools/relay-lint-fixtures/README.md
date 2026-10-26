@@ -37,9 +37,9 @@ Update the table by re-deriving it from the harness output, never by editing row
 | `rootindex/` | 2 | Root INDEX ordering |
 | `rootres/` | 15 | INDEX root resolution: markers, file cells, duplicates, near-misses |
 | `rowtruth/` | 5 | ROW_TRUTH_CHECK evidence hooks for FOLD_SCOPE and SCOPE_DIFF rows |
-| `xroot/` | 121 | Declared cross-root design edge: both axes, fail-closed, plan-path symmetry, carrier engagement, and hostile-object containment; generated at harness runtime by tools/xrootfixgen.py |
+| `xroot/` | 130 | Declared cross-root design edge: both axes, fail-closed, plan-path symmetry, carrier engagement, hostile-object containment, reviewer-peer pairs, and capacity cases; generated at harness runtime by tools/xrootfixgen.py |
 
-**777 harness-asserted outcomes** across 27 families.
+**786 harness-asserted outcomes** across 27 families.
 
 Two notes on the corpus shape.
 An outcome is one harness assertion, not one file: the lineage-bearing families (`mastertier/`, `design-review/`, `lockdigest/`, and others) stage whole relay-root scenarios — several relay files plus an INDEX per case — because the rules under test judge chains, not single relays.

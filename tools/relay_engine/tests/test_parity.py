@@ -1,11 +1,16 @@
+import ast
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unittest
+from unittest import mock
+
+import xrootfixgen
 
 from relay_engine import rules
 from relay_engine.envelope import REQUIRED_FIELDS
@@ -36,6 +41,34 @@ def _population():
 
 def _digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def native_process_violations(source):
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree)
+               for child in ast.iter_child_nodes(node)}
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        base = node.func.value
+        if not isinstance(base, ast.Name):
+            continue
+        owner = parents.get(node)
+        while owner is not None and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            owner = parents.get(owner)
+        function = owner.name if owner is not None else None
+        if base.id == "subprocess" and not (
+                node.func.attr == "Popen" and function == "_xroot_start_git"):
+            violations.append("subprocess call outside Git seam")
+        if base.id == "os" and (node.func.attr in {"system", "popen"} or
+                               node.func.attr.startswith(("exec", "spawn", "posix_spawn", "fork"))):
+            violations.append("os process launch")
+    return violations
+
+
+def non_git_commands(commands):
+    return [command for command in commands if not command or command[0] != "git"]
 
 
 def _verdict(result):
@@ -103,7 +136,7 @@ class TestParity(unittest.TestCase):
     def test_native_blocked_script_leg_matches_frozen_golden(self):
         source = Path(rules.__file__).read_text()
         self.assertNotIn("importlib", source)
-        self.assertNotIn("subprocess", source)
+        self.assertEqual(native_process_violations(source), [])
         self.assertNotIn("relay-lint.py", source)
         with tempfile.TemporaryDirectory() as isolated:
             self.assertFalse(Path(isolated, "relay-lint.py").exists())
@@ -112,6 +145,38 @@ class TestParity(unittest.TestCase):
         self.assertEqual(_digest(SCRIPT), frozen["producer_sha256"])
         self.assertEqual(_digest(MANIFEST), frozen["manifest_sha256"])
         self.assertEqual(actual, frozen["verdicts"])
+
+    def test_native_process_boundary_rejects_other_launches(self):
+        source = Path(rules.__file__).read_text()
+        self.assertEqual(native_process_violations(source), [])
+        for added, expected in (
+                ("subprocess.run(['python3', 'relay-lint.py'])", "subprocess call outside Git seam"),
+                ("os.posix_spawnp('python3', ['python3', 'relay-lint.py'], {})", "os process launch")):
+            with self.subTest(added=added):
+                self.assertEqual(native_process_violations(source + "\n" + added), [expected])
+
+    def test_native_cross_root_launches_only_git(self):
+        commands = []
+        original = rules._xroot_start_git
+
+        def observed(command, **kwargs):
+            commands.append(list(command))
+            return original(command, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            label, root, expected_exit, expected_errors = xrootfixgen._build_case(
+                Path(directory), "XV-valid-edge", expected_errors=[])
+            self.assertEqual(label, "xroot/XV-valid-edge")
+            self.assertEqual(expected_exit, 0)
+            with rules.xroot_fact_cache(rules.XrootFactCache()), \
+                    mock.patch.object(rules, "_xroot_start_git", side_effect=observed):
+                result = rules.lint_relay_root(root)
+            self.assertEqual(result.errors, expected_errors)
+        self.assertTrue(any("--batch" in command for command in commands))
+        self.assertTrue(any("--batch" not in command for command in commands))
+        self.assertEqual(non_git_commands(commands), [])
+        forbidden = [sys.executable, str(SCRIPT)]
+        self.assertEqual(non_git_commands(commands + [forbidden]), [forbidden])
 
     def test_live_secondary_comparison_all_modes(self):
         live = _collect(_standalone())
