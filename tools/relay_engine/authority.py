@@ -539,25 +539,30 @@ def _external_evidence(root, lineage, reasons, *, pair_lineage=True, ancestors=(
                         exc = rules.XrootAxisError('declaration', 'missing '+', '.join(missing))
                         refused.append(record(exc, declaration, 'cross-root-design', item))
                     else:
-                        try:
-                            _origin, review, population = rules.xroot_verify(root, declaration)
-                            if pair_lineage:
-                                rules._xroot_stage('review-approval')
-                                if not _approved(review):
-                                    raise rules.XrootAxisError('review-approval',
-                                        f'selected review {review.name} is not an authority approval')
-                                rules._xroot_stage('foreign-control-character')
-                                if any(_control_refusal(row.text) for row in population
-                                       if _foreign_selection_relevant(row.text, declaration['DESIGN_DOC_ID'])):
-                                    raise rules.XrootAxisError('foreign-control-character',
-                                        'selection-relevant foreign carrier contains a control character')
-                            rules._xroot_checkpoint()
-                        except rules.XrootAxisError as exc:
-                            exc = rules._xroot_reframe(rules._xroot_error_deadline(exc), declaration)
-                            refused.append(record(exc, declaration, 'cross-root-design', item))
-                        except (OSError, ValueError, KeyError):
-                            exc = rules.XrootAxisError('repository', 'unexpected Git or object parse failure')
-                            refused.append(record(exc, declaration, 'cross-root-design', item))
+                        with rules._xroot_edge():
+                            try:
+                                _origin, review, population = rules.xroot_verify(root, declaration)
+                                if pair_lineage:
+                                    rules._xroot_stage('review-approval')
+                                    rules._xroot_checkpoint()
+                                    if not _approved(review):
+                                        raise rules.XrootAxisError('review-approval',
+                                            f'selected review {review.name} is not an authority approval')
+                                    rules._xroot_checkpoint()
+                                    rules._xroot_stage('foreign-control-character')
+                                    if any(_control_refusal(row.text) for row in population
+                                           if _foreign_selection_relevant(row.text, declaration['DESIGN_DOC_ID'])):
+                                        raise rules.XrootAxisError('foreign-control-character',
+                                            'selection-relevant foreign carrier contains a control character')
+                                else:
+                                    rules._xroot_stage('authority-completion')
+                                rules._xroot_checkpoint()
+                            except rules.XrootAxisError as exc:
+                                exc = rules._xroot_reframe(rules._xroot_error_deadline(exc), declaration)
+                                refused.append(record(exc, declaration, 'cross-root-design', item))
+                            except (OSError, ValueError, KeyError):
+                                exc = rules.XrootAxisError('repository', 'unexpected Git or object parse failure')
+                                refused.append(record(exc, declaration, 'cross-root-design', item))
             # A repeated design identity must never skip this carrier's own locks.
             if any(_h27(item.text, key) for key in ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT')):
                 result = rules.LintResult()

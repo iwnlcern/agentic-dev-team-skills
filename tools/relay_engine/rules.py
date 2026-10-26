@@ -3890,6 +3890,11 @@ def _xroot_reframe(exc, declaration):
     limit = getattr(exc, 'limit', None)
     if limit is not None:
         detail = f'{label} exceeds the supported {limit} of {globals()[limit]}; this is a capacity limit, not a lineage gap'
+    elif exc.progress.get('walk_complete'):
+        progress = exc.progress
+        detail = (f'foreign read of {label} read {progress["relays_read"]} relays and {progress["trees_read"]} trees, '
+                  f'then stopped at the {XROOT_EDGE_SECONDS} s bound during {progress["stopped_at"]}; '
+                  'this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine')
     else:
         progress = exc.progress
         detail = (f'foreign read of {label} stopped at the {XROOT_EDGE_SECONDS} s bound at '
@@ -4437,6 +4442,7 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
             answer = _xroot_capacity(root_tree, progress)
         answer.read_progress = dict(progress)
         raise answer
+    progress["walk_complete"] = True
     return relays
 
 def xroot_target_ok(relay: XrootRelay, key: str, expected: str) -> bool:
@@ -4559,7 +4565,7 @@ def xroot_authority(
 ) -> tuple[XrootRelay, XrootRelay, List[XrootRelay]]:
     relays = xroot_relays(repo, root_tree)
     doc_id = declaration["DESIGN_DOC_ID"]
-    _xroot_stage(f"selection {doc_id}")
+    _xroot_stage("selection")
     _xroot_checkpoint()
     origins = [
         relay for relay in relays

@@ -320,6 +320,116 @@ class TestXrootDeadline(unittest.TestCase):
                     self.assertEqual('capacity', caught.exception.axis)
                     self.assertEqual('Git batch reader timed out at the 5 s bound; '+tail, caught.exception.detail)
 
+    def test_deadline_after_completed_walk_reports_walk_progress(self):
+        from relay_engine import authority
+        from relay_engine.tests import xroot_cache_cases as cc
+        tail = 'this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine'
+        label = self.case.declaration['DESIGN_SOURCE_ROOT']+' at '+self.case.commit[:12]
+        counts = dict(relays_read=2, trees_read=1,
+                      bytes_read=len(DESIGN.encode())+len(REVIEW.encode()))
+        (self.repo/'PLAN-pair-planner-20261013-120000.md').write_bytes(self.raw())
+
+        @contextmanager
+        def expire(module, target, late):
+            now = [0]
+            owner, name = (authority, target) if target.startswith('_') else (module, target)
+            original = getattr(owner, name)
+            def observed(*args, **kwargs):
+                answer = original(*args, **kwargs)
+                if late and (name != '_approved' or isinstance(args[0], rules.XrootRelay)):
+                    now[0] = 6
+                return answer
+            with module.xroot_fact_cache(module.XrootFactCache()), self.budget(5, module), \
+                 mock.patch.object(module.time, 'monotonic', side_effect=lambda: now[0]), \
+                 mock.patch.object(owner, name, side_effect=observed):
+                yield
+
+        def check(entry, step):
+            self.assertEqual('capacity', entry['axis'])
+            self.assertEqual(f'foreign read of {label} read 2 relays and 1 trees, then stopped at the 5 s bound during {step}; '+tail, entry['detail'])
+            self.assertEqual(step, entry['progress']['stopped_at'])
+            for key, value in counts.items():
+                self.assertEqual(value, entry['progress'][key], key)
+                self.assertGreater(value, 0)
+
+        # Stage 2 runs in both linters and submit judging.
+        for module in (rules, _standalone()):
+            for late in (False, True):
+                with self.subTest(caller=module.__name__, late=late), expire(module, 'xroot_relays', late):
+                    result = module.lint_relay_root(self.repo)
+                if late:
+                    self.assertEqual(1, len(result.external))
+                    check(result.external[0], 'selection')
+                else:
+                    self.assertEqual([], result.errors)
+        for late in (False, True):
+            with self.subTest(caller='submit', late=late), expire(rules, 'xroot_relays', late):
+                external = [f for f in self.judge(self.raw()) if f.id == 'external.could-not-evaluate']
+            self.assertEqual(int(late), len(external))
+            if late:
+                check(external[0].params, 'selection')
+
+        with cc.authority_fixture(self.case.declaration) as (fixture, pair, direct):
+            for path, grant, action in (('pair', pair, 'implement'), ('direct', direct, 'merge')):
+                stages = [('xroot_relays', 'selection'),
+                          ('xroot_verify', 'review-approval' if path == 'pair' else 'authority-completion')]
+                if path == 'pair':
+                    stages += [('_approved', 'review-approval'),
+                               ('_foreign_selection_relevant', 'foreign-control-character')]
+                for target, step in stages:
+                    for late in (False, True):
+                        with self.subTest(path=path, target=target, late=late), expire(rules, target, late):
+                            answer = fixture.check(grant, action=action)
+                        self.assertEqual(not late, answer['allowed'])
+                        self.assertEqual(int(late), len(answer['external']))
+                        if late:
+                            self.assertEqual(['authority.could-not-evaluate'], answer['reasons'])
+                            check(answer['external'][0], step)
+
+        # Existing event and pre-walk forms, including their zero counts, stand.
+        for stage in ('event', 'classification'):
+            with self.subTest(control=stage), rules.xroot_fact_cache(rules.XrootFactCache()), self.injected_deadline(rules, stage):
+                entries = [f.params for f in self.judge(self.raw()) if f.id == 'external.could-not-evaluate']
+            self.assertEqual(1, len(entries))
+            entry = entries[0]
+            self.assertEqual('tree ' if stage == 'event' else 'query', entry['progress']['stopped_at'])
+            for key in counts:
+                self.assertEqual(0, entry['progress'][key])
+            expected = (f'foreign read of {label} stopped at the 5 s bound at tree , after 0 relays and 0 trees; '
+                        if stage == 'event' else 'Git object query timed out at the 5 s bound during rev-parse; ')
+            self.assertEqual(expected+tail, entry['detail'])
+
+        # A second edge that expires before its walk must not inherit the
+        # first edge's completed counters, even in the same operation.
+        from relay_engine.tests.test_authority_b9 import TestAuthorityB9
+        other = cc.make(self.home/'later-edge')
+        helper = TestAuthorityB9()
+        now = [0]
+        original_git = rules.xroot_git
+        observed_walks = []
+        original_set_event = rules._xroot_set_event
+        def record_walk(*args):
+            observed_walks.append(args[1])
+            return original_set_event(*args)
+        def late_git(repo, *args, **kwargs):
+            if Path(repo).resolve() == other.repository.resolve():
+                now[0] = 6
+            return original_git(repo, *args, **kwargs)
+        with helper.direct_chain((other.declaration, self.case.declaration)) as (fixture, grant, carriers), \
+             mock.patch.object(rules.time, 'monotonic', side_effect=lambda: now[0]), \
+             mock.patch.object(rules, '_xroot_set_event', side_effect=record_walk), \
+             mock.patch.object(rules, 'xroot_git', side_effect=late_git):
+            answer = fixture.check(grant, action='merge')
+        self.assertEqual(1, len(observed_walks))
+        self.assertEqual(2, observed_walks[0]['relays_read'])
+        self.assertEqual(1, len(answer['external']))
+        entry = answer['external'][0]
+        self.assertEqual(other.commit, entry['commit'])
+        self.assertEqual('query', entry['progress']['stopped_at'])
+        for key in counts:
+            self.assertEqual(0, entry['progress'][key])
+        self.assertEqual('Git object query timed out at the 5 s bound during classification; '+tail, entry['detail'])
+
     def test_capacity_detail_names_root_and_commit(self):
         from relay_engine.tests.capture_xroot_baseline import LiftedBudget
         from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
