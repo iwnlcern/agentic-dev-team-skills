@@ -4428,6 +4428,12 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                     record_context: Optional[dict] = None,
                     context_mode: Optional[str] = None,
                     history_audit: bool = False) -> LintResult:
+    path = Path(os.path.realpath(path))
+    if projection_digests is not None:
+        projection_digests = {
+            Path(os.path.realpath(key.parent)) / key.name: digest
+            for key, digest in projection_digests.items()
+        }
     result = LintResult()
     received_entries = record_context.get('entries', []) if isinstance(record_context, dict) else []
     if not isinstance(received_entries, list):
@@ -4466,7 +4472,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                 index_files = []
         all_md = files + index_files
     else:
-        all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
+        all_md = sorted((p for p in path.rglob("*.md") if p.is_file() and (engine_root or ".engine" not in p.relative_to(path).parts)),
                         key=lambda p: relay_order_key(p, path))
         index_files = [p for p in all_md if p.name == "INDEX.md"]
         files = [p for p in all_md if p.name != "INDEX.md"]

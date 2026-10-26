@@ -4053,8 +4053,9 @@ def xroot_design_gate(
 
 
 def lint_relay_root(path: Path, *, template_mode: bool = False) -> LintResult:
+    path = Path(os.path.realpath(path))
     result = LintResult()
-    all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
+    all_md = sorted((p for p in path.rglob("*.md") if p.is_file() and ".engine" not in p.relative_to(path).parts),
                     key=lambda p: relay_order_key(p, path))
     index_files = [p for p in all_md if p.name == "INDEX.md"]
     files = [p for p in all_md if p.name != "INDEX.md"]
