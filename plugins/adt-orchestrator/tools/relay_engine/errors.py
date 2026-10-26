@@ -37,6 +37,18 @@ class _VersionMismatchRemedy:
 
 
 _TEXT = {
+    'error-draft-shape-cause': 'the draft has a line the engine refuses',
+    'error-draft-shape-remedy': 'run relay lint on the draft; it names the line and the fix',
+    'error-draft-shape-explain': 'a draft is refused before admission when one of its lines would be read two ways: a line break other than a newline or carriage return, or a cycle, supersession or grant verdict line outside the header block',
+    'error-draft-shape-separator-cause': 'line {line}, column {column}: {codepoint} {name} is a line break to some readers and ordinary text to others',
+    'error-draft-shape-separator-remedy': 'use a newline there, or write the character as text, for example {codepoint}',
+    'error-draft-shape-late-control-cause': 'line {line}: {key} is outside the header block (lines {first} to {last}), where the engine never reads it',
+    'error-draft-shape-late-control-remedy': 'move the line into the header block, or quote it in code',
+    'error-draft-shape-late-verdict-cause': "line {line}: {key} is outside this grant's header block (lines {first} to {last}), so authority reads the grant as carrying no verdict",
+    'error-draft-shape-late-verdict-remedy': 'move the line into the header block, where any value but an exact positive word denies the grant; or remove it; or quote it in code',
+    'error-draft-shape-boot-field-cause': 'the boot relay for this registration would carry a refused line shape in its {field} line',
+    'error-draft-shape-boot-field-remedy': "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line, or ask the operator to re-commission the root with a commissioning path on one line",
+
     "error-no-top-seat-cause": "no top seat is recorded on this root",
     "error-no-top-seat-remedy": "have the eligible starter run daemon start --seat <address> on this root",
     "error-no-top-seat-explain": "declarations require the current key of an explicitly designated top seat",
@@ -134,9 +146,44 @@ def _is_version_mismatch_remedy(value):
             _is_identity_value(value.daemon_install, strings.valid_install))
 
 
+def _shape_value(value, kind):
+    # Lazy import: envelope imports this registry while its module initializes.
+    from relay_engine import envelope
+    if kind == 'position':
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+    if kind == 'codepoint':
+        return value in {pair[0] for pair in envelope.SEPARATORS.values()}
+    if kind == 'name':
+        return value in {pair[1] for pair in envelope.SEPARATORS.values()}
+    if kind == 'control':
+        return value in envelope.LATE_CONTROL_KEYS
+    if kind == 'verdict':
+        return (isinstance(value, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', value) is not None
+                and envelope._shape_verdict_key(value))
+    if kind == 'boot':
+        return value in {'ROLE', 'PHASE', 'AUTHORITY', 'DISPATCH_ID', 'RUN_ID',
+                         'CEREMONY_TIER', 'EVIDENCE_TARGET', 'HUMAN_GATE_REQUIRED',
+                         'FROM', 'TO', 'SUBJECT', 'COMMISSIONED_BY', 'body'}
+    return False
+
+
 strings.register_inventory(
     _TEXT,
     {
+        ('error-draft-shape-separator-cause', 'line'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-separator-cause', 'column'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-separator-cause', 'codepoint'): lambda v: _shape_value(v, 'codepoint'),
+        ('error-draft-shape-separator-cause', 'name'): lambda v: _shape_value(v, 'name'),
+        ('error-draft-shape-late-control-cause', 'line'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-late-control-cause', 'key'): lambda v: _shape_value(v, 'control'),
+        ('error-draft-shape-late-control-cause', 'first'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-late-control-cause', 'last'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-late-verdict-cause', 'line'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-late-verdict-cause', 'key'): lambda v: _shape_value(v, 'verdict'),
+        ('error-draft-shape-late-verdict-cause', 'first'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-late-verdict-cause', 'last'): lambda v: _shape_value(v, 'position'),
+        ('error-draft-shape-boot-field-cause', 'field'): lambda v: _shape_value(v, 'boot'),
+        ('error-draft-shape-separator-remedy', 'codepoint'): lambda v: _shape_value(v, 'codepoint'),
         ("error-framing-cause", "reason"): lambda v: v in strings.FRAMING_REASONS,
         ("error-header-cause", "field"): lambda v: (isinstance(v, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", v) is not None),
         ("error-envelope-edge-remedy", "targets"):
@@ -174,6 +221,7 @@ def _spec(stem, cls):
 
 
 ERRORS = {
+    "E-DRAFT-SHAPE": _spec("draft-shape", "integrity"),
     "no-top-seat": _spec("no-top-seat", "command"),
     "E-KEY-MISMATCH": _spec("key-mismatch", "policy"),
     "E-ID-COLLISION": _spec("id-collision", "policy"),
@@ -200,6 +248,11 @@ ERRORS = {
 }
 
 ERROR_VARIANTS = {
+    ("E-DRAFT-SHAPE", "separator"): _spec("draft-shape-separator", "integrity"),
+    ("E-DRAFT-SHAPE", "late-control"): _spec("draft-shape-late-control", "integrity"),
+    ("E-DRAFT-SHAPE", "late-verdict"): _spec("draft-shape-late-verdict", "integrity"),
+    ("E-DRAFT-SHAPE", "boot-field"): _spec("draft-shape-boot-field", "integrity"),
+
     ("E-ENVELOPE", "edge-resolution"):
         _spec("envelope-edge", "integrity"),
     ("E-PATH-ESCAPE", "not-found"):
