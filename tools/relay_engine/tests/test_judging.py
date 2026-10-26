@@ -202,13 +202,13 @@ class TestJudging(unittest.TestCase):
                    ('PLAN_SOURCE_COMMIT', 'a' * 40)]
         raw = xrootfixgen._render(fields).encode()
         spawned = []
-        real_spawn = os.posix_spawnp
+        real_spawn = rules._xroot_start_git
         def record(*args, **kwargs):
-            pid = real_spawn(*args, **kwargs)
-            spawned.append(pid)
-            return pid
+            process = real_spawn(*args, **kwargs)
+            spawned.append(process.pid)
+            return process
         start = time.monotonic()
-        with mock.patch.object(os, 'posix_spawnp', side_effect=record):
+        with mock.patch.object(rules, '_xroot_start_git', side_effect=record):
             findings = self.judge(raw, deadline=start + 0.5)
         self.assertLess(time.monotonic() - start, 1.5)
         external = [f for f in findings if f.id == 'external.could-not-evaluate']
@@ -219,7 +219,7 @@ class TestJudging(unittest.TestCase):
             with self.assertRaises(ChildProcessError):
                 os.waitpid(pid, os.WNOHANG)
         # Expired budgets must prevent any Git process from being spawned.
-        with mock.patch.object(rules.os, 'posix_spawnp', side_effect=AssertionError('expired budget spawned Git')):
+        with mock.patch.object(rules, '_xroot_start_git', side_effect=AssertionError('expired budget spawned Git')):
             for gate in ('design', 'plan', 'artifact'):
                 with self.assertRaises(rules.XrootAxisError) as raised:
                     rules.xroot_git(self.root, 'rev-parse', 'HEAD', axis=gate, deadline=time.monotonic()-1)

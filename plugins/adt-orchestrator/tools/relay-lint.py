@@ -3363,19 +3363,22 @@ def xroot_declaration(fields: Dict[str, str], text: str) -> Dict[str, str] | Non
     }
 
 
-def _xroot_kill_and_reap(pid: int) -> None:
+def _xroot_start_git(command: list[str], *, stdin, stdout, stderr) -> subprocess.Popen:
+    return subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr,
+                            close_fds=True, bufsize=0)
+
+
+def _xroot_kill_and_reap(process: subprocess.Popen) -> None:
     try:
-        os.kill(pid, signal.SIGKILL)
+        process.kill()
     except ProcessLookupError:
         pass
     while True:
         try:
-            os.waitpid(pid, 0)
+            process.wait()
             return
         except InterruptedError:
             continue
-        except ChildProcessError:
-            return
 
 
 _XROOT_BUDGET = ContextVar("relay_xroot_budget", default=None)
@@ -3386,113 +3389,92 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
     budget = _XROOT_BUDGET.get()
     if budget is not None:
         deadline = budget[0] if deadline is None else min(deadline, budget[0])
-    if deadline is not None and deadline <= time.monotonic():
+
+    def timeout():
+        detail = (f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; "
+                  "this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
         if budget is not None:
-            budget[1].append(f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
-        raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
+            budget[1].append(detail)
+        raise XrootAxisError("capacity", detail)
+
+    if deadline is not None and deadline <= time.monotonic():
+        timeout()
     argv = ["git", "-C", str(repo)]
     if _XROOT_MODE.get() is not None:
         argv.append("--no-replace-objects")
     argv.extend(args)
     stdout_chunks: List[bytes] = []
     stderr_chunks: List[bytes] = []
-    open_fds = set()
     selector = selectors.DefaultSelector()
-    pid = None
-    reaped = False
-    timed_out = False
-    status = None
+    process = None
+    streams = {}
     try:
-        stdout_read, stdout_write = os.pipe()
-        open_fds.update((stdout_read, stdout_write))
-        stderr_read, stderr_write = os.pipe()
-        open_fds.update((stderr_read, stderr_write))
-        file_actions = [
-            (os.POSIX_SPAWN_DUP2, stdout_write, 1),
-            (os.POSIX_SPAWN_DUP2, stderr_write, 2),
-            (os.POSIX_SPAWN_CLOSE, stdout_read),
-            (os.POSIX_SPAWN_CLOSE, stderr_read),
-            (os.POSIX_SPAWN_CLOSE, stdout_write),
-            (os.POSIX_SPAWN_CLOSE, stderr_write),
-        ]
         try:
-            pid = os.posix_spawnp(
-                "git", argv, os.environ, file_actions=file_actions)
+            process = _xroot_start_git(argv, stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except FileNotFoundError as exc:
-            raise XrootAxisError(
-                "repository", "git executable is unavailable"
-            ) from exc
-
-        for fd in (stdout_write, stderr_write):
-            os.close(fd)
-            open_fds.remove(fd)
-        for fd, chunks in (
-            (stdout_read, stdout_chunks),
-            (stderr_read, stderr_chunks),
-        ):
+            raise XrootAxisError("repository", "git executable is unavailable") from exc
+        for stream, chunks in ((process.stdout, stdout_chunks), (process.stderr, stderr_chunks)):
+            fd = stream.fileno()
+            streams[fd] = stream
             os.set_blocking(fd, False)
             selector.register(fd, selectors.EVENT_READ, chunks)
-
         deadline = time.monotonic() + XROOT_GIT_TIMEOUT_SECONDS if deadline is None else deadline
-        while selector.get_map() or status is None:
-            if status is None:
-                waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
-                if waited_pid == pid:
-                    status = waited_status
-                    reaped = True
+        while selector.get_map() or process.returncode is None:
+            status = process.poll()
             if not selector.get_map() and status is not None:
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                timed_out = True
-                if budget is not None:
-                    budget[1].append(f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
-                raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
+                timeout()
+            if status is not None:
+                # The child has finished writing. Drain its buffered output;
+                # another holder of a write end must not make us await EOF.
+                for key in list(selector.get_map().values()):
+                    while True:
+                        try:
+                            chunk = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            break
+                        key.data.append(chunk)
+                    selector.unregister(key.fd)
+                    streams[key.fd].close()
+                break
             if selector.get_map():
-                events = selector.select(remaining)
-                if not events:
-                    timed_out = True
-                    if budget is not None:
-                        budget[1].append(f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
-                    raise XrootAxisError("capacity", f"Git object query timed out at the 5 s bound during {args[0] if args else 'query'}; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")
-                for key, _mask in events:
-                    fd = key.fd
+                # Check child exit even if a foreign writer prevents EOF.
+                for key, _mask in selector.select(min(0.01, remaining)):
                     try:
-                        chunk = os.read(fd, 65536)
+                        chunk = os.read(key.fd, 65536)
                     except BlockingIOError:
                         continue
                     if chunk:
                         key.data.append(chunk)
                     else:
-                        selector.unregister(fd)
-                        os.close(fd)
-                        open_fds.remove(fd)
+                        selector.unregister(key.fd)
+                        streams[key.fd].close()
             else:
                 time.sleep(min(0.01, remaining))
-
-        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        if process.returncode != 0:
             error = XrootAxisError(axis, "Git object query failed")
-            error.returncode = os.waitstatus_to_exitcode(status)
+            error.returncode = process.returncode
             error.stdout = b"".join(stdout_chunks)
             error.stderr = b"".join(stderr_chunks)
             raise error
-    except BaseException:
-        if pid is not None and not reaped:
-            _xroot_kill_and_reap(pid)
-            reaped = True
-        raise
     finally:
-        selector.close()
-        for fd in tuple(open_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if timed_out and pid is not None and not reaped:
-            _xroot_kill_and_reap(pid)
-
+        try:
+            if process is not None and process.returncode is None:
+                _xroot_kill_and_reap(process)
+        finally:
+            selector.close()
+            if process is not None:
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
     stdout = b"".join(stdout_chunks)
     return stdout if binary else stdout.decode("utf-8").strip()
+
 
 
 def _xroot_declared_repository(path, declaration, repo_key="DESIGN_SOURCE_REPO"):
@@ -4075,6 +4057,7 @@ class XrootBatchReader:
         self.max_blob_bytes = XROOT_MAX_RELAY_BYTES
         self.content_bytes_read = 0
         self.pid = None
+        self._process = None
         self._fds = set()
         self._pending = bytearray()
         self._closed = False
@@ -4084,25 +4067,16 @@ class XrootBatchReader:
         self._selector = selectors.PollSelector()
         self._write_interest = False
         try:
-            incoming, self._input = os.pipe()
-            self._fds.update((incoming, self._input))
-            self._output, outgoing = os.pipe()
-            self._fds.update((self._output, outgoing))
-            stderr = os.open(os.devnull, os.O_WRONLY)
-            self._fds.add(stderr)
-            actions = [(os.POSIX_SPAWN_DUP2, incoming, 0),
-                       (os.POSIX_SPAWN_DUP2, outgoing, 1),
-                       (os.POSIX_SPAWN_DUP2, stderr, 2)]
-            actions.extend((os.POSIX_SPAWN_CLOSE, fd) for fd in self._fds)
             command = ['git', '-C', str(repo)]
             if no_replace or _XROOT_MODE.get() is not None:
                 command.append('--no-replace-objects')
             command.extend(['cat-file', '--batch'])
-            self.pid = os.posix_spawnp('git', command,
-                                       os.environ, file_actions=actions)
-            for fd in (incoming, outgoing, stderr):
-                os.close(fd)
-                self._fds.remove(fd)
+            self._process = _xroot_start_git(command, stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            self.pid = self._process.pid
+            self._input = self._process.stdin.fileno()
+            self._output = self._process.stdout.fileno()
+            self._fds.update((self._input, self._output))
             os.set_blocking(self._input, False)
             os.set_blocking(self._output, False)
             self._selector.register(self._output, selectors.EVENT_READ)
@@ -4125,14 +4099,15 @@ class XrootBatchReader:
             return
         self._closed = True
         try:
-            if self.pid is not None:
-                _xroot_kill_and_reap(self.pid)
+            if self._process is not None:
+                _xroot_kill_and_reap(self._process)
         finally:
             for key in list(self._selector.get_map().values()):
                 self._selector.unregister(key.fd)
             self._selector.close()
-            for fd in self._fds:
-                os.close(fd)
+            if self._process is not None:
+                self._process.stdin.close()
+                self._process.stdout.close()
             self._fds.clear()
             self._pending.clear()
             self._read_ahead.clear()

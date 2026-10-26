@@ -91,16 +91,16 @@ class TestXroot(unittest.TestCase):
     def test_fifo_timeout_is_bounded_reaped_and_descriptor_clean(self):
         root, expected_exit, expected_errors = self.by_name[TIMEOUT_CASE]
         spawned = []
-        real_spawn = os.posix_spawnp
+        real_spawn = rules._xroot_start_git
 
         def recording_spawn(*args, **kwargs):
-            pid = real_spawn(*args, **kwargs)
-            spawned.append(pid)
-            return pid
+            process = real_spawn(*args, **kwargs)
+            spawned.append(process.pid)
+            return process
 
         before = _fd_census()
         started = time.monotonic()
-        with mock.patch.object(os, "posix_spawnp", side_effect=recording_spawn):
+        with mock.patch.object(rules, "_xroot_start_git", side_effect=recording_spawn):
             result = rules.lint_relay_root(root)
         elapsed = time.monotonic() - started
         after = _fd_census()
