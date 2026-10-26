@@ -1153,6 +1153,12 @@ def check_filename_timestamp(
         result.error(f"filename {msg}")
 
 
+def draft_shape_errors(text: str, *, separators_only: bool = False) -> list[str]:
+    from relay_engine import envelope
+    shape = envelope.first_separator(text) if separators_only else envelope.draft_shape(text)
+    return [] if shape is None else [envelope.shape_message(shape)]
+
+
 def lint_file(
     path: Path,
     *,
@@ -1178,6 +1184,8 @@ def lint_file(
     clean = sanitized_text(text)
     result = LintResult()
     fields = header_fields(text)
+    for message in draft_shape_errors(text):
+        result.error(message)
 
     if not template_mode:
         for _a5e in lock_digest_shape_errors(text):
@@ -1878,6 +1886,8 @@ def lint_relay_index(path: Path, *, audit: bool = False,
         text = snapshot.decode("utf-8")
     except UnicodeDecodeError:
         text = snapshot.decode("utf-8", errors="replace")
+    for message in draft_shape_errors(text, separators_only=True):
+        result.error(message)
     projection_is_verified = daemon_projection or (
         daemon_projection_digest is not None and
         hashlib.sha256(snapshot).hexdigest() == daemon_projection_digest)
