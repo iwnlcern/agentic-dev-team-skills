@@ -107,3 +107,137 @@ def content_hash(envelope, body, admits_against):
         "admits_against": admits_against,
     })
     return hashlib.sha256(canonical).hexdigest()
+
+
+LINE_BREAKS = frozenset('\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029')
+SEPARATORS = {
+    '\v': ('U+000B', 'LINE TABULATION'),
+    '\f': ('U+000C', 'FORM FEED'),
+    '\x1c': ('U+001C', 'INFORMATION SEPARATOR FOUR'),
+    '\x1d': ('U+001D', 'INFORMATION SEPARATOR THREE'),
+    '\x1e': ('U+001E', 'INFORMATION SEPARATOR TWO'),
+    '\x85': ('U+0085', 'NEXT LINE'),
+    '\u2028': ('U+2028', 'LINE SEPARATOR'),
+    '\u2029': ('U+2029', 'PARAGRAPH SEPARATOR'),
+}
+LATE_CONTROL_KEYS = ('SUPERSEDES', 'CYCLE_TERMINUS', 'CYCLE_REOPEN')
+_SHAPE_FENCE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
+_SHAPE_PREFIX = re.compile(r'^[ \t]*(?:(?:[-*+]|\d{1,9}[.)]|>)[ \t]+|>)*[ \t]*')
+
+
+@dataclass(frozen=True)
+class DraftShape:
+    kind: str
+    line: int
+    column: int
+    char: str | None
+    key: str | None
+    block: tuple[int, int] | None
+
+
+def first_separator(text: str) -> DraftShape | None:
+    for line_number, line in enumerate(text.splitlines(keepends=True), 1):
+        for column, char in enumerate(line, 1):
+            if char in SEPARATORS:
+                return DraftShape('separator', line_number, column, char, None, None)
+    return None
+
+
+def _shape_verdict_key(key):
+    return any(key == suffix or key.endswith('_' + suffix)
+               for suffix in ('VERDICT', 'MERGE_AUTHORIZATION', 'MERGE_APPROVED'))
+
+
+def _shape_header_positive(key, value):
+    # The header form requires both the linter's key-specific positive value
+    # and authority's exact positive word. Keep independent of both readers.
+    allowed = {
+        'MERGE_AUTHORIZATION': {'approved', 'granted', 'yes'},
+        'HUMAN_MERGE_AUTHORIZATION': {'approved', 'granted', 'yes'},
+        'MERGE_APPROVED': {'yes', 'true', 'approved'},
+        'VERDICT': {'merge-ready', 'approved', 'complete'},
+    }
+    return (value.isascii() and value == value.lstrip(' \t') and
+            value.rstrip(' \t').lower() in allowed.get(key.upper(), set()))
+
+
+def _shape_block(lines):
+    start = None
+    for index, line in enumerate(lines):
+        if _HEADER.fullmatch(line):
+            if start is None:
+                start = index
+        elif start is not None:
+            return start, index
+    return None if start is None else (start, len(lines))
+
+
+def _shape_outside(lines, block):
+    """Return indexed non-header lines outside closed fences (R217)."""
+    ordinary_openers = set()
+    while True:
+        result = []
+        fence = None
+        opener = None
+        for index, line in enumerate(lines):
+            if block[0] <= index < block[1]:
+                continue
+            match = None if index in ordinary_openers else _SHAPE_FENCE.match(line)
+            if fence is None:
+                if match:
+                    fence, opener = match.group(1), index
+                else:
+                    result.append((index, line))
+            elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
+                fence = None
+        if fence is None:
+            return result
+        ordinary_openers.add(opener)
+
+
+def draft_shape(text: str) -> DraftShape | None:
+    separator = first_separator(text)
+    lines = text.splitlines()
+    block = _shape_block(lines)
+    if block is None:
+        return separator
+    headers = [_HEADER.fullmatch(line).groups() for line in lines[block[0]:block[1]]]
+    phase = next((value for key, value in headers if key == 'PHASE'), '').rstrip(' \t')
+    token = {'MERGE-GATE': 'DISPATCH MERGE', 'IMPL': 'DISPATCH IMPL'}.get(phase)
+    outside = _shape_outside(lines, block)
+    grant = token is not None and (
+        any(line.strip(' \t') == token for _, line in outside) or
+        (phase == 'MERGE-GATE' and any(_shape_header_positive(k, v) for k, v in headers)))
+    candidates = [] if separator is None else [separator]
+    for index, line in outside:
+        column = _SHAPE_PREFIX.match(line).end()
+        match = _HEADER.fullmatch(line[column:])
+        if match is None:
+            continue
+        key = match.group(1)
+        if key in LATE_CONTROL_KEYS:
+            kind = 'late-control'
+        elif grant and _shape_verdict_key(key):
+            kind = 'late-verdict'
+        else:
+            continue
+        candidates.append(DraftShape(kind, index + 1, column + 1, None, key,
+                                     (block[0] + 1, block[1])))
+    return min(candidates, key=lambda item: (item.line, item.column)) if candidates else None
+
+
+def shape_error(shape: DraftShape, *, boot_field: str | None = None) -> errors.EngineError:
+    if boot_field is not None:
+        return errors.error_for('E-DRAFT-SHAPE', variant='boot-field', field=boot_field)
+    if shape.kind == 'separator':
+        codepoint, name = SEPARATORS[shape.char]
+        return errors.error_for('E-DRAFT-SHAPE', variant='separator', line=shape.line,
+                                column=shape.column, codepoint=codepoint, name=name)
+    first, last = shape.block
+    return errors.error_for('E-DRAFT-SHAPE', variant=shape.kind, line=shape.line,
+                            key=shape.key, first=first, last=last)
+
+
+def shape_message(shape: DraftShape) -> str:
+    error = shape_error(shape)
+    return error.cause + '; ' + error.remedy

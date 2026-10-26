@@ -23,6 +23,7 @@ POLICY_CODES = {
 ALL_CODES = POLICY_CODES | {
     "no-top-seat",
     "E-HEADER",
+    "E-DRAFT-SHAPE",
     "E-ENVELOPE",
     "E-REPLAY-MISMATCH",
     "E-STORAGE",

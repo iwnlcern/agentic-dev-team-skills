@@ -65,7 +65,7 @@ CONTEXT_PAGE_BUDGET = (16 * 1024 * 1024) - CONTEXT_FRAME_MARGIN
 CONTEXT_ENTRY_CAP = 4096
 _CODE_VALUES = {
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
-    "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE",
+    "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE", "E-DRAFT-SHAPE",
     "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN",
     "E-VERSION-MISMATCH",
     "no-top-seat", "seat-occupied", "commission-conflict", "commission-late",
@@ -224,7 +224,7 @@ def _placeholders(template):
                  if field is not None)
 
 
-def render(key, **params):
+def render(key, /, **params):
     if key not in INVENTORY:
         raise KeyError(key)
     fields = _placeholders(INVENTORY[key])
