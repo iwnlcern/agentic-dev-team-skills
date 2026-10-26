@@ -91,13 +91,32 @@ def commission(ledger, root, dispatch_path, child_run_id):
 
 
 def adopt(ledger, record):
+    from relay_engine.envelope import LINE_BREAKS
+    from relay_engine.jcs import parse_record
     if not isinstance(record, bytes):
         raise TypeError("commissioning record bytes required")
+    try:
+        fields, _ = parse_record(record)
+    except (TypeError, ValueError):
+        fields = {}
+    path = fields.get('commissioning_path')
+    if isinstance(path, str) and any(char in LINE_BREAKS for char in path):
+        raise ValueError("commissioning path mismatch")
     value = establish_run_identity(ledger, None, record)
     return {"commissioned_by": value}
 
 
 def startup_run_identity(context):
+    from relay_engine.envelope import LINE_BREAKS
+    from relay_engine.jcs import parse_record
+    record = context.get("commissioning_record")
+    try:
+        fields, _ = parse_record(record)
+    except (TypeError, ValueError):
+        fields = {}
+    path = fields.get('commissioning_path')
+    if isinstance(path, str) and any(char in LINE_BREAKS for char in path):
+        raise ValueError("commissioning path mismatch")
     establish_run_identity(
         context["ledger"], context.get("run_id"),
         context.get("commissioning_record"))

@@ -10502,7 +10502,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/commission.py",
-    "sha256": "459fcec278b33ff04a0040403ae6e644d482ec8c9828765f9d9883dcffc7c1f2",
+    "sha256": "03973cd5261318b0113e20f286424576a2f3a646b129bb0383e9b9b68e6daedf",
     "source": "tools/relay_engine/commission.py"
   },
   {
@@ -10586,7 +10586,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/seats.py",
-    "sha256": "1a8e790d9569c13a99f3eeac6e5c4cdae32d6bd4bdee5856f7f05d8a67e4f78b",
+    "sha256": "30070bfaacc7d323b0a933639c69ee645d6945441277ca891e71bde9a209899d",
     "source": "tools/relay_engine/seats.py"
   },
   {
@@ -21020,7 +21020,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/commission.py",
-    "sha256": "459fcec278b33ff04a0040403ae6e644d482ec8c9828765f9d9883dcffc7c1f2",
+    "sha256": "03973cd5261318b0113e20f286424576a2f3a646b129bb0383e9b9b68e6daedf",
     "source": "tools/relay_engine/commission.py"
   },
   {
@@ -21104,7 +21104,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/seats.py",
-    "sha256": "1a8e790d9569c13a99f3eeac6e5c4cdae32d6bd4bdee5856f7f05d8a67e4f78b",
+    "sha256": "30070bfaacc7d323b0a933639c69ee645d6945441277ca891e71bde9a209899d",
     "source": "tools/relay_engine/seats.py"
   },
   {
@@ -31466,7 +31466,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/commission.py",
-    "sha256": "459fcec278b33ff04a0040403ae6e644d482ec8c9828765f9d9883dcffc7c1f2",
+    "sha256": "03973cd5261318b0113e20f286424576a2f3a646b129bb0383e9b9b68e6daedf",
     "source": "tools/relay_engine/commission.py"
   },
   {
@@ -31550,7 +31550,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/seats.py",
-    "sha256": "1a8e790d9569c13a99f3eeac6e5c4cdae32d6bd4bdee5856f7f05d8a67e4f78b",
+    "sha256": "30070bfaacc7d323b0a933639c69ee645d6945441277ca891e71bde9a209899d",
     "source": "tools/relay_engine/seats.py"
   },
   {
