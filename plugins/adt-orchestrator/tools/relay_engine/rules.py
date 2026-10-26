@@ -1015,12 +1015,13 @@ def merge_claimed(text: str, fields: Dict[str, str]) -> bool:
         r"\bgit\s+merge\b",
     ]
     no_action_ref = re.match(
-        r"^ACTIONS_GIT_REF:\s*none\s+—\s+\S", action_ref_block, flags=re.IGNORECASE
+        r"^ACTIONS_GIT_REF:[ \t]*none[ \t]+—[ \t]+\S", action_ref_block, flags=re.IGNORECASE
     ) is not None
     field_claim = bool(action_ref_block.strip()) and not no_action_ref and any(
         re.search(pattern, scoped, flags=re.IGNORECASE) for pattern in field_patterns
     )
     canonical_surface = remove_named_block(operational, "ESCALATION_SCAN")
+    canonical_surface = remove_named_block(canonical_surface, "SUBJECT")
     canonical_claim = re.search(r"\bmerge\s*=\s*\S", canonical_surface, flags=re.IGNORECASE) is not None
     return field_claim or canonical_claim
 
