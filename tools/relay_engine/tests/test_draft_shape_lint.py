@@ -11,7 +11,7 @@ from relay_engine.tests.test_parity import _standalone
 
 
 def expected_shape_sweep(baseline):
-    """PL-v297-b2 task 2: only three additions to the pinned order oracle."""
+    """PL-v297-b2 tasks 2/5: exact additions and draft-warning removals."""
     expected = copy.deepcopy(baseline)
     errors = expected['tools/relay-lint-fixtures']['errors']
     for index, path, line, column in (
@@ -21,6 +21,10 @@ def expected_shape_sweep(baseline):
         errors.insert(index, f'{path}: line {line}, column {column}: U+2028 LINE SEPARATOR '
                       'is a line break to some readers and ordinary text to others; '
                       'use a newline there, or write the character as text, for example U+2028')
+    warnings = expected['tools/relay-lint-fixtures']['warnings']
+    for filename in ('draft-plan-noroot.md', 'draft-plan.md'):
+        warnings.remove('plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/'
+                        + filename + ": plan shape: PLAN_ARTIFACT 'fixture-plan-draft' resolves at no probe root; the relay body was measured")
     return expected
 
 
