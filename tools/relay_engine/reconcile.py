@@ -64,6 +64,7 @@ def _hand_entries(ledger):
 
 
 def prepare_candidates(ledger, root, paths):
+    from relay_engine.envelope import draft_shape, shape_error
     candidates = []
     malformed = []
     for rel in paths:
@@ -73,7 +74,11 @@ def prepare_candidates(ledger, root, paths):
             continue
         try:
             body = root.open_read(rel)
-            envelope = parse_draft(body.decode("utf-8"))
+            text = body.decode("utf-8")
+            shape = draft_shape(text)
+            if shape is not None:
+                raise shape_error(shape)
+            envelope = parse_draft(text)
             match = _RELAY_NAME.fullmatch(rel.rsplit("/", 1)[-1])
             stamp = match.group(1).rstrip("Z")
             candidates.append((rel, stamp, body, envelope))

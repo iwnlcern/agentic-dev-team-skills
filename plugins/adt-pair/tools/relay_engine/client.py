@@ -354,6 +354,7 @@ def lint_context(root_name, timeout=10.0, cid=None):
 
 def submit(root_name, draft, key_path=None, admits_against=None,
            timeout=10.0, cid=None):
+    from relay_engine.envelope import draft_shape, shape_error
     with Root(root_name) as root:
         draft_rel = _relative(root, draft)
         if key_path is None:
@@ -363,7 +364,11 @@ def submit(root_name, draft, key_path=None, admits_against=None,
         key_rel = _relative(root, key_path)
         body = _open_required(root, draft_rel, "draft")
         try:
-            envelope = parse_draft(body.decode("utf-8"))
+            text = body.decode("utf-8")
+            shape = draft_shape(text)
+            if shape is not None:
+                raise shape_error(shape)
+            envelope = parse_draft(text)
             tag = _open_required(root, key_rel, "key").decode("utf-8").strip()
         except UnicodeDecodeError as exc:
             raise errors.error_for("E-ENVELOPE") from exc
