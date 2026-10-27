@@ -165,12 +165,11 @@ def _shape_value(value, kind):
     if kind == 'control':
         return value in envelope.LATE_CONTROL_KEYS
     if kind == 'verdict':
-        return (isinstance(value, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', value) is not None
+        return (isinstance(value, str) and re.fullmatch(r'[A-Z][A-Z0-9_]*', value) is not None
                 and envelope._shape_verdict_key(value))
     if kind == 'boot':
-        return value in {'ROLE', 'PHASE', 'AUTHORITY', 'DISPATCH_ID', 'RUN_ID',
-                         'CEREMONY_TIER', 'EVIDENCE_TARGET', 'HUMAN_GATE_REQUIRED',
-                         'FROM', 'TO', 'SUBJECT', 'COMMISSIONED_BY', 'body'}
+        return (isinstance(value, str) and
+                (value == 'body' or re.fullmatch(r'[A-Z][A-Z0-9_]*', value) is not None))
     return False
 
 
