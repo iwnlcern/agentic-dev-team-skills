@@ -374,7 +374,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/check-relay-lint-fixtures.py",
-    "sha256": "c442abce5759c7925c139385546e2f636b159824e2a15b505fb18e2f3633c709",
+    "sha256": "7caa96a88202669445bf6f5da7b0d134f19e19ae8586132f28dd078fb216240f",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -10892,7 +10892,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/check-relay-lint-fixtures.py",
-    "sha256": "c442abce5759c7925c139385546e2f636b159824e2a15b505fb18e2f3633c709",
+    "sha256": "7caa96a88202669445bf6f5da7b0d134f19e19ae8586132f28dd078fb216240f",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
@@ -21338,7 +21338,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/check-relay-lint-fixtures.py",
-    "sha256": "c442abce5759c7925c139385546e2f636b159824e2a15b505fb18e2f3633c709",
+    "sha256": "7caa96a88202669445bf6f5da7b0d134f19e19ae8586132f28dd078fb216240f",
     "source": "tools/check-relay-lint-fixtures.py"
   },
   {
