@@ -72,3 +72,20 @@ class TestBootLineBreaks(unittest.TestCase):
                                     self.f.ledger.execute('SELECT commissioned_by FROM runs').fetchone()[0]
                                     if commissioned else None)
             self.assertIsNone(envelope.draft_shape(raw.decode()))
+
+    def test_boot_backstop_names_any_line_the_record_splices(self):
+        for record_value, field in (('a\n\nSUPERSEDES: x', 'SUPERSEDES'),
+                                    ('a\nFOO: b\u2028c', 'FOO')):
+            with self.subTest(field=field):
+                self.f.ledger.execute('DELETE FROM runs')
+                self.f.ledger.execute('INSERT INTO runs(run_id,commissioned_by) VALUES(?,?)',
+                                      ('r', record_value))
+                before = self.f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
+                with self.assertRaises(errors.EngineError) as caught:
+                    seats.register(self.f.ledger, self.f.root, 'p.planner', 'Planner', 'boot')
+                self.assertEqual((caught.exception.code, caught.exception.cause_key),
+                                 ('E-DRAFT-SHAPE', 'error-draft-shape-boot-field-cause'))
+                self.assertIn(field, caught.exception.cause)
+                self.assertEqual(list(Path(self.f.root.path, '.engine/seats/p.planner').glob('*.key')), [])
+                self.assertEqual(self.f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
+                self.assertEqual(self.f.ledger.execute('SELECT * FROM seat_events').fetchall(), [])

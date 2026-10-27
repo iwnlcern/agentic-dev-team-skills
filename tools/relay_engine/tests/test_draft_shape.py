@@ -186,3 +186,77 @@ class TestDraftShape(unittest.TestCase):
         error = E.shape_error(cases[0][0], boot_field='COMMISSIONED_BY')
         self.assertEqual(error.cause, 'the boot relay for this registration would carry a refused line shape in its COMMISSIONED_BY line')
         self.assertEqual(error.remedy, "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line, or ask the operator to re-commission the root with a commissioning path on one line")
+
+    def test_late_verdict_keys_of_any_length_render(self):
+        import tempfile
+        from pathlib import Path
+        from relay_engine.tests.test_parity import _standalone
+        hand = _standalone()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'MERGE-GATE-pair-planner-20261026-010000.md'
+            for length in (64, 65, 4096):
+                with self.subTest(length=length):
+                    key = 'A' * (length - len('_VERDICT')) + '_VERDICT'
+                    text = draft('MERGE-GATE', body='DISPATCH MERGE\n\n' + key + ': no\n')
+                    shape = E.draft_shape(text)
+                    self.assertEqual((shape.kind, shape.key), ('late-verdict', key))
+                    error = E.shape_error(shape)
+                    self.assertEqual((error.code, error.cause_key),
+                                     ('E-DRAFT-SHAPE', 'error-draft-shape-late-verdict-cause'))
+                    self.assertIn(key, error.cause)
+                    expected = error.cause + '; ' + error.remedy
+                    self.assertEqual(rules.draft_shape_errors(text), [expected])
+                    path.write_text(text)
+                    messages = [e for e in hand.lint_file(path).errors
+                                if "outside this grant's header block" in e]
+                    self.assertEqual(messages, [expected])
+
+    def test_long_verdict_keys_are_refused_by_every_consumer(self):
+        import tempfile
+        from pathlib import Path
+        from relay_engine import daemon, errors
+        from relay_engine.tests import test_admission_judging as admission
+        from relay_engine.tests.test_parity import _standalone
+        hand = _standalone()
+        fixture = admission.TestAdmissionJudging()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'MERGE-GATE-pair-planner-20261026-010000.md'
+            for length in (65, 4096):
+                key = 'A' * (length - len('_VERDICT')) + '_VERDICT'
+                raw = admission.body('MERGE-GATE', 'operator',
+                                     content='DISPATCH MERGE\n\n' + key + ': no')
+                before = fixture.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
+                with self.subTest(length=length, consumer='handler'):
+                    with self.assertRaises(errors.EngineError) as caught:
+                        daemon._submit_handler(fixture.ledger, fixture.root, fixture.args(raw))
+                    self.assertEqual((caught.exception.code, caught.exception.cause_key),
+                                     ('E-DRAFT-SHAPE', 'error-draft-shape-late-verdict-cause'))
+                    self.assertIn(key, caught.exception.cause)
+                    self.assertEqual(fixture.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
+                path.write_bytes(raw)
+                for consumer in ('file', 'root'):
+                    with self.subTest(length=length, consumer=consumer):
+                        expected = hand.draft_shape_errors(raw.decode())[0]
+                        result = (rules.lint_file(path) if consumer == 'file'
+                                  else rules.lint_relay_root(root, engine_root=False))
+                        messages = [e for e in result.errors if "outside this grant's header block" in e]
+                        self.assertEqual(messages, [expected if consumer == 'file' else path.name + ': ' + expected])
+
+    def test_shape_validators_refuse_values_outside_the_grammar(self):
+        from relay_engine import errors
+        for key in ('x_VERDICT', 'VERDICTS', 'A_VERDICT\u2028'):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    errors.error_for('E-DRAFT-SHAPE', variant='late-verdict',
+                                     line=4, first=1, last=2, key=key)
+        for field in ('', 'commissioned_by', 'A B'):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    errors.error_for('E-DRAFT-SHAPE', variant='boot-field', field=field)
+        for field in ('body', 'COMMISSIONED_BY'):
+            error = errors.error_for('E-DRAFT-SHAPE', variant='boot-field', field=field)
+            self.assertEqual(error.code, 'E-DRAFT-SHAPE')
+            self.assertIn(field, error.cause)
