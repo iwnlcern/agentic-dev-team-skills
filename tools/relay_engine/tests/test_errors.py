@@ -28,6 +28,7 @@ ALL_CODES = POLICY_CODES | {
     "E-REPLAY-MISMATCH",
     "E-STORAGE",
     "E-DAEMON-DOWN",
+    "E-NO-ROOT",
     "seat-occupied",
     "commission-conflict",
     "commission-late",

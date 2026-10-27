@@ -27,7 +27,15 @@ def _cmd_explain(args):
 def _command_root(args, fresh=False):
     if fresh:
         return os.path.realpath(os.path.abspath(args.root or os.getcwd()))
-    return client.discover_root(args.root)
+    if args.root is not None:
+        return client.discover_root(args.root)
+    try:
+        root_name = client.discover_root()
+    except FileNotFoundError as exc:
+        raise errors.error_for("E-NO-ROOT", directory=os.path.realpath(os.getcwd())) from exc
+    if not Path(root_name, ".engine/ledger.db").is_file():
+        raise errors.error_for("E-NO-ROOT", variant="unstarted", directory=root_name)
+    return root_name
 
 
 def _cmd_daemon_start(args):
@@ -275,9 +283,33 @@ def _cmd_authority_check(args):
 
 
 def cmd_show(args):
-    result = client.request(
-        _command_root(args), "show",
-        {"target": args.target, "body": args.body}, timeout=args.timeout)
+    root_name = None
+    try:
+        root_name = _command_root(args)
+        result = client.request(
+            root_name, "show",
+            {"target": args.target, "body": args.body}, timeout=args.timeout)
+    except (errors.EngineError, client.RemoteError) as exc:
+        if exc.code != "E-NO-ROOT" and not (
+                isinstance(exc, client.RemoteError) and exc.code == "E-PATH-ESCAPE"):
+            raise
+        _report_command_error(exc)
+        try:
+            target = Path(args.target).resolve()
+            if target.is_file():
+                if args.root is not None:
+                    hint_root = Path(root_name or args.root).resolve()
+                else:
+                    hint_root = next((parent for parent in target.parents
+                                      if (parent / ".engine/ledger.db").is_file()), None)
+                if hint_root is not None:
+                    relative = target.relative_to(hint_root).as_posix()
+                    if relative != args.target:
+                        strings.emit("stderr", "show-root-hint", path=str(target),
+                                     root=str(hint_root), rel=relative)
+        except (OSError, ValueError):
+            pass
+        return 1
     if args.body:
         body = base64.b64decode(result.pop("body_b64"), validate=True)
         strings.emit_verbatim(sys.stdout.buffer, body)

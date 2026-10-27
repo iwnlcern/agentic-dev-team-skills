@@ -202,7 +202,9 @@ def show(ledger, target):
             "SELECT seq,rendered_path,origin,body_sha256,content_hash,body "
             "FROM relays WHERE seq=?", (seq,)).fetchone()
     if row is None:
-        raise errors.error_for("E-ENVELOPE")
+        root = ledger.execute("SELECT value FROM meta WHERE key='canonical_root'").fetchone()[0]
+        raise errors.error_for("E-PATH-ESCAPE", variant="relay-not-found",
+                               target=target, root=root)
     event = ledger.execute(
         "SELECT event FROM projection_events WHERE relay_seq=? "
         "ORDER BY seq DESC LIMIT 1", (row[0],)).fetchone()
