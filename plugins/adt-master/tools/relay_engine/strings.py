@@ -35,6 +35,7 @@ class ExistingTargets:
 
 
 INVENTORY = {
+    "show-root-hint": "hint: {path} is inside the relay root {root}; pass {rel}, with --root {root} or from a directory inside the root",
     "engine-root-admission-summary": "engine-root admission: {judged} judged at admission, {with_findings} with findings, {failed} judging failed, {unevaluated} never judged, {exempt} engine-authored",
     "notice-name-caution": "caution: this name is also an engine notice label; registration or declaration grants no authority",
     "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
@@ -66,7 +67,7 @@ CONTEXT_ENTRY_CAP = 4096
 _CODE_VALUES = {
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE", "E-DRAFT-SHAPE",
-    "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN",
+    "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN", "E-NO-ROOT",
     "E-VERSION-MISMATCH",
     "no-top-seat", "seat-occupied", "commission-conflict", "commission-late",
     "run-id-mismatch", "run-id-uninitialized", "run-id-invalid",
@@ -90,6 +91,16 @@ def _is_code(value):
 
 def _is_text(value):
     return isinstance(value, str) and bool(value) and "\n" not in value
+
+
+def _is_show_text(value):
+    return (isinstance(value, str) and bool(value) and
+            all(ord(char) >= 32 and not 127 <= ord(char) <= 159 and
+                char not in '\u2028\u2029' for char in value))
+
+
+def _is_show_absolute(value):
+    return _is_show_text(value) and value.startswith('/')
 
 
 def _is_digest12(value):
@@ -169,6 +180,9 @@ def valid_fp(value):
 
 
 _VALIDATORS.update({
+    ("show-root-hint", "path"): _is_show_absolute,
+    ("show-root-hint", "root"): _is_show_absolute,
+    ("show-root-hint", "rel"): _is_show_text,
     ("explain-heading", "code"): _is_code,
     ("explain-cause", "cause"): _is_text,
     ("explain-remedy", "remedy"): _is_text,

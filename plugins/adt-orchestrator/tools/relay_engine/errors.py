@@ -49,6 +49,13 @@ _TEXT = {
     'error-draft-shape-boot-field-cause': 'the boot relay for this registration would carry a refused line shape in its {field} line',
     'error-draft-shape-boot-field-remedy': "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line, or ask the operator to re-commission the root with a commissioning path on one line",
 
+    "error-no-root-cause": "no relay root at or above {directory}",
+    "error-no-root-remedy": "pass --root with the relay root's path",
+    "error-no-root-explain": "a command run without --root looks for the nearest directory at or above the working directory holding .engine/ with its relay record",
+    "error-no-root-unstarted-cause": "{directory} holds .engine/ but no relay record",
+    "error-no-root-unstarted-remedy": "if {directory} is not the relay root, pass --root with the relay root's path. If it is, its daemon has never been started. " + E_DAEMON_DOWN_ESCALATION,
+    "error-relay-not-found-cause": "no filed relay is {target} under the root {root}",
+    "error-relay-not-found-remedy": "pass the relay's root-relative path as INDEX.md's file cell gives it, or its seq number",
     "error-no-top-seat-cause": "no top seat is recorded on this root",
     "error-no-top-seat-remedy": "have the eligible starter run daemon start --seat <address> on this root",
     "error-no-top-seat-explain": "declarations require the current key of an explicitly designated top seat",
@@ -170,6 +177,11 @@ def _shape_value(value, kind):
 strings.register_inventory(
     _TEXT,
     {
+        ('error-no-root-cause', 'directory'): lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+        ('error-no-root-unstarted-cause', 'directory'): lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+        ('error-no-root-unstarted-remedy', 'directory'): lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+        ('error-relay-not-found-cause', 'root'): lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+        ('error-relay-not-found-cause', 'target'): lambda v: strings._is_rejected(v) or strings._is_show_text(v),
         ('error-draft-shape-separator-cause', 'line'): lambda v: _shape_value(v, 'position'),
         ('error-draft-shape-separator-cause', 'column'): lambda v: _shape_value(v, 'position'),
         ('error-draft-shape-separator-cause', 'codepoint'): lambda v: _shape_value(v, 'codepoint'),
@@ -232,6 +244,7 @@ ERRORS = {
     "E-REPLAY-MISMATCH": _spec("replay", "integrity"),
     "E-STORAGE": _spec("storage", "integrity"),
     "E-DAEMON-DOWN": _spec("daemon-down", "client"),
+    "E-NO-ROOT": _spec("no-root", "client"),
     "seat-occupied": _spec("seat-occupied", "registration"),
     "commission-conflict": _spec("commission-conflict", "command"),
     "commission-late": _spec("commission-late", "command"),
@@ -248,6 +261,8 @@ ERRORS = {
 }
 
 ERROR_VARIANTS = {
+    ("E-NO-ROOT", "unstarted"): _spec("no-root-unstarted", "client"),
+    ("E-PATH-ESCAPE", "relay-not-found"): _spec("relay-not-found", "policy"),
     ("E-DRAFT-SHAPE", "separator"): _spec("draft-shape-separator", "integrity"),
     ("E-DRAFT-SHAPE", "late-control"): _spec("draft-shape-late-control", "integrity"),
     ("E-DRAFT-SHAPE", "late-verdict"): _spec("draft-shape-late-verdict", "integrity"),
@@ -355,6 +370,14 @@ def error_for(code, *, variant=None, **params):
         rel = params.get("rel")
         if not _is_not_found_rel(rel):
             params["rel"] = _rejected(rel)
+    if code == "E-NO-ROOT":
+        if not strings._is_show_absolute(params.get("directory")):
+            params["directory"] = _rejected(params.get("directory"))
+    if (code, variant) == ("E-PATH-ESCAPE", "relay-not-found"):
+        for field, validator in (("root", strings._is_show_absolute),
+                                 ("target", strings._is_show_text)):
+            if not validator(params.get(field)):
+                params[field] = _rejected(params.get(field))
     if code == "E-VERSION-MISMATCH":
         for field, validator in (
                 ("client_install", strings.valid_install),

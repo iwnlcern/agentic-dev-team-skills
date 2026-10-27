@@ -134,7 +134,8 @@ def census_values():
         if matches[name]:
             raise AssertionError("%s matches: %r" % (name, matches[name]))
     if matches["hand_relay"] != [
-            ("error-daemon-down-remedy", "Hand-relay")]:
+            ("error-daemon-down-remedy", "Hand-relay"),
+            ("error-no-root-unstarted-remedy", "Hand-relay")]:
         raise AssertionError("hand-relay census mismatch: %r" %
                              (matches["hand_relay"],))
     if errors.E_DAEMON_DOWN_ESCALATION != ESCALATION:
@@ -412,7 +413,8 @@ class TestCensus(unittest.TestCase):
         for name in ("registration", "d25", "overclaim"):
             self.assertEqual(values["matches"][name], [])
         self.assertEqual(values["matches"]["hand_relay"], [
-            ("error-daemon-down-remedy", "Hand-relay")])
+            ("error-daemon-down-remedy", "Hand-relay"),
+            ("error-no-root-unstarted-remedy", "Hand-relay")])
 
     def test_nondisclosure_census(self):
         path, values = write_census_artifact()
