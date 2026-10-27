@@ -245,6 +245,7 @@ class TestAuthorityB9(unittest.TestCase):
         self.assertEqual({'key':'PLAN_LOCK_ID','path':'plans/missing.md'},answer['external'][0]['lock'])
 
     def test_plan_source_same_repo_commit_different_lock(self):
+        # DD r11 erratum 1 section 2 row 1 (R229): digest mismatch is artifact-changed.
         for key in ('DESIGN_LOCK_ID','PLAN_LOCK_ID'):
             for fault in ('path','digest'):
                 good=dict(self.case.declaration,PLAN_SOURCE_REPO=str(self.case.repository),PLAN_SOURCE_COMMIT=self.case.commit)
@@ -279,7 +280,7 @@ class TestAuthorityB9(unittest.TestCase):
         with cc.authority_fixture(control.case.declaration) as (fixture,pair,direct):
             for stage in ('classification','classification-query','batch','event','limit'):
                 expected=(f'Git object query timed out at the 5 s bound during {"classification" if stage=="classification-query" else "rev-parse"}; '+tail
-                          if stage.startswith('classification') else f'foreign read of {label} stopped at the 5 s bound at tree , after 0 relays and 0 trees; '+tail)
+                          if stage.startswith('classification') else f'foreign read of {label} stopped at the 5 s bound at tree relays, after 0 relays and 0 trees; '+tail)
                 if stage=='limit':expected=label+' exceeds the supported XROOT_MAX_RELAYS of 1; this is a capacity limit, not a lineage gap'
                 for path,grant,action in (('pair',pair,'implement'),('direct',direct,'merge')):
                     with self.subTest(stage=stage,path=path),rules.xroot_fact_cache(rules.XrootFactCache()), \

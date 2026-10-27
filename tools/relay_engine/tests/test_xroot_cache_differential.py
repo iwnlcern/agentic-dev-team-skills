@@ -116,6 +116,7 @@ class TestXrootCacheDifferential(unittest.TestCase):
     def run_sequence(self, bound, require_external=False):
         cache = rules.XrootFactCache(bound)
         counts = dict(steps=0, inside=0, outside=0, structural=0)
+        hits = [0]
         cold_facts = {}
         for label, case, limit in sequence(self.home/f'bound-{bound}'):
             with self.subTest(bound=bound, step=label), corpus.budget(rules), cc.budget(old), \
@@ -125,6 +126,7 @@ class TestXrootCacheDifferential(unittest.TestCase):
                 def get(key):
                     fact = original_get(key)
                     if fact is not None:
+                        hits[0] += 1
                         warm_facts.append((key, fact))
                     return fact
                 def put(key, fact, charge):
@@ -169,9 +171,10 @@ class TestXrootCacheDifferential(unittest.TestCase):
                 if label=='same-bytes-own-timestamp':
                     self.assertEqual('b/DESIGN-planner-20260801-103000.md', warm['verify']['origin'])
                 self.assertLessEqual(cache.charge_total(), bound)
-        self.assertGreater(counts['inside'], 0)
-        self.assertGreater(counts['outside'], 0)
-        self.assertGreater(counts['structural'], 0)
+                if bound < 768:
+                    self.assertLessEqual(len(cache._entries), 1)
+        self.assertGreater(hits[0], 0, 'eviction arm never reused a warm fact')
+        self.assertEqual(dict(steps=59, inside=52, outside=5, structural=2), counts)
         print('cache-differential', counts, 'bound', bound, 'charge', cache.charge_total(),
               'rss', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
@@ -179,5 +182,9 @@ class TestXrootCacheDifferential(unittest.TestCase):
         self.run_sequence(rules.XROOT_CACHE_BOUND)
 
     def test_cache_differential_under_eviction(self):
-        for bound in (512, 4096):
+        case = cc.make(self.home/'one-entry-size')
+        raw = rules.xroot_git(case.repository, 'cat-file', 'tree', case.commit+':relays', binary=True)
+        one_entry = rules._xroot_fact_charge(rules.xroot_tree_fact(raw)) + 256
+        self.assertLess(one_entry, 768)  # namespace plus two minimum facts cannot fit.
+        for bound in (one_entry, 4096):
             self.run_sequence(bound)

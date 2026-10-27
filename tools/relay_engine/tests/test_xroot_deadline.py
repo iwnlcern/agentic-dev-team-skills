@@ -294,7 +294,7 @@ class TestXrootDeadline(unittest.TestCase):
             for stage in ('classification', 'classification-query', 'batch', 'event', 'limit'):
                 expected = ('Git object query timed out at the 5 s bound during rev-parse; '+tail
                             if stage == 'classification' else
-                            f'foreign read of {label} stopped at the 5 s bound at tree , after 0 relays and 0 trees; '+tail)
+                            f'foreign read of {label} stopped at the 5 s bound at tree relays, after 0 relays and 0 trees; '+tail)
                 if stage == 'classification-query':
                     expected = 'Git object query timed out at the 5 s bound during classification; '+tail
                 if stage == 'limit':
@@ -392,10 +392,10 @@ class TestXrootDeadline(unittest.TestCase):
                 entries = [f.params for f in self.judge(self.raw()) if f.id == 'external.could-not-evaluate']
             self.assertEqual(1, len(entries))
             entry = entries[0]
-            self.assertEqual('tree ' if stage == 'event' else 'query', entry['progress']['stopped_at'])
+            self.assertEqual('tree relays' if stage == 'event' else 'query', entry['progress']['stopped_at'])
             for key in counts:
                 self.assertEqual(0, entry['progress'][key])
-            expected = (f'foreign read of {label} stopped at the 5 s bound at tree , after 0 relays and 0 trees; '
+            expected = (f'foreign read of {label} stopped at the 5 s bound at tree relays, after 0 relays and 0 trees; '
                         if stage == 'event' else 'Git object query timed out at the 5 s bound during rev-parse; ')
             self.assertEqual(expected+tail, entry['detail'])
 

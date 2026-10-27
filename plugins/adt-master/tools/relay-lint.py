@@ -3364,6 +3364,8 @@ def xroot_declaration(fields: Dict[str, str], text: str) -> Dict[str, str] | Non
 
 
 def _xroot_start_git(command: list[str], *, stdin, stdout, stderr) -> subprocess.Popen:
+    if not command or command[0] != 'git':
+        raise ValueError('Git command required')
     return subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr,
                             close_fds=True, bufsize=0)
 
@@ -3385,7 +3387,7 @@ _XROOT_BUDGET = ContextVar("relay_xroot_budget", default=None)
 
 
 def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = False,
-              deadline: float | None = None):
+              deadline: float | None = None, clean_stderr: bool = False):
     budget = _XROOT_BUDGET.get()
     if budget is not None:
         deadline = budget[0] if deadline is None else min(deadline, budget[0])
@@ -3456,7 +3458,7 @@ def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = F
                         streams[key.fd].close()
             else:
                 time.sleep(min(0.01, remaining))
-        if process.returncode != 0:
+        if process.returncode != 0 or (clean_stderr and stderr_chunks):
             error = XrootAxisError(axis, "Git object query failed")
             error.returncode = process.returncode
             error.stdout = b"".join(stdout_chunks)
@@ -3704,8 +3706,9 @@ def xroot_operation():
         yield
     finally:
         try:
-            for reader in readers.values():
-                reader.close()
+            with ExitStack() as cleanup:
+                for reader in reversed(tuple(readers.values())):
+                    cleanup.callback(reader.close)
         finally:
             _XROOT_EVENT.reset(event_token)
             _XROOT_READERS.reset(reader_token)
@@ -3800,6 +3803,8 @@ def _xroot_reframe(exc, declaration):
     root = declaration.get('DESIGN_SOURCE_ROOT', 'foreign root')
     commit = declaration.get('DESIGN_SOURCE_COMMIT', '')[:12]
     label = f'{root} at {commit}'
+    if exc.progress.get('stopped_at') == 'tree .':
+        exc.progress = dict(exc.progress, stopped_at='tree '+root)
     limit = getattr(exc, 'limit', None)
     if limit is not None:
         detail = f'{label} exceeds the supported {limit} of {globals()[limit]}; this is a capacity limit, not a lineage gap'
@@ -4007,7 +4012,7 @@ def xroot_classify(repo: Path) -> XrootNamespace | None:
     try:
         _xroot_classification_deadline()
         try:
-            configured = xroot_git(repo, 'config', '--type=bool', '--get', 'core.useReplaceRefs')
+            configured = xroot_git(repo, 'config', '--type=bool', '--get', 'core.useReplaceRefs', clean_stderr=True)
         except XrootAxisError as exc:
             if (getattr(exc, 'returncode', None) == 1
                     and getattr(exc, 'stdout', None) == b''
@@ -4020,12 +4025,11 @@ def xroot_classify(repo: Path) -> XrootNamespace | None:
         base = os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')
         if not base or '\x00' in base or '\n' in base or not base.startswith('refs/'):
             return None
-        names = xroot_git(repo, 'for-each-ref', '--format=%(refname)')
-        if any(not name.startswith('refs/') or any(ord(ch) <= 32 or ord(ch) == 127 for ch in name)
-               for name in names.splitlines()):
+        names = xroot_git(repo, 'replace', '-l', binary=True, clean_stderr=True).decode('ascii').splitlines()
+        if any(re.fullmatch(r'[0-9a-fA-F]{40}', name) is None for name in names):
             return None
-        names = [name for name in names.splitlines() if name.startswith(base)]
-        paths = xroot_git(repo, 'rev-parse', '--show-toplevel', '--git-common-dir').splitlines()
+        paths = xroot_git(repo, 'rev-parse', '--show-toplevel', '--git-common-dir',
+                          clean_stderr=True).splitlines()
         if len(paths) != 2 or not paths[0] or not paths[1]:
             return None
         location = Path(os.path.realpath(repo))
@@ -4071,6 +4075,7 @@ class XrootBatchReader:
         # changes. Read interest on the write-only pipe is inert until closure.
         self._selector = selectors.PollSelector()
         self._write_interest = False
+        self._input_registered = False
         try:
             command = ['git', '-C', str(repo)]
             if no_replace or _XROOT_MODE.get() is not None:
@@ -4086,6 +4091,7 @@ class XrootBatchReader:
             os.set_blocking(self._output, False)
             self._selector.register(self._output, selectors.EVENT_READ)
             self._selector.register(self._input, selectors.EVENT_READ)
+            self._input_registered = True
         except OSError as exc:
             self.close()
             raise XrootAxisError('repository', 'Git batch reader failed') from exc
@@ -4142,7 +4148,10 @@ class XrootBatchReader:
     def _wait(self):
         try:
             writing = bool(self._pending)
-            if writing != self._write_interest:
+            if writing and not self._input_registered:
+                self._selector.register(self._input, selectors.EVENT_READ)
+                self._input_registered = True
+            if self._input_registered and writing != self._write_interest:
                 self._selector.modify(self._input, selectors.EVENT_READ |
                                       (selectors.EVENT_WRITE if writing else 0))
                 self._write_interest = writing
@@ -4152,7 +4161,14 @@ class XrootBatchReader:
                 self._check_deadline()
             for key, _ in events:
                 if key.fd == self._input:
-                    self._flush()
+                    if self._pending:
+                        self._flush()
+                    else:
+                        # Read readiness on our write-only end means hangup.
+                        # Do not spin on it while stdout remains open.
+                        self._selector.unregister(self._input)
+                        self._input_registered = False
+                        self._write_interest = False
         except OSError as exc:
             raise XrootAxisError('repository', 'Git batch reader failed') from exc
 
@@ -4246,7 +4262,7 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
     pending = {}
     barrier = False
     scanned = 0
-    progress = dict(stopped_at='tree ', relays_read=0, trees_read=0, bytes_read=0, entries_read=0)
+    progress = dict(stopped_at='tree .', relays_read=0, trees_read=0, bytes_read=0, entries_read=0)
     _xroot_set_event(root_tree, progress)
     budget = _XROOT_BUDGET.get()
     deadline = budget[0] if budget is not None else time.monotonic()+XROOT_EDGE_SECONDS
@@ -4278,7 +4294,7 @@ def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
                 event = stack.pop()
                 scanned -= 1
                 kind, oid, relname, name_bytes, depth = event
-                progress['stopped_at'] = kind+' '+relname.decode('utf-8', 'surrogateescape')
+                progress['stopped_at'] = kind+' '+(relname.decode('utf-8', 'surrogateescape') or '.')
                 _xroot_checkpoint(root_tree, progress, deadline)
                 if kind == 'tree':
                     if depth > XROOT_MAX_TREE_DEPTH:

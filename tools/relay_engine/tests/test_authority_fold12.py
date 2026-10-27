@@ -13,15 +13,19 @@ class TestAuthorityFold12(TestAuthorityFold5):
         self.assert_case([], unrelated='SUBJECT: unrelated historical probe\n\nExample `hostile\0input` stays immutable.\n')
 
     def test_body_only_doc_id_refuses(self):
+        # Historical name: R181 now allows this noncandidate carrier.
         self.assert_case([], unrelated='PHASE: SITREP\n\nThis discusses d1.\f')
 
     def test_two_phase_mentions_refuse(self):
+        # Historical name: R181 now allows this noncandidate carrier.
         self.assert_case([], unrelated='PHASE: SITREP\n\nAn example PHASE: elsewhere.\f')
 
     def test_split_doc_id_refuses(self):
+        # Historical name: R181 now allows this noncandidate carrier.
         self.assert_case([], unrelated='PHASE: SITREP\n\nDiscuss d\x011.')
 
     def test_ascii_case_doc_id_refuses(self):
+        # Historical name: R181 now allows this noncandidate carrier.
         self.assert_case([], unrelated='PHASE: SITREP\n\nDiscuss D1.\f')
 
     def test_older_approving_review_refuses(self):
@@ -36,6 +40,7 @@ class TestAuthorityFold12(TestAuthorityFold5):
             self.assertEqual(f.check(g)['reasons'],['authority.lineage-incomplete'])
 
     def test_relevant_non_ff_controls_refuse(self):
+        # Historical name: R181 now allows this noncandidate carrier.
         for c in ['\v','\0','\x7f','\x85','\u2028']:
             with self.subTest(control=repr(c)):
                 self.assert_case([],unrelated='PHASE: SITREP\n\nDiscuss d1.'+c)

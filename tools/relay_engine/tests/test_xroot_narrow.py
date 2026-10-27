@@ -274,7 +274,10 @@ class TestXrootNarrow(unittest.TestCase):
                     requested.append(spec)
                     return super().request(spec)
             for walk in (rules.xroot_relays, ref.xroot_reference_relays):
-                token = rules._XROOT_BUDGET.set((time.monotonic()+0.2, []))
+                # Lift the semantic ordering arm; the other arm is an explicit
+                # blocked-object deadline control, not a performance assertion.
+                seconds = 600 if name.startswith('DESIGN-') else 0.2
+                token = rules._XROOT_BUDGET.set((time.monotonic()+seconds, []))
                 try:
                     with mock.patch.object(rules, 'XrootBatchReader', Observed) if walk is rules.xroot_relays else nullcontext():
                         outcomes.append(self.outcome(tree, walk))

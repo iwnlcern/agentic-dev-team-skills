@@ -92,6 +92,9 @@ def gate_violations(paths):
                          parents[node].value is node)):
                 violations.append((module, node.lineno,
                                    "bare subprocess reference"))
+            if (module == "rules" and isinstance(node, ast.ImportFrom) and
+                    any(alias.name == "__import__" for alias in node.names)):
+                violations.append((module, node.lineno, "forbidden dynamic import binding"))
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 names = ([a.name.split(".")[0] for a in node.names]
                          if isinstance(node, ast.Import) else
@@ -101,9 +104,14 @@ def gate_violations(paths):
                                   isinstance(node, ast.Import) and
                                   all(alias.name == "subprocess" and alias.asname is None
                                       for alias in node.names if alias.name.split(".")[0] == "subprocess"))
-                    if name in FORBIDDEN_IMPORTS and not git_import:
+                    if ((name in FORBIDDEN_IMPORTS and not git_import) or
+                            (module == "rules" and name in {"asyncio", "pty", "multiprocessing"})):
                         violations.append((module, node.lineno,
                                            "forbidden import " + name))
+            if module == "rules" and (
+                    (isinstance(node, ast.Name) and node.id == "__import__") or
+                    (isinstance(node, ast.Attribute) and node.attr == "__import__")):
+                violations.append((module, node.lineno, "forbidden dynamic import"))
             if isinstance(node, ast.Call):
                 if (module == "rules" and isinstance(node.func, ast.Name) and
                         node.func.id == "_xroot_start_git"):
@@ -214,6 +222,20 @@ class TestGate(unittest.TestCase):
                  if name.endswith(".py")]
         paths.append(os.path.join(os.path.dirname(package), "relay"))
         return paths
+
+    def test_rules_forbids_alternate_launch_imports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'rules.py'
+            for source in ("__import__('subprocess')", "import builtins; builtins.__import__('pty')",
+                           "from builtins import __import__",
+                           "from builtins import __import__ as load; load('subprocess').Popen(['sh', '-c', 'true'])",
+                           "import asyncio", "from asyncio import subprocess",
+                           "import pty", "import multiprocessing"):
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertTrue(gate_violations([str(path)]))
+            path.write_text('import selectors')
+            self.assertEqual([], gate_violations([str(path)]))
 
     def test_production_tree_uses_only_keyed_output(self):
         self.assertEqual(gate_violations(self.production_paths()), [])

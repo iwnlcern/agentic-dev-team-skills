@@ -332,7 +332,7 @@ class TestXrootCache(unittest.TestCase):
             def git(repo, *args, **kwargs):
                 key = args[0] if args else ''
                 selected = ((fault.startswith('config') and key=='config')
-                            or (fault.startswith('refs') and key=='for-each-ref')
+                            or (fault.startswith('refs') and key=='replace')
                             or ((fault.startswith('common') or fault=='top-mismatch') and '--git-common-dir' in args))
                 if selected:
                     if fault.endswith('fail'):
@@ -341,7 +341,7 @@ class TestXrootCache(unittest.TestCase):
                         return str(self.case.repository)+'\n/no/such/b9-common-dir'
                     if fault=='top-mismatch':
                         return str(self.home)+'\n'+str(self.case.repository/'.git')
-                    return 'malformed\x00value'
+                    return b'malformed\x00value' if kwargs.get('binary') else 'malformed\x00value'
                 return original(repo, *args, **kwargs)
             stat = os.stat
             def stat_hook(path, *args, **kwargs):
