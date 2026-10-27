@@ -6,8 +6,10 @@ harness noise; it does not call any LLM, network, subprocess, or git command.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -219,6 +221,24 @@ A5_SEAM = {
     "lockdigest/RLD8-mixed-partition/.relays/v29": "lockdigest/RLD8-mixed-partition/cwd/plans/fixture-plan.md",
     "lockdigest/RLD9-read-seam/.relays/v29": "lockdigest/RLD9-read-seam/plans/fixture-plan.md",
 }
+
+class SeamIneffective(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def a5_private_seam(rel: str):
+    case = Path(*Path(rel).parts[:2])
+    with tempfile.TemporaryDirectory(prefix="relay-a5-seam-") as temporary:
+        private = Path(temporary)
+        shutil.copytree(FIXTURES / case, private / case)
+        seam = private / A5_SEAM[rel]
+        seam.chmod(0)
+        if os.access(seam, os.R_OK):
+            raise SeamIneffective(rel)
+        cwd_rel = A5_CWD.get(rel)
+        yield private / rel, (private / cwd_rel if cwd_rel else None)
+
 
 LIFECYCLE_EXPECTED = [
     ("root", "mastertier/MT34-foreign-design-kind-present", 0),
@@ -2271,35 +2291,33 @@ def main() -> int:
     for kind, rel, expected in EXPECTED:
         target = FIXTURES / rel
         cwd_rel = A5_CWD.get(rel)
-        seam_rel = A5_SEAM.get(rel)
-        old_cwd = os.getcwd()
-        if cwd_rel:
-            os.chdir(FIXTURES / cwd_rel)
-        if seam_rel:
-            os.chmod(FIXTURES / seam_rel, 0)
-            if os.access(FIXTURES / seam_rel, os.R_OK):
-                os.chmod(FIXTURES / seam_rel, 0o644)
+        working = FIXTURES / cwd_rel if cwd_rel else None
+        with contextlib.ExitStack() as stack:
+            if rel in A5_SEAM:
+                try:
+                    target, working = stack.enter_context(a5_private_seam(rel))
+                except SeamIneffective:
+                    print(f"{rel}: read seam ineffective in this environment (root?) FAIL")
+                    failed = True
+                    continue
+            old_cwd = os.getcwd()
+            try:
+                if working is not None:
+                    os.chdir(working)
+                if kind == "file":
+                    result = lint.lint_file(target)
+                elif kind == "file-root":
+                    result = lint.lint_file(target, artifact_root=FIXTURES / FILE_ROOT_OF[rel])
+                elif kind == "template":
+                    result = lint.lint_file(target, template_mode=True)
+                elif kind == "index":
+                    result = lint.lint_relay_index(target / "INDEX.md")
+                elif kind == "index-rel":
+                    result = lint.lint_relay_index(Path("INDEX.md"))
+                else:
+                    result = lint.lint_relay_root(target)
+            finally:
                 os.chdir(old_cwd)
-                print(f"{rel}: read seam ineffective in this environment (root?) FAIL")
-                failed = True
-                continue
-        try:
-            if kind == "file":
-                result = lint.lint_file(target)
-            elif kind == "file-root":
-                result = lint.lint_file(target, artifact_root=FIXTURES / FILE_ROOT_OF[rel])
-            elif kind == "template":
-                result = lint.lint_file(target, template_mode=True)
-            elif kind == "index":
-                result = lint.lint_relay_index(target / "INDEX.md")
-            elif kind == "index-rel":
-                result = lint.lint_relay_index(Path("INDEX.md"))
-            else:
-                result = lint.lint_relay_root(target)
-        finally:
-            if seam_rel:
-                os.chmod(FIXTURES / seam_rel, 0o644)
-            os.chdir(old_cwd)
         observed = 0 if result.ok else 1
         expected_errors = EXPECTED_ERROR_SET.get(rel)
         if expected_errors is not None:
