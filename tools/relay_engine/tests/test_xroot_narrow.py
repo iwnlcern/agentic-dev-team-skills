@@ -258,6 +258,8 @@ class TestXrootNarrow(unittest.TestCase):
                                                             'g.md': (b'160000', '3'*40)})))
 
     def test_blocked_tree_candidate_and_old_name(self):
+        from relay_engine.tests.xroot_test_stops import stop
+        self.enterContext(stop(120))
         import os
         from contextlib import nullcontext
         subtree = self.tree({'x': 'x'})

@@ -197,7 +197,8 @@ class TestJudging(unittest.TestCase):
         clean = xrootfixgen._render(fields).encode()
         from relay_engine.tests import xroot_narrow_corpus as corpus
         with corpus.budget(rules):
-            self.assertFalse(self.family(clean, 'external.could-not-evaluate'))
+            self.assertFalse([f for f in self.judge(clean, deadline=float('inf'))
+                              if f.id == 'external.could-not-evaluate'])
         xrootfixgen._fifo_object(self.root, foreign, fields)
         xrootfixgen._replace(fields, 'DESIGN_LOCK_ID', 'designs/d1.md')
         fields += [('PLAN_LOCK_ID', 'plans/p1.md'), ('PLAN_SOURCE_REPO', str(foreign)),

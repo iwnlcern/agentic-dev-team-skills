@@ -183,6 +183,7 @@ class TestFoldProcess(unittest.TestCase):
 
 
     def test_stdin_hangup_still_receives_stdout(self):
+        from relay_engine.tests.xroot_test_stops import stop
         import sys
         import time
         with tempfile.TemporaryDirectory(prefix='fold-hup-response-') as temporary:
@@ -201,7 +202,7 @@ class TestFoldProcess(unittest.TestCase):
             for module in self.modules:
                 with self.subTest(module=module.__name__), cc.budget(module), \
                      mock.patch.dict(os.environ, {'PATH':str(home)+os.pathsep+os.environ['PATH']}):
-                    with module.XrootBatchReader(home, float("inf")) as reader:
+                    with stop(30), module.XrootBatchReader(home, float("inf")) as reader:
                         while not (home/'closed').exists():
                             time.sleep(0.001)
                         try:
@@ -336,20 +337,21 @@ class TestFoldCache(unittest.TestCase):
             xf._init_repo(consumer)
             for module in self.modules:
                 cache = module.XrootFactCache()
-                with cc.budget(module), module.xroot_fact_cache(cache):
-                    self.assertIsNone(verify(module, consumer, case.declaration)['axis'])
-                    hits = []
-                    get = cache.get
-                    def observe(key):
-                        value = get(key)
-                        self.assertIsNotNone(value)
-                        hits.append(key)
-                        return value
-                    with mock.patch.object(cache, 'get', side_effect=observe), \
-                         mock.patch.object(module.XrootBatchReader, 'request',
-                                           side_effect=AssertionError('warm control requested batch')):
+                with module.xroot_fact_cache(cache):
+                    with cc.budget(module):
                         self.assertIsNone(verify(module, consumer, case.declaration)['axis'])
-                    self.assertGreater(len(hits), 1)
+                        hits = []
+                        get = cache.get
+                        def observe(key):
+                            value = get(key)
+                            self.assertIsNotNone(value)
+                            hits.append(key)
+                            return value
+                        with mock.patch.object(cache, 'get', side_effect=observe), \
+                             mock.patch.object(module.XrootBatchReader, 'request',
+                                               side_effect=AssertionError('warm control requested batch')):
+                            self.assertIsNone(verify(module, consumer, case.declaration)['axis'])
+                        self.assertGreater(len(hits), 1)
                     for at in (1, len(hits)):
                         calls, expired = [0], [False]
                         def clock():

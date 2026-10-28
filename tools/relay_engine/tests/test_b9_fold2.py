@@ -22,15 +22,17 @@ class TestOracleBudget(unittest.TestCase):
         original_select = selectors.PollSelector.select
         a_entered, b_entered, a_left = (threading.Event() for _ in range(3))
         def first():
-            with cc.budget(rules):
+            with corpus.budget(rules):
                 a_entered.set()
-                b_entered.wait()
+                self.assertTrue(b_entered.wait(120), "second scope did not enter")
             a_left.set()
         def second():
-            a_entered.wait()
-            with cc.budget(rules):
+            self.assertTrue(a_entered.wait(120), "first scope did not enter")
+            with corpus.budget(rules):
                 b_entered.set()
-                a_left.wait()
+                self.assertTrue(a_left.wait(120), "first scope did not exit")
+                self.assertIsNot(original_select, selectors.PollSelector.select)
+                self.assertEqual(float("inf"), rules._XROOT_BUDGET.get()[0])
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 a, b = pool.submit(first), pool.submit(second)
@@ -49,8 +51,9 @@ class TestOracleBudget(unittest.TestCase):
             with self.subTest(module=module.__name__), corpus.budget(module):
                 # A long pause cannot turn a semantic reference answer into a timeout.
                 self.assertGreater(module._XROOT_BUDGET.get()[0], time.monotonic()+10**12)
-                module._XROOT_BUDGET.set((time.monotonic()+5, []))
-                self.assertGreater(module._XROOT_BUDGET.get()[0], time.monotonic()+10**12)
+                explicit = time.monotonic()+5
+                module._XROOT_BUDGET.set((explicit, []))
+                self.assertEqual(explicit, module._XROOT_BUDGET.get()[0])
 
     def test_root_deadline_reference_label_matches_native(self):
         from relay_engine.tests import xroot_reference as reference
@@ -69,7 +72,8 @@ class TestConfigView(unittest.TestCase):
         cls.modules = (rules, _standalone())
 
     def caches(self, module):
-        return {route: module.XrootFactCache() for route in ('verify', 'pair', 'direct')}
+        return dict({route: module.XrootFactCache() for route in ('verify', 'pair', 'direct')},
+                    **{route: rules.XrootFactCache() for route in ('native-pair', 'native-direct')})
 
     def answers(self, module, consumer, case, axis, reason, caches):
         # Each caller has its own cache: its first check is genuinely cold,
@@ -81,7 +85,10 @@ class TestConfigView(unittest.TestCase):
             result = original_verify(*args)
             # Standalone verifies first; its successful None return is adapted
             # with the native selection tuple required by authority.check.
-            return rules.xroot_verify(*args) if result is None else result
+            if result is None:
+                with corpus.budget(rules), rules.xroot_fact_cache(caches["native-"+route]):
+                    return rules.xroot_verify(*args)
+            return result
         for route in ('pair', 'direct'):
             with module.xroot_fact_cache(caches[route]), \
                  mock.patch.object(authority, 'rules', module), \

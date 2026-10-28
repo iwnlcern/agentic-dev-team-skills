@@ -68,6 +68,9 @@ class TestAuthorityFold12(TestAuthorityFold5):
         import tempfile
         from pathlib import Path
         import xrootfixgen
+        from relay_engine.tests import test_xroot
+        from relay_engine.tests.xroot_test_stops import stop
+        budgets = test_xroot.TestXroot()
         matched=[]
         target=rules.xroot_target_ok
         def matching(relay,key,expected):
@@ -81,7 +84,7 @@ class TestAuthorityFold12(TestAuthorityFold5):
             self.assertEqual(len(cases),130)
             with mock.patch.object(rules,'xroot_target_ok',side_effect=matching):
                 for label,root,exit_code,errors in cases:
-                    with self.subTest(case=label):
+                    with self.subTest(case=label), budgets.case_budget(rules, label), stop(120):
                         result=rules.lint_relay_root(root)
                         self.assertEqual(sorted(result.errors),sorted(errors))
         self.assertGreater(len(matched),0)

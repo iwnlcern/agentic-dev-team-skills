@@ -479,6 +479,7 @@ class TestXrootReader(unittest.TestCase):
                         self.assert_governing(label, actual, bad_bounded, bad_lifted, 'pair', elapsed, lifted_deadline=True)
 
     def test_deep_tree_reaches_depth_refusal(self):
+        from relay_engine.tests.xroot_test_stops import stop
         from relay_engine.tests.xroot_b9_cases import materialize
         case = materialize(self.repo/'deep', only=['F-depth-2500'])['F-depth-2500']
         actual, elapsed = self.verify_case(case, budget_seconds=float("inf"))
@@ -487,6 +488,7 @@ class TestXrootReader(unittest.TestCase):
         tree = self.tree({'x.md':'x'})
         obj = self.repo/'.git/objects'/tree[:2]/tree[2:]
         obj.unlink(); os.mkfifo(obj)
+        self.enterContext(stop(30))
         token = rules._XROOT_BUDGET.set((time.monotonic()+0.05, []))
         try:
             with self.assertRaises(rules.XrootAxisError) as caught:

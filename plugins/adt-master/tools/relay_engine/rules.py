@@ -3450,7 +3450,7 @@ def _xroot_start_git(command: list[str], *, stdin, stdout, stderr) -> subprocess
     if not command or command[0] != 'git':
         raise ValueError('Git command required')
     return subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr,
-                            close_fds=True, bufsize=0)
+                            close_fds=True, bufsize=0, env=os.environ)
 
 
 def _xroot_kill_and_reap(process: subprocess.Popen) -> None:

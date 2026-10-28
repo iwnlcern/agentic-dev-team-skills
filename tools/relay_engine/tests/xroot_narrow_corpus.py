@@ -13,14 +13,43 @@ import xrootfixgen as xf
 
 
 class Budget:
+    """Shared proxy; all actual deadlines and nesting live in ContextVars.
+
+    Only implicit authority defaults are lifted by AuthorityTime below.
+    Explicit writes are never rewritten, including expiry values other than zero.
+    """
     def __init__(self, original, seconds=float('inf')):
-        self.original, self.seconds = original, seconds
+        from contextvars import ContextVar
+        self.original = original
+        self.scopes = ContextVar('semantic_lift_scope', default=0)
     def set(self, value):
-        return self.original.set((0 if value[0] == 0 else time.monotonic()+self.seconds, value[1]))
+        return self.original.set(value)
     def get(self):
         return self.original.get()
     def reset(self, token):
         self.original.reset(token)
+
+
+_BUDGET_LOCK = threading.Lock()
+_BUDGET_SCOPES = {}
+_AUTHORITY_TIME = None
+
+
+class AuthorityTime:
+    def __init__(self, original):
+        self.original = original
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+    def monotonic(self):
+        from relay_engine import authority
+        budget = authority.rules._XROOT_BUDGET
+        if isinstance(budget, Budget) and budget.scopes.get():
+            current = budget.get()
+            if current is not None:
+                # _external_evidence's fixed +5 default must preserve the
+                # active semantic scope, including an explicit finite expiry.
+                return current[0] - 5
+        return self.original.monotonic()
 
 
 _SELECTOR_LOCK = threading.Lock()
@@ -44,8 +73,20 @@ def unbounded_selectors():
             for cls in {selectors.PollSelector, selectors.DefaultSelector}:
                 original = cls.select
                 def select(self, timeout=None, original=original):
-                    return original(self, None if timeout is not None and math.isinf(timeout) else timeout)
+                    from relay_engine.tests.xroot_test_stops import wait_timeout
+                    timeout = None if timeout is not None and math.isinf(timeout) else timeout
+                    answer = original(self, wait_timeout(timeout))
+                    wait_timeout(None)
+                    return answer
                 _SELECTOR_PATCHES.enter_context(mock.patch.object(cls, 'select', select))
+            original_sleep = time.sleep
+            def sleep(seconds):
+                from relay_engine.tests.xroot_test_stops import wait_timeout
+                original_sleep(wait_timeout(seconds))
+                wait_timeout(None)
+            # xroot_git polls a live child with no open streams using sleep.
+            # That branch must observe the worker's stop as well as selectors.
+            _SELECTOR_PATCHES.enter_context(mock.patch.object(time, 'sleep', sleep))
         _SELECTOR_SCOPES += 1
     try:
         yield
@@ -59,12 +100,46 @@ def unbounded_selectors():
 
 @contextmanager
 def budget(module, seconds=float('inf')):
-    with unbounded_selectors(), mock.patch.object(module, '_XROOT_BUDGET', Budget(module._XROOT_BUDGET, seconds)):
-        token = module._XROOT_BUDGET.set((time.monotonic()+seconds, []))
-        try:
+    from relay_engine import authority
+    from relay_engine.tests.xroot_test_stops import stop
+    global _AUTHORITY_TIME
+    with _BUDGET_LOCK:
+        if module not in _BUDGET_SCOPES:
+            original = module._XROOT_BUDGET
+            proxy = Budget(original)
+            _BUDGET_SCOPES[module] = [original, proxy, 0]
+            module._XROOT_BUDGET = proxy
+        state = _BUDGET_SCOPES[module]
+        state[2] += 1
+        if _AUTHORITY_TIME is None:
+            _AUTHORITY_TIME = authority.time
+            authority.time = AuthorityTime(_AUTHORITY_TIME)
+    proxy = state[1]
+    token = scope_token = None
+    try:
+        current = proxy.get()
+        if proxy.scopes.get() and (math.isfinite(seconds) or
+                                   current is not None and math.isfinite(current[0])):
+            raise AssertionError('explicit finite nested corpus budget requires a separate timed scope')
+        scope_token = proxy.scopes.set(proxy.scopes.get()+1)
+        token = proxy.set((time.monotonic()+seconds, []))
+        # Four hours is above the retained slowest large semantic run.
+        # This stop only raises; it never supplies a compared answer.
+        with unbounded_selectors(), stop(14400):
             yield
-        finally:
-            module._XROOT_BUDGET.reset(token)
+    finally:
+        if token is not None:
+            proxy.reset(token)
+        if scope_token is not None:
+            proxy.scopes.reset(scope_token)
+        with _BUDGET_LOCK:
+            state[2] -= 1
+            if not state[2]:
+                module._XROOT_BUDGET = state[0]
+                del _BUDGET_SCOPES[module]
+            if not _BUDGET_SCOPES:
+                authority.time = _AUTHORITY_TIME
+                _AUTHORITY_TIME = None
 
 
 def materialize(dest):

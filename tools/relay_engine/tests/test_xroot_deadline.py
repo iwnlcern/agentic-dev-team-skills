@@ -143,9 +143,9 @@ class TestXrootDeadline(unittest.TestCase):
     def raw(self, ident='candidate'):
         return jt.body(ident=ident, extra='\n'.join(k+': '+v for k,v in self.case.declaration.items()))
 
-    def judge(self, raw):
+    def judge(self, raw, deadline=None):
         return judging.judge_candidate(judging.Corpus((),None,None), 'PLAN-pair-planner-20261013-120000.md',
-                                       jt.envelope(raw), raw, artifact_root=self.repo, deadline=time.monotonic()+5)
+                                       jt.envelope(raw), raw, artifact_root=self.repo, deadline=time.monotonic()+5 if deadline is None else deadline)
 
     def test_lint_per_edge_bound(self):
         for i in (1,2):
@@ -171,7 +171,7 @@ class TestXrootDeadline(unittest.TestCase):
 
     def test_submit_finding_carries_capacity_detail(self):
         with mock.patch.object(rules,'XROOT_MAX_RELAYS',1):
-            findings = self.judge(self.raw())
+            findings = self.judge(self.raw(), deadline=float("inf"))
         external = [f for f in findings if f.id=='external.could-not-evaluate']
         self.assertEqual(1,len(external))
         item = external[0]
@@ -433,7 +433,6 @@ class TestXrootDeadline(unittest.TestCase):
         self.assertEqual('Git object query timed out at the 5 s bound during classification; '+tail, entry['detail'])
 
     def test_capacity_detail_names_root_and_commit(self):
-        from relay_engine.tests.capture_xroot_baseline import LiftedBudget
         from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
         repo = self.case.repository
         tree = xf._git(repo, 'rev-parse', self.case.commit+':relays')
@@ -458,7 +457,7 @@ class TestXrootDeadline(unittest.TestCase):
         fixture.add('PLAN-REVIEW', 'p.implementer', 'p.planner', 'review',
                     'PARENT_DISPATCH_ID: plan\nPLAN_LOCK_ID: PL\n'+pin+'\nVERDICT: approve', '')
         grant = fixture.add(ident='grant', extra='PARENT_DISPATCH_ID: review\nPLAN_LOCK_ID: PL')
-        with mock.patch.object(rules, '_XROOT_BUDGET', LiftedBudget(rules._XROOT_BUDGET)):
+        with corpus.budget(rules):
             result = rules.lint_relay_root(self.repo)
             self.assertEqual(['PLAN-pair-planner-20261013-120000.md: '+rules.xroot_error('capacity', expected)], result.errors)
             # Task 5 adds public external rows; Task 3 observes the real

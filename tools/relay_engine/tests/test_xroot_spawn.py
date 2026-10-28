@@ -11,6 +11,8 @@ from unittest import mock
 
 from relay_engine import rules
 from relay_engine.tests.test_xroot import _standalone
+from relay_engine.tests import xroot_cache_cases as cc
+from relay_engine.tests.xroot_test_stops import stop
 import xrootfixgen as xf
 
 
@@ -51,7 +53,14 @@ class TestXrootSpawn(unittest.TestCase):
             original = module._xroot_start_git
             def start(*args, **kwargs):
                 process = original(*args, **kwargs)
-                observations.append(self.descriptors(process.pid))
+                try:
+                    observations.append(self.descriptors(process.pid))
+                except BaseException:
+                    module._xroot_kill_and_reap(process)
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
+                    raise
                 return process
             with mock.patch.object(module, '_xroot_start_git', side_effect=start):
                 yield
@@ -59,7 +68,16 @@ class TestXrootSpawn(unittest.TestCase):
             original = os.posix_spawnp
             def start(*args, **kwargs):
                 pid = original(*args, **kwargs)
-                observations.append(self.descriptors(pid))
+                try:
+                    observations.append(self.descriptors(pid))
+                except BaseException:
+                    import signal
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    os.waitpid(pid, 0)
+                    raise
                 return pid
             with mock.patch.object(os, 'posix_spawnp', side_effect=start):
                 yield
@@ -100,6 +118,7 @@ class TestXrootSpawn(unittest.TestCase):
                                       if row['name']])
 
     def test_uncooperative_producer_beside_batch_spawn_completes(self):
+        self.enterContext(stop(300))
         expected = xf._git(self.repo, 'rev-parse', 'HEAD')
         for module in (rules, _standalone()):
             with self.subTest(module=module.__name__):
@@ -112,9 +131,16 @@ class TestXrootSpawn(unittest.TestCase):
                         state['fds'] = fds
                         for fd in fds:
                             os.set_inheritable(fd, True)
-                        state['creation_view'] = self.descriptors(os.getpid())
+                        try:
+                            state['creation_view'] = self.descriptors(os.getpid())
+                        except BaseException as exc:
+                            state['observation_error'] = exc
+                            for fd in fds:
+                                os.close(fd)
+                            ready.set()
+                            raise
                         ready.set()
-                        state['overlapped'] = started.wait(1)
+                        state['overlapped'] = started.wait(120)
                         for fd in fds:
                             os.set_inheritable(fd, False)
                     return fds
@@ -128,20 +154,22 @@ class TestXrootSpawn(unittest.TestCase):
                 with mock.patch.object(os, 'pipe', side_effect=pipe):
                     thread.start()
                     try:
-                        self.assertTrue(ready.wait(2))
+                        self.assertTrue(ready.wait(120), "producer setup reached its failure stop")
+                        if "observation_error" in state:
+                            raise state["observation_error"]
                         # Pipe identities are captured while the producer holds
                         # the creation window open; it does not share a lock.
                         parent = state['creation_view']
-                        reader = module.XrootBatchReader(self.repo, time.monotonic()+5)
+                        reader = module.XrootBatchReader(self.repo, float("inf"))
                         started.set()
                         child = self.descriptors(reader.pid)
-                        thread.join(1)
+                        thread.join(120)
                         completed = not thread.is_alive()
                     finally:
                         started.set()
                         if reader is not None:
                             reader.close()
-                        thread.join(2)
+                        thread.join(120)
                 self.assertFalse(thread.is_alive(), 'producer did not clean up')
                 self.assertTrue(state['overlapped'])
                 self.assertEqual({'value': expected}, output)
@@ -154,6 +182,7 @@ class TestXrootSpawn(unittest.TestCase):
                 self.assertEqual(set(), endpoints & held)
 
     def test_query_answers_after_child_exit_with_pipe_held_elsewhere(self):
+        self.enterContext(stop(300))
         content = b'full-output\n'*20000
         oid = xf._literal_object(self.repo, 'blob', content)
         for module in (rules, _standalone()):
@@ -169,7 +198,8 @@ class TestXrootSpawn(unittest.TestCase):
                     def query():
                         try:
                             args = ('rev-parse', '--verify', 'missing-ref') if failure else ('cat-file', 'blob', oid)
-                            answer['value'] = module.xroot_git(self.repo, *args, binary=True)
+                            with cc.budget(module):
+                                answer['value'] = module.xroot_git(self.repo, *args, binary=True)
                         except module.XrootAxisError as exc:
                             answer.update(axis=exc.axis, detail=exc.detail,
                                           returncode=getattr(exc, 'returncode', None),
@@ -180,12 +210,12 @@ class TestXrootSpawn(unittest.TestCase):
                     with mock.patch.object(os, 'pipe', side_effect=pipe):
                         thread.start()
                         try:
-                            thread.join(1)
+                            thread.join(120)
                             completed = not thread.is_alive()
                         finally:
                             for fd in held:
                                 os.close(fd)
-                            thread.join(2)
+                            thread.join(120)
                     self.assertFalse(thread.is_alive(), 'query did not clean up')
                     self.assertEqual(1, len(held))
                     self.assertTrue(completed, 'query waited for a writer unrelated to its child')

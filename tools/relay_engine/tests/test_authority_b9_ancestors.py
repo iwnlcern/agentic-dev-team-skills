@@ -11,6 +11,7 @@ from relay_engine import authority, rules
 from relay_engine.tests import test_authority_fold5 as fixtures
 from relay_engine.tests import test_authority_fold10 as fold10
 from relay_engine.tests import xroot_cache_cases as cc
+from relay_engine.tests import xroot_narrow_corpus as corpus
 from relay_engine.tests.test_judging import body
 import xrootfixgen as xf
 
@@ -185,7 +186,7 @@ class TestAuthorityB9Ancestors(unittest.TestCase):
         f.add('PLAN-REVIEW','p.implementer','p.planner','review',
               'PARENT_DISPATCH_ID: plan\nPLAN_LOCK_ID: PL\nVERDICT: approve\n'+pin,'')
         grant=f.add(ident='grant',extra='PARENT_DISPATCH_ID: review\nPLAN_LOCK_ID: PL')
-        with mock.patch.object(rules,'xroot_plan_gate',wraps=rules.xroot_plan_gate) as gate:
+        with corpus.budget(rules), mock.patch.object(rules,'xroot_plan_gate',wraps=rules.xroot_plan_gate) as gate:
             answer=f.check(grant)
         self.assertEqual([C],answer['reasons'])
         self.assertEqual(2,gate.call_count)

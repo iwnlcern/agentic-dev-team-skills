@@ -40,13 +40,10 @@ def make(home, graph=None):
 
 @contextmanager
 def budget(module, seconds=float('inf')):
-    # This helper also runs concurrently: never replace the module ContextVar.
-    token = module._XROOT_BUDGET.set((time.monotonic()+seconds, []))
-    try:
-        with corpus.unbounded_selectors():
-            yield
-    finally:
-        module._XROOT_BUDGET.reset(token)
+    # Share the strict, refcounted proxy while keeping scope state local to
+    # each worker. Authority's implicit +5 default must see that worker's lift.
+    with corpus.budget(module, seconds):
+        yield
 
 
 @contextmanager
