@@ -128,7 +128,7 @@ def _event(address, event, occupant_id, key_id, **extra):
 def register(ledger, root, address, role_word, dispatch_ref=None, *,
              replace=False, top=False):
     """Issue one occupancy and atomically bind its boot row when required."""
-    from relay_engine.envelope import _HEADER, draft_shape, shape_error
+    from relay_engine.envelope import _HEADER, LINE_BREAKS, draft_shape, shape_error
     _validate(address, role_word, dispatch_ref)
     run_id = _run_id(ledger)
     current = _latest(ledger, address)
@@ -168,6 +168,10 @@ def register(ledger, root, address, role_word, dispatch_ref=None, *,
             if shape is not None:
                 header = _HEADER.fullmatch(text.splitlines()[shape.line - 1])
                 raise shape_error(shape, boot_field=header.group(1) if header else 'body')
+            if commissioned and commissioned[0] and any(
+                    char in LINE_BREAKS for char in commissioned[0]):
+                raise errors.error_for('E-DRAFT-SHAPE', variant='boot-field',
+                                       field='COMMISSIONED_BY')
             envelope = parse_draft(text)
             admission = admit(
                 ledger, root, envelope, body, occupant_id,

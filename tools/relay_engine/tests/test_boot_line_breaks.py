@@ -75,7 +75,8 @@ class TestBootLineBreaks(unittest.TestCase):
 
     def test_boot_backstop_names_any_line_the_record_splices(self):
         for record_value, field in (('a\n\nSUPERSEDES: x', 'SUPERSEDES'),
-                                    ('a\nFOO: b\u2028c', 'FOO')):
+                                    ('a\nFOO: b\u2028c', 'FOO'),
+                                    ('a\nX1: b\u2028c', 'X1')):
             with self.subTest(field=field):
                 self.f.ledger.execute('DELETE FROM runs')
                 self.f.ledger.execute('INSERT INTO runs(run_id,commissioned_by) VALUES(?,?)',
@@ -89,3 +90,27 @@ class TestBootLineBreaks(unittest.TestCase):
                 self.assertEqual(list(Path(self.f.root.path, '.engine/seats/p.planner').glob('*.key')), [])
                 self.assertEqual(self.f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
                 self.assertEqual(self.f.ledger.execute('SELECT * FROM seat_events').fetchall(), [])
+
+    def test_boot_backstop_refuses_any_stored_line_break(self):
+        for value in ('a\nSUPERSEDES: x', 'a\rCYCLE_REOPEN: x', 'a\n\nX1: y'):
+            with self.subTest(value=value):
+                # Each case owns its ledger: an erroneously admitted boot must
+                # not turn the next case into a seat-occupied refusal.
+                f = fixtures.LedgerFixture()
+                f.setUp()
+                try:
+                    f.initialize()
+                    ledger.establish_run_identity(f.ledger, 'r')
+                    f.ledger.execute('INSERT INTO runs(run_id,commissioned_by) VALUES(?,?)', ('r', value))
+                    before = f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
+                    events = f.ledger.execute('SELECT * FROM seat_events').fetchall()
+                    with self.assertRaises(errors.EngineError) as caught:
+                        seats.register(f.ledger, f.root, 'p.planner', 'Planner', 'boot')
+                    self.assertEqual((caught.exception.code, caught.exception.cause_key),
+                                     ('E-DRAFT-SHAPE', 'error-draft-shape-boot-field-cause'))
+                    self.assertIn('COMMISSIONED_BY', caught.exception.cause)
+                    self.assertEqual(list(Path(f.root.path, '.engine/seats/p.planner').glob('*.key')), [])
+                    self.assertEqual(f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
+                    self.assertEqual(f.ledger.execute('SELECT * FROM seat_events').fetchall(), events)
+                finally:
+                    f.tearDown()

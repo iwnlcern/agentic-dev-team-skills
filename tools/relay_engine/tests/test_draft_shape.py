@@ -37,6 +37,13 @@ def late_verdict_cases():
         yield draft(phase, extra, body, prefix), key
 
 
+def verdict_keys(lengths):
+    for length in lengths:
+        yield 'A' * (length - len('_VERDICT')) + '_VERDICT'
+    yield 'A1_VERDICT'
+    yield 'A1' + '2' * 55 + '_VERDICT'
+
+
 def diagnostic_texts():
     """Shared input population for the standalone/engine differential."""
     yield draft()
@@ -91,10 +98,9 @@ def diagnostic_texts():
         yield draft(body='SUPERSEDES: x'+char)
     yield draft('MERGE-GATE', body='DISPATCH MERGE\n\nVERDICT: merge-blocked\u2029')
     from relay_engine.tests import test_admission_judging as admission
-    for length in (64,65,4096):
-        key = 'A'*(length-len('_VERDICT'))+'_VERDICT'
+    for key in verdict_keys((64,65,4096)):
         yield draft('MERGE-GATE', body='DISPATCH MERGE\n\n'+key+': no\n')
-        if length != 64:
+        if len(key) != 64:
             yield admission.body('MERGE-GATE','operator',content='DISPATCH MERGE\n\n'+key+': no').decode()
     for cases in (fence_region_cases(), fence_form_cases(), wide_cases(), preserved_cases()):
         for case in cases:
@@ -371,9 +377,8 @@ class TestDraftShape(unittest.TestCase):
         hand = _standalone()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'MERGE-GATE-pair-planner-20261026-010000.md'
-            for length in (64, 65, 4096):
-                with self.subTest(length=length):
-                    key = 'A' * (length - len('_VERDICT')) + '_VERDICT'
+            for key in verdict_keys((64, 65, 4096)):
+                with self.subTest(key=key):
                     text = draft('MERGE-GATE', body='DISPATCH MERGE\n\n' + key + ': no\n')
                     shape = E.draft_shape(text)
                     self.assertEqual((shape.kind, shape.key), ('late-verdict', key))
@@ -401,12 +406,11 @@ class TestDraftShape(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / 'MERGE-GATE-pair-planner-20261026-010000.md'
-            for length in (65, 4096):
-                key = 'A' * (length - len('_VERDICT')) + '_VERDICT'
+            for key in verdict_keys((65, 4096)):
                 raw = admission.body('MERGE-GATE', 'operator',
                                      content='DISPATCH MERGE\n\n' + key + ': no')
                 before = fixture.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
-                with self.subTest(length=length, consumer='handler'):
+                with self.subTest(key=key, consumer='handler'):
                     with self.assertRaises(errors.EngineError) as caught:
                         daemon._submit_handler(fixture.ledger, fixture.root, fixture.args(raw))
                     self.assertEqual((caught.exception.code, caught.exception.cause_key),
@@ -415,7 +419,7 @@ class TestDraftShape(unittest.TestCase):
                     self.assertEqual(fixture.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
                 path.write_bytes(raw)
                 for consumer in ('file', 'root'):
-                    with self.subTest(length=length, consumer=consumer):
+                    with self.subTest(key=key, consumer=consumer):
                         expected = hand.draft_shape_errors(raw.decode())[0]
                         result = (rules.lint_file(path) if consumer == 'file'
                                   else rules.lint_relay_root(root, engine_root=False))
