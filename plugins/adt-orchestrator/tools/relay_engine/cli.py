@@ -307,7 +307,7 @@ def cmd_show(args):
                     if relative != args.target:
                         strings.emit("stderr", "show-root-hint", path=str(target),
                                      root=str(hint_root), rel=relative)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             pass
         return 1
     if args.body:

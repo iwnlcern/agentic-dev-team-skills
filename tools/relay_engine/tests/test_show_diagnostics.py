@@ -152,3 +152,46 @@ class TestShowDiagnostics(unittest.TestCase):
                     self.assertEqual(rc, 1)
                     self.assertNotIn('hint:', err.getvalue())
                     self.assertNotIn(char, err.getvalue())
+
+    def test_hint_never_raises(self):
+        target = self.root / 'loop'
+        target.symlink_to('loop')
+        rc, out, err = self.run_cli(self.empty, 'show', str(target), '--root', str(self.root))
+        self.assertEqual((rc, out), (1, b''))
+        self.assertTrue(err.startswith('E-PATH-ESCAPE\n'), err)
+        self.assertNotIn('hint:', err)
+        self.assertNotIn('unexpected error', err)
+        resolve = Path.resolve
+        def loop_error(path, *args, **kwargs):
+            if path == target:
+                raise RuntimeError('Symlink loop')
+            return resolve(path, *args, **kwargs)
+        err = io.StringIO()
+        with cwd(self.empty), patch.object(Path, 'resolve', loop_error), contextlib.redirect_stderr(err):
+            rc = cli.main(['show', str(target), '--root', str(self.root)])
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.getvalue().startswith('E-PATH-ESCAPE\n'), err.getvalue())
+        self.assertNotIn('hint:', err.getvalue())
+        self.assertNotIn('unexpected error', err.getvalue())
+
+    def test_hint_shows_non_ascii_paths_verbatim(self):
+        root = self.base / '文档' / '根'
+        root.mkdir(parents=True)
+        _, did = cid_did()
+        running = RunningDaemon(str(root), did, socket_name=str(self.base / 'unicode-s')).start()
+        self.addCleanup(running.stop)
+        target = root / '消息.md'
+        target.write_text('not a filed relay')
+        rc, out, err = self.run_cli(self.empty, 'show', str(target), '--root', str(root))
+        self.assertEqual((rc, out), (1, b''))
+        self.assertTrue(err.startswith('E-PATH-ESCAPE\n'), err)
+        self.assertIn(f'hint: {target} is inside the relay root {root}; pass 消息.md, '
+                      f'with --root {root} or from a directory inside the root', err)
+
+    def test_no_hint_when_the_target_is_root_relative(self):
+        (self.root / 'unfiled.md').write_text('not a filed relay')
+        rc, out, err = self.run_cli(self.root, 'show', 'unfiled.md')
+        self.assertEqual((rc, out), (1, b''))
+        self.assertTrue(err.startswith('E-PATH-ESCAPE\n'), err)
+        self.assertIn('no filed relay is unfiled.md', err)
+        self.assertNotIn('hint:', err)
