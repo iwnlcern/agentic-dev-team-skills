@@ -144,8 +144,11 @@ class TestDraftShapeAdmission(unittest.TestCase):
         self.assertEqual(cutover['imported'], [f.relay_path])
 
     def test_shape_is_checked_before_parse_draft(self):
-        raw = admission.body('SITREP').replace(b'SUBJECT: test candidate',
-                                              'SUBJECT: a\u2028b'.encode())
+        raw = admission.body('SITREP').replace(b'ROLE: Pair Planner',
+                                              'ROLE: a\u2028b'.encode())
+        with self.assertRaises(errors.EngineError) as parse_error:
+            envelope.parse_draft(raw.decode())
+        self.assertEqual(parse_error.exception.code, 'E-HEADER')
         path = Path(self.f.root.path, '.engine/drafts/p.planner/order.md')
         path.parent.mkdir(parents=True)
         path.write_bytes(raw)
@@ -171,9 +174,12 @@ class TestDraftShapeAdmission(unittest.TestCase):
         fields, _ = jcs.parse_record(base64.b64decode(parent.bundle_result['bundle_b64']))
         clean = base64.b64decode(fields['ruling_body_b64']).decode()
         lines = clean.splitlines(keepends=True)
-        index = next(i for i,line in enumerate(lines) if line.startswith('SUBJECT:'))
-        lines[index] = 'SUBJECT: a\u2028b\n'
+        index = next(i for i,line in enumerate(lines) if line.startswith('ROLE:'))
+        lines[index] = 'ROLE: a\u2028b\n'
         raw = ''.join(lines).encode()
+        with self.assertRaises(errors.EngineError) as parse_error:
+            envelope.parse_draft(raw.decode())
+        self.assertEqual(parse_error.exception.code, 'E-HEADER')
         changed = dict(fields, ruling_body_b64=base64.b64encode(raw).decode(),
                        ruling_content_digest=hashlib.sha256(raw).hexdigest())
         before = child.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
