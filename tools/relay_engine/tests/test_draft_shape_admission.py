@@ -79,7 +79,7 @@ class TestDraftShapeAdmission(unittest.TestCase):
                           b'SUBJECT: test candidate\n```\nCYCLE_TERMINUS: withdrawn\n')
         self.assert_refused(raw, lambda: self.f.handler(raw, sid='open', edge=grant['path']))
         closed = admission.body('SITREP', 'operator', ident='fence-cycle',
-                                content='```\nCYCLE_TERMINUS: withdrawn\n```')
+                                content='```\nCYCLE_TERMINUS: withdrawn\n```').replace(b'FINAL_GIT_STATUS_SHORT: clean\n\n', b'FINAL_GIT_STATUS_SHORT: clean\n')
         self.f.handler(closed, sid='closed', edge=grant['path'])
         self.assertTrue(authority.check(self.f.ledger, self.f.root, grant['path'],
                                         'p.implementer', 'merge')['allowed'])
@@ -142,3 +142,43 @@ class TestDraftShapeAdmission(unittest.TestCase):
         self.assertEqual(receipt['census']['malformed'], [bad])
         cutover = migrate.cutover(f.ledger, f.root, result['receipt'])
         self.assertEqual(cutover['imported'], [f.relay_path])
+
+    def test_shape_is_checked_before_parse_draft(self):
+        raw = admission.body('SITREP').replace(b'SUBJECT: test candidate',
+                                              'SUBJECT: a\u2028b'.encode())
+        path = Path(self.f.root.path, '.engine/drafts/p.planner/order.md')
+        path.parent.mkdir(parents=True)
+        path.write_bytes(raw)
+        with mock.patch.object(client, 'request', wraps=client.request) as request:
+            self.assert_refused(raw, lambda: client.submit(
+                self.f.root.path, '.engine/drafts/p.planner/order.md',
+                '.engine/seats/p.planner/occ.key'))
+            request.assert_not_called()
+        # Build valid request metadata from a clean body, then replace just the
+        # bytes and supplied envelope to exercise a check-skipping client.
+        args = self.f.args(admission.body('SITREP'))
+        args['body_b64'] = base64.b64encode(raw).decode()
+        args['envelope'] = {}
+        self.assert_refused(raw, lambda: daemon._submit_handler(self.f.ledger, self.f.root, args))
+        parent = adoption.TestAdoptedSupersession()
+        parent.setUp()
+        self.addCleanup(parent.tearDown)
+        child = fixtures.LedgerFixture()
+        child.setUp()
+        self.addCleanup(child.tearDown)
+        child.initialize()
+        ledger.establish_run_identity(child.ledger, 'child', base64.b64decode(parent.record_result['record_b64']))
+        fields, _ = jcs.parse_record(base64.b64decode(parent.bundle_result['bundle_b64']))
+        clean = base64.b64decode(fields['ruling_body_b64']).decode()
+        lines = clean.splitlines(keepends=True)
+        index = next(i for i,line in enumerate(lines) if line.startswith('SUBJECT:'))
+        lines[index] = 'SUBJECT: a\u2028b\n'
+        raw = ''.join(lines).encode()
+        changed = dict(fields, ruling_body_b64=base64.b64encode(raw).decode(),
+                       ruling_content_digest=hashlib.sha256(raw).hexdigest())
+        before = child.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
+        with self.assertRaises(errors.EngineError) as caught:
+            supersede.adopt_ruling(child.ledger, child.root, jcs.frame_record(changed))
+        self.assertEqual(caught.exception.code, 'E-DRAFT-SHAPE')
+        self.assertIn('U+2028', caught.exception.cause)
+        self.assertEqual(child.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
