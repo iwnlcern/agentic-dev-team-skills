@@ -156,6 +156,8 @@ class TestParity(unittest.TestCase):
                 self.assertEqual(native_process_violations(source + "\n" + added), [expected])
 
     def test_native_cross_root_launches_only_git(self):
+        from relay_engine.tests import xroot_narrow_corpus as corpus
+        self.enterContext(corpus.budget(rules))
         commands = []
         original = rules._xroot_start_git
 

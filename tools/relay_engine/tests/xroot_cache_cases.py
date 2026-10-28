@@ -39,10 +39,12 @@ def make(home, graph=None):
 
 
 @contextmanager
-def budget(module, seconds=600):
+def budget(module, seconds=float('inf')):
+    # This helper also runs concurrently: never replace the module ContextVar.
     token = module._XROOT_BUDGET.set((time.monotonic()+seconds, []))
     try:
-        yield
+        with corpus.unbounded_selectors():
+            yield
     finally:
         module._XROOT_BUDGET.reset(token)
 

@@ -4098,6 +4098,8 @@ def xroot_classify(repo: Path) -> XrootNamespace | None:
     token = _XROOT_MODE.set(None)
     try:
         _xroot_classification_deadline()
+        if 'GIT_CONFIG' in os.environ:
+            return None
         try:
             configured = xroot_git(repo, 'config', '--type=bool', '--get', 'core.useReplaceRefs', clean_stderr=True)
         except XrootAxisError as exc:

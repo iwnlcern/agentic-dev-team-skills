@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from relay_engine import rules
+from relay_engine.tests import xroot_narrow_corpus as corpus
 from relay_engine.tests.xroot_b9_cases import _object_tree
 import xrootfixgen as xf
 
@@ -19,13 +20,16 @@ class TestXrootReader(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
         xf._init_repo(self.repo)
+        self.enterContext(corpus.unbounded_selectors())
+        token = rules._XROOT_BUDGET.set((float("inf"), []))
+        self.addCleanup(rules._XROOT_BUDGET.reset, token)
 
     def tree(self, files):
         return _object_tree(self.repo, files)
 
     def reader(self, deadline=None):
         self.assertTrue(hasattr(rules, 'XrootBatchReader'), 'ordered batch reader is missing')
-        return rules.XrootBatchReader(self.repo, deadline or time.monotonic()+5)
+        return rules.XrootBatchReader(self.repo, float("inf") if deadline is None else deadline)
 
     def read(self, files):
         return rules.xroot_relays(self.repo, self.tree(files))
@@ -65,7 +69,7 @@ class TestXrootReader(unittest.TestCase):
         blob = xf._literal_object(self.repo, 'blob', b'abc')
         calls = 0
         real_read = os.read
-        with self.reader(time.monotonic()+600) as reader:
+        with self.reader() as reader:
             def read(fd, size):
                 nonlocal calls
                 if fd == reader._output:
@@ -83,7 +87,7 @@ class TestXrootReader(unittest.TestCase):
         # A large permitted body must not accumulate as unframed read-ahead.
         payload = b'x'*(3*65536+17)
         blob = xf._literal_object(self.repo, 'blob', payload)
-        with self.reader(time.monotonic()+600) as reader:
+        with self.reader() as reader:
             self.assertTrue(hasattr(reader, '_read_ahead'), 'bounded transport buffer missing')
             real_read = os.read
             observed = []
@@ -164,7 +168,7 @@ class TestXrootReader(unittest.TestCase):
         rules.xroot_git(self.repo, 'update-ref', 'refs/replace/'+original, replacement)
         for no_replace, expected in ((False, b'replacement'), (True, b'original')):
             with self.subTest(no_replace=no_replace):
-                with rules.XrootBatchReader(self.repo, time.monotonic()+5, no_replace=no_replace) as reader:
+                with rules.XrootBatchReader(self.repo, float("inf"), no_replace=no_replace) as reader:
                     reader.request(original+'^{blob}')
                     self.assertEqual(('blob', expected), reader.next_response())
 
@@ -350,14 +354,20 @@ class TestXrootReader(unittest.TestCase):
         self.assertTrue(hasattr(rules,'XrootBatchReader'))
         original = rules.XrootBatchReader
         queued = []
+        pending = []
         subtree = self.tree({'x.md':'x'})
         class Observed(original):
             def request(self, spec):
                 queued.append(spec)
+                pending.append(spec)
                 return super().request(spec)
             def next_response(self):
                 if len(queued)>1:
                     self_outer.assertIn(subtree+'^{tree}',queued)
+                # The noncandidate a.md is ignored; expire at the blocked
+                # subtree's consumption, independently of machine speed.
+                if pending.pop(0) == subtree+'^{tree}':
+                    self.deadline = time.monotonic()-1
                 return super().next_response()
         self_outer=self
         # A FIFO loose object makes the later Git read block until killed.
@@ -458,7 +468,7 @@ class TestXrootReader(unittest.TestCase):
         cases = materialize(self.repo/'cases', only=[k for k in CASES if not k.startswith('T')])
         for label, case in cases.items():
             with self.subTest(case=label):
-                actual, elapsed = self.verify_case(case, budget_seconds=600)
+                actual, elapsed = self.verify_case(case, budget_seconds=float("inf"))
                 for path in ('pair', 'direct'):
                     self.assert_governing(label, actual, baseline, lifted, path, elapsed, lifted_deadline=True)
                 if label in ('F-depth-2500', 'G2-non-utf8-blob'):
@@ -471,7 +481,7 @@ class TestXrootReader(unittest.TestCase):
     def test_deep_tree_reaches_depth_refusal(self):
         from relay_engine.tests.xroot_b9_cases import materialize
         case = materialize(self.repo/'deep', only=['F-depth-2500'])['F-depth-2500']
-        actual, elapsed = self.verify_case(case, budget_seconds=600)
+        actual, elapsed = self.verify_case(case, budget_seconds=float("inf"))
         self.assertEqual(dict(axis='repository', detail='DESIGN_SOURCE_ROOT exceeds maximum tree depth 256'), actual)
         # A genuinely blocked tree still reaches its own deadline.
         tree = self.tree({'x.md':'x'})
@@ -490,7 +500,7 @@ class TestXrootReader(unittest.TestCase):
         baseline, lifted = self.captures()
         for label, case in materialize(self.repo/'limits', only=['C1-over-count-20001', 'M1-over-trees-20001']).items():
             with self.subTest(case=label):
-                actual, elapsed = self.verify_case(case, budget_seconds=600)
+                actual, elapsed = self.verify_case(case, budget_seconds=float("inf"))
                 for path in ('pair', 'direct'):
                     self.assert_governing(label, actual, baseline, lifted, path, elapsed, lifted_deadline=True)
 

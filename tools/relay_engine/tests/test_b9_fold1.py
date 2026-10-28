@@ -61,15 +61,18 @@ class TestFoldReplacement(unittest.TestCase):
                         try:
                             for module in self.modules:
                                 with self.subTest(backend=backend, target=target, shape=shape,
-                                                  module=module.__name__), cc.budget(module):
+                                                  module=module.__name__), corpus.budget(module):
                                     self.assertIsNone(module.xroot_classify(repo))
                                     answer = verify(module, consumer, case.declaration)
-                                    self.assertIsNotNone(answer['axis'])
+                                    self.assertEqual(dict(origin='authority-population', review='authority-population',
+                                                          tree='repository', design='byte', commit='commit')[target], answer['axis'])
                                     with mock.patch.object(authority, 'rules', module), \
                                          mock.patch.object(authority, 'datetime', cc.FixedDateTime):
                                         answers = cc.whole_answers(case.declaration)
                                     for route, result in answers.items():
                                         self.assertFalse(result['allowed'], route)
+                                        expected = 'lineage-incomplete' if target in ('origin', 'review') else 'could-not-evaluate'
+                                        self.assertEqual(['authority.'+expected], sorted(result['reasons']), route)
                         finally:
                             if shape == 'symbolic':
                                 xf._git(repo, 'symbolic-ref', '--delete', ref)
@@ -97,20 +100,24 @@ class TestFoldReplacement(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='fold-stderr-') as temporary:
             home = Path(temporary)
             case = cc.make(home/'foreign')
+            # Exercise exit 0, not the separately guarded missing-key exit 1.
+            xf._git(case.repository, 'config', 'core.useReplaceRefs', 'true')
             consumer = home/'consumer'
             xf._init_repo(consumer)
             real_git = shutil.which('git')
             wrapper = home/'bin'
             wrapper.mkdir()
             script = wrapper/'git'
-            script.write_text('#!/bin/sh\ncase "$*" in *"replace -l"*) echo warning >&2;; esac\nexec "'+
-                              real_git+'" "$@"\n')
-            script.chmod(0o755)
-            for module in self.modules:
-                with self.subTest(module=module.__name__), cc.budget(module), \
-                     mock.patch.dict(os.environ, {'PATH':str(wrapper)+os.pathsep+os.environ['PATH']}):
-                    self.assertIsNone(module.xroot_classify(case.repository))
-                    self.assertIsNone(verify(module, consumer, case.declaration)['axis'])
+            for query in ('replace -l', 'config --type=bool', 'rev-parse --show-toplevel --git-common-dir'):
+                script.write_text('#!/bin/sh\ncase "$*" in *"'+query+'"*) echo warning >&2;; esac\nexec "'+
+                                  real_git+'" "$@"\n')
+                script.chmod(0o755)
+                for module in self.modules:
+                    with self.subTest(module=module.__name__, query=query), cc.budget(module), \
+                         mock.patch.dict(os.environ, {'PATH':str(wrapper)+os.pathsep+os.environ['PATH']}):
+                        self.assertIsNone(module.xroot_classify(case.repository))
+                        self.assertIsNone(verify(module, consumer, case.declaration)['axis'])
+
 
 
 class TestFoldProcess(unittest.TestCase):
@@ -132,24 +139,25 @@ class TestFoldProcess(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='fold-close-') as temporary:
             repo = cc.make(Path(temporary)/'foreign').repository
             for module in self.modules:
-                with self.subTest(module=module.__name__), ExitStack() as cleanup:
-                    readers = [module.XrootBatchReader(repo, time.monotonic()+600) for _ in range(2)]
-                    for reader in readers:
-                        cleanup.callback(reader.close)
-                    close = readers[0].close
-                    def failing_close():
-                        close()
-                        raise RuntimeError('first close failed')
-                    with mock.patch.object(readers[0], 'close', side_effect=failing_close):
-                        with self.assertRaisesRegex(RuntimeError, 'first close failed'):
-                            with module.xroot_operation():
-                                module._XROOT_READERS.get().update(enumerate(readers))
-                    for reader in readers:
-                        self.assertIsNotNone(reader._process.poll())
-                        self.assertTrue(reader._process.stdin.closed)
-                        self.assertTrue(reader._process.stdout.closed)
-                        with self.assertRaises(ChildProcessError):
-                            os.waitpid(reader.pid, os.WNOHANG)
+                for position in range(2):
+                    with self.subTest(module=module.__name__, position=position), ExitStack() as cleanup:
+                        readers = [module.XrootBatchReader(repo, time.monotonic()+600) for _ in range(2)]
+                        for reader in readers:
+                            cleanup.callback(reader.close)
+                        close = readers[position].close
+                        def failing_close():
+                            close()
+                            raise RuntimeError('first close failed')
+                        with mock.patch.object(readers[position], 'close', side_effect=failing_close):
+                            with self.assertRaisesRegex(RuntimeError, 'first close failed'):
+                                with module.xroot_operation():
+                                    module._XROOT_READERS.get().update(enumerate(readers))
+                        for reader in readers:
+                            self.assertIsNotNone(reader._process.poll())
+                            self.assertTrue(reader._process.stdin.closed)
+                            self.assertTrue(reader._process.stdout.closed)
+                            with self.assertRaises(ChildProcessError):
+                                os.waitpid(reader.pid, os.WNOHANG)
 
     def test_idle_stdin_hangup_waits_without_cpu_spin(self):
         import sys
@@ -163,15 +171,48 @@ class TestFoldProcess(unittest.TestCase):
                 with self.subTest(module=module.__name__), \
                      mock.patch.dict(os.environ, {'PATH':str(home)+os.pathsep+os.environ['PATH']}):
                     wall = time.monotonic()
-                    cpu = time.process_time()
+                    cpu = time.thread_time()
                     with module.XrootBatchReader(home, wall+2) as reader:
                         with self.assertRaises(module.XrootAxisError) as caught:
                             reader.next_response()
                         self.assertEqual('capacity', caught.exception.axis)
                         self.assertIn('Git batch reader timed out', caught.exception.detail)
                     elapsed = time.monotonic()-wall
-                    used = time.process_time()-cpu
+                    used = time.thread_time()-cpu
                     self.assertLess(used, elapsed/4, (used, elapsed))
+
+
+    def test_stdin_hangup_still_receives_stdout(self):
+        import sys
+        import time
+        with tempfile.TemporaryDirectory(prefix='fold-hup-response-') as temporary:
+            home = Path(temporary)
+            script = home/'git'
+            # The child waits for the parent's release after stdin is closed.
+            # No scheduling assumption is needed to establish the hang-up.
+            script.write_text('#!'+sys.executable+'\nimport os,time\nos.close(0)\n'
+                              'open("closed", "w").close()\n'
+                              'while not os.path.exists("release"): time.sleep(0.001)\n'
+                              'os.write(1, b"'+('1'*40)+' blob 2\\nok\\n")\n'
+                              'time.sleep(20)\n')
+            script.chmod(0o755)
+            # Git is launched with -C, which this fake must implement itself.
+            script.write_text(script.read_text().replace('import os,time', 'import os,time,sys\nos.chdir(sys.argv[2])'))
+            for module in self.modules:
+                with self.subTest(module=module.__name__), cc.budget(module), \
+                     mock.patch.dict(os.environ, {'PATH':str(home)+os.pathsep+os.environ['PATH']}):
+                    with module.XrootBatchReader(home, float("inf")) as reader:
+                        while not (home/'closed').exists():
+                            time.sleep(0.001)
+                        try:
+                            reader._wait()
+                            (home/'release').touch()
+                            response = reader.next_response()
+                        except module.XrootAxisError as exc:
+                            self.fail('stdin hang-up discarded pending stdout: '+str(exc))
+                        self.assertEqual(('blob', b'ok'), response)
+                (home/'closed').unlink(missing_ok=True)
+                (home/'release').unlink(missing_ok=True)
 
 
 class TestFoldCache(unittest.TestCase):
@@ -311,9 +352,8 @@ class TestFoldCache(unittest.TestCase):
                     self.assertGreater(len(hits), 1)
                     for at in (1, len(hits)):
                         calls, expired = [0], [False]
-                        real_clock = time.monotonic
                         def clock():
-                            return real_clock() + (1200 if expired[0] else 0)
+                            return 6 if expired[0] else 0
                         def hit(key):
                             value = get(key)
                             self.assertIsNotNone(value)
@@ -322,7 +362,7 @@ class TestFoldCache(unittest.TestCase):
                             return value
                         with self.subTest(module=module.__name__, hit=at), \
                              mock.patch.object(cache, 'get', side_effect=hit), \
-                             mock.patch.object(module.time, 'monotonic', side_effect=clock), \
+                             mock.patch.object(module.time, 'monotonic', side_effect=clock), cc.budget(module, 5), \
                              mock.patch.object(module.XrootBatchReader, 'request',
                                                side_effect=AssertionError('warm expiry requested batch')):
                             answer = verify(module, consumer, case.declaration)

@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 from relay_engine import rules, ledger
 from relay_engine.tests import xroot_reference as ref
+from relay_engine.tests import xroot_narrow_corpus as corpus
 from relay_engine.tests.xroot_b9_cases import _object_tree
 import xrootfixgen as xf
 
@@ -19,8 +20,7 @@ class TestXrootNarrow(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
         xf._init_repo(self.repo)
-        token = rules._XROOT_BUDGET.set((time.monotonic()+600, []))
-        self.addCleanup(rules._XROOT_BUDGET.reset, token)
+        self.enterContext(corpus.budget(rules))
 
     def tree(self, files):
         return _object_tree(self.repo, files)
@@ -107,7 +107,6 @@ class TestXrootNarrow(unittest.TestCase):
                 result = self.compare(self.tree(forbidden))
                 self.assertEqual('capacity', result[0]); self.assertIn(limit, result[1])
         # A real 20,001-candidate root exercises the shared fixture's lint caller.
-        from relay_engine.tests.capture_xroot_baseline import LiftedBudget
         def prepare(_root, repo, fields):
             original = xf._git(repo, 'rev-parse', 'HEAD:relays')
             raw = xf._git(repo, 'cat-file', 'tree', original, text=False)
@@ -120,7 +119,7 @@ class TestXrootNarrow(unittest.TestCase):
                                      + xf._tree_entry(b'40000', b'relays', relays))
             xf._replace(fields, 'DESIGN_SOURCE_COMMIT', xf._literal_commit(repo, tree))
         _, root, _, _ = xf._build_case(self.repo/'capacity', 'candidate-count', prepare=prepare)
-        with mock.patch.object(rules, '_XROOT_BUDGET', LiftedBudget(rules._XROOT_BUDGET)):
+        with corpus.budget(rules):
             result = rules.lint_relay_root(root)
         self.assertEqual(1, len(result.errors))
         self.assertIn('verification: capacity:', result.errors[0])
@@ -269,20 +268,31 @@ class TestXrootNarrow(unittest.TestCase):
             outcomes = []
             requested = []
             original_reader = rules.XrootBatchReader
+            original_git = rules.xroot_git
             class Observed(original_reader):
+                def __init__(self, *args, **kwargs):
+                    self.queued = []
+                    super().__init__(*args, **kwargs)
                 def request(self, spec):
                     requested.append(spec)
+                    self.queued.append(spec)
                     return super().request(spec)
+                def next_response(self):
+                    if self.queued.pop(0) == subtree+'^{tree}':
+                        self.deadline = time.monotonic()-1
+                    return super().next_response()
+            def expired_tree(repo, *args, **kwargs):
+                if args == ('cat-file', 'tree', subtree):
+                    kwargs['deadline'] = time.monotonic()-1
+                return original_git(repo, *args, **kwargs)
             for walk in (rules.xroot_relays, ref.xroot_reference_relays):
-                # Lift the semantic ordering arm; the other arm is an explicit
-                # blocked-object deadline control, not a performance assertion.
-                seconds = 600 if name.startswith('DESIGN-') else 0.2
-                token = rules._XROOT_BUDGET.set((time.monotonic()+seconds, []))
-                try:
-                    with mock.patch.object(rules, 'XrootBatchReader', Observed) if walk is rules.xroot_relays else nullcontext():
-                        outcomes.append(self.outcome(tree, walk))
-                finally:
-                    rules._XROOT_BUDGET.reset(token)
+                # Expire only at consumption of the blocked subtree. Request-ahead
+                # must not preempt the earlier invalid candidate's deciding error.
+                fault = (mock.patch.object(rules, 'XrootBatchReader', Observed)
+                         if walk is rules.xroot_relays else
+                         mock.patch.object(rules, 'xroot_git', side_effect=expired_tree))
+                with corpus.budget(rules), fault:
+                    outcomes.append(self.outcome(tree, walk))
             with self.subTest(name=name):
                 self.assertEqual(outcomes[0], outcomes[1])
                 if name.startswith('DESIGN-'):

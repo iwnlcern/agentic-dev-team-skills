@@ -49,7 +49,8 @@ class TestXrootCache(unittest.TestCase):
         self.clock = mock.patch.object(authority, 'datetime', cc.FixedDateTime)
         self.clock.start()
         self.addCleanup(self.clock.stop)
-        token = rules._XROOT_BUDGET.set((time.monotonic()+600, []))
+        self.enterContext(corpus.unbounded_selectors())
+        token = rules._XROOT_BUDGET.set((float("inf"), []))
         self.addCleanup(rules._XROOT_BUDGET.reset, token)
 
     def verify(self, case=None, module=rules):

@@ -67,7 +67,9 @@ class TestAuthorityB9Ancestors(unittest.TestCase):
             f.add('PLAN-REVIEW','p.implementer','p.planner','review',
                   'PARENT_DISPATCH_ID: nearest\nPLAN_LOCK_ID: PL\n'+pin+'\nVERDICT: approve','')
             grant = f.add(ident='grant',extra='PARENT_DISPATCH_ID: review\nPLAN_LOCK_ID: PL')
-            yield f,grant,carriers,plan
+            from relay_engine.tests import xroot_narrow_corpus as corpus
+            with corpus.budget(rules):
+                yield f,grant,carriers,plan
         finally:
             f.tearDown()
 

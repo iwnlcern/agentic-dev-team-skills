@@ -195,22 +195,26 @@ class TestJudging(unittest.TestCase):
         foreign, commit, digest = xrootfixgen._foreign_repo(self.root)
         fields = xrootfixgen._plan_fields(foreign, commit, digest)
         clean = xrootfixgen._render(fields).encode()
-        self.assertFalse(self.family(clean, 'external.could-not-evaluate'))
+        from relay_engine.tests import xroot_narrow_corpus as corpus
+        with corpus.budget(rules):
+            self.assertFalse(self.family(clean, 'external.could-not-evaluate'))
         xrootfixgen._fifo_object(self.root, foreign, fields)
         xrootfixgen._replace(fields, 'DESIGN_LOCK_ID', 'designs/d1.md')
         fields += [('PLAN_LOCK_ID', 'plans/p1.md'), ('PLAN_SOURCE_REPO', str(foreign)),
                    ('PLAN_SOURCE_COMMIT', 'a' * 40)]
         raw = xrootfixgen._render(fields).encode()
         spawned = []
+        now = [0]
         real_spawn = rules._xroot_start_git
         def record(*args, **kwargs):
             process = real_spawn(*args, **kwargs)
             spawned.append(process.pid)
+            if any('a'*40 in str(arg) for arg in args[0]):
+                now[0] = 6
             return process
-        start = time.monotonic()
-        with mock.patch.object(rules, '_xroot_start_git', side_effect=record):
-            findings = self.judge(raw, deadline=start + 0.5)
-        self.assertLess(time.monotonic() - start, 1.5)
+        with mock.patch.object(rules.time, 'monotonic', side_effect=lambda: now[0]), \
+             mock.patch.object(rules, '_xroot_start_git', side_effect=record):
+            findings = self.judge(raw, deadline=5)
         external = [f for f in findings if f.id == 'external.could-not-evaluate']
         self.assertEqual({f.params['gate'] for f in external},
                          {'cross-root-design', 'cross-root-DESIGN_LOCK_ID', 'cross-root-PLAN_LOCK_ID'})

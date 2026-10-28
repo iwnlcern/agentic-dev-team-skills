@@ -28,6 +28,11 @@ class TestAuthorityB9(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
         self.case = cc.make(self.home/'valid')
+        # These two tests own a scripted finite clock; other assertions decide
+        # semantic answers and must not be replaced by machine-load deadlines.
+        if self._testMethodName not in {'test_external_deadline_detail_wording',
+                                        'test_post_review_deadline_never_allows'}:
+            self.enterContext(corpus.budget(rules))
 
     @contextmanager
     def direct_chain(self, declarations):

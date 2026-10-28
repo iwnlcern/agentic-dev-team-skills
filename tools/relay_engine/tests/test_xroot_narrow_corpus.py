@@ -1,5 +1,5 @@
 """Whole-answer differential over the shared and synthetic foreign corpus."""
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -62,8 +62,19 @@ class TestXrootNarrowCorpus(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         cls.rows = corpus.materialize(Path(cls.temp.name))
 
+    @contextmanager
+    def semantic_budget(self, label, declaration):
+        original = rules.xroot_git
+        def git(repo, *args, **kwargs):
+            if label == 'xroot/X43-fifo-object-timeout' and any(
+                    declaration['DESIGN_SOURCE_COMMIT'] in arg for arg in args):
+                kwargs['deadline'] = time.monotonic()-1
+            return original(repo, *args, **kwargs)
+        with corpus.budget(rules), mock.patch.object(rules, 'xroot_git', side_effect=git):
+            yield
+
     def observed(self, label, root, declaration, reference_walk=False):
-        with corpus.budget(rules, 5 if label=='xroot/X43-fifo-object-timeout' else 600):
+        with self.semantic_budget(label, declaration):
             with reference.xroot_reference_walk() if reference_walk else nullcontext():
                 answer = dict(verify=corpus.verify(rules, root, declaration),
                               authority=corpus.authority_answers(declaration))
@@ -91,7 +102,7 @@ class TestXrootNarrowCorpus(unittest.TestCase):
         self.assertEqual('b8d87ebe15fbd3f5e06f1d0112fccad832acd1b1', self.capture['source_commit'])
         self.assertEqual({row[0] for row in self.rows}, set(self.capture['cases']))
         for label, root, declaration in self.rows:
-            with self.subTest(case=label), corpus.budget(rules, 5 if label=='xroot/X43-fifo-object-timeout' else 600):
+            with self.subTest(case=label), self.semantic_budget(label, declaration):
                 verdict = corpus.domain(root, declaration, reference.xroot_old_domain)
                 print('old-domain', label, json.dumps(verdict, sort_keys=True), flush=True)
                 actual = corpus.verify(rules, root, declaration)

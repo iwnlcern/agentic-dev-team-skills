@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from relay_engine import rules, judging
+from relay_engine.tests import xroot_narrow_corpus as corpus
 from relay_engine.tests import test_authority_fold10 as a10, test_judging as jt
 from relay_engine.tests.test_xroot import _standalone
 from relay_engine.tests.xroot_b9_cases import materialize, _object_tree, DESIGN, REVIEW, O, R
@@ -22,6 +23,7 @@ class TestXrootDeadline(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.repo = self.home/'consumer'
         xf._init_repo(self.repo)
+        self.enterContext(corpus.unbounded_selectors())
         self.case = materialize(self.home/'cases', only=['control-allow'])['control-allow']
 
     @contextmanager
@@ -97,7 +99,7 @@ class TestXrootDeadline(unittest.TestCase):
             commit = xf._literal_commit(self.repo, _object_tree(self.repo, graph))
             base = dict(self.case.declaration, DESIGN_SOURCE_REPO=str(self.repo), DESIGN_SOURCE_COMMIT=commit)
             for order in (('d1','d2'), ('d2','d1')):
-                with self.subTest(conflict=conflict, order=order), rules.xroot_fact_cache(rules.XrootFactCache()), self.operation(), self.budget(time.monotonic()+5), \
+                with self.subTest(conflict=conflict, order=order), rules.xroot_fact_cache(rules.XrootFactCache()), self.operation(), self.budget(float("inf")), \
                      mock.patch.object(rules, 'XrootBatchReader', wraps=rules.XrootBatchReader) as reader:
                     for doc in order:
                         declaration = dict(base, DESIGN_DOC_ID=doc)
@@ -202,7 +204,7 @@ class TestXrootDeadline(unittest.TestCase):
             value = original(*args)
             readers.append(value)
             return value
-        with self.operation(), self.budget(time.monotonic()+5), mock.patch.object(rules,'XrootBatchReader',side_effect=reader):
+        with self.operation(), self.budget(float("inf")), mock.patch.object(rules,'XrootBatchReader',side_effect=reader):
             for tree in trees:
                 rules.xroot_relays(self.repo,tree)
             self.assertEqual(1,len(readers))

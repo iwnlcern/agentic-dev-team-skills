@@ -80,9 +80,16 @@ class TestXrootSpawn(unittest.TestCase):
                     observations = []
                     with self.observe_start(module, observations):
                         if kind == 'query':
-                            with self.assertRaises(module.XrootAxisError) as caught:
-                                module.xroot_git(self.repo, 'cat-file', 'blob', oid,
-                                                 deadline=time.monotonic()+0.5)
+                            now = [0]
+                            original_start = module._xroot_start_git
+                            def expire_after_spawn(*args, **kwargs):
+                                process = original_start(*args, **kwargs)
+                                now[0] = 6
+                                return process
+                            with mock.patch.object(module.time, 'monotonic', side_effect=lambda: now[0]), \
+                                 mock.patch.object(module, '_xroot_start_git', side_effect=expire_after_spawn):
+                                with self.assertRaises(module.XrootAxisError) as caught:
+                                    module.xroot_git(self.repo, 'cat-file', 'blob', oid, deadline=5)
                             self.assertEqual('capacity', caught.exception.axis)
                         else:
                             with module.XrootBatchReader(self.repo, time.monotonic()+5):

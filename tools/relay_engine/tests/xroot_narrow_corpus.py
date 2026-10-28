@@ -1,5 +1,8 @@
 """Reusable real-object corpus and whole-answer observations for narrow reads."""
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
+import math
+import selectors
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -10,20 +13,54 @@ import xrootfixgen as xf
 
 
 class Budget:
-    def __init__(self, original, seconds=600):
+    def __init__(self, original, seconds=float('inf')):
         self.original, self.seconds = original, seconds
     def set(self, value):
-        return self.original.set((time.monotonic()+self.seconds, value[1]))
+        return self.original.set((0 if value[0] == 0 else time.monotonic()+self.seconds, value[1]))
     def get(self):
         return self.original.get()
     def reset(self, token):
         self.original.reset(token)
 
 
+_SELECTOR_LOCK = threading.Lock()
+_SELECTOR_SCOPES = 0
+_SELECTOR_PATCHES = None
+
+
 @contextmanager
-def budget(module, seconds=600):
-    with mock.patch.object(module, '_XROOT_BUDGET', Budget(module._XROOT_BUDGET, seconds)):
-        token = module._XROOT_BUDGET.set((0, []))
+def unbounded_selectors():
+    """Translate the test-only infinite deadline to the selector's no-timeout API.
+
+    Production deadlines and explicitly injected finite deadlines are untouched.
+    Patching both implementations also covers the pinned posix_spawn oracle.
+    """
+    global _SELECTOR_SCOPES, _SELECTOR_PATCHES
+    # Worker scopes may overlap without nesting. Only the last exit restores
+    # the shared methods; each worker's actual budget remains a ContextVar.
+    with _SELECTOR_LOCK:
+        if not _SELECTOR_SCOPES:
+            _SELECTOR_PATCHES = ExitStack()
+            for cls in {selectors.PollSelector, selectors.DefaultSelector}:
+                original = cls.select
+                def select(self, timeout=None, original=original):
+                    return original(self, None if timeout is not None and math.isinf(timeout) else timeout)
+                _SELECTOR_PATCHES.enter_context(mock.patch.object(cls, 'select', select))
+        _SELECTOR_SCOPES += 1
+    try:
+        yield
+    finally:
+        with _SELECTOR_LOCK:
+            _SELECTOR_SCOPES -= 1
+            if not _SELECTOR_SCOPES:
+                _SELECTOR_PATCHES.close()
+                _SELECTOR_PATCHES = None
+
+
+@contextmanager
+def budget(module, seconds=float('inf')):
+    with unbounded_selectors(), mock.patch.object(module, '_XROOT_BUDGET', Budget(module._XROOT_BUDGET, seconds)):
+        token = module._XROOT_BUDGET.set((time.monotonic()+seconds, []))
         try:
             yield
         finally:

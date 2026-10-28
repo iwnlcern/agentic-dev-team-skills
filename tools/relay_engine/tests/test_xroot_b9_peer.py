@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from relay_engine import rules
+from relay_engine.tests import xroot_narrow_corpus as corpus
 from relay_engine.tests.test_xroot import _standalone
 from relay_engine.tests.xroot_b9_cases import OLD, CASES
 import xrootfixgen as xf
@@ -29,7 +30,7 @@ class TestB9Peer(unittest.TestCase):
             repo, commit, digest = xf._foreign_repo(Path(td), mutate)
             declaration = dict(xf._plan_fields(repo, commit, digest))
             for module in (rules, self.live):
-                with self.subTest(copy=module.__name__, origin=origin, review=review):
+                with self.subTest(copy=module.__name__, origin=origin, review=review), corpus.budget(module):
                     if allowed:
                         try:
                             selected = module.xroot_verify(Path(td), declaration)

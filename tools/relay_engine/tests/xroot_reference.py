@@ -16,7 +16,7 @@ def candidate(name: bytes) -> bool:
 def xroot_reference_relays(repo: Path, root_tree: str) -> list[rules.XrootRelay]:
     relays = []
     stack = [('tree', root_tree, b'', b'', 0)]
-    progress = dict(stopped_at='tree ', relays_read=0, trees_read=0,
+    progress = dict(stopped_at='tree .', relays_read=0, trees_read=0,
                     bytes_read=0, entries_read=0)
     def read(kind, oid, axis):
         try:
@@ -28,7 +28,7 @@ def xroot_reference_relays(repo: Path, root_tree: str) -> list[rules.XrootRelay]
     retained_bytes = 0
     while stack:
         kind, oid, path, name, depth = stack.pop()
-        progress['stopped_at'] = kind+' '+path.decode('utf-8', 'surrogateescape')
+        progress['stopped_at'] = kind+' '+(path.decode('utf-8', 'surrogateescape') or '.')
         if kind == 'tree':
             if depth > rules.XROOT_MAX_TREE_DEPTH:
                 raise rules.XrootAxisError('repository', f'DESIGN_SOURCE_ROOT exceeds maximum tree depth {rules.XROOT_MAX_TREE_DEPTH}')

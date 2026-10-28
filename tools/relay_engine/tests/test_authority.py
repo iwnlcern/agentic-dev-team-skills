@@ -331,6 +331,8 @@ class TestAuthority(LedgerFixture):
         self.assertTrue(self.check(seat='p.pair-implementer')['allowed'])
 
     def test_cross_root_design_uses_pinned_lineage_and_shared_budget(self):
+        from relay_engine.tests import xroot_narrow_corpus as corpus
+        self.enterContext(corpus.budget(rules))
         import tempfile
         import xrootfixgen
         from relay_engine import paths
