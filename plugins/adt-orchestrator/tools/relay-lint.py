@@ -1083,7 +1083,6 @@ def check_filename_timestamp(
 
 
 _DRAFT_SHAPE_HEADER = re.compile(r"^([A-Z][A-Z0-9_]*):[ \t]*(.*)$")
-LINE_BREAKS = frozenset('\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029')
 SEPARATORS = {
     '\v': ('U+000B', 'LINE TABULATION'),
     '\f': ('U+000C', 'FORM FEED'),
@@ -1095,8 +1094,25 @@ SEPARATORS = {
     '\u2029': ('U+2029', 'PARAGRAPH SEPARATOR'),
 }
 LATE_CONTROL_KEYS = ('SUPERSEDES', 'CYCLE_TERMINUS', 'CYCLE_REOPEN')
-_SHAPE_FENCE = re.compile(r'^ {0,3}(`{3,}|~{3,})')
-_SHAPE_PREFIX = re.compile(r'^[ \t]*(?:(?:[-*+]|\d{1,9}[.)]|>)[ \t]+|>)*[ \t]*')
+# Unicode 16.0.0: Zs and Default_Ignorable_Code_Point, pinned by R237.
+_SHAPE_ZS_RANGES = ((0x20, 0x20), (0xA0, 0xA0), (0x1680, 0x1680),
+                    (0x2000, 0x200A), (0x202F, 0x202F), (0x205F, 0x205F),
+                    (0x3000, 0x3000))
+_SHAPE_IGNORABLE_RANGES = (
+    (0xAD, 0xAD), (0x34F, 0x34F), (0x61C, 0x61C), (0x115F, 0x1160),
+    (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+_SHAPE_IGNORABLE = frozenset(chr(c) for a, b in _SHAPE_IGNORABLE_RANGES
+                             for c in range(a, b + 1))
+SHAPE_SET_ASIDE = _SHAPE_IGNORABLE | frozenset(
+    chr(c) for a, b in ((9, 9),) + _SHAPE_ZS_RANGES for c in range(a, b + 1))
+_SHAPE_W = '[' + re.escape(''.join(sorted(SHAPE_SET_ASIDE))) + ']'
+_SHAPE_PREFIX = re.compile(r'^' + _SHAPE_W + r'*(?:(?:[-*+]|\d{1,9}[.)]|>)' +
+                           _SHAPE_W + r'+|>)*' + _SHAPE_W + r'*')
+_SHAPE_OPEN = re.compile(r'^ {0,3}(`{3,})[^`]*$|^ {0,3}(~{3,}).*$')
+_SHAPE_CLOSE = re.compile(r'^ {0,3}(`{3,}|~{3,})[ \t]*$')
 
 
 class DraftShape(NamedTuple):
@@ -1146,26 +1162,41 @@ def _shape_block(lines):
 
 
 def _shape_outside(lines, block):
-    """Return indexed non-header lines outside closed fences (R217)."""
-    ordinary_openers = set()
-    while True:
-        result = []
-        fence = None
-        opener = None
-        for index, line in enumerate(lines):
-            if block[0] <= index < block[1]:
-                continue
-            match = None if index in ordinary_openers else _SHAPE_FENCE.match(line)
-            if fence is None:
-                if match:
-                    fence, opener = match.group(1), index
-                else:
-                    result.append((index, line))
-            elif match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
-                fence = None
-        if fence is None:
-            return result
-        ordinary_openers.add(opener)
+    """Quote closed fences on each side of the header block in linear time.
+
+    A reverse pass records whether each opener has any later matching closer.
+    The forward pass then opens only those fences and uses their first closer.
+    An unclosed opener is ordinary, exactly as in R217's repeated demotion,
+    without rescanning the suffix for each such opener.
+    """
+    result = []
+    for start, end in ((0, block[0]), (block[1], len(lines))):
+        opens = {}
+        closes = {}
+        longest = {'`': 0, '~': 0}
+        for index in range(end - 1, start - 1, -1):
+            line = lines[index]
+            opening = _SHAPE_OPEN.fullmatch(line)
+            if opening:
+                run = opening.group(1) or opening.group(2)
+                if len(run) <= longest[run[0]]:
+                    opens[index] = (run[0], len(run))
+            closing = _SHAPE_CLOSE.fullmatch(line)
+            if closing:
+                run = closing.group(1)
+                closes[index] = (run[0], len(run))
+                longest[run[0]] = max(longest[run[0]], len(run))
+        active = None
+        for index in range(start, end):
+            if active is not None:
+                closing = closes.get(index)
+                if closing and closing[0] == active[0] and closing[1] >= active[1]:
+                    active = None
+            elif index in opens:
+                active = opens[index]
+            else:
+                result.append((index, lines[index]))
+    return result
 
 
 def draft_shape(text: str) -> DraftShape | None:
@@ -1184,7 +1215,10 @@ def draft_shape(text: str) -> DraftShape | None:
     candidates = [] if separator is None else [separator]
     for index, line in outside:
         column = _SHAPE_PREFIX.match(line).end()
-        match = _DRAFT_SHAPE_HEADER.fullmatch(line[column:])
+        tail = line[column:]
+        key, colon, value = tail.partition(':')
+        key = ''.join(char for char in key if char not in _SHAPE_IGNORABLE)
+        match = _DRAFT_SHAPE_HEADER.fullmatch(key + colon + value)
         if match is None:
             continue
         key = match.group(1)

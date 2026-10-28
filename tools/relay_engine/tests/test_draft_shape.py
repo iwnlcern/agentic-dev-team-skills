@@ -1,5 +1,7 @@
 """Behavioral contract for draft admission shapes and their diagnostic locations."""
 import itertools
+import random
+import re
 import unittest
 
 from relay_engine import authority, envelope as E, rules
@@ -50,6 +52,181 @@ def diagnostic_texts():
         yield draft(body=fence + '\nSUPERSEDES: x\n')
     yield draft(body='SUPERSEDES: x\u2028')
     yield draft('MERGE-GATE', body='DISPATCH MERGE\n\nVERDICT: no\u2029')
+
+
+    # Every remaining predicate input from the original contract, including
+    # negative controls, locations, long-key rendering and raw handler inputs.
+    for char in CHARS:
+        yield draft().replace('SUBJECT: shape', 'SUBJECT: a'+char+'b')
+        yield draft(body='abc'+char+'tail')
+        yield draft(prefix='title'+char+'\n')
+    for ending in ('\n', '\r\n', '\r'):
+        yield draft(body='> ordinary note\n').replace('\n', ending)
+    for prefix, extra in (('', '- list\n'), ('', 'prose\n'), ('# title\n\n', ''),
+                          ('\ufeff# title\n\n', ''), ('\n\n', '')):
+        yield draft(prefix=prefix, extra=extra, body='SUPERSEDES: x\n')
+    for key in KEYS:
+        yield draft(extra='prose\n'+key+': x\n')
+        yield draft(prefix='    '+key+': x\n')
+        yield draft(body=key+': x\n').replace('\n', '\r\n')
+        yield draft(extra=key+': x\n')
+        for fence in ('```', '~~~'):
+            yield draft(body=fence+'\n'+key+': x\n'+fence)
+            yield draft(extra=fence+'\n'+key+': x\n'+fence+'\n')
+        for quoted in ('`'+key+': x`', 'This mentions '+key+': x'):
+            yield draft(body=quoted)
+    yield draft(extra='```\nCYCLE_TERMINUS: withdrawn\nFINAL_GIT_STATUS_SHORT: clean\n')
+    yield draft(body='```\nSUPERSEDES: x')
+    yield draft(body='```\n~~~\nSUPERSEDES: x')
+    yield draft('MERGE-GATE', extra='VERDICT: approved\n', body='DISPATCH MERGE')
+    yield draft('MERGE-GATE', body='DISPATCH MERGE')
+    yield draft('MERGE-GATE', body='RECOMMENDED_VERDICT: merge — merge PR #8')
+    yield draft(body='VERDICT: no')
+    yield draft('MERGE-GATE', body='```\nDISPATCH MERGE\n```\nVERDICT: no')
+    yield draft('MERGE-GATE', body='- DISPATCH MERGE\n\nVERDICT: no')
+    prefix = 'PHASE: SITREP\n\n'+'\n'*6
+    yield prefix+'SUPERSEDES: x\n'+'\n'*4+'a\u2028'
+    yield prefix+'a\u2028'+'\n'*4+'SUPERSEDES: x'
+    for char in ('\u2028', '\x85'):
+        yield draft(body='SUPERSEDES: x'+char)
+    yield draft('MERGE-GATE', body='DISPATCH MERGE\n\nVERDICT: merge-blocked\u2029')
+    from relay_engine.tests import test_admission_judging as admission
+    for length in (64,65,4096):
+        key = 'A'*(length-len('_VERDICT'))+'_VERDICT'
+        yield draft('MERGE-GATE', body='DISPATCH MERGE\n\n'+key+': no\n')
+        if length != 64:
+            yield admission.body('MERGE-GATE','operator',content='DISPATCH MERGE\n\n'+key+': no').decode()
+    for cases in (fence_region_cases(), fence_form_cases(), wide_cases(), preserved_cases()):
+        for case in cases:
+            yield case[0]
+    yield from scan_cases()
+    yield from linear_cases()
+
+
+def fence_region_cases():
+    for opener, closer in (('~~~text', '~~~'), ('```text', '```')):
+        for key in ('CYCLE_TERMINUS', 'SUPERSEDES'):
+            yield draft(prefix=opener+'\n', body=key+': withdrawn\n'+closer), 'late-control', key
+        yield draft('MERGE-GATE', prefix=opener+'\n',
+                    body='DISPATCH MERGE\nVERDICT: merge-blocked\n'+closer), 'late-verdict', 'VERDICT'
+
+
+def fence_form_cases():
+    for body, kind in (
+            ('```\n```x\n```\nSUPERSEDES: x\n```', 'late-control'),
+            ('```a`b\nSUPERSEDES: x\n```', 'late-control'),
+            ('~~~a`b\nSUPERSEDES: x\n~~~', None),
+            ('```\nSUPERSEDES: x\n``` \t', None)):
+        yield draft(body=body), kind
+
+
+def wide_cases():
+    for char, marker, verdict in itertools.product(
+            '\u00a0\u2003\u3000\u200b\u061c\u3164\ufeff', ('', '- '), (False, True)):
+        prefix = marker + char
+        key = 'VERDICT' if verdict else 'SUPERSEDES'
+        body = ('DISPATCH MERGE\n' if verdict else '') + prefix + key + ': x'
+        yield draft('MERGE-GATE' if verdict else 'SITREP', body=body), key, len(prefix)+1
+    yield draft(prefix='\ufeffSUPERSEDES: x\n'), 'SUPERSEDES', 2
+    for key in ('SUPER\u200bSEDES', 'SUPERSEDES\U000e0041'):
+        yield draft(body=key+': x'), 'SUPERSEDES', 1
+    yield draft(body='\u200b```\nSUPERSEDES: x\n```'), 'SUPERSEDES', 1
+    yield draft(body='**SUPERSEDES:** x'), None, None
+
+
+def preserved_cases():
+    for ending in ('\r\n', '\r'):
+        yield draft(body='abc\u2028tail').replace('\n', ending), 'separator', 13
+        yield draft('MERGE-GATE', body='DISPATCH MERGE\nVERDICT: no').replace('\n', ending), 'late-verdict', 14
+    yield draft(body='SUPERSEDES: x').replace('\n', '\r'), 'late-control', 13
+    for middle in ('~~~', '```'):
+        for after in (False, True):
+            body = '````\n'+middle+'\n'+('' if after else 'SUPERSEDES: x\n')+'````\n'
+            if after:
+                body += 'SUPERSEDES: x'
+            yield draft(body=body), 'late-control' if after else None, 16 if after else None
+    for indent in ('   ', '    '):
+        yield draft(body=indent+'```\nSUPERSEDES: x\n'+indent+'```'), ('late-control' if len(indent)==4 else None), 14
+    for marker, kind in (('1) ', 'late-control'), ('-', None)):
+        yield draft(body=marker+'SUPERSEDES: x'), kind, 13
+    for phase, token in (('MERGE-GATE', 'DISPATCH MERGE \t'), ('MERGE-GATE \t', 'DISPATCH MERGE')):
+        yield draft(phase, body=token+'\nVERDICT: no'), 'late-verdict', 14
+    yield draft('IMPL', extra='MERGE_AUTHORIZATION: approved\n', body='VERDICT: no'), None, None
+    yield draft('MERGE-GATE', body='DISPATCH MERGE\nXVERDICT: no'), None, None
+    yield 'abc\u2028tail', 'separator', 1
+    yield draft('MERGE-GATE', body='```\nDISPATCH MERGE\n```\nVERDICT: no'), None, None
+    yield draft('MERGE-GATE', body='VERDICT: no'), None, None
+
+
+def scan_cases():
+    yield from (text for text, _, _ in fence_region_cases())
+    rng = random.Random(297)
+    lines = ['```', '````', '`````', '~~~', '~~~~', '~~~~~', '```lang',
+             '~~~`info', '```bad`info', '```x', '~~~ \t', 'SUPERSEDES: x', 'ordinary', '']
+    for _ in range(200):
+        yield draft(prefix='\n'.join(rng.choices(lines, k=8))+'\n',
+                    body='\n'.join(rng.choices(lines, k=16)))
+
+
+def linear_cases():
+    for k, n in ((32, 3200), (600, 600000), (1200, 1200000)):
+        yield draft(body='\n'.join('`'*length for length in range(k+2, 2, -1))+'\n'*n)
+
+
+def repeated_outside(lines, block):
+    """Independent R217 reference; deliberately repeated, not the fast algorithm."""
+    result = []
+    opening = re.compile(r'^ {0,3}(`{3,})[^`]*$|^ {0,3}(~{3,}).*$')
+    closing = re.compile(r'^ {0,3}(`{3,}|~{3,})[ \t]*$')
+    for indices in (range(block[0]), range(block[1], len(lines))):
+        demoted = set()
+        while True:
+            visible, active, start = [], None, None
+            for i in indices:
+                if active is not None:
+                    close = closing.fullmatch(lines[i])
+                    if close and close[1][0] == active[0] and len(close[1]) >= len(active):
+                        active = None
+                else:
+                    op = opening.fullmatch(lines[i]) if i not in demoted else None
+                    if op:
+                        active, start = op[1] or op[2], i
+                    else:
+                        visible.append((i, lines[i]))
+            if active is None:
+                result.extend(visible)
+                break
+            demoted.add(start)
+    return result
+
+
+class CountedLines(list):
+    def __init__(self, lines, visits):
+        super().__init__(lines)
+        self.visits = visits
+
+    def __iter__(self):
+        for line in super().__iter__():
+            self.visits[0] += 1
+            yield line
+
+    def __getitem__(self, index):
+        result = super().__getitem__(index)
+        if isinstance(index, slice):
+            self.visits[0] += len(result)
+            return CountedLines(result, self.visits)
+        self.visits[0] += 1
+        return result
+
+
+class CountedText(str):
+    def __new__(cls, text, visits):
+        obj = super().__new__(cls, text)
+        obj.visits = visits
+        return obj
+
+    def splitlines(self, keepends=False):
+        return CountedLines(super().splitlines(keepends), self.visits)
 
 
 class TestDraftShape(unittest.TestCase):
@@ -260,3 +437,64 @@ class TestDraftShape(unittest.TestCase):
             error = errors.error_for('E-DRAFT-SHAPE', variant='boot-field', field=field)
             self.assertEqual(error.code, 'E-DRAFT-SHAPE')
             self.assertIn(field, error.cause)
+
+    def test_a_fence_cannot_span_the_header_block(self):
+        for text, kind, key in fence_region_cases():
+            with self.subTest(kind=kind, key=key):
+                shape = E.draft_shape(text)
+                self.assertIsNotNone(shape)
+                self.assertEqual((shape.kind, shape.key), (kind, key))
+                self.assertEqual(text.splitlines()[shape.line-1], key+(': merge-blocked' if key=='VERDICT' else ': withdrawn'))
+
+    def test_fence_lines_take_commonmark_forms(self):
+        for text, kind in fence_form_cases():
+            with self.subTest(text=text):
+                shape = E.draft_shape(text)
+                self.assertEqual(None if shape is None else shape.kind, kind)
+
+    def test_wide_and_ignorable_characters_are_set_aside(self):
+        for text, key, column in wide_cases():
+            with self.subTest(text=text):
+                shape = E.draft_shape(text)
+                if key is None:
+                    self.assertIsNone(shape)
+                else:
+                    self.assertIsNotNone(shape)
+                    self.assertEqual((shape.key, shape.column), (key, column))
+                    self.assertEqual(shape.kind, 'late-verdict' if key=='VERDICT' else 'late-control')
+
+    def test_set_aside_table(self):
+        from relay_engine.tests.test_parity import _standalone
+        ranges = ((9,9),(32,32),(0xa0,0xa0),(0x1680,0x1680),(0x2000,0x200a),
+                  (0x202f,0x202f),(0x205f,0x205f),(0x3000,0x3000),
+                  (0xad,0xad),(0x34f,0x34f),(0x61c,0x61c),(0x115f,0x1160),
+                  (0x17b4,0x17b5),(0x180b,0x180f),(0x200b,0x200f),(0x202a,0x202e),
+                  (0x2060,0x206f),(0x3164,0x3164),(0xfe00,0xfe0f),(0xfeff,0xfeff),
+                  (0xffa0,0xffa0),(0xfff0,0xfff8),(0x1bca0,0x1bca3),
+                  (0x1d173,0x1d17a),(0xe0000,0xe0fff))
+        expected = frozenset(chr(c) for a,b in ranges for c in range(a,b+1))
+        self.assertEqual(E.SHAPE_SET_ASIDE, expected)
+        self.assertEqual(_standalone().SHAPE_SET_ASIDE, expected)
+
+    def test_one_pass_equals_the_repeated_scan(self):
+        from unittest import mock
+        for text in scan_cases():
+            with self.subTest(text=text):
+                actual = E.draft_shape(text)
+                with mock.patch.object(E, '_shape_outside', repeated_outside):
+                    expected = E.draft_shape(text)
+                self.assertEqual(actual, expected)
+
+    def test_fence_scan_is_linear(self):
+        for text in linear_cases():
+            visits = [0]
+            self.assertIsNone(E.draft_shape(CountedText(text, visits)))
+            self.assertLessEqual(visits[0], 12*len(text.splitlines()))
+
+    def test_previously_unpinned_rules(self):
+        for text, kind, line in preserved_cases():
+            with self.subTest(text=text):
+                shape = E.draft_shape(text)
+                self.assertEqual(None if shape is None else shape.kind, kind)
+                if kind:
+                    self.assertEqual(shape.line, line)
