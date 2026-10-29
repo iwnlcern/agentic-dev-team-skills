@@ -281,6 +281,24 @@ def _opener_parent(ledger, rows, item):
                  and row.seq < item.seq), None)
 
 
+
+def _walked_ancestors(ledger, rows, plan) -> tuple[list[Evidence], bool]:
+    """Walk historical edges, stopping before any ambiguous declaration."""
+    ancestors = []
+    item = plan
+    while (parent_id := item.fields.get('PARENT_DISPATCH_ID')):
+        if rules.STRUCTURED_ABSENT_RE.match(parent_id):
+            break
+        parent = _opener_parent(ledger, rows, item)
+        if parent is None:
+            break
+        if _conflict(parent):
+            return ancestors, True
+        ancestors.append(parent)
+        item = parent
+    return ancestors, False
+
+
 def _parent(ledger, rows, item, phase, sender):
     candidates = [row for row in rows if row.seq < item.seq
                   and row.fields.get('DISPATCH_ID') == item.fields.get('PARENT_DISPATCH_ID')
@@ -482,53 +500,103 @@ def read_artifact(root, locator):
     return snapshots[0]
 
 
-def _external_evidence(root, lineage, reasons, *, pair_lineage=True):
-    # One deadline covers every Git query across every declared external edge.
+def _xroot_reason(axis: str, detail: str) -> str:
+    if axis in ('authority-population', 'authority-parent', 'authority-owner',
+                'authority-verdict', 'ordering', 'ambiguity',
+                'review-approval', 'foreign-control-character'):
+        return 'authority.lineage-incomplete'
+    if axis == 'byte' and 'does not match' in detail:
+        return 'authority.artifact-changed'
+    return 'authority.could-not-evaluate'
+
+
+def _external_evidence(root, lineage, reasons, *, pair_lineage=True, ancestors=(), external=None):
+    # Gate identities live only for this check; object facts have their own cache.
+    external = external if external is not None else []
     token = rules._XROOT_BUDGET.set((time.monotonic()+5, []))
-    seen = set()
+    seen = {}
+
+    def record(exc, declaration, gate, item, lock=None):
+        declared = {key: value for key, value in declaration.items() if key in item.fields}
+        entry = rules._xroot_external_entry(exc, declared, gate, [item.path], lock)
+        entry['reason'] = _xroot_reason(exc.axis, exc.detail)
+        reasons.add(entry['reason'])
+        external.append(entry)
+        return entry
+
     try:
-        for item in lineage:
+        for item in (*lineage, *ancestors):
             if _xroot_engaged(item.text):
-                declaration = rules.xroot_declaration(item.fields,item.text)
-                identity = tuple((key,declaration.get(key)) for key in rules.XROOT_REQUIRED)
+                declaration = rules.xroot_declaration(item.fields, item.text)
+                identity = tuple((key, declaration.get(key)) for key in rules.XROOT_REQUIRED)
                 if identity in seen:
-                    continue
-                seen.add(identity)
-                if any(not declaration.get(key) for key in rules.XROOT_REQUIRED):
-                    reasons.add('authority.could-not-evaluate')
-                    continue
-                try:
-                    _origin, review, population = rules.xroot_verify(root,declaration)
-                    if pair_lineage:
-                        if not _approved(review):
-                            reasons.add('authority.lineage-incomplete')
-                        if any(_control_refusal(row.text) for row in population
-                               if _foreign_selection_relevant(row.text, declaration['DESIGN_DOC_ID'])):
-                            reasons.add('authority.lineage-incomplete')
-                except rules.XrootAxisError as exc:
-                    if exc.axis == 'byte' and 'does not match' in exc.detail:
-                        reasons.add('authority.artifact-changed')
-                    elif exc.axis in ('authority','authority-population','ambiguity'):
-                        reasons.add('authority.lineage-incomplete')
+                    for entry in seen[identity]:
+                        entry['relays'].append(item.path)
+                else:
+                    refused = seen[identity] = []
+                    missing = [key for key in rules.XROOT_REQUIRED if not declaration.get(key)]
+                    if missing:
+                        exc = rules.XrootAxisError('declaration', 'missing '+', '.join(missing))
+                        refused.append(record(exc, declaration, 'cross-root-design', item))
                     else:
-                        reasons.add('authority.could-not-evaluate')
-            if any(_h27(item.text,key) for key in ('PLAN_SOURCE_REPO','PLAN_SOURCE_COMMIT')):
-                result=rules.LintResult()
-                rules.xroot_plan_gate(root,root/item.path,item.fields,item.text,result)
-                if result.errors:
-                    reasons.add('authority.could-not-evaluate')
+                        with rules._xroot_edge():
+                            try:
+                                _origin, review, population = rules.xroot_verify(root, declaration)
+                                if pair_lineage:
+                                    rules._xroot_stage('review-approval')
+                                    rules._xroot_checkpoint()
+                                    if not _approved(review):
+                                        raise rules.XrootAxisError('review-approval',
+                                            f'selected review {review.name} is not an authority approval')
+                                    rules._xroot_checkpoint()
+                                    rules._xroot_stage('foreign-control-character')
+                                    if any(_control_refusal(row.text) for row in population
+                                           if _foreign_selection_relevant(row.text, declaration['DESIGN_DOC_ID'])):
+                                        raise rules.XrootAxisError('foreign-control-character',
+                                            'selection-relevant foreign carrier contains a control character')
+                                else:
+                                    rules._xroot_stage('authority-completion')
+                                rules._xroot_checkpoint()
+                            except rules.XrootAxisError as exc:
+                                exc = rules._xroot_reframe(rules._xroot_error_deadline(exc), declaration)
+                                refused.append(record(exc, declaration, 'cross-root-design', item))
+                            except (OSError, ValueError, KeyError):
+                                exc = rules.XrootAxisError('repository', 'unexpected Git or object parse failure')
+                                refused.append(record(exc, declaration, 'cross-root-design', item))
+            # A repeated design identity must never skip this carrier's own locks.
+            if any(_h27(item.text, key) for key in ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT')):
+                result = rules.LintResult()
+                rules.xroot_plan_gate(root, root/item.path, item.fields, item.text, result)
+                entries = getattr(result, 'external', [])
+                if result.errors and not entries:
+                    keys = ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT')
+                    declaration = {key: item.fields.get(key, '').strip() for key in keys}
+                    conflicts = rules.xroot_field_conflicts(item.text, keys)
+                    missing = [key for key in keys if not declaration[key]]
+                    if conflicts:
+                        exc = rules.XrootAxisError('declaration', 'conflicting '+conflicts[0]+' values')
+                    elif missing:
+                        exc = rules.XrootAxisError('declaration', 'missing '+', '.join(missing))
+                    else:
+                        exc = rules.XrootAxisError('repository', 'unexpected Git or object parse failure')
+                    record(exc, declaration, 'plan-source', item)
+                for entry in entries:
+                    entry['relays'] = [item.path]
+                    entry['reason'] = _xroot_reason(entry['axis'], entry['detail'])
+                    reasons.add(entry['reason'])
+                    external.append(entry)
         if rules._XROOT_BUDGET.get()[1]:
             reasons.add('authority.could-not-evaluate')
-    except (OSError,ValueError,KeyError):
+    except (OSError, ValueError, KeyError):
         reasons.add('authority.could-not-evaluate')
     finally:
         rules._XROOT_BUDGET.reset(token)
 
-
 def check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     token = _PARSE_CACHE.set({})
     try:
-        return _check(ledger, root, relay_path, seat, action)
+        with rules.xroot_operation():
+            return _check(ledger, root, relay_path, seat, action)
     finally:
         _PARSE_CACHE.reset(token)
 
@@ -541,6 +609,7 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     grant = next((row for row in rows if row.path==relay_path),None)
     if grant is None:raise errors.error_for('E-HEADER', field='RELAY_PATH')
     reasons = set()
+    external = []
     targets = rules.split_addresses(grant.fields.get('TO'))
     if targets != [seat] or not rules.is_implementer_address(seat):
         reasons.add('authority.not-addressee')
@@ -562,6 +631,19 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     if not shape:
         reasons.add('authority.shape-absent')
     lineage=_lineage(rows,grant,seat,action,reasons,ledger)
+    ancestors = []
+    if not rules.from_is_direct_authority(grant.fields):
+        plan = next((row for row in lineage if row.fields.get('PHASE') == 'PLAN'), None)
+        if plan is not None:
+            walked, conflict = _walked_ancestors(ledger, rows, plan)
+            if conflict:
+                reasons.add('authority.header-conflict')
+            # Local design rows can already belong to the approval lineage.
+            lineage_seqs = {row.seq for row in lineage}
+            ancestors = [row for row in walked if row.seq not in lineage_seqs]
+            for row in ancestors:
+                if _control_refusal(row.text):
+                    reasons.add('authority.lineage-incomplete')
     for row in lineage:
         if (row is not grant and not rules.from_is_direct_authority(grant.fields)
                 and _control_refusal(row.text)):
@@ -577,10 +659,12 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
         reasons.add('authority.could-not-evaluate')
     else:
         _external_evidence(root_path,lineage,reasons,
-                           pair_lineage=not rules.from_is_direct_authority(grant.fields))
+                           pair_lineage=not rules.from_is_direct_authority(grant.fields),
+                           ancestors=ancestors, external=external)
         for locator,digest in sorted(required.items()):
             try:actual=hashlib.sha256(read_artifact(root_path,locator)).hexdigest()
             except (OSError,ValueError):reasons.add('authority.could-not-evaluate');continue
             if actual!=digest:reasons.add('authority.artifact-changed')
     return {'allowed':not reasons,'reasons':sorted(reasons),'relay':relay_path,
-            'seat':seat,'action':action,'checked_at':datetime.now().strftime('%Y%m%d-%H%M%S')}
+            'seat':seat,'action':action,'checked_at':datetime.now().strftime('%Y%m%d-%H%M%S'),
+            'external':external}

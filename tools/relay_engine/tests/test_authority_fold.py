@@ -2,7 +2,7 @@
 import hashlib
 import tempfile
 from pathlib import Path
-from relay_engine import authority, ledger
+from relay_engine import authority, ledger, rules
 from relay_engine.envelope import parse_draft
 from relay_engine.tests import test_authority as helpers
 from relay_engine.tests.test_ledger import LedgerFixture, WALL
@@ -120,6 +120,8 @@ class TestAuthorityFold(LedgerFixture):
                     self.assertTrue(self.check(grant,action='merge')['allowed'])
 
     def test_M4_changed_cross_root_bytes_deny_with_unchanged_control(self):
+        from relay_engine.tests import xroot_narrow_corpus as corpus
+        self.enterContext(corpus.budget(rules))
         import xrootfixgen
         with tempfile.TemporaryDirectory() as foreign:
             def complete_review(repo):
