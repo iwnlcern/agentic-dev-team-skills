@@ -1015,12 +1015,13 @@ def merge_claimed(text: str, fields: Dict[str, str]) -> bool:
         r"\bgit\s+merge\b",
     ]
     no_action_ref = re.match(
-        r"^ACTIONS_GIT_REF:\s*none\s+—\s+\S", action_ref_block, flags=re.IGNORECASE
+        r"^ACTIONS_GIT_REF:[ \t]*none[ \t]+—[ \t]+\S", action_ref_block, flags=re.IGNORECASE
     ) is not None
     field_claim = bool(action_ref_block.strip()) and not no_action_ref and any(
         re.search(pattern, scoped, flags=re.IGNORECASE) for pattern in field_patterns
     )
     canonical_surface = remove_named_block(operational, "ESCALATION_SCAN")
+    canonical_surface = remove_named_block(canonical_surface, "SUBJECT")
     canonical_claim = re.search(r"\bmerge\s*=\s*\S", canonical_surface, flags=re.IGNORECASE) is not None
     return field_claim or canonical_claim
 
@@ -1153,6 +1154,12 @@ def check_filename_timestamp(
         result.error(f"filename {msg}")
 
 
+def draft_shape_errors(text: str, *, separators_only: bool = False) -> list[str]:
+    from relay_engine import envelope
+    shape = envelope.first_separator(text) if separators_only else envelope.draft_shape(text)
+    return [] if shape is None else [envelope.shape_message(shape)]
+
+
 def lint_file(
     path: Path,
     *,
@@ -1178,6 +1185,8 @@ def lint_file(
     clean = sanitized_text(text)
     result = LintResult()
     fields = header_fields(text)
+    for message in draft_shape_errors(text):
+        result.error(message)
 
     if not template_mode:
         for _a5e in lock_digest_shape_errors(text):
@@ -1878,6 +1887,8 @@ def lint_relay_index(path: Path, *, audit: bool = False,
         text = snapshot.decode("utf-8")
     except UnicodeDecodeError:
         text = snapshot.decode("utf-8", errors="replace")
+    for message in draft_shape_errors(text, separators_only=True):
+        result.error(message)
     projection_is_verified = daemon_projection or (
         daemon_projection_digest is not None and
         hashlib.sha256(snapshot).hexdigest() == daemon_projection_digest)
@@ -4418,6 +4429,12 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                     record_context: Optional[dict] = None,
                     context_mode: Optional[str] = None,
                     history_audit: bool = False) -> LintResult:
+    path = Path(os.path.realpath(path))
+    if projection_digests is not None:
+        projection_digests = {
+            Path(os.path.realpath(key.parent)) / key.name: digest
+            for key, digest in projection_digests.items()
+        }
     result = LintResult()
     received_entries = record_context.get('entries', []) if isinstance(record_context, dict) else []
     if not isinstance(received_entries, list):
@@ -4456,7 +4473,7 @@ def lint_relay_root(path: Path, *, template_mode: bool = False,
                 index_files = []
         all_md = files + index_files
     else:
-        all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
+        all_md = sorted((p for p in path.rglob("*.md") if p.is_file() and (engine_root or ".engine" not in p.relative_to(path).parts)),
                         key=lambda p: relay_order_key(p, path))
         index_files = [p for p in all_md if p.name == "INDEX.md"]
         files = [p for p in all_md if p.name != "INDEX.md"]

@@ -340,6 +340,7 @@ class TestRecordIntegrityMatrix(unittest.TestCase):
                               ("dangling target", dangling)):
             with self.subTest(label=label), \
                     tempfile.TemporaryDirectory() as temporary:
+                temporary = os.path.realpath(temporary)
                 root = _copy_fixture(temporary, "suppressed")
                 context = _context(root)
                 relay = root / context["entries"][0]["path"]
@@ -538,6 +539,7 @@ class TestRecordTopology(unittest.TestCase):
 
     def test_root_escape_symlink_is_unfollowed(self):
         with tempfile.TemporaryDirectory() as temporary:
+            temporary = os.path.realpath(temporary)
             root = _copy_fixture(temporary, "suppressed")
             context = _context(root)
             outside = Path(temporary, "outside-secret")
@@ -692,6 +694,7 @@ class TestRecordTopology(unittest.TestCase):
 
     def test_top_level_index_symlink_never_reads_target_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
+            temporary = os.path.realpath(temporary)
             root = _copy_fixture(temporary, "suppressed")
             context = _context(root)
             outside = Path(temporary, "outside-projection")
@@ -713,6 +716,7 @@ class TestRecordTopology(unittest.TestCase):
 
     def test_top_level_index_swap_never_reads_target_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
+            temporary = os.path.realpath(temporary)
             root = _copy_fixture(temporary, "suppressed")
             context = _context(root)
             index = root / "INDEX.md"

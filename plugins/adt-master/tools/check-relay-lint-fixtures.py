@@ -6,8 +6,10 @@ harness noise; it does not call any LLM, network, subprocess, or git command.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -50,7 +52,7 @@ A5_EXPECTED = [
     ("file", "lockdigest/FB6a-info-opener.md", 0),
     ("file", "lockdigest/FB6b-backtick-info-nonopener.md", 1),
     ("file", "lockdigest/FB7-nbsp-pseudo-closer.md", 0),
-    ("file", "lockdigest/FB8-u2028-pseudo-closer.md", 0),
+    ("file", "lockdigest/FB8-u2028-pseudo-closer.md", 1),
     ("file", "lockdigest/FLD01-valid-shape.md", 0),
     ("file", "lockdigest/FLD04-digest-no-locator.md", 1),
     ("file", "lockdigest/FLD05-digest-short.md", 1),
@@ -72,7 +74,7 @@ A5_EXPECTED = [
     ("file", "lockdigest/FLD21-digestconflict-all-malformed.md", 1),
     ("file", "lockdigest/FLD22-locconflict-all-malformed.md", 1),
     ("file", "lockdigest/FLD23-missing-locator-digestconflict.md", 1),
-    ("file", "lockdigest/FLD24-u2028-field-decoy.md", 0),
+    ("file", "lockdigest/FLD24-u2028-field-decoy.md", 1),
     ("file", "lockdigest/LDM1-missing/01-plan-20260801-130000.md", 0),
     ("root", "lockdigest/LDM1-missing", 1),
     ("file", "lockdigest/LDM2-mismatch/.relays/v29/01-plan-20260801-130000.md", 0),
@@ -100,7 +102,7 @@ A5_EXPECTED = [
     ("index", "rootres/XR12-spaced-root", 0),
     ("index-rel", "rootres/XR13-norows-duplicate-markers", 1),
     ("index-rel", "rootres/XR14-norows-bad-root", 1),
-    ("index", "rootres/XR16-u2028-marker-decoy", 0),
+    ("index", "rootres/XR16-u2028-marker-decoy", 1),
     ("index-rel", "rootres/XR2-marked-missing-file", 1),
     ("index", "rootres/XR3-unmarked-unresolvable", 0),
     ("index", "rootres/XR4-duplicate-markers", 1),
@@ -130,7 +132,7 @@ A5_ERRORS = {
     "lockdigest/FB6a-info-opener.md": [],
     "lockdigest/FB6b-backtick-info-nonopener.md": ["PLAN_ARTIFACT value 'plans/fixture-plan' is not a bare filename stem", "PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
     "lockdigest/FB7-nbsp-pseudo-closer.md": [],
-    "lockdigest/FB8-u2028-pseudo-closer.md": [],
+    "lockdigest/FB8-u2028-pseudo-closer.md": ['line 20, column 4: U+2028 LINE SEPARATOR is a line break to some readers and ordinary text to others; use a newline there, or write the character as text, for example U+2028'],
     "lockdigest/FLD01-valid-shape.md": [],
     "lockdigest/FLD04-digest-no-locator.md": ["PLAN_SHA256 declared with no PLAN_ARTIFACT to locate the artifact"],
     "lockdigest/FLD05-digest-short.md": ["PLAN_SHA256 value 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a 64-hex lowercase sha256 digest"],
@@ -152,7 +154,7 @@ A5_ERRORS = {
     "lockdigest/FLD21-digestconflict-all-malformed.md": ["PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
     "lockdigest/FLD22-locconflict-all-malformed.md": ["PLAN_ARTIFACT carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present"],
     "lockdigest/FLD23-missing-locator-digestconflict.md": ["PLAN_SHA256 carries 2 distinct values across 2 occurrences; an authority-critical field is fail-closed unless exactly one distinct value is present", "PLAN_SHA256 declared with no PLAN_ARTIFACT to locate the artifact"],
-    "lockdigest/FLD24-u2028-field-decoy.md": [],
+    "lockdigest/FLD24-u2028-field-decoy.md": ['line 10, column 13: U+2028 LINE SEPARATOR is a line break to some readers and ordinary text to others; use a newline there, or write the character as text, for example U+2028'],
     "lockdigest/LDM1-missing/01-plan-20260801-130000.md": [],
     "lockdigest/LDM1-missing": ["01-plan-20260801-130000.md: PLAN_SHA256: no artifact resolves for stem 'no-such-stem' under plans/ at any probe root"],
     "lockdigest/LDM2-mismatch/.relays/v29/01-plan-20260801-130000.md": [],
@@ -180,7 +182,7 @@ A5_ERRORS = {
     "rootres/XR12-spaced-root": [],
     "rootres/XR13-norows-duplicate-markers": ["INDEX declares 2 root markers; at most one is permitted"],
     "rootres/XR14-norows-bad-root": ["root marker value 'no-such-dir' does not resolve to a directory"],
-    "rootres/XR16-u2028-marker-decoy": [],
+    "rootres/XR16-u2028-marker-decoy": ['line 4, column 11: U+2028 LINE SEPARATOR is a line break to some readers and ordinary text to others; use a newline there, or write the character as text, for example U+2028'],
     "rootres/XR2-marked-missing-file": ["line 3: file cell 'AUDIT-planner-20260801-130000.md' does not resolve under the declared root ."],
     "rootres/XR3-unmarked-unresolvable": [],
     "rootres/XR4-duplicate-markers": ["INDEX declares 2 root markers; at most one is permitted"],
@@ -219,6 +221,24 @@ A5_SEAM = {
     "lockdigest/RLD8-mixed-partition/.relays/v29": "lockdigest/RLD8-mixed-partition/cwd/plans/fixture-plan.md",
     "lockdigest/RLD9-read-seam/.relays/v29": "lockdigest/RLD9-read-seam/plans/fixture-plan.md",
 }
+
+class SeamIneffective(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def a5_private_seam(rel: str):
+    case = Path(*Path(rel).parts[:2])
+    with tempfile.TemporaryDirectory(prefix="relay-a5-seam-") as temporary:
+        private = Path(temporary)
+        shutil.copytree(FIXTURES / case, private / case)
+        seam = private / A5_SEAM[rel]
+        seam.chmod(0)
+        if os.access(seam, os.R_OK):
+            raise SeamIneffective(rel)
+        cwd_rel = A5_CWD.get(rel)
+        yield private / rel, (private / cwd_rel if cwd_rel else None)
+
 
 LIFECYCLE_EXPECTED = [
     ("root", "mastertier/MT34-foreign-design-kind-present", 0),
@@ -2271,35 +2291,33 @@ def main() -> int:
     for kind, rel, expected in EXPECTED:
         target = FIXTURES / rel
         cwd_rel = A5_CWD.get(rel)
-        seam_rel = A5_SEAM.get(rel)
-        old_cwd = os.getcwd()
-        if cwd_rel:
-            os.chdir(FIXTURES / cwd_rel)
-        if seam_rel:
-            os.chmod(FIXTURES / seam_rel, 0)
-            if os.access(FIXTURES / seam_rel, os.R_OK):
-                os.chmod(FIXTURES / seam_rel, 0o644)
+        working = FIXTURES / cwd_rel if cwd_rel else None
+        with contextlib.ExitStack() as stack:
+            if rel in A5_SEAM:
+                try:
+                    target, working = stack.enter_context(a5_private_seam(rel))
+                except SeamIneffective:
+                    print(f"{rel}: read seam ineffective in this environment (root?) FAIL")
+                    failed = True
+                    continue
+            old_cwd = os.getcwd()
+            try:
+                if working is not None:
+                    os.chdir(working)
+                if kind == "file":
+                    result = lint.lint_file(target)
+                elif kind == "file-root":
+                    result = lint.lint_file(target, artifact_root=FIXTURES / FILE_ROOT_OF[rel])
+                elif kind == "template":
+                    result = lint.lint_file(target, template_mode=True)
+                elif kind == "index":
+                    result = lint.lint_relay_index(target / "INDEX.md")
+                elif kind == "index-rel":
+                    result = lint.lint_relay_index(Path("INDEX.md"))
+                else:
+                    result = lint.lint_relay_root(target)
+            finally:
                 os.chdir(old_cwd)
-                print(f"{rel}: read seam ineffective in this environment (root?) FAIL")
-                failed = True
-                continue
-        try:
-            if kind == "file":
-                result = lint.lint_file(target)
-            elif kind == "file-root":
-                result = lint.lint_file(target, artifact_root=FIXTURES / FILE_ROOT_OF[rel])
-            elif kind == "template":
-                result = lint.lint_file(target, template_mode=True)
-            elif kind == "index":
-                result = lint.lint_relay_index(target / "INDEX.md")
-            elif kind == "index-rel":
-                result = lint.lint_relay_index(Path("INDEX.md"))
-            else:
-                result = lint.lint_relay_root(target)
-        finally:
-            if seam_rel:
-                os.chmod(FIXTURES / seam_rel, 0o644)
-            os.chdir(old_cwd)
         observed = 0 if result.ok else 1
         expected_errors = EXPECTED_ERROR_SET.get(rel)
         if expected_errors is not None:
