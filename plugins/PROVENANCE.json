@@ -10574,7 +10574,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/tools/relay_engine/roster.py",
-    "sha256": "2359d32197e64ed1fa6b0472303cc6abcd5773b05d4df8bc491a4ac0f6809ab1",
+    "sha256": "1393a35cc08d02829ae5d82eef66d2d657d8c104dccbae596c1f391189125e84",
     "source": "tools/relay_engine/roster.py"
   },
   {
@@ -21092,7 +21092,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/tools/relay_engine/roster.py",
-    "sha256": "2359d32197e64ed1fa6b0472303cc6abcd5773b05d4df8bc491a4ac0f6809ab1",
+    "sha256": "1393a35cc08d02829ae5d82eef66d2d657d8c104dccbae596c1f391189125e84",
     "source": "tools/relay_engine/roster.py"
   },
   {
@@ -31538,7 +31538,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/tools/relay_engine/roster.py",
-    "sha256": "2359d32197e64ed1fa6b0472303cc6abcd5773b05d4df8bc491a4ac0f6809ab1",
+    "sha256": "1393a35cc08d02829ae5d82eef66d2d657d8c104dccbae596c1f391189125e84",
     "source": "tools/relay_engine/roster.py"
   },
   {
