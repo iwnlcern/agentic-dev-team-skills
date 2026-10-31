@@ -114,3 +114,34 @@ class TestBootLineBreaks(unittest.TestCase):
                     self.assertEqual(f.ledger.execute('SELECT * FROM seat_events').fetchall(), events)
                 finally:
                     f.tearDown()
+
+    def test_boot_backstop_names_a_reference_showing_a_key(self):
+        # Scan refusal must happen before a boot relay or seat event is written.
+        for ref, stored, field in (
+                ('note SUPERSEDES: x', None, 'DISPATCH_ID'),
+                ('SUPERSEDES：x', None, 'DISPATCH_ID'),
+                ('a&colon;b CYCLE_REOPEN&#58; c', None, 'DISPATCH_ID'),
+                ('v297-b2-impl-6', 'see SUPERSEDES: x', 'COMMISSIONED_BY')):
+            with self.subTest(ref=ref, stored=stored):
+                f = fixtures.LedgerFixture()
+                f.setUp()
+                try:
+                    f.initialize()
+                    ledger.establish_run_identity(f.ledger, 'r')
+                    if stored:
+                        f.ledger.execute('INSERT INTO runs(run_id,commissioned_by) VALUES(?,?)', ('r', stored))
+                    before = f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0]
+                    events = f.ledger.execute('SELECT * FROM seat_events').fetchall()
+                    with self.assertRaises(errors.EngineError) as caught:
+                        seats.register(f.ledger, f.root, 'p.planner', 'Planner', ref)
+                    self.assertEqual(caught.exception.code, 'E-DRAFT-SHAPE')
+                    self.assertEqual(caught.exception.cause_key, 'error-draft-shape-boot-field-cause')
+                    self.assertIn(field, caught.exception.cause)
+                    self.assertEqual(caught.exception.remedy, "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line that shows no cycle or supersession key with a colon, or ask the operator to re-commission the root with a commissioning path on one line that shows none")
+                    self.assertEqual(list(Path(f.root.path, '.engine/seats/p.planner').glob('*.key')), [])
+                    self.assertEqual(f.ledger.execute('SELECT COUNT(*) FROM relays').fetchone()[0], before)
+                    self.assertEqual(f.ledger.execute('SELECT * FROM seat_events').fetchall(), events)
+                finally:
+                    f.tearDown()
+        result = seats.register(self.f.ledger, self.f.root, 'p.planner', 'Planner', 'v297-b2-impl-6')
+        self.assertTrue(Path(self.f.root.path, result['boot_relay']).is_file())

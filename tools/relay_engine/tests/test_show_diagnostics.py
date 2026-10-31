@@ -195,3 +195,18 @@ class TestShowDiagnostics(unittest.TestCase):
         self.assertTrue(err.startswith('E-PATH-ESCAPE\n'), err)
         self.assertIn('no filed relay is unfiled.md', err)
         self.assertNotIn('hint:', err)
+
+    def test_hint_guard_covers_path_resolution_only(self):
+        # A rendering failure must reach main's unexpected-error handler.
+        from relay_engine import strings
+        emit = strings.emit
+        def fail_hint(stream, key, *args, **kwargs):
+            if key == 'show-root-hint':
+                raise RuntimeError('hint rendering failed')
+            return emit(stream, key, *args, **kwargs)
+        err = io.StringIO()
+        with cwd(self.repo), patch.object(strings, 'emit', side_effect=fail_hint), contextlib.redirect_stderr(err):
+            rc = cli.main(['show', str(self.root / self.rel), '--root', str(self.root)])
+        self.assertEqual(rc, 1)
+        self.assertIn('E-PATH-ESCAPE', err.getvalue())
+        self.assertIn('unexpected error', err.getvalue())
