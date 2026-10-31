@@ -208,7 +208,7 @@ class TestFiniteReadStop(unittest.TestCase):
 
 class TestFailureStops(unittest.TestCase):
     def test_stop_escapes_domain_conversion(self):
-        import time
+        import signal
         from relay_engine.tests.xroot_test_stops import stop, TestStop
         for module in (rules,_standalone()):
             declaration={key:'value' for key in module.XROOT_REQUIRED}
@@ -217,36 +217,41 @@ class TestFailureStops(unittest.TestCase):
                  mock.patch.object(module,'xroot_declaration',return_value=declaration), \
                  mock.patch.object(module,'xroot_pair_plan_carrier_shape',return_value=(True,True)), \
                  mock.patch.object(module,'xroot_field_conflicts',return_value=[]), \
-                 mock.patch.object(module,'xroot_verify',side_effect=lambda *args:time.sleep(.1)):
+                 mock.patch.object(module,'xroot_verify',side_effect=lambda *args:signal.raise_signal(signal.SIGALRM)):
                 with self.assertRaises(TestStop):
-                    with stop(.01):
+                    with stop(120):
                         module.xroot_design_gate(Path('/tmp'),Path('/tmp/PLAN.md'),{},'',[],module.LintResult())
 
     def test_worker_waits_observe_failure_stop(self):
         import selectors
-        import time
         from concurrent.futures import ThreadPoolExecutor
-        from relay_engine.tests.xroot_test_stops import stop, TestStop
+        from relay_engine.tests.xroot_test_stops import stop, TestStop, _DEADLINE
         for kind in ('selector','sleep'):
             read,write=os.pipe()
+            release=threading.Event()
             def blocked():
-                with cc.budget(rules), stop(.02):
-                    if kind=='sleep':
-                        time.sleep(.2)
-                    else:
-                        with selectors.DefaultSelector() as selector:
-                            selector.register(read,selectors.EVENT_READ)
-                            selector.select(None)
-            # Release a broken selector guard so the RED witness cannot hang.
-            timer=threading.Timer(.2,lambda:os.write(write,b'x'))
+                with mock.patch.object(corpus.time,'sleep',lambda seconds:release.wait()), \
+                     cc.budget(rules), stop(120):
+                    token=_DEADLINE.set(0)
+                    try:
+                        if kind=='sleep':
+                            corpus.time.sleep(1)
+                        else:
+                            with selectors.DefaultSelector() as selector:
+                                selector.register(read,selectors.EVENT_READ)
+                                selector.select(None)
+                    finally:
+                        _DEADLINE.reset(token)
+            pool=ThreadPoolExecutor(max_workers=1)
             try:
-                with self.subTest(kind=kind),ThreadPoolExecutor(max_workers=1) as pool:
-                    timer.start()
-                    future=pool.submit(blocked)
+                with self.subTest(kind=kind):
                     with self.assertRaises(TestStop):
-                        future.result(timeout=2)
+                        pool.submit(blocked).result(timeout=120)
             finally:
-                timer.cancel();timer.join()
+                # Only a failed guard needs this release; it cannot make a pass.
+                release.set()
+                os.write(write,b'x')
+                pool.shutdown(wait=True)
                 os.close(read);os.close(write)
 
     def test_nested_default_does_not_erase_explicit_expiry(self):
@@ -265,11 +270,13 @@ class TestFailureStops(unittest.TestCase):
     def test_worker_stop_reaps_git_with_no_open_streams(self):
         import sys
         from concurrent.futures import ThreadPoolExecutor
-        from relay_engine.tests.xroot_test_stops import stop, TestStop
+        from relay_engine.tests.xroot_test_stops import stop, TestStop, _DEADLINE
         with tempfile.TemporaryDirectory() as temporary:
             home=Path(temporary)
+            gate=home/'gate'
+            os.mkfifo(gate)
             script=home/'git'
-            script.write_text('#!'+sys.executable+'\nimport os,time\nos.close(1)\nos.close(2)\ntime.sleep(2)\n')
+            script.write_text('#!'+sys.executable+'\nimport os\nos.close(1)\nos.close(2)\nf=os.open('+repr(str(gate))+',os.O_RDONLY)\nos.read(f,1)\n')
             script.chmod(0o755)
             for module in (rules,_standalone()):
                 children=[]
@@ -279,14 +286,28 @@ class TestFailureStops(unittest.TestCase):
                     children.append(child)
                     return child
                 def query():
-                    with cc.budget(module),stop(.2):
-                        module.xroot_git(home,'rev-parse','HEAD')
-                with self.subTest(module=module.__name__), \
-                     mock.patch.dict(os.environ,{'PATH':str(home)+os.pathsep+os.environ['PATH']}), \
-                     mock.patch.object(module,'_xroot_start_git',side_effect=start), \
-                     ThreadPoolExecutor(max_workers=1) as pool:
-                    with self.assertRaises(TestStop):
-                        pool.submit(query).result(timeout=120)
+                    with cc.budget(module),stop(120):
+                        guarded_sleep=module.time.sleep
+                        def expire_at_no_stream_wait(seconds):
+                            token=_DEADLINE.set(0)
+                            try:
+                                return guarded_sleep(seconds)
+                            finally:
+                                _DEADLINE.reset(token)
+                        with mock.patch.object(module.time,'sleep',expire_at_no_stream_wait):
+                            module.xroot_git(home,'rev-parse','HEAD')
+                pool=ThreadPoolExecutor(max_workers=1)
+                try:
+                    with self.subTest(module=module.__name__), \
+                         mock.patch.dict(os.environ,{'PATH':str(home)+os.pathsep+os.environ['PATH']}), \
+                         mock.patch.object(module,'_xroot_start_git',side_effect=start):
+                        with self.assertRaises(TestStop):
+                            pool.submit(query).result(timeout=120)
+                finally:
+                    fd=os.open(gate,os.O_RDWR|os.O_NONBLOCK)
+                    os.write(fd,b'x')
+                    pool.shutdown(wait=True)
+                    os.close(fd)
                 self.assertEqual(1,len(children))
                 self.assertIsNotNone(children[0].returncode)
                 with self.assertRaises(ChildProcessError):

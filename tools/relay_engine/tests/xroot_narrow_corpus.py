@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest import mock
 from relay_engine import rules
+from relay_engine.tests.xroot_test_stops import alarm_guard
 from relay_engine.tests import xroot_b9_cases as cases
 from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
 import xrootfixgen as xf
@@ -67,7 +68,7 @@ def unbounded_selectors():
     global _SELECTOR_SCOPES, _SELECTOR_PATCHES
     # Worker scopes may overlap without nesting. Only the last exit restores
     # the shared methods; each worker's actual budget remains a ContextVar.
-    with _SELECTOR_LOCK:
+    with alarm_guard(), _SELECTOR_LOCK:
         if not _SELECTOR_SCOPES:
             _SELECTOR_PATCHES = ExitStack()
             for cls in {selectors.PollSelector, selectors.DefaultSelector}:
@@ -91,7 +92,7 @@ def unbounded_selectors():
     try:
         yield
     finally:
-        with _SELECTOR_LOCK:
+        with alarm_guard(), _SELECTOR_LOCK:
             _SELECTOR_SCOPES -= 1
             if not _SELECTOR_SCOPES:
                 _SELECTOR_PATCHES.close()
@@ -103,7 +104,7 @@ def budget(module, seconds=float('inf')):
     from relay_engine import authority
     from relay_engine.tests.xroot_test_stops import stop
     global _AUTHORITY_TIME
-    with _BUDGET_LOCK:
+    with alarm_guard(), _BUDGET_LOCK:
         if module not in _BUDGET_SCOPES:
             original = module._XROOT_BUDGET
             proxy = Budget(original)
@@ -132,7 +133,7 @@ def budget(module, seconds=float('inf')):
             proxy.reset(token)
         if scope_token is not None:
             proxy.scopes.reset(scope_token)
-        with _BUDGET_LOCK:
+        with alarm_guard(), _BUDGET_LOCK:
             state[2] -= 1
             if not state[2]:
                 module._XROOT_BUDGET = state[0]
