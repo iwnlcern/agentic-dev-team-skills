@@ -109,3 +109,23 @@ class TestDraftShapeLint(unittest.TestCase):
             else:
                 continue
             self.assertFalse(any(name.startswith('relay_engine') for name in names))
+
+    def test_in_block_shapes_lint_with_their_texts(self):
+        # Both public linters must distinguish header values from body mentions.
+        remedy = 'to mention the key in the header block, put it and its colon in inline code'
+        cases = (
+            (draft().replace('ROLE: Pair Planner', 'ROLE: Pair Planner see SUPERSEDES: x'), 1, 'SUPERSEDES', False),
+            (draft().replace('SUBJECT: shape', 'SUBJECT: s see SUPERSEDES: x'), 11, 'SUPERSEDES', False),
+            (draft('MERGE-GATE', body='DISPATCH MERGE').replace('SUBJECT: shape', 'SUBJECT: s see VERDICT: no'), 11, 'VERDICT', True))
+        for text, line, key, grant in cases:
+            cause = (f"line {line}: {key} appears in this grant's header block text (lines 1 to 11) but is not that line's own header, so authority never reads it as a verdict" if grant else
+                     f"line {line}: {key} appears in the header block's text (lines 1 to 11) but is not that line's own header, so the engine never reads it as {key}")
+            for module in (self.hand, rules):
+                with self.subTest(copy=module.__name__, line=line, key=key):
+                    self.assertEqual(module.draft_shape_errors(text), [cause+'; '+remedy])
+                    result = module.lint_file(self.write(text))
+                    self.assertEqual([e for e in result.errors if 'appears in' in e], [cause+'; '+remedy])
+                    outside = draft('MERGE-GATE' if grant else 'SITREP', body=('DISPATCH MERGE\n\n' if grant else '')+'see '+key+': x')
+                    messages = module.draft_shape_errors(outside)
+                    self.assertEqual(len(messages), 1)
+                    self.assertIn('outside', messages[0])

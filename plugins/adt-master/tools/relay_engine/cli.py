@@ -296,9 +296,15 @@ def cmd_show(args):
         _report_command_error(exc)
         try:
             target = Path(args.target).resolve()
+        except (OSError, ValueError, RuntimeError):
+            return 1
+        try:
             if target.is_file():
                 if args.root is not None:
-                    hint_root = Path(root_name or args.root).resolve()
+                    try:
+                        hint_root = Path(root_name or args.root).resolve()
+                    except RuntimeError:
+                        return 1
                 else:
                     hint_root = next((parent for parent in target.parents
                                       if (parent / ".engine/ledger.db").is_file()), None)
@@ -307,7 +313,7 @@ def cmd_show(args):
                     if relative != args.target:
                         strings.emit("stderr", "show-root-hint", path=str(target),
                                      root=str(hint_root), rel=relative)
-        except (OSError, ValueError, RuntimeError):
+        except (OSError, ValueError):
             pass
         return 1
     if args.body:

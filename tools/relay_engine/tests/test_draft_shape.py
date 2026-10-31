@@ -105,6 +105,43 @@ def diagnostic_texts():
     for cases in (fence_region_cases(), fence_form_cases(), wide_cases(), preserved_cases()):
         for case in cases:
             yield case[0]
+    yield from (text for _, text, _ in R8_SHOWN_CASES)
+    for char, marker, verdict in itertools.product(
+            '\x01\x1b\x1f\x7f\x80\x9b\u0600\u06dd\ufff9\U000110bd\u2800', ('', '- '), (False, True)):
+        key = 'VERDICT' if verdict else 'SUPERSEDES'
+        line = marker+char+key+': x'
+        yield draft('MERGE-GATE' if verdict else 'SITREP', body=('DISPATCH MERGE\n\n' if verdict else '')+line)
+        yield draft(body='```\n'+line+'\n```')
+    for body in ('1\u200b. SUPERSEDES: x', '1\x1f) SUPERSEDES: x', 'SUPER\x1fSEDES: x', 'SUPERSEDES:\x1f x'):
+        yield draft(body=body)
+    for stop in ('- note','* note','+ note','2) step','> quote','-','<!-- c -->','- - -','</div>','<?x>','<div>',
+                 '    - x','-not','1.not','< not html'):
+        yield draft(body=stop+'\n  ```\nSUPERSEDES: x\n  ```')
+    for prefix in ('1. step\n```\n  SUPERSEDES: x\n```\n',
+                   '\ufeff```\nx\n```\n  SUPERSEDES: x\n```\n',
+                   '\ufeff```\n  SUPERSEDES: x\n```\n'):
+        yield draft(prefix=prefix)
+    for cp in (0x16130,0x1e4f0,0x11f50,0x0661,0x1d7ce,0x1fbf1,0x10d30,0x1e5f1,0x16d70):
+        yield draft(body=chr(cp)+'. x\n```\nSUPERSEDES: y\n```')
+        yield draft(body=chr(cp)+'. SUPERSEDES: y')
+    for before in ('    - x', '-not', '1.not', '< not html'):
+        yield draft(body=before+'\n```\nSUPERSEDES: x\n```')
+    yield draft(body='```\nSUPERSEDES: x\n```\n- note')
+    yield draft(body='```\n- item\nSUPERSEDES: x\n```')
+    yield draft(prefix='```\n  SUPERSEDES: x\n```\n', body='- item')
+    yield draft('MERGE-GATE', body='DISPATCH MERGE\n\n- note\n```\nVERDICT: merge-blocked\n```')
+    yield draft('MERGE-GATE', body='DISPATCH MERGE').replace('SUBJECT: shape', 'SUBJECT: s see VERDICT: no')
+    yield admission.body('SITREP', content='**SUPERSEDES:** x').decode()
+    yield admission.body('MERGE-GATE','operator',content='DISPATCH MERGE\n\n(PLAN_REVIEW_VERDICT: approve, at x)').decode()
+    yield admission.body('SITREP').decode().replace('SUBJECT: test candidate', 'SUBJECT: s see SUPERSEDES: x')
+    from relay_engine import seats
+    for ref, stored in (('note SUPERSEDES: x',None),('SUPERSEDES：x',None),
+                        ('a&colon;b CYCLE_REOPEN&#58; c',None),('v297-b2-impl-6','see SUPERSEDES: x'),
+                        ('v297-b2-impl-6',None)):
+        yield seats._boot_bytes('p.planner','Planner','r',ref,'occupant',stored).decode()
+    for make in closed_linear_families():
+        for n in (4000,16000,2000000):
+            yield draft(body=make(n))
     yield from scan_cases()
     yield from linear_cases()
 
@@ -137,7 +174,7 @@ def wide_cases():
     for key in ('SUPER\u200bSEDES', 'SUPERSEDES\U000e0041'):
         yield draft(body=key+': x'), 'SUPERSEDES', 1
     yield draft(body='\u200b```\nSUPERSEDES: x\n```'), 'SUPERSEDES', 1
-    yield draft(body='**SUPERSEDES:** x'), None, None
+    yield draft(body='**SUPERSEDES:** x'), 'SUPERSEDES', 13
 
 
 def preserved_cases():
@@ -153,12 +190,12 @@ def preserved_cases():
             yield draft(body=body), 'late-control' if after else None, 16 if after else None
     for indent in ('   ', '    '):
         yield draft(body=indent+'```\nSUPERSEDES: x\n'+indent+'```'), ('late-control' if len(indent)==4 else None), 14
-    for marker, kind in (('1) ', 'late-control'), ('-', None)):
+    for marker, kind in (('1) ', 'late-control'), ('-', 'late-control')):
         yield draft(body=marker+'SUPERSEDES: x'), kind, 13
     for phase, token in (('MERGE-GATE', 'DISPATCH MERGE \t'), ('MERGE-GATE \t', 'DISPATCH MERGE')):
         yield draft(phase, body=token+'\nVERDICT: no'), 'late-verdict', 14
     yield draft('IMPL', extra='MERGE_AUTHORIZATION: approved\n', body='VERDICT: no'), None, None
-    yield draft('MERGE-GATE', body='DISPATCH MERGE\nXVERDICT: no'), None, None
+    yield draft('MERGE-GATE', body='DISPATCH MERGE\nXVERDICT: no'), 'late-verdict', 14
     yield 'abc\u2028tail', 'separator', 1
     yield draft('MERGE-GATE', body='```\nDISPATCH MERGE\n```\nVERDICT: no'), None, None
     yield draft('MERGE-GATE', body='VERDICT: no'), None, None
@@ -168,7 +205,8 @@ def scan_cases():
     yield from (text for text, _, _ in fence_region_cases())
     rng = random.Random(297)
     lines = ['```', '````', '`````', '~~~', '~~~~', '~~~~~', '```lang',
-             '~~~`info', '```bad`info', '```x', '~~~ \t', 'SUPERSEDES: x', 'ordinary', '']
+             '~~~`info', '```bad`info', '```x', '~~~ \t', 'SUPERSEDES: x', 'ordinary', '',
+             '- item', '+ item', '* item', '1. item', '1) item', '-', '>', '<div>', '</div>', '<!-- x -->', '<?x>', '\ufeff```']
     for _ in range(200):
         yield draft(prefix='\n'.join(rng.choices(lines, k=8))+'\n',
                     body='\n'.join(rng.choices(lines, k=16)))
@@ -179,28 +217,62 @@ def linear_cases():
         yield draft(body='\n'.join('`'*length for length in range(k+2, 2, -1))+'\n'*n)
 
 
+def closed_linear_families():
+    def runs(n, paired):
+        parts, total, length = [], 0, 2 if paired else 1
+        while total+length+1 <= n//2:
+            parts.append('`'*length+' ')
+            total += length+1
+            length += 1
+        return (''.join(parts)+('`x` ' if paired else 'x')*n)[:n]
+    families = (lambda n: ('<a>'*((n+2)//3))[:n],
+                lambda n: '<a'*(n//4)+'>'*(n//2),
+                lambda n: ']('*(n//4)+')'*(n//2),
+                lambda n: '!['*(n//4)+']'*(n//2),
+                lambda n: '[x]('*(n//8)+')'*(n//2),
+                lambda n: runs(n, True), lambda n: runs(n, False),
+                lambda n: ('SUPER'*((n+4)//5))[:n])
+    return families
+
+
 def repeated_outside(lines, block):
-    """Independent R217 reference; deliberately repeated, not the fast algorithm."""
-    result = []
+    """Independent repeated scan of erratum 2.2, with local raw patterns."""
     opening = re.compile(r'^ {0,3}(`{3,})[^`]*$|^ {0,3}(~{3,}).*$')
     closing = re.compile(r'^ {0,3}(`{3,}|~{3,})[ \t]*$')
-    for indices in (range(block[0]), range(block[1], len(lines))):
+    stop = re.compile(r'^ {0,3}(?:(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)|>|<[A-Za-z/!?])')
+    # Independently spelled prefix table, rather than the implementation's regex.
+    spaces = '\t \xa0\u1680' + ''.join(chr(c) for c in range(0x2000,0x200b))+'\u202f\u205f\u3000'
+    ranges = ((0xad,0xad),(0x34f,0x34f),(0x61c,0x61c),(0x115f,0x1160),(0x17b4,0x17b5),
+              (0x180b,0x180f),(0x200b,0x200f),(0x202a,0x202e),(0x2060,0x206f),(0x3164,0x3164),
+              (0xfe00,0xfe0f),(0xfeff,0xfeff),(0xffa0,0xffa0),(0xfff0,0xfff8),
+              (0x1bca0,0x1bca3),(0x1d173,0x1d17a),(0xe0000,0xe0fff))
+    chars = spaces+''.join(chr(c) for a,b in ranges for c in range(a,b+1))
+    w = '['+re.escape(chars)+']'
+    prefix = re.compile('^'+w+'*(?:(?:[-*+]|[0-9]{1,9}[.)]|>)'+w+'+|>)*'+w+'*')
+    result, carried = [], False
+    for side, indices in enumerate((range(block[0]), range(block[1], len(lines)))):
         demoted = set()
         while True:
             visible, active, start = [], None, None
+            stopped = carried if side else False
             for i in indices:
                 if active is not None:
                     close = closing.fullmatch(lines[i])
                     if close and close[1][0] == active[0] and len(close[1]) >= len(active):
                         active = None
                 else:
-                    op = opening.fullmatch(lines[i]) if i not in demoted else None
+                    stopped |= bool(stop.match(lines[i]) or (i == 0 and lines[i].startswith('\ufeff')))
+                    op = opening.fullmatch(lines[i]) if not stopped and i not in demoted else None
                     if op:
                         active, start = op[1] or op[2], i
                     else:
                         visible.append((i, lines[i]))
             if active is None:
                 result.extend(visible)
+                if not side:
+                    carried = any(stop.match(line) or (i == 0 and line.startswith('\ufeff')) or
+                                  opening.fullmatch(line) or re.match(r'<[A-Za-z/!?]', line[prefix.match(line).end():])
+                                  for i,line in visible)
                 break
             demoted.add(start)
     return result
@@ -293,8 +365,11 @@ class TestDraftShape(unittest.TestCase):
             for fence in ('```', '~~~'):
                 self.assertIsNone(E.draft_shape(draft(body=fence+'\n'+line+'\n'+fence)))
                 self.assertIsNone(E.draft_shape(draft(extra=fence+'\n'+line+'\n'+fence+'\n')))
-            for quoted in ('`'+line+'`', 'This mentions '+line):
-                self.assertIsNone(E.draft_shape(draft(body=quoted)))
+            self.assertIsNone(E.draft_shape(draft(body='`'+line+'`')))
+            shape = E.draft_shape(draft(body='This mentions '+line))
+            self.assertIsNotNone(shape)
+            self.assertEqual((shape.kind, shape.key, shape.line, shape.column),
+                             ('late-control', key, 13, 15+len(key)))
 
     def test_late_verdicts_on_grants_are_refused(self):
         for text, key in late_verdict_cases():
@@ -357,10 +432,10 @@ class TestDraftShape(unittest.TestCase):
              'use a newline there, or write the character as text, for example U+2028'),
             (E.DraftShape('late-control', 8, 1, None, 'SUPERSEDES', (1, 4)),
              'line 8: SUPERSEDES is outside the header block (lines 1 to 4), where the engine never reads it',
-             'move the line into the header block, or quote it in code'),
+             'move the line into the header block, or quote it in code; to mention the key, put it and its colon in inline code'),
             (E.DraftShape('late-verdict', 8, 1, None, 'VERDICT', (1, 4)),
              "line 8: VERDICT is outside this grant's header block (lines 1 to 4), so authority reads the grant as carrying no verdict",
-             'move the line into the header block, where any value but an exact positive word denies the grant; or remove it; or quote it in code'))
+             'move the line into the header block, where any value but an exact positive word denies the grant; or remove it; or quote it in code; to mention the key, put it and its colon in inline code'))
         for shape, cause, remedy in cases:
             error = E.shape_error(shape)
             self.assertEqual((error.code, error.cls, error.cause, error.remedy),
@@ -368,7 +443,7 @@ class TestDraftShape(unittest.TestCase):
             self.assertEqual(E.shape_message(shape), cause+'; '+remedy)
         error = E.shape_error(cases[0][0], boot_field='COMMISSIONED_BY')
         self.assertEqual(error.cause, 'the boot relay for this registration would carry a refused line shape in its COMMISSIONED_BY line')
-        self.assertEqual(error.remedy, "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line, or ask the operator to re-commission the root with a commissioning path on one line")
+        self.assertEqual(error.remedy, "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line that shows no cycle or supersession key with a colon, or ask the operator to re-commission the root with a commissioning path on one line that shows none")
 
     def test_late_verdict_keys_of_any_length_render(self):
         import tempfile
@@ -502,3 +577,270 @@ class TestDraftShape(unittest.TestCase):
                 self.assertEqual(None if shape is None else shape.kind, kind)
                 if kind:
                     self.assertEqual(shape.line, line)
+
+
+# Literal expected answers from plan r8 task 9e; no runtime oracle dependency.
+H = ("ROLE: Pair Planner\nPHASE: {phase}\nAUTHORITY: report-only\nDISPATCH_ID: d\nRUN_ID: r\n"
+     "CEREMONY_TIER: small\nEVIDENCE_TARGET: E2\nHUMAN_GATE_REQUIRED: no\nFROM: p.planner\n"
+     "TO: p.implementer\nSUBJECT: s\n")
+
+def sitrep(body, before=""):
+    return before + H.format(phase="SITREP") + "\n" + body + "\n"
+
+def grant(body):
+    return H.format(phase="MERGE-GATE") + "\nDISPATCH MERGE\n\n" + body + "\n"
+
+C = "late-control"
+
+V = "late-verdict"
+
+R8_SHOWN_CASES = [
+    # the scan's positives: (name, text, (kind, key, line, column) or None)
+    ("emphasis", sitrep("**SUPERSEDES:** x"), (C, "SUPERSEDES", 13, 13)),
+    ("glyph bullet", sitrep("• SUPERSEDES: x"), (C, "SUPERSEDES", 13, 13)),
+    ("letter enumerator", sitrep("a. SUPERSEDES: x"), (C, "SUPERSEDES", 13, 14)),
+    ("ten-digit enumerator", sitrep("1234567890. SUPERSEDES: x"), (C, "SUPERSEDES", 13, 23)),
+    ("dash no space", sitrep("-SUPERSEDES: x"), (C, "SUPERSEDES", 13, 12)),
+    ("cyrillic E", sitrep("SUPERSЕDES: x"), (C, "SUPERSEDES", 13, 11)),
+    ("fullwidth colon", sitrep("SUPERSEDES： x"), (C, "SUPERSEDES", 13, 11)),
+    ("prose", sitrep("This mentions SUPERSEDES: x"), (C, "SUPERSEDES", 13, 25)),
+    ("XVERDICT grant", grant("XVERDICT: no"), (V, "VERDICT", 15, 9)),
+    ("cited review verdict", grant("(PLAN_REVIEW_VERDICT: approve, at x)"), (V, "VERDICT", 15, 21)),
+    ("image in key", sitrep("SUPER![i](s)SEDES: x"), (C, "SUPERSEDES", 13, 18)),
+    ("tag in key", sitrep("SUPER<b></b>SEDES: x"), (C, "SUPERSEDES", 13, 18)),
+    ("inline link tail", sitrep("[SUPER](u)SEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("reference label", sitrep("[SUPER][r]SEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("comment in key", sitrep("SUPER<!-- c -->SEDES: x"), (C, "SUPERSEDES", 13, 21)),
+    ("decimal reference", sitrep("&#83;UPERSEDES: x"), (C, "SUPERSEDES", 13, 15)),
+    ("hex reference", sitrep("&#x53;UPERSEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("reference colon", sitrep("SUPERSEDES&#58; x"), (C, "SUPERSEDES", 13, 11)),
+    ("named colon", sitrep("SUPERSEDES&colon; x"), (C, "SUPERSEDES", 13, 11)),
+    ("named zero width", sitrep("SUPER&ZeroWidthSpace;SEDES: x"), (C, "SUPERSEDES", 13, 27)),
+    ("named soft hyphen", sitrep("SUPER&shy;SEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("soft break", sitrep("SUPER\nSEDES: x"), (C, "SUPERSEDES", 14, 6)),
+    ("header value", sitrep("x").replace("SUBJECT: s", "SUBJECT: s see SUPERSEDES: x"), (C, "SUPERSEDES", 11, 26)),
+    ("fullwidth underscore", sitrep("CYCLE＿TERMINUS: x"), (C, "CYCLE_TERMINUS", 13, 15)),
+    ("digit one", sitrep("CYCLE_TERM1NUS: x"), (C, "CYCLE_TERMINUS", 13, 15)),
+    ("bar", sitrep("CYCLE_TERM|NUS: x"), (C, "CYCLE_TERMINUS", 13, 15)),
+    ("digit zero", sitrep("CYCLE_RE0PEN: x"), (C, "CYCLE_REOPEN", 13, 13)),
+    ("math bold S", sitrep("\U0001d412UPERSEDES: x"), (C, "SUPERSEDES", 13, 11)),
+    ("fullwidth S", sitrep("ＳUPERSEDES: x"), (C, "SUPERSEDES", 13, 11)),
+    ("circled S", sitrep("ⓈUPERSEDES: x"), (C, "SUPERSEDES", 13, 11)),
+    ("tie", grant("VERDICT<b>CYCLE_TERMINUS</b>: x"), (C, "CYCLE_TERMINUS", 15, 29)),
+    # inline code that does not qualify
+    ("unpaired run", sitrep("a ` b `SUPERSEDES: x`"), (C, "SUPERSEDES", 13, 18)),
+    ("escaped backtick", sitrep("\\`SUPERSEDES: x`"), (C, "SUPERSEDES", 13, 13)),
+    ("tag outside spans", sitrep("a <b> `SUPERSEDES: x`"), (C, "SUPERSEDES", 13, 18)),
+    ("link outside spans", sitrep("[x](u) `SUPERSEDES: x`"), (C, "SUPERSEDES", 13, 19)),
+    ("html start before", sitrep("<div>\n\n`SUPERSEDES: x`"), (C, "SUPERSEDES", 15, 12)),
+    ("split at span edge", sitrep("`SUPERSEDES`: x"), (C, "SUPERSEDES", 13, 13)),
+    ("split over two spans", sitrep("`SUPER` `SEDES: x`"), (C, "SUPERSEDES", 13, 15)),
+    # fences CommonMark carries across the block
+    ("list item touching", "- item\n" + H.format(phase="SITREP") + "  ```\nSUPERSEDES: x\n  ```\n", (C, "SUPERSEDES", 14, 1)),
+    ("unclosed opener before", "```\n" + H.format(phase="SITREP") + "~~~\n```\nSUPERSEDES: x\n~~~\n", (C, "SUPERSEDES", 15, 1)),
+    ("html block before", "<div>\n" + H.format(phase="SITREP") + "\n```\nSUPERSEDES: x\n```\n", (C, "SUPERSEDES", 15, 1)),
+    ("grant token inside a carried fence", "- item\n" + H.format(phase="MERGE-GATE") + "  ```\nDISPATCH MERGE\nVERDICT: no\n  ```\n", (V, "VERDICT", 15, 1)),
+    # added after the tests lens (panel-1/plan8-tests/REPORT-as-received.md)
+    ("tab in key", sitrep("SUPER\tSEDES: x"), (C, "SUPERSEDES", 13, 12)),
+    ("hex reference, upper X", sitrep("&#X53;UPERSEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("seven-digit decimal reference", sitrep("&#0000083;UPERSEDES: x"), (C, "SUPERSEDES", 13, 20)),
+    ("six-digit hex reference", sitrep("&#x000053;UPERSEDES: x"), (C, "SUPERSEDES", 13, 20)),
+    ("label outside spans", sitrep("[x][`] b` c `SUPERSEDES: x`\n\n[`]: /u"), (C, "SUPERSEDES", 13, 24)),
+    ("unicode space line is not blank", sitrep("a `\n　\n`SUPERSEDES: x`"), (C, "SUPERSEDES", 15, 12)),
+    ("two-letter map value, authorization", grant("see MERGE_AUTHORIZATЮN: no"), (V, "MERGE_AUTHORIZATION", 15, 23)),
+    ("two-letter map value, approved", grant("see MERGE_AP㏚OVED: yes"), (V, "MERGE_APPROVED", 15, 18)),
+    ("html start inside a list item", sitrep("- <pre>\n\n  `SUPERSEDES: x`"), (C, "SUPERSEDES", 15, 14)),
+    ("html block joins across a blank line", sitrep("<pre>\nSUPER<!--\n\n-->SEDES: x\n</pre>"), (C, "SUPERSEDES", 16, 9)),
+    ("processing instruction in key", sitrep("SUPER<?x?>SEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("end tag in key", sitrep("SUPER</b>SEDES: x"), (C, "SUPERSEDES", 13, 15)),
+    ("tie by order, not alphabet", sitrep("SUPERSEDES<b>CYCLE_TERMINUS</b>: x"), (C, "SUPERSEDES", 13, 32)),
+    ("tie by order on a grant", grant("VERDICT<b>MERGE_APPROVED</b>: x"), (V, "VERDICT", 15, 29)),
+    ("a gap leaves the code span", sitrep("`SUPER![` x `]SEDES: x`"), (C, "SUPERSEDES", 13, 20)),
+    ("tildes in key", sitrep("~~SUPER~~SEDES: x"), (C, "SUPERSEDES", 13, 15)),
+    ("format character in emphasis", sitrep("**SUPER￹SEDES:** x"), (C, "SUPERSEDES", 13, 14)),
+    ("escaped colon", sitrep("see SUPERSEDES\\: x"), (C, "SUPERSEDES", 13, 16)),
+    ("escaped underscore", sitrep("CYCLE\\_TERMINUS: x"), (C, "CYCLE_TERMINUS", 13, 16)),
+    ("no-break space in key", sitrep("see SUPER SEDES: x"), (C, "SUPERSEDES", 13, 16)),
+    ("merge approved in prose", grant("see MERGE_APPROVED: yes"), (V, "MERGE_APPROVED", 15, 19)),
+    ("emphasised merge authorization", grant("**MERGE_AUTHORIZATION:** no"), (V, "MERGE_AUTHORIZATION", 15, 22)),
+    ("unequal runs do not pair", sitrep("`a`` b `SUPERSEDES: x`"), (C, "SUPERSEDES", 13, 19)),
+    ("qualification is per paragraph", sitrep("a `\n`SUPERSEDES: x`"), (C, "SUPERSEDES", 14, 12)),
+    ("in block, first line", sitrep("x").replace("ROLE: Pair Planner", "ROLE: Pair Planner see SUPERSEDES: x"), (C, "SUPERSEDES", 1, 34)),
+    ("empty image description", sitrep("SUPER![](s)SEDES: x"), (C, "SUPERSEDES", 13, 17)),
+    ("image reference", sitrep("SUPER![i][r]SEDES: x"), (C, "SUPERSEDES", 13, 18)),
+    ("code in image description", sitrep("SUPER![`i`](s)SEDES: x"), (C, "SUPERSEDES", 13, 20)),
+    ("star bullet stop line", sitrep("* note\n  ```\nSUPERSEDES: x\n  ```"), (C, "SUPERSEDES", 15, 1)),
+    ("plus bullet stop line", sitrep("+ note\n  ```\nSUPERSEDES: x\n  ```"), (C, "SUPERSEDES", 15, 1)),
+    ("end tag stop line", sitrep("</div>\n```\nSUPERSEDES: x\n```"), (C, "SUPERSEDES", 15, 1)),
+    ("processing instruction stop line", sitrep("<?x>\n```\nSUPERSEDES: x\n```\n?>"), (C, "SUPERSEDES", 15, 1)),
+    ("tilde opener before the block", "~~~\n" + H.format(phase="SITREP") + "```\n~~~\nSUPERSEDES: x\n```\n", (C, "SUPERSEDES", 15, 1)),
+    ("BOM stop line", "﻿```\n  SUPERSEDES: x\n```\n" + H.format(phase="SITREP"), (C, "SUPERSEDES", 2, 3)),
+    ("BOM pair without the BOM", "```\n  SUPERSEDES: x\n```\n" + H.format(phase="SITREP"), None),
+    # negatives
+    ("inline code", sitrep("`SUPERSEDES: x`"), None),
+    ("double inline code", sitrep("`` SUPERSEDES: x ``"), None),
+    ("case", sitrep("Supersedes: x"), None),
+    ("no colon", sitrep("SUPERSEDES x"), None),
+    ("visible diacritic", sitrep("SUPERSÉDES: x"), None),
+    ("hyphen", sitrep("CYCLE-TERMINUS: x"), None),
+    ("lt reference", sitrep("SUPER&lt;SEDES: x"), None),
+    ("zero reference", sitrep("SUPERSEDES&#0;: x"), None),
+    ("surrogate reference", sitrep("SUPERSEDES&#xD800;: x"), None),
+    ("too large reference", sitrep("SUPERSEDES&#1114112;: x"), None),
+    ("non-grant citation", sitrep("(PLAN_REVIEW_VERDICT: approve, at x)"), None),
+    ("closed fence after", sitrep("```\nSUPERSEDES: x\n```"), None),
+    ("closed fence before, fence after", "```\nx\n```\n" + H.format(phase="SITREP") + "\n```\nSUPERSEDES: x\n```\n", None),
+    ("supplementary digit", sitrep("\U00016130. x\n```\nSUPERSEDES: x\n```"), None),
+    ("arabic-indic digit", sitrep("١. x\n```\nSUPERSEDES: x\n```"), None),
+    ("header own key", sitrep("x").replace("SUBJECT: s", "SUPERSEDES: v297-b2/X.md\nSUBJECT: s"), None),
+]
+
+class TestClosedRule(unittest.TestCase):
+    def test_the_scan_refuses_shown_keys(self):
+        # Missing scanning, wrong source positions, and incorrect exemptions fail.
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            for name, text, expected in R8_SHOWN_CASES:
+                with self.subTest(copy=module.__name__, case=name):
+                    shape = module.draft_shape(text)
+                    actual = None if shape is None else (shape.kind, shape.key, shape.line, shape.column)
+                    self.assertEqual(actual, expected)
+
+    def test_set_aside_class_matches_its_table(self):
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            pattern = re.compile(module._SHAPE_W)
+            actual = frozenset(chr(c) for c in range(0x110000) if pattern.fullmatch(chr(c)))
+            self.assertEqual(actual, module.SHAPE_SET_ASIDE)
+
+    def test_set_aside_class_is_built_from_ranges(self):
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            self.assertLess(len(module._SHAPE_W), 512)
+
+    def test_invisible_characters_before_the_colon_are_removed(self):
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            for char, marker, verdict in itertools.product(
+                    '\x01\x1b\x1f\x7f\x80\x9b\u0600\u06dd\ufff9\U000110bd\u2800', ('', '- '), (False, True)):
+                key = 'VERDICT' if verdict else 'SUPERSEDES'
+                prefix = marker+char
+                body = ('DISPATCH MERGE\n\n' if verdict else '')+prefix+key+': x'
+                text = draft('MERGE-GATE' if verdict else 'SITREP', body=body)
+                with self.subTest(copy=module.__name__, prefix=prefix, verdict=verdict):
+                    shape = module.draft_shape(text)
+                    self.assertIsNotNone(shape)
+                    self.assertEqual((shape.kind, shape.key, shape.column),
+                                     ('late-verdict' if verdict else 'late-control', key, len(prefix)+1))
+                    self.assertIsNone(module.draft_shape(draft(body='```\n'+prefix+key+': x\n```')))
+            for body, column in (('1\u200b. SUPERSEDES: x', 5), ('1\x1f) SUPERSEDES: x', 5),
+                                 ('SUPER\x1fSEDES: x', 1), ('SUPERSEDES:\x1f x', 1)):
+                shape = module.draft_shape(draft(body=body))
+                self.assertIsNotNone(shape)
+                self.assertEqual((shape.key, shape.column), ('SUPERSEDES', column))
+
+    def test_answers_do_not_depend_on_the_interpreters_unicode(self):
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            for c in (0x16130, 0x1e4f0, 0x11f50, 0x0661, 0x1d7ce, 0x1fbf1, 0x10d30, 0x1e5f1, 0x16d70):
+                with self.subTest(copy=module.__name__, cp=c):
+                    self.assertIsNone(module.draft_shape(draft(body=chr(c)+'. x\n```\nSUPERSEDES: y\n```')))
+                    shape = module.draft_shape(draft(body=chr(c)+'. SUPERSEDES: y'))
+                    self.assertIsNotNone(shape)
+                    self.assertEqual((shape.kind, shape.key, shape.column), ('late-control', 'SUPERSEDES', 14))
+
+    def test_key_map_table(self):
+        from relay_engine.tests.test_parity import _standalone
+        self.assertEqual(E.SHAPE_KEY_MAP, _standalone().SHAPE_KEY_MAP)
+        self.assertEqual(len(E.SHAPE_KEY_MAP), 1914)
+        for chars, want in (('：∶', ':'), ('＿﹍', '_'), ('ЕΕ', 'E'), ('Ｓ𝐒Ⓢ', 'S'), ('0','O'), ('1I|','l'), ('m','rn')):
+            for char in chars:
+                self.assertEqual(E.SHAPE_KEY_MAP[char], want)
+        for char in ('É', '-'):
+            self.assertNotIn(char, E.SHAPE_KEY_MAP)
+        self.assertTrue(all(re.fullmatch('[A-Za-z0-9:_]+', value) for value in E.SHAPE_KEY_MAP.values()))
+
+    def test_entity_table(self):
+        from relay_engine.tests.test_parity import _standalone
+        self.assertEqual(E.SHAPE_ENTITY_MAP, _standalone().SHAPE_ENTITY_MAP)
+        self.assertEqual(len(E.SHAPE_ENTITY_MAP), 349)
+        for name, value in (('colon', ':'), ('ZeroWidthSpace', '\u200b'), ('shy', '\xad')):
+            self.assertEqual(E.SHAPE_ENTITY_MAP[name], value)
+        for name in ('lt','LT','gt','GT','excl','grave','DiacriticalGrave','lbrack','lsqb','rbrack','rsqb'):
+            self.assertNotIn(name, E.SHAPE_ENTITY_MAP)
+
+    def test_removal_table(self):
+        from relay_engine.tests.test_parity import _standalone
+        cf = ((0xad,0xad),(0x600,0x605),(0x61c,0x61c),(0x6dd,0x6dd),(0x70f,0x70f),
+              (0x890,0x891),(0x8e2,0x8e2),(0x180e,0x180e),(0x200b,0x200f),(0x202a,0x202e),
+              (0x2060,0x2064),(0x2066,0x206f),(0xfeff,0xfeff),(0xfff9,0xfffb),
+              (0x110bd,0x110bd),(0x110cd,0x110cd),(0x13430,0x1343f),(0x1bca0,0x1bca3),
+              (0x1d173,0x1d17a),(0xe0001,0xe0001),(0xe0020,0xe007f))
+        dicp = ((0xad,0xad),(0x34f,0x34f),(0x61c,0x61c),(0x115f,0x1160),
+                (0x17b4,0x17b5),(0x180b,0x180f),(0x200b,0x200f),(0x202a,0x202e),
+                (0x2060,0x206f),(0x3164,0x3164),(0xfe00,0xfe0f),(0xfeff,0xfeff),
+                (0xffa0,0xffa0),(0xfff0,0xfff8),(0x1bca0,0x1bca3),(0x1d173,0x1d17a),(0xe0000,0xe0fff))
+        expected = frozenset(chr(c) for a,b in cf+dicp+((0,8),(10,31),(127,159),(0x2800,0x2800)) for c in range(a,b+1))
+        self.assertEqual(len(expected), 4271)
+        for module in (E, _standalone()):
+            self.assertEqual(module.SHAPE_REMOVAL, expected)
+            self.assertNotIn('\t', module.SHAPE_REMOVAL)
+
+    def test_scan_is_linear(self):
+        from unittest.mock import patch
+        from relay_engine.tests.test_parity import _standalone
+        families = closed_linear_families()
+        for module in (E, _standalone()):
+            for number, make in enumerate(families):
+                baseline = None
+                for n in (4000, 16000, 2000000):
+                    count = [0]
+                    def visit(amount=1):
+                        count[0] += amount
+                    with self.subTest(copy=module.__name__, family=number, n=n):
+                        with patch.object(module, '_shape_scan_work', visit):
+                            module.draft_shape(draft(body=make(n)))
+                        self.assertGreater(count[0], 0)
+                        rate = count[0]/n
+                        if baseline is None:
+                            baseline = rate
+                        else:
+                            self.assertLessEqual(rate, 1.25*baseline)
+
+
+    def test_stop_lines_end_fence_quoting(self):
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            for stop in ('- note','* note','+ note','2) step','> quote','-','<!-- c -->','- - -','</div>','<?x>','<div>'):
+                text = draft(body=stop+'\n  ```\nSUPERSEDES: x\n  ```')
+                with self.subTest(copy=module.__name__, stop=stop):
+                    shape = module.draft_shape(text)
+                    self.assertIsNotNone(shape)
+                    self.assertEqual((shape.kind, shape.key, shape.line, shape.column), ('late-control','SUPERSEDES',15,1))
+            for text, line, col in ((draft(prefix='1. step\n```\n  SUPERSEDES: x\n```\n'),3,3),
+                                    (draft(prefix='\ufeff```\nx\n```\n  SUPERSEDES: x\n```\n'),4,3),
+                                    (draft(prefix='\ufeff```\n  SUPERSEDES: x\n```\n'),2,3)):
+                shape = module.draft_shape(text)
+                self.assertIsNotNone(shape)
+                self.assertEqual((shape.kind,shape.line,shape.column),('late-control',line,col))
+            for before in ('    - x', '-not', '1.not', '< not html'):
+                self.assertIsNone(module.draft_shape(draft(body=before+'\n```\nSUPERSEDES: x\n```')))
+            for text in (draft(body='```\nSUPERSEDES: x\n```\n- note'),
+                         draft(body='```\n- item\nSUPERSEDES: x\n```'),
+                         draft(prefix='```\n  SUPERSEDES: x\n```\n',body='- item')):
+                self.assertIsNone(module.draft_shape(text))
+            shape = module.draft_shape(draft('MERGE-GATE', body='DISPATCH MERGE\n\n- note\n```\nVERDICT: merge-blocked\n```'))
+            self.assertIsNotNone(shape)
+            self.assertEqual((shape.kind,shape.key,shape.line),('late-verdict','VERDICT',17))
+
+    def test_fences_carried_across_the_block_quote_nothing(self):
+        from relay_engine.tests.test_parity import _standalone
+        names = {'list item touching','unclosed opener before','html block before',
+                 'grant token inside a carried fence','tilde opener before the block',
+                 'closed fence before, fence after','supplementary digit','arabic-indic digit'}
+        for module in (E, _standalone()):
+            for name,text,want in R8_SHOWN_CASES:
+                if name in names:
+                    with self.subTest(copy=module.__name__,case=name):
+                        shape = module.draft_shape(text)
+                        self.assertEqual(None if shape is None else (shape.kind,shape.key,shape.line,shape.column),want)
