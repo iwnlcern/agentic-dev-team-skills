@@ -1109,9 +1109,15 @@ _SHAPE_IGNORABLE = frozenset(chr(c) for a, b in _SHAPE_IGNORABLE_RANGES
 SHAPE_SET_ASIDE = _SHAPE_IGNORABLE | frozenset(
     chr(c) for a, b in ((9, 9),) + _SHAPE_ZS_RANGES for c in range(a, b + 1))
 # Frozen Unicode 16 Cc (except tab), Cf, DICP, and braille blank.
-_SHAPE_REMOVAL_RANGES = ((173, 173), (1536, 1541), (1564, 1564), (1757, 1757), (1807, 1807), (2192, 2193), (2274, 2274), (6158, 6158), (8203, 8207), (8234, 8238), (8288, 8292), (8294, 8303), (65279, 65279), (65529, 65531), (69821, 69821), (69837, 69837), (78896, 78911), (113824, 113827), (119155, 119162), (917505, 917505), (917536, 917631), (0, 8), (10, 31), (127, 159), (10240, 10240))
-SHAPE_REMOVAL = _SHAPE_IGNORABLE | frozenset(
-    chr(c) for a, b in _SHAPE_REMOVAL_RANGES for c in range(a, b+1))
+_SHAPE_REMOVAL_RANGES = (
+    (0x0, 0x8), (0xA, 0x1F), (0x7F, 0x9F), (0xAD, 0xAD), (0x34F, 0x34F), (0x600, 0x605),
+    (0x61C, 0x61C), (0x6DD, 0x6DD), (0x70F, 0x70F), (0x890, 0x891), (0x8E2, 0x8E2),
+    (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E),
+    (0x2060, 0x206F), (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0), (0xFFF0, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD),
+    (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+SHAPE_REMOVAL = frozenset(
+    chr(c) for a, b in _SHAPE_REMOVAL_RANGES for c in range(a, b + 1))
 # Derived from Unicode 16 compatibility decomposition and confusable skeletons.
 SHAPE_KEY_MAP = {'0': 'O',
  '1': 'l',
@@ -3384,14 +3390,14 @@ def _shape_range_class(chars):
     ranges = []
     first = last = points[0]
     for cp in points[1:]:
-        if cp == last+1:
+        if cp == last + 1:
             last = cp
         else:
             ranges.append((first, last))
             first = last = cp
     ranges.append((first, last))
-    return '['+''.join(re.escape(chr(a)) + ('-'+re.escape(chr(b)) if b != a else '')
-                       for a, b in ranges)+']'
+    return '[' + ''.join(re.escape(chr(a)) + ('-' + re.escape(chr(b)) if b != a else '')
+                       for a, b in ranges) + ']'
 
 
 _SHAPE_W = _shape_range_class(SHAPE_SET_ASIDE)
@@ -3403,7 +3409,7 @@ _SHAPE_STOP = re.compile(r'^ {0,3}(?:(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|$)|>|<[A-Z
 _SHAPE_TAG = re.compile(r'<[A-Za-z/!?]')
 _SHAPE_ENTITY = re.compile(r'&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});')
 _SHAPE_DROP = SHAPE_REMOVAL | frozenset('\t_*~\\`[]!<>') | frozenset(
-    chr(c) for a, b in _SHAPE_ZS_RANGES for c in range(a, b+1))
+    chr(c) for a, b in _SHAPE_ZS_RANGES for c in range(a, b + 1))
 
 
 class DraftShape(NamedTuple):
@@ -3506,11 +3512,11 @@ def _shape_scan_work(amount=1):
 def _shape_code_spans(line):
     runs = [(m.start(), m.end()) for m in re.finditer(r'`+', line)]
     following, by_length = {}, {}
-    for i in range(len(runs)-1, -1, -1):
+    for i in range(len(runs) - 1, -1, -1):
         a, b = runs[i]
         _shape_scan_work()
-        following[i] = by_length.get(b-a)
-        by_length[b-a] = i
+        following[i] = by_length.get(b - a)
+        by_length[b - a] = i
     spans, good, i = [], '\\`' not in line, 0
     while i < len(runs):
         end = following[i]
@@ -3519,7 +3525,7 @@ def _shape_code_spans(line):
             i += 1
         else:
             spans.append((runs[i][0], runs[end][1]))
-            i = end+1
+            i = end + 1
     cursor = 0
     for a, b in spans + [(len(line), len(line))]:
         outside = line[cursor:a]
@@ -3531,24 +3537,27 @@ def _shape_code_spans(line):
 
 def _shape_scan(lines, block, outside, grant):
     """Shift-and simulation, with a constant number of aggregated gap states."""
-    keys = LATE_CONTROL_KEYS + (('VERDICT', 'MERGE_AUTHORIZATION', 'MERGE_APPROVED') if grant else ())
+    keys = LATE_CONTROL_KEYS + (
+        ('VERDICT', 'MERGE_AUTHORIZATION', 'MERGE_APPROVED') if grant else ())
     masks, starts, finishes, offset = {}, 0, [], 0
     for key in keys:
-        pattern = ''.join(SHAPE_KEY_MAP.get(c, c) for c in key if c != '_')+':'
+        pattern = ''.join(SHAPE_KEY_MAP.get(c, c) for c in key if c != '_') + ':'
         starts |= 1 << offset
         for c in pattern:
             masks[c] = masks.get(c, 0) | (1 << offset)
             offset += 1
-        finishes.append(1 << (offset-1))
+        finishes.append(1 << (offset - 1))
         offset += 1  # Separate targets, so a shift can never join them.
     finished = sum(finishes)
     indices = [i for i, _ in outside if i < block[0]] + list(range(*block))
     indices.extend(i for i, _ in outside if i >= block[1])
-    html = next((i for i in indices if _SHAPE_TAG.match(lines[i], _SHAPE_PREFIX.match(lines[i]).end())), None)
+    html = next((i for i in indices
+                 if _SHAPE_TAG.match(lines[i], _SHAPE_PREFIX.match(lines[i]).end())), None)
     regions, region, previous = [], [], None
     for i in indices:
         merged = html is not None and i >= html
-        if not merged and (not lines[i].strip(' \t') or (previous is not None and i != previous+1)):
+        if not merged and (not lines[i].strip(' \t')
+                           or (previous is not None and i != previous + 1)):
             if region:
                 regions.append(region)
             region = []
@@ -3559,13 +3568,14 @@ def _shape_scan(lines, block, outside, grant):
         regions.append(region)
     for region in regions:
         per_line = {i: _shape_code_spans(lines[i]) for i in region}
-        qualified = (html is None or html > region[-1]) and all(good for _, good in per_line.values())
+        qualified = ((html is None or html > region[-1])
+                     and all(good for _, good in per_line.values()))
         good = bad = 0
         gap_good, gap_bad = [0, 0, 0], [0, 0, 0]
         last_unit = None
         for i in region:
             # Newlines leave every header/code unit, including suspended states.
-            _shape_scan_work(good.bit_count()+sum(bits.bit_count() for bits in gap_good))
+            _shape_scan_work(good.bit_count() + sum(bits.bit_count() for bits in gap_good))
             bad |= good
             good = 0
             for k in range(3):
@@ -3581,9 +3591,10 @@ def _shape_scan(lines, block, outside, grant):
                 while span_index < len(spans) and j >= spans[span_index][1]:
                     span_index += 1
                 unit = ('header', i) if j <= colon else (
-                    (i, span_index) if span_index < len(spans) and spans[span_index][0] <= j else None)
+                    (i, span_index) if span_index < len(spans)
+                    and spans[span_index][0] <= j else None)
                 if unit != last_unit:
-                    _shape_scan_work(good.bit_count()+sum(bits.bit_count() for bits in gap_good))
+                    _shape_scan_work(good.bit_count() + sum(bits.bit_count() for bits in gap_good))
                     bad |= good
                     good = 0
                     for k in range(3):
@@ -3591,25 +3602,24 @@ def _shape_scan(lines, block, outside, grant):
                         gap_good[k] = 0
                     last_unit = unit
                 raw = line[j]
-                chars, end = raw, j+1
+                chars, end = raw, j + 1
                 if raw == '&':
                     match = _SHAPE_ENTITY.match(line, j)
                     if match:
                         name = match.group()[1:-1]
                         if name.startswith('#'):
                             value = int(name[2:], 16) if name[1] in 'xX' else int(name[1:])
-                            chars = '\ufffd' if value == 0 or value > 0x10ffff or 0xd800 <= value <= 0xdfff else chr(value)
+                            chars = ('\ufffd' if value == 0 or value > 0x10ffff
+                                     or 0xd800 <= value <= 0xdfff else chr(value))
                             end = match.end()
                         elif name in SHAPE_ENTITY_MAP:
                             chars, end = SHAPE_ENTITY_MAP[name], match.end()
                 opening = (0 if raw == '<' and _SHAPE_TAG.match(line, j) else
-                           1 if raw == '(' and j and line[j-1] == ']' else
-                           2 if raw == '[' and j and line[j-1] in ']!' else None)
+                           1 if raw == '(' and j and line[j - 1] == ']' else
+                           2 if raw == '[' and j and line[j - 1] in ']!' else None)
                 closing = {'>': 0, ')': 1, ']': 2}.get(raw)
-                if end > j+1:  # A decoded reference never opens or closes markup.
-                    opening = closing = None
                 if opening is not None:
-                    _shape_scan_work(good.bit_count()+bad.bit_count())
+                    _shape_scan_work(good.bit_count() + bad.bit_count())
                     gap_good[opening] |= good
                     gap_bad[opening] |= bad
                 for char in chars:
@@ -3618,17 +3628,19 @@ def _shape_scan(lines, block, outside, grant):
                     for c in SHAPE_KEY_MAP.get(char, char):
                         if c in _SHAPE_DROP:
                             continue
-                        _shape_scan_work(good.bit_count()+bad.bit_count()+len(keys))
+                        _shape_scan_work(good.bit_count() + bad.bit_count() + len(keys))
                         mask = masks.get(c, 0)
                         good = ((good << 1) | (starts if unit is not None else 0)) & mask
                         bad = ((bad << 1) | (starts if unit is None else 0)) & mask
                         if bad & finished:
                             target = next(k for k, bit in enumerate(finishes) if bad & bit)
                             return DraftShape('late-control' if target < 3 else 'late-verdict',
-                                              i+1, j+1, None, keys[target], (block[0]+1, block[1]))
+                                              i + 1, j + 1, None, keys[target],
+                                              (block[0] + 1, block[1]))
                         good &= ~finished
                 if closing is not None:
-                    _shape_scan_work(gap_good[closing].bit_count()+gap_bad[closing].bit_count())
+                    _shape_scan_work(gap_good[closing].bit_count()
+                                     + gap_bad[closing].bit_count())
                     good |= gap_good[closing]
                     bad |= gap_bad[closing]
                 j = end
