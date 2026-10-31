@@ -210,3 +210,25 @@ class TestShowDiagnostics(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('E-PATH-ESCAPE', err.getvalue())
         self.assertIn('unexpected error', err.getvalue())
+        self.assertLess(err.getvalue().index('E-PATH-ESCAPE'),
+                        err.getvalue().index('unexpected error'))
+
+    def test_root_resolve_runtime_error_omits_the_hint(self):
+        target = self.root / 'unfiled.md'
+        target.write_text('not a filed relay')
+        resolve = Path.resolve
+        root = Path(str(self.root))
+
+        def loop_error(path, *args, **kwargs):
+            if path == root:
+                raise RuntimeError('Symlink loop')
+            return resolve(path, *args, **kwargs)
+
+        err = io.StringIO()
+        with cwd(self.empty), patch.object(Path, 'resolve', loop_error):
+            with contextlib.redirect_stderr(err):
+                rc = cli.main(['show', str(target), '--root', str(self.root)])
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.getvalue().startswith('E-PATH-ESCAPE\n'))
+        self.assertNotIn('hint:', err.getvalue())
+        self.assertNotIn('unexpected error', err.getvalue())

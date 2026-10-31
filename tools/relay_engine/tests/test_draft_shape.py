@@ -111,9 +111,14 @@ def diagnostic_texts():
         key = 'VERDICT' if verdict else 'SUPERSEDES'
         line = marker+char+key+': x'
         yield draft('MERGE-GATE' if verdict else 'SITREP', body=('DISPATCH MERGE\n\n' if verdict else '')+line)
-        yield draft(body='```\n'+line+'\n```')
+        yield draft('MERGE-GATE' if verdict else 'SITREP',
+                    body=('DISPATCH MERGE\n\n' if verdict else '')
+                    + '```\n' + line + '\n```')
+        if verdict:
+            yield draft(body='```\n' + line + '\n```')
     for body in ('1\u200b. SUPERSEDES: x', '1\x1f) SUPERSEDES: x', 'SUPER\x1fSEDES: x', 'SUPERSEDES:\x1f x'):
         yield draft(body=body)
+        yield draft(body='```\n' + body + '\n```')
     for stop in ('- note','* note','+ note','2) step','> quote','-','<!-- c -->','- - -','</div>','<?x>','<div>',
                  '    - x','-not','1.not','< not html'):
         yield draft(body=stop+'\n  ```\nSUPERSEDES: x\n  ```')
@@ -142,6 +147,16 @@ def diagnostic_texts():
     for make in closed_linear_families():
         for n in (4000,16000,2000000):
             yield draft(body=make(n))
+    yield draft('MERGE-GATE', body='DISPATCH MERGE\n\n```\nVERDICT: x\n```')
+    yield from (text for _, text, _ in review_fold_cases())
+    yield draft(body='<div>\n```\nCYCLE_TERMINUS: withdrawn\n```\n</div>')
+    for key, value in (('ROLE: Pair Planner', 'ROLE: Pair Planner see SUPERSEDES: x'),
+                       ('SUBJECT: shape', 'SUBJECT: s see SUPERSEDES: x')):
+        yield draft().replace(key, value)
+    yield draft(body='see SUPERSEDES: x')
+    yield draft('MERGE-GATE', body='DISPATCH MERGE\n\nsee VERDICT: x')
+    for i, content in enumerate(('`SUPERSEDES: x`', 'Supersedes: x')):
+        yield admission.body('SITREP', ident='shown-clean-' + str(i), content=content).decode()
     yield from scan_cases()
     yield from linear_cases()
 
@@ -215,6 +230,28 @@ def scan_cases():
 def linear_cases():
     for k, n in ((32, 3200), (600, 600000), (1200, 1200000)):
         yield draft(body='\n'.join('`'*length for length in range(k+2, 2, -1))+'\n'*n)
+
+
+def review_fold_cases():
+    """Panel 2's missing rule pins, with literal diagnostic coordinates."""
+    for label, body, line, column in (
+            ('stop-tab-bullet', '-\t\n  ```\nSUPERSEDES: x\n  ```', 15, 1),
+            ('stop-tab-number', '1.\t\n   ```\nSUPERSEDES: x\n   ```', 15, 1),
+            ('stop-indent0', '   <div>\n```\nSUPERSEDES: x\n```', 15, 1),
+            ('drop-star-double', 'SUPER**SEDES**: x', 13, 15),
+            ('drop-star-single', 'SUPER*SEDES*: x', 13, 13),
+            ('drop-star-leading', '**SUPER**SEDES: x', 13, 15),
+            ('drop-lbracket', 'SUPER[SEDES](u): x', 13, 16),
+            ('pfx-star-control', '* SUPERSEDES: x', 13, 3),
+            ('pfx-digits-control', '123. SUPERSEDES: x', 13, 6),
+            ('pfx-quote-control', '>SUPERSEDES: x', 13, 2)):
+        yield label, draft(body=body), ('late-control', 'SUPERSEDES', line, column)
+    for prefix in ('* ', '+ ', '123. ', '>', '> - '):
+        yield ('verdict-prefix-' + prefix,
+               draft('MERGE-GATE', body='DISPATCH MERGE\n\n' + prefix
+                     + 'PLAN_REVIEW_VERDICT: no'),
+               ('late-verdict', 'PLAN_REVIEW_VERDICT', 15, len(prefix) + 1))
+    yield 'digit-entity', draft(body='&#\u0668\u0663;UPERSEDES: x'), None
 
 
 def closed_linear_families():
@@ -577,6 +614,8 @@ class TestDraftShape(unittest.TestCase):
                 self.assertEqual(None if shape is None else shape.kind, kind)
                 if kind:
                     self.assertEqual(shape.line, line)
+                    if 'XVERDICT: no' in text:
+                        self.assertEqual(shape.key, 'VERDICT')
 
 
 # Literal expected answers from plan r8 task 9e; no runtime oracle dependency.
@@ -721,6 +760,8 @@ class TestClosedRule(unittest.TestCase):
     def test_invisible_characters_before_the_colon_are_removed(self):
         from relay_engine.tests.test_parity import _standalone
         for module in (E, _standalone()):
+            self.assertIsNone(module.draft_shape(draft(
+                'MERGE-GATE', body='DISPATCH MERGE\n\n```\nVERDICT: x\n```')))
             for char, marker, verdict in itertools.product(
                     '\x01\x1b\x1f\x7f\x80\x9b\u0600\u06dd\ufff9\U000110bd\u2800', ('', '- '), (False, True)):
                 key = 'VERDICT' if verdict else 'SUPERSEDES'
@@ -732,12 +773,26 @@ class TestClosedRule(unittest.TestCase):
                     self.assertIsNotNone(shape)
                     self.assertEqual((shape.kind, shape.key, shape.column),
                                      ('late-verdict' if verdict else 'late-control', key, len(prefix)+1))
-                    self.assertIsNone(module.draft_shape(draft(body='```\n'+prefix+key+': x\n```')))
+                    self.assertIsNone(module.draft_shape(draft(
+                        'MERGE-GATE' if verdict else 'SITREP',
+                        body=('DISPATCH MERGE\n\n' if verdict else '')
+                        + '```\n' + prefix + key + ': x\n```')))
             for body, column in (('1\u200b. SUPERSEDES: x', 5), ('1\x1f) SUPERSEDES: x', 5),
                                  ('SUPER\x1fSEDES: x', 1), ('SUPERSEDES:\x1f x', 1)):
                 shape = module.draft_shape(draft(body=body))
                 self.assertIsNotNone(shape)
                 self.assertEqual((shape.key, shape.column), ('SUPERSEDES', column))
+                self.assertIsNone(module.draft_shape(draft(body='```\n' + body + '\n```')))
+
+    def test_review_fold_rule_pins(self):
+        from relay_engine.tests.test_parity import _standalone
+        for module in (E, _standalone()):
+            for name, text, expected in review_fold_cases():
+                with self.subTest(copy=module.__name__, case=name):
+                    shape = module.draft_shape(text)
+                    actual = (None if shape is None else
+                              (shape.kind, shape.key, shape.line, shape.column))
+                    self.assertEqual(actual, expected)
 
     def test_answers_do_not_depend_on_the_interpreters_unicode(self):
         from relay_engine.tests.test_parity import _standalone
@@ -797,15 +852,16 @@ class TestClosedRule(unittest.TestCase):
                     count = [0]
                     def visit(amount=1):
                         count[0] += amount
-                    with self.subTest(copy=module.__name__, family=number, n=n):
-                        with patch.object(module, '_shape_scan_work', visit):
-                            module.draft_shape(draft(body=make(n)))
-                        self.assertGreater(count[0], 0)
-                        rate = count[0]/n
-                        if baseline is None:
-                            baseline = rate
-                        else:
-                            self.assertLessEqual(rate, 1.25*baseline)
+                    # Fail immediately: a quadratic scan must never reach 2,000,000.
+                    context = (module.__name__, number, n)
+                    with patch.object(module, '_shape_scan_work', visit):
+                        module.draft_shape(draft(body=make(n)))
+                    self.assertGreater(count[0], 0, context)
+                    rate = count[0] / n
+                    if baseline is None:
+                        baseline = rate
+                    else:
+                        self.assertLessEqual(rate, 1.25 * baseline, context)
 
 
     def test_stop_lines_end_fence_quoting(self):
@@ -817,6 +873,11 @@ class TestClosedRule(unittest.TestCase):
                     shape = module.draft_shape(text)
                     self.assertIsNotNone(shape)
                     self.assertEqual((shape.kind, shape.key, shape.line, shape.column), ('late-control','SUPERSEDES',15,1))
+            html = draft(body='<div>\n```\nCYCLE_TERMINUS: withdrawn\n```\n</div>')
+            shape = module.draft_shape(html)
+            self.assertIsNotNone(shape)
+            self.assertEqual((shape.kind, shape.key, shape.line, shape.column),
+                             ('late-control', 'CYCLE_TERMINUS', 15, 1))
             for text, line, col in ((draft(prefix='1. step\n```\n  SUPERSEDES: x\n```\n'),3,3),
                                     (draft(prefix='\ufeff```\nx\n```\n  SUPERSEDES: x\n```\n'),4,3),
                                     (draft(prefix='\ufeff```\n  SUPERSEDES: x\n```\n'),2,3)):

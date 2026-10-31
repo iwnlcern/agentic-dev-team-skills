@@ -127,5 +127,14 @@ class TestDraftShapeLint(unittest.TestCase):
                     self.assertEqual([e for e in result.errors if 'appears in' in e], [cause+'; '+remedy])
                     outside = draft('MERGE-GATE' if grant else 'SITREP', body=('DISPATCH MERGE\n\n' if grant else '')+'see '+key+': x')
                     messages = module.draft_shape_errors(outside)
-                    self.assertEqual(len(messages), 1)
-                    self.assertIn('outside', messages[0])
+                    outside_cause = (
+                        "line 15: VERDICT is outside this grant's header block (lines 1 to 11), "
+                        "so authority reads the grant as carrying no verdict" if grant else
+                        "line 13: SUPERSEDES is outside the header block (lines 1 to 11), "
+                        "where the engine never reads it")
+                    outside_remedy = (
+                        "move the line into the header block, where any value but an exact "
+                        "positive word denies the grant; or remove it; or quote it in code"
+                        if grant else "move the line into the header block, or quote it in code")
+                    suffix = '; to mention the key, put it and its colon in inline code'
+                    self.assertEqual(messages, [outside_cause + '; ' + outside_remedy + suffix])

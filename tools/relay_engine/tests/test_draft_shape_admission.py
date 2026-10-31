@@ -206,6 +206,9 @@ class TestDraftShapeAdmission(unittest.TestCase):
                     request.assert_not_called()
                 self.assertEqual(caught.exception.code, 'E-DRAFT-SHAPE')
                 self.assertEqual(caught.exception.cause_key, 'error-draft-shape-'+variant+'-cause')
+                line = next(i for i, text in enumerate(raw.decode().splitlines(), 1)
+                            if 'SUPERSEDES' in text or '(PLAN_REVIEW_VERDICT' in text)
+                self.assertIn('line ' + str(line) + ':', caught.exception.cause)
                 with self.assertRaises(errors.EngineError) as caught:
                     daemon._submit_handler(self.f.ledger, self.f.root, self.f.args(raw))
                 self.assertEqual(caught.exception.code, 'E-DRAFT-SHAPE')
