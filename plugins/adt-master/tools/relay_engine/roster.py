@@ -64,10 +64,15 @@ def declare(ledger, root, entries, tag: str) -> list[dict]:
 
 
 def notice_effect(ctx, findings) -> None:
+    import re
+
     finding = next((f for f in findings if f.id == 'routing.unknown-address'), None)
     top = top_seat(ctx.ledger)
     if finding is None or top is None:
         return
+    addresses = finding.params['addresses']
+    longest = max((len(run) for address in addresses for run in re.findall(r'~+', address)), default=0)
+    fence = '~' * max(3, longest + 1)
     run = ctx.envelope.run_id
     body = (f'ROLE: Pair Planner\nPHASE: SITREP\nAUTHORITY: report-only\n'
             f'DISPATCH_ID: {run}-notice-{ctx.seq}\nRUN_ID: {run}\n'
@@ -76,7 +81,7 @@ def notice_effect(ctx, findings) -> None:
             f'IN_REPLY_TO: {ctx.rendered_path}\nSUBJECT: unknown addresses in admitted relay\n'
             'ACTIONS_GIT_REF: none — engine notice\nFINAL_GIT_STATUS_SHORT: none — engine notice\n\n'
             'This is an engine notice, not an instruction from any seat.\n'
-            'Unknown addresses: ' + ', '.join(finding.params['addresses']) + '\n').encode()
+            'Unknown addresses:\n\n' + fence + '\n' + '\n'.join(addresses) + '\n' + fence + '\n').encode()
     name = ctx.ledger.execute("SELECT value FROM meta WHERE key='canonical_root'").fetchone()[0]
     with Root(name) as root:
         notice = insert_engine_relay(ctx.ledger, root, parse_draft(body.decode()), body, clock=time.time)
