@@ -579,7 +579,6 @@ Review scope and evidence: <pinned change, evidence paths, and open merge condit
 
 Reviewer reply:
 
-
 ```text
 ## Team <id> — <bundle>: GATE REVIEW REPLY
 

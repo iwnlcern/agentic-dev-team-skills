@@ -377,8 +377,9 @@ A valid implementation dispatch, passing tests, a clean PR, or a finished branch
 The protocol layers the addressed merge token on top of the field-form merge authorization.
 Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`.
 A field-form grant is addressed to exactly one Implementer.
-Both linters refuse a token when the same relay has a negative operational merge-verdict line or more than one such line.
-For those linters, an operational merge verdict is a `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION` or `MERGE_APPROVED` line, or a `VERDICT` line with a merge-form value, outside fenced and backticked text, whether in the header or body.
+Both linters, the standalone `tools/relay-lint.py` and the engine's `tools/relay lint`, refuse a token when the same relay has more than one operational merge-verdict line, or one that is negative.
+For those linters, the lines that count, in the header or the body, and the values that are positive are what `merge_authorization_verdict_lines` and `merge_authorization_positive` in `tools/relay_engine/rules.py` decide; that matching is not R6's whole-value rule, so the linters and the check can read the same header verdict differently.
+They skip backticked text and what `strip_fenced_blocks` in the same file treats as fenced, which is not CommonMark's fence rule: a `~~~` fence hides nothing from them, and an unclosed backtick fence hides every line after it.
 The authority check instead reads verdicts from the header only: a negative header verdict defeats the token with `authority.denied`, adding `authority.verdict-conflict` when positive and negative header verdicts occur together; a verdict line below the header neither grants nor denies (R6 below).
 As an authoring convention, a grantor who means a verdict to count writes it in the header, where both readers see it.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
@@ -417,11 +418,12 @@ Do not retry into a pass or fall back to reading the relay by eye.
 A command failure never turns a managed root into a hand-authored root.
 
 Ask again before resuming after a stop in which anything the answer is computed from changed.
-Examples include changed plan or design bytes, an approved amendment or its later review, supersession in the lineage, or a change in the cycle's state.
+Examples include changed plan or design bytes, an approved amendment or its later review, supersession in the lineage, or a change in the state of a cycle the answer rests on.
 A resume is unchanged only when the seat establishes all three conditions:
 - Every plan and design artifact the last answer rested on, the base and every approved amendment, hashes as it did at that check.
 - Since that check no relay was filed by the pair's Planner, the operator or an orchestrator seat, and this seat filed no review; this test is by author, not by the presence of lock headers.
-- The cycle's actual current state is open, established from the root's record rather than inferred from authors or the absence of particular relay kinds.
+- The grant's cycle and, for a pair-Planner grant, the cycle of each relay in its pair lineage are open, established from the root's record rather than inferred from authors or the absence of particular relay kinds.
+
 Anything the seat cannot establish is unknown, and unknown asks again.
 With all three established, an unchanged resume needs no new check.
 A changed artifact always requires a fresh answer; an approved erratum can make that answer yes.
@@ -430,7 +432,7 @@ The check answers for a closed cycle through `authority.cycle-closed`; no suppor
 Retain the command, its output or stderr code, and exit status for every check actually run.
 The report carries exactly one `AUTHORITY_CHECK` line, in its header, for the latest check before the act reported: `AUTHORITY_CHECK: allowed <action> <relay path> <checked_at>`.
 Copy its three values from that check's output; earlier checks stay in retained evidence.
-Admission counts every line starting at column 0 with `AUTHORITY_CHECK:` outside a fence, header or body, so do not repeat such a line elsewhere in the report.
+Admission counts every line starting at column 0 with `AUTHORITY_CHECK:`, header or body, reading fences as the linters do under Literal merge token, so do not repeat such a line elsewhere in the report.
 On a managed root, a dispatch or merge go-ahead is live only as a filed relay; a seat receiving one by direct message asks its sender to file it and does not act.
 This rule governs the seat that would act on the go-ahead; an Orchestrator Planner recording the operator's words as `GATE_DISPOSITION` in its own filed grant under § Reviewer checkpoints is filing the go-ahead.
 On a hand-authored root there is no daemon to ask: apply the literal-token conditions by reading the relay and cite `AUTHORITY_CHECK: unavailable — <reason>`.
@@ -439,6 +441,9 @@ A managed-root seat whose check failed, was denied, could not evaluate or was no
 **What the check reads.**
 The engine's code governs; these predicates describe the release this text ships with, with routes and relay kinds kept explicit.
 Reason identifiers below are identifiers only, not display messages.
+
+Where a rule below gives `authority.lineage-incomplete` for an unusable review, that is a review the grant's lineage rests on.
+An amendment's delta review, the review of an `-erratum-N`, `-supplement-N` or `-amendment-N` file declared by a later PLAN or DESIGN of the same lock, adds no reason when it fails R3, R5, R6 or R7: the check leaves the amendment out and answers as though it had not been filed, so the amendment's bytes are not pinned and an allowed answer does not show that the delta review counted.
 
 - R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with an empty line or a line holding only spaces and tabs on each side, or the corresponding file edge.
   A `DISPATCH IMPL` token is live only in `PHASE: IMPL`; the `DISPATCH MERGE` phase binding is stated under Literal merge token.
@@ -461,7 +466,8 @@ Reason identifiers below are identifiers only, not display messages.
 - R7, approving reviews (`authority.lineage-incomplete`): PHASE_VERDICT, with the phase's hyphens changed to underscores, or VERDICT equals approve or approved, with no denial key.
 - R8, control characters (`authority.shape-absent` for a grant; `authority.lineage-incomplete` for the pair-Planner lineage cases below): refused characters are C0 controls except tab, line feed and carriage return, DEL, U+0085, U+2028 and U+2029; other C1 controls are not refused.
   These characters void every grant.
-  For a pair-Planner grant they also refuse the grant when present in any relay of its pair lineage or any relay reached by following its PLAN's `PARENT_DISPATCH_ID` chain beyond that lineage, whoever filed it.
+  For a pair-Planner grant they also refuse the grant when present in any relay of its pair lineage.
+  Beyond that lineage, they are refused in the first relay filed under each dispatch id that the PLAN's `PARENT_DISPATCH_ID` chain reaches, whoever filed it; a later relay filed under one of those ids is not read for them.
   For a cross-root design they also refuse that pair-Planner grant when present in a relay of its foreign root that the engine counts toward selecting the design's review, with the refusal reported in `external`; which foreign relays count is the engine's, and this text does not restate it.
   In pair lineage, a later PLAN or DESIGN by the same Planner, or a later review of that phase by the acting Implementer, after the corresponding lineage origin also denies the earlier grant with `authority.lineage-incomplete` if it contains one of these characters.
 - R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header, including the strict/legacy parsed-field comparison.
@@ -472,7 +478,7 @@ Reason identifiers below are identifiers only, not display messages.
   Normalization takes the value's first whitespace-delimited word, lowercased, and removes trailing `.`, `,`, `;`, `:`, `!` and `?`; an empty value refuses.
   Grants are still authored with `all-in`; this predicate describes the check, not a new authoring form.
 
-Two authoring conventions go beyond those predicates: write grants with no fenced block so they remain readable if reissued in token form, and never repeat any header field in the body with a different value, critical or not.
+Besides the header-verdict convention under Literal merge token, two authoring conventions go beyond those predicates: write grants with no fenced block so they remain readable if reissued in token form, and never repeat any header field in the body with a different value, critical or not.
 For a token grant, R2 already refuses a fence; the broader fence-free convention also covers field-form grants.
 The convention against differing body repeats also covers noncritical fields that R9 does not refuse.
 
