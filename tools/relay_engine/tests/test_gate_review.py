@@ -648,6 +648,30 @@ class TestGateReview(unittest.TestCase):
         )
         actual = json.loads((REPO / path).read_text())
 
+        # PL-v297-b2 task 10 preserves B8 while applying task 2's five rows
+        # and task 5's root warnings. Pin only those authorized fields to
+        # the post-B9/B8 B2 replay; all other baseline bytes still compare.
+        b2 = json.loads(
+            subprocess.check_output(
+                ["git", "show", "4a469852010d7bc62152ecfdea78d929a0632bc3:" + path],
+                cwd=REPO,
+            )
+        )
+        fixture = "tools/relay-lint-fixtures/"
+        moves = (
+            ("index", fixture + "rootres/XR16-u2028-marker-decoy/INDEX.md", "errors"),
+            ("index", fixture + "rootres/XR16-u2028-marker-decoy/INDEX.md", "exit"),
+            ("root", "tools/relay-lint-fixtures", "errors"),
+            ("root", "tools/relay-lint-fixtures", "warnings"),
+            ("single", fixture + "lockdigest/FB8-u2028-pseudo-closer.md", "errors"),
+            ("single", fixture + "lockdigest/FB8-u2028-pseudo-closer.md", "exit"),
+            ("single", fixture + "lockdigest/FLD24-u2028-field-decoy.md", "errors"),
+            ("single", fixture + "lockdigest/FLD24-u2028-field-decoy.md", "exit"),
+            ("single", fixture + "rootres/XR16-u2028-marker-decoy/INDEX.md", "errors"),
+        )
+        for group, row, field in moves:
+            base["verdicts"][group][row][field] = b2["verdicts"][group][row][field]
+
         def same(candidate):
             return (
                 candidate["verdicts"] == base["verdicts"]
