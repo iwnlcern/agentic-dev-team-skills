@@ -6,6 +6,9 @@ import selectors
 import signal
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 
 from relay_engine import authority, rules
@@ -103,7 +106,7 @@ def probe(mode):
                     raise AssertionError(('state leaked at', target.__name__, lineno))
         assert delivered > 20, delivered
     elif mode == 'cascade':
-        # Force delivery as cleanup starts, then exercise later lifted checks.
+        # Queue an alarm for cleanup to consume, then exercise later lifts.
         target = stops.stop.__wrapped__
         lines, first = inspect.getsourcelines(target)
         lineno = next(first+i for i, line in enumerate(lines) if 'signal.setitimer(signal.ITIMER_REAL, 0)' in line or 'signal.signal(signal.SIGALRM, signal.SIG_IGN)' in line)
@@ -155,3 +158,19 @@ class TestAlarmLifecycle(unittest.TestCase):
 
     def test_cleanup_alarm_does_not_poison_later_lifts(self):
         self.check_probe('cascade')
+
+
+class TestRealClockStops(unittest.TestCase):
+    def test_main_wait_observes_automatic_stop(self):
+        # The wait has its own bound: a broken sender fails instead of hanging.
+        with self.assertRaises(stops.TestStop):
+            with stops.stop(0.2):
+                threading.Event().wait(5)
+
+    def test_worker_lifted_sleep_observes_automatic_stop(self):
+        def blocked():
+            with corpus.budget(rules), stops.stop(0.2):
+                time.sleep(5)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with self.assertRaises(stops.TestStop):
+                pool.submit(blocked).result(timeout=10)
