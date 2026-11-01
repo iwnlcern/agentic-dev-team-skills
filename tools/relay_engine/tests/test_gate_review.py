@@ -15,7 +15,7 @@ from relay_engine import rules
 from relay_engine.tests.test_parity import _standalone
 from relay_engine.tests import test_finding_tags
 
-PRE_B8_BASE = "36a246639fbb92893a2a103104bbffdbd037d4e7"
+PRE_B8_BASE = "2138c1c859037b9fb2a102c156e1eaf495aa257e"
 REPO = Path(__file__).resolve().parents[3]
 FAMILY = "review.gate-not-heard"
 PLAN = "B8 plan\n"
