@@ -1,0 +1,1841 @@
+{
+  "captures": [
+    {
+      "interpreter": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+      "load_average": [
+        8.375,
+        7.92724609375,
+        7.73291015625
+      ],
+      "page_cache": "uncontrolled",
+      "python": "3.12.5",
+      "source_commit": "b8d87ebe15fbd3f5e06f1d0112fccad832acd1b1",
+      "source_sha256": {
+        "authority": "131746d2aeed862e27925f97ae13aa2deed6f081c13c87e41e636c2f20b9a8aa",
+        "rules": "c1c31f872e2fec0de8f68a580e42e951d44b2cbd9096c6d0102fe8b190553bff"
+      }
+    },
+    {
+      "interpreter": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+      "load_average": [
+        9.197265625,
+        8.21435546875,
+        7.86474609375
+      ],
+      "page_cache": "uncontrolled",
+      "python": "3.12.5",
+      "source_commit": "b8d87ebe15fbd3f5e06f1d0112fccad832acd1b1",
+      "source_sha256": {
+        "authority": "131746d2aeed862e27925f97ae13aa2deed6f081c13c87e41e636c2f20b9a8aa",
+        "rules": "c1c31f872e2fec0de8f68a580e42e951d44b2cbd9096c6d0102fe8b190553bff"
+      }
+    }
+  ],
+  "cases": {
+    "B1-complete-within-envelope": {
+      "expected_old": [
+        "authority.could-not-evaluate",
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate",
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 5.001920124981552
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate",
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 5.005262040998787
+        }
+      }
+    },
+    "C1-over-count-20001": {
+      "expected_old": [
+        "authority.could-not-evaluate",
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate",
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 5.001990124990698
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate",
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 5.002242500020657
+        }
+      }
+    },
+    "C2-over-bytes-300MiB": {
+      "expected_old": [],
+      "paths": {
+        "direct": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md",
+            "big/SITREP-x-20260801-000000.md",
+            "big/SITREP-x-20260801-000001.md",
+            "big/SITREP-x-20260801-000002.md",
+            "big/SITREP-x-20260801-000003.md",
+            "big/SITREP-x-20260801-000004.md",
+            "big/SITREP-x-20260801-000005.md",
+            "big/SITREP-x-20260801-000006.md",
+            "big/SITREP-x-20260801-000007.md",
+            "big/SITREP-x-20260801-000008.md",
+            "big/SITREP-x-20260801-000009.md",
+            "big/SITREP-x-20260801-000010.md",
+            "big/SITREP-x-20260801-000011.md",
+            "big/SITREP-x-20260801-000012.md",
+            "big/SITREP-x-20260801-000013.md",
+            "big/SITREP-x-20260801-000014.md",
+            "big/SITREP-x-20260801-000015.md",
+            "big/SITREP-x-20260801-000016.md",
+            "big/SITREP-x-20260801-000017.md",
+            "big/SITREP-x-20260801-000018.md",
+            "big/SITREP-x-20260801-000019.md",
+            "big/SITREP-x-20260801-000020.md",
+            "big/SITREP-x-20260801-000021.md",
+            "big/SITREP-x-20260801-000022.md",
+            "big/SITREP-x-20260801-000023.md",
+            "big/SITREP-x-20260801-000024.md",
+            "big/SITREP-x-20260801-000025.md",
+            "big/SITREP-x-20260801-000026.md",
+            "big/SITREP-x-20260801-000027.md",
+            "big/SITREP-x-20260801-000028.md",
+            "big/SITREP-x-20260801-000029.md",
+            "big/SITREP-x-20260801-000030.md",
+            "big/SITREP-x-20260801-000031.md",
+            "big/SITREP-x-20260801-000032.md",
+            "big/SITREP-x-20260801-000033.md",
+            "big/SITREP-x-20260801-000034.md",
+            "big/SITREP-x-20260801-000035.md",
+            "big/SITREP-x-20260801-000036.md",
+            "big/SITREP-x-20260801-000037.md",
+            "big/SITREP-x-20260801-000038.md",
+            "big/SITREP-x-20260801-000039.md",
+            "big/SITREP-x-20260801-000040.md",
+            "big/SITREP-x-20260801-000041.md",
+            "big/SITREP-x-20260801-000042.md",
+            "big/SITREP-x-20260801-000043.md",
+            "big/SITREP-x-20260801-000044.md",
+            "big/SITREP-x-20260801-000045.md",
+            "big/SITREP-x-20260801-000046.md",
+            "big/SITREP-x-20260801-000047.md",
+            "big/SITREP-x-20260801-000048.md",
+            "big/SITREP-x-20260801-000049.md",
+            "big/SITREP-x-20260801-000050.md",
+            "big/SITREP-x-20260801-000051.md",
+            "big/SITREP-x-20260801-000052.md",
+            "big/SITREP-x-20260801-000053.md",
+            "big/SITREP-x-20260801-000054.md",
+            "big/SITREP-x-20260801-000055.md",
+            "big/SITREP-x-20260801-000056.md",
+            "big/SITREP-x-20260801-000057.md",
+            "big/SITREP-x-20260801-000058.md",
+            "big/SITREP-x-20260801-000059.md",
+            "big/SITREP-x-20260801-000060.md",
+            "big/SITREP-x-20260801-000061.md",
+            "big/SITREP-x-20260801-000062.md",
+            "big/SITREP-x-20260801-000063.md",
+            "big/SITREP-x-20260801-000064.md",
+            "big/SITREP-x-20260801-000065.md",
+            "big/SITREP-x-20260801-000066.md",
+            "big/SITREP-x-20260801-000067.md",
+            "big/SITREP-x-20260801-000068.md",
+            "big/SITREP-x-20260801-000069.md",
+            "big/SITREP-x-20260801-000070.md",
+            "big/SITREP-x-20260801-000071.md",
+            "big/SITREP-x-20260801-000072.md",
+            "big/SITREP-x-20260801-000073.md",
+            "big/SITREP-x-20260801-000074.md",
+            "big/SITREP-x-20260801-000075.md",
+            "big/SITREP-x-20260801-000076.md",
+            "big/SITREP-x-20260801-000077.md",
+            "big/SITREP-x-20260801-000078.md",
+            "big/SITREP-x-20260801-000079.md",
+            "big/SITREP-x-20260801-000080.md",
+            "big/SITREP-x-20260801-000081.md",
+            "big/SITREP-x-20260801-000082.md",
+            "big/SITREP-x-20260801-000083.md",
+            "big/SITREP-x-20260801-000084.md",
+            "big/SITREP-x-20260801-000085.md",
+            "big/SITREP-x-20260801-000086.md",
+            "big/SITREP-x-20260801-000087.md",
+            "big/SITREP-x-20260801-000088.md",
+            "big/SITREP-x-20260801-000089.md",
+            "big/SITREP-x-20260801-000090.md",
+            "big/SITREP-x-20260801-000091.md",
+            "big/SITREP-x-20260801-000092.md",
+            "big/SITREP-x-20260801-000093.md",
+            "big/SITREP-x-20260801-000094.md",
+            "big/SITREP-x-20260801-000095.md",
+            "big/SITREP-x-20260801-000096.md",
+            "big/SITREP-x-20260801-000097.md",
+            "big/SITREP-x-20260801-000098.md",
+            "big/SITREP-x-20260801-000099.md",
+            "big/SITREP-x-20260801-000100.md",
+            "big/SITREP-x-20260801-000101.md",
+            "big/SITREP-x-20260801-000102.md",
+            "big/SITREP-x-20260801-000103.md",
+            "big/SITREP-x-20260801-000104.md",
+            "big/SITREP-x-20260801-000105.md",
+            "big/SITREP-x-20260801-000106.md",
+            "big/SITREP-x-20260801-000107.md",
+            "big/SITREP-x-20260801-000108.md",
+            "big/SITREP-x-20260801-000109.md",
+            "big/SITREP-x-20260801-000110.md",
+            "big/SITREP-x-20260801-000111.md",
+            "big/SITREP-x-20260801-000112.md",
+            "big/SITREP-x-20260801-000113.md",
+            "big/SITREP-x-20260801-000114.md",
+            "big/SITREP-x-20260801-000115.md",
+            "big/SITREP-x-20260801-000116.md",
+            "big/SITREP-x-20260801-000117.md",
+            "big/SITREP-x-20260801-000118.md",
+            "big/SITREP-x-20260801-000119.md",
+            "big/SITREP-x-20260801-000120.md",
+            "big/SITREP-x-20260801-000121.md",
+            "big/SITREP-x-20260801-000122.md",
+            "big/SITREP-x-20260801-000123.md",
+            "big/SITREP-x-20260801-000124.md",
+            "big/SITREP-x-20260801-000125.md",
+            "big/SITREP-x-20260801-000126.md",
+            "big/SITREP-x-20260801-000127.md",
+            "big/SITREP-x-20260801-000128.md",
+            "big/SITREP-x-20260801-000129.md",
+            "big/SITREP-x-20260801-000130.md",
+            "big/SITREP-x-20260801-000131.md",
+            "big/SITREP-x-20260801-000132.md",
+            "big/SITREP-x-20260801-000133.md",
+            "big/SITREP-x-20260801-000134.md",
+            "big/SITREP-x-20260801-000135.md",
+            "big/SITREP-x-20260801-000136.md",
+            "big/SITREP-x-20260801-000137.md",
+            "big/SITREP-x-20260801-000138.md",
+            "big/SITREP-x-20260801-000139.md",
+            "big/SITREP-x-20260801-000140.md",
+            "big/SITREP-x-20260801-000141.md",
+            "big/SITREP-x-20260801-000142.md",
+            "big/SITREP-x-20260801-000143.md",
+            "big/SITREP-x-20260801-000144.md",
+            "big/SITREP-x-20260801-000145.md",
+            "big/SITREP-x-20260801-000146.md",
+            "big/SITREP-x-20260801-000147.md",
+            "big/SITREP-x-20260801-000148.md",
+            "big/SITREP-x-20260801-000149.md",
+            "big/SITREP-x-20260801-000150.md",
+            "big/SITREP-x-20260801-000151.md",
+            "big/SITREP-x-20260801-000152.md",
+            "big/SITREP-x-20260801-000153.md",
+            "big/SITREP-x-20260801-000154.md",
+            "big/SITREP-x-20260801-000155.md",
+            "big/SITREP-x-20260801-000156.md",
+            "big/SITREP-x-20260801-000157.md",
+            "big/SITREP-x-20260801-000158.md",
+            "big/SITREP-x-20260801-000159.md",
+            "big/SITREP-x-20260801-000160.md",
+            "big/SITREP-x-20260801-000161.md",
+            "big/SITREP-x-20260801-000162.md",
+            "big/SITREP-x-20260801-000163.md",
+            "big/SITREP-x-20260801-000164.md",
+            "big/SITREP-x-20260801-000165.md",
+            "big/SITREP-x-20260801-000166.md",
+            "big/SITREP-x-20260801-000167.md",
+            "big/SITREP-x-20260801-000168.md",
+            "big/SITREP-x-20260801-000169.md",
+            "big/SITREP-x-20260801-000170.md",
+            "big/SITREP-x-20260801-000171.md",
+            "big/SITREP-x-20260801-000172.md",
+            "big/SITREP-x-20260801-000173.md",
+            "big/SITREP-x-20260801-000174.md",
+            "big/SITREP-x-20260801-000175.md",
+            "big/SITREP-x-20260801-000176.md",
+            "big/SITREP-x-20260801-000177.md",
+            "big/SITREP-x-20260801-000178.md",
+            "big/SITREP-x-20260801-000179.md",
+            "big/SITREP-x-20260801-000180.md",
+            "big/SITREP-x-20260801-000181.md",
+            "big/SITREP-x-20260801-000182.md",
+            "big/SITREP-x-20260801-000183.md",
+            "big/SITREP-x-20260801-000184.md",
+            "big/SITREP-x-20260801-000185.md",
+            "big/SITREP-x-20260801-000186.md",
+            "big/SITREP-x-20260801-000187.md",
+            "big/SITREP-x-20260801-000188.md",
+            "big/SITREP-x-20260801-000189.md",
+            "big/SITREP-x-20260801-000190.md",
+            "big/SITREP-x-20260801-000191.md",
+            "big/SITREP-x-20260801-000192.md",
+            "big/SITREP-x-20260801-000193.md",
+            "big/SITREP-x-20260801-000194.md",
+            "big/SITREP-x-20260801-000195.md",
+            "big/SITREP-x-20260801-000196.md",
+            "big/SITREP-x-20260801-000197.md",
+            "big/SITREP-x-20260801-000198.md",
+            "big/SITREP-x-20260801-000199.md",
+            "big/SITREP-x-20260801-000200.md",
+            "big/SITREP-x-20260801-000201.md",
+            "big/SITREP-x-20260801-000202.md",
+            "big/SITREP-x-20260801-000203.md",
+            "big/SITREP-x-20260801-000204.md",
+            "big/SITREP-x-20260801-000205.md",
+            "big/SITREP-x-20260801-000206.md",
+            "big/SITREP-x-20260801-000207.md",
+            "big/SITREP-x-20260801-000208.md",
+            "big/SITREP-x-20260801-000209.md",
+            "big/SITREP-x-20260801-000210.md",
+            "big/SITREP-x-20260801-000211.md",
+            "big/SITREP-x-20260801-000212.md",
+            "big/SITREP-x-20260801-000213.md",
+            "big/SITREP-x-20260801-000214.md",
+            "big/SITREP-x-20260801-000215.md",
+            "big/SITREP-x-20260801-000216.md",
+            "big/SITREP-x-20260801-000217.md",
+            "big/SITREP-x-20260801-000218.md",
+            "big/SITREP-x-20260801-000219.md",
+            "big/SITREP-x-20260801-000220.md",
+            "big/SITREP-x-20260801-000221.md",
+            "big/SITREP-x-20260801-000222.md",
+            "big/SITREP-x-20260801-000223.md",
+            "big/SITREP-x-20260801-000224.md",
+            "big/SITREP-x-20260801-000225.md",
+            "big/SITREP-x-20260801-000226.md",
+            "big/SITREP-x-20260801-000227.md",
+            "big/SITREP-x-20260801-000228.md",
+            "big/SITREP-x-20260801-000229.md",
+            "big/SITREP-x-20260801-000230.md",
+            "big/SITREP-x-20260801-000231.md",
+            "big/SITREP-x-20260801-000232.md",
+            "big/SITREP-x-20260801-000233.md",
+            "big/SITREP-x-20260801-000234.md",
+            "big/SITREP-x-20260801-000235.md",
+            "big/SITREP-x-20260801-000236.md",
+            "big/SITREP-x-20260801-000237.md",
+            "big/SITREP-x-20260801-000238.md",
+            "big/SITREP-x-20260801-000239.md",
+            "big/SITREP-x-20260801-000240.md",
+            "big/SITREP-x-20260801-000241.md",
+            "big/SITREP-x-20260801-000242.md",
+            "big/SITREP-x-20260801-000243.md",
+            "big/SITREP-x-20260801-000244.md",
+            "big/SITREP-x-20260801-000245.md",
+            "big/SITREP-x-20260801-000246.md",
+            "big/SITREP-x-20260801-000247.md",
+            "big/SITREP-x-20260801-000248.md",
+            "big/SITREP-x-20260801-000249.md",
+            "big/SITREP-x-20260801-000250.md",
+            "big/SITREP-x-20260801-000251.md",
+            "big/SITREP-x-20260801-000252.md",
+            "big/SITREP-x-20260801-000253.md",
+            "big/SITREP-x-20260801-000254.md",
+            "big/SITREP-x-20260801-000255.md",
+            "big/SITREP-x-20260801-000256.md",
+            "big/SITREP-x-20260801-000257.md",
+            "big/SITREP-x-20260801-000258.md",
+            "big/SITREP-x-20260801-000259.md",
+            "big/SITREP-x-20260801-000260.md",
+            "big/SITREP-x-20260801-000261.md",
+            "big/SITREP-x-20260801-000262.md",
+            "big/SITREP-x-20260801-000263.md",
+            "big/SITREP-x-20260801-000264.md",
+            "big/SITREP-x-20260801-000265.md",
+            "big/SITREP-x-20260801-000266.md",
+            "big/SITREP-x-20260801-000267.md",
+            "big/SITREP-x-20260801-000268.md",
+            "big/SITREP-x-20260801-000269.md",
+            "big/SITREP-x-20260801-000270.md",
+            "big/SITREP-x-20260801-000271.md",
+            "big/SITREP-x-20260801-000272.md",
+            "big/SITREP-x-20260801-000273.md",
+            "big/SITREP-x-20260801-000274.md",
+            "big/SITREP-x-20260801-000275.md",
+            "big/SITREP-x-20260801-000276.md",
+            "big/SITREP-x-20260801-000277.md",
+            "big/SITREP-x-20260801-000278.md",
+            "big/SITREP-x-20260801-000279.md",
+            "big/SITREP-x-20260801-000280.md",
+            "big/SITREP-x-20260801-000281.md",
+            "big/SITREP-x-20260801-000282.md",
+            "big/SITREP-x-20260801-000283.md",
+            "big/SITREP-x-20260801-000284.md",
+            "big/SITREP-x-20260801-000285.md",
+            "big/SITREP-x-20260801-000286.md",
+            "big/SITREP-x-20260801-000287.md",
+            "big/SITREP-x-20260801-000288.md",
+            "big/SITREP-x-20260801-000289.md",
+            "big/SITREP-x-20260801-000290.md",
+            "big/SITREP-x-20260801-000291.md",
+            "big/SITREP-x-20260801-000292.md",
+            "big/SITREP-x-20260801-000293.md",
+            "big/SITREP-x-20260801-000294.md",
+            "big/SITREP-x-20260801-000295.md",
+            "big/SITREP-x-20260801-000296.md",
+            "big/SITREP-x-20260801-000297.md",
+            "big/SITREP-x-20260801-000298.md",
+            "big/SITREP-x-20260801-000299.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 4.1325987500022165
+        },
+        "pair": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md",
+            "big/SITREP-x-20260801-000000.md",
+            "big/SITREP-x-20260801-000001.md",
+            "big/SITREP-x-20260801-000002.md",
+            "big/SITREP-x-20260801-000003.md",
+            "big/SITREP-x-20260801-000004.md",
+            "big/SITREP-x-20260801-000005.md",
+            "big/SITREP-x-20260801-000006.md",
+            "big/SITREP-x-20260801-000007.md",
+            "big/SITREP-x-20260801-000008.md",
+            "big/SITREP-x-20260801-000009.md",
+            "big/SITREP-x-20260801-000010.md",
+            "big/SITREP-x-20260801-000011.md",
+            "big/SITREP-x-20260801-000012.md",
+            "big/SITREP-x-20260801-000013.md",
+            "big/SITREP-x-20260801-000014.md",
+            "big/SITREP-x-20260801-000015.md",
+            "big/SITREP-x-20260801-000016.md",
+            "big/SITREP-x-20260801-000017.md",
+            "big/SITREP-x-20260801-000018.md",
+            "big/SITREP-x-20260801-000019.md",
+            "big/SITREP-x-20260801-000020.md",
+            "big/SITREP-x-20260801-000021.md",
+            "big/SITREP-x-20260801-000022.md",
+            "big/SITREP-x-20260801-000023.md",
+            "big/SITREP-x-20260801-000024.md",
+            "big/SITREP-x-20260801-000025.md",
+            "big/SITREP-x-20260801-000026.md",
+            "big/SITREP-x-20260801-000027.md",
+            "big/SITREP-x-20260801-000028.md",
+            "big/SITREP-x-20260801-000029.md",
+            "big/SITREP-x-20260801-000030.md",
+            "big/SITREP-x-20260801-000031.md",
+            "big/SITREP-x-20260801-000032.md",
+            "big/SITREP-x-20260801-000033.md",
+            "big/SITREP-x-20260801-000034.md",
+            "big/SITREP-x-20260801-000035.md",
+            "big/SITREP-x-20260801-000036.md",
+            "big/SITREP-x-20260801-000037.md",
+            "big/SITREP-x-20260801-000038.md",
+            "big/SITREP-x-20260801-000039.md",
+            "big/SITREP-x-20260801-000040.md",
+            "big/SITREP-x-20260801-000041.md",
+            "big/SITREP-x-20260801-000042.md",
+            "big/SITREP-x-20260801-000043.md",
+            "big/SITREP-x-20260801-000044.md",
+            "big/SITREP-x-20260801-000045.md",
+            "big/SITREP-x-20260801-000046.md",
+            "big/SITREP-x-20260801-000047.md",
+            "big/SITREP-x-20260801-000048.md",
+            "big/SITREP-x-20260801-000049.md",
+            "big/SITREP-x-20260801-000050.md",
+            "big/SITREP-x-20260801-000051.md",
+            "big/SITREP-x-20260801-000052.md",
+            "big/SITREP-x-20260801-000053.md",
+            "big/SITREP-x-20260801-000054.md",
+            "big/SITREP-x-20260801-000055.md",
+            "big/SITREP-x-20260801-000056.md",
+            "big/SITREP-x-20260801-000057.md",
+            "big/SITREP-x-20260801-000058.md",
+            "big/SITREP-x-20260801-000059.md",
+            "big/SITREP-x-20260801-000060.md",
+            "big/SITREP-x-20260801-000061.md",
+            "big/SITREP-x-20260801-000062.md",
+            "big/SITREP-x-20260801-000063.md",
+            "big/SITREP-x-20260801-000064.md",
+            "big/SITREP-x-20260801-000065.md",
+            "big/SITREP-x-20260801-000066.md",
+            "big/SITREP-x-20260801-000067.md",
+            "big/SITREP-x-20260801-000068.md",
+            "big/SITREP-x-20260801-000069.md",
+            "big/SITREP-x-20260801-000070.md",
+            "big/SITREP-x-20260801-000071.md",
+            "big/SITREP-x-20260801-000072.md",
+            "big/SITREP-x-20260801-000073.md",
+            "big/SITREP-x-20260801-000074.md",
+            "big/SITREP-x-20260801-000075.md",
+            "big/SITREP-x-20260801-000076.md",
+            "big/SITREP-x-20260801-000077.md",
+            "big/SITREP-x-20260801-000078.md",
+            "big/SITREP-x-20260801-000079.md",
+            "big/SITREP-x-20260801-000080.md",
+            "big/SITREP-x-20260801-000081.md",
+            "big/SITREP-x-20260801-000082.md",
+            "big/SITREP-x-20260801-000083.md",
+            "big/SITREP-x-20260801-000084.md",
+            "big/SITREP-x-20260801-000085.md",
+            "big/SITREP-x-20260801-000086.md",
+            "big/SITREP-x-20260801-000087.md",
+            "big/SITREP-x-20260801-000088.md",
+            "big/SITREP-x-20260801-000089.md",
+            "big/SITREP-x-20260801-000090.md",
+            "big/SITREP-x-20260801-000091.md",
+            "big/SITREP-x-20260801-000092.md",
+            "big/SITREP-x-20260801-000093.md",
+            "big/SITREP-x-20260801-000094.md",
+            "big/SITREP-x-20260801-000095.md",
+            "big/SITREP-x-20260801-000096.md",
+            "big/SITREP-x-20260801-000097.md",
+            "big/SITREP-x-20260801-000098.md",
+            "big/SITREP-x-20260801-000099.md",
+            "big/SITREP-x-20260801-000100.md",
+            "big/SITREP-x-20260801-000101.md",
+            "big/SITREP-x-20260801-000102.md",
+            "big/SITREP-x-20260801-000103.md",
+            "big/SITREP-x-20260801-000104.md",
+            "big/SITREP-x-20260801-000105.md",
+            "big/SITREP-x-20260801-000106.md",
+            "big/SITREP-x-20260801-000107.md",
+            "big/SITREP-x-20260801-000108.md",
+            "big/SITREP-x-20260801-000109.md",
+            "big/SITREP-x-20260801-000110.md",
+            "big/SITREP-x-20260801-000111.md",
+            "big/SITREP-x-20260801-000112.md",
+            "big/SITREP-x-20260801-000113.md",
+            "big/SITREP-x-20260801-000114.md",
+            "big/SITREP-x-20260801-000115.md",
+            "big/SITREP-x-20260801-000116.md",
+            "big/SITREP-x-20260801-000117.md",
+            "big/SITREP-x-20260801-000118.md",
+            "big/SITREP-x-20260801-000119.md",
+            "big/SITREP-x-20260801-000120.md",
+            "big/SITREP-x-20260801-000121.md",
+            "big/SITREP-x-20260801-000122.md",
+            "big/SITREP-x-20260801-000123.md",
+            "big/SITREP-x-20260801-000124.md",
+            "big/SITREP-x-20260801-000125.md",
+            "big/SITREP-x-20260801-000126.md",
+            "big/SITREP-x-20260801-000127.md",
+            "big/SITREP-x-20260801-000128.md",
+            "big/SITREP-x-20260801-000129.md",
+            "big/SITREP-x-20260801-000130.md",
+            "big/SITREP-x-20260801-000131.md",
+            "big/SITREP-x-20260801-000132.md",
+            "big/SITREP-x-20260801-000133.md",
+            "big/SITREP-x-20260801-000134.md",
+            "big/SITREP-x-20260801-000135.md",
+            "big/SITREP-x-20260801-000136.md",
+            "big/SITREP-x-20260801-000137.md",
+            "big/SITREP-x-20260801-000138.md",
+            "big/SITREP-x-20260801-000139.md",
+            "big/SITREP-x-20260801-000140.md",
+            "big/SITREP-x-20260801-000141.md",
+            "big/SITREP-x-20260801-000142.md",
+            "big/SITREP-x-20260801-000143.md",
+            "big/SITREP-x-20260801-000144.md",
+            "big/SITREP-x-20260801-000145.md",
+            "big/SITREP-x-20260801-000146.md",
+            "big/SITREP-x-20260801-000147.md",
+            "big/SITREP-x-20260801-000148.md",
+            "big/SITREP-x-20260801-000149.md",
+            "big/SITREP-x-20260801-000150.md",
+            "big/SITREP-x-20260801-000151.md",
+            "big/SITREP-x-20260801-000152.md",
+            "big/SITREP-x-20260801-000153.md",
+            "big/SITREP-x-20260801-000154.md",
+            "big/SITREP-x-20260801-000155.md",
+            "big/SITREP-x-20260801-000156.md",
+            "big/SITREP-x-20260801-000157.md",
+            "big/SITREP-x-20260801-000158.md",
+            "big/SITREP-x-20260801-000159.md",
+            "big/SITREP-x-20260801-000160.md",
+            "big/SITREP-x-20260801-000161.md",
+            "big/SITREP-x-20260801-000162.md",
+            "big/SITREP-x-20260801-000163.md",
+            "big/SITREP-x-20260801-000164.md",
+            "big/SITREP-x-20260801-000165.md",
+            "big/SITREP-x-20260801-000166.md",
+            "big/SITREP-x-20260801-000167.md",
+            "big/SITREP-x-20260801-000168.md",
+            "big/SITREP-x-20260801-000169.md",
+            "big/SITREP-x-20260801-000170.md",
+            "big/SITREP-x-20260801-000171.md",
+            "big/SITREP-x-20260801-000172.md",
+            "big/SITREP-x-20260801-000173.md",
+            "big/SITREP-x-20260801-000174.md",
+            "big/SITREP-x-20260801-000175.md",
+            "big/SITREP-x-20260801-000176.md",
+            "big/SITREP-x-20260801-000177.md",
+            "big/SITREP-x-20260801-000178.md",
+            "big/SITREP-x-20260801-000179.md",
+            "big/SITREP-x-20260801-000180.md",
+            "big/SITREP-x-20260801-000181.md",
+            "big/SITREP-x-20260801-000182.md",
+            "big/SITREP-x-20260801-000183.md",
+            "big/SITREP-x-20260801-000184.md",
+            "big/SITREP-x-20260801-000185.md",
+            "big/SITREP-x-20260801-000186.md",
+            "big/SITREP-x-20260801-000187.md",
+            "big/SITREP-x-20260801-000188.md",
+            "big/SITREP-x-20260801-000189.md",
+            "big/SITREP-x-20260801-000190.md",
+            "big/SITREP-x-20260801-000191.md",
+            "big/SITREP-x-20260801-000192.md",
+            "big/SITREP-x-20260801-000193.md",
+            "big/SITREP-x-20260801-000194.md",
+            "big/SITREP-x-20260801-000195.md",
+            "big/SITREP-x-20260801-000196.md",
+            "big/SITREP-x-20260801-000197.md",
+            "big/SITREP-x-20260801-000198.md",
+            "big/SITREP-x-20260801-000199.md",
+            "big/SITREP-x-20260801-000200.md",
+            "big/SITREP-x-20260801-000201.md",
+            "big/SITREP-x-20260801-000202.md",
+            "big/SITREP-x-20260801-000203.md",
+            "big/SITREP-x-20260801-000204.md",
+            "big/SITREP-x-20260801-000205.md",
+            "big/SITREP-x-20260801-000206.md",
+            "big/SITREP-x-20260801-000207.md",
+            "big/SITREP-x-20260801-000208.md",
+            "big/SITREP-x-20260801-000209.md",
+            "big/SITREP-x-20260801-000210.md",
+            "big/SITREP-x-20260801-000211.md",
+            "big/SITREP-x-20260801-000212.md",
+            "big/SITREP-x-20260801-000213.md",
+            "big/SITREP-x-20260801-000214.md",
+            "big/SITREP-x-20260801-000215.md",
+            "big/SITREP-x-20260801-000216.md",
+            "big/SITREP-x-20260801-000217.md",
+            "big/SITREP-x-20260801-000218.md",
+            "big/SITREP-x-20260801-000219.md",
+            "big/SITREP-x-20260801-000220.md",
+            "big/SITREP-x-20260801-000221.md",
+            "big/SITREP-x-20260801-000222.md",
+            "big/SITREP-x-20260801-000223.md",
+            "big/SITREP-x-20260801-000224.md",
+            "big/SITREP-x-20260801-000225.md",
+            "big/SITREP-x-20260801-000226.md",
+            "big/SITREP-x-20260801-000227.md",
+            "big/SITREP-x-20260801-000228.md",
+            "big/SITREP-x-20260801-000229.md",
+            "big/SITREP-x-20260801-000230.md",
+            "big/SITREP-x-20260801-000231.md",
+            "big/SITREP-x-20260801-000232.md",
+            "big/SITREP-x-20260801-000233.md",
+            "big/SITREP-x-20260801-000234.md",
+            "big/SITREP-x-20260801-000235.md",
+            "big/SITREP-x-20260801-000236.md",
+            "big/SITREP-x-20260801-000237.md",
+            "big/SITREP-x-20260801-000238.md",
+            "big/SITREP-x-20260801-000239.md",
+            "big/SITREP-x-20260801-000240.md",
+            "big/SITREP-x-20260801-000241.md",
+            "big/SITREP-x-20260801-000242.md",
+            "big/SITREP-x-20260801-000243.md",
+            "big/SITREP-x-20260801-000244.md",
+            "big/SITREP-x-20260801-000245.md",
+            "big/SITREP-x-20260801-000246.md",
+            "big/SITREP-x-20260801-000247.md",
+            "big/SITREP-x-20260801-000248.md",
+            "big/SITREP-x-20260801-000249.md",
+            "big/SITREP-x-20260801-000250.md",
+            "big/SITREP-x-20260801-000251.md",
+            "big/SITREP-x-20260801-000252.md",
+            "big/SITREP-x-20260801-000253.md",
+            "big/SITREP-x-20260801-000254.md",
+            "big/SITREP-x-20260801-000255.md",
+            "big/SITREP-x-20260801-000256.md",
+            "big/SITREP-x-20260801-000257.md",
+            "big/SITREP-x-20260801-000258.md",
+            "big/SITREP-x-20260801-000259.md",
+            "big/SITREP-x-20260801-000260.md",
+            "big/SITREP-x-20260801-000261.md",
+            "big/SITREP-x-20260801-000262.md",
+            "big/SITREP-x-20260801-000263.md",
+            "big/SITREP-x-20260801-000264.md",
+            "big/SITREP-x-20260801-000265.md",
+            "big/SITREP-x-20260801-000266.md",
+            "big/SITREP-x-20260801-000267.md",
+            "big/SITREP-x-20260801-000268.md",
+            "big/SITREP-x-20260801-000269.md",
+            "big/SITREP-x-20260801-000270.md",
+            "big/SITREP-x-20260801-000271.md",
+            "big/SITREP-x-20260801-000272.md",
+            "big/SITREP-x-20260801-000273.md",
+            "big/SITREP-x-20260801-000274.md",
+            "big/SITREP-x-20260801-000275.md",
+            "big/SITREP-x-20260801-000276.md",
+            "big/SITREP-x-20260801-000277.md",
+            "big/SITREP-x-20260801-000278.md",
+            "big/SITREP-x-20260801-000279.md",
+            "big/SITREP-x-20260801-000280.md",
+            "big/SITREP-x-20260801-000281.md",
+            "big/SITREP-x-20260801-000282.md",
+            "big/SITREP-x-20260801-000283.md",
+            "big/SITREP-x-20260801-000284.md",
+            "big/SITREP-x-20260801-000285.md",
+            "big/SITREP-x-20260801-000286.md",
+            "big/SITREP-x-20260801-000287.md",
+            "big/SITREP-x-20260801-000288.md",
+            "big/SITREP-x-20260801-000289.md",
+            "big/SITREP-x-20260801-000290.md",
+            "big/SITREP-x-20260801-000291.md",
+            "big/SITREP-x-20260801-000292.md",
+            "big/SITREP-x-20260801-000293.md",
+            "big/SITREP-x-20260801-000294.md",
+            "big/SITREP-x-20260801-000295.md",
+            "big/SITREP-x-20260801-000296.md",
+            "big/SITREP-x-20260801-000297.md",
+            "big/SITREP-x-20260801-000298.md",
+            "big/SITREP-x-20260801-000299.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 5.607608749996871
+        }
+      }
+    },
+    "D1-repo-missing": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "DESIGN_SOURCE_REPO does not name an existing directory",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.013705125020351261
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "DESIGN_SOURCE_REPO does not name an existing directory",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.013086792023386806
+        }
+      }
+    },
+    "D3-commit-short": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "commit",
+          "detail": "DESIGN_SOURCE_COMMIT must be a full lowercase 40-hex object id",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.032242042012512684
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "commit",
+          "detail": "DESIGN_SOURCE_COMMIT must be a full lowercase 40-hex object id",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.025242041039746255
+        }
+      }
+    },
+    "D4-commit-absent": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "commit",
+          "detail": "DESIGN_SOURCE_COMMIT object is unavailable",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.037550500012002885
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "commit",
+          "detail": "DESIGN_SOURCE_COMMIT object is unavailable",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.03845241595990956
+        }
+      }
+    },
+    "D5-root-missing": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT does not exist at pinned commit",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.07745562499621883
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT does not exist at pinned commit",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.06450679199770093
+        }
+      }
+    },
+    "D6-path-missing": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "DESIGN_SOURCE_PATH does not exist at pinned commit",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.08751841599587351
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "DESIGN_SOURCE_PATH does not exist at pinned commit",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.10153429198544472
+        }
+      }
+    },
+    "D7-digest-mismatch": {
+      "expected_old": [
+        "authority.artifact-changed"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "DESIGN_SHA256 does not match pinned blob bytes",
+          "reasons": [
+            "authority.artifact-changed"
+          ],
+          "seconds": 0.12472799996612594
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "DESIGN_SHA256 does not match pinned blob bytes",
+          "reasons": [
+            "authority.artifact-changed"
+          ],
+          "seconds": 0.11192133300937712
+        }
+      }
+    },
+    "D8-digest-malformed": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "DESIGN_SHA256 must be a full lowercase 64-hex digest",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.13024595798924565
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "DESIGN_SHA256 must be a full lowercase 64-hex digest",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.10466987499967217
+        }
+      }
+    },
+    "D9-root-dotdot": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "declaration",
+          "detail": "DESIGN_SOURCE_ROOT must be a literal relative path",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.03918462502770126
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "declaration",
+          "detail": "DESIGN_SOURCE_ROOT must be a literal relative path",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.04377954202936962
+        }
+      }
+    },
+    "F-blob-tag": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md",
+            "z.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 0.33250029099872336
+        },
+        "pair": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md",
+            "z.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 0.6307756250025705
+        }
+      }
+    },
+    "F-depth-2500": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 5.000896707992069
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 5.0092585000093095
+        }
+      }
+    },
+    "F-early-invalid-later-deep": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.3063143749604933
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.22683791699819267
+        }
+      }
+    },
+    "F-early-invalid-later-malformed": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.32735329103888944
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.24267299997154623
+        }
+      }
+    },
+    "F-early-invalid-later-missing": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.3910529169952497
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.523985542007722
+        }
+      }
+    },
+    "F-early-missing-later-invalid": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query failed",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.2994519590283744
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query failed",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.253741665976122
+        }
+      }
+    },
+    "F-early-symlink-over-count": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT contains symlink carrier a-link.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.19536962499842048
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT contains symlink carrier a-link.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.18473808304406703
+        }
+      }
+    },
+    "F-invalid-before-metadata": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.2466141670010984
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.22888120904099196
+        }
+      }
+    },
+    "F-missing-tree": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query failed",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.30105591600295156
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query failed",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.3910392500110902
+        }
+      }
+    },
+    "F-nonstandard-mode": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "pinned tree object has malformed entry bytes",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.30980075005209073
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "pinned tree object has malformed entry bytes",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.35018725000554696
+        }
+      }
+    },
+    "F-phase-after-origin": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "conflicting PHASE occurrences in z.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.2047481249901466
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "conflicting PHASE occurrences in z.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.20383491698885337
+        }
+      }
+    },
+    "F-phase-before-origin": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "conflicting PHASE occurrences in A.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.33337541698710993
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "conflicting PHASE occurrences in A.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.22365945798810571
+        }
+      }
+    },
+    "F-stage1-before-stage2": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.23468933399999514
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier a.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.23283591598737985
+        }
+      }
+    },
+    "F-tree-commit": {
+      "expected_old": null,
+      "paths": {
+        "direct": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 0.3661901250015944
+        },
+        "pair": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 0.5119167920202017
+        }
+      }
+    },
+    "G1-symlink": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT contains symlink carrier zz-link.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.14030050003202632
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT contains symlink carrier zz-link.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.14602858398575336
+        }
+      }
+    },
+    "G2-non-utf8-blob": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier SITREP-x-20260801-120000.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.15304316696710885
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "authority carrier SITREP-x-20260801-120000.md is not UTF-8",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.1455474160029553
+        }
+      }
+    },
+    "G3-non-utf8-name": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.11035999999148771
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.11619387497194111
+        }
+      }
+    },
+    "G4-phase-conflict-unrelated": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "conflicting PHASE occurrences in SITREP-x-20260801-120000.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.1567047080025077
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "conflicting PHASE occurrences in SITREP-x-20260801-120000.md",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.15624220797326416
+        }
+      }
+    },
+    "G5-depth-257": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "DESIGN_SOURCE_ROOT exceeds maximum tree depth 256",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 3.441172082966659
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "DESIGN_SOURCE_ROOT exceeds maximum tree depth 256",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 3.47271079197526
+        }
+      }
+    },
+    "G6-gitlink-md": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query failed",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.15234112500911579
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query failed",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.16856095800176263
+        }
+      }
+    },
+    "L1-no-origin": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "no DESIGN origin found for DESIGN_DOC_ID d1",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.1418165829963982
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "no DESIGN origin found for DESIGN_DOC_ID d1",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.13283387501724064
+        }
+      }
+    },
+    "L2-no-review": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-parent",
+          "detail": "no DESIGN-REVIEW found for selected origin f-design",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.13645475002704188
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-parent",
+          "detail": "no DESIGN-REVIEW found for selected origin f-design",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.12954787496710196
+        }
+      }
+    },
+    "L3-owner-mismatch": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-owner",
+          "detail": "selected origin owner f does not match DESIGN_OWNER g",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.138249707990326
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-owner",
+          "detail": "selected origin owner f does not match DESIGN_OWNER g",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.1481177500099875
+        }
+      }
+    },
+    "L4-verdict-must-revise": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-verdict",
+          "detail": "selected review DESIGN-REVIEW-implementer-20260801-110000.md verdict must-revise is not approve",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.1394967909436673
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-verdict",
+          "detail": "selected review DESIGN-REVIEW-implementer-20260801-110000.md verdict must-revise is not approve",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.1540968749905005
+        }
+      }
+    },
+    "L5-ordering-review-earlier": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "ordering",
+          "detail": "selected review is not later than selected origin",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.1464475829852745
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "ordering",
+          "detail": "selected review is not later than selected origin",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.1367954169982113
+        }
+      }
+    },
+    "L6-ambiguity-two-origins": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "ambiguity",
+          "detail": "multiple latest DESIGN origins share timestamp 20260801-100000",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.15830283297691494
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "ambiguity",
+          "detail": "multiple latest DESIGN origins share timestamp 20260801-100000",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.17209766601445153
+        }
+      }
+    },
+    "L7-orchestrator-peer": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "selected review DESIGN-REVIEW-implementer-20260801-110000.md is not a peer for selected origin role orchestrator-planner",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.15500183298718184
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "selected review DESIGN-REVIEW-implementer-20260801-110000.md is not a peer for selected origin role orchestrator-planner",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.147278374992311
+        }
+      }
+    },
+    "L8-origin-no-timestamp": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "ordering",
+          "detail": "authority carrier DESIGN-planner.md lacks a filename timestamp",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.1425841249874793
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "ordering",
+          "detail": "authority carrier DESIGN-planner.md lacks a filename timestamp",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.17058262502541766
+        }
+      }
+    },
+    "L9-review-wrong-authority": {
+      "expected_old": [
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "selected review DESIGN-REVIEW-implementer-20260801-110000.md AUTHORITY is not review-only",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.1350255830329843
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "selected review DESIGN-REVIEW-implementer-20260801-110000.md AUTHORITY is not review-only",
+          "reasons": [
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.15307454200228676
+        }
+      }
+    },
+    "M1-over-trees-20001": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 5.002265416958835
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 5.001380708010402
+        }
+      }
+    },
+    "M2-over-entries-200001": {
+      "expected_old": [],
+      "paths": {
+        "direct": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 1.7945529170101508
+        },
+        "pair": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 1.5246566249988973
+        }
+      }
+    },
+    "T1-timeout-blob": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.09703062498010695
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "byte",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.12758412503171712
+        }
+      }
+    },
+    "T1b-timeout-population-blob": {
+      "expected_old": [
+        "authority.could-not-evaluate",
+        "authority.lineage-incomplete"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate",
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.11818029097048566
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "authority-population",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate",
+            "authority.lineage-incomplete"
+          ],
+          "seconds": 0.14873587503097951
+        }
+      }
+    },
+    "T2-timeout-tree": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.04885812499560416
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "repository",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.049554500030353665
+        }
+      }
+    },
+    "T3-timeout-commit": {
+      "expected_old": [
+        "authority.could-not-evaluate"
+      ],
+      "paths": {
+        "direct": {
+          "allowed": false,
+          "axis": "commit",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.039573874964844435
+        },
+        "pair": {
+          "allowed": false,
+          "axis": "commit",
+          "detail": "Git object query timed out",
+          "reasons": [
+            "authority.could-not-evaluate"
+          ],
+          "seconds": 0.03970733401365578
+        }
+      }
+    },
+    "control-allow": {
+      "expected_old": [],
+      "paths": {
+        "direct": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 0.1383876670151949
+        },
+        "pair": {
+          "allowed": true,
+          "axis": null,
+          "detail": null,
+          "origin": "DESIGN-planner-20260801-100000.md",
+          "population": [
+            "DESIGN-REVIEW-implementer-20260801-110000.md",
+            "DESIGN-planner-20260801-100000.md"
+          ],
+          "reasons": [],
+          "review": "DESIGN-REVIEW-implementer-20260801-110000.md",
+          "seconds": 0.15201066696317866
+        }
+      }
+    }
+  },
+  "interpreter": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+  "load_average": [
+    8.375,
+    7.92724609375,
+    7.73291015625
+  ],
+  "page_cache": "uncontrolled",
+  "python": "3.12.5",
+  "source_commit": "b8d87ebe15fbd3f5e06f1d0112fccad832acd1b1",
+  "source_sha256": {
+    "authority": "131746d2aeed862e27925f97ae13aa2deed6f081c13c87e41e636c2f20b9a8aa",
+    "rules": "c1c31f872e2fec0de8f68a580e42e951d44b2cbd9096c6d0102fe8b190553bff"
+  }
+}

@@ -30,7 +30,7 @@ class TestAuthorityFold11(TestAuthorityFold5):
         self.assert_case([], unrelated='PHASE: SITREP\nSUBJECT: prose\f tail\n\nclean body')
 
     def test_expired_budget_at_declaration_refuses(self):
-        with self.foreign_case() as (f,g,_,_):
+        with self.foreign_case(timed=True) as (f,g,_,_):
             now = [0]
             original = rules.xroot_declaration
             def declaration(*args):
@@ -42,7 +42,7 @@ class TestAuthorityFold11(TestAuthorityFold5):
                 self.assertEqual(f.check(g)['reasons'], ['authority.could-not-evaluate'])
 
     def test_expired_budget_before_population_is_not_restarted(self):
-        with self.foreign_case() as (f,g,_,_):
+        with self.foreign_case(timed=True) as (f,g,_,_):
             now = [0]
             original = rules.xroot_authority
             def select(*args):

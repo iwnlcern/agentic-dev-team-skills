@@ -1,0 +1,102 @@
+{
+  "budget_seconds": 600,
+  "cases": {
+    "early-candidate-later-missing": {
+      "axis": "authority-population",
+      "detail": "authority carrier DESIGN-a.md is not UTF-8"
+    },
+    "hygiene-False-0": {
+      "axis": "authority-population",
+      "detail": "authority carrier a/SITREP-x.md is not UTF-8"
+    },
+    "hygiene-False-1": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains symlink carrier a/SITREP-x.md"
+    },
+    "hygiene-False-2": {
+      "axis": "authority-population",
+      "detail": "Git object query failed"
+    },
+    "hygiene-False-3": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "hygiene-False-4": {
+      "axis": "authority-population",
+      "detail": "authority carrier z/SITREP-x.md is not UTF-8"
+    },
+    "hygiene-False-5": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains symlink carrier z/SITREP-x.md"
+    },
+    "hygiene-False-6": {
+      "axis": "authority-population",
+      "detail": "Git object query failed"
+    },
+    "hygiene-False-7": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "hygiene-True-0": {
+      "axis": "authority-population",
+      "detail": "authority carrier a/DESIGN-x.md is not UTF-8"
+    },
+    "hygiene-True-1": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains symlink carrier a/DESIGN-x.md"
+    },
+    "hygiene-True-2": {
+      "axis": "authority-population",
+      "detail": "Git object query failed"
+    },
+    "hygiene-True-3": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "hygiene-True-4": {
+      "axis": "authority-population",
+      "detail": "authority carrier z/DESIGN-x.md is not UTF-8"
+    },
+    "hygiene-True-5": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains symlink carrier z/DESIGN-x.md"
+    },
+    "hygiene-True-6": {
+      "axis": "authority-population",
+      "detail": "Git object query failed"
+    },
+    "hygiene-True-7": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "lane-candidate": {
+      "axis": null,
+      "population": [
+        "lane/DESIGN-x.md"
+      ]
+    },
+    "missing-tree": {
+      "axis": "repository",
+      "detail": "Git object query failed"
+    },
+    "noncandidate-directory": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "position-None": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "position-invalid": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    },
+    "position-missing": {
+      "axis": "authority-population",
+      "detail": "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename"
+    }
+  },
+  "python": "3.12.5",
+  "source_commit": "b8d87ebe15fbd3f5e06f1d0112fccad832acd1b1",
+  "source_sha256": "c1c31f872e2fec0de8f68a580e42e951d44b2cbd9096c6d0102fe8b190553bff"
+}

@@ -17,6 +17,7 @@ LINT = ROOT / "tools" / "relay-lint.py"
 FIXTURES = ROOT / "tools" / "relay-lint-fixtures"
 XROOT_GEN = ROOT / "tools" / "xrootfixgen.py"
 XROOT_AXES = {
+    "capacity",
     "declaration",
     "repository",
     "commit",

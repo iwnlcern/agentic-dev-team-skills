@@ -1312,7 +1312,12 @@ def _design_gate(path, f, fields, text, phases, result):
     start = len(budget[1]) if budget else 0
     engaged = xroot_design_gate(path, f, fields, text, phases, temporary)
     if budget and len(budget[1]) > start:
-        result.add_finding(_external(str(f.relative_to(path)), 'cross-root-design', budget[1][-1]))
+        failure = budget[1][-1]
+        cause = failure['detail'] if isinstance(failure, dict) else failure
+        finding = _external(str(f.relative_to(path)), 'cross-root-design', cause)
+        if isinstance(failure, dict):
+            finding.params.update({key: value for key, value in failure.items() if key != 'gate'})
+        result.add_finding(finding)
     else:
         for finding in temporary.findings:
             result.add_finding(finding)
@@ -1391,34 +1396,40 @@ def judge_candidate(corpus: Corpus, subject: str, envelope: Envelope, body: byte
     for severity, messages in (('error', per_file.errors), ('warn', per_file.warnings)):
         for message in messages:
             result.add_finding(Finding('file.lint', severity, subject, (), {}, f'{subject}: {message}'))
-    token = rules._XROOT_BUDGET.set((deadline, []))
-    try:
-        _candidate_lineage(root, phases, [candidate], result)
-        source_engaged = any(h27_occurrences(text, key) for key in ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT'))
-        for key in ('DESIGN_LOCK_ID', 'PLAN_LOCK_ID'):
-            value = fields.get(key, '')
-            bare = value.split(' @ ', 1)[0]
-            if source_engaged:
-                gate_fields = dict(fields)
-                gate_fields.pop('PLAN_LOCK_ID' if key == 'DESIGN_LOCK_ID' else 'DESIGN_LOCK_ID', None)
-                temporary = LintResult()
-                failures = rules._XROOT_BUDGET.get()[1]
-                count = len(failures)
-                xroot_plan_gate(root, root / subject, gate_fields, text, temporary)
-                if len(failures) > count:
-                    result.add_finding(_external(subject, 'cross-root-' + key, failures[-1]))
-                else:
-                    for finding in temporary.findings:
+    with rules.xroot_operation():
+        token = rules._XROOT_BUDGET.set((deadline, []))
+        try:
+            _candidate_lineage(root, phases, [candidate], result)
+            source_engaged = any(h27_occurrences(text, key) for key in ('PLAN_SOURCE_REPO', 'PLAN_SOURCE_COMMIT'))
+            for key in ('DESIGN_LOCK_ID', 'PLAN_LOCK_ID'):
+                value = fields.get(key, '')
+                bare = value.split(' @ ', 1)[0]
+                if source_engaged:
+                    gate_fields = dict(fields)
+                    gate_fields.pop('PLAN_LOCK_ID' if key == 'DESIGN_LOCK_ID' else 'DESIGN_LOCK_ID', None)
+                    temporary = LintResult()
+                    failures = rules._XROOT_BUDGET.get()[1]
+                    count = len(failures)
+                    xroot_plan_gate(root, root / subject, gate_fields, text, temporary)
+                    if len(failures) > count:
+                        failure = failures[-1]
+                        cause = failure['detail'] if isinstance(failure, dict) else failure
+                        finding = _external(subject, 'cross-root-' + key, cause)
+                        if isinstance(failure, dict):
+                            finding.params.update({name: value for name, value in failure.items() if name != 'gate'})
                         result.add_finding(finding)
-                continue
-            if bare and ('/' in bare or bare.endswith('.md')):
-                probes = (Path(bare),) if Path(bare).is_absolute() else (root / bare, Path(bare), root.parent.parent / bare)
-                if not any(p.exists() for p in probes):
-                    result.add_finding(Finding('lineage.lock-path', 'error', subject, (), {}, f'{subject}: {key} references missing file {bare}'))
-        for finding in _artifact_findings(root, subject, text):
-            result.add_finding(finding)
-    finally:
-        rules._XROOT_BUDGET.reset(token)
+                    else:
+                        for finding in temporary.findings:
+                            result.add_finding(finding)
+                    continue
+                if bare and ('/' in bare or bare.endswith('.md')):
+                    probes = (Path(bare),) if Path(bare).is_absolute() else (root / bare, Path(bare), root.parent.parent / bare)
+                    if not any(p.exists() for p in probes):
+                        result.add_finding(Finding('lineage.lock-path', 'error', subject, (), {}, f'{subject}: {key} references missing file {bare}'))
+            for finding in _artifact_findings(root, subject, text):
+                result.add_finding(finding)
+        finally:
+            rules._XROOT_BUDGET.reset(token)
     targets = split_addresses(fields.get('TO'))
     if (fields.get('PHASE') == 'MERGE-GATE' and from_is_direct_authority(fields)
             and len(targets) == 1 and canonical_role(address_role(targets[0])) == 'implementer'

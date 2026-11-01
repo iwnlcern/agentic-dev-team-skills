@@ -1,0 +1,4938 @@
+"""relay-lint: truth-agnostic structure checker for agentic-dev-team relay files.
+
+This linter checks relay shape, enums, addressing, phase/authority consistency,
+downgrade field ordering, read-only status proof substance, delegated dispatch
+structure, addressed merge-token authorization, review-fold scope artifacts,
+relay report-field grammar, role/FROM consistency, mandatory pair-Planner parent-lineage shape, and orchestrator-reviewer visibility for authority-bearing orchestrator relays.
+It does not verify whether claims are true.
+"""
+from __future__ import annotations
+
+import datetime
+from dataclasses import dataclass
+from contextvars import ContextVar
+import errno
+import functools
+import hashlib
+import os
+import re
+import selectors
+import signal
+import time
+import stat
+from pathlib import Path
+from typing import Dict, List, NamedTuple, Optional, Tuple
+
+from relay_engine import strings
+
+# Relay filename timestamps must name the real authoring time. Wall-clock drift
+# is a fabrication risk, not a cosmetic one: a stamp the author invented makes the
+# append-only trail unorderable and lets a relay appear to precede its own parent.
+# The stamp is checked for (a) being a real date/time and (b) being close to the
+# clock at authoring time. Freshness is only enforced where it is meaningful --
+# on explicitly-linted files (the authoring path) -- never on a historical sweep.
+FILENAME_TS_RE = re.compile(r"(\d{8})[-T]?(\d{6})(Z?)")
+DEFAULT_MAX_DRIFT_MINUTES = 2
+INDEX_TIME_FORMATS = (
+    "%Y%m%d-%H%M%S", "%Y%m%d-%H%M%SZ", "%Y%m%dT%H%M%SZ",
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
+)
+# Position-based strictness boundary for an append-only index. Rows *after* the
+# marker line must be non-decreasing and at/after the marker's own stamp; rows
+# before it are grandfathered history (see --index-audit). Position, not value,
+# defines the boundary -- a value-based cutoff would be defeated by pre-existing
+# rows stamped in the future, which would force every later row to keep matching
+# the fabrication instead of the real clock.
+INDEX_MONOTONIC_MARKER_RE = re.compile(
+    r"<!--\s*relay-lint:\s*monotonic-from\s+(\S[^>]*?)\s*-->", re.IGNORECASE
+)
+
+ROLE_VALUES = {
+    "Planner", "Implementer", "Orchestrator Planner", "Orchestrator Reviewer", "Reviewer",
+    "Downstream Implementer",
+    "Master Planner", "Master Reviewer", "Domain Planner", "Domain Reviewer",
+    "Pair Planner", "Pair Implementer",
+    "Operator",
+}
+PHASE_VALUES = {
+    "AUDIT", "DESIGN", "DESIGN-REVIEW", "PLAN", "PLAN-REVIEW", "IMPL", "REVIEW-FOLD",
+    "MERGE-GATE", "LIVE-VERIFY", "SITREP", "RECONCILE",
+    "BOOT",
+}
+AUTHORITY_VALUES = {
+    "read-only", "plan-only", "design-only", "review-only", "implementation",
+    "fold-in-only", "merge-gated", "live-verify", "report-only",
+    "design-only for Planner; read-only challenge/answers for Implementer",
+    "seat-registration",
+}
+CEREMONY_VALUES = {"tiny", "small", "medium", "large", "production-risk"}
+EVIDENCE_VALUES = {"E1", "E2", "E3", "E4"}
+ADDRESS_ROLE_VALUES = {
+    "planner", "implementer", "orchestrator-planner", "orchestrator-reviewer", "reviewer",
+    "master-planner", "master-reviewer", "domain-planner", "domain-reviewer",
+    "pair-planner", "pair-implementer",
+}
+SPECIAL_ADDRESS_VALUES = {"orchestrator", "operator"}
+VERDICT_VALUES = {
+    "merge-blocked", "merged-not-deployed", "deployed-not-live-verified",
+    "failed-live-verification", "complete", "human-decision-required",
+}
+SCAN_RESULT_VALUES = {"all-no", "trigger-present", "unknown-present"}
+DESIGN_RECORD_KIND_VALUES = {"design-doc", "audit-record", "direct-override"}
+DESIGN_REVIEW_VERDICT_VALUES = {"approve", "must-revise", "reject-narrow", "human-decision-required"}
+PLACEHOLDER_RE = re.compile(r"^<[^<>]+>$")
+ABSENCE_WORD_RE = re.compile(r"^(unavailable|none|e0/unverified|unverified|n/?a|n\.a\.)\b", re.IGNORECASE)
+STRUCTURED_ABSENT_RE = re.compile(r"^(unavailable|none|e0/unverified|unverified|n/?a|n\.a\.)\s*[—–-]+\s*\S", re.IGNORECASE)
+HUMAN_GATE_BARE_YES = re.compile(r"^yes[ \t—–:-]*$")
+SCOPE_DIFF_ROW_RE = re.compile(r"^\s*-\s+(\S.*?)\s*(?:->|:)\s*(in|out)\s*$", re.IGNORECASE)
+READ_ONLY_PHASES = {"AUDIT", "DESIGN", "DESIGN-REVIEW", "PLAN", "PLAN-REVIEW", "RECONCILE", "SITREP"}
+ROW_BEARING_HEADERS = ("SCOPE_DIFF", "SCOPE_DIFF_RESULT", "FOLD_SCOPE", "FOLD_SCOPE_RESULT")
+ROLE_TO_ADDRESS_ROLE = {
+    "Planner": "planner",
+    "Implementer": "implementer",
+    "Orchestrator Planner": "orchestrator-planner",
+    "Orchestrator Reviewer": "orchestrator-reviewer",
+    "Reviewer": "reviewer",
+    "Downstream Implementer": "implementer",
+    "Master Planner": "master-planner",
+    "Master Reviewer": "master-reviewer",
+    "Domain Planner": "domain-planner",
+    "Domain Reviewer": "domain-reviewer",
+    "Pair Planner": "pair-planner",
+    "Pair Implementer": "pair-implementer",
+    # H32 (192606 ruling): ROLE is author-truth; where a special address
+    # authors, the enum grows rather than borrowing a seat fiction. Operator
+    # classes to the operator special address.
+    "Operator": "operator",
+}
+# D3: the pair tier gains a prefix; bare legacy forms stay valid permanently.
+# Gates compare canonical roles so pair-planner/planner are one seat-role.
+PAIR_ROLE_CANONICAL = {"pair-planner": "planner", "pair-implementer": "implementer"}
+
+
+def canonical_role(role: str | None) -> str | None:
+    return PAIR_ROLE_CANONICAL.get(role, role) if role is not None else None
+
+
+LINEAGE_DIRECT_FROM_ROLES = {"operator", "orchestrator", "orchestrator-planner"}
+MASTER_TIER_ROLES = {"master-planner", "master-reviewer", "domain-planner", "domain-reviewer"}
+H27_CONFLICT_FIELDS = (
+    "AUTHORITY", "PHASE", "FROM", "TO", "DESIGN_DOC_ID", "DESIGN_LOCK_ID",
+    "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT", "DELEGATED_DISPATCH_AUTHORITY",
+    "DISPATCH_ID", "PARENT_DISPATCH_ID", "COMMISSION_AUTHORIZATION", "COMMISSION_ID",
+    "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+)
+H27_TEMPLATE_MASTER_TIER_FROM_RE = re.compile(
+    r"^<[A-Za-z][A-Za-z0-9_-]*>\.(master-planner|master-reviewer|domain-planner|domain-reviewer)$"
+)
+
+CANONICAL_SCAN_ROWS = [
+    "authz/tenant/RLS/permissions/secrets",
+    "migration/backfill/destructive-write/canonical-data-repair",
+    "money/inventory/orders/planning/accounting/trust-critical-state",
+    "AI-or-automation-acts-downstream",
+    "worker/scheduler/queue/retry/async-side-effect",
+    "cross-repo/service-contract/generated-schema/shared-API-event",
+    "user-visible-control-with-materializer/downstream-consumer",
+    "test-runtime-role-mismatch",
+    "broad-scope-expansion/ambiguous-product-semantics/residual-risk/live-verify-skip",
+]
+CANONICAL_SCAN_ROWS_NORMALIZED = {row.lower(): row for row in CANONICAL_SCAN_ROWS}
+
+# Allowed authority hints by phase. Some templates combine semicolon-separated authorities.
+PHASE_AUTHORITY_ALLOWED = {
+    "BOOT": {"seat-registration"},
+    "AUDIT": {"read-only", "review-only", "report-only"},
+    "DESIGN": {"design-only", "read-only", "review-only", "plan-only"},
+    "DESIGN-REVIEW": {"review-only", "read-only"},
+    "PLAN": {"plan-only", "read-only", "review-only"},
+    "PLAN-REVIEW": {"review-only", "read-only", "plan-only"},
+    "IMPL": {"implementation"},
+    "REVIEW-FOLD": {"fold-in-only", "implementation"},
+    "MERGE-GATE": {"merge-gated", "review-only", "report-only"},
+    "LIVE-VERIFY": {"live-verify", "report-only"},
+    "SITREP": {"report-only", "read-only"},
+    "RECONCILE": {"review-only", "report-only", "read-only"},
+}
+
+MIN_HEADER_FIELDS = [
+    "ROLE", "PHASE", "AUTHORITY", "DISPATCH_ID", "CEREMONY_TIER",
+    "EVIDENCE_TARGET", "HUMAN_GATE_REQUIRED",
+]
+
+FAMILY_IDS = frozenset((
+    "file.lint", "lineage.lock-lifecycle", "lineage.receiving-seat",
+    "lineage.commission", "lineage.cross-root-design", "lineage.design-review",
+    "lineage.dispatch", "lineage.impl-report-parent", "lineage.merge-claim",
+    "lineage.row-truth", "lineage.review-visibility", "lineage.lock-path",
+    "lineage.governing-digest",
+))
+
+
+@dataclass(frozen=True)
+class Finding:
+    id: str
+    lint_severity: str
+    subject: str
+    operands: tuple[str, ...]
+    params: dict
+    message: str
+
+
+def _structural(check_id, subject, message, *, operands=(), params=None,
+                severity="error"):
+    return Finding(check_id, severity, str(subject),
+                   tuple(sorted(set(str(value) for value in operands))),
+                   {} if params is None else dict(params), message)
+
+
+class LintResult:
+    def __init__(self) -> None:
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
+        self.findings: List[Finding] = []
+
+    def error(self, msg: str, *, check_id=None, subject=None,
+              operands=(), params=None) -> None:
+        self.errors.append(msg)
+        if check_id is not None:
+            self.findings.append(_structural(check_id, subject, msg,
+                                            operands=operands, params=params))
+
+    def warn(self, msg: str, *, check_id=None, subject=None,
+             operands=(), params=None) -> None:
+        self.warnings.append(msg)
+        if check_id is not None:
+            self.findings.append(_structural(check_id, subject, msg,
+                                            operands=operands, params=params,
+                                            severity="warn"))
+
+    def add_finding(self, finding: Finding) -> None:
+        if not isinstance(finding, Finding):
+            raise TypeError("structural emission requires a Finding")
+        if finding.lint_severity not in ("error", "warn"):
+            raise ValueError("unknown finding severity")
+        target = self.errors if finding.lint_severity == "error" else self.warnings
+        target.append(finding.message)
+        self.findings.append(finding)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(errors="replace")
+
+
+@functools.lru_cache(maxsize=16384)
+def strip_fenced_blocks(text: str) -> str:
+    out: List[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if re.match(r"^\s*```", line):
+            in_fence = not in_fence
+            out.append("")
+            continue
+        out.append("" if in_fence else line)
+    return "\n".join(out)
+
+
+def strip_inline_code_spans(text: str) -> str:
+    """Remove single-line Markdown inline-code spans.
+
+    Operational dispatch tokens inside backticks are quoted mentions, not
+    authority. This intentionally keeps fenced-code stripping separate so
+    normal relay parsing can still operate on non-token fields.
+    """
+    return "\n".join(re.sub(r"`[^`\n]*`", "", line) for line in text.splitlines())
+
+
+def operational_token_text(text: str) -> str:
+    return strip_inline_code_spans(strip_fenced_blocks(text))
+
+
+def fenced_dispatch_mentions(text: str) -> List[int]:
+    warnings: List[int] = []
+    in_fence = False
+    for i, line in enumerate(text.splitlines(), start=1):
+        if re.match(r"^\s*```", line):
+            in_fence = not in_fence
+            continue
+        if in_fence and "DISPATCH IMPL" in line:
+            warnings.append(i)
+    return warnings
+
+
+GENERIC_FIELD_HEADER_RE = re.compile(r"^[A-Z][A-Z0-9_-]*:\s*")
+
+
+def duplicate_row_bearing_header_errors(text: str) -> List[str]:
+    """Detect multiple operational SCOPE_DIFF/FOLD_SCOPE blocks.
+
+    The relay report of record carries exactly one row-bearing block and one
+    matching RESULT block. Honest quoting belongs in fenced or backticked text,
+    which is stripped from operational text before this check.
+    """
+    op = operational_token_text(text)
+    errors: List[str] = []
+    for header in ROW_BEARING_HEADERS:
+        matches = list(re.finditer(rf"^{re.escape(header)}\s*:", op, flags=re.IGNORECASE | re.MULTILINE))
+        if len(matches) > 1:
+            errors.append(f"duplicate {header} block; the report of record carries exactly one")
+    return errors
+
+
+def ambiguous_continuation_errors(text: str, header: str) -> List[str]:
+    """Find indented continuation-looking lines after a blank-closed field block.
+
+    Field blocks are contiguous: they end at the first blank line or the
+    next ALL-CAPS header. An indented non-header line after that blank is
+    ambiguous because weak agents can hide a continuation-line action claim
+    below the boundary. This is a structural error, not a truth check.
+    """
+    lines = sanitized_text(text).splitlines()
+    header_re = re.compile(rf"^{re.escape(header)}:\s*", re.IGNORECASE)
+    errors: List[str] = []
+    in_block = False
+    for idx, line in enumerate(lines):
+        if header_re.match(line):
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if GENERIC_FIELD_HEADER_RE.match(line):
+            in_block = False
+            continue
+        if not line.strip():
+            in_block = False
+            j = idx + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines):
+                nxt = lines[j]
+                if nxt[:1].isspace() and not GENERIC_FIELD_HEADER_RE.match(nxt):
+                    errors.append(
+                        f"{header} has ambiguous indented continuation after a blank line at line {j + 1}; field blocks must be contiguous"
+                    )
+            continue
+    return errors
+
+
+
+
+def detached_row_errors(text: str) -> List[str]:
+    """Find row-shaped lines outside their row-bearing field block.
+
+    A line such as '- file -> out' visually reads as part of SCOPE_DIFF or
+    FOLD_SCOPE even when a blank line or RESULT header has closed the block.
+    Truth-agnostic lint treats that as structural ambiguity for row-bearing
+    blocks. Flush-left prose remains outside this check.
+    """
+    errors: List[str] = []
+    lines = operational_token_text(text).splitlines()
+    header_re = GENERIC_FIELD_HEADER_RE
+    for header in ("SCOPE_DIFF", "FOLD_SCOPE"):
+        result_re = re.compile(rf"^{header}_RESULT\s*:", re.IGNORECASE)
+        header_line_re = re.compile(rf"^{re.escape(header)}\s*:", re.IGNORECASE)
+        for start, line in enumerate(lines):
+            if not header_line_re.match(line):
+                continue
+            i = start + 1
+            # Consume the contiguous block body until a blank line or any header.
+            while i < len(lines) and lines[i].strip() and not header_re.match(lines[i]):
+                i += 1
+            # Continue scanning the post-block window until the next real header,
+            # but pass through this block's own RESULT header so PB/FD11-style
+            # trailing rows directly under RESULT are visible.
+            while i < len(lines) and (not header_re.match(lines[i]) or result_re.match(lines[i])):
+                if SCOPE_DIFF_ROW_RE.match(lines[i]):
+                    errors.append(f"row-shaped line outside the {header} block: {lines[i].strip()!r}; rows must sit contiguously under their header")
+                i += 1
+    return errors
+
+
+def block_start_index(text: str, header: str) -> int:
+    """Line index of the first 'HEADER:' line in operational text, or -1."""
+    for i, line in enumerate(operational_token_text(text).splitlines()):
+        if re.match(rf"^{re.escape(header)}\s*:", line):
+            return i
+    return -1
+
+
+def substantive_actions_ref(text: str, fields: Dict[str, str]) -> bool:
+    """ACTIONS_GIT_REF is present with real content.
+
+    A one-line structured absence such as 'none — no edits made' is an absence
+    report, not a fold action. If refs appear on continuation lines after an
+    absence prefix, the record is substantive and must be scoped.
+    """
+    if "ACTIONS_GIT_REF" not in fields:
+        return False
+    content = field_block_content(text, "ACTIONS_GIT_REF")
+    if not content:
+        return False
+    return not (STRUCTURED_ABSENT_RE.match(content) and len(content.splitlines()) == 1)
+
+
+
+def implementation_work_claimed(text: str, fields: Dict[str, str]) -> bool:
+    """ACTIONS_GIT_REF claims implementation work, not only merge visibility.
+
+    This powers the non-addressee IMPL-report trap. Merge claims have their
+    own MERGE-GATE lineage and may contain words like branch/commit/merged; do
+    not make that channel require an implementation-dispatch parent.
+    """
+    if not substantive_actions_ref(text, fields):
+        return False
+    content = field_block_content(text, "ACTIONS_GIT_REF")
+    patterns = [
+        r"\bedited\b",
+        r"\bcreated\b",
+        r"\bdeleted\b",
+        r"\bchanged\b",
+        r"\bmodified\b",
+        r"\bupdated\b",
+        r"\bimplemented\b",
+        r"\bapplied\s+(?:a\s+)?patch\b",
+        r"\bmigration\s+file\b",
+        r"\bbackfill\b",
+        r"\bopened\s+a\s+PR\b",
+    ]
+    return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
+
+def remove_named_block(text: str, header: str) -> str:
+    lines = text.splitlines()
+    out: List[str] = []
+    in_block = False
+    header_re = re.compile(rf"^{re.escape(header)}:\s*", re.IGNORECASE)
+    for line in lines:
+        if header_re.match(line):
+            in_block = True
+            out.append("")
+            continue
+        if in_block and (not line.strip() or GENERIC_FIELD_HEADER_RE.match(line)):
+            in_block = False
+        out.append("" if in_block else line)
+    return "\n".join(out)
+
+
+def sanitized_text(text: str) -> str:
+    return strip_fenced_blocks(text)
+
+
+def h27_occurrences(text: str, key: str) -> List[str]:
+    """Every own-line occurrence of key over fence-sanitized lines."""
+    return list(_h27_occurrences_cached(text, key))
+
+
+@functools.lru_cache(maxsize=131072)
+def _h27_occurrences_cached(text: str, key: str):
+    out: List[str] = []
+    pat = re.compile(r"^" + re.escape(key) + r":\s*(.*)$")
+    for line in sanitized_text(text).splitlines():
+        m = pat.match(line.rstrip())
+        if m:
+            out.append(m.group(1).strip())
+    return tuple(out)
+
+
+def extract_named_block(text: str, header: str) -> str:
+    """Return a contiguous FIELD: block.
+
+    Blocks include the field line plus continuation lines until the first blank
+    line or the next ALL-CAPS header field.
+
+    Header fields in relays may be written either inline::
+
+        ACTIONS_GIT_REF: merge=abc123 target_contains=yes
+
+    or as a continuation block::
+
+        ACTIONS_GIT_REF:
+          commit abc123 — merged to master
+
+    The merge-claim check needs the whole standardized field block, not only
+    the same-line value harvested by ``header_fields``.
+    """
+    lines = sanitized_text(text).splitlines()
+    block: List[str] = []
+    in_block = False
+    header_re = re.compile(rf"^{re.escape(header)}:\s*", re.IGNORECASE)
+    for line in lines:
+        if header_re.match(line):
+            in_block = True
+            block.append(line)
+            continue
+        if in_block and (not line.strip() or GENERIC_FIELD_HEADER_RE.match(line)):
+            break
+        if in_block:
+            block.append(line)
+    return "\n".join(block)
+
+
+def field_block_content(text: str, header: str) -> str:
+    """Return same-line value plus continuation lines of a FIELD: block, stripped."""
+    block = extract_named_block(text, header)
+    if not block:
+        return ""
+    lines = block.splitlines()
+    first = re.sub(rf"^{re.escape(header)}:\s*", "", lines[0], flags=re.IGNORECASE)
+    return "\n".join([first] + lines[1:]).strip()
+
+
+def report_field_error(text: str, header: str) -> str | None:
+    """Strict-mode substance check for a report-of-record field.
+
+    Empty fields, placeholders, and reason-less reserved absence words are lint
+    errors. Structured absence with a reason is allowed for FINAL_GIT_STATUS_SHORT
+    and ACTIONS_GIT_REF; SCOPE_DIFF has its own row grammar and no structured-none
+    escape for delegated dispatch.
+    """
+    content = field_block_content(text, header)
+    if not content:
+        return f"{header} is empty; provide content or 'unavailable — <reason>' / 'none — <reason>'"
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if lines and all(PLACEHOLDER_RE.match(line) for line in lines):
+        return f"{header} carries a placeholder, not content; placeholders are valid only in --templates mode"
+    if ABSENCE_WORD_RE.match(content) and not STRUCTURED_ABSENT_RE.match(content):
+        return f"{header} uses a reserved absence word without a reason; use 'unavailable — <reason>' / 'none — <reason>'"
+    return None
+
+
+def parse_marked_rows(text: str, header: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Parse '<path> -> in|out' rows under a field block.
+
+    Unparseable non-blank lines are errors, never dropped. The error text
+    interpolates the header so existing SCOPE_DIFF assertions stay byte-stable.
+    """
+    block = extract_named_block(text, header)
+    rows: List[Tuple[str, str]] = []
+    errors: List[str] = []
+    for line in block.splitlines()[1:]:
+        if not line.strip():
+            continue
+        m = SCOPE_DIFF_ROW_RE.match(line)
+        if m:
+            rows.append((m.group(1), m.group(2).lower()))
+        else:
+            errors.append(f"unparseable {header} row: {line.strip()!r}")
+    return rows, errors
+
+
+def parse_scope_diff_rows(text: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    return parse_marked_rows(text, "SCOPE_DIFF")
+
+
+def header_fields(text: str) -> Dict[str, str]:
+    return dict(_header_fields_cached(text))
+
+
+@functools.lru_cache(maxsize=16384)
+def _header_fields_cached(text: str):
+    fields: Dict[str, str] = {}
+    for line in sanitized_text(text).splitlines():
+        m = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
+        if m:
+            fields.setdefault(m.group(1), m.group(2).strip())
+    return fields
+
+
+def find_line(text: str, token: str) -> int | None:
+    for i, line in enumerate(sanitized_text(text).splitlines(), start=1):
+        if re.match(rf"^{re.escape(token)}:\s*", line):
+            return i
+    return None
+
+
+def parse_scan_rows(text: str) -> Tuple[Dict[str, str], List[str]]:
+    """Return normalized scan rows and structural row errors.
+
+    ESCALATION_SCAN is a contiguous field block. Row values must begin with
+    yes/no/unknown. Unparseable rows are returned as errors instead of being
+    silently dropped.
+    """
+    rows: Dict[str, str] = {}
+    errors: List[str] = []
+    block = extract_named_block(text, "ESCALATION_SCAN")
+    for line in block.splitlines()[1:]:
+        if not line.strip():
+            continue
+        m = re.match(r"^\s*-\s*([^:]+):\s*(.*)$", line)
+        if not m:
+            errors.append(f"unparseable ESCALATION_SCAN row: {line.strip()!r}")
+            continue
+        raw_key = m.group(1).strip()
+        raw_value = m.group(2).strip()
+        norm_key = raw_key.lower()
+        if norm_key not in CANONICAL_SCAN_ROWS_NORMALIZED:
+            errors.append(f"non-canonical ESCALATION_SCAN row: {raw_key!r}")
+            continue
+        vm = re.match(r"^(yes|no|unknown)\b", raw_value, flags=re.IGNORECASE)
+        if not vm:
+            errors.append(f"ESCALATION_SCAN row {raw_key!r} has non-canonical value: {raw_value!r}")
+            continue
+        if norm_key in rows:
+            errors.append(f"duplicate ESCALATION_SCAN row: {raw_key!r}")
+        rows[norm_key] = vm.group(1).lower()
+    return rows, errors
+
+
+def authority_consistent(phase: str, authority: str) -> bool:
+    allowed = PHASE_AUTHORITY_ALLOWED.get(phase)
+    if not allowed:
+        return True
+    lower = authority.lower()
+    return any(a in lower for a in allowed)
+
+
+def enum_field(result: LintResult, fields: Dict[str, str], name: str, values: set[str], *, template_mode: bool) -> None:
+    val = fields.get(name)
+    if val is None:
+        return
+    if template_mode and ("<" in val or "|" in val):
+        return
+    if val not in values:
+        result.error(f"{name} has non-canonical value: {val!r}")
+
+def split_addresses(raw: str | None) -> List[str]:
+    if raw is None or raw.strip() == "":
+        return []
+    return [part.strip() for part in raw.split(",")]
+
+
+def address_role(address: str) -> str | None:
+    val = address.strip()
+    low = val.lower()
+    if low in SPECIAL_ADDRESS_VALUES:
+        return low
+    m = re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.([A-Za-z][A-Za-z0-9-]*)$", val)
+    if not m:
+        return None
+    role = m.group(1).lower()
+    return role if role in ADDRESS_ROLE_VALUES else None
+
+
+def address_owner(address: str) -> str | None:
+    val = address.strip()
+    if val.lower() in SPECIAL_ADDRESS_VALUES:
+        return val.lower()
+    if "." not in val:
+        return None
+    role = address_role(val)
+    if role is None:
+        return None
+    return val.rsplit(".", 1)[0].lower()
+
+
+def addr_is(address: str | None, owner: str | None, role: str) -> bool:
+    if address is None or owner is None:
+        return False
+    return address_owner(address) == owner and canonical_role(address_role(address)) == role
+
+
+def dispatch_is_delegated(fields: Dict[str, str], clean: str) -> bool:
+    """Delegation is structural (H28): only the DELEGATED_DISPATCH_AUTHORITY
+    field marks a dispatch as delegated. The former bare-word prose operand was
+    negation-blind and misfired on placeholder prose mentioning delegation.
+    Direct-authority FROM seats carry their own authorization regardless."""
+    if fields.get("DELEGATED_DISPATCH_AUTHORITY", "").lower() in {"yes", "true"}:
+        return True
+    return False
+
+
+def is_implementer_address(address: str) -> bool:
+    return canonical_role(address_role(address)) == "implementer"
+
+
+def impl_dispatch_parent_qualifies(actor_from: List[str], item) -> bool:
+    """rev19 shared structural predicate: item qualifies as the IMPL report's
+    DISPATCH IMPL parent for actor_from iff it carries a live own-line token
+    and is addressed, one-to-one, to the same owner and canonical role with
+    both roles parseable. Consumed by BOTH multi-holder qualification and the
+    singleton order-eligibility branch; design rev19 forbids any second copy."""
+    if len(actor_from) != 1:
+        return False
+    if not own_line_dispatch_present(item[4]):
+        return False
+    t = split_addresses(item[3].get("TO"))
+    return (
+        len(t) == 1
+        and address_role(t[0]) is not None
+        and address_role(actor_from[0]) is not None
+        and address_owner(t[0]) == address_owner(actor_from[0])
+        and canonical_role(address_role(t[0])) == canonical_role(address_role(actor_from[0]))
+    )
+
+
+def validate_address_fields(result: LintResult, fields: Dict[str, str], *, template_mode: bool) -> Dict[str, List[str]]:
+    parsed: Dict[str, List[str]] = {}
+    for name in ("FROM", "TO", "CC"):
+        raw = fields.get(name)
+        if raw is None:
+            continue
+        if template_mode and ("<" in raw or "|" in raw):
+            parsed[name] = []
+            continue
+        addrs = split_addresses(raw)
+        parsed[name] = addrs
+        if not addrs:
+            result.error(f"{name} address list is empty")
+            continue
+        if name == "FROM" and len(addrs) != 1:
+            result.error("FROM must contain exactly one address")
+        for addr in addrs:
+            if address_role(addr) is None:
+                result.error(f"{name} has invalid address {addr!r}; expected operator, orchestrator, or <owner>.<role>")
+            elif addr != addr.lower():
+                result.warn(f"{name} address {addr!r} is non-canonical case; addresses compare case-insensitively and canonicalize to lowercase")
+    return parsed
+
+
+def owners_in_addresses(addrs: List[str]) -> set[str]:
+    owners = set()
+    for addr in addrs:
+        owner = address_owner(addr)
+        if owner and owner not in SPECIAL_ADDRESS_VALUES:
+            owners.add(owner)
+    return owners
+
+
+def normalized_addr(address: str | None) -> str:
+    return (address or "").strip().lower()
+
+
+def from_role(address: str | None) -> str | None:
+    if not address:
+        return None
+    return address_role(address.strip())
+
+
+def from_owner(address: str | None) -> str | None:
+    if not address:
+        return None
+    return address_owner(address.strip())
+
+
+def from_is_direct_authority(fields: Dict[str, str]) -> bool:
+    addrs = split_addresses(fields.get("FROM"))
+    if len(addrs) != 1:
+        return False
+    role = from_role(addrs[0])
+    return role in LINEAGE_DIRECT_FROM_ROLES
+
+
+def role_from_consistency_error(fields: Dict[str, str]) -> str | None:
+    """Tripwire for proxy-authorship confusion.
+
+    A relay's ROLE is the seat writing the relay. A non-special FROM address
+    must carry the same role suffix. This does not prove identity; it catches
+    the observed confusion-class failure where an agent was baited into writing
+    a relay whose FROM was someone else's seat.
+    """
+    role = fields.get("ROLE")
+    expected = ROLE_TO_ADDRESS_ROLE.get(role or "")
+    if not expected:
+        return None
+    from_addrs = split_addresses(fields.get("FROM"))
+    if len(from_addrs) != 1:
+        return None
+    actual = from_role(from_addrs[0])
+    if actual in SPECIAL_ADDRESS_VALUES:
+        special_expected = {
+            "orchestrator": "orchestrator-planner",
+            "operator": "operator",
+        }[actual]
+        if canonical_role(expected) != special_expected:
+            return f"ROLE/FROM mismatch: ROLE={role!r} but FROM={from_addrs[0]!r}; do not proxy-author another seat's relay"
+        return None
+    if actual and canonical_role(actual) != canonical_role(expected):
+        return f"ROLE/FROM mismatch: ROLE={role!r} but FROM={from_addrs[0]!r}; do not proxy-author another seat's relay"
+    return None
+
+
+def parse_row_evidence(text: str, header: str) -> set[str]:
+    """Parse '<path> -> <evidence>' rows from a row-evidence block."""
+    block = extract_named_block(text, header)
+    paths: set[str] = set()
+    for line in block.splitlines()[1:]:
+        if not line.strip():
+            continue
+        m = re.match(r"^\s*-\s+(\S.*?)\s*(?:->|:)\s*(\S.*)$", line)
+        if m and m.group(2).strip() and not PLACEHOLDER_RE.match(m.group(2).strip()):
+            paths.add(m.group(1).strip())
+    return paths
+
+
+def row_evidence_errors(text: str, row_header: str, evidence_header: str) -> List[str]:
+    rows, row_errors = parse_marked_rows(text, row_header)
+    if row_errors:
+        return []
+    in_paths = [path for path, mark in rows if mark == "in"]
+    if not in_paths:
+        return []
+    evidence_paths = parse_row_evidence(text, evidence_header)
+    errors: List[str] = []
+    if not evidence_paths:
+        errors.append(f"{row_header} has IN rows but missing {evidence_header}; verify row truth against file/scope evidence, not row shape")
+        return errors
+    missing = [path for path in in_paths if path not in evidence_paths]
+    for path in missing:
+        errors.append(f"{evidence_header} missing evidence for IN row {path!r}")
+    return errors
+
+
+def dispatch_id_map(phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]) -> Dict[str, List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]]:
+    out: Dict[str, List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]] = {}
+    for item in phases:
+        for did in set(h27_occurrences(item[4], "DISPATCH_ID")):
+            out.setdefault(did, []).append(item)
+    return out
+
+
+def same_owner_addr(owner: str | None, role: str) -> str:
+    return f"{owner}.{role}" if owner else ""
+
+
+def own_line_dispatch_present(text: str) -> bool:
+    return re.search(r"^DISPATCH IMPL\s*$", operational_token_text(text), flags=re.MULTILINE) is not None
+
+
+def own_line_merge_present(text: str) -> bool:
+    return re.search(r"^DISPATCH MERGE\s*$", operational_token_text(text), flags=re.MULTILINE) is not None
+
+
+def h27_master_seat_errors(text: str, fields: Dict[str, str], *, template_mode: bool) -> List[str]:
+    """Ruled file/template arms for the four master-tier seats (H27 rules 1-2)."""
+    errors: List[str] = []
+    master_roles: List[str] = []
+    for raw in h27_occurrences(text, "FROM"):
+        segments = raw.split("|") if template_mode else split_addresses(raw)
+        for segment in segments:
+            candidate = segment.strip()
+            role = from_role(candidate)
+            if role in MASTER_TIER_ROLES:
+                master_roles.append(role)
+                continue
+            if template_mode:
+                match = H27_TEMPLATE_MASTER_TIER_FROM_RE.fullmatch(candidate)
+                if match:
+                    master_roles.append(match.group(1))
+    if not master_roles:
+        return errors
+    role = master_roles[0]
+    authority_keys = (
+        "DELEGATED_DISPATCH_AUTHORITY",
+        "DESIGN_LOCK_ID",
+        "DESIGN_RECORD_KIND",
+    )
+    occurrences: Dict[str, List[str]] = {key: [] for key in authority_keys}
+    for line in sanitized_text(text).splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
+        if match and match.group(1) in occurrences:
+            occurrences[match.group(1)].append(match.group(2).strip())
+
+    resolved: Dict[str, str] = {}
+    for key in authority_keys:
+        values = occurrences[key]
+        distinct_values = set(values)
+        if len(distinct_values) > 1:
+            errors.append(
+                f"{key} carries {len(distinct_values)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present"
+            )
+        elif values:
+            resolved[key] = values[0]
+
+    for key in H27_CONFLICT_FIELDS:
+        if key in authority_keys:
+            continue
+        values = h27_occurrences(text, key)
+        distinct_values = set(values)
+        if len(distinct_values) > 1:
+            errors.append(
+                f"{key} carries {len(distinct_values)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present "
+                "(DD-v29-master-authority-20260809 rule 5)"
+            )
+
+    if own_line_dispatch_present(text):
+        errors.append(
+            f"master-tier seat {role!r} may not carry DISPATCH IMPL: execution authority never enters the master tier "
+            "(DD-v29-master-authority-20260809: token prohibition)"
+        )
+    if own_line_merge_present(text):
+        errors.append(
+            f"master-tier seat {role!r} may not carry DISPATCH MERGE: execution authority never enters the master tier "
+            "(DD-v29-master-authority-20260809: token prohibition)"
+        )
+    if resolved.get("DESIGN_RECORD_KIND") == "direct-override":
+        errors.append(
+            f"master-tier seat {role!r} may not use DESIGN_RECORD_KIND: direct-override: that record kind stays on the "
+            "operator/orchestrator chain (DD-v29-master-authority-20260809 cross-seat rule 2)"
+        )
+    return errors
+
+
+def inline_dispatch_mentions(text: str) -> List[int]:
+    lines = operational_token_text(text).splitlines()
+    bad: List[int] = []
+    for i, line in enumerate(lines, start=1):
+        if "DISPATCH IMPL" in line and line.strip() != "DISPATCH IMPL":
+            bad.append(i)
+    return bad
+
+
+def inline_merge_mentions(text: str) -> List[int]:
+    lines = operational_token_text(text).splitlines()
+    bad: List[int] = []
+    for i, line in enumerate(lines, start=1):
+        if "DISPATCH MERGE" in line and line.strip() != "DISPATCH MERGE":
+            bad.append(i)
+    return bad
+
+
+def fenced_token_mentions(text: str, token: str) -> List[int]:
+    warnings: List[int] = []
+    in_fence = False
+    for i, line in enumerate(text.splitlines(), start=1):
+        if re.match(r"^\s*```", line):
+            in_fence = not in_fence
+            continue
+        if in_fence and token in line:
+            warnings.append(i)
+    return warnings
+
+
+
+
+def merge_authorization_verdict_lines(text: str) -> List[Tuple[int, str, str]]:
+    """Operational MERGE-GATE authorization verdict lines.
+
+    Field-form merge authorization is a single-verdict record. A second
+    MERGE_AUTHORIZATION/HUMAN_MERGE_AUTHORIZATION/MERGE_APPROVED line, or a
+    merge-form VERDICT line, is structurally ambiguous: humans read the latest
+    context/denial, while regex search can accidentally grant from a pasted
+    draft. Fenced/backticked quotations are stripped before scanning.
+    """
+    verdicts: List[Tuple[int, str, str]] = []
+    op = operational_token_text(text)
+    for line_no, line in enumerate(op.splitlines(), start=1):
+        m = re.match(r"^\s*(MERGE_AUTHORIZATION|HUMAN_MERGE_AUTHORIZATION|MERGE_APPROVED|VERDICT)\s*:\s*(.*)$", line, flags=re.IGNORECASE)
+        if not m:
+            continue
+        key = m.group(1).upper()
+        value = m.group(2).strip()
+        if key == "VERDICT" and not re.match(r"^(merge[- ]ready|approved|complete|denied|merge[- ]blocked|blocked|rejected)\b", value, flags=re.IGNORECASE):
+            continue
+        verdicts.append((line_no, key, value))
+    return verdicts
+
+
+MERGE_AUTHORIZATION_KEYS = frozenset({
+    "MERGE_AUTHORIZATION", "HUMAN_MERGE_AUTHORIZATION", "MERGE_APPROVED", "VERDICT",
+})
+
+
+def merge_authorization_positive(key: str, value: str) -> bool:
+    key = key.upper()
+    if key not in MERGE_AUTHORIZATION_KEYS:
+        return False
+    if key in {"MERGE_AUTHORIZATION", "HUMAN_MERGE_AUTHORIZATION"}:
+        return re.match(r"^(approved|granted|yes)\b", value, flags=re.IGNORECASE) is not None
+    if key == "MERGE_APPROVED":
+        return re.match(r"^(yes|true|approved)\b", value, flags=re.IGNORECASE) is not None
+    if key == "VERDICT":
+        return re.match(r"^(merge[- ]ready|approved|complete)\b", value, flags=re.IGNORECASE) is not None
+    return False
+
+
+def merge_token_authorized(text: str, fields: Dict[str, str]) -> bool:
+    if fields.get("PHASE") != "MERGE-GATE":
+        return False
+    if not own_line_merge_present(text):
+        return False
+    verdicts = merge_authorization_verdict_lines(text)
+    if len(verdicts) > 1 or any(not merge_authorization_positive(key, value)
+                                for _line, key, value in verdicts):
+        return False
+    from_addrs = split_addresses(fields.get("FROM"))
+    if len(from_addrs) != 1:
+        return False
+    from_addr = from_addrs[0].strip()
+    from_low = from_addr.lower()
+    if from_low not in {"operator", "orchestrator"} and address_role(from_addr) != "orchestrator-planner":
+        return False
+    to_addrs = split_addresses(fields.get("TO"))
+    return len(to_addrs) == 1 and is_implementer_address(to_addrs[0])
+
+
+def plan_review_approved(text: str) -> bool:
+    # Same-line only. Do not allow DOTALL/prose-later approve matches.
+    patterns = [
+        r"^\s*(?:PLAN_REVIEW_VERDICT|PLAN-REVIEW VERDICT|VERDICT|Verdict)\s*:\s*approve(?:d)?\s*$",
+        r"^\s*(?:PLAN_REVIEW_VERDICT|PLAN-REVIEW VERDICT|VERDICT|Verdict)\s*:\s*approve(?:d)?\s+[—-].*$",
+    ]
+    clean = sanitized_text(text)
+    return any(re.search(p, clean, flags=re.IGNORECASE | re.MULTILINE) for p in patterns)
+
+def strip_negated_merge_phrases(value: str) -> str:
+    """Remove common no-merge status phrases before positive merge detection.
+
+    Merge visibility is scoped to ACTIONS_GIT_REF. Honest reports such as
+    "NOT merged to master; awaiting MERGE-GATE authorization" must not count
+    as merge claims, while canonical forms such as ``merge=<sha>`` must.
+    """
+    patterns = [
+        r"\bnot\s+merged\b[^;\n.]*[;\n.]?",
+        r"\bno\s+merge\b[^;\n.]*[;\n.]?",
+        r"\bawaiting\s+(?:a\s+)?merge(?:-gate)?(?:\s+authorization)?\b[^;\n.]*[;\n.]?",
+        r"\bmerge\s+(?:pending|not\s+authorized|awaiting\s+authorization)\b[^;\n.]*[;\n.]?",
+    ]
+    out = value
+    for pattern in patterns:
+        out = re.sub(pattern, " ", out, flags=re.IGNORECASE)
+    return out
+
+
+def merge_claimed(text: str, fields: Dict[str, str]) -> bool:
+    # Prose merge visibility is scoped to the standardized
+    # ACTIONS_GIT_REF *block*, not only the same-line field value. A later revision
+    # layers a canonical machine-form scan on top: merge=<sha> outside fenced
+    # blocks, inline code spans, and ESCALATION_SCAN blocks counts as a merge
+    # claim in relay-root mode even when it is flush-left prose after the block.
+    # Free-prose flush-left claims remain outside truth-agnostic lint's scope.
+    operational = operational_token_text(text)
+    action_ref_block = extract_named_block(operational, "ACTIONS_GIT_REF")
+    scoped = strip_negated_merge_phrases(action_ref_block)
+    field_patterns = [
+        r"\bmerge\s*=\s*[A-Za-z0-9_.:-]+",
+        r"\bmerge\s+commit\b",
+        r"\bmerged\b",
+        r"\bgit\s+merge\b",
+    ]
+    no_action_ref = re.match(
+        r"^ACTIONS_GIT_REF:\s*none\s+—\s+\S", action_ref_block, flags=re.IGNORECASE
+    ) is not None
+    field_claim = bool(action_ref_block.strip()) and not no_action_ref and any(
+        re.search(pattern, scoped, flags=re.IGNORECASE) for pattern in field_patterns
+    )
+    canonical_surface = remove_named_block(operational, "ESCALATION_SCAN")
+    canonical_claim = re.search(r"\bmerge\s*=\s*\S", canonical_surface, flags=re.IGNORECASE) is not None
+    return field_claim or canonical_claim
+
+
+def merge_authorized(text: str, fields: Dict[str, str]) -> bool:
+    if fields.get("PHASE") != "MERGE-GATE":
+        return False
+    from_addrs = split_addresses(fields.get("FROM"))
+    if len(from_addrs) != 1:
+        return False
+    from_addr = from_addrs[0].strip()
+    from_low = from_addr.lower()
+    if from_low not in {"operator", "orchestrator"} and address_role(from_addr) != "orchestrator-planner":
+        # Prevent self-authorization: an Implementer-authored MERGE-GATE relay
+        # does not satisfy the gate that polices that Implementer's merge claim.
+        return False
+    to_addrs = split_addresses(fields.get("TO"))
+    if len(to_addrs) != 1 or not is_implementer_address(to_addrs[0]):
+        return False
+    verdicts = merge_authorization_verdict_lines(text)
+    if len(verdicts) > 1:
+        # A duplicate/conflicting grant relay is structurally dirty and must not
+        # satisfy merge lineage, even if one pasted line says approved.
+        return False
+    field_form = bool(verdicts) and merge_authorization_positive(verdicts[0][1], verdicts[0][2])
+    return field_form or merge_token_authorized(text, fields)
+
+
+def relay_order_key(path: Path, root: Optional[Path] = None) -> Tuple[int, object, str]:
+    stem = path.stem
+    # Preferred: timestamp anywhere in protocol-ish filenames.
+    m = re.search(r"(\d{8})[-T]?(\d{6})(?:Z)?", stem)
+    if m:
+        return (0, f"{m.group(1)}{m.group(2)}", path.name)
+    # Legacy fixtures often use numeric prefixes.
+    m = re.match(r"^(\d+)", stem)
+    if m:
+        return (1, int(m.group(1)), path.name)
+    # Deterministic fallback: stable path ordering, never filesystem stat.
+    if root is not None:
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+    else:
+        rel = path.as_posix()
+    return (2, rel, path.name)
+
+
+def clock_now(is_utc: bool) -> datetime.datetime:
+    if is_utc:
+        return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    return datetime.datetime.now()
+
+
+def parse_stamp(raw: str) -> Optional[datetime.datetime]:
+    """Parse an index/marker timestamp in any accepted form; None if not a real time."""
+    raw = raw.strip()
+    for fmt in INDEX_TIME_FORMATS:
+        try:
+            return datetime.datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def filename_timestamp(name: str) -> Tuple[str, Optional[datetime.datetime], str, bool]:
+    """Extract the relay filename stamp.
+
+    Returns (status, dt, raw, is_utc) where status is "absent" (no stamp-shaped
+    text), "invalid" (stamp-shaped but not a real date/time, e.g. minute 62), or
+    "ok". A stamp-shaped-but-invalid name can never be ordered and no real clock
+    ever produced it; template mode skips stamp checks entirely.
+    """
+    stem = Path(name).stem
+    m = FILENAME_TS_RE.search(stem)
+    if not m:
+        return ("absent", None, "", False)
+    raw = f"{m.group(1)}-{m.group(2)}"
+    is_utc = bool(m.group(3))
+    try:
+        dt = datetime.datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return ("invalid", None, raw, is_utc)
+    return ("ok", dt, raw, is_utc)
+
+
+def drift_error(raw: str, dt: datetime.datetime, is_utc: bool, max_drift_minutes: int) -> Optional[str]:
+    now = clock_now(is_utc)
+    drift_min = (dt - now).total_seconds() / 60.0
+    if abs(drift_min) <= max_drift_minutes:
+        return None
+    if abs(drift_min) >= 1440:
+        magnitude = f"{abs(drift_min) / 1440.0:.1f} days"
+    else:
+        magnitude = f"{abs(drift_min):.0f} min"
+    direction = "in the future" if drift_min > 0 else "in the past"
+    zone = "UTC" if is_utc else "local"
+    return (
+        f"timestamp {raw} is {magnitude} {direction} of the {zone} clock "
+        f"(now {now.strftime('%Y%m%d-%H%M%S')}, tolerance +/-{max_drift_minutes} min); "
+        "stamp the relay with the real current time"
+    )
+
+
+def check_filename_timestamp(
+    result: LintResult,
+    path: Path,
+    *,
+    freshness: bool,
+    max_drift_minutes: int,
+    template_mode: bool,
+) -> None:
+    if template_mode:
+        return
+    status, dt, raw, is_utc = filename_timestamp(path.name)
+    if status == "invalid":
+        result.error(f"filename timestamp {raw} is not a real date/time")
+        return
+    if status == "absent":
+        if freshness:
+            result.error(
+                "filename carries no YYYYMMDD-HHMMSS timestamp; authoring drift cannot be verified"
+            )
+        return
+    if not freshness or dt is None:
+        return
+    msg = drift_error(raw, dt, is_utc, max_drift_minutes)
+    if msg:
+        result.error(f"filename {msg}")
+
+
+def lint_file(
+    path: Path,
+    *,
+    template_mode: bool = False,
+    freshness: bool = False,
+    max_drift_minutes: int = DEFAULT_MAX_DRIFT_MINUTES,
+    artifact_root: Path | None = None,
+    _text: Optional[str] = None,
+    _raw: bytes | None = None,
+) -> LintResult:
+    """Lint text while measuring the original body bytes.
+
+    A supplied text snapshot without raw bytes falls back to re-encoding;
+    that fallback cannot preserve original newlines or invalid UTF-8 bytes.
+    """
+    if _text is None:
+        body = path.read_bytes()
+        text = body.decode('utf-8', errors='replace').replace('\r\n', '\n').replace('\r', '\n')
+        if _raw is None:
+            _raw = body
+    else:
+        text = _text
+    clean = sanitized_text(text)
+    result = LintResult()
+    fields = header_fields(text)
+
+    if not template_mode:
+        for _a5e in lock_digest_shape_errors(text):
+            result.error(_a5e)
+
+    if not template_mode:
+        for _warning in plan_shape_warnings(path, text, fields, artifact_root, raw=_raw):
+            result.warn(_warning)
+        _ordinal_warning = plan_revision_ordinal_warning(fields)
+        if _ordinal_warning is not None:
+            result.warn(_ordinal_warning)
+
+    check_filename_timestamp(
+        result, path, freshness=freshness,
+        max_drift_minutes=max_drift_minutes, template_mode=template_mode,
+    )
+
+    if not template_mode:
+        for f in MIN_HEADER_FIELDS:
+            if f not in fields:
+                result.error(f"missing required header field {f}")
+
+    enum_field(result, fields, "ROLE", ROLE_VALUES, template_mode=template_mode)
+    enum_field(result, fields, "PHASE", PHASE_VALUES, template_mode=template_mode)
+    enum_field(result, fields, "AUTHORITY", AUTHORITY_VALUES, template_mode=template_mode)
+    enum_field(result, fields, "CEREMONY_TIER", CEREMONY_VALUES, template_mode=template_mode)
+    enum_field(result, fields, "EVIDENCE_TARGET", EVIDENCE_VALUES, template_mode=template_mode)
+    enum_field(result, fields, "DESIGN_RECORD_KIND", DESIGN_RECORD_KIND_VALUES, template_mode=template_mode)
+    enum_field(result, fields, "DESIGN_REVIEW_VERDICT", DESIGN_REVIEW_VERDICT_VALUES, template_mode=template_mode)
+
+    hg_value = fields.get("HUMAN_GATE_REQUIRED")
+    if hg_value is not None and HUMAN_GATE_BARE_YES.fullmatch(hg_value.strip()):
+        result.warn(
+            "HUMAN_GATE_REQUIRED: yes carries no annotation naming its ask; "
+            "annotate as 'yes — <the decision>'"
+        )
+
+    phase = fields.get("PHASE")
+    authority = fields.get("AUTHORITY", "")
+    if phase in PHASE_VALUES and authority and not template_mode:
+        if not authority_consistent(phase, authority):
+            result.error(f"phase/authority inconsistent: PHASE={phase}, AUTHORITY={authority!r}")
+
+    addresses = validate_address_fields(result, fields, template_mode=template_mode)
+    if not template_mode:
+        mismatch = role_from_consistency_error(fields)
+        if mismatch:
+            result.error(mismatch)
+    for err in duplicate_row_bearing_header_errors(text):
+        result.error(err)
+    for err in detached_row_errors(text):
+        result.error(err)
+    if not template_mode:
+        for block_header in ("ACTIONS_GIT_REF", "FINAL_GIT_STATUS_SHORT", "ESCALATION_SCAN", "SCOPE_DIFF", "FOLD_SCOPE"):
+            if block_header in fields:
+                for err in ambiguous_continuation_errors(text, block_header):
+                    result.error(err)
+    has_dispatch = own_line_dispatch_present(text)
+    if has_dispatch and not template_mode:
+        to_addrs = addresses.get("TO", [])
+        if "TO" not in fields:
+            result.error("DISPATCH IMPL requires a TO address")
+        elif len(to_addrs) != 1:
+            result.error("DISPATCH IMPL requires exactly one TO addressee")
+        elif not is_implementer_address(to_addrs[0]):
+            result.error("DISPATCH IMPL requires TO to be exactly one implementer-role address")
+
+    master_errors = h27_master_seat_errors(text, fields, template_mode=template_mode)
+    for err in master_errors:
+        result.error(err)
+    dispatch_id_conflict = h27_conflict_message(text, "DISPATCH_ID")
+    if dispatch_id_conflict and dispatch_id_conflict not in master_errors:
+        result.error(dispatch_id_conflict)
+
+    has_merge_dispatch = own_line_merge_present(text)
+    if has_merge_dispatch and not template_mode:
+        to_addrs = addresses.get("TO", [])
+        from_addrs = addresses.get("FROM", [])
+        if phase != "MERGE-GATE":
+            result.error("DISPATCH MERGE is valid only in PHASE: MERGE-GATE relay files")
+        if "TO" not in fields:
+            result.error("DISPATCH MERGE requires a TO address")
+        elif len(to_addrs) != 1:
+            result.error("DISPATCH MERGE requires exactly one TO addressee")
+        elif not is_implementer_address(to_addrs[0]):
+            result.error("DISPATCH MERGE requires TO to be exactly one implementer-role address")
+        if len(from_addrs) != 1:
+            result.error("DISPATCH MERGE requires exactly one FROM grantor")
+        else:
+            from_addr = from_addrs[0].strip()
+            from_low = from_addr.lower()
+            if from_low not in {"operator", "orchestrator"} and address_role(from_addr) != "orchestrator-planner":
+                result.error("DISPATCH MERGE FROM must be operator, orchestrator, or an orchestrator-planner-role address")
+
+    if phase == "MERGE-GATE" and not template_mode:
+        verdict_lines = merge_authorization_verdict_lines(text)
+        if len(verdict_lines) > 1:
+            result.error("duplicate/conflicting merge authorization; the grant of record carries exactly one verdict line")
+
+    # Merge/live verdict enum when structurally visible.
+    verdict = fields.get("MERGE_LIVE_VERDICT") or fields.get("VERDICT")
+    if verdict and verdict not in VERDICT_VALUES and not template_mode:
+        # Only enforce if it looks like a merge/live verdict, not arbitrary audit verdict text.
+        if phase in {"MERGE-GATE", "LIVE-VERIFY"}:
+            result.error(f"non-canonical merge/live verdict: {verdict!r}")
+
+    # Suspicious dispatch tokens: valid token must be bare, unfenced, un-backticked,
+    # and alone on its own line. Inline quoted/code mentions are inert.
+    for line_no in inline_dispatch_mentions(text):
+        result.error(f"DISPATCH IMPL appears inline on line {line_no}; dispatch token is valid only bare/unfenced/un-backticked and alone on its own line")
+    for line_no in inline_merge_mentions(text):
+        result.error(f"DISPATCH MERGE appears inline on line {line_no}; merge token is valid only bare/unfenced/un-backticked and alone on its own line")
+    for line_no in fenced_token_mentions(text, "DISPATCH IMPL"):
+        result.warn(f"DISPATCH IMPL appears inside fenced code on line {line_no}; quoted/fenced tokens are inert")
+    for line_no in fenced_token_mentions(text, "DISPATCH MERGE"):
+        result.warn(f"DISPATCH MERGE appears inside fenced code on line {line_no}; quoted/fenced tokens are inert")
+
+    # Downgrade ordering and scan shape.
+    # H29: CEREMONY_DOWNGRADE gates on an actual downgrade value; `none` is a
+    # declaration of no downgrade, not a trigger. The other keys stay
+    # presence-triggered: a scan or waiver that exists must validate.
+    _cd_val = fields.get("CEREMONY_DOWNGRADE", "").strip().lower()
+    has_downgrade = ("CEREMONY_DOWNGRADE" in fields and _cd_val not in {"", "none"}) or any(
+        k in fields for k in ("WHY_DOWNGRADE_IS_SAFE", "OPERATOR_WAIVER", "ESCALATION_SCAN", "ESCALATION_SCAN_RESULT")
+    )
+    if has_downgrade:
+        scan_line = find_line(text, "ESCALATION_SCAN")
+        result_line = find_line(text, "ESCALATION_SCAN_RESULT")
+        why_line = find_line(text, "WHY_DOWNGRADE_IS_SAFE")
+        waiver_line = find_line(text, "OPERATOR_WAIVER")
+        if scan_line is None:
+            result.error("downgrade/waiver present but ESCALATION_SCAN is missing")
+        if result_line is None:
+            result.error("downgrade/waiver present but ESCALATION_SCAN_RESULT is missing")
+        if why_line is not None:
+            if scan_line is None or result_line is None or why_line < max(scan_line or 0, result_line or 0):
+                result.error("WHY_DOWNGRADE_IS_SAFE appears before completed ESCALATION_SCAN + ESCALATION_SCAN_RESULT")
+        rows, row_errors = parse_scan_rows(text)
+        for e in row_errors:
+            result.error(e)
+        missing = [row for row in CANONICAL_SCAN_ROWS if row.lower() not in rows]
+        for row in missing:
+            result.error(f"missing canonical ESCALATION_SCAN row: {row}")
+        values = set(rows.values())
+        if fields.get("ESCALATION_SCAN_RESULT") and fields.get("ESCALATION_SCAN_RESULT") not in SCAN_RESULT_VALUES and not template_mode:
+            result.error(f"ESCALATION_SCAN_RESULT has non-canonical value: {fields.get('ESCALATION_SCAN_RESULT')!r}")
+        if not missing and not row_errors:
+            expected_result = "trigger-present" if "yes" in values else "unknown-present" if "unknown" in values else "all-no"
+            if fields.get("ESCALATION_SCAN_RESULT") and fields.get("ESCALATION_SCAN_RESULT") != expected_result and not template_mode:
+                result.error(f"ESCALATION_SCAN_RESULT={fields.get('ESCALATION_SCAN_RESULT')!r} inconsistent with rows; expected {expected_result!r}")
+        has_yes_unknown = any(value in {"yes", "unknown"} for value in rows.values())
+        if has_yes_unknown:
+            if why_line is not None:
+                result.error("WHY_DOWNGRADE_IS_SAFE forbidden when any ESCALATION_SCAN row is yes/unknown")
+            if waiver_line is None:
+                result.error("OPERATOR_WAIVER required when any ESCALATION_SCAN row is yes/unknown")
+
+    # Read-only/report-only final status. The relay file is the report of record.
+    if phase in READ_ONLY_PHASES:
+        if "FINAL_GIT_STATUS_SHORT" not in fields:
+            result.error(f"{phase} report missing FINAL_GIT_STATUS_SHORT or explicit unavailable reason")
+        elif not template_mode:
+            err = report_field_error(text, "FINAL_GIT_STATUS_SHORT")
+            if err:
+                result.error(err)
+
+    # Structurally detectable action claim references. Exclude scan/template/code blocks.
+    action_scan_text = remove_named_block(clean, "ESCALATION_SCAN")
+    action_claim = re.search(r"\b(edited|created|deleted|committed|pushed|opened a PR|merged|migration file|backfill|changed git state)\b", action_scan_text, flags=re.IGNORECASE)
+    if action_claim and "ACTIONS_GIT_REF" not in fields:
+        result.error("structurally detectable edit/commit/PR/migration claim lacks ACTIONS_GIT_REF")
+    elif action_claim and not template_mode:
+        err = report_field_error(text, "ACTIONS_GIT_REF")
+        if err:
+            result.error(err)
+
+    # REVIEW-FOLD actions require a pre-action FOLD_SCOPE artifact.
+    fold_gate = bool(action_claim) or substantive_actions_ref(text, fields)
+    if phase == "REVIEW-FOLD" and fold_gate and not template_mode:
+        if "FOLD_SCOPE" not in fields:
+            result.error("REVIEW-FOLD report claims actions without FOLD_SCOPE; list every touched file against the findings scope before editing")
+        else:
+            rows, row_errors = parse_marked_rows(text, "FOLD_SCOPE")
+            for e in row_errors:
+                result.error(e)
+            if not rows:
+                result.error("FOLD_SCOPE requires >=1 parsed '<path> -> in|out' row; an empty scope list does not license a fold edit")
+            elif any(value == "out" for _, value in rows):
+                result.error("FOLD_SCOPE contains an OUT row alongside claimed actions; an OUT file requires a deviation relay before any edit")
+        if "FOLD_SCOPE_RESULT" not in fields:
+            result.error("REVIEW-FOLD report claims actions without FOLD_SCOPE_RESULT")
+        elif fields.get("FOLD_SCOPE_RESULT") != "all-in":
+            result.error("REVIEW-FOLD edits require FOLD_SCOPE_RESULT: all-in; any OUT file goes to a deviation relay before edit")
+        fs_idx = block_start_index(text, "FOLD_SCOPE")
+        agr_idx = block_start_index(text, "ACTIONS_GIT_REF")
+        if fs_idx != -1 and agr_idx != -1 and fs_idx > agr_idx:
+            result.error("FOLD_SCOPE appears after ACTIONS_GIT_REF; the scope artifact precedes the action claim (field-ordering)")
+
+    # Delegated dispatch requires substantive SCOPE_DIFF.
+    has_dispatch = own_line_dispatch_present(text)
+    delegated = dispatch_is_delegated(fields, clean)
+    if has_dispatch and delegated:
+        if "SCOPE_DIFF" not in fields:
+            result.error("delegated DISPATCH IMPL missing SCOPE_DIFF")
+        elif not template_mode:
+            rows, row_errors = parse_scope_diff_rows(text)
+            for e in row_errors:
+                result.error(e)
+            if not rows:
+                result.error("delegated DISPATCH IMPL requires SCOPE_DIFF with >=1 parsed '<path> -> in|OUT' row; a vacuous or structured-none diff does not authorize dispatch")
+            elif any(value == "out" for _, value in rows) and fields.get("SCOPE_DIFF_RESULT") == "all-in":
+                result.error("SCOPE_DIFF_RESULT: all-in inconsistent with an OUT row")
+        if "SCOPE_DIFF_RESULT" not in fields:
+            result.error("delegated DISPATCH IMPL missing SCOPE_DIFF_RESULT")
+        elif fields.get("SCOPE_DIFF_RESULT") != "all-in":
+            result.error("delegated DISPATCH IMPL requires SCOPE_DIFF_RESULT: all-in")
+
+
+
+    # Reconciliation-layer row-truth check. Truth-agnostic lint cannot prove the
+    # evidence is correct, but when a relay declares ROW_TRUTH_CHECK required it
+    # can require every IN row to carry row-evidence for later reconciliation.
+    # This preserves the base shape checks while making the honest-false
+    # battery fixtures mechanically enforceable.
+    if not template_mode and fields.get("ROW_TRUTH_CHECK", "").lower() in {"yes", "true", "required"}:
+        if "SCOPE_DIFF" in fields:
+            for e in row_evidence_errors(text, "SCOPE_DIFF", "SCOPE_ROW_EVIDENCE"):
+                result.error(e)
+        if "FOLD_SCOPE" in fields:
+            for e in row_evidence_errors(text, "FOLD_SCOPE", "FOLD_SCOPE_EVIDENCE"):
+                result.error(e)
+
+    return result
+
+
+
+def design_doc_items_for_owner(phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]], owner: str | None):
+    if not owner:
+        return []
+    out = []
+    for item in phases:
+        _p, _order, phase, fields, _text = item
+        if phase != "DESIGN" or not fields.get("DESIGN_DOC_ID"):
+            continue
+        addrs = split_addresses(fields.get("FROM"))
+        if len(addrs) == 1 and from_owner(addrs[0]) == owner:
+            out.append(item)
+    return out
+
+
+def design_review_items_for_owner(phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]], owner: str | None):
+    if not owner:
+        return []
+    out = []
+    for item in phases:
+        _p, _order, phase, fields, _text = item
+        if phase != "DESIGN-REVIEW":
+            continue
+        addrs = split_addresses(fields.get("FROM"))
+        if len(addrs) == 1 and from_owner(addrs[0]) == owner:
+            out.append(item)
+    return out
+
+
+def design_review_gate_applies(fields: Dict[str, str], owner: str | None, phases, *, require_record_kind: bool = True) -> bool:
+    """Whether observable relay-root context makes a design-review gate relevant.
+
+    This is intentionally truth-agnostic: it checks only relay fields on disk. A
+    pair Planner can say audit-record or omit DESIGN_RECORD_KIND, but if a
+    same-owner DESIGN relay with DESIGN_DOC_ID is visible, the design-doc gate is
+    in play for that owner.
+    """
+    if fields.get("DESIGN_RECORD_KIND") == "design-doc":
+        return True
+    return bool(design_doc_items_for_owner(phases, owner))
+
+
+def is_direct_design_override(fields: Dict[str, str]) -> bool:
+    return fields.get("DESIGN_RECORD_KIND") == "direct-override" and from_is_direct_authority(fields)
+
+
+def design_record_kind_error_context(fields: Dict[str, str], owner: str | None, phases) -> bool:
+    """Discriminator for missing DESIGN_RECORD_KIND.
+
+    Missing DESIGN_RECORD_KIND is hard only when design-review context is
+    visible in the relay root. Isolated legacy DESIGN_LOCK_ID relays remain
+    tolerated under the report-of-record precedent.
+    """
+    if not fields.get("DESIGN_LOCK_ID"):
+        return False
+    if fields.get("DESIGN_RECORD_KIND"):
+        return False
+    if design_doc_items_for_owner(phases, owner):
+        return True
+    if design_review_items_for_owner(phases, owner):
+        return True
+    parent_id = fields.get("PARENT_DISPATCH_ID")
+    if parent_id:
+        for _p, _order, phase, review_fields, _text in phases:
+            if review_fields.get("DISPATCH_ID") == parent_id and phase == "DESIGN-REVIEW":
+                return True
+    return False
+
+
+
+def orchestrator_review_in_broad_set(phase: str, fields: Dict[str, str], text: str) -> bool:
+    """Broad SET for orchestrator-review visibility.
+
+    Caller has already confirmed the relay is FROM orchestrator or an
+    orchestrator-planner-role address. This is a visibility gate, not an
+    approval/verdict lineage gate.
+    """
+    if phase in {"AUDIT", "DESIGN", "REVIEW-FOLD", "MERGE-GATE"}:
+        return True
+    if phase == "PLAN" and fields.get("DELEGATED_DISPATCH_AUTHORITY", "").strip().lower() == "yes":
+        return True
+    if phase == "IMPL" and own_line_dispatch_present(text):
+        return True
+    return False
+
+
+def run_has_operator_orch_review_waiver(phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]) -> bool:
+    """Return true only for an operator-authored no-reviewer waiver.
+
+    An orchestrator-planner-authored ORCH_REVIEW_WAIVER is not a waiver; it is
+    the self-waiver dodge this gate exists to close.
+    """
+    for _p, _order, _phase, fields, _text in phases:
+        from_addrs = split_addresses(fields.get("FROM"))
+        if len(from_addrs) == 1 and normalized_addr(from_addrs[0]) == "operator" and fields.get("ORCH_REVIEW_WAIVER", "").strip():
+            return True
+    return False
+
+
+def orchestrator_review_gate_errors(path: Path, phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]]) -> List[Finding]:
+    """Orchestrator-pair review visibility gate.
+
+    Every orchestrator authority relay in the broad SET must address an
+    orchestrator-reviewer in TO or CC unless the run root contains an
+    operator-authored no-reviewer waiver. Pair-seat and operator-authored relays
+    are exempt by construction because the FROM-set check comes first.
+    """
+    errors: List[Finding] = []
+    waiver = run_has_operator_orch_review_waiver(phases)
+    for f, _order, phase, fields, text in phases:
+        from_addrs = split_addresses(fields.get("FROM"))
+        if len(from_addrs) != 1:
+            continue
+        from_addr = from_addrs[0]
+        is_orchestrator_from = (from_role(from_addr) == "orchestrator-planner") or (normalized_addr(from_addr) == "orchestrator")
+        if not is_orchestrator_from:
+            continue
+        if not orchestrator_review_in_broad_set(phase, fields, text):
+            continue
+        addrs = split_addresses(fields.get("TO")) + split_addresses(fields.get("CC"))
+        if any(address_role(addr) == "orchestrator-reviewer" for addr in addrs):
+            continue
+        if waiver:
+            continue
+        errors.append(_structural('lineage.review-visibility', f.relative_to(path), f"{f.relative_to(path)}: orchestrator authority relay must CC <run>.orchestrator-reviewer (or run under an operator no-reviewer waiver)", operands=()))
+    return errors
+
+
+def split_index_cells(stripped: str) -> list[str]:
+    cells: list[str] = []
+    cur: list[str] = []
+    backslashes = 0
+    for ch in stripped:
+        if ch == "\\":
+            backslashes += 1
+            cur.append(ch)
+            continue
+        if ch == "|":
+            if backslashes % 2 == 1:
+                cur[-1:] = ["|"]
+            else:
+                cells.append("".join(cur).strip())
+                cur = []
+            backslashes = 0
+            continue
+        backslashes = 0
+        cur.append(ch)
+    cells.append("".join(cur).strip())
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return cells
+
+
+A5_LOCK_PAIRS = (
+    ("DESIGN_SHA256", "DESIGN_ARTIFACT", "designs"),
+    ("PLAN_SHA256", "PLAN_ARTIFACT", "plans"),
+)
+
+A5_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+A5_INDEX_ROOT_MARKER_RE = re.compile(r"root:\s+(\S.*)")
+A5_NO_RELAY_CELL_RE = re.compile(r"none \u2014 \S.*")
+
+
+A5_FENCE_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+A5_LINE_SPLIT_RE = re.compile(r"\r\n|\r|\n")
+
+
+def a5_split_lines(text: str) -> List[str]:
+    """A5-owned line splitter (a5-plan r5 R3): CommonMark line endings ONLY
+    (CRLF, CR, LF). Python's splitlines() also splits on Unicode separators
+    such as U+2028/U+0085, which would turn a forbidden closer suffix into a
+    bare closer and let embedded decoys become own-line declarations."""
+    return A5_LINE_SPLIT_RE.split(text)
+
+
+def a5_sanitized_text(text: str) -> str:
+    """A5-owned fence sanitizer (design rev32, CommonMark 0.31.2 SS4.5 at line
+    level): 0-3 space indentation; opener info strings, the backtick family's
+    containing no backtick; closers of the SAME family with run length >= the
+    opener's and whitespace-only suffix; opposite families never close;
+    shorter runs, suffix-bearing pseudo-closers, and 4+-space fence-like
+    lines are content; unclosed regions strip through EOF; every line inside
+    a region strips. Container-block contexts deliberately unmodeled."""
+    out: List[str] = []
+    open_char = ""
+    open_len = 0
+    for line in a5_split_lines(text):
+        m = A5_FENCE_RE.match(line)
+        if open_char:
+            out.append("")
+            if (m and m.group(2)[0] == open_char and len(m.group(2)) >= open_len
+                    and m.group(3).strip(" \t") == ""):
+                open_char = ""
+                open_len = 0
+            continue
+        if m:
+            fam = m.group(2)[0]
+            if fam == "`" and "`" in m.group(3):
+                out.append(line)
+                continue
+            open_char = fam
+            open_len = len(m.group(2))
+            out.append("")
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+class PlanShape(NamedTuple):
+    lines: int
+    fenced: int
+    largest_block: int
+    byte_count: int
+    longest_line: int
+
+
+def plan_shape_measure(data: bytes) -> PlanShape:
+    text = data.decode('utf-8', errors='replace')
+    lines = a5_split_lines(text)
+    if lines and lines[-1] == '' and text.endswith(('\n', '\r')):
+        lines.pop()
+    if not data:
+        lines = []
+    fenced = largest = block = 0
+    open_char = ''
+    open_len = 0
+    for line in lines:
+        match = A5_FENCE_RE.match(line)
+        if open_char:
+            if (match and match.group(2)[0] == open_char
+                    and len(match.group(2)) >= open_len
+                    and match.group(3).strip(' \t') == ''):
+                largest = max(largest, block)
+                block = 0
+                open_char = ''
+                open_len = 0
+            else:
+                fenced += 1
+                block += 1
+            continue
+        if match:
+            family = match.group(2)[0]
+            if family == '`' and '`' in match.group(3):
+                continue
+            open_char = family
+            open_len = len(match.group(2))
+    return PlanShape(len(lines), fenced, max(largest, block), len(data),
+                     max((len(line) for line in lines), default=0))
+
+
+def plan_shape_exceeded(shape: PlanShape) -> list[tuple[str, str, str]]:
+    exceeded = []
+    for name, value, limit in (('block', shape.largest_block, 80),
+                               ('fenced', shape.fenced, 400)):
+        if value > limit:
+            exceeded.append((name, str(value), str(limit)))
+    if shape.lines > 400 and 2 * shape.fenced > shape.lines:
+        exceeded.append(('ratio', f'{shape.fenced / shape.lines:.2f}', '0.50'))
+    for name, value, limit in (('lines', shape.lines, 1500),
+                               ('bytes', shape.byte_count, 65536),
+                               ('longest line', shape.longest_line, 8000)):
+        if value > limit:
+            exceeded.append((name, str(value), str(limit)))
+    return exceeded
+
+
+def plan_shape_warnings(path: Path, text: str, fields: dict,
+                        artifact_root: Path | None, raw: bytes | None = None) -> list[str]:
+    """Measure raw body bytes when supplied, otherwise re-encode the text.
+
+    The text-only fallback cannot recover original newlines or invalid bytes;
+    lint_file supplies bytes from its read or the caller's record snapshot.
+    """
+    if (artifact_root is None or fields.get('PHASE') != 'PLAN'
+            or not h27_pair_planner_address(fields.get('FROM'))):
+        return []
+    stem = fields.get('PLAN_ARTIFACT')
+    warnings = []
+    data = None
+    target = 'relay body'
+    if stem is None:
+        warnings.append('plan shape: no PLAN_ARTIFACT declared; the relay body was measured')
+    else:
+        if a5_stem_is_bare(stem):
+            rel = f'plans/{stem}.md'
+            probes = ((artifact_root / rel, rel),
+                      (Path(rel), './' + rel),
+                      (artifact_root.parent.parent / rel, '../../' + rel))
+            for candidate, display in probes:
+                try:
+                    if not candidate.is_file():
+                        continue
+                    data = candidate.read_bytes()
+                except OSError:
+                    continue
+                target = display
+                break
+        if data is None:
+            warnings.append(f"plan shape: PLAN_ARTIFACT {stem!r} resolves at no probe root; the relay body was measured")
+    if data is None:
+        data = raw if raw is not None else text.encode('utf-8', errors='replace')
+    exceeded = plan_shape_exceeded(plan_shape_measure(data))
+    if exceeded:
+        items = ', '.join(f'{name} {value} > {limit}' for name, value, limit in exceeded)
+        warnings.append(f'plan shape: {target} over threshold: {items}')
+    return warnings
+
+
+def plan_revision_ordinal(dispatch_id: str | None) -> int | None:
+    match = re.fullmatch(r'.+-plan(?:-([1-9][0-9]{0,2}))?', dispatch_id or '')
+    return (int(match.group(1)) if match.group(1) else 1) if match else None
+
+
+def plan_revision_ordinal_warning(fields: dict) -> str | None:
+    if fields.get('PHASE') != 'PLAN' or not h27_pair_planner_address(fields.get('FROM')):
+        return None
+    ordinal = plan_revision_ordinal(fields.get('DISPATCH_ID'))
+    if ordinal is not None and ordinal >= 8:
+        return f'plan revision ordinal {ordinal} declared by DISPATCH_ID; the corpus median is 5'
+    return None
+
+
+def a5_field_occurrences(text: str) -> Dict[str, List[str]]:
+    """Every occurrence of the four A5 fields, in file order per key (A4's
+    distinct-VALUE semantics consume these; header_fields stays untouched)."""
+    keys = ("DESIGN_SHA256", "PLAN_SHA256", "DESIGN_ARTIFACT", "PLAN_ARTIFACT")
+    occ: Dict[str, List[str]] = {k: [] for k in keys}
+    for line in a5_split_lines(a5_sanitized_text(text)):
+        m = re.match(r"^([A-Z][A-Z0-9_-]*):\s*(.*)$", line.rstrip())
+        if m and m.group(1) in occ:
+            occ[m.group(1)].append(m.group(2).strip())
+    return occ
+
+
+def a5_stem_is_bare(stem: str) -> bool:
+    return bool(stem) and "/" not in stem and "\\" not in stem and " @ " not in stem and not stem.endswith(".md")
+
+
+def a5_filename_stamp(f: Path):
+    """Eligibility stamp: the LINTER'S OWN filename parser must accept it
+    (design rev28; a5-plan r2 R1 — `filename_timestamp` owns the accepted
+    grammar including the T-separator, no-hyphen, and Z forms, so eligibility
+    never narrows it; a digit-shaped impossible calendar stamp is ineligible)."""
+    _status, _dt, _raw, _utc = filename_timestamp(f.name)
+    return _dt if _status == "ok" else None
+
+
+def lock_digest_shape_errors(text: str) -> List[str]:
+    """A5 check 1, shape half (both modes, authored relays only — the caller
+    gates on template_mode; design rev28 rules 2/4/5).
+
+    Shape preconditions are gated on digest OCCURRENCE; conflicting-duplicate
+    refusals are unconditional from birth; a conflicted field's own shape
+    validation is REPLACED by its refusal (A4 precedent)."""
+    errors: List[str] = []
+    occ = a5_field_occurrences(text)
+    conflicted = set()
+    for key, values in occ.items():
+        distinct = set(values)
+        if len(distinct) > 1:
+            conflicted.add(key)
+            errors.append(
+                f"{key} carries {len(distinct)} distinct values across {len(values)} occurrences; "
+                "an authority-critical field is fail-closed unless exactly one distinct value is present"
+            )
+    for dkey, akey, _sub in A5_LOCK_PAIRS:
+        if not occ[dkey]:
+            continue
+        if dkey not in conflicted:
+            dval = occ[dkey][0]
+            if A5_SHA256_RE.fullmatch(dval) is None:
+                errors.append(f"{dkey} value {dval!r} is not a 64-hex lowercase sha256 digest")
+        xroot_locator = (
+            dkey == "DESIGN_SHA256"
+            and xroot_pair_plan_applicable(text)
+            and bool(h27_occurrences(text, "DESIGN_SOURCE_PATH"))
+        )
+        if not occ[akey] and not xroot_locator:
+            errors.append(f"{dkey} declared with no {akey} to locate the artifact")
+        elif occ[akey] and akey not in conflicted:
+            aval = occ[akey][0]
+            if not a5_stem_is_bare(aval):
+                errors.append(f"{akey} value {aval!r} is not a bare filename stem")
+    return errors
+
+
+def a5_eligible_declaration(f: Path, text: str, dkey: str, akey: str):
+    """A relay's eligible declaration for one pair, or None (design rev28:
+    parse-valid filename stamp, shape-valid, single-distinct both fields)."""
+    stamp = a5_filename_stamp(f)
+    if stamp is None:
+        return None
+    occ = a5_field_occurrences(text)
+    dvals, avals = set(occ[dkey]), set(occ[akey])
+    if len(dvals) != 1 or len(avals) != 1:
+        return None
+    declared, stem = next(iter(dvals)), next(iter(avals))
+    if A5_SHA256_RE.fullmatch(declared) is None or not a5_stem_is_bare(stem):
+        return None
+    return (stamp, stem, declared)
+
+
+def a5_resolve_and_compare(path: Path, dkey: str, stem: str, sub: str, declared: str) -> List[str]:
+    """Candidate partition for the GOVERNING declaration (design rev28 rule 3):
+    no candidate -> generic missing; invalid/unreadable candidates -> one
+    per-path finding each, generic EXCLUDED; readable regular candidates ->
+    comparison, additive."""
+    import hashlib as _a5_hashlib
+    import os as _a5_os
+
+    def disp(p: Path, cwd_probe: bool = False) -> str:
+        if cwd_probe:
+            return "./" + str(p)
+        try:
+            return str(p.relative_to(path))
+        except ValueError:
+            return _a5_os.path.relpath(p)
+
+    errors: List[str] = []
+    rel = f"{sub}/{stem}.md"
+    probes = [(path / rel, False), (Path(rel), True), (path.parent.parent / rel, False)]
+    candidates = [(p, c) for p, c in probes if p.exists()]
+    if not candidates:
+        return [f"{dkey}: no artifact resolves for stem {stem!r} under {sub}/ at any probe root"]
+    for p, c in candidates:
+        if not p.is_file():
+            errors.append(f"{dkey}: {disp(p, c)} is not a readable regular file")
+            continue
+        try:
+            data = p.read_bytes()
+        except OSError:
+            errors.append(f"{dkey}: {disp(p, c)} is not a readable regular file")
+            continue
+        actual = _a5_hashlib.sha256(data).hexdigest()
+        if actual != declared:
+            errors.append(f"{dkey}: {disp(p, c)} digest {actual} does not match the declared {declared}")
+    return errors
+
+
+def lint_relay_index(path: Path, *, audit: bool = False,
+                     daemon_projection: bool = False,
+                     daemon_projection_digest: Optional[str] = None,
+                     snapshot: Optional[bytes] = None,
+                     ) -> LintResult:
+    """Check an append-only relay INDEX for timestamp truth and monotonicity.
+
+    This is an ORDERING check, not a drift check. Enforced on rows after the
+    `monotonic-from` marker (all rows when no marker is present): every stamp is a
+    real date/time, stamps never decrease, no stamp predates the marker, each row's
+    stamp matches its file's own filename stamp, and the newest row is not in the
+    future. An index that has not been appended to recently is not a defect. Rows
+    before the marker are grandfathered history, reported only under audit.
+    A verified daemon projection skips only the final wall-clock ceiling.
+    Digest evidence is checked against the same byte snapshot that is parsed.
+    Ordering and filename agreement remain mandatory for projected bytes.
+    """
+    result = LintResult()
+    if snapshot is None:
+        snapshot = path.read_bytes()
+    try:
+        text = snapshot.decode("utf-8")
+    except UnicodeDecodeError:
+        text = snapshot.decode("utf-8", errors="replace")
+    projection_is_verified = daemon_projection or (
+        daemon_projection_digest is not None and
+        hashlib.sha256(snapshot).hexdigest() == daemon_projection_digest)
+    lines = text.splitlines()
+
+    marker_line = 0
+    marker_dt: Optional[datetime.datetime] = None
+    _markers = list(INDEX_MONOTONIC_MARKER_RE.finditer(text))
+    m = _markers[-1] if _markers else None
+    if m:
+        for i, line in enumerate(lines, 1):
+            if INDEX_MONOTONIC_MARKER_RE.search(line):
+                marker_line = i
+        marker_dt = parse_stamp(m.group(1))
+        if marker_dt is None:
+            result.error(f"monotonic-from marker value {m.group(1)!r} is not a valid timestamp")
+
+    rows: List[Tuple[int, str, Optional[datetime.datetime], str]] = []
+    header_arity: int | None = None
+    grandfathered_arity_issues: List[Tuple[int, int]] = []
+    for lineno, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = split_index_cells(stripped)
+        if len(cells) < 2:
+            continue
+        if cells[0].lower() == "time":
+            if header_arity is None:
+                header_arity = len(cells)
+            continue
+        if set(cells[0]) <= set("-: "):
+            continue
+        if header_arity is not None and len(cells) != header_arity:
+            message = (
+                f"line {lineno}: row has {len(cells)} cells, header declares {header_arity}; "
+                "a literal | in cell prose must be escaped as \\|"
+            )
+            if lineno > marker_line:
+                result.error(message)
+            else:
+                grandfathered_arity_issues.append((lineno, len(cells)))
+        rows.append((lineno, cells[0], parse_stamp(cells[0]), cells[-1]))
+
+    if header_arity is None:
+        result.warn("no header row; arity not checked")
+
+    # A5 check 2: marker-gated file-cell resolution (forms lock M07).
+    # Placed BEFORE the no-rows early return (a5-plan r2 R3): a header-only
+    # or marker-only INDEX still gets duplicate-marker and root validation;
+    # the row loop is naturally empty when there are no rows.
+    # Own-line anchored recognition over fence-sanitized lines; no marker, no
+    # check; exactly one or none; the root must be a directory; a file cell
+    # either resolves as a file under the root or carries the explicit
+    # no-relay form; {root} renders the resolved base the join used.
+    a5_markers = []
+    for _a5line in a5_split_lines(a5_sanitized_text(text)):
+        _a5m = A5_INDEX_ROOT_MARKER_RE.fullmatch(_a5line.strip())
+        if _a5m:
+            a5_markers.append(_a5m.group(1))
+    if len(a5_markers) > 1:
+        result.error(f"INDEX declares {len(a5_markers)} root markers; at most one is permitted")
+    elif len(a5_markers) == 1:
+        _a5val = a5_markers[0]
+        _a5root = Path(_a5val) if Path(_a5val).is_absolute() else path.parent / _a5val
+        if not _a5root.is_dir():
+            result.error(f"root marker value {_a5val!r} does not resolve to a directory")
+        else:
+            import os as _a5_os
+            _a5disp = str(_a5root) if Path(_a5val).is_absolute() else _a5_os.path.relpath(_a5root, path.parent)
+            for _a5ln, _a5raw, _a5dt, _a5cell in rows:
+                if A5_NO_RELAY_CELL_RE.fullmatch(_a5cell):
+                    continue
+                if not (_a5root / _a5cell).is_file():
+                    result.error(
+                        f"line {_a5ln}: file cell {_a5cell!r} does not resolve under the declared root {_a5disp}"
+                    )
+
+    if not rows:
+        # H26: a freshly seeded INDEX -- the boot shape with BOTH the header
+        # row AND a root marker present, zero data rows -- is a valid
+        # pre-first-row state, not a defect. Either component alone is still
+        # an error: the grant covers exactly the marker+header boot state.
+        if header_arity is None or not a5_markers:
+            result.error(f"no index rows found in {path.name}")
+        return result
+
+    scoped = [r for r in rows if r[0] > marker_line]
+    grandfathered = [r for r in rows if r[0] <= marker_line]
+
+    for lineno, raw, dt, _file_cell in scoped:
+        if dt is None:
+            result.error(f"line {lineno}: index time {raw!r} is not a valid timestamp")
+
+    parsed = [(ln, raw, dt, fc) for ln, raw, dt, fc in scoped if dt is not None]
+
+    # Stamps must never decrease, and none may predate the strictness boundary.
+    for (lineno, raw, dt, _fc), (_pln, praw, pdt, _pfc) in zip(parsed[1:], parsed[:-1]):
+        if dt < pdt:
+            result.error(
+                f"line {lineno}: index time {raw} precedes the previous row {praw}; "
+                "an append-only index must be non-decreasing"
+            )
+    if marker_dt is not None:
+        for lineno, raw, dt, _fc in parsed:
+            if dt < marker_dt:
+                result.error(
+                    f"line {lineno}: index time {raw} predates the monotonic-from boundary "
+                    f"{marker_dt.strftime('%Y%m%d-%H%M%S')}"
+                )
+
+    # The row must agree with the relay file it points at.
+    for lineno, raw, dt, file_cell in parsed:
+        status, fdt, fraw, _is_utc = filename_timestamp(file_cell)
+        if status == "invalid":
+            result.error(f"line {lineno}: referenced file timestamp {fraw} is not a real date/time")
+        elif status == "ok" and fdt != dt:
+            result.error(
+                f"line {lineno}: index time {raw} disagrees with its filename timestamp {fraw}"
+            )
+
+    # Ordering only -- no lower bound. An index nobody has appended to for a while
+    # is not a defect, so the newest row is checked against a ceiling, not a window:
+    # a row cannot claim a time later than the clock that appended it. The tight
+    # wall-clock window belongs on the relay filename, which is authored once.
+    if parsed and not projection_is_verified:
+        lineno, raw, dt, file_cell = parsed[-1]
+        _s, _d, _r, is_utc = filename_timestamp(file_cell)
+        now = clock_now(is_utc)
+        if dt > now:
+            ahead = (dt - now).total_seconds() / 60.0
+            magnitude = f"{ahead / 1440.0:.1f} days" if ahead >= 1440 else f"{ahead:.0f} min"
+            zone = "UTC" if is_utc else "local"
+            result.error(
+                f"line {lineno}: newest index time {raw} is {magnitude} ahead of the {zone} clock "
+                f"(now {now.strftime('%Y%m%d-%H%M%S')}); an append-only index cannot carry a row "
+                "stamped later than the append that wrote it"
+            )
+
+    if audit:
+        hist = [(ln, raw, dt) for ln, raw, dt, _fc in grandfathered if dt is not None]
+        unparsed = [(ln, raw) for ln, raw, dt, _fc in grandfathered if dt is None]
+        viol = [
+            (ln, praw, raw)
+            for (ln, raw, dt), (_pln, praw, pdt) in zip(hist[1:], hist[:-1])
+            if dt < pdt
+        ]
+        result.warn(
+            f"grandfathered history: {len(grandfathered)} rows before the marker, "
+            f"{len(viol)} non-monotonic, {len(unparsed)} unparseable"
+        )
+        for ln, praw, raw in viol:
+            result.warn(f"line {ln}: (grandfathered) {praw} -> {raw} decreases")
+        for ln, raw in unparsed:
+            result.warn(f"line {ln}: (grandfathered) unparseable time {raw!r}")
+        for ln, arity in grandfathered_arity_issues:
+            result.warn(
+                f"line {ln}: (grandfathered) row has {arity} cells, "
+                f"header declares {header_arity}; a literal | in cell prose must be escaped as \\|"
+            )
+
+    return result
+
+
+H27_LOCK_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 1)"
+H27_COMMISSION_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3)"
+H27_COMMISSION_AUTH_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3a)"
+H27_COMMISSION_CHARTER_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3b)"
+H27_COMMISSION_GRANT_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3c)"
+H27_COMMISSION_RECEIPT_RULE = " (DD-v29-master-authority-20260809 cross-seat rule 3d)"
+H27_COMMISSION_SURFACE = ("COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID")
+H27_COMMISSION_CARRIERS = ("COMMISSION_AUTHORIZATION",) + H27_COMMISSION_SURFACE
+H27_COMMISSION_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def h27_resolved_discriminator(text: str, key: str) -> Tuple[str | None, bool]:
+    """Return the sole distinct value and whether conflicting values exist."""
+    values = h27_occurrences(text, key)
+    distinct = set(values)
+    if len(distinct) > 1:
+        return None, True
+    return (values[0] if values else None), False
+
+
+def h27_single_from(text: str) -> str | None:
+    """Resolve exactly one FROM address without first-value parsing."""
+    raw, conflict = h27_resolved_discriminator(text, "FROM")
+    if conflict or raw is None:
+        return None
+    addresses = split_addresses(raw)
+    return addresses[0] if len(addresses) == 1 else None
+
+
+def h27_tier_classification(address: str | None) -> str:
+    """Classify an origin address as foreign, direct, or pair tier."""
+    role = from_role(address)
+    if role in MASTER_TIER_ROLES:
+        return "foreign"
+    if normalized_addr(address) in SPECIAL_ADDRESS_VALUES or role in {"orchestrator-planner", "orchestrator-reviewer"}:
+        return "direct"
+    return "pair"
+
+
+def h27_has_foreign_from_occurrence(text: str) -> bool:
+    for raw in h27_occurrences(text, "FROM"):
+        if any(h27_tier_classification(address) == "foreign" for address in split_addresses(raw)):
+            return True
+    return False
+
+
+def h27_conflict_message(text: str, key: str) -> str | None:
+    values = h27_occurrences(text, key)
+    distinct = set(values)
+    if len(distinct) <= 1:
+        return None
+    return (
+        f"{key} carries {len(distinct)} distinct values across {len(values)} occurrences; "
+        "an authority-critical field is fail-closed unless exactly one distinct value is present "
+        "(DD-v29-master-authority-20260809 rule 5)"
+    )
+
+
+def h27_select_origins(phases, lock_id: str, before_order):
+    """Select the consumer-relative origin universe for one lock identity."""
+    selected = []
+    for item in phases:
+        _path, order, _phase, _fields, text = item
+        if order >= before_order:
+            continue
+        design_doc_ids = h27_occurrences(text, "DESIGN_DOC_ID")
+        phases_seen = h27_occurrences(text, "PHASE")
+        if lock_id not in design_doc_ids or not any(phase in {"DESIGN", "AUDIT"} for phase in phases_seen):
+            continue
+        selected.append(item)
+    return selected
+
+
+def h27_group_and_route(origins, consumer_text: str) -> Tuple[str, str | None, List[object], str | None]:
+    """Owner-group selected origins and implement the lock routing table."""
+    foreign_groups: Dict[str | None, List[object]] = {}
+    pair_group = False
+    for item in origins:
+        origin_text = item[4]
+        address, from_conflict = h27_resolved_discriminator(origin_text, "FROM")
+        if from_conflict:
+            return "refuse", None, [], "origin-conflict"
+        address = h27_single_from(origin_text)
+        tier = h27_tier_classification(address)
+        if tier == "foreign":
+            foreign_groups.setdefault(from_owner(address), []).append(item)
+        elif tier == "pair":
+            pair_group = True
+    if foreign_groups and pair_group:
+        return "refuse", None, [], "collision"
+    if len(foreign_groups) > 1:
+        return "refuse", None, [], "multiple-foreign"
+    if foreign_groups:
+        owner, items = next(iter(foreign_groups.items()))
+        return "foreign", owner, items, None
+    consumer_address = h27_single_from(consumer_text)
+    if h27_tier_classification(consumer_address) == "foreign":
+        return "refuse", from_owner(consumer_address), [], "master-no-origin"
+    return "pair", None, [], None
+
+
+def h27_same_position_latest(items):
+    """Return every item at the latest chronological position, ignoring tie-break names."""
+    latest_position = max(item[1][:2] for item in items)
+    return [item for item in items if item[1][:2] == latest_position]
+
+
+def h27_chronological_position(order):
+    """The ordering position without a filename/path tie-breaker."""
+    return order[:2]
+
+
+def h27_is_earlier(order, before_order) -> bool:
+    """Strict chronology: a filename never makes a same-position relay earlier."""
+    return h27_chronological_position(order) < h27_chronological_position(before_order)
+
+
+def h27_commission_surface(text: str) -> Tuple[str | None, ...]:
+    """Resolve the four byte-equality operands without first-value collapse."""
+    return tuple(h27_resolved_discriminator(text, key)[0] for key in H27_COMMISSION_SURFACE)
+
+
+def h27_commission_surface_complete(text: str) -> bool:
+    """A stage surface is complete only when all four sole values are non-empty."""
+    return all(value not in {None, ""} for value in h27_commission_surface(text))
+
+
+def h27_commission_id_grammatical(value: str | None) -> bool:
+    """The design grammar permits digits and hyphens throughout the tail."""
+    return value is not None and H27_COMMISSION_ID_RE.fullmatch(value) is not None
+
+
+def h27_direct_path_has_commission_carrier(
+    from_role_value: str | None, dda_presence: bool, carrier_presence: set[str],
+) -> bool:
+    """Direct grants are insulated iff all five commission carriers are absent."""
+    return bool(
+        dda_presence
+        and from_role_value in {"operator", "orchestrator", "orchestrator-planner"}
+        and carrier_presence
+    )
+
+
+def h27_receipt_self_grants(text: str, is_receipt: bool) -> bool:
+    """A commissioned pair receipt may consume a grant but never author one."""
+    return is_receipt and "yes" in h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY")
+
+
+def h27_receiving_seat_errors(root: Path, phases) -> List[Finding]:
+    """Rule 3(e): conflict-first, every-occurrence receiving-seat refusal."""
+    errors: List[Finding] = []
+    for item in phases:
+        relname = item[0].relative_to(root)
+        text = item[4]
+        dda_occurrences = h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY")
+        if not dda_occurrences:
+            continue
+        to_occurrences = h27_occurrences(text, "TO")
+        targets = [target for raw in to_occurrences for target in split_addresses(raw)]
+        if not any(from_role(target) in MASTER_TIER_ROLES for target in targets):
+            continue
+        conflicts = []
+        for key, values in (
+            ("DELEGATED_DISPATCH_AUTHORITY", dda_occurrences),
+            ("TO", to_occurrences),
+        ):
+            if len(set(values)) > 1:
+                conflicts.append(key)
+                errors.append(
+                    _structural('lineage.receiving-seat', relname, f"{relname}: rule 3e gate: {key} carries {len(set(values))} distinct values across "
+                    f"{len(values)} occurrences; a conflicting discriminator contributes no passing operand "
+                    "(DD-v29-master-authority-20260809 rule 5)", operands=())
+                )
+        if conflicts:
+            continue
+        if "yes" not in dda_occurrences:
+            continue
+        seen_targets = set()
+        for raw in to_occurrences:
+            for target in split_addresses(raw):
+                normalized = normalized_addr(target)
+                if from_role(target) not in MASTER_TIER_ROLES or normalized in seen_targets:
+                    continue
+                seen_targets.add(normalized)
+                errors.append(
+                    _structural('lineage.receiving-seat', relname, f"{relname}: DELEGATED_DISPATCH_AUTHORITY: yes addressed to master/domain seat {target!r}; "
+                    "the tier never receives delegated dispatch authority "
+                    "(DD-v29-master-authority-20260809 cross-seat rule 3e)", operands=())
+                )
+    return errors
+
+
+def h27_pair_planner_address(raw: str | None) -> bool:
+    """Accept legacy planner and explicit pair-planner, never special/tier/reviewer/multiple."""
+    addresses = split_addresses(raw)
+    if len(addresses) != 1 or canonical_role(from_role(addresses[0])) != "planner":
+        return False
+    owner = from_owner(addresses[0])
+    return owner is not None and normalized_addr(owner) not in SPECIAL_ADDRESS_VALUES
+
+
+def h27_direct_commission_grantor(address: str | None) -> bool:
+    return from_role(address) in {"operator", "orchestrator", "orchestrator-planner"}
+
+
+def h27_any_role_occurrence(text: str, roles: set[str]) -> bool:
+    return any(
+        from_role(address) in roles
+        for raw in h27_occurrences(text, "FROM")
+        for address in split_addresses(raw)
+    )
+
+
+def h27_commission_auth_shape_ok(item) -> bool:
+    """Task 9.5a stage-(a) carrier parsing and local shape, conflict-first."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "TO", "COMMISSION_AUTHORIZATION",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    from_addr = h27_single_from(text)
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    authority, _ = h27_resolved_discriminator(text, "AUTHORITY")
+    carrier, _ = h27_resolved_discriminator(text, "COMMISSION_AUTHORIZATION")
+    to_raw, _ = h27_resolved_discriminator(text, "TO")
+    commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+    to_addrs = split_addresses(to_raw)
+    return (
+        h27_direct_commission_grantor(from_addr)
+        and phase == "PLAN"
+        and authority == "plan-only"
+        and carrier == "yes"
+        and len(to_addrs) == 1
+        and from_role(to_addrs[0]) == "master-planner"
+        and h27_commission_surface_complete(text)
+        and h27_pair_planner_address(commission_to)
+    )
+
+
+def h27_commission_charter_shape_ok(item) -> bool:
+    """Task 9.5a charter-local shape; parent resolution deliberately belongs to 9.5b."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "DESIGN_DOC_ID", "DESIGN_RECORD_KIND",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    from_addr = h27_single_from(text)
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    authority, _ = h27_resolved_discriminator(text, "AUTHORITY")
+    design_doc_id, _ = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
+    kind, _ = h27_resolved_discriminator(text, "DESIGN_RECORD_KIND")
+    charter_doc_id, _ = h27_resolved_discriminator(text, "CHARTER_DOC_ID")
+    return (
+        from_role(from_addr) == "master-planner"
+        and phase == "DESIGN"
+        and authority == "design-only"
+        and design_doc_id not in {None, ""}
+        and design_doc_id == charter_doc_id
+        and kind == "design-doc"
+        and h27_commission_surface_complete(text)
+    )
+
+
+def h27_commission_approval_shape_ok(item) -> bool:
+    """Task 9.5a approval-local shape; edge and same-owner checks belong to 9.5b."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "DESIGN_DOC_ID", "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    kind, _ = h27_resolved_discriminator(text, "DESIGN_RECORD_KIND")
+    verdict, _ = h27_resolved_discriminator(text, "DESIGN_REVIEW_VERDICT")
+    return (
+        phase == "DESIGN-REVIEW"
+        and kind == "design-doc"
+        and verdict in DESIGN_REVIEW_VERDICT_VALUES
+        and h27_commission_surface_complete(text)
+    )
+
+
+def h27_commission_grant_shape_ok(item) -> bool:
+    """Task 9.5a grant-local shape, including literal marker and pair target."""
+    _path, _order, _phase, _fields, text = item
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "TO", "DELEGATED_DISPATCH_AUTHORITY",
+        "COMMISSION_ID", "COMMISSION_SCOPE", "COMMISSION_TO", "CHARTER_DOC_ID",
+    ):
+        if h27_resolved_discriminator(text, key)[1]:
+            return False
+    from_addr = h27_single_from(text)
+    phase, _ = h27_resolved_discriminator(text, "PHASE")
+    authority, _ = h27_resolved_discriminator(text, "AUTHORITY")
+    marker, _ = h27_resolved_discriminator(text, "DELEGATED_DISPATCH_AUTHORITY")
+    to_raw, _ = h27_resolved_discriminator(text, "TO")
+    commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+    to_addrs = split_addresses(to_raw)
+    return (
+        from_role(from_addr) == "master-planner"
+        and phase == "PLAN"
+        and authority == "plan-only"
+        and marker == "yes"
+        and h27_pair_planner_address(commission_to)
+        and len(to_addrs) == 1
+        and normalized_addr(to_addrs[0]) == normalized_addr(commission_to)
+        and h27_commission_surface_complete(text)
+    )
+
+
+def h27_foreign_lock_errors(
+    root: Path, consumer, lock_id: str, owner: str | None, origins, phases,
+) -> List[Finding]:
+    """Validate the foreign lock origin/review/consumer lifecycle branch."""
+    consumer_path, consumer_order, _consumer_phase, _consumer_fields, consumer_text = consumer
+    consumer_name = consumer_path.relative_to(root)
+    latest_origins = h27_same_position_latest(origins)
+    if len(latest_origins) != 1:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} has {len(latest_origins)} same-position latest origins "
+            f"for owner {owner}; lock resolution fails closed{H27_LOCK_RULE}", operands=())
+        ]
+    origin = latest_origins[0]
+    origin_path, _origin_order, _origin_phase, _origin_fields, origin_text = origin
+    origin_name = origin_path.relative_to(root)
+    for key in ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "DESIGN_DOC_ID", "DESIGN_RECORD_KIND"):
+        _value, conflict = h27_resolved_discriminator(origin_text, key)
+        if conflict:
+            return [
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign origin {origin_name} has conflicting {key} occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}", operands=(origin_name,))
+            ]
+
+    origin_from = h27_single_from(origin_text)
+    origin_role = from_role(origin_from)
+    origin_phase, _ = h27_resolved_discriminator(origin_text, "PHASE")
+    origin_authority, _ = h27_resolved_discriminator(origin_text, "AUTHORITY")
+    origin_id, _ = h27_resolved_discriminator(origin_text, "DISPATCH_ID")
+    origin_doc, _ = h27_resolved_discriminator(origin_text, "DESIGN_DOC_ID")
+    origin_kind, _ = h27_resolved_discriminator(origin_text, "DESIGN_RECORD_KIND")
+    if origin_kind is None:
+        return [_structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign origin {origin_name} requires DESIGN_RECORD_KIND{H27_LOCK_RULE}", operands=(origin_name,))]
+    if origin_role in {"master-reviewer", "domain-reviewer"}:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign {origin_kind} may not originate from reviewer seat {origin_role!r} "
+            f"in PHASE {origin_phase}{H27_LOCK_RULE}", operands=(origin_name,))
+        ]
+    if origin_kind == "design-doc" and not (
+        origin_role in {"master-planner", "domain-planner"}
+        and origin_phase == "DESIGN" and origin_authority == "design-only"
+    ):
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign design-doc origin {origin_name} must be planner-seat PHASE DESIGN "
+            f"with AUTHORITY: design-only{H27_LOCK_RULE}", operands=(origin_name,))
+        ]
+    if origin_kind == "audit-record" and not (
+        origin_role in {"master-planner", "domain-planner"}
+        and origin_phase == "AUDIT" and origin_authority in {"review-only", "report-only"}
+    ):
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign audit-record origin {origin_name} must be planner-seat PHASE AUDIT "
+            f"with AUTHORITY: review-only or report-only{H27_LOCK_RULE}", operands=(origin_name,))
+        ]
+    if origin_kind not in {"design-doc", "audit-record"} or origin_doc != lock_id or not origin_id:
+        return [_structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign origin {origin_name} does not resolve lock identity {lock_id!r}{H27_LOCK_RULE}", operands=(origin_name,))]
+
+    review_candidates = []
+    for item in phases:
+        _review_path, review_order, _review_phase, _review_fields, review_text = item
+        if review_order >= consumer_order:
+            continue
+        review_phases = h27_occurrences(review_text, "PHASE")
+        review_docs = h27_occurrences(review_text, "DESIGN_DOC_ID")
+        review_parents = h27_occurrences(review_text, "PARENT_DISPATCH_ID")
+        if "DESIGN-REVIEW" not in review_phases or lock_id not in review_docs:
+            continue
+        if origin_id not in review_parents:
+            continue
+        review_candidates.append(item)
+    if not review_candidates:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign DESIGN_LOCK_ID {lock_id!r} has no earlier DESIGN-REVIEW parented "
+            f"to latest origin {origin_name}{H27_LOCK_RULE}", operands=(origin_name,))
+        ]
+    latest_reviews = h27_same_position_latest(review_candidates)
+    if len(latest_reviews) != 1:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: latest origin {origin_name} has {len(latest_reviews)} same-position latest "
+            f"DESIGN-REVIEW candidates; lock resolution fails closed{H27_LOCK_RULE}", operands=(origin_name,))
+        ]
+    review = latest_reviews[0]
+    review_path, _review_order, _review_phase, _review_fields, review_text = review
+    review_name = review_path.relative_to(root)
+    for key in (
+        "FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+        "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT",
+    ):
+        _value, conflict = h27_resolved_discriminator(review_text, key)
+        if conflict:
+            return [
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} has conflicting {key} occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}", operands=(review_name, origin_name,))
+            ]
+
+    review_from = h27_single_from(review_text)
+    expected_review_role = "master-reviewer" if origin_role == "master-planner" else "domain-reviewer"
+    expected_review_from = same_owner_addr(owner, expected_review_role)
+    if normalized_addr(review_from) != expected_review_from:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} must be FROM {expected_review_from}, "
+            f"the same-owner tier reviewer{H27_LOCK_RULE}", operands=(review_name, origin_name,))
+        ]
+    review_kind, _ = h27_resolved_discriminator(review_text, "DESIGN_RECORD_KIND")
+    if review_kind is None:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} requires DESIGN_RECORD_KIND equal to "
+            f"origin kind {origin_kind!r}{H27_LOCK_RULE}", operands=(review_name, origin_name,))
+        ]
+    if review_kind != origin_kind:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: foreign approval {review_name} DESIGN_RECORD_KIND {review_kind!r} does not "
+            f"equal origin kind {origin_kind!r}{H27_LOCK_RULE}", operands=(review_name, origin_name,))
+        ]
+    review_verdict, _ = h27_resolved_discriminator(review_text, "DESIGN_REVIEW_VERDICT")
+    if review_verdict != "approve":
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: latest foreign approval {review_name} requires DESIGN_REVIEW_VERDICT: approve; "
+            f"got {review_verdict!r}{H27_LOCK_RULE}", operands=(review_name, origin_name,))
+        ]
+    consumer_kind, _ = h27_resolved_discriminator(consumer_text, "DESIGN_RECORD_KIND")
+    if consumer_kind is not None and consumer_kind != origin_kind:
+        return [
+            _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: consumer DESIGN_RECORD_KIND {consumer_kind!r} does not equal foreign origin "
+            f"kind {origin_kind!r}{H27_LOCK_RULE}", operands=(origin_name, review_name,))
+        ]
+    return []
+
+
+def h27_lock_lifecycle_precompute(root: Path, phases):
+    """Precompute every consumer route and all foreign-branch diagnostics."""
+    routes: Dict[Path, str] = {}
+    errors: List[Finding] = []
+    for consumer in phases:
+        consumer_path, consumer_order, _phase, _fields, consumer_text = consumer
+        lock_values = h27_occurrences(consumer_text, "DESIGN_LOCK_ID")
+        if not lock_values:
+            continue
+        consumer_name = consumer_path.relative_to(root)
+        consumer_conflict = False
+        for key in ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND", "FROM"):
+            conflict = h27_conflict_message(consumer_text, key)
+            if conflict:
+                consumer_conflict = True
+                if not h27_has_foreign_from_occurrence(consumer_text):
+                    errors.append(_structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: {conflict}", operands=()))
+        if consumer_conflict:
+            routes[consumer_path] = "refuse"
+            continue
+        lock_id, _ = h27_resolved_discriminator(consumer_text, "DESIGN_LOCK_ID")
+        if not lock_id:
+            routes[consumer_path] = "refuse"
+            continue
+        origins = h27_select_origins(phases, lock_id, consumer_order)
+        route, owner, foreign_origins, refusal = h27_group_and_route(origins, consumer_text)
+        routes[consumer_path] = route
+        if refusal == "collision":
+            errors.append(
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to both pair and master/domain origin "
+                f"groups; lock routing fails closed{H27_LOCK_RULE}", operands=())
+            )
+        elif refusal == "multiple-foreign":
+            owner_count = len({from_owner(h27_single_from(item[4])) for item in origins if h27_tier_classification(h27_single_from(item[4])) == "foreign"})
+            errors.append(
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: DESIGN_LOCK_ID {lock_id!r} resolves to {owner_count} master/domain owner "
+                f"groups; lock routing fails closed{H27_LOCK_RULE}", operands=())
+            )
+        elif refusal == "master-no-origin":
+            errors.append(
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: master/domain-seat consumer DESIGN_LOCK_ID {lock_id!r} has no resolvable "
+                f"earlier master/domain origin{H27_LOCK_RULE}", operands=())
+            )
+        elif refusal == "origin-conflict":
+            conflicted_origin = next(
+                item for item in origins if h27_resolved_discriminator(item[4], "FROM")[1]
+            )
+            origin_name = conflicted_origin[0].relative_to(root)
+            origin_label = "foreign origin" if h27_has_foreign_from_occurrence(conflicted_origin[4]) else "origin"
+            errors.append(
+                _structural('lineage.lock-lifecycle', consumer_name, f"{consumer_name}: {origin_label} {origin_name} has conflicting FROM occurrences; "
+                f"lock lifecycle refuses first-value resolution{H27_LOCK_RULE}", operands=(origin_name,))
+            )
+        elif route == "foreign":
+            errors.extend(h27_foreign_lock_errors(root, consumer, lock_id, owner, foreign_origins, phases))
+    return routes, errors
+
+
+def h27_commission_precompute(root: Path, phases) -> List[Finding]:
+    """Validate commission carriers, exact ancestry, and authorization lifetime."""
+    errors: List[Finding] = []
+
+    dispatch_holders: Dict[str, List[object]] = {}
+    for phase_item in phases:
+        for dispatch_id in set(h27_occurrences(phase_item[4], "DISPATCH_ID")):
+            dispatch_holders.setdefault(dispatch_id, []).append(phase_item)
+
+    def relname(item) -> str:
+        return str(item[0].relative_to(root))
+
+    def marker_universe(marker: str, commission_id: str, before_order):
+        return sorted(
+            (
+                item for item in phases
+                if h27_is_earlier(item[1], before_order)
+                and h27_occurrences(item[4], marker)
+                and commission_id in h27_occurrences(item[4], "COMMISSION_ID")
+            ),
+            key=lambda item: item[1],
+        )
+
+    def latest_at_one_position(items):
+        if not items:
+            return None, 0
+        latest = h27_same_position_latest(items)
+        return (latest[0] if len(latest) == 1 else None), len(latest)
+
+    def selected_conflict(item, keys) -> str | None:
+        for key in keys:
+            if h27_resolved_discriminator(item[4], key)[1]:
+                return key
+        return None
+
+    def resolve_ancestry(parent_id: str | None, before_order, consumer, edge: str, site_rule: str):
+        """Resolve one edge over every local DISPATCH_ID occurrence, then validate."""
+        if parent_id in {None, ""}:
+            return None
+        candidates = sorted(
+            (item for item in dispatch_holders.get(parent_id, []) if h27_is_earlier(item[1], before_order)),
+            key=lambda item: item[1],
+        )
+        if not candidates:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: {edge} {parent_id!r} does not resolve to an earlier relay{site_rule}", operands=())
+            )
+            return None
+        latest = h27_same_position_latest(candidates)
+        if len(latest) != 1:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: {edge} {parent_id!r} has {len(latest)} same-position latest holders; "
+                f"ambiguity fails closed{site_rule}", operands=())
+            )
+            return None
+        selected = latest[0]
+        if h27_resolved_discriminator(selected[4], "DISPATCH_ID")[1]:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected {edge} relay {relname(selected)} has conflicting DISPATCH_ID "
+                f"occurrences; ancestry resolution refuses first-value resolution{site_rule}", operands=(relname(selected),))
+            )
+            return None
+        return selected
+
+    def latest_stage(candidates, consumer, label: str, site_rule: str):
+        candidates = sorted(candidates, key=lambda item: item[1])
+        if not candidates:
+            return None
+        latest = h27_same_position_latest(candidates)
+        if len(latest) != 1:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: commission {h27_resolved_discriminator(consumer[4], 'COMMISSION_ID')[0]!r} "
+                f"has {len(latest)} {label} at the latest order position; ambiguity fails closed{site_rule}", operands=())
+            )
+            return False
+        return latest[0]
+
+    def charter_candidates(charter_doc_id: str, commission_id: str, before_order):
+        return [
+            item for item in phases
+            if h27_is_earlier(item[1], before_order)
+            and (
+                charter_doc_id in h27_occurrences(item[4], "DESIGN_DOC_ID")
+                or commission_id in h27_occurrences(item[4], "COMMISSION_ID")
+            )
+            and h27_occurrences(item[4], "DESIGN_DOC_ID")
+            and h27_any_role_occurrence(item[4], {"master-planner"})
+        ]
+
+    def review_candidates(charter, charter_doc_id: str, commission_id: str, before_order):
+        charter_id, charter_id_conflict = h27_resolved_discriminator(charter[4], "DISPATCH_ID")
+        if charter_id_conflict or charter_id in {None, ""}:
+            return []
+        return [
+            item for item in phases
+            if h27_is_earlier(item[1], before_order)
+            and (
+                charter_doc_id in h27_occurrences(item[4], "DESIGN_DOC_ID")
+                or commission_id in h27_occurrences(item[4], "COMMISSION_ID")
+            )
+            and h27_occurrences(item[4], "DESIGN_DOC_ID")
+            and h27_any_role_occurrence(item[4], {"master-reviewer"})
+        ]
+
+    def stage_conflict(item, keys, consumer, label: str, site_rule: str) -> bool:
+        conflict = selected_conflict(item, keys)
+        if conflict:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected {label} {relname(item)} has conflicting {conflict} occurrences; "
+                f"ancestry resolution refuses first-value resolution{site_rule}", operands=(relname(item),))
+            )
+            return True
+        return False
+
+    def same_owner_reviewer(review, charter) -> bool:
+        review_from = h27_single_from(review[4])
+        charter_from = h27_single_from(charter[4])
+        expected = same_owner_addr(from_owner(charter_from), "master-reviewer")
+        return from_role(review_from) == "master-reviewer" and normalized_addr(review_from) == normalized_addr(expected)
+
+    def charter_parent_authorization(charter, authorization, consumer, site_rule: str) -> bool:
+        parent_id, parent_conflict = h27_resolved_discriminator(charter[4], "PARENT_DISPATCH_ID")
+        if parent_conflict:
+            return False
+        if parent_id in {None, ""}:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected charter revision {relname(charter)} lacks a usable "
+                f"PARENT_DISPATCH_ID{site_rule}", operands=(relname(charter),))
+            )
+            return False
+        parent = resolve_ancestry(parent_id, charter[1], consumer, "charter parent", site_rule)
+        if parent is None:
+            return False
+        if parent is not authorization:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: charter parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                f"the reselected stage-(a) authorization{site_rule}", operands=(relname(parent),))
+            )
+            return False
+        return True
+
+    def selected_authorization_conflict(selected, consumer) -> bool:
+        conflict = selected_conflict(
+            selected,
+            ("FROM", "PHASE", "AUTHORITY", "TO", "DISPATCH_ID", "COMMISSION_AUTHORIZATION")
+            + H27_COMMISSION_SURFACE,
+        )
+        if conflict:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: selected authorization-universe member {relname(selected)} has conflicting "
+                f"{conflict} occurrences; universe selection refuses first-value resolution{H27_COMMISSION_AUTH_RULE}", operands=(relname(selected),))
+            )
+            return True
+        return False
+
+    def authorization_for(consumer, commission_id: str, site_rule: str):
+        candidates = marker_universe("COMMISSION_AUTHORIZATION", commission_id, consumer[1])
+        selected, tied = latest_at_one_position(candidates)
+        if not candidates:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: commission {commission_id!r} has no earlier authorization-universe member{site_rule}", operands=())
+            )
+            return None
+        if selected is None:
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: commission {commission_id!r} has {tied} authorization-universe candidates "
+                f"at the latest order position; ambiguity fails closed{H27_COMMISSION_AUTH_RULE}", operands=())
+            )
+            return None
+        if selected_authorization_conflict(selected, consumer):
+            return None
+        if not h27_commission_auth_shape_ok(selected):
+            errors.append(
+                _structural('lineage.commission', relname(consumer), f"{relname(consumer)}: latest authorization-universe member {relname(selected)} fails stage-(a) "
+                f"shape; marker-bearing malformed authorization shadows and fails{H27_COMMISSION_AUTH_RULE}", operands=(relname(selected),))
+            )
+            return None
+        return selected
+
+    def authorization_conflict_for(consumer, commission_id: str) -> bool:
+        """Report only a uniquely selected authorization's conflict, without trusting its shape."""
+        selected, _tied = latest_at_one_position(
+            marker_universe("COMMISSION_AUTHORIZATION", commission_id, consumer[1])
+        )
+        if selected is None:
+            return False
+        return selected_authorization_conflict(selected, consumer)
+
+    def add_nonmaster_conflicts(item) -> bool:
+        """File-mode H27 already reports master-seat conflicts; cover special/pair stages here."""
+        from_addr = h27_single_from(item[4])
+        is_master = from_role(from_addr) in MASTER_TIER_ROLES
+        conflicted = False
+        for key in H27_CONFLICT_FIELDS:
+            conflict = h27_conflict_message(item[4], key)
+            if conflict:
+                conflicted = True
+                if not is_master:
+                    errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: {conflict}", operands=()))
+        return conflicted
+
+    for item in phases:
+        _path, order, _phase, _fields, text = item
+        carrier_presence = {key for key in H27_COMMISSION_CARRIERS if h27_occurrences(text, key)}
+        dda_presence = bool(h27_occurrences(text, "DELEGATED_DISPATCH_AUTHORITY"))
+        master_grant_marker = dda_presence and h27_any_role_occurrence(text, {"master-planner"})
+        if not carrier_presence and not master_grant_marker:
+            continue
+
+        commission_id, commission_id_conflict = h27_resolved_discriminator(text, "COMMISSION_ID")
+        if (
+            carrier_presence == {"COMMISSION_ID"}
+            and not dda_presence
+            and not commission_id_conflict
+            and commission_id not in {None, ""}
+        ):
+            # A non-empty ID alone is an inert reference. Empty ID is engaged.
+            continue
+
+        from_addr = h27_single_from(text)
+        from_role_value = from_role(from_addr)
+        phase, _ = h27_resolved_discriminator(text, "PHASE")
+        auth_marker = bool(h27_occurrences(text, "COMMISSION_AUTHORIZATION"))
+
+        # A direct grant is insulated only when it carries none of the five
+        # commission carriers. Any one carrier engages the full machine; the
+        # authorization carrier produces the both-markers case.
+        if h27_direct_path_has_commission_carrier(from_role_value, dda_presence, carrier_presence):
+            errors.append(
+                _structural('lineage.commission', relname(item), f"{relname(item)}: a direct delegation grant carries commission gating carriers; "
+                "direct path must carry none of the five"
+                f"{H27_COMMISSION_RULE}", operands=())
+            )
+            continue
+
+        if (
+            auth_marker
+            and not dda_presence
+            and h27_occurrences(text, "COMMISSION_ID")
+            and not commission_id_conflict
+            and not h27_commission_id_grammatical(commission_id)
+        ):
+            errors.append(
+                _structural('lineage.commission', relname(item), f"{relname(item)}: commission machine engaged with non-grammatical COMMISSION_ID "
+                f"{commission_id!r}; expected [a-z0-9][a-z0-9-]*{H27_COMMISSION_RULE}", operands=())
+            )
+            continue
+
+        # Logical CH identity is validated at the authorization trust root.
+        # Charter-local DESIGN_DOC_ID equality is checked at its own stage;
+        # later equality-surface diagnostics remain unchanged.
+        charter_doc_id, _ = h27_resolved_discriminator(text, "CHARTER_DOC_ID")
+        if (
+            auth_marker
+            and not commission_id_conflict
+            and h27_commission_id_grammatical(commission_id)
+            and charter_doc_id not in {None, f"CH-{commission_id}"}
+        ):
+            errors.append(
+                _structural('lineage.commission', relname(item), f"{relname(item)}: CHARTER_DOC_ID {charter_doc_id!r} must equal "
+                f"{'CH-' + commission_id!r}{H27_COMMISSION_RULE}", operands=())
+            )
+            continue
+
+        # Stage (a) is marker-defined. Both markers intentionally do not exit
+        # here; they fall through to delegation-stage classification.
+        if auth_marker and not dda_presence:
+            if add_nonmaster_conflicts(item):
+                continue
+            if not h27_commission_auth_shape_ok(item):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: relay carries COMMISSION_AUTHORIZATION but fails stage-(a) shape "
+                    "(literal yes, direct-authority FROM, PHASE PLAN, AUTHORITY plan-only, TO exactly one "
+                    "master-planner, complete equality surface, pair-planner COMMISSION_TO)"
+                    f"{H27_COMMISSION_AUTH_RULE}", operands=())
+                )
+            continue
+
+        is_receipt = phase == "PLAN" and canonical_role(from_role_value) == "planner"
+        if is_receipt and not h27_commission_surface_complete(text):
+            if add_nonmaster_conflicts(item):
+                continue
+            errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: commissioned pair receipt has incomplete equality surface{H27_COMMISSION_RECEIPT_RULE}", operands=()))
+            continue
+
+        if add_nonmaster_conflicts(item):
+            continue
+        if commission_id in {None, ""}:
+            errors.append(
+                _structural('lineage.commission', relname(item), f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
+                f"{H27_COMMISSION_RULE}", operands=())
+            )
+            continue
+
+        # Charter stage: select the marker-universe authorization, then resolve
+        # the mandatory parent generically across every earlier DISPATCH_ID holder.
+        design_doc_id, _ = h27_resolved_discriminator(text, "DESIGN_DOC_ID")
+        if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id != charter_doc_id:
+            errors.append(
+                _structural('lineage.commission', relname(item), f"{relname(item)}: charter DESIGN_DOC_ID {design_doc_id!r} must equal "
+                f"CHARTER_DOC_ID {charter_doc_id!r}{H27_COMMISSION_CHARTER_RULE}", operands=())
+            )
+            continue
+        if phase == "DESIGN" and from_role_value == "master-planner" and design_doc_id == charter_doc_id:
+            if not h27_commission_charter_shape_ok(item):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter fails stage-(b) shape; requires master-planner PHASE DESIGN, "
+                    "AUTHORITY design-only, matching document identity, and DESIGN_RECORD_KIND design-doc"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            authorization = authorization_for(item, commission_id, H27_COMMISSION_CHARTER_RULE)
+            if authorization is None:
+                continue
+            parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
+            if parent_id in {None, ""}:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter PARENT_DISPATCH_ID is mandatory and must resolve the selected "
+                    f"authorization{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            parent = resolve_ancestry(parent_id, order, item, "charter parent", H27_COMMISSION_CHARTER_RULE)
+            if parent is None:
+                continue
+            if parent is not authorization:
+                selected_id, _ = h27_resolved_discriminator(authorization[4], "DISPATCH_ID")
+                if h27_commission_auth_shape_ok(parent):
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter parent {parent_id!r} does not equal selected authorization "
+                        f"{selected_id!r}{H27_COMMISSION_CHARTER_RULE}", operands=())
+                    )
+                else:
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                        f"the selected stage-(a) authorization{H27_COMMISSION_CHARTER_RULE}", operands=(relname(parent),))
+                    )
+                continue
+            auth_to, _ = h27_resolved_discriminator(authorization[4], "TO")
+            auth_to_addrs = split_addresses(auth_to)
+            if len(auth_to_addrs) != 1 or normalized_addr(auth_to_addrs[0]) != normalized_addr(from_addr):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter FROM must equal the master-planner address selected authorization TO"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            if h27_commission_surface(text) != h27_commission_surface(authorization[4]):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter equality surface is not byte-equal to the selected authorization"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+            continue
+
+        # Approval resolves the latest charter revision, its exact edge, and
+        # independently reselects the live authorization before accepting it.
+        if phase == "DESIGN-REVIEW" and from_role_value == "master-reviewer" and design_doc_id not in {None, ""}:
+            if not h27_commission_approval_shape_ok(item):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval requires DESIGN_RECORD_KIND: design-doc and a "
+                    f"grammatical DESIGN_REVIEW_VERDICT{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            charter = latest_stage(
+                charter_candidates(charter_doc_id, commission_id, order), item,
+                "charter revisions", H27_COMMISSION_CHARTER_RULE,
+            )
+            if charter is False:
+                continue
+            if charter is None:
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: charter approval has no earlier charter revision{H27_COMMISSION_CHARTER_RULE}", operands=()))
+                continue
+            parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
+            if parent_id in {None, ""}:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval PARENT_DISPATCH_ID is mandatory and must resolve the latest "
+                    f"charter revision{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            parent = resolve_ancestry(parent_id, order, item, "charter approval parent", H27_COMMISSION_CHARTER_RULE)
+            if parent is None:
+                continue
+            if parent is not charter:
+                charter_id_value, _ = h27_resolved_discriminator(charter[4], "DISPATCH_ID")
+                if h27_commission_charter_shape_ok(parent):
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval parent {parent_id!r} does not equal latest charter "
+                        f"revision {charter_id_value!r}{H27_COMMISSION_CHARTER_RULE}", operands=())
+                    )
+                else:
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval parent {parent_id!r} resolves to {relname(parent)}, "
+                        f"which is not the latest charter revision{H27_COMMISSION_CHARTER_RULE}", operands=(relname(parent),))
+                    )
+                continue
+            charter_conflicted = stage_conflict(
+                charter,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                item, "charter revision", H27_COMMISSION_CHARTER_RULE,
+            )
+            if charter_conflicted:
+                authorization_conflict_for(item, commission_id)
+                continue
+            if not h27_commission_charter_shape_ok(charter):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval parent is not a valid stage-(b) charter revision"
+                    f"{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            if not same_owner_reviewer(item, charter):
+                charter_owner = from_owner(h27_single_from(charter[4]))
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter approval must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+                continue
+            charter_id, conflict = h27_resolved_discriminator(charter[4], "COMMISSION_ID")
+            if conflict or charter_id in {None, ""}:
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_CHARTER_RULE}", operands=()))
+                continue
+            authorization = authorization_for(item, charter_id, H27_COMMISSION_CHARTER_RULE)
+            if authorization is None:
+                continue
+            if not charter_parent_authorization(charter, authorization, item, H27_COMMISSION_CHARTER_RULE):
+                continue
+            surfaces = {
+                h27_commission_surface(text),
+                h27_commission_surface(charter[4]),
+                h27_commission_surface(authorization[4]),
+            }
+            if len(surfaces) != 1:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: approval equality surface is not byte-equal to the selected authorization "
+                    f"and charter revision{H27_COMMISSION_CHARTER_RULE}", operands=())
+                )
+            continue
+
+        # Grant local shape and four-way equality. The literal marker is
+        # checked separately so YES/true remain universe members but fail.
+        if dda_presence and from_role_value == "master-planner":
+            marker, _ = h27_resolved_discriminator(text, "DELEGATED_DISPATCH_AUTHORITY")
+            if marker != "yes":
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: master-planner grant requires literal DELEGATED_DISPATCH_AUTHORITY: yes; "
+                    f"got {marker!r}{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+                continue
+            commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+            if not h27_pair_planner_address(commission_to):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: COMMISSION_TO {commission_to!r} is not exactly one non-special "
+                    f"pair-planner address{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+                continue
+            to_raw, _ = h27_resolved_discriminator(text, "TO")
+            to_addrs = split_addresses(to_raw)
+            if len(to_addrs) != 1 or normalized_addr(to_addrs[0]) != normalized_addr(commission_to):
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: grant TO must be exactly the COMMISSION_TO address{H27_COMMISSION_GRANT_RULE}", operands=()))
+                continue
+            if not h27_commission_grant_shape_ok(item):
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: master-planner grant fails stage-(c) shape{H27_COMMISSION_GRANT_RULE}", operands=()))
+                continue
+            charter = latest_stage(
+                charter_candidates(charter_doc_id, commission_id, order), item,
+                "charter revisions", H27_COMMISSION_GRANT_RULE,
+            )
+            if charter is False:
+                continue
+            if charter is None:
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: grant lacks an earlier charter revision{H27_COMMISSION_GRANT_RULE}", operands=()))
+                continue
+            charter_conflicted = stage_conflict(
+                charter,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                item, "latest charter revision", H27_COMMISSION_GRANT_RULE,
+            )
+            if charter_conflicted:
+                eager_approval, _tied = latest_at_one_position(
+                    review_candidates(charter, charter_doc_id, commission_id, order)
+                )
+                if eager_approval is not None:
+                    stage_conflict(
+                        eager_approval,
+                        ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                         "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                        item, "charter review", H27_COMMISSION_GRANT_RULE,
+                    )
+                authorization_conflict_for(item, commission_id)
+                continue
+            if not h27_commission_charter_shape_ok(charter):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
+                    f"{H27_COMMISSION_GRANT_RULE}", operands=(relname(charter),))
+                )
+                continue
+            approval = latest_stage(
+                review_candidates(charter, charter_doc_id, commission_id, order), item,
+                "charter reviews", H27_COMMISSION_GRANT_RULE,
+            )
+            if approval is False:
+                continue
+            if approval is None:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant has no earlier charter review for the latest charter revision"
+                    f"{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+                continue
+            approval_conflicted = stage_conflict(
+                approval,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                item, "charter review", H27_COMMISSION_GRANT_RULE,
+            )
+            if approval_conflicted:
+                authorization_conflict_for(item, commission_id)
+                continue
+            verdict, _ = h27_resolved_discriminator(approval[4], "DESIGN_REVIEW_VERDICT")
+            if not h27_commission_approval_shape_ok(approval) or verdict != "approve":
+                if h27_commission_approval_shape_ok(approval):
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: latest charter review {relname(approval)} requires "
+                        f"DESIGN_REVIEW_VERDICT: approve; got {verdict!r}{H27_COMMISSION_GRANT_RULE}", operands=(relname(approval),))
+                    )
+                else:
+                    errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: grant parent is not a valid charter review{H27_COMMISSION_GRANT_RULE}", operands=()))
+                continue
+            if not same_owner_reviewer(approval, charter):
+                charter_owner = from_owner(h27_single_from(charter[4]))
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+                continue
+            parent_id, _ = h27_resolved_discriminator(text, "PARENT_DISPATCH_ID")
+            if parent_id in {None, ""}:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve the latest approving "
+                    f"review{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+                continue
+            parent = resolve_ancestry(parent_id, order, item, "grant parent", H27_COMMISSION_GRANT_RULE)
+            if parent is None:
+                continue
+            if parent is not approval:
+                approval_id, _ = h27_resolved_discriminator(approval[4], "DISPATCH_ID")
+                if h27_commission_approval_shape_ok(parent):
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: grant parent {parent_id!r} does not equal latest charter review "
+                        f"{approval_id!r}{H27_COMMISSION_GRANT_RULE}", operands=())
+                    )
+                else:
+                    errors.append(
+                        _structural('lineage.commission', relname(item), f"{relname(item)}: grant parent {parent_id!r} resolves to {relname(parent)}, which is not "
+                        f"the latest charter review{H27_COMMISSION_GRANT_RULE}", operands=(relname(parent),))
+                    )
+                continue
+            approval_parent_id, _ = h27_resolved_discriminator(approval[4], "PARENT_DISPATCH_ID")
+            if approval_parent_id in {None, ""}:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} lacks a usable "
+                    f"PARENT_DISPATCH_ID{H27_COMMISSION_GRANT_RULE}", operands=(relname(approval),))
+                )
+                continue
+            approval_parent = resolve_ancestry(
+                approval_parent_id, approval[1], item, "approval parent", H27_COMMISSION_GRANT_RULE,
+            )
+            if approval_parent is None:
+                continue
+            if approval_parent is not charter:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: approval parent {approval_parent_id!r} resolves to {relname(approval_parent)}, "
+                    f"which is not the charter revision{H27_COMMISSION_GRANT_RULE}", operands=(relname(approval_parent),))
+                )
+                continue
+            charter_id, conflict = h27_resolved_discriminator(charter[4], "COMMISSION_ID")
+            if conflict or charter_id in {None, ""}:
+                errors.append(_structural('lineage.commission', relname(item), f"{relname(item)}: selected charter revision has no usable COMMISSION_ID{H27_COMMISSION_GRANT_RULE}", operands=()))
+                continue
+            authorization = authorization_for(item, charter_id, H27_COMMISSION_GRANT_RULE)
+            if authorization is None:
+                continue
+            if not charter_parent_authorization(charter, authorization, item, H27_COMMISSION_GRANT_RULE):
+                continue
+            auth_to, _ = h27_resolved_discriminator(authorization[4], "TO")
+            auth_to_addrs = split_addresses(auth_to)
+            if len(auth_to_addrs) != 1 or normalized_addr(auth_to_addrs[0]) != normalized_addr(from_addr):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant FROM must equal the master-planner address selected authorization TO"
+                    f"{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+                continue
+            surfaces = {
+                h27_commission_surface(text), h27_commission_surface(approval[4]),
+                h27_commission_surface(charter[4]), h27_commission_surface(authorization[4]),
+            }
+            if len(surfaces) != 1:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant equality surface is not byte-equal across selected authorization, "
+                    f"charter revision, approval, and grant{H27_COMMISSION_GRANT_RULE}", operands=())
+                )
+            continue
+
+        # Pair receipt: target first, then latest grant-universe selection.
+        if is_receipt:
+            if h27_receipt_self_grants(text, is_receipt):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commissioned pair receipt carries DELEGATED_DISPATCH_AUTHORITY: yes; "
+                    f"self-grant is prohibited{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            commission_to, _ = h27_resolved_discriminator(text, "COMMISSION_TO")
+            if normalized_addr(from_addr) != normalized_addr(commission_to):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commissioned pair receipt FROM {from_addr!r} does not equal "
+                    f"COMMISSION_TO {commission_to!r}{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            candidates = marker_universe("DELEGATED_DISPATCH_AUTHORITY", commission_id, order)
+            selected, tied = latest_at_one_position(candidates)
+            if not candidates:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commission {commission_id!r} has no earlier grant-universe member"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            if selected is None:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: commission {commission_id!r} has {tied} grant-universe candidates at the "
+                    f"latest order position; ambiguity fails closed{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            conflict = selected_conflict(
+                selected,
+                ("FROM", "PHASE", "AUTHORITY", "TO", "DELEGATED_DISPATCH_AUTHORITY") + H27_COMMISSION_SURFACE,
+            )
+            if conflict:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting {conflict} "
+                    f"occurrences; universe selection refuses first-value resolution{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(selected),))
+                )
+                eager_charter, _tied = latest_at_one_position(
+                    charter_candidates(charter_doc_id, commission_id, selected[1])
+                )
+                if eager_charter is not None:
+                    stage_conflict(
+                        eager_charter,
+                        ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                         "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                        item, "latest charter revision", H27_COMMISSION_RECEIPT_RULE,
+                    )
+                    eager_approval, _tied = latest_at_one_position(
+                        review_candidates(eager_charter, charter_doc_id, commission_id, selected[1])
+                    )
+                    if eager_approval is not None:
+                        stage_conflict(
+                            eager_approval,
+                            ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                             "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                            item, "charter review", H27_COMMISSION_RECEIPT_RULE,
+                        )
+                authorization_conflict_for(item, commission_id)
+                continue
+            if not h27_commission_grant_shape_ok(selected):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: latest grant-universe member {relname(selected)} fails stage-(c) shape; "
+                    f"marker-bearing malformed grant shadows and fails{H27_COMMISSION_GRANT_RULE}", operands=(relname(selected),))
+                )
+                continue
+            if h27_commission_surface(text) != h27_commission_surface(selected[4]):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: latest grant-universe member is not targeted to this pair planner with a "
+                    f"byte-equal surface{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            grant_parent_id, grant_parent_conflict = h27_resolved_discriminator(
+                selected[4], "PARENT_DISPATCH_ID",
+            )
+            if grant_parent_conflict:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant-universe member {relname(selected)} has conflicting "
+                    f"PARENT_DISPATCH_ID occurrences; ancestry resolution refuses first-value resolution"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(selected),))
+                )
+                continue
+            if grant_parent_id in {None, ""}:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: grant PARENT_DISPATCH_ID is mandatory and must resolve an approving review"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            charter = latest_stage(
+                charter_candidates(charter_doc_id, commission_id, selected[1]), item,
+                "charter revisions", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if charter is False:
+                continue
+            if charter is None:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected latest charter revision <none> fails stage-(b) shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            charter_conflicted = stage_conflict(
+                charter,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND") + H27_COMMISSION_SURFACE,
+                item, "latest charter revision", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if charter_conflicted:
+                eager_approval, _tied = latest_at_one_position(
+                    review_candidates(charter, charter_doc_id, commission_id, selected[1])
+                )
+                if eager_approval is not None:
+                    stage_conflict(
+                        eager_approval,
+                        ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                         "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                        item, "charter review", H27_COMMISSION_RECEIPT_RULE,
+                    )
+                authorization_conflict_for(item, commission_id)
+                continue
+            if not h27_commission_charter_shape_ok(charter):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected latest charter revision {relname(charter)} fails stage-(b) shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(charter),))
+                )
+                continue
+            approval = latest_stage(
+                review_candidates(charter, charter_doc_id, commission_id, selected[1]), item,
+                "charter reviews", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if approval is False:
+                continue
+            if approval is None:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant has no earlier charter review"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            approval_conflicted = stage_conflict(
+                approval,
+                ("FROM", "PHASE", "AUTHORITY", "DISPATCH_ID", "PARENT_DISPATCH_ID", "DESIGN_DOC_ID",
+                 "DESIGN_RECORD_KIND", "DESIGN_REVIEW_VERDICT") + H27_COMMISSION_SURFACE,
+                item, "charter review", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if approval_conflicted:
+                authorization_conflict_for(item, commission_id)
+                continue
+            if not h27_commission_approval_shape_ok(approval):
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} fails stage-(b) review shape"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
+                )
+                continue
+            approval_verdict, _ = h27_resolved_discriminator(approval[4], "DESIGN_REVIEW_VERDICT")
+            if approval_verdict != "approve":
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} requires "
+                    f"DESIGN_REVIEW_VERDICT: approve; got {approval_verdict!r}{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
+                )
+                continue
+            if not same_owner_reviewer(approval, charter):
+                charter_owner = from_owner(h27_single_from(charter[4]))
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: charter review must be FROM {same_owner_addr(charter_owner, 'master-reviewer')}, "
+                    f"the charter owner's tier reviewer{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            grant_parent = resolve_ancestry(
+                grant_parent_id, selected[1], item, "grant parent", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if grant_parent is None:
+                continue
+            if grant_parent is not approval:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected grant does not parent to the latest charter review before the grant"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            approval_parent_id, approval_parent_conflict = h27_resolved_discriminator(
+                approval[4], "PARENT_DISPATCH_ID",
+            )
+            if approval_parent_conflict:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} has conflicting "
+                    f"PARENT_DISPATCH_ID occurrences; ancestry resolution refuses first-value resolution"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
+                )
+                continue
+            if approval_parent_id in {None, ""}:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: selected charter review {relname(approval)} lacks a usable "
+                    f"PARENT_DISPATCH_ID{H27_COMMISSION_RECEIPT_RULE}", operands=(relname(approval),))
+                )
+                continue
+            approval_parent = resolve_ancestry(
+                approval_parent_id, approval[1], item, "approval parent", H27_COMMISSION_RECEIPT_RULE,
+            )
+            if approval_parent is None:
+                continue
+            if approval_parent is not charter:
+                errors.append(
+                    _structural('lineage.commission', relname(item), f"{relname(item)}: approval parent {approval_parent_id!r} does not resolve to the latest "
+                    f"charter revision before the review"
+                    f"{H27_COMMISSION_RECEIPT_RULE}", operands=())
+                )
+                continue
+            authorization = authorization_for(item, commission_id, H27_COMMISSION_RECEIPT_RULE)
+            if authorization is None:
+                continue
+            if not charter_parent_authorization(
+                charter, authorization, item, H27_COMMISSION_RECEIPT_RULE,
+            ):
+                continue
+            continue
+
+        errors.append(
+            _structural('lineage.commission', relname(item), f"{relname(item)}: commission machine engaged but relay is not consumed by any Task 9.5a stage"
+            f"{H27_COMMISSION_RULE}", operands=())
+        )
+    return errors
+
+
+XROOT_PREFIX = "declared design edge failed verification"
+XROOT_TRIGGERS = (
+    "DESIGN_SOURCE_REPO",
+    "DESIGN_SOURCE_COMMIT",
+    "DESIGN_SOURCE_ROOT",
+    "DESIGN_SOURCE_PATH",
+    "DESIGN_OWNER",
+)
+XROOT_REQUIRED = XROOT_TRIGGERS + ("DESIGN_DOC_ID", "DESIGN_SHA256")
+XROOT_GIT_TIMEOUT_SECONDS = 5
+XROOT_MAX_TREE_DEPTH = 256
+
+
+class XrootAxisError(Exception):
+    def __init__(self, axis: str, detail: str) -> None:
+        super().__init__(detail)
+        self.axis = axis
+        self.detail = detail
+
+
+def xroot_error(axis: str, detail: str) -> str:
+    return f"{XROOT_PREFIX}: {axis}: {detail}"
+
+
+def xroot_design_engaged(text: str) -> bool:
+    """Whether a PLAN-phase relay carries any declared-edge trigger."""
+    fields = header_fields(text)
+    if fields.get("PHASE") != "PLAN":
+        return False
+    return any(h27_occurrences(text, key) for key in XROOT_TRIGGERS)
+
+
+def xroot_pair_plan_applicable(text: str) -> bool:
+    """Whether text is inside the locked A5 pair-Planner PLAN boundary."""
+    fields = header_fields(text)
+    if fields.get("PHASE") != "PLAN":
+        return False
+    from_values = h27_occurrences(text, "FROM")
+    if len(from_values) != 1:
+        return False
+    from_addrs = split_addresses(from_values[0])
+    if len(from_addrs) != 1 or canonical_role(from_role(from_addrs[0])) != "planner":
+        return False
+    return any(h27_occurrences(text, key) for key in XROOT_TRIGGERS)
+
+
+def xroot_pair_plan_carrier_shape(text: str) -> tuple[bool, bool]:
+    """Return the ROLE and FROM halves of the canonical carrier shape."""
+    fields = header_fields(text)
+    role_ok = canonical_role(ROLE_TO_ADDRESS_ROLE.get(fields.get("ROLE", ""))) == "planner"
+    from_values = h27_occurrences(text, "FROM")
+    from_addrs = split_addresses(from_values[0]) if len(from_values) == 1 else []
+    from_ok = len(from_addrs) == 1 and canonical_role(from_role(from_addrs[0])) == "planner"
+    return role_ok, from_ok
+
+
+def xroot_field_conflicts(text: str, keys: tuple[str, ...]) -> List[str]:
+    conflicts: List[str] = []
+    for key in keys:
+        values = {value.strip() for value in h27_occurrences(text, key)}
+        if len(values) > 1:
+            conflicts.append(key)
+    return conflicts
+
+
+def xroot_declaration(fields: Dict[str, str], text: str) -> Dict[str, str] | None:
+    if not xroot_design_engaged(text):
+        return None
+    return {
+        key: fields.get(key, "").strip()
+        for key in XROOT_REQUIRED + ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND")
+    }
+
+
+def _xroot_kill_and_reap(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    while True:
+        try:
+            os.waitpid(pid, 0)
+            return
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            return
+
+
+_XROOT_BUDGET = ContextVar("relay_xroot_budget", default=None)
+
+
+def xroot_git(repo: Path, *args: str, axis: str = "repository", binary: bool = False,
+              deadline: float | None = None):
+    budget = _XROOT_BUDGET.get()
+    if budget is not None:
+        deadline = budget[0] if deadline is None else min(deadline, budget[0])
+    if deadline is not None and deadline <= time.monotonic():
+        if budget is not None:
+            budget[1].append("Git object query timed out")
+        raise XrootAxisError(axis, "Git object query timed out")
+    argv = ["git", "-C", str(repo), *args]
+    stdout_chunks: List[bytes] = []
+    stderr_chunks: List[bytes] = []
+    open_fds = set()
+    selector = selectors.DefaultSelector()
+    pid = None
+    reaped = False
+    timed_out = False
+    status = None
+    try:
+        stdout_read, stdout_write = os.pipe()
+        open_fds.update((stdout_read, stdout_write))
+        stderr_read, stderr_write = os.pipe()
+        open_fds.update((stderr_read, stderr_write))
+        file_actions = [
+            (os.POSIX_SPAWN_DUP2, stdout_write, 1),
+            (os.POSIX_SPAWN_DUP2, stderr_write, 2),
+            (os.POSIX_SPAWN_CLOSE, stdout_read),
+            (os.POSIX_SPAWN_CLOSE, stderr_read),
+            (os.POSIX_SPAWN_CLOSE, stdout_write),
+            (os.POSIX_SPAWN_CLOSE, stderr_write),
+        ]
+        try:
+            pid = os.posix_spawnp(
+                "git", argv, os.environ, file_actions=file_actions)
+        except FileNotFoundError as exc:
+            raise XrootAxisError(
+                "repository", "git executable is unavailable"
+            ) from exc
+
+        for fd in (stdout_write, stderr_write):
+            os.close(fd)
+            open_fds.remove(fd)
+        for fd, chunks in (
+            (stdout_read, stdout_chunks),
+            (stderr_read, stderr_chunks),
+        ):
+            os.set_blocking(fd, False)
+            selector.register(fd, selectors.EVENT_READ, chunks)
+
+        deadline = time.monotonic() + XROOT_GIT_TIMEOUT_SECONDS if deadline is None else deadline
+        while selector.get_map() or status is None:
+            if status is None:
+                waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
+                if waited_pid == pid:
+                    status = waited_status
+                    reaped = True
+            if not selector.get_map() and status is not None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                if budget is not None:
+                    budget[1].append("Git object query timed out")
+                raise XrootAxisError(axis, "Git object query timed out")
+            if selector.get_map():
+                events = selector.select(remaining)
+                if not events:
+                    timed_out = True
+                    if budget is not None:
+                        budget[1].append("Git object query timed out")
+                    raise XrootAxisError(axis, "Git object query timed out")
+                for key, _mask in events:
+                    fd = key.fd
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except BlockingIOError:
+                        continue
+                    if chunk:
+                        key.data.append(chunk)
+                    else:
+                        selector.unregister(fd)
+                        os.close(fd)
+                        open_fds.remove(fd)
+            else:
+                time.sleep(min(0.01, remaining))
+
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise XrootAxisError(axis, "Git object query failed")
+    except BaseException:
+        if pid is not None and not reaped:
+            _xroot_kill_and_reap(pid)
+            reaped = True
+        raise
+    finally:
+        selector.close()
+        for fd in tuple(open_fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if timed_out and pid is not None and not reaped:
+            _xroot_kill_and_reap(pid)
+
+    stdout = b"".join(stdout_chunks)
+    return stdout if binary else stdout.decode("utf-8").strip()
+
+
+def xroot_repository_and_commit(
+    path: Path,
+    declaration: Dict[str, str],
+    repo_key: str = "DESIGN_SOURCE_REPO",
+    commit_key: str = "DESIGN_SOURCE_COMMIT",
+) -> tuple[Path, str]:
+    try:
+        consuming_top = Path(
+            xroot_git(path, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        )
+    except XrootAxisError as exc:
+        if exc.axis == "repository" and exc.detail == "git executable is unavailable":
+            raise
+        raise XrootAxisError(
+            "repository", "consuming relay root is not inside a Git repository"
+        ) from exc
+    declared_repo = Path(declaration[repo_key])
+    candidate = declared_repo if declared_repo.is_absolute() else consuming_top / declared_repo
+    candidate = Path(os.path.realpath(candidate))
+    if not candidate.is_dir():
+        raise XrootAxisError("repository", f"{repo_key} does not name an existing directory")
+    try:
+        reported_top = Path(
+            xroot_git(candidate, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        )
+    except XrootAxisError as exc:
+        if exc.axis == "repository" and exc.detail == "git executable is unavailable":
+            raise
+        raise XrootAxisError(
+            "repository", f"{repo_key} is not a Git repository top level"
+        ) from exc
+    if Path(os.path.realpath(reported_top)) != candidate:
+        raise XrootAxisError(
+            "repository",
+            f"{repo_key} resolves inside a Git repository but not to its top level",
+        )
+    commit = declaration[commit_key]
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise XrootAxisError(
+            "commit", f"{commit_key} must be a full lowercase 40-hex object id"
+        )
+    try:
+        object_type = xroot_git(candidate, "cat-file", "-t", commit, axis="commit")
+    except XrootAxisError as exc:
+        if exc.detail == "Git object query failed":
+            raise XrootAxisError("commit", f"{commit_key} object is unavailable") from exc
+        raise
+    if object_type != "commit":
+        raise XrootAxisError(
+            "commit", f"{commit_key} object type is {object_type}, not commit"
+        )
+    return candidate, commit
+
+
+def xroot_valid_relpath(value: str) -> bool:
+    parts = value.split("/")
+    return bool(
+        value
+        and not value.startswith("/")
+        and "\x00" not in value
+        and all(part not in {"", ".", ".."} and not part.startswith(":") for part in parts)
+    )
+
+
+def xroot_commit_tree(repo: Path, commit: str) -> str:
+    content = xroot_git(repo, "cat-file", "-p", commit, axis="commit")
+    first = content.splitlines()[0] if content else ""
+    if re.fullmatch(r"tree [0-9a-f]{40}", first) is None:
+        raise XrootAxisError("commit", "commit object lacks a canonical root tree")
+    return first.split(" ", 1)[1]
+
+
+def xroot_tree_entries(repo: Path, tree_oid: str) -> dict[bytes, tuple[str, str]]:
+    raw = xroot_git(repo, "cat-file", "tree", tree_oid, axis="repository", binary=True)
+    entries: dict[bytes, tuple[str, str]] = {}
+    offset = 0
+    while offset < len(raw):
+        space = raw.find(b" ", offset)
+        nul = raw.find(b"\x00", space + 1)
+        if space < 0 or nul < 0 or nul + 21 > len(raw):
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            )
+        try:
+            mode = raw[offset:space].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            ) from exc
+        if mode not in {"40000", "040000", "100644", "100755", "120000", "160000"}:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            )
+        name = raw[space + 1:nul]
+        if not name:
+            raise XrootAxisError(
+                "repository", "pinned tree object has malformed entry bytes"
+            )
+        oid = raw[nul + 1:nul + 21].hex()
+        if mode == "120000":
+            kind = "symlink"
+        elif mode in {"40000", "040000"}:
+            kind = "tree"
+        else:
+            kind = "blob"
+        entries[name] = (kind, oid)
+        offset = nul + 21
+    return entries
+
+
+def xroot_walk(
+    repo: Path,
+    root_tree: str,
+    relpath: str,
+    field_name: str,
+) -> tuple[str, str] | None:
+    tree_oid = root_tree
+    parts = relpath.split("/")
+    for index, part in enumerate(parts):
+        entry = xroot_tree_entries(repo, tree_oid).get(part.encode("utf-8"))
+        if entry is None:
+            return None
+        kind, oid = entry
+        if kind == "symlink":
+            raise XrootAxisError(
+                "declaration", f"{field_name} traverses symlink component {part}"
+            )
+        if index < len(parts) - 1:
+            if kind != "tree":
+                return None
+            tree_oid = oid
+    return kind, oid
+
+
+def xroot_paths(
+    repo: Path,
+    commit: str,
+    declaration: Dict[str, str],
+) -> tuple[str, str]:
+    for key in ("DESIGN_SOURCE_ROOT", "DESIGN_SOURCE_PATH"):
+        if not xroot_valid_relpath(declaration[key]):
+            raise XrootAxisError("declaration", f"{key} must be a literal relative path")
+    commit_tree = xroot_commit_tree(repo, commit)
+    root_entry = xroot_walk(
+        repo, commit_tree, declaration["DESIGN_SOURCE_ROOT"], "DESIGN_SOURCE_ROOT"
+    )
+    if root_entry is None:
+        raise XrootAxisError(
+            "authority-population", "DESIGN_SOURCE_ROOT does not exist at pinned commit"
+        )
+    root_kind, root_oid = root_entry
+    if root_kind != "tree":
+        raise XrootAxisError(
+            "authority-population", f"DESIGN_SOURCE_ROOT resolves to {root_kind}, not tree"
+        )
+    path_entry = xroot_walk(
+        repo, commit_tree, declaration["DESIGN_SOURCE_PATH"], "DESIGN_SOURCE_PATH"
+    )
+    if path_entry is None:
+        raise XrootAxisError("byte", "DESIGN_SOURCE_PATH does not exist at pinned commit")
+    path_kind, blob_oid = path_entry
+    if path_kind != "blob":
+        raise XrootAxisError("byte", f"DESIGN_SOURCE_PATH resolves to {path_kind}, not blob")
+    return root_oid, blob_oid
+
+
+class XrootRelay(NamedTuple):
+    name: str
+    fields: Dict[str, str]
+    text: str
+    stamp: datetime.datetime | None
+    stamp_raw: str | None
+
+
+def xroot_relays(repo: Path, root_tree: str) -> List[XrootRelay]:
+    relays: List[XrootRelay] = []
+    stack = [("tree", root_tree, "", b"", 0)]
+    while stack:
+        kind, oid, relname, name_bytes, depth = stack.pop()
+        if kind == "tree":
+            if depth > XROOT_MAX_TREE_DEPTH:
+                raise XrootAxisError(
+                    "repository",
+                    f"DESIGN_SOURCE_ROOT exceeds maximum tree depth {XROOT_MAX_TREE_DEPTH}",
+                )
+            entries = sorted(xroot_tree_entries(repo, oid).items(), reverse=True)
+            for child_name, (child_kind, child_oid) in entries:
+                try:
+                    decoded = child_name.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise XrootAxisError(
+                        "authority-population",
+                        "DESIGN_SOURCE_ROOT contains a non-UTF-8 filename",
+                    ) from exc
+                child_relname = f"{relname}/{decoded}" if relname else decoded
+                stack.append((child_kind, child_oid, child_relname, child_name, depth + 1))
+            continue
+        name = name_bytes.decode("utf-8")
+        if name == "INDEX.md":
+            continue
+        if kind == "symlink":
+            raise XrootAxisError(
+                "authority-population",
+                f"DESIGN_SOURCE_ROOT contains symlink carrier {relname}",
+            )
+        if not name.endswith(".md"):
+            continue
+        blob = xroot_git(
+            repo, "cat-file", "blob", oid, axis="authority-population", binary=True
+        )
+        try:
+            relay_text = blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise XrootAxisError(
+                "authority-population", f"authority carrier {relname} is not UTF-8"
+            ) from exc
+        status, stamp, raw, _utc = filename_timestamp(name)
+        relays.append(
+            XrootRelay(
+                relname,
+                header_fields(relay_text),
+                relay_text,
+                stamp if status == "ok" else None,
+                raw if status == "ok" else None,
+            )
+        )
+    return relays
+
+
+def xroot_target_ok(relay: XrootRelay, key: str, expected: str) -> bool:
+    values = [value.strip() for value in h27_occurrences(relay.text, key)]
+    if expected not in values:
+        return False
+    if len(set(values)) > 1:
+        raise XrootAxisError(
+            "authority-population", f"conflicting {key} occurrences in {relay.name}"
+        )
+    return True
+
+
+def xroot_unique_latest(
+    candidates: List[XrootRelay],
+    *,
+    empty_axis: str,
+    empty_detail: str,
+    carrier_kind: str,
+) -> XrootRelay:
+    if not candidates:
+        raise XrootAxisError(empty_axis, empty_detail)
+    for relay in candidates:
+        if relay.stamp is None:
+            raise XrootAxisError(
+                "ordering", f"authority carrier {relay.name} lacks a filename timestamp"
+            )
+    latest_stamp = max(relay.stamp for relay in candidates)
+    latest = [relay for relay in candidates if relay.stamp == latest_stamp]
+    if len(latest) != 1:
+        raw = latest[0].stamp_raw or "unknown"
+        raise XrootAxisError(
+            "ambiguity", f"multiple latest {carrier_kind} share timestamp {raw}"
+        )
+    return latest[0]
+
+
+def xroot_selected_conflicts(relay: XrootRelay, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        values = h27_occurrences(relay.text, key)
+        if len(set(value.strip() for value in values)) > 1:
+            raise XrootAxisError(
+                "authority-population",
+                f"conflicting {key} occurrences in selected carrier {relay.name}",
+            )
+
+
+def xroot_selected_role(relay: XrootRelay, kind: str) -> tuple[str, str]:
+    if not relay.fields.get("ROLE"):
+        raise XrootAxisError(
+            "authority-population", f"selected {kind} {relay.name} lacks ROLE"
+        )
+    role = canonical_role(ROLE_TO_ADDRESS_ROLE.get(relay.fields["ROLE"]))
+    from_addrs = split_addresses(relay.fields.get("FROM"))
+    if (
+        role is None
+        or len(from_addrs) != 1
+        or role != canonical_role(from_role(from_addrs[0]))
+    ):
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} ROLE does not match FROM",
+        )
+    return role, from_owner(from_addrs[0]) or ""
+
+
+def xroot_validate_selected(
+    relay: XrootRelay,
+    *,
+    kind: str,
+    owner: str,
+) -> tuple[str, str]:
+    conflict_keys = (
+        "ROLE",
+        "FROM",
+        "AUTHORITY",
+        "DISPATCH_ID",
+        "DESIGN_RECORD_KIND",
+    )
+    if kind == "origin":
+        conflict_keys += ("PARENT_DISPATCH_ID",)
+    else:
+        conflict_keys += ("DESIGN_REVIEW_VERDICT",)
+    xroot_selected_conflicts(relay, conflict_keys)
+    if not relay.fields.get("DESIGN_RECORD_KIND"):
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} lacks DESIGN_RECORD_KIND",
+        )
+    if relay.fields["DESIGN_RECORD_KIND"] != "design-doc":
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} DESIGN_RECORD_KIND is not design-doc",
+        )
+    role, relay_owner = xroot_selected_role(relay, kind)
+    if not relay.fields.get("DISPATCH_ID"):
+        raise XrootAxisError(
+            "authority-population", f"selected {kind} {relay.name} lacks DISPATCH_ID"
+        )
+    expected_authority = "design-only" if kind == "origin" else "review-only"
+    if relay.fields.get("AUTHORITY") != expected_authority:
+        raise XrootAxisError(
+            "authority-population",
+            f"selected {kind} {relay.name} AUTHORITY is not {expected_authority}",
+        )
+    if relay_owner != owner:
+        raise XrootAxisError(
+            "authority-owner",
+            f"selected {kind} owner {relay_owner} does not match DESIGN_OWNER {owner}",
+        )
+    return role, relay.fields["DISPATCH_ID"]
+
+
+def xroot_authority(
+    repo: Path,
+    root_tree: str,
+    declaration: Dict[str, str],
+) -> tuple[XrootRelay, XrootRelay, List[XrootRelay]]:
+    relays = xroot_relays(repo, root_tree)
+    doc_id = declaration["DESIGN_DOC_ID"]
+    origins = [
+        relay for relay in relays
+        if xroot_target_ok(relay, "PHASE", "DESIGN")
+        and xroot_target_ok(relay, "DESIGN_DOC_ID", doc_id)
+    ]
+    origin = xroot_unique_latest(
+        origins,
+        empty_axis="authority-population",
+        empty_detail=f"no DESIGN origin found for DESIGN_DOC_ID {doc_id}",
+        carrier_kind="DESIGN origins",
+    )
+    origin_role, origin_dispatch = xroot_validate_selected(
+        origin, kind="origin", owner=declaration["DESIGN_OWNER"]
+    )
+    reviews = [
+        relay for relay in relays
+        if xroot_target_ok(relay, "PHASE", "DESIGN-REVIEW")
+        and xroot_target_ok(relay, "DESIGN_DOC_ID", doc_id)
+        and xroot_target_ok(relay, "PARENT_DISPATCH_ID", origin_dispatch)
+    ]
+    review = xroot_unique_latest(
+        reviews,
+        empty_axis="authority-parent",
+        empty_detail=f"no DESIGN-REVIEW found for selected origin {origin_dispatch}",
+        carrier_kind="DESIGN-REVIEW carriers",
+    )
+    review_role, _review_dispatch = xroot_validate_selected(
+        review, kind="review", owner=declaration["DESIGN_OWNER"]
+    )
+    peer_roles = {
+        "planner": {"implementer", "pair-implementer"},
+        "pair-planner": {"implementer", "pair-implementer"},
+        "domain-planner": {"domain-reviewer"},
+        "master-planner": {"master-reviewer"},
+    }
+    if review_role not in peer_roles.get(origin_role, set()):
+        raise XrootAxisError(
+            "authority-population",
+            f"selected review {review.name} is not a peer for selected origin role {origin_role}",
+        )
+    verdict = review.fields.get("DESIGN_REVIEW_VERDICT")
+    if verdict not in DESIGN_REVIEW_VERDICT_VALUES:
+        raise XrootAxisError(
+            "authority-population",
+            f"selected review {review.name} has invalid DESIGN_REVIEW_VERDICT",
+        )
+    if review.stamp is None or origin.stamp is None or review.stamp <= origin.stamp:
+        raise XrootAxisError("ordering", "selected review is not later than selected origin")
+    if verdict != "approve":
+        raise XrootAxisError(
+            "authority-verdict",
+            f"selected review {review.name} verdict {verdict} is not approve",
+        )
+    return origin, review, relays
+
+
+def xroot_plan_gate(
+    path: Path,
+    f: Path,
+    fields: Dict[str, str],
+    text: str,
+    result: LintResult,
+) -> bool:
+    source_keys = ("PLAN_SOURCE_REPO", "PLAN_SOURCE_COMMIT")
+    if not any(h27_occurrences(text, key) for key in source_keys):
+        return False
+    rel = f.relative_to(path)
+    conflicts = xroot_field_conflicts(text, source_keys)
+    if conflicts:
+        result.error(f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}", check_id='lineage.lock-path', subject=str(rel), operands=())
+        return True
+    declaration = {key: fields.get(key, "").strip() for key in source_keys}
+    missing = [key for key in source_keys if not declaration[key]]
+    if missing:
+        result.error(f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}", check_id='lineage.lock-path', subject=str(rel), operands=())
+        return True
+    locks = []
+    for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
+        lock = fields.get(key, "")
+        lock_path, separator, annotation = lock.partition(" @ ")
+        if not lock_path or ("/" not in lock_path and not lock_path.endswith(".md")):
+            continue
+        locks.append((key, lock_path, separator, annotation))
+    if not locks:
+        return True
+    try:
+        repo, commit = xroot_repository_and_commit(
+            path,
+            declaration,
+            repo_key="PLAN_SOURCE_REPO",
+            commit_key="PLAN_SOURCE_COMMIT",
+        )
+        commit_tree = xroot_commit_tree(repo, commit)
+        for key, lock_path, separator, annotation in locks:
+            if not xroot_valid_relpath(lock_path):
+                raise XrootAxisError(
+                    "declaration", f"{key} path must be a literal relative path"
+                )
+            entry = xroot_walk(repo, commit_tree, lock_path, key)
+            if entry is None:
+                raise XrootAxisError("byte", f"{key} path does not exist at pinned commit")
+            kind, blob_oid = entry
+            if kind != "blob":
+                raise XrootAxisError("byte", f"{key} path resolves to {kind}, not blob")
+            blob = xroot_git(
+                repo, "cat-file", "blob", blob_oid, axis="byte", binary=True
+            )
+            if separator:
+                if re.fullmatch(r"[0-9a-f]{64}", annotation) is None:
+                    raise XrootAxisError(
+                        "byte", f"{key} annotation is not a full lowercase 64-hex digest"
+                    )
+                if hashlib.sha256(blob).hexdigest() != annotation:
+                    raise XrootAxisError(
+                        "byte", f"{key} annotation digest does not match pinned blob bytes"
+                    )
+    except XrootAxisError as exc:
+        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}", check_id='lineage.lock-path', subject=str(rel), operands=())
+    except Exception:
+        result.error(f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}", check_id='lineage.lock-path', subject=str(rel), operands=())
+    return True
+
+
+def xroot_verify(path: Path, declaration: Dict[str, str]) -> tuple[XrootRelay, XrootRelay, List[XrootRelay]]:
+    repo, commit = xroot_repository_and_commit(path, declaration)
+    relay_tree, blob_oid = xroot_paths(repo, commit, declaration)
+    declared_digest = declaration["DESIGN_SHA256"]
+    if re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None:
+        raise XrootAxisError(
+            "byte", "DESIGN_SHA256 must be a full lowercase 64-hex digest"
+        )
+    blob = xroot_git(repo, "cat-file", "blob", blob_oid, axis="byte", binary=True)
+    if hashlib.sha256(blob).hexdigest() != declared_digest:
+        raise XrootAxisError("byte", "DESIGN_SHA256 does not match pinned blob bytes")
+    return xroot_authority(repo, relay_tree, declaration)
+
+
+def xroot_design_gate(
+    path: Path,
+    f: Path,
+    fields: Dict[str, str],
+    text: str,
+    phases,
+    result: LintResult,
+) -> bool:
+    declaration = xroot_declaration(fields, text)
+    if declaration is None:
+        return False
+    rel = f.relative_to(path)
+    role_ok, from_ok = xroot_pair_plan_carrier_shape(text)
+    if not role_ok:
+        result.error(f"{rel}: {xroot_error('declaration', 'declared edge carrier ROLE must be pair-Planner class')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+        return True
+    if not from_ok:
+        result.error(f"{rel}: {xroot_error('declaration', 'declared edge carrier FROM must be exactly one pair-Planner-class address')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+        return True
+    conflicts = xroot_field_conflicts(
+        text, XROOT_REQUIRED + ("DESIGN_LOCK_ID", "DESIGN_RECORD_KIND")
+    )
+    if conflicts:
+        result.error(f"{rel}: {xroot_error('declaration', f'conflicting {conflicts[0]} values')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+        return True
+    missing = [key for key in XROOT_REQUIRED if not declaration[key]]
+    if not declaration["DESIGN_LOCK_ID"]:
+        missing.append("DESIGN_LOCK_ID")
+    if missing:
+        result.error(f"{rel}: {xroot_error('declaration', 'missing ' + ', '.join(missing))}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+        return True
+    if declaration["DESIGN_RECORD_KIND"] != "design-doc":
+        result.error(f"{rel}: {xroot_error('declaration', 'DESIGN_RECORD_KIND must be design-doc under a declared edge')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+        return True
+    for local_f, _order, local_phase, local_fields, _local_text in phases:
+        if local_f == f or local_phase != "DESIGN":
+            continue
+        local_from = split_addresses(local_fields.get("FROM"))
+        if (
+            local_fields.get("DESIGN_DOC_ID") == declaration["DESIGN_DOC_ID"]
+            and len(local_from) == 1
+            and from_owner(local_from[0]) == declaration["DESIGN_OWNER"]
+        ):
+            result.error(f"{rel}: {xroot_error('ambiguity', 'same-owner local DESIGN carries DESIGN_DOC_ID ' + declaration['DESIGN_DOC_ID'])}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+            return True
+    try:
+        xroot_verify(path, declaration)
+    except XrootAxisError as exc:
+        result.error(f"{rel}: {xroot_error(exc.axis, exc.detail)}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+    except Exception:
+        result.error(f"{rel}: {xroot_error('repository', 'unexpected Git or object parse failure')}", check_id='lineage.cross-root-design', subject=str(rel), operands=())
+    return True
+def _engine_record_finding(result: LintResult, cause: str,
+                           path: str) -> None:
+    result.error(strings.render(
+        "engine-root-record-integrity", cause=cause,
+        path=_safe_engine_finding_path(path)))
+
+
+def _engine_outside_finding(result: LintResult, cause: str,
+                            path: str) -> None:
+    result.error(strings.render(
+        "engine-root-outside-the-record", cause=cause,
+        path=_safe_engine_finding_path(path)))
+
+
+def _safe_engine_finding_path(value: str) -> str:
+    parts = [part for part in value.replace("\\", "/").split("/")
+             if part not in {"", ".", ".."}]
+    candidate = "/".join(parts)
+    try:
+        strings.render("engine-root-outside-the-record",
+                       cause="root escape", path=candidate)
+    except ValueError:
+        encoded = value.encode("utf-8", "surrogatepass")
+        candidate = "entry-%s" % hashlib.sha256(encoded).hexdigest()[:12]
+    return candidate
+
+
+_ENGINE_RELAY_NAME = re.compile(
+    r"^[A-Z][A-Z-]*-[A-Za-z0-9-]+-\d{8}-\d{6}Z?\.md$")
+
+
+def _canonical_record_path(value: object) -> Optional[str]:
+    if (not isinstance(value, str) or not value or value.startswith("/") or
+            any(part in {"", ".", ".."} for part in value.split("/")) or
+            "\x00" in value or "\n" in value or "\r" in value):
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value
+
+
+def _symlink_escapes(root: Path, parent: str, target: str) -> bool:
+    if os.path.isabs(target):
+        destination = os.path.abspath(target)
+    else:
+        destination = os.path.abspath(os.path.join(
+            os.fspath(root), parent, target))
+    canonical_root = os.path.abspath(root)
+    try:
+        return os.path.commonpath((canonical_root, destination)) != \
+            canonical_root
+    except ValueError:
+        return True
+
+
+def _read_record_candidate(
+        root_fd: int, relative: str,
+) -> Tuple[Optional[bytes], Optional[str],
+           Optional[Tuple[str, str]]]:
+    parts = relative.split("/")
+    directory_fd = root_fd
+    held_directories = []
+    descriptor = None
+    try:
+        for index, component in enumerate(parts[:-1], start=1):
+            ancestor = "/".join(parts[:index])
+            try:
+                info = os.stat(
+                    component, dir_fd=directory_fd,
+                    follow_symlinks=False)
+            except FileNotFoundError:
+                return None, "missing", None
+            except OSError:
+                return None, "unreadable", None
+            if stat.S_ISLNK(info.st_mode):
+                return None, None, ("symlinked component", ancestor)
+            if not stat.S_ISDIR(info.st_mode):
+                return None, None, ("non-directory ancestor", ancestor)
+            try:
+                child_fd = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+            except OSError as exc:
+                try:
+                    changed = os.stat(
+                        component, dir_fd=directory_fd,
+                        follow_symlinks=False)
+                except FileNotFoundError:
+                    return None, "missing", None
+                except OSError:
+                    changed = None
+                if changed is not None and stat.S_ISLNK(changed.st_mode):
+                    return None, None, ("symlinked component", ancestor)
+                if changed is not None and not stat.S_ISDIR(changed.st_mode):
+                    return None, None, ("non-directory ancestor", ancestor)
+                if exc.errno == errno.ELOOP:
+                    return None, None, ("symlinked component", ancestor)
+                if exc.errno == errno.ENOTDIR:
+                    return None, None, ("non-directory ancestor", ancestor)
+                return None, "unreadable", None
+            held_directories.append(child_fd)
+            directory_fd = child_fd
+
+        basename = parts[-1]
+        try:
+            info = os.stat(
+                basename, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None, "missing", None
+        except OSError:
+            return None, "unreadable", None
+        if stat.S_ISLNK(info.st_mode):
+            return None, "symlinked", None
+        if not stat.S_ISREG(info.st_mode):
+            return None, "non-regular", None
+        if stat.S_IMODE(info.st_mode) & 0o444 == 0:
+            return None, "unreadable", None
+        descriptor = os.open(
+            basename,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory_fd,
+        )
+        held_info = os.fstat(descriptor)
+        if not stat.S_ISREG(held_info.st_mode):
+            return None, "non-regular", None
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), None, None
+    except PermissionError:
+        return None, "unreadable", None
+    except FileNotFoundError:
+        return None, "missing", None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "symlinked", None
+        return None, "unreadable", None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        for held_fd in reversed(held_directories):
+            os.close(held_fd)
+
+
+def _record_scoped_population(path: Path, context: dict,
+                              result: LintResult
+                              ) -> Tuple[List[Path], Dict[Path, str], Dict[Path, bytes], set[Path]]:
+    entries = context.get("entries", []) if isinstance(context, dict) else []
+    record_entries: Dict[str, dict] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        received = entry.get("path") if isinstance(entry, dict) else None
+        relative = _canonical_record_path(received)
+        if relative is None:
+            _engine_outside_finding(
+                result, "root escape",
+                _safe_engine_finding_path(
+                    received if isinstance(received, str) else "record-entry"),
+            )
+            continue
+        record_entries[relative] = entry
+
+    allowed_directories = set()
+    for relative in record_entries:
+        parts = relative.split("/")[:-1]
+        for index in range(1, len(parts) + 1):
+            allowed_directories.add("/".join(parts[:index]))
+
+    root_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    blocked = set()
+    metadata_denied = set()
+    foreign_canonical = set()
+
+    def block_descendants(relative: str) -> None:
+        prefix = relative + "/"
+        blocked.update(record for record in record_entries
+                       if record.startswith(prefix))
+
+    def inventory(directory_fd: int, parent: str = "") -> None:
+        names = sorted(os.listdir(directory_fd), key=os.fsencode)
+        for name in names:
+            relative = name if not parent else parent + "/" + name
+            try:
+                info = os.stat(name, dir_fd=directory_fd,
+                               follow_symlinks=False)
+            except OSError:
+                if relative in record_entries:
+                    _engine_record_finding(result, "unreadable", relative)
+                    metadata_denied.add(relative)
+                else:
+                    _engine_outside_finding(
+                        result, "foreign entry", relative)
+                continue
+            if not parent and name == ".engine" and stat.S_ISDIR(info.st_mode):
+                continue
+            if (not parent and name in {"INDEX.md", "SEATS.md"} and
+                    stat.S_ISREG(info.st_mode)):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                if (relative not in record_entries and
+                        relative not in allowed_directories):
+                    _engine_outside_finding(
+                        result,
+                        "unexpected directory", relative)
+                child_fd = None
+                try:
+                    child_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    inventory(child_fd, relative)
+                except OSError:
+                    _engine_outside_finding(
+                        result,
+                        "symlinked component", relative)
+                    block_descendants(relative)
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                if relative in record_entries:
+                    continue
+                if relative in allowed_directories:
+                    _engine_outside_finding(
+                        result,
+                        "symlinked component", relative)
+                    block_descendants(relative)
+                    continue
+                try:
+                    target = os.readlink(name, dir_fd=directory_fd)
+                except OSError:
+                    target = ""
+                cause = ("root escape" if _symlink_escapes(
+                    path, parent, target) else "foreign entry")
+                _engine_outside_finding(
+                    result, cause,
+                    relative)
+                continue
+            if relative in allowed_directories:
+                _engine_outside_finding(
+                    result,
+                    "non-directory ancestor", relative)
+                block_descendants(relative)
+            elif relative not in record_entries:
+                _engine_outside_finding(
+                    result,
+                    "foreign entry", relative)
+                if (stat.S_ISREG(info.st_mode) and
+                        _ENGINE_RELAY_NAME.fullmatch(name) is not None):
+                    foreign_canonical.add(relative)
+
+    try:
+        inventory(root_fd)
+        files = []
+        texts = {}
+        raws = {}
+        suppressed = set()
+        for relative, entry in sorted(
+                record_entries.items(), key=lambda item: item[0].encode("utf-8")):
+            if relative in blocked or relative in metadata_denied:
+                continue
+            body, cause, topology = _read_record_candidate(root_fd, relative)
+            if topology is not None:
+                topology_cause, topology_path = topology
+                _engine_outside_finding(
+                    result, topology_cause, topology_path)
+                continue
+            if cause is not None:
+                _engine_record_finding(result, cause, relative)
+                continue
+            file_path = path / relative
+            files.append(file_path)
+            raws[file_path] = body
+            try:
+                text = body.decode("utf-8")
+            except UnicodeDecodeError:
+                text = body.decode(errors="replace")
+            texts[file_path] = text
+            expected = entry.get("body_sha256") if isinstance(entry, dict) \
+                else None
+            if hashlib.sha256(body).hexdigest() == expected:
+                suppressed.add(file_path)
+            else:
+                _engine_record_finding(
+                    result,
+                    "digest-mismatch", relative)
+        for relative in sorted(foreign_canonical,
+                               key=lambda item: item.encode("utf-8")):
+            body, cause, topology = _read_record_candidate(root_fd, relative)
+            if body is None or cause is not None or topology is not None:
+                continue
+            file_path = path / relative
+            files.append(file_path)
+            raws[file_path] = body
+            try:
+                texts[file_path] = body.decode("utf-8")
+            except UnicodeDecodeError:
+                texts[file_path] = body.decode(errors="replace")
+        return files, texts, raws, suppressed
+    finally:
+        os.close(root_fd)
+
+
+def lint_relay_root(path: Path, *, template_mode: bool = False,
+                    engine_root: bool = False,
+                    projection_digests: Optional[Dict[Path, str]] = None,
+                    record_context: Optional[dict] = None,
+                    context_mode: Optional[str] = None,
+                    history_audit: bool = False) -> LintResult:
+    result = LintResult()
+    received_entries = record_context.get('entries', []) if isinstance(record_context, dict) else []
+    if not isinstance(received_entries, list):
+        received_entries = []
+    record_entries = {entry['path']: entry for entry in received_entries
+                      if isinstance(entry, dict) and _canonical_record_path(entry.get('path')) is not None}
+    texts: Dict[Path, str] = {}
+    raws: Dict[Path, bytes] = {}
+    suppressed: set[Path] = set()
+    index_snapshots: Dict[Path, bytes] = {}
+    if engine_root and record_context is not None:
+        files, texts, raws, suppressed = _record_scoped_population(
+            path, record_context, result)
+        index = path / "INDEX.md"
+        try:
+            index_info = index.stat(follow_symlinks=False)
+        except OSError:
+            index_files = []
+        else:
+            if stat.S_ISREG(index_info.st_mode):
+                root_fd = os.open(
+                    path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    snapshot, cause, topology = _read_record_candidate(
+                        root_fd, "INDEX.md")
+                finally:
+                    os.close(root_fd)
+                if snapshot is None:
+                    _engine_outside_finding(
+                        result, "foreign entry", "INDEX.md")
+                    index_files = []
+                else:
+                    index_files = [index]
+                    index_snapshots[index] = snapshot
+            else:
+                index_files = []
+        all_md = files + index_files
+    else:
+        all_md = sorted((p for p in path.rglob("*.md") if p.is_file()),
+                        key=lambda p: relay_order_key(p, path))
+        index_files = [p for p in all_md if p.name == "INDEX.md"]
+        files = [p for p in all_md if p.name != "INDEX.md"]
+    if engine_root and record_context is None:
+        all_md = [item for item in all_md if item.name == "INDEX.md" or
+                  (item.name not in {"SEATS.md"} and
+                   _ENGINE_RELAY_NAME.fullmatch(item.name) is not None and
+                   ".engine" not in item.relative_to(path).parts)]
+        index_files = [p for p in all_md if p.name == "INDEX.md"]
+        files = [p for p in all_md if p.name != "INDEX.md"]
+    if not all_md and record_context is None:
+        result.error(f"no .md relay files found under {path}")
+        return result
+    files = sorted(files, key=lambda item: relay_order_key(item, path))
+    per_file: List[Tuple[Path, LintResult]] = [
+        (f, LintResult() if f in suppressed else lint_file(f, template_mode=template_mode,
+                      _text=texts.get(f), _raw=raws.get(f), artifact_root=path)) for f in files]
+    for f, r in per_file:
+        for e in r.errors:
+            result.error(f"{f.relative_to(path)}: {e}", check_id='file.lint' if record_context is not None else None, subject=str(f.relative_to(path)))
+        for w in r.warnings:
+            result.warn(f"{f.relative_to(path)}: {w}", check_id='file.lint' if record_context is not None else None, subject=str(f.relative_to(path)))
+
+    if record_context is not None:
+        result.warn(strings.render(
+            "engine-root-sweep-summary", count=len(record_entries),
+            mode=context_mode))
+        counts = {status: 0 for status in ('judged', 'failed', 'none', 'exempt')}
+        with_findings = 0
+        for entry in record_entries.values():
+            status = entry.get('judgment', 'none')
+            counts[status] += 1
+            with_findings += status == 'judged' and entry.get('finding_count', 0) > 0
+        result.warn(strings.render('engine-root-admission-summary',
+            judged=counts['judged'], with_findings=with_findings,
+            failed=counts['failed'], unevaluated=counts['none'], exempt=counts['exempt']))
+
+    projection_digests = (
+        {} if projection_digests is None else projection_digests)
+    for idx in index_files:
+        r = lint_relay_index(
+            idx, daemon_projection_digest=projection_digests.get(idx),
+            snapshot=index_snapshots.get(idx))
+        for e in r.errors:
+            result.error(f"{idx.relative_to(path)}: {e}")
+        for w in r.warnings:
+            result.warn(f"{idx.relative_to(path)}: {w}")
+
+    # Cross-file implementation-dispatch lineage. Pair-Planner
+    # dispatches are parent-lineage aware when PARENT_DISPATCH_ID is present: the
+    # dispatch parent must be an approving PLAN-REVIEW relay, and that review's
+    # parent must be the pair Planner's PLAN. Direct operator/orchestrator grants
+    # are override paths and are exempt from this pair-lineage gate.
+    phases: List[Tuple[Path, Tuple[int, object, str], str, Dict[str, str], str]] = []
+    for f, _ in per_file:
+        tx = texts[f] if f in texts else read(f)
+        fields = header_fields(tx)
+        phases.append((f, relay_order_key(f, path), fields.get("PHASE", ""), fields, tx))
+    by_id = dispatch_id_map(phases)
+
+    def resolve_parent(by_id, did, before_order, predicate):
+        items = by_id.get(did or "", [])
+        if not items:
+            return None, [], []
+        if len(items) == 1:
+            return items[0], items, []
+        qualifying = sorted((it for it in items if it[1] < before_order and predicate(it)), key=lambda it: it[1])
+        if not qualifying:
+            return None, items, []
+        return qualifying[-1], items, qualifying[:-1]
+
+    def owner_review_by_id(did: str | None, owner: str | None, want_lock: str, before_order):
+        # Latest same-owner Implementer DESIGN-REVIEW of the
+        # locked doc, before the PLAN. Do not filter on verdict; the
+        # downstream DESIGN_REVIEW_VERDICT check must catch a thread ending in
+        # must-revise after an earlier approve.
+        if not did or not owner:
+            return None
+        owned = []
+        for item in by_id.get(did, []):
+            _p, item_order, item_phase, item_fields, _text = item
+            if item_phase != "DESIGN-REVIEW" or item_fields.get("DESIGN_DOC_ID") != want_lock or item_order >= before_order:
+                continue
+            addrs = split_addresses(item_fields.get("FROM"))
+            if len(addrs) == 1 and addr_is(addrs[0], owner, "implementer"):
+                owned.append(item)
+        return sorted(owned, key=lambda item: item[1])[-1] if owned else None
+
+    def owner_design_by_id(did: str | None, owner: str | None, want_lock: str, before_order):
+        # Latest same-owner pair-Planner DESIGN of the locked doc,
+        # before the DESIGN-REVIEW. Orchestrator PHASE: DESIGN dispatches that
+        # share the thread id are never design-of-record candidates.
+        if not did or not owner:
+            return None
+        owned = []
+        for item in by_id.get(did, []):
+            _p, item_order, item_phase, item_fields, _text = item
+            if item_phase != "DESIGN" or item_fields.get("DESIGN_DOC_ID") != want_lock or item_order >= before_order:
+                continue
+            addrs = split_addresses(item_fields.get("FROM"))
+            if len(addrs) == 1 and addr_is(addrs[0], owner, "planner"):
+                owned.append(item)
+        return sorted(owned, key=lambda item: item[1])[-1] if owned else None
+
+    lock_routes, lock_lifecycle_errors = h27_lock_lifecycle_precompute(path, phases)
+    for lock_lifecycle_error in lock_lifecycle_errors:
+        result.add_finding(lock_lifecycle_error)
+
+    for receiving_seat_error in h27_receiving_seat_errors(path, phases):
+        result.add_finding(receiving_seat_error)
+
+    for commission_error in h27_commission_precompute(path, phases):
+        result.add_finding(commission_error)
+
+    # Design-review lineage gate. A pair-Planner PLAN that locks a
+    # design-doc-backed design must parent to an approving Implementer
+    # DESIGN-REVIEW relay, and that review must parent to the DESIGN relay that
+    # introduced the matching DESIGN_DOC_ID.
+    for f, order, phase, fields, text in phases:
+        if phase != "PLAN":
+            continue
+        if xroot_design_gate(path, f, fields, text, phases, result):
+            continue
+        if (
+            any(h27_occurrences(text, key) for key in ("PLAN_SOURCE_REPO", "PLAN_SOURCE_COMMIT"))
+            and fields.get("DESIGN_LOCK_ID")
+            and (
+                "/" in fields["DESIGN_LOCK_ID"].split(" @ ", 1)[0]
+                or fields["DESIGN_LOCK_ID"].split(" @ ", 1)[0].endswith(".md")
+            )
+        ):
+            continue
+        if lock_routes.get(f, "pair") != "pair": continue
+        if not fields.get("DESIGN_LOCK_ID"):
+            continue
+        from_addrs = split_addresses(fields.get("FROM"))
+        if len(from_addrs) != 1:
+            continue
+        from_addr = from_addrs[0]
+        plan_owner = from_owner(from_addr)
+        if canonical_role(from_role(from_addr)) != "planner" or not plan_owner or plan_owner in SPECIAL_ADDRESS_VALUES:
+            continue
+        lock_id = fields.get("DESIGN_LOCK_ID", "")
+        kind = fields.get("DESIGN_RECORD_KIND")
+
+        if design_record_kind_error_context(fields, plan_owner, phases):
+            result.error(f"{f.relative_to(path)}: DESIGN_LOCK_ID present with design-review context but DESIGN_RECORD_KIND is missing", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
+            continue
+
+        if kind == "direct-override":
+            if not is_direct_design_override(fields):
+                result.error(f"{f.relative_to(path)}: pair Planner cannot use DESIGN_RECORD_KIND: direct-override; only operator/orchestrator/orchestrator-planner authority may override design review", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
+            continue
+
+        same_owner_designs = design_doc_items_for_owner(phases, plan_owner)
+        if kind == "audit-record":
+            if same_owner_designs:
+                result.error(f"{f.relative_to(path)}: DESIGN_RECORD_KIND: audit-record conflicts with observable same-owner DESIGN relay carrying DESIGN_DOC_ID", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
+            continue
+
+        if not design_review_gate_applies(fields, plan_owner, phases):
+            continue
+
+        if kind not in {"design-doc", None}:
+            # Enum errors are handled in lint_file; avoid duplicate/confusing lineage errors.
+            continue
+        if kind is None:
+            # Missing-kind with context was handled above; isolated legacy path is exempt.
+            continue
+
+        design_candidates = [item for item in same_owner_designs if item[3].get("DESIGN_DOC_ID") == lock_id]
+        earlier_designs = [item for item in design_candidates if item[1] < order]
+        if not earlier_designs:
+            result.error(f"{f.relative_to(path)}: DESIGN_LOCK_ID {lock_id!r} has no earlier same-owner DESIGN relay carrying matching DESIGN_DOC_ID", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=())
+            continue
+        design_item = sorted(earlier_designs, key=lambda item: item[1])[-1]
+        dp, do, dph, dfields, dtext = design_item
+
+        if not fields.get("PARENT_DISPATCH_ID"):
+            result.error(f"{f.relative_to(path)}: design-doc PLAN requires PARENT_DISPATCH_ID to the approving DESIGN-REVIEW relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path),))
+            continue
+        review_item = owner_review_by_id(fields.get("PARENT_DISPATCH_ID"), plan_owner, lock_id, order)
+        if review_item is None:
+            result.error(f"{f.relative_to(path)}: design-doc PLAN parent {fields.get('PARENT_DISPATCH_ID')!r} does not resolve to a relay in this lineage", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path),))
+            continue
+        rp, ro, rph, rfields, rtext = review_item
+        if ro >= order:
+            result.error(f"{f.relative_to(path)}: approving DESIGN-REVIEW parent is not earlier than the PLAN relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
+        if rph != "DESIGN-REVIEW":
+            result.error(f"{f.relative_to(path)}: design-doc PLAN parent must be a DESIGN-REVIEW relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
+        rfrom = split_addresses(rfields.get("FROM"))
+        if len(rfrom) != 1 or not addr_is(rfrom[0], plan_owner, "implementer"):
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must be FROM {plan_owner}.implementer", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
+        if rfields.get("DESIGN_REVIEW_VERDICT") != "approve":
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must have DESIGN_REVIEW_VERDICT: approve", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
+        if rfields.get("DESIGN_DOC_ID") != lock_id:
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
+        review_parent = owner_design_by_id(rfields.get("PARENT_DISPATCH_ID"), plan_owner, lock_id, ro)
+        if review_parent is None:
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent lacks a resolvable DESIGN parent", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path),))
+            continue
+        vdp, vdo, vdph, vdfields, vdtext = review_parent
+        if vdo >= ro:
+            result.error(f"{f.relative_to(path)}: DESIGN parent is not earlier than the DESIGN-REVIEW relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
+        if vdph != "DESIGN":
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW parent must point to a DESIGN relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
+        vfrom = split_addresses(vdfields.get("FROM"))
+        if len(vfrom) != 1 or not addr_is(vfrom[0], plan_owner, "planner"):
+            result.error(f"{f.relative_to(path)}: DESIGN-REVIEW must review the pair Planner's DESIGN relay", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
+        if vdfields.get("DESIGN_DOC_ID") != lock_id:
+            result.error(f"{f.relative_to(path)}: DESIGN parent DESIGN_DOC_ID must match PLAN DESIGN_LOCK_ID {lock_id!r}", check_id='lineage.design-review', subject=str(f.relative_to(path)), operands=(dp.relative_to(path), rp.relative_to(path), vdp.relative_to(path),))
+
+    for f, order, phase, fields, text in phases:
+        clean = sanitized_text(text)
+        if not own_line_dispatch_present(text):
+            continue
+        from_addrs = split_addresses(fields.get("FROM"))
+        from_addr = from_addrs[0] if len(from_addrs) == 1 else ""
+        from_role_val = from_role(from_addr)
+        to_addrs = split_addresses(fields.get("TO"))
+        dispatch_owner = address_owner(to_addrs[0]) if len(to_addrs) == 1 else None
+
+        # Direct operator/orchestrator/orchestrator-planner grants are explicit
+        # override paths and do not belong to the pair-lineage walk. Pair
+        # Planner grants are different: the privileged action is inert without
+        # its approving PLAN-REVIEW parent. The parent edge is
+        # mandatory for that path because the observed failures were edge-less.
+        if from_role_val in LINEAGE_DIRECT_FROM_ROLES:
+            continue
+        if canonical_role(from_role_val) != "planner":
+            continue
+        if not dispatch_owner or dispatch_owner in SPECIAL_ADDRESS_VALUES:
+            continue
+        if from_owner(from_addr) != dispatch_owner:
+            result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL FROM owner does not match TO implementer owner", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+            continue
+        if not fields.get("PARENT_DISPATCH_ID"):
+            result.error(f"{f.relative_to(path)}: pair-Planner DISPATCH IMPL requires PARENT_DISPATCH_ID to an approving PLAN-REVIEW relay; absence is not a delegated-dispatch escape hatch", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+            continue
+
+        did = fields.get("PARENT_DISPATCH_ID")
+        review_item, holders, extra_qualifying = resolve_parent(
+            by_id,
+            did,
+            order,
+            lambda it: it[2] == "PLAN-REVIEW"
+            and (lambda a: len(a) == 1 and addr_is(a[0], dispatch_owner, "implementer"))(
+                split_addresses(it[3].get("FROM"))
+            ),
+        )
+        if review_item is None:
+            if holders:
+                result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} is held by {len(holders)} relays "
+                    f"({', '.join(h[0].name for h in holders)}); none is an earlier PLAN-REVIEW relay "
+                    f"from {dispatch_owner}.implementer", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+            else:
+                result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {did!r} does not resolve to a relay in this lineage", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+            continue
+        if extra_qualifying:
+            result.warn(f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
+                f"PLAN-REVIEW parent; selected latest {review_item[0].name}; candidates: "
+                f"{', '.join(h[0].name for h in extra_qualifying)}", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+        rp, ro, rph, rfields, rtext = review_item
+        if ro >= order:
+            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent {fields.get('PARENT_DISPATCH_ID')!r} is not earlier than the dispatch relay", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path),))
+        if rph != "PLAN-REVIEW" or not plan_review_approved(rtext):
+            result.error(f"{f.relative_to(path)}: DISPATCH IMPL parent must be an earlier PLAN-REVIEW relay with verdict approve", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path),))
+        rfrom = split_addresses(rfields.get("FROM"))
+        if len(rfrom) != 1 or not addr_is(rfrom[0], dispatch_owner, "implementer"):
+            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must be FROM {dispatch_owner}.implementer", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path),))
+        plan_did = rfields.get("PARENT_DISPATCH_ID")
+        plan_item, holders, extra_qualifying = resolve_parent(
+            by_id,
+            plan_did,
+            ro,
+            lambda it: it[2] == "PLAN"
+            and (lambda a: len(a) == 1 and addr_is(a[0], dispatch_owner, "planner"))(
+                split_addresses(it[3].get("FROM"))
+            ),
+        )
+        if plan_item is None:
+            if holders:
+                result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent {plan_did!r} is held by {len(holders)} relays "
+                    f"({', '.join(h[0].name for h in holders)}); none is an earlier PLAN relay "
+                    f"from {dispatch_owner}.planner", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+            else:
+                result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent lacks a resolvable pair-Planner PLAN parent", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+            continue
+        if extra_qualifying:
+            result.warn(f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {plan_did!r} qualify as the "
+                f"PLAN parent; selected latest {plan_item[0].name}; candidates: "
+                f"{', '.join(h[0].name for h in extra_qualifying)}", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=())
+        pp, po, pph, pfields, ptext = plan_item
+        if po >= ro:
+            result.error(f"{f.relative_to(path)}: pair-Planner PLAN parent is not earlier than the PLAN-REVIEW relay", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
+        if pph != "PLAN":
+            result.error(f"{f.relative_to(path)}: PLAN-REVIEW parent must point to a PLAN relay", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
+        pfrom = split_addresses(pfields.get("FROM"))
+        if len(pfrom) != 1 or not addr_is(pfrom[0], dispatch_owner, "planner"):
+            result.error(f"{f.relative_to(path)}: PLAN-REVIEW must review the pair Planner's PLAN, not a CC'd orchestrator dispatch", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
+        if not any(addr_is(a, dispatch_owner, "implementer") for a in split_addresses(pfields.get("TO"))):
+            result.error(f"{f.relative_to(path)}: pair-Planner PLAN must address the Implementer in TO for review", check_id='lineage.dispatch', subject=str(f.relative_to(path)), operands=(rp.relative_to(path), pp.relative_to(path),))
+
+    # Non-addressee action trap: if an IMPL report claims substantive
+    # implementation actions, it must point back to the dispatch that authorized
+    # those actions. Missing parent is an error, not an opt-out; otherwise a
+    # sibling Implementer can act on a CC/cross-read dispatch and report clean.
+    # Merge-claim visibility is handled by the separate MERGE-GATE lineage below.
+    for f, order, phase, fields, text in phases:
+        if phase != "IMPL":
+            continue
+        if not implementation_work_claimed(text, fields):
+            continue
+        if from_is_direct_authority(fields) and own_line_dispatch_present(text):
+            # KR-8 Class A (D26): a relay issued by a direct-authority seat
+            # (operator/orchestrator/orchestrator-planner) that itself carries
+            # the live own-line token IS the dispatch, not a report owing a
+            # parent edge. Seat-scoped deliberately: any other FROM -- an
+            # implementer embedding a live token to dodge the trap -- still
+            # falls through and is caught below.
+            continue
+        if not fields.get("PARENT_DISPATCH_ID"):
+            result.error(f"{f.relative_to(path)}: IMPL report with substantive actions requires PARENT_DISPATCH_ID to the addressed DISPATCH IMPL relay", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=())
+            continue
+        actor_from = split_addresses(fields.get("FROM"))
+        did = fields.get("PARENT_DISPATCH_ID")
+        parent, holders, extra_qualifying = resolve_parent(
+            by_id,
+            did,
+            order,
+            lambda it: impl_dispatch_parent_qualifies(actor_from, it),
+        )
+        if parent is None:
+            if holders:
+                actor = actor_from[0] if len(actor_from) == 1 else fields.get("FROM", "")
+                result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} is held by {len(holders)} relays "
+                    f"({', '.join(h[0].name for h in holders)}); none is an earlier DISPATCH IMPL relay "
+                    f"addressed to {actor}", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=())
+            else:
+                result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} does not resolve to a relay in this lineage", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=())
+            continue
+        if len(holders) == 1 and impl_dispatch_parent_qualifies(actor_from, parent) and parent[1] >= order:
+            result.error(f"{f.relative_to(path)}: IMPL report parent {did!r} is held by 1 relays "
+                f"({parent[0].name}); none is an earlier DISPATCH IMPL relay addressed to {actor_from[0]}", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
+            continue
+        if extra_qualifying:
+            result.warn(f"{f.relative_to(path)}: {len(extra_qualifying)+1} relays under {did!r} qualify as the "
+                f"DISPATCH IMPL parent; selected latest {parent[0].name}; candidates: "
+                f"{', '.join(h[0].name for h in extra_qualifying)}", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
+        pp, po, pph, pfields, ptext = parent
+        if not own_line_dispatch_present(ptext):
+            result.error(f"{f.relative_to(path)}: IMPL report parent must be a DISPATCH IMPL relay", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
+            continue
+        parent_to = split_addresses(pfields.get("TO"))
+        if len(actor_from) == 1 and len(parent_to) == 1 and not (
+            address_role(actor_from[0]) is not None
+            and address_role(parent_to[0]) is not None
+            and address_owner(actor_from[0]) == address_owner(parent_to[0])
+            and canonical_role(address_role(actor_from[0])) == canonical_role(address_role(parent_to[0]))
+        ):
+            result.error(f"{f.relative_to(path)}: IMPL report FROM {actor_from[0]!r} is not the addressee of the parent DISPATCH IMPL relay", check_id='lineage.impl-report-parent', subject=str(f.relative_to(path)), operands=(parent[0].relative_to(path),))
+
+    # Merge-claim visibility: report claiming a merge commit needs an earlier merge authorization.
+    for f, order, phase, fields, text in phases:
+        if merge_claimed(text, fields):
+            claim_dispatch_id = fields.get("DISPATCH_ID")
+            prior_merge_auth = any(
+                o < order
+                and claim_dispatch_id
+                and fl.get("DISPATCH_ID") == claim_dispatch_id
+                and merge_authorized(tx, fl)
+                for p, o, ph, fl, tx in phases
+            )
+            if not prior_merge_auth:
+                result.error(f"{f.relative_to(path)}: relay claims a merge/merge commit without an earlier MERGE-GATE authorization relay with the same DISPATCH_ID", check_id='lineage.merge-claim', subject=str(f.relative_to(path)), operands=())
+
+    # Reconciliation-layer honest-false-row support: when a lineage declares
+    # ROW_TRUTH_CHECK, an OUT->IN flip for the same path is structurally dirty
+    # unless a future release adds an explicit, evidence-backed override.
+    row_state: Dict[Tuple[str, str], Tuple[str, Path]] = {}
+    for f, order, phase, fields, text in phases:
+        if fields.get("ROW_TRUTH_CHECK", "").lower() not in {"yes", "true", "required"}:
+            continue
+        did = fields.get("DISPATCH_ID", "")
+        for header in ("SCOPE_DIFF", "FOLD_SCOPE"):
+            rows, row_errors = parse_marked_rows(text, header)
+            if row_errors:
+                continue
+            for row_path, val in rows:
+                key = (did, row_path)
+                if key in row_state:
+                    prior_val, prior_file = row_state[key]
+                    if prior_val == "out" and val == "in":
+                        result.error(f"{f.relative_to(path)}: {header} flips {row_path!r} from OUT in {prior_file.relative_to(path)} to IN without a reconciliation evidence override", check_id='lineage.row-truth', subject=str(f.relative_to(path)), operands=(prior_file.relative_to(path),))
+                row_state[key] = (val, f)
+
+    # Orchestrator-review visibility gate. Every orchestrator
+    # authority-bearing relay in the broad SET must make the reviewer seat
+    # visible by address, unless the run carries an operator-authored waiver.
+    for err in orchestrator_review_gate_errors(path, phases):
+        result.add_finding(err)
+
+    # Lock references that look like paths should exist.
+    for f, _ in per_file:
+        lock_text = texts[f] if f in texts else read(f)
+        fields = header_fields(lock_text)
+        plan_source_engaged = xroot_plan_gate(path, f, fields, lock_text, result)
+        for key in ("DESIGN_LOCK_ID", "PLAN_LOCK_ID"):
+            val = fields.get(key)
+            bare = val.split(" @ ", 1)[0] if val else ""
+            if plan_source_engaged and bare and ("/" in bare or bare.endswith(".md")):
+                continue
+            if bare and ("/" in bare or bare.endswith(".md")):
+                if Path(bare).is_absolute():
+                    found = Path(bare).exists()
+                else:
+                    found = (
+                        (path / bare).exists()
+                        or Path(bare).exists()
+                        or (path.parent.parent / bare).exists()
+                    )
+                if not found:
+                    result.error(f"{f.relative_to(path)}: {key} references missing file {bare}", check_id='lineage.lock-path', subject=str(f.relative_to(path)), operands=())
+
+    # A5 check 1 (root mode): the GOVERNING declaration per (key, stem) —
+    # latest parse-valid stamp; distinct values at an indistinguishable
+    # latest timestamp refuse; identical values co-govern; earlier
+    # declarations are acknowledged history (design rev28 rule 3).
+    a5_decls: Dict[Tuple[str, str], List[Tuple[object, Path, str]]] = {}
+    for f, _ in per_file:
+        _a5text = texts[f] if f in texts else read(f)
+        for _a5dkey, _a5akey, _a5sub in A5_LOCK_PAIRS:
+            _a5d = a5_eligible_declaration(f, _a5text, _a5dkey, _a5akey)
+            if _a5d is not None:
+                a5_decls.setdefault((_a5dkey, _a5d[1]), []).append((_a5d[0], f, _a5d[2]))
+    for (_a5dkey, _a5stem), _a5list in sorted(a5_decls.items()):
+        _a5latest = max(item[0] for item in _a5list)
+        _a5stratum = sorted((item for item in _a5list if item[0] == _a5latest), key=lambda item: str(item[1]))
+        _a5values = {item[2] for item in _a5stratum}
+        if len(_a5values) > 1:
+            for _stamp, _a5f, _v in _a5stratum:
+                result.error(f"{_a5f.relative_to(path)}: {_a5dkey}: stem {_a5stem!r} carries {len(_a5values)} "
+                    "indistinguishable latest declarations; verification refuses", check_id='lineage.governing-digest', subject=str(_a5f.relative_to(path)), operands=())
+            continue
+        _a5declared = next(iter(_a5values))
+        _a5sub = dict((k, s) for k, _a, s in A5_LOCK_PAIRS)[_a5dkey]
+        _a5errs = a5_resolve_and_compare(path, _a5dkey, _a5stem, _a5sub, _a5declared)
+        for _stamp, _a5f, _v in _a5stratum:
+            for _a5e in _a5errs:
+                result.error(f"{_a5f.relative_to(path)}: {_a5e}", check_id='lineage.governing-digest', subject=str(_a5f.relative_to(path)), operands=())
+
+    if record_context is not None:
+        entries = record_entries
+        historical = [finding for finding in result.findings if finding.subject in entries]
+        result.findings = [finding for finding in result.findings if finding.subject not in entries]
+        for finding in historical:
+            messages = result.errors if finding.lint_severity == 'error' else result.warnings
+            messages.remove(finding.message)
+            if history_audit and finding.id != 'file.lint':
+                result.add_finding(Finding(finding.id, 'warn', finding.subject,
+                    finding.operands, finding.params, 'history-audit: ' + finding.message))
+    return result
+
+
+from relay_engine.envelope import REQUIRED_FIELDS as SUBMISSION_REQUIRED_FIELDS
+
+REQUIRED_FIELDS = tuple(SUBMISSION_REQUIRED_FIELDS)
+
+
+def advisories_for(envelope):
+    """Return pure native-rule advisories for an already parsed envelope."""
+    fields = envelope.headers
+    advisories = []
+    if not authority_consistent(envelope.phase, envelope.authority):
+        advisories.append("phase-authority-mismatch")
+    consistency = role_from_consistency_error(fields)
+    if consistency is not None:
+        advisories.append("role-from-mismatch")
+    return tuple(advisories)

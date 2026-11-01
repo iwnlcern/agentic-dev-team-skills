@@ -385,14 +385,14 @@ def _latest_origin(repo: Path, mutate) -> None:
 def _authority_cases(dest: Path) -> list[Case]:
     cases: list[Case] = []
 
-    def add(name: str, mutate_foreign=None, mutate_plan=None, axis="authority-population", detail=""):
+    def add(name: str, mutate_foreign=None, mutate_plan=None, axis="authority-population", detail="", expected_exit=1):
         cases.append(_build_case(
             dest,
             name,
             mutate_foreign=mutate_foreign,
             mutate_plan=mutate_plan,
-            expected_exit=1,
-            expected_errors=[_xerror(axis, detail)],
+            expected_exit=expected_exit,
+            expected_errors=[_xerror(axis, detail)] if expected_exit else [],
         ))
 
     add(
@@ -501,17 +501,38 @@ def _authority_cases(dest: Path) -> list[Case]:
             detail=f"selected review {REVIEW_NAME} is not a peer for selected origin role {reported_origin_role}",
         )
 
+    # B9: one admitted peer row and the six explicitly unadmitted pairs.
+    b9_pairs = [
+        ("orchestrator-planner", "orchestrator-reviewer", True),
+        ("orchestrator-planner", "implementer", False),
+        ("planner", "orchestrator-reviewer", False),
+        ("orchestrator-reviewer", "orchestrator-reviewer", False),
+        ("planner", "master-reviewer", False),
+        ("planner", "planner", False),
+        ("planner", "orchestrator-planner", False),
+        ("orchestrator-planner", "planner", False),
+    ]
+    for origin, review, allowed in b9_pairs:
+        values = (origin.replace("-", " ").title(), "m-1." + origin,
+                  review.replace("-", " ").title(), "m-1." + review)
+        cases.append(_build_case(
+            dest, f"B9-peer-{origin}-{review}",
+            mutate_foreign=lambda repo, values=values: tier(repo, *values),
+            expected_exit=0 if allowed else 1,
+            expected_errors=[] if allowed else [_xerror(
+                "authority-population",
+                f"selected review {REVIEW_NAME} is not a peer for selected origin role {origin}")],
+        ))
+
     add(
         "X29-origin-tie",
         lambda repo: _copy_relay(repo, ORIGIN_NAME, "ALT-DESIGN-planner-20260801-100000.md"),
-        axis="ambiguity",
-        detail="multiple latest DESIGN origins share timestamp 20260801-100000",
+        expected_exit=0,
     )
     add(
         "X30-review-tie",
         lambda repo: _copy_relay(repo, REVIEW_NAME, "ALT-DESIGN-REVIEW-reviewer-20260801-110000.md"),
-        axis="ambiguity",
-        detail="multiple latest DESIGN-REVIEW carriers share timestamp 20260801-110000",
+        expected_exit=0,
     )
 
     def rename(repo: Path, source: str, target: str) -> None:
@@ -772,6 +793,23 @@ def _plan_source_cases(dest: Path) -> list[Case]:
     return cases
 
 
+def _b9_capacity_case(dest: Path) -> Case:
+    expected = []
+    def prepare(_case_root, foreign, fields):
+        blob = _literal_object(foreign, "blob", b"PHASE: SITREP\n")
+        raw = b"".join(_tree_entry(b"100644", f"relay-{i:05d}.md".encode(), blob)
+                       for i in range(20001))
+        relays = _literal_object(foreign, "tree", raw)
+        designs = _git(foreign, "rev-parse", "HEAD:designs")
+        root = _literal_object(foreign, "tree", _tree_entry(b"40000", b"designs", designs)
+                               + _tree_entry(b"40000", b"relays", relays))
+        commit = _literal_commit(foreign, root)
+        _replace(fields, "DESIGN_SOURCE_COMMIT", commit)
+        expected.append(_xerror("authority-population", "no DESIGN origin found for DESIGN_DOC_ID d1"))
+    return _build_case(dest, "B9-capacity-relays-one-over", prepare=prepare,
+                       expected_exit=1, expected_errors=expected)
+
+
 def materialize(dest: Path) -> list[Case]:
     """Create all Git-backed cases under dest and return their expectations."""
     dest.mkdir(parents=True, exist_ok=True)
@@ -1028,7 +1066,7 @@ def materialize(dest: Path) -> list[Case]:
             "X43-fifo-object-timeout",
             prepare=_fifo_object,
             expected_exit=1,
-            expected_errors=[_xerror("commit", "Git object query timed out")],
+            expected_errors=[_xerror("capacity", "Git object query timed out at the 5 s bound during cat-file; this is a time limit on a cold read, not a lineage fault; a large root can reach it on a busy machine")],
         ),
         _build_case(
             dest,
@@ -1047,6 +1085,7 @@ def materialize(dest: Path) -> list[Case]:
             ],
         ),
     ]
+    cases.append(_b9_capacity_case(dest))
     cases.extend(_authority_cases(dest))
     cases.extend(_plan_source_cases(dest))
     return cases

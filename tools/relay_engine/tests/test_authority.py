@@ -81,7 +81,7 @@ class TestAuthority(LedgerFixture):
     def test_valid_grant_unchanged_artifact_allows(self):
         self.base()
         result=self.check()
-        self.assertEqual(set(result),{'allowed','reasons','relay','seat','action','checked_at'})
+        self.assertEqual(set(result),{'allowed','reasons','relay','seat','action','checked_at','external'})
         self.assertTrue(result['allowed'],result)
         self.assertEqual(result['reasons'],[])
         self.assertRegex(result['checked_at'],r'^\d{8}-\d{6}$')
@@ -331,6 +331,8 @@ class TestAuthority(LedgerFixture):
         self.assertTrue(self.check(seat='p.pair-implementer')['allowed'])
 
     def test_cross_root_design_uses_pinned_lineage_and_shared_budget(self):
+        from relay_engine.tests import xroot_narrow_corpus as corpus
+        self.enterContext(corpus.budget(rules))
         import tempfile
         import xrootfixgen
         from relay_engine import paths

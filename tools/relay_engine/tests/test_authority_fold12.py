@@ -13,16 +13,20 @@ class TestAuthorityFold12(TestAuthorityFold5):
         self.assert_case([], unrelated='SUBJECT: unrelated historical probe\n\nExample `hostile\0input` stays immutable.\n')
 
     def test_body_only_doc_id_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='PHASE: SITREP\n\nThis discusses d1.\f')
+        # Historical name: R181 now allows this noncandidate carrier.
+        self.assert_case([], unrelated='PHASE: SITREP\n\nThis discusses d1.\f')
 
     def test_two_phase_mentions_refuse(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='PHASE: SITREP\n\nAn example PHASE: elsewhere.\f')
+        # Historical name: R181 now allows this noncandidate carrier.
+        self.assert_case([], unrelated='PHASE: SITREP\n\nAn example PHASE: elsewhere.\f')
 
     def test_split_doc_id_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='PHASE: SITREP\n\nDiscuss d\x011.')
+        # Historical name: R181 now allows this noncandidate carrier.
+        self.assert_case([], unrelated='PHASE: SITREP\n\nDiscuss d\x011.')
 
     def test_ascii_case_doc_id_refuses(self):
-        self.assert_case(['authority.lineage-incomplete'], unrelated='PHASE: SITREP\n\nDiscuss D1.\f')
+        # Historical name: R181 now allows this noncandidate carrier.
+        self.assert_case([], unrelated='PHASE: SITREP\n\nDiscuss D1.\f')
 
     def test_older_approving_review_refuses(self):
         older=foreign_fixture.REVIEW+'\nprose\f tail'
@@ -36,9 +40,10 @@ class TestAuthorityFold12(TestAuthorityFold5):
             self.assertEqual(f.check(g)['reasons'],['authority.lineage-incomplete'])
 
     def test_relevant_non_ff_controls_refuse(self):
+        # Historical name: R181 now allows this noncandidate carrier.
         for c in ['\v','\0','\x7f','\x85','\u2028']:
             with self.subTest(control=repr(c)):
-                self.assert_case(['authority.lineage-incomplete'],unrelated='PHASE: SITREP\n\nDiscuss d1.'+c)
+                self.assert_case([],unrelated='PHASE: SITREP\n\nDiscuss d1.'+c)
 
     def test_selected_candidates_are_in_scanned_set(self):
         older=foreign_fixture.REVIEW
@@ -63,6 +68,9 @@ class TestAuthorityFold12(TestAuthorityFold5):
         import tempfile
         from pathlib import Path
         import xrootfixgen
+        from relay_engine.tests import test_xroot
+        from relay_engine.tests.xroot_test_stops import stop
+        budgets = test_xroot.TestXroot()
         matched=[]
         target=rules.xroot_target_ok
         def matching(relay,key,expected):
@@ -73,10 +81,10 @@ class TestAuthorityFold12(TestAuthorityFold5):
             return answer
         with tempfile.TemporaryDirectory(prefix='e30-candidates-') as td:
             cases=xrootfixgen.materialize(Path(td))
-            self.assertEqual(len(cases),121)
+            self.assertEqual(len(cases),130)
             with mock.patch.object(rules,'xroot_target_ok',side_effect=matching):
                 for label,root,exit_code,errors in cases:
-                    with self.subTest(case=label):
+                    with self.subTest(case=label), budgets.case_budget(rules, label), stop(120):
                         result=rules.lint_relay_root(root)
                         self.assertEqual(sorted(result.errors),sorted(errors))
         self.assertGreater(len(matched),0)
