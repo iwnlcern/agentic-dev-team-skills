@@ -379,7 +379,8 @@ Existing field forms remain valid when written by `operator`, `orchestrator`, or
 A field-form grant is addressed to exactly one Implementer.
 Both linters, the standalone `tools/relay-lint.py` and the engine's `tools/relay lint`, refuse a token when the same relay has more than one operational merge-verdict line, or one that is negative.
 For those linters, the lines that count, in the header or the body, and the values that are positive are what `merge_authorization_verdict_lines` and `merge_authorization_positive` in `tools/relay_engine/rules.py` decide; that matching is not R6's whole-value rule, so the linters and the check can read the same header verdict differently.
-They skip backticked text and what `strip_fenced_blocks` in the same file treats as fenced, which is not CommonMark's fence rule: a `~~~` fence hides nothing from them, and an unclosed backtick fence hides every line after it.
+They skip what `strip_inline_code_spans` and `strip_fenced_blocks` in the same file remove, which is not CommonMark's rule.
+Of backticked text they skip only what lies between two single backticks on one line, so a double-backtick span, or one that crosses a line ending, is read; a `~~~` fence hides nothing from them; and every line that starts, after any whitespace, with three backticks opens or closes a fence, whatever follows them, so an unclosed one hides every line after it.
 The authority check instead reads verdicts from the header only: a negative header verdict defeats the token with `authority.denied`, adding `authority.verdict-conflict` when positive and negative header verdicts occur together; a verdict line below the header neither grants nor denies (R6 below).
 As an authoring convention, a grantor who means a verdict to count writes it in the header, where both readers see it.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
@@ -442,8 +443,12 @@ A managed-root seat whose check failed, was denied, could not evaluate or was no
 The engine's code governs; these predicates describe the release this text ships with, with routes and relay kinds kept explicit.
 Reason identifiers below are identifiers only, not display messages.
 
-Where a rule below gives `authority.lineage-incomplete` for an unusable review, that is a review the grant's lineage rests on.
-An amendment's delta review, the review of an `-erratum-N`, `-supplement-N` or `-amendment-N` file declared by a later PLAN or DESIGN of the same lock, adds no reason when it fails R3, R5, R6 or R7: the check leaves the amendment out and answers as though it had not been filed, so the amendment's bytes are not pinned and an allowed answer does not show that the delta review counted.
+Where a rule below gives `authority.lineage-incomplete` for an unusable review, that is a review a pair-Planner grant's lineage rests on.
+An amendment is an `-erratum-N`, `-supplement-N` or `-amendment-N` file declared by a later PLAN or DESIGN of the same lock, and `_required_artifacts` in `tools/relay_engine/authority.py` pins its bytes in one of two ways.
+An amendment that a relay the grant's lineage rests on declares with a digest is pinned, as any artifact is; for an operator or orchestrator grant those relays are the grant itself and every relay `_lineage` reaches from its `PARENT_DISPATCH_ID`, whatever the reviews among them say.
+An amendment no such relay declares is pinned only when the same function counts it, accepting both the later relay that declares it and the acting Implementer's review of that relay.
+When it does not count one, whatever the cause, including a review of it that fails a rule below, it adds neither a pin nor a reason, so that amendment's bytes are not pinned; R8's later-relay rule reads those later relays on its own and can still refuse a pair-Planner grant over one.
+An allowed answer alone therefore shows neither that a delta review counted nor that an amendment's bytes are pinned; a grant that itself declares the amendment's digest is allowed only when those bytes are pinned at that digest and match it, so declaring it is a sufficient way to require the pin.
 
 - R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with an empty line or a line holding only spaces and tabs on each side, or the corresponding file edge.
   A `DISPATCH IMPL` token is live only in `PHASE: IMPL`; the `DISPATCH MERGE` phase binding is stated under Literal merge token.
@@ -467,7 +472,8 @@ An amendment's delta review, the review of an `-erratum-N`, `-supplement-N` or `
 - R8, control characters (`authority.shape-absent` for a grant; `authority.lineage-incomplete` for the pair-Planner lineage cases below): refused characters are C0 controls except tab, line feed and carriage return, DEL, U+0085, U+2028 and U+2029; other C1 controls are not refused.
   These characters void every grant.
   For a pair-Planner grant they also refuse the grant when present in any relay of its pair lineage.
-  Beyond that lineage, they are refused in the first relay filed under each dispatch id that the PLAN's `PARENT_DISPATCH_ID` chain reaches, whoever filed it; a later relay filed under one of those ids is not read for them.
+  Beyond that lineage, they are refused in the opener of each dispatch id the PLAN's `PARENT_DISPATCH_ID` chain reaches, whoever filed it, as `_opener_parent` in `tools/relay_engine/authority.py` decides: the opener is the first relay filed under the id, not counting a supersession ruling adopted from a parent root, and the chain stops at an id whose opener was filed after the relay that names it.
+  Other relays filed under those ids are not read for them, except as this rule's last sentence says.
   For a cross-root design they also refuse that pair-Planner grant when present in a relay of its foreign root that the engine counts toward selecting the design's review, with the refusal reported in `external`; which foreign relays count is the engine's, and this text does not restate it.
   In pair lineage, a later PLAN or DESIGN by the same Planner, or a later review of that phase by the acting Implementer, after the corresponding lineage origin also denies the earlier grant with `authority.lineage-incomplete` if it contains one of these characters.
 - R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header, including the strict/legacy parsed-field comparison.
