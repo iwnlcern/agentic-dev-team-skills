@@ -794,7 +794,7 @@ A seat whose role gives it a standing duty toward copied relays still acts on th
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
 A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it, and every later filing refreshes the binding without moving delivery progress.
 On Claude Code, an active plugin's monitor with the default `when` starts at session start and on plugin reload.
-Plugin monitors run only in interactive sessions and not on Amazon Bedrock, Google Cloud's Agent Platform or Microsoft Foundry; see the [plugin manifest reference](https://code.claude.com/docs/en/plugins-reference#monitors).
+Plugin monitors don't start in non-interactive mode with the `-p` flag, and on some providers or with some settings they may need a minimum Claude Code version; see the [monitor documentation](https://code.claude.com/docs/en/plugins/components#monitors).
 On Codex the SessionStart hook supplies the arming context unless `ADT_CODEX_FORK=0`.
 At `startup` that context is the boot wording: the boot turn arms only when the `monitor` tool is in its advertised surface, and otherwise reports `unavailable: monitor-tool` and falls back to the pointer.
 For every SessionStart source other than `startup`, including an unrecognised source, it is the non-boot wording: the session is not a new boot and needs no acknowledgment, a watch starts only if none of this session's is running (without the `monitor` tool, delivery stays `unavailable: monitor-tool` with the pointer as fallback), and the seat carries on with the work in progress in the same turn.
