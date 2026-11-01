@@ -577,7 +577,6 @@ Review scope and evidence: <pinned change, evidence paths, and open merge condit
 
 Reviewer reply:
 
-Authors: see "What the check reads" in `protocol.md` § Authority check before acting.
 
 ```text
 ## Team <id> — <bundle>: GATE REVIEW REPLY

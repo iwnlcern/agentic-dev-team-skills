@@ -377,7 +377,10 @@ A valid implementation dispatch, passing tests, a clean PR, or a finished branch
 The protocol layers the addressed merge token on top of the field-form merge authorization.
 Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`.
 A field-form grant is addressed to exactly one Implementer.
-A negative verdict line or conflicting verdict lines defeats a token in the same relay.
+Both linters refuse a token when the same relay has a negative operational merge-verdict line or more than one such line.
+For those linters, an operational merge verdict is a `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION` or `MERGE_APPROVED` line, or a `VERDICT` line with a merge-form value, outside fenced and backticked text, whether in the header or body.
+The authority check instead reads verdicts from the header only: a negative header verdict defeats the token with `authority.denied`, adding `authority.verdict-conflict` when positive and negative header verdicts occur together; a verdict line below the header neither grants nor denies (R6 below).
+As an authoring convention, a grantor who means a verdict to count writes it in the header, where both readers see it.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
 The canonical token path is:
 
@@ -405,7 +408,9 @@ Hidden continuation claims, canonical `merge=<sha>` machine forms, and field-for
 On a managed root, before starting implementation on a dispatch and always before merging on a grant, the acting seat runs `tools/relay authority check <relay> --seat <own address> --action implement|merge --root <root>`.
 The relay argument is its root-relative recorded path, without a leading `./` or an absolute prefix.
 Permission is exit status 0 with `allowed` true and returned `relay`, `seat` and `action` equal to the act in hand; nothing else is permission.
-A denial (exit 1), a result that could not be evaluated (exit 2), no result at all, and a client without this command each stop the act and are relayed as a blocker to the governing seat.
+A result with `allowed` false exits 1, or 2 when its reasons include `authority.could-not-evaluate`, whatever else they include.
+A command that returns no result exits nonzero with a message on stderr.
+Every nonzero exit stops the act; a denial, a result that could not be evaluated, no result at all, and a client without this command are relayed as blockers to the governing seat.
 Quote the returned result object when one exists, including `external` when it is not empty; when there is no result, retain and quote the stderr code instead.
 An `external` entry on the `capacity` axis reports a limit of the cross-root read, not a gap in the lineage; it still stops the act and goes to the governing seat.
 Do not retry into a pass or fall back to reading the relay by eye.
@@ -423,8 +428,9 @@ A changed artifact always requires a fresh answer; an approved erratum can make 
 The check answers for a closed cycle through `authority.cycle-closed`; no supported cycle-state read is prescribed here.
 
 Retain the command, its output or stderr code, and exit status for every check actually run.
-The report carries exactly one `AUTHORITY_CHECK` header line for the latest check before the act reported: `AUTHORITY_CHECK: allowed <action> <relay path> <checked_at>`.
-Copy its three values from that check's output; earlier checks stay in retained evidence and add no second header line.
+The report carries exactly one `AUTHORITY_CHECK` line, in its header, for the latest check before the act reported: `AUTHORITY_CHECK: allowed <action> <relay path> <checked_at>`.
+Copy its three values from that check's output; earlier checks stay in retained evidence.
+Admission counts every line starting at column 0 with `AUTHORITY_CHECK:` outside a fence, header or body, so do not repeat such a line elsewhere in the report.
 On a managed root, a dispatch or merge go-ahead is live only as a filed relay; a seat receiving one by direct message asks its sender to file it and does not act.
 This rule governs the seat that would act on the go-ahead; an Orchestrator Planner recording the operator's words as `GATE_DISPOSITION` in its own filed grant under § Reviewer checkpoints is filing the go-ahead.
 On a hand-authored root there is no daemon to ask: apply the literal-token conditions by reading the relay and cite `AUTHORITY_CHECK: unavailable — <reason>`.
@@ -434,28 +440,37 @@ A managed-root seat whose check failed, was denied, could not evaluate or was no
 The engine's code governs; these predicates describe the release this text ships with, with routes and relay kinds kept explicit.
 Reason identifiers below are identifiers only, not display messages.
 
-- R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with a blank or whitespace-only line on each side or the corresponding file edge.
+- R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with an empty line or a line holding only spaces and tabs on each side, or the corresponding file edge.
+  A `DISPATCH IMPL` token is live only in `PHASE: IMPL`; the `DISPATCH MERGE` phase binding is stated under Literal merge token.
 - R2, token route only (`authority.shape-absent`): any run of three or more backticks or tildes anywhere in the grant voids its token.
   A field-form merge grant's independent positive-header route does not reject fences on this basis.
 - R3, grants on either route and reviews (`authority.shape-absent` for grants; `authority.lineage-incomplete` for an unusable review): no HTML-like line with at most three leading spaces and then `<` followed by a letter, `/`, `!` or `?`, nor a line containing `<!--`, `<?`, `<![`, `<!` followed by a letter, or an opening script, pre, style or textarea tag.
 - R4, grant/review header parsing (`authority.shape-absent` or `authority.lineage-incomplete`): the header starts at the first uppercase `KEY: value` line with the colon adjacent to the key and ends at the first blank or nonmatching line.
   Lowercase keys, a space before the colon and a hyphen in a key end it.
   Every required field must be present with a nonempty value, and no key may appear twice, required or not; any repeated header key fails the parse, voiding a grant and stopping a review from approving.
+  A `RUN_ID` outside the engine's run-id grammar or a `TO` naming no address also fails the parse.
 - R5, grants on either route and reviews (`authority.shape-absent` or `authority.lineage-incomplete`): no header value contains `<`, including SUBJECT; fill every header placeholder.
 - R6, grants and reviews (`authority.denied` for a denied grant; `authority.lineage-incomplete` for an unusable review): verdicts and denials are read from the header only.
   Verdict keys are VERDICT, MERGE_AUTHORIZATION, MERGE_APPROVED, or a key ending in an underscore plus one of those names.
   The whole value is positive only when it is exactly approved, approve, granted, yes, true, complete or merge-ready, case-insensitively in ASCII; any other value under a verdict key denies, including an approval followed by commentary.
   For a field-form merge grant, the value must also satisfy the engine's per-key lists in `tools/relay_engine/rules.py` (`merge_authorization_positive`), while remaining exactly one whole positive value under the rule above: MERGE_AUTHORIZATION and HUMAN_MERGE_AUTHORIZATION accept approved, granted or yes; MERGE_APPROVED accepts yes, true or approved; VERDICT accepts merge-ready, approved or complete.
+  A field-form merge grant is live only in `PHASE: MERGE-GATE`.
   Of the prefixed verdict keys, only HUMAN_MERGE_AUTHORIZATION can supply this field-form merge-grant shape; `MERGE_AUTHORIZATION: approve` neither grants nor denies, and without another granting route yields `authority.shape-absent`.
   An approval followed by commentary, such as `approved — notes`, or `merge ready` with a space fails the whole-value rule.
   A denial in body prose neither grants nor denies.
 - R7, approving reviews (`authority.lineage-incomplete`): PHASE_VERDICT, with the phase's hyphens changed to underscores, or VERDICT equals approve or approved, with no denial key.
-- R8, a grant or any relay in its pair lineage (`authority.shape-absent` or `authority.lineage-incomplete`): refused characters are C0 controls except tab, line feed and carriage return, DEL, U+0085, U+2028 and U+2029; other C1 controls are not refused.
+- R8, control characters (`authority.shape-absent` for a grant; `authority.lineage-incomplete` for the pair-Planner lineage cases below): refused characters are C0 controls except tab, line feed and carriage return, DEL, U+0085, U+2028 and U+2029; other C1 controls are not refused.
+  These characters void every grant.
+  For a pair-Planner grant they also refuse the grant when present in any relay of its pair lineage or any relay reached by following its PLAN's `PARENT_DISPATCH_ID` chain beyond that lineage, whoever filed it.
+  For a cross-root design they also refuse that pair-Planner grant when present in a relay of its foreign root that the engine counts toward selecting the design's review, with the refusal reported in `external`; which foreign relays count is the engine's, and this text does not restate it.
   In pair lineage, a later PLAN or DESIGN by the same Planner, or a later review of that phase by the acting Implementer, after the corresponding lineage origin also denies the earlier grant with `authority.lineage-incomplete` if it contains one of these characters.
 - R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header, including the strict/legacy parsed-field comparison.
   Critical fields are PHASE, FROM, TO, DISPATCH_ID, PARENT_DISPATCH_ID, DESIGN_LOCK_ID, DESIGN_DOC_ID, PLAN_LOCK_ID, DESIGN_ARTIFACT, DESIGN_SHA256, PLAN_ARTIFACT, PLAN_SHA256, PLAN_SOURCE_REPO, PLAN_SOURCE_COMMIT and the cross-root trigger fields.
   Differing body repeats of noncritical fields such as SUBJECT or CC are not conflicts detected by this rule; fenced repeats are not read.
 - R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer.
+- R11, pair-Planner implementation grants (`authority.issuer-not-permitted`): any own-line `SCOPE_DIFF_RESULT`, in the header or body, that does not normalize to `all-in` refuses the grant.
+  Normalization takes the value's first whitespace-delimited word, lowercased, and removes trailing `.`, `,`, `;`, `:`, `!` and `?`; an empty value refuses.
+  Grants are still authored with `all-in`; this predicate describes the check, not a new authoring form.
 
 Two authoring conventions go beyond those predicates: write grants with no fenced block so they remain readable if reissued in token form, and never repeat any header field in the body with a different value, critical or not.
 For a token grant, R2 already refuses a fence; the broader fence-free convention also covers field-form grants.
@@ -881,7 +896,7 @@ Root integrity errors remain errors however old the relay.
 The managed-root history audit reports findings on record-known relays as warnings, except per-file lint findings, which it leaves out; a history-audit finding blocks nothing and needs no waiver.
 A clean history audit therefore does not establish a clean structural record.
 On a hand-authored root, a lint error on the relays an act rests on blocks that act unless the operator waives the named error.
-No waiver changes an authority answer: a denial requires a valid grant or a direct override by an operator or orchestrator seat, followed by a fresh check under [Authority check before acting](#authority-check-before-acting).
+No waiver changes an authority answer: a denial requires a valid grant or a direct grant from `operator`, `orchestrator` or an orchestrator-planner-role address, followed by a fresh check under [Authority check before acting](#authority-check-before-acting).
 These lint rules assume the current linter has passed its bundled tool-correctness fixture matrix.
 If the linter is unavailable, write `RELAY_LINT: unavailable — <reason>` and continue with the normal protocol; do not claim lint passed.
 To make it available for host adapters, install the whole `tools/` directory from the same generated `plugins/adt-<tier>/` bundle as the loaded skill; the first shipped adapter lives at `tools/adapters/claude-code/`; its setup guide is `tools/adapters/README.md`.
