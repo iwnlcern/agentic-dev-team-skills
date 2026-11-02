@@ -833,7 +833,9 @@ Once that relay is handled, the seat returns to the interrupted work unless that
 A `CC` arrival is context only: it grants no authority and asks for no reply, so nothing is owed or filed in response to it.
 A seat whose role gives it a standing duty toward copied relays still acts on that duty and files under it, not as a reply the copy asked for.
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
-A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it, and every later filing refreshes the binding without moving delivery progress.
+A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it.
+As `bind_from_receipt` in `tools/adapters/relay-monitor.py` decides, a filing as the bound seat in the bound root leaves delivery progress where it is; any other filing moves that root’s progress to the filing itself, so earlier undelivered relays are skipped even after a return filing.
+After returning, use `relay-monitor.py replay` to re-print skipped relays alongside relays already delivered, checking each against work already handled.
 On Claude Code, an active plugin's monitor with the default `when` starts at session start and on plugin reload.
 Plugin monitors don't start in non-interactive mode with the `-p` flag, and on some providers or with some settings they may need a minimum Claude Code version; see the [monitor documentation](https://code.claude.com/docs/en/plugins/components#monitors).
 On Codex the SessionStart hook supplies the arming context unless `ADT_CODEX_FORK=0`.

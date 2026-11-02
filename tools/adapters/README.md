@@ -163,7 +163,9 @@ Deployment drift remains on the watch list. A future adapter hardening turn may 
 Files: `tools/adapters/relay-monitor.py`, `tools/adapters/shell_lex.py`, `tools/adapters/plugin-monitors.json` (shipped as `monitors/monitors.json`), the three hooks in `plugin-hooks.json`, `tools/adapters/codex/adt-codex`, `tools/adapters/claude-code/relay-guard-destinations.py`, tests and the scope oracle in `tools/adapters/tests/`.
 
 Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `status`, `operator`, `replay`.
-State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell; the binding anchor initializes it once.
+State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell.
+As `bind_from_receipt` in `tools/adapters/relay-monitor.py` decides, a filing as the bound seat in the bound root leaves progress where it is; any other filing moves that root’s progress to the filing itself, skipping earlier undelivered relays even after a return filing.
+After returning, `relay-monitor.py replay` re-prints those relays together with ones already delivered; check each against work already handled.
 Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` optional) bind without a hook, for hand-authored roots; `ADT_HOST` names the host explicitly.
 
 The status grammar separates follower readiness from binding observations and install identity:
