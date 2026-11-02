@@ -56,7 +56,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/domain-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -80,7 +80,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/domain-reviewer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -110,7 +110,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/master-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -134,7 +134,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/master-reviewer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -170,7 +170,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -206,7 +206,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -224,7 +224,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-implementer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -248,7 +248,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -10688,7 +10688,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -10724,7 +10724,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -10742,7 +10742,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-implementer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -10766,7 +10766,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -21188,7 +21188,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-implementer/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
@@ -21212,7 +21212,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-planner/protocol.md",
-    "sha256": "bae9ccffdaf4944f6f5654cdadfbb6c540d2a16543c120ce0aeb4576d75939e6",
+    "sha256": "573ba4958bc5a740f4713017d9e936274d60d93a2ecaab7eb39089474c427dd9",
     "source": "shared/protocol.md"
   },
   {
