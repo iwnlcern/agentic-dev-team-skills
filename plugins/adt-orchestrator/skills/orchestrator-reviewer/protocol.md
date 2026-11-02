@@ -378,12 +378,14 @@ A valid implementation dispatch, passing tests, a clean PR, or a finished branch
 The protocol layers the addressed merge token on top of the field-form merge authorization.
 Existing field forms remain valid when written by `operator`, `orchestrator`, or an orchestrator-planner-role address: `MERGE_AUTHORIZATION`, `HUMAN_MERGE_AUTHORIZATION`, `MERGE_APPROVED`, or `VERDICT: merge-ready`.
 A field-form grant is addressed to exactly one Implementer.
+Submit refuses a grant carrying a verdict-key line outside its header block with `E-DRAFT-SHAPE`, as `draft_shape` in `tools/relay_engine/envelope.py` decides; remove the line, since moving it into the header makes it count there and any value but an exact positive word denies the grant.
 Both linters, the standalone `tools/relay-lint.py` and the engine's `tools/relay lint`, refuse a token when the same relay has more than one operational merge-verdict line, or one that is negative.
 For those linters, the lines that count, in the header or the body, and the values that are positive are what `merge_authorization_verdict_lines` and `merge_authorization_positive` in `tools/relay_engine/rules.py` decide; that matching is not R6's whole-value rule, so the linters and the check can read the same header verdict differently.
-They skip what `strip_inline_code_spans` and `strip_fenced_blocks` in the same file remove, which is not CommonMark's rule.
-Of backticked text they skip only what lies between two single backticks on one line, so a double-backtick span, or one that crosses a line ending, is read; a `~~~` fence hides nothing from them; and every line that starts, after any whitespace, with three backticks opens or closes a fence, whatever follows them, so an unclosed one hides every line after it.
+The linters split lines as Python’s `str.splitlines` does.
+The linters skip what `strip_inline_code_spans` and `strip_fenced_blocks` in the same file remove, which is not CommonMark's rule.
+On each line the linters skip from each odd-numbered backtick to the next, whatever the run lengths; a `~~~` fence hides nothing from them; and every line that starts, after any whitespace, with three backticks opens or closes a fence, whatever follows them, so an unclosed one hides every line after it.
 The authority check instead reads verdicts from the header only: a negative header verdict defeats the token with `authority.denied`, adding `authority.verdict-conflict` when positive and negative header verdicts occur together; a verdict line below the header neither grants nor denies (R6 below).
-As an authoring convention, a grantor who means a verdict to count writes it in the header, where both readers see it.
+As an authoring convention, a grantor who means a verdict to count writes it in the header; both readers see the verdict lines that `merge_authorization_verdict_lines` counts, while a header verdict under another verdict key is read by the authority check alone.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
 The canonical token path is:
 
