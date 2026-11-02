@@ -99,7 +99,7 @@ For the managed mode, follow this order:
    The starter passes the designated seat, including itself if the operator named it, and never picks a top seat on its own.
    A first designation records the top-seat name; stand-down leaves that record in place.
    Starting with that recorded name reuses its existing key only while its occupancy remains active; after stand-down, startup issues a fresh occupancy and key under the same name.
-   The recorded name alone does not make an earlier key current; after a start, use the key that start left under the root's seat directory.
+   The earlier key file stays beside the new one after stand-down and restart; use the key file named for the `occupant_id` of the latest `occupied` entry shown by `tools/relay seat show <address>`, since the earlier key is refused with `E-KEY-MISMATCH`.
 2. The top seat declares the roster with `seat declare` using its own key issued by that start: every seat the run will address, the reviewer included, and for a commissioned team its members on the receiving root.
    Check that each declaration result is `added` or `exists`; otherwise stop setup and report the result to the operator.
 3. The top seat registers each downstream seat once, at first occupancy; that registration files its engine boot record and issues its key.
@@ -116,7 +116,7 @@ Replacing an occupant with `seat replace` is operator-directed only.
 A roster declaration recognises names only: it occupies no seat, issues no key, grants no authority, delivers nothing across roots and follows no later changes in another root.
 For the maintained start/register/submit procedure, see `tools/relay_engine/README.md` § Typical flow.
 For roster declaration flags, which that flow does not cover, see `tools/relay seat declare --help`.
-The two input forms not described there are defined in `tools/relay_engine/cli.py` (`_cmd_seat_declare`): `--key` takes the top seat's key file resolved against the root, as a root-relative path or an absolute path inside it, and `--from-file` takes one `<address> <role>` pair per line.
+The two input forms not described there are defined in `tools/relay_engine/cli.py` (`_cmd_seat_declare`): `--key` takes the top seat's key file resolved against the root, as a root-relative path or an absolute path inside it, and `--from-file` takes one `<address> <role>` pair per line from a file resolved against the command’s working directory, not the relay root.
 
 ## Header convention
 

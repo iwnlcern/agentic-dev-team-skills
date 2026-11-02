@@ -113,6 +113,7 @@ Treat incoming sitreps as stale until reconciled. Watch for misattributed PRs, s
 
 A clean managed sweep's root integrity report establishes that the record is intact, not that any lineage is currently valid; its history audit is separate from current authority.
 For each authority citation, check that the path is the relay actually acted on and that checked_at precedes the act the report covers: initial work, resumed work or the merge.
+A relay’s filename stamp can run ahead of the clock, so a check made after the relay was filed can carry an earlier `checked_at` than the filename stamp; do not read that ordering as a check made before the relay.
 A re-run answers for now and cannot prove that the earlier check ran.
 See `protocol.md` § Authority check before acting.
 As the Orchestrator Reviewer, perform a lightweight behavioral honesty check: flag suspicious `DESIGN_RECORD_KIND: audit-record` labels on obviously new design-doc work, pair Planner `direct-override` attempts, missing Implementer design review for design-doc-backed plans, and stale/mismatched `DESIGN_LOCK_ID` references.
