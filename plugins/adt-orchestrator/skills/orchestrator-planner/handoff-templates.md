@@ -30,7 +30,6 @@ Use minimal headers by default, including `FROM` / `TO` / `CC` for orchestrator-
 
 `DESIGN_LOCK_ID` and `PLAN_LOCK_ID` carry a lock value — a logical identity or repo-relative path, optionally annotated ` @ sha256 <hex>`; equality compares the unannotated value. Optional `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` fields carry filename-stem locators, and optional `DESIGN_SHA256` / `PLAN_SHA256` fields carry lowercase-hex sha256 byte-integrity values. Prefer the separate fields; the lock value itself admits only the optional ` @ sha256 <hex>` annotation, never a filename stem.
 
-
 Operator no-reviewer waiver, only when the run genuinely has no Orchestrator Reviewer:
 
 ```text

@@ -214,7 +214,6 @@ A reissued gated design-doc PLAN re-parents the same approving DESIGN-REVIEW; th
 
 The following are intentionally out of scope: latest-non-superseded approve, suppressing or forging the DESIGN relay, harness identity binding, structured relay bodies, replay deltas, and HITL capsules.
 
-
 ## Orchestrator-review visibility gate
 
 When `relay-lint --relay-root` is available, every orchestrator authority relay in the broad SET must address the run's Orchestrator Reviewer in `TO` or `CC`, or the run root must contain an operator-authored no-reviewer waiver.
@@ -901,7 +900,6 @@ The pointer is terminal output, outside relay-lint's surface, so it is not
 linter-enforced: the pointer block remains mandatory on every relay-filing turn as the
 copy-paste fallback; auto-delivery does not relieve it, and the operator enforces it by
 declining to hand-relay a relay that arrives without one.
-
 
 ## Relay lint
 

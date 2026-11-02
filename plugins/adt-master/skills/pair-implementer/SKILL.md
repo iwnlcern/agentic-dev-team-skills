@@ -58,7 +58,6 @@ Read-only. Inspect code, run safe read-only commands, answer Planner design ques
 
 Read-only, same restrictions as AUDIT. Design Q&A is inline — answer the Planner's design questions with file:line evidence, challenge alternatives that conflict with observed code, and flag product-semantics questions for the operator; no relay file for Q&A exchanges. No edits, branches, or prototypes.
 
-
 ### DESIGN-REVIEW
 
 When writing the verdict, see "What the check reads" in `protocol.md` § Authority check before acting.
