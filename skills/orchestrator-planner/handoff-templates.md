@@ -42,6 +42,8 @@ HUMAN_GATE_REQUIRED: yes — operator accepts missing Orchestrator Reviewer visi
 FROM: operator
 TO: <run>.orchestrator-planner
 CC: operator
+RUN_ID: <run id>
+SUBJECT: <summary>
 ORCH_REVIEW_WAIVER: <why this run has no orchestrator-reviewer seat>
 FINAL_GIT_STATUS_SHORT: unavailable — operator waiver, no git workspace
 ```
@@ -63,6 +65,7 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: orchestrator
 TO: <team>.planner, <team>.implementer
 CC: <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <parent | none>
 BUNDLE_ID: <bundle>
@@ -148,6 +151,7 @@ GRILL_REQUIRED: <yes|no>
 FROM: orchestrator
 TO: <team>.planner
 CC: <team>.implementer, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <audit/reconcile dispatch id>
 DESIGN_DOC_ID: <logical design id to create>
@@ -251,6 +255,7 @@ HUMAN_GATE_REQUIRED: <yes — remaining operator decision | no | no — downstre
 FROM: <team>.planner
 TO: orchestrator
 CC: <team>.implementer, <operator | boundary-adjacent owner.role | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <approving DESIGN-REVIEW dispatch id>
 DESIGN_DOC_ID: <approved logical design id>
@@ -288,6 +293,7 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: orchestrator
 TO: <team>.planner
 CC: <team>.implementer, <run>.orchestrator-reviewer, <boundary-adjacent owner.role | operator | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <design-completion SITREP/report id for design-doc path; otherwise audit/design dispatch id>
 APPROVED_DESIGN_DOC_ID: <approved logical design id | none>
@@ -459,6 +465,8 @@ HUMAN_GATE_REQUIRED: no — downstream: merge requires human/operator gate
 FROM: <team>.planner | orchestrator | operator
 TO: <team>.implementer
 CC: <team>.planner, <run>.orchestrator-reviewer, <operator | none>
+RUN_ID: <run id>
+SUBJECT: <summary>
 PARENT_DISPATCH_ID: <impl dispatch id>
 DESIGN_LOCK_ID: <logical design id | none>
 DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
@@ -517,6 +525,8 @@ HUMAN_GATE_REQUIRED: yes — merge/deploy/live-verification judgment
 FROM: <team>.planner
 TO: <orchestrator | operator>
 CC: <team>.implementer, <run>.orchestrator-reviewer, <orchestrator | none>
+RUN_ID: <run id>
+SUBJECT: <summary>
 DESIGN_LOCK_ID: <logical design id | none>
 DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>
 DESIGN_SHA256: <lowercase-hex sha256; omit line when absent>
@@ -565,6 +575,7 @@ HUMAN_GATE_REQUIRED: no — review request only
 FROM: <run>.orchestrator-planner
 TO: <run>.orchestrator-reviewer
 CC: <team>.planner, <team>.implementer
+SUBJECT: <summary>
 GATE_HEAD: <full PR head commit pin observed when filing>
 GATE_BASE: <full PR base commit pin observed when filing>
 PLAN_LOCK_ID: <gate record's plan lock id>
@@ -618,6 +629,8 @@ HUMAN_GATE_REQUIRED: <yes|no — reason>
 FROM: <team>.implementer
 TO: <team>.planner
 CC: <run>.orchestrator-reviewer, <orchestrator | operator | none>
+RUN_ID: <run id>
+SUBJECT: <summary>
 DESIGN_LOCK_ID: <logical design id | none>
 PLAN_LOCK_ID: <logical plan id>
 BUNDLE_ID: <bundle>
@@ -735,6 +748,8 @@ HUMAN_GATE_REQUIRED: <yes — decision | no | no — downstream: standing gate>
 FROM: <sender owner.role | orchestrator | operator>
 TO: <recipient owner.role | orchestrator | operator>
 CC: <boundary-adjacent owner.role; omit the line when none>
+RUN_ID: <run id>
+SUBJECT: <summary>
 PARENT_DISPATCH_ID:
 DESIGN_LOCK_ID: <logical design id | none>
 DESIGN_ARTIFACT: <design artifact filename stem; omit line when absent>

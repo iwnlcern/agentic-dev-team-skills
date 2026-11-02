@@ -93,6 +93,7 @@ RUN_ID: <run>
 FROM: <run>.orchestrator-reviewer
 TO: <run>.orchestrator-planner
 CC: operator
+SUBJECT: <summary>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: <yes — decision needed | no — review only>

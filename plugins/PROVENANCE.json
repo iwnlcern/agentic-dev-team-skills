@@ -146,13 +146,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/design-request-template.md",
-    "sha256": "ccfe4029f14add8636598c6ceb1b40a799b691d798a24771f6629d04d145068f",
+    "sha256": "1734b4c2f37aca064cdcd61bfc04b7f6c8cc8941286b8ff5c9c830899365c456",
     "source": "shared/design-request-template.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "8ee289de5d66944e330e4e70b255e150bcb28467abda22cece9cce672365deeb",
+    "sha256": "0ffecfc51fb71e5edfdcd423b112b41259c9d04a08fc8a8a53af22025f668577",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -188,13 +188,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/sitrep-reconciliation.md",
-    "sha256": "c133a76f7017ba2953903f694b6f9d075fe98ccce16292fff239ee0aff586ba9",
+    "sha256": "919a35be6989c8381d450b1ee65c0195115288799977c848003c21ea1f7f20ef",
     "source": "skills/orchestrator-planner/sitrep-reconciliation.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "17bd2d85dcb8af0e128b8e8d09ea3e878cdd211f2926729ccb16dc3fc4848665",
+    "sha256": "f28c08c31f6b04649ad33c9fb4caa89c969d31f4988517655b805dfe1816ce3d",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -236,7 +236,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-planner/design-request-template.md",
-    "sha256": "ccfe4029f14add8636598c6ceb1b40a799b691d798a24771f6629d04d145068f",
+    "sha256": "1734b4c2f37aca064cdcd61bfc04b7f6c8cc8941286b8ff5c9c830899365c456",
     "source": "shared/design-request-template.md"
   },
   {
@@ -10664,13 +10664,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/design-request-template.md",
-    "sha256": "ccfe4029f14add8636598c6ceb1b40a799b691d798a24771f6629d04d145068f",
+    "sha256": "1734b4c2f37aca064cdcd61bfc04b7f6c8cc8941286b8ff5c9c830899365c456",
     "source": "shared/design-request-template.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/handoff-templates.md",
-    "sha256": "8ee289de5d66944e330e4e70b255e150bcb28467abda22cece9cce672365deeb",
+    "sha256": "0ffecfc51fb71e5edfdcd423b112b41259c9d04a08fc8a8a53af22025f668577",
     "source": "skills/orchestrator-planner/handoff-templates.md"
   },
   {
@@ -10706,13 +10706,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/sitrep-reconciliation.md",
-    "sha256": "c133a76f7017ba2953903f694b6f9d075fe98ccce16292fff239ee0aff586ba9",
+    "sha256": "919a35be6989c8381d450b1ee65c0195115288799977c848003c21ea1f7f20ef",
     "source": "skills/orchestrator-planner/sitrep-reconciliation.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "17bd2d85dcb8af0e128b8e8d09ea3e878cdd211f2926729ccb16dc3fc4848665",
+    "sha256": "f28c08c31f6b04649ad33c9fb4caa89c969d31f4988517655b805dfe1816ce3d",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -10754,7 +10754,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-planner/design-request-template.md",
-    "sha256": "ccfe4029f14add8636598c6ceb1b40a799b691d798a24771f6629d04d145068f",
+    "sha256": "1734b4c2f37aca064cdcd61bfc04b7f6c8cc8941286b8ff5c9c830899365c456",
     "source": "shared/design-request-template.md"
   },
   {
@@ -21200,7 +21200,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-planner/design-request-template.md",
-    "sha256": "ccfe4029f14add8636598c6ceb1b40a799b691d798a24771f6629d04d145068f",
+    "sha256": "1734b4c2f37aca064cdcd61bfc04b7f6c8cc8941286b8ff5c9c830899365c456",
     "source": "shared/design-request-template.md"
   },
   {

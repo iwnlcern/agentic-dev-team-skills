@@ -21,6 +21,8 @@ EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 FROM: <sender owner.role | orchestrator | operator>
 TO: <recipient owner.role | orchestrator | operator>
 CC: <boundary-adjacent owner.role; omit the line when none>
+RUN_ID: <run id>
+SUBJECT: <summary>
 BUNDLE_ID: <bundle/lane id>
 OWNER: <team/pair/agent>
 BASE: <repo>@<branch>@<sha or unknown>
@@ -276,6 +278,8 @@ EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 FROM: <run>.orchestrator-planner
 TO: <team>.planner | <team>.implementer | operator
 CC: <run>.orchestrator-reviewer, <boundary-adjacent owner.role | none>
+RUN_ID: <run id>
+SUBJECT: <summary>
 BUNDLE_ID: <bundle>
 OWNER: <team/pair>
 BASE: <repo>@<branch>@<sha or unknown>
@@ -331,6 +335,7 @@ RUN_ID: <run>
 FROM: <run>.orchestrator-planner
 TO: <run>.orchestrator-reviewer
 CC: operator
+SUBJECT: <summary>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: no — round review
@@ -353,6 +358,7 @@ RUN_ID: <run>
 FROM: <run>.orchestrator-reviewer
 TO: <run>.orchestrator-planner
 CC: operator
+SUBJECT: <summary>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: <yes — decision needed | no — review only>

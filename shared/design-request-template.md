@@ -16,6 +16,7 @@ HUMAN_GATE_REQUIRED: <yes/no + for what>
 FROM: <team>.planner
 TO: <team>.implementer
 CC: <orchestrator | operator | boundary-adjacent owner.role | none>
+SUBJECT: <summary>
 RUN_ID: <run id>
 PARENT_DISPATCH_ID: <DESIGN relay dispatch id from orchestrator/operator>
 DESIGN_DOC_ID: <logical design id>
