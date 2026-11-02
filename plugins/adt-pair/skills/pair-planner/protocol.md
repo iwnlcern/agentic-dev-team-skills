@@ -141,7 +141,7 @@ Legitimacy is reviewer- and reader-owned: for a design or plan artifact, a diges
 For the acting seat's current permission, use [Authority check before acting](#authority-check-before-acting).
 The owning register records the history and supplies reviewer evidence; it does not substitute for required approval or override.
 An acknowledgment outside that lineage is a reviewer flag, never a digest-lint error.
-Forward practice: an amendment's carriers — the amending relay and its approving review — declare the locator beside the digest so the amendment governs its own stem; Amendment 2's own carriers predate this rule and stand as the register's fired example of the digest-without-locator class.
+An amendment's carriers — the amending relay and its approving review — declare the locator beside the digest so the amendment governs its own stem; Amendment 2's own carriers predate this rule and stand as the register's fired example of the digest-without-locator class.
 This check narrows silent tampering without closing acknowledged tampering.
 
 ## Plan contract
@@ -165,6 +165,7 @@ It may not ask for code bodies; a finding that a body is missing is not a findin
 Code correctness is reviewed in the Implementer's worktree and IMPL or PR review.
 After an approve, a correction that leaves bound items unchanged rides the existing `-erratum-N` stem grammar with a delta review of the erratum alone, rather than a full reissue.
 The erratum's carrier is a pair-Planner `PHASE: PLAN` relay taking the next `-plan-N` handoff id, with `PLAN_ARTIFACT` and `PLAN_SHA256` naming the erratum stem and its bytes and `PLAN_LOCK_ID` unchanged; the delta review is the Implementer's `PHASE: PLAN-REVIEW` parented to that carrier and scoped to the erratum.
+The delta review declares the erratum’s locator and digest as its carrier does: `_required_artifacts` in `tools/relay_engine/authority.py` counts the erratum only from such a review, although a digest declared by a relay the grant’s lineage rests on pins it independently.
 An approved erratum does not re-open `DISPATCH IMPL` when implementation is already dispatched; the Implementer resumes under the standing dispatch after reading the approved erratum.
 A change to a bound item requires a reissue.
 
@@ -433,7 +434,9 @@ A resume is unchanged only when the seat establishes all three conditions:
 
 Anything the seat cannot establish is unknown, and unknown asks again.
 With all three established, an unchanged resume needs no new check.
-A changed artifact always requires a fresh answer; an approved erratum can make that answer yes.
+A changed artifact always requires a fresh answer; for the grant in hand, an approved amendment filed as a new file beside an unchanged base can make that answer yes.
+An artifact pinned by that grant’s lineage keeps its pin for that grant, as `_required_artifacts` in `tools/relay_engine/authority.py` decides; a relay outside the lineage cannot replace that pin, so an in-place edit stays `authority.artifact-changed` for that grant.
+An amendment pinned instead through later counted carriers and reviews takes its latest counted declaration’s digest, so a later counted carrier and review can move that pin.
 The check answers for a closed cycle through `authority.cycle-closed`; no supported cycle-state read is prescribed here.
 
 Retain the command, its output or stderr code, and exit status for every check actually run.
@@ -449,12 +452,17 @@ A managed-root seat whose check failed, was denied, could not evaluate or was no
 The engine's code governs; these predicates describe the release this text ships with, with routes and relay kinds kept explicit.
 Reason identifiers below are identifiers only, not display messages.
 
-Where a rule below gives `authority.lineage-incomplete` for an unusable review, that is a review a pair-Planner grant's lineage rests on.
-An amendment is an `-erratum-N`, `-supplement-N` or `-amendment-N` file declared by a later PLAN or DESIGN of the same lock, and `_required_artifacts` in `tools/relay_engine/authority.py` pins its bytes in one of two ways.
-An amendment that a relay the grant's lineage rests on declares with a digest is pinned, as any artifact is; for an operator or orchestrator grant those relays are the grant itself and every relay `_lineage` reaches from its `PARENT_DISPATCH_ID`, whatever the reviews among them say.
-An amendment no such relay declares is pinned only when the same function counts it, accepting both the later relay that declares it and the acting Implementer's review of that relay.
-When it does not count one, whatever the cause, including a review of it that fails a rule below, it adds neither a pin nor a reason, so that amendment's bytes are not pinned; R8's later-relay rule reads those later relays on its own and can still refuse a pair-Planner grant over one.
-An allowed answer alone therefore shows neither that a delta review counted nor that an amendment's bytes are pinned; a grant that itself declares the amendment's digest is allowed only when those bytes are pinned at that digest and match it, so declaring it is a sufficient way to require the pin.
+Where R3 to R7 give `authority.lineage-incomplete` for an unusable review, that is a review a pair-Planner grant’s lineage rests on; R8 can also refuse over a later review outside that lineage.
+An amendment is an `-erratum-N`, `-supplement-N` or `-amendment-N` file declared by a later PLAN or DESIGN of the same lock, and `_required_artifacts` in `tools/relay_engine/authority.py` decides its pin.
+An amendment that a relay the grant’s lineage rests on declares with a digest is pinned, as any artifact is.
+For a grant from `operator`, `orchestrator` or an orchestrator-planner-role address, the declaring relays are the grant itself and every relay `_lineage` reaches from its `PARENT_DISPATCH_ID`, whatever the reviews among them say; for a pair-Planner grant, they are the reviews, PLAN and DESIGN its lineage selects, not the grant or the PLAN’s ancestors.
+The pin takes the latest digest those declaring relays supply; a name without a digest never removes an existing pin, but answers `authority.could-not-evaluate` when nothing pins the amendment.
+An amendment no such relay declares is pinned when the same function counts it from its later declaring carrier and the acting Implementer’s approving review that restates the locator and digest.
+A name without a digest in the declaring set also keeps that counting step from pinning the amendment; without a digest from the set it answers `authority.could-not-evaluate` even if the amendment would otherwise count.
+A pair-Planner grant’s own name without a digest answers `authority.could-not-evaluate` only when nothing else pins the amendment.
+When the counting step does not count an amendment, whatever the cause, including a review that fails a rule below, that step adds neither a pin nor a reason; R8 reads later relays independently and can still refuse a pair-Planner grant over one.
+An allowed answer alone therefore shows neither that a delta review counted nor that an amendment’s bytes are pinned.
+A grant declaring the amendment’s digest as a field the check reads requires the bytes to match the applicable pin, with the latest declaring digest governing; a declaration inside a fence or indented does not establish that requirement.
 
 - R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with an empty line or a line holding only spaces and tabs on each side, or the corresponding file edge.
   A `DISPATCH IMPL` token is live only in `PHASE: IMPL`; the `DISPATCH MERGE` phase binding is stated under Literal merge token.
