@@ -297,14 +297,15 @@ Quote only the operator’s reply to that question, and only if it says to merge
 An acknowledgment, a conditional, an earlier general instruction, or an answer to a different question is not authorization.
 A quoted refusal is not a disposition.
 The inline record is bound to this grant's pins and the effective held review; it carries no separate grant authority.
-The planned consumer checks only the exact key, `operator-in-chat`, a well-formed stamp and a nonempty quotation; it cannot verify chat authenticity or semantic authorization.
+The disposition check in `gate_checkpoint_findings` in `tools/relay_engine/rules.py` checks only the line’s form; it cannot verify chat authenticity or semantic authorization.
 Its silence is not proof that the operator actually disposed of the conditions.
 Without the well-formed line, an orchestrator grant after a held reply is not heard.
 The Implementer still acts on the filed grant, not on the chat record alone.
 
-The engine consumer (B8) has not landed; no mechanical checkpoint warning is claimed here until it lands and is evidenced.
-Its specified rule is `review.gate-not-heard`: lint will warn on an orchestrator grant after adoption when the checkpoint is not heard.
-The warning's subject is the evaluated grant; the gate record, effective request, effective reply and disposition, where present, are its operands.
+The live warning `review.gate-not-heard` is decided by `gate_checkpoint_findings` in `tools/relay_engine/rules.py`; a seat sees it in submit admission findings, a managed root’s history audit, and either linter’s sweep of a hand-authored root.
+The warning’s subject is the evaluated grant; its operands are the gate record, effective request and effective reply that exist, and its reason and the disposition’s state are parameters.
+A grant with no orchestrator Planner request parented to the record its `PARENT_DISPATCH_ID` names warns with `no-request` on every grant, including a chain with the reviewer’s record parented to the gate record and the grant parented to the reviewer’s record.
+An adopting run files Template L between the gate record and the reply and parents the grant to the gate record, as the request/reply sequence above specifies.
 A new grant's warning is not suppressed merely because its gate record is known history.
 The warning never changes exit status, refuses, or blocks a merge in any context.
 No new finding arises for a non-adopting root, an operator-authored grant in any topology, or a root with the existing operator-authored no-reviewer waiver before the grant in the applicable order.
