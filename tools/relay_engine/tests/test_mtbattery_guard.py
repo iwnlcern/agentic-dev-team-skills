@@ -180,3 +180,198 @@ class TestMutationGuard(unittest.TestCase):
 
     def test_lint_call_raising_the_same_type_is_a_kill(self):
         self.check_isolation(('file-root', PC10), KeyError)
+
+
+class TestMutationRunner(unittest.TestCase):
+    def output(self, raised=True, label='fixture', outcome='FAIL'):
+        marker = f'{mt.RAISE_MARKER}IndexError\n' if raised else ''
+        return marker + f'{label}: expected=0 observed=1 {outcome}\n'
+
+    def test_proxy_isolates_a_raising_lint_call(self):
+        import io
+        def fail(*args):
+            raise IndexError('seeded')
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = mt.LintProxy(SimpleNamespace(lint_file=fail)).lint_file('x')
+        self.assertFalse(result.ok)
+        self.assertEqual(stdout.getvalue(), f'{mt.RAISE_MARKER}IndexError\n')
+        self.assertEqual(stderr.getvalue(), '')
+
+    def test_proxy_wraps_only_lint_calls(self):
+        def fail():
+            raise ValueError('outside')
+        proxy = mt.LintProxy(SimpleNamespace(other=fail, constant=42))
+        self.assertEqual(proxy.constant, 42)
+        with self.assertRaises(ValueError):
+            proxy.other()
+
+    def test_proxy_leaves_internal_calls_unwrapped(self):
+        import io
+        def fail():
+            raise IndexError('inner')
+        lint = SimpleNamespace(lint_file=fail)
+        lint.lint_relay_root = lambda: lint.lint_file()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            mt.LintProxy(lint).lint_relay_root()
+        self.assertEqual(stdout.getvalue().count(mt.RAISE_MARKER), 1)
+
+    def test_parse_assigns_marker_to_next_result_line(self):
+        result = mt.parse_suite_output(self.output() + 'other: expected=0 observed=0 PASS\n', 1)
+        self.assertEqual(result.raised, {'fixture': 'IndexError'})
+        self.assertEqual((result.failed, result.passed), (1, 1))
+
+    def test_raised_label_is_a_kill_even_when_its_line_passes(self):
+        suite = mt.parse_suite_output(self.output(outcome='PASS'), 0)
+        self.assertEqual(suite.raised, {'fixture': 'IndexError'})
+        # Inject only external observations; run_arm still builds the actual kill union.
+        with mock.patch.object(mt, 'observe_suite', return_value=suite), \
+                mock.patch.object(mt, 'exact_error_sets', return_value={('file', 'fixture'): mt.Raised('IndexError')}):
+            actual = mt.run_arm(spec.ARMS[0], mt.DEFAULT_SUITE, {('file', 'fixture'): frozenset()})
+        self.assertIn('fixture', actual.kills)
+
+    def test_parse_marker_on_xroot_label(self):
+        self.assertEqual(mt.parse_suite_output(self.output(label='xroot/X'), 1).raised, {'xroot/X': 'IndexError'})
+
+    def test_parse_marker_without_result_line_is_a_hard_stop(self):
+        with self.assertRaises(mt.RunnerError):
+            mt.parse_suite_output(f'{mt.RAISE_MARKER}ValueError\n', 1)
+
+    def test_parse_strips_root_and_index_prefixes(self):
+        output = '--relay-root X: expected=0 observed=1 FAIL\n--index Y: expected=0 observed=1 FAIL\n'
+        self.assertEqual(mt.parse_suite_output(output, 1).fail_labels, frozenset({'X', 'Y'}))
+
+    def test_parse_carries_returncode(self):
+        self.assertEqual(mt.parse_suite_output('x: expected=0 observed=0 PASS\n', 1).exit, 1)
+
+    def test_runner_completion_checks(self):
+        mt.check_runner_completion(f'{mt.RUNNER_DONE_MARKER}1\n', 1)
+        for output in ('', f'{mt.RUNNER_FAILED_MARKER}RuntimeError\n', f'{mt.RUNNER_DONE_MARKER}0\n', f'{mt.RUNNER_DONE_MARKER}1\n' * 2):
+            with self.subTest(output=output), self.assertRaises(mt.RunnerError):
+                mt.check_runner_completion(output, 1)
+
+    @contextlib.contextmanager
+    def tree(self, rows=2, truncated=False, outside=False, raises=False):
+        with tempfile.TemporaryDirectory() as raw:
+            tools = Path(raw) / 'tools'
+            tools.mkdir()
+            (tools / 'relay-lint.py').write_text('''from types import SimpleNamespace
+
+def lint_file(target):
+    bad = target == 'bad'
+    if bad and RAISE:
+        raise IndexError('lint')
+    return SimpleNamespace(ok=not bad, errors=['bad'] if bad else [], warnings=[])
+'''.replace('RAISE', str(raises)))
+            # The mutant flips False to True in this single expression.
+            arm = {'name': 'standin', 'row': 'C8a', 'function': 'lint_file', 'node': 'Compare', 'original': "target == 'bad'", 'replacement': "target == 'first'"}
+            (tools / 'check-relay-lint-fixtures.py').write_text('''import importlib.util
+from pathlib import Path
+EXPECTED = [('file', name, 0) for name in NAMES]
+def load_linter():
+    spec = importlib.util.spec_from_file_location('standin_lint', Path(__file__).with_name('relay-lint.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+def xroot_cases(path):
+    return []
+def main():
+    lint = load_linter()
+    failed = False
+    for kind, rel, expected in EXPECTED[:LIMIT]:
+        result = lint.lint_file(rel)
+        observed = 0 if result.ok else 1
+        ok = expected == observed
+        failed |= not ok
+        print(f"{rel}: expected={expected} observed={observed} {'PASS' if ok else 'FAIL'}")
+    if OUTSIDE:
+        raise RuntimeError('after all lines')
+    return int(failed)
+'''.replace('NAMES', repr(['first', 'second', 'third'][:rows])).replace('LIMIT', '1' if truncated else 'None').replace('OUTSIDE', str(outside)))
+            yield tools, arm
+
+    def test_observe_suite_complete_stand_in_keeps_exit_1(self):
+        with self.tree() as (tools, arm):
+            obs = mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertEqual((obs.exit, obs.denominator), (1, 2))
+        self.assertEqual(obs.fail_labels, frozenset({'first'}))
+
+    def test_observe_suite_truncated_without_marker(self):
+        with self.tree(truncated=True) as (tools, arm), self.assertRaises(mt.IncompleteSuiteError) as caught:
+            mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertIn('1/2', str(caught.exception))
+
+    def test_observe_suite_runner_failure_outside_lint_call(self):
+        with self.tree(outside=True) as (tools, arm), self.assertRaises(mt.RunnerError):
+            mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+
+    def test_observe_suite_uses_the_tree_population(self):
+        with self.tree(rows=3) as (tools, arm):
+            obs = mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertEqual(obs.denominator, 3)
+        self.assertEqual(obs.passed + obs.failed, 3)
+
+    def test_observe_suite_isolates_lint_raise(self):
+        with self.tree(raises=True) as (tools, arm):
+            obs = mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertEqual(obs.raised, {'first': 'IndexError'})
+        self.assertEqual((obs.passed, obs.failed), (1, 1))
+
+    def test_visible_labels_excludes_xroot_for_non_xr_arms(self):
+        for row, expected in [('C8a', {'static'}), ('XR8', {'static', 'xroot/X'})]:
+            self.assertEqual(mt.visible_labels({'row': row}, {'static', 'xroot/X'}), frozenset(expected))
+
+    def test_static_raise_mismatch(self):
+        self.assertEqual(mt.static_raise_mismatch({'x': 'ValueError'}, {'x': 'ValueError', 'xroot/X': 'IndexError'}), [])
+        self.assertTrue(any('y' in s for s in mt.static_raise_mismatch({}, {'y': 'IndexError'})))
+
+    def observation(self, kills=('x',), universal=('x',)):
+        return mt.ArmObservation(frozenset(kills), {}, frozenset(universal), {}, 1, 1, 1)
+
+    def test_classify_match_observes_once(self):
+        value = self.observation()
+        observer = mock.Mock(return_value=value)
+        self.assertEqual(mt.classify_arm({'name': 'arm'}, value.kills, {}, {}, observer), (value, []))
+        self.assertEqual(observer.call_count, 1)
+
+    def test_classify_repeated_mismatch_returns_the_observation(self):
+        value = self.observation()
+        observer = mock.Mock(return_value=value)
+        self.assertEqual(mt.classify_arm({'name': 'arm'}, frozenset(), {}, {}, observer), (value, []))
+        self.assertEqual(observer.call_count, 2)
+
+    def test_classify_discharged_count_control_is_not_a_mismatch(self):
+        value = self.observation(universal=('x', 'control'))
+        observer = mock.Mock(return_value=value)
+        self.assertEqual(mt.classify_arm({'name': 'arm'}, value.kills, {}, {'arm': {'control': 'x'}}, observer), (value, []))
+        self.assertEqual(observer.call_count, 1)
+
+    def test_classify_alternating_observation_is_unstable(self):
+        observer = mock.Mock(side_effect=[self.observation(), self.observation(kills=('x', 'moved'))])
+        value, errors = mt.classify_arm({'name': 'arm'}, frozenset(), {}, {}, observer)
+        self.assertIsNone(value)
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith('UNSTABLE arm'))
+        self.assertIn('moved', errors[0])
+
+    def test_runner_command_uses_invoking_battery(self):
+        self.assertIn(str(Path(mt.__file__).resolve()), mt.DEFAULT_SUITE)
+
+    def test_main_preflight_exits_7_before_any_arm(self):
+        import io
+        stdout = io.StringIO()
+        with mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']), \
+                mock.patch.object(mt, 'run_arm', side_effect=AssertionError('arm must not run')) as run, contextlib.redirect_stdout(stdout):
+            self.assertEqual(mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py')]), 7)
+        self.assertEqual(run.call_count, 0)
+        self.assertIn('G3 seeded', stdout.getvalue())
+        self.assertNotIn('ARM=', stdout.getvalue())
+
+    def test_main_passes_selection_to_preflight(self):
+        import io
+        with mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']) as guard, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'XR8']), 7)
+        self.assertEqual(len(guard.call_args.args[2]), 2)
+        self.assertTrue(all('XR8' in arm.get('rows', (arm['row'],)) for arm in guard.call_args.args[2]))
+        self.assertFalse(guard.call_args.args[3])

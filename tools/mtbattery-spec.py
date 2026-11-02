@@ -445,3 +445,6 @@ if set(KILLS) != _arm_names:
     )
 for _arm in ARMS:
     _arm["kills"] = tuple(KILLS[_arm["name"]])
+
+
+RAISES: dict[str, dict[str, str]] = {}

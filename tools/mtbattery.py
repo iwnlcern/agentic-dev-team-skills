@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import importlib.util
 import os
 import re
@@ -12,15 +13,15 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from functools import partial
+from dataclasses import dataclass, replace
+from functools import partial, lru_cache
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
-DEFAULT_SUITE = (sys.executable, "tools/check-relay-lint-fixtures.py")
+DEFAULT_SUITE = (sys.executable, str(Path(__file__).resolve()), "--suite-runner", "tools/check-relay-lint-fixtures.py")
 # A fixture result has the harness's fixed outcome fields. Other status lines
 # may legitimately end in PASS/FAIL and must not enter the battery denominator.
 RESULT_LINE = re.compile(r"^(?:--relay-root |--index )?.+: expected=[01] observed=[01] (PASS|FAIL)$")
@@ -155,7 +156,8 @@ def parse_results(output: str) -> tuple[int, int]:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--spec", type=Path, required=True)
+    parser.add_argument("--spec", type=Path)
+    parser.add_argument("--suite-runner", type=Path)
     parser.add_argument("--only", metavar="ROW", action="append", default=[])
     parser.add_argument(
         "command",
@@ -163,6 +165,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="suite command after --; defaults to the base fixture suite",
     )
     args = parser.parse_args(argv)
+    if args.spec is None and args.suite_runner is None:
+        parser.error("--spec is required unless --suite-runner is supplied")
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
     return args
@@ -582,43 +586,225 @@ def structural_errors(spec, harness, spec_arms, full_run: bool) -> list[str]:
     return errors
 
 
-def run_arm(
-    arm: dict[str, object],
-    command: tuple[str, ...],
-    universal_baseline: dict[tuple[str, str], frozenset[str]],
-) -> tuple[set[str], set[str], int, int, int]:
-    source = (TOOLS / "relay-lint.py").read_text(encoding="utf-8")
+RAISE_MARKER = "MTBATTERY_RAISE "
+RUNNER_DONE_MARKER = "MTBATTERY_DONE "
+RUNNER_FAILED_MARKER = "MTBATTERY_FAILED "
+
+
+class RunnerError(Exception):
+    """No attributable suite observation was produced."""
+
+
+class IncompleteSuiteError(RunnerError):
+    def __init__(self, observed: int, expected: int):
+        self.observed, self.expected = observed, expected
+        super().__init__(f"{observed}/{expected}")
+
+
+class LintProxy:
+    def __init__(self, lint):
+        self.lint = lint
+
+    def __getattr__(self, name):
+        attribute = getattr(self.lint, name)
+        if not name.startswith("lint_") or not callable(attribute):
+            return attribute
+        def isolated(*args, **kwargs):
+            try:
+                return attribute(*args, **kwargs)
+            except Exception as exc:
+                print(f"{RAISE_MARKER}{type(exc).__name__}", flush=True)
+                return SimpleNamespace(ok=False, errors=[f"lint call raised {type(exc).__name__}"], warnings=[])
+        return isolated
+
+
+def suite_runner_main(harness_path: Path) -> int:
+    try:
+        harness = load_module("mtbattery_suite", harness_path.resolve())
+        lint = harness.load_linter()
+        harness.load_linter = lambda: LintProxy(lint)
+        code = harness.main()
+    except BaseException as exc:
+        print(f"{RUNNER_FAILED_MARKER}{type(exc).__name__}: {exc}", flush=True)
+        return 1
+    print(f"{RUNNER_DONE_MARKER}{code}", flush=True)
+    return code
+
+
+@dataclass(frozen=True)
+class SuiteObservation:
+    passed: int
+    failed: int
+    fail_labels: frozenset[str]
+    raised: dict[str, str]
+    exit: int
+    denominator: int = 0
+
+
+def parse_suite_output(output: str, returncode: int) -> SuiteObservation:
+    passed = failed = 0
+    failures, raised, seen = set(), {}, set()
+    pending = None
+    for line in output.splitlines():
+        if line.startswith(RAISE_MARKER):
+            if pending is not None:
+                raise RunnerError("multiple raise markers before a result")
+            pending = line[len(RAISE_MARKER):]
+            if not pending:
+                raise RunnerError("empty raise marker")
+            continue
+        match = RESULT_DETAIL.fullmatch(line)
+        if match is None:
+            continue
+        label = match['label'].removeprefix('--relay-root ').removeprefix('--index ')
+        if label in seen:
+            raise RunnerError(f"duplicate result label {label}")
+        seen.add(label)
+        if match['outcome'] == 'PASS':
+            passed += 1
+        else:
+            failed += 1
+            failures.add(label)
+        if pending is not None:
+            raised[label] = pending
+            pending = None
+    if pending is not None:
+        raise RunnerError("raise marker without a following result")
+    return SuiteObservation(passed, failed, frozenset(failures), raised, returncode)
+
+
+def check_runner_completion(output: str, returncode: int) -> None:
+    lines = output.splitlines()
+    failures = [line for line in lines if line.startswith(RUNNER_FAILED_MARKER)]
+    done = [line[len(RUNNER_DONE_MARKER):] for line in lines if line.startswith(RUNNER_DONE_MARKER)]
+    if failures or done != [str(returncode)]:
+        raise RunnerError(f"runner completion invalid: exit={returncode} done={done} failures={failures}")
+
+
+@lru_cache(maxsize=None)
+def _suite_denominator(tools_root: Path) -> int:
+    harness = load_module("mtbattery_population", tools_root / "check-relay-lint-fixtures.py")
+    return len(harness.EXPECTED) + xroot_registration_count(harness)
+
+
+def suite_denominator(tools_root: Path) -> int:
+    return _suite_denominator(tools_root.resolve())
+
+
+@contextlib.contextmanager
+def mutated_tools(arm, tools_root):
+    source = (tools_root / "relay-lint.py").read_text(encoding="utf-8")
     start, end = mutation_span(source, arm)
-    mutant = source[:start] + str(arm["replacement"]) + source[end:]
-    ast.parse(mutant)  # A non-importable mutant is never a kill.
+    mutant = source[:start] + str(arm['replacement']) + source[end:]
     with tempfile.TemporaryDirectory(prefix="mtbattery-") as raw:
-        scratch = Path(raw)
-        shutil.copytree(TOOLS, scratch / "tools")
-        (scratch / "tools" / "relay-lint.py").write_text(mutant, encoding="utf-8")
-        clear_bytecode(scratch / "tools")
-        # Parsing is not enough: import the exact copied mutant in an isolated
-        # module namespace after cache removal.  Failure is a hard stop, never
-        # counted as a kill.
-        load_module(f"mtbattery_import_{arm['name'].replace('-', '_')}", scratch / "tools" / "relay-lint.py")
-        scratch_harness = load_module(
-            f"mtbattery_harness_{arm['name'].replace('-', '_')}",
-            scratch / "tools" / "check-relay-lint-fixtures.py",
-        )
-        universal_observed = exact_error_sets(scratch_harness)
-        universal_kills = {
-            rel for key, expected_errors in universal_baseline.items()
-            if universal_observed.get(key) != expected_errors
-            for _kind, rel in [key]
-        }
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-        completed = subprocess.run(command, cwd=scratch, capture_output=True, text=True, check=False, env=env)
+        copied = Path(raw) / "tools"
+        shutil.copytree(tools_root, copied)
+        (copied / "relay-lint.py").write_text(mutant, encoding="utf-8")
+        clear_bytecode(copied)
+        try:
+            ast.parse(mutant)
+            load_module("mtbattery_import", copied / "relay-lint.py")
+        except Exception as exc:
+            raise RunnerError(f"mutant import: {type(exc).__name__}: {exc}") from exc
+        yield copied
+
+
+def observe_suite(arm, tools_root: Path, command: tuple[str, ...]) -> SuiteObservation:
+    with mutated_tools(arm, tools_root) as copied:
+        completed = subprocess.run(command, cwd=copied.parent, capture_output=True,
+                                   text=True, check=False,
+                                   env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    if command != DEFAULT_SUITE:
+        # Preserve the legacy arbitrary-command output interpretation.
         output = completed.stdout + completed.stderr
         passed, failed = parse_results(output)
-        return result_failures(output), universal_kills, passed, failed, completed.returncode
+        return SuiteObservation(passed, failed, frozenset(result_failures(output)), {}, completed.returncode)
+    check_runner_completion(completed.stdout, completed.returncode)
+    observation = parse_suite_output(completed.stdout, completed.returncode)
+    denominator = suite_denominator(tools_root)
+    if observation.passed + observation.failed != denominator:
+        raise IncompleteSuiteError(observation.passed + observation.failed, denominator)
+    return replace(observation, denominator=denominator)
+
+
+def visible_labels(arm, labels) -> frozenset[str]:
+    rows = arm.get('rows', (arm.get('row'),))
+    xr = any(str(row).startswith('XR') for row in rows)
+    return frozenset(label for label in labels if xr or not label.startswith('xroot/'))
+
+
+@dataclass(frozen=True)
+class ArmObservation:
+    kills: frozenset[str]
+    raises: dict[str, str]
+    universal_kills: frozenset[str]
+    universal_raises: dict[str, str]
+    passed: int
+    failed: int
+    exit: int
+
+
+def static_raise_mismatch(universal_raises, suite_raises) -> list[str]:
+    static = {label: typ for label, typ in suite_raises.items() if not label.startswith('xroot/')}
+    return [f"static raise mismatch {label}: universal={universal_raises.get(label)} suite={static.get(label)}"
+            for label in sorted(universal_raises.keys() | static.keys())
+            if universal_raises.get(label) != static.get(label)]
+
+
+def run_arm(arm, command, universal_baseline) -> ArmObservation:
+    with mutated_tools(arm, TOOLS) as copied:
+        harness = load_module("mtbattery_arm_harness", copied / "check-relay-lint-fixtures.py")
+        universal = exact_error_sets(harness)
+    universal_kills = frozenset(rel for (kind, rel), expected in universal_baseline.items()
+                                if universal.get((kind, rel)) != expected)
+    universal_raises = {rel: value.exception_type for (_, rel), value in universal.items()
+                        if isinstance(value, Raised)}
+    suite = observe_suite(arm, TOOLS, command)
+    if command == DEFAULT_SUITE:
+        mismatch = static_raise_mismatch(universal_raises, suite.raised)
+        if mismatch:
+            raise RunnerError('; '.join(mismatch))
+    return ArmObservation(visible_labels(arm, suite.fail_labels | suite.raised.keys()),
+                          {label: suite.raised[label] for label in visible_labels(arm, suite.raised)},
+                          universal_kills, universal_raises, suite.passed, suite.failed, suite.exit)
+
+
+def a2_extra(arm, observation, count_controls):
+    extra = set(observation.universal_kills - observation.kills)
+    errors = []
+    for control, twin in count_controls.get(str(arm['name']), {}).items():
+        conditions = []
+        if control not in observation.universal_kills:
+            conditions.append("control is not universally killed")
+        if control in observation.kills:
+            conditions.append("control does not survive its registered oracle")
+        if twin not in observation.kills:
+            conditions.append("twin is not killed by its registered oracle")
+        if conditions:
+            errors.extend(f"CONTROL arm={arm['name']} control={control!r} twin={twin!r}: {message}" for message in conditions)
+        else:
+            extra.discard(control)
+    return frozenset(extra), errors
+
+
+def classify_arm(arm, declared_kills, declared_raises, count_controls, observe):
+    first = observe()
+    extra, controls = a2_extra(arm, first, count_controls)
+    if first.kills == declared_kills and first.raises == declared_raises and not extra and not controls:
+        return first, []
+    second = observe()
+    if first == second:
+        return first, []
+    moved = set(first.kills ^ second.kills) | set(first.universal_kills ^ second.universal_kills)
+    for left, right in ((first.raises, second.raises), (first.universal_raises, second.universal_raises)):
+        moved.update(label for label in left.keys() | right.keys() if left.get(label) != right.get(label))
+    return None, [f"UNSTABLE {arm['name']} moved={sorted(moved)} counts/exit={(first.passed, first.failed, first.exit)}->{(second.passed, second.failed, second.exit)}"]
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.suite_runner is not None:
+        return suite_runner_main(args.suite_runner)
     if not args.spec.is_file():
         raise SystemExit(f"spec does not exist: {args.spec}")
     sys.dont_write_bytecode = True
@@ -628,8 +814,12 @@ def main(argv: list[str]) -> int:
         arm for arm in spec.ARMS
         if not args.only or set(str(row) for row in arm.get("rows", (arm["row"],))) & set(args.only)
     ]
-    errors = validate_spec(spec, selected, not args.only)
     harness = load_module("mtbattery_denominator", TOOLS / "check-relay-lint-fixtures.py")
+    errors = structural_errors(spec, harness, selected, not args.only)
+    if errors:
+        for error in errors:
+            print(f"ERROR {error}")
+        return 7
     count_controls, control_errors = validate_count_controls(spec, harness)
     errors.extend(control_errors)
     xroot_registrations = xroot_registration_count(harness)
@@ -656,39 +846,30 @@ def main(argv: list[str]) -> int:
     completed: list[str] = []
     for arm in selected:
         attempted.append(str(arm["name"]))
+        declared = frozenset(arm["kills"])
+        declared_raises = getattr(spec, 'RAISES', {}).get(str(arm['name']), {})
         try:
-            observed, universal, passed, failed, code = run_arm(arm, command, universal_baseline)
+            observation, unstable = classify_arm(arm, declared, declared_raises, count_controls,
+                                                 lambda: run_arm(arm, command, universal_baseline))
+        except IncompleteSuiteError as exc:
+            errors.append(f"A2 {arm['name']} incomplete-denominator={exc}")
+            continue
         except Exception as exc:
             print(f"ARM={arm['name']} ROW={arm['row']} HARD-FAIL={exc}")
             errors.append(f"{arm['name']}: {exc}")
             continue
+        if observation is None:
+            errors.extend(unstable)
+            continue
         completed.append(str(arm["name"]))
-        arm_rows = {str(row) for row in arm.get("rows", (arm["row"],))}
-        if not any(row.startswith("XR") for row in arm_rows):
-            # Increment 9 is a frozen ledger over the committed static matrix.
-            # Runtime-generated xroot registrations belong to Increment 10 and
-            # do not retroactively enlarge historical arm kill declarations.
-            observed = {label for label in observed if not label.startswith("xroot/")}
-        declared = set(arm["kills"])
-        universal_extra = universal - observed
-        for control, twin in count_controls.get(str(arm["name"]), {}).items():
-            condition_errors: list[str] = []
-            if control not in universal:
-                condition_errors.append("control is not universally killed")
-            if control in observed:
-                condition_errors.append("control does not survive its registered oracle")
-            if twin not in observed:
-                condition_errors.append("twin is not killed by its registered oracle")
-            if condition_errors:
-                errors.extend(
-                    f"CONTROL arm={arm['name']} control={control!r} twin={twin!r}: {message}"
-                    for message in condition_errors
-                )
-            else:
-                universal_extra.discard(control)
+        observed, universal = observation.kills, observation.universal_kills
+        passed, failed, code = observation.passed, observation.failed, observation.exit
+        universal_extra, control_errors = a2_extra(arm, observation, count_controls)
+        errors.extend(control_errors)
         print(
             f"ARM={arm['name']} ROW={arm['row']} ROW_ANCHOR={arm['function']} ANCHOR=1 IMPORT=ok "
             f"KILLED={sorted(observed)} EXPECTED={sorted(declared)} "
+            f"RAISED={sorted(observation.raises.items())} "
             f"UNIVERSAL_EXACT={sorted(universal)} UNIVERSAL_MINUS_REGISTERED={sorted(universal_extra)} "
             f"PASS={passed} FAIL={failed} TOTAL={passed + failed}/{registration_denominator} exit={code}"
         )
@@ -699,6 +880,8 @@ def main(argv: list[str]) -> int:
             )
         if observed != declared:
             errors.append(f"O3 {arm['name']} observed={sorted(observed)} declared={sorted(declared)}")
+        if observation.raises != declared_raises:
+            errors.append(f"O3 {arm['name']} raises observed={observation.raises} declared={declared_raises}")
         if universal_extra:
             errors.append(
                 f"A2 universal-exact-minus-registered {arm['name']}={sorted(universal_extra)}"
