@@ -158,6 +158,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--suite-runner", type=Path)
+    parser.add_argument("--static-only", action="store_true")
     parser.add_argument("--only", metavar="ROW", action="append", default=[])
     parser.add_argument(
         "command",
@@ -618,11 +619,14 @@ class LintProxy:
         return isolated
 
 
-def suite_runner_main(harness_path: Path) -> int:
+def suite_runner_main(harness_path: Path, static_only: bool = False) -> int:
     try:
         harness = load_module("mtbattery_suite", harness_path.resolve())
         lint = harness.load_linter()
         harness.load_linter = lambda: LintProxy(lint)
+        if static_only:
+            harness.xroot_cases = lambda *args, **kwargs: []
+            harness.xroot_generator_contract_errors = lambda *args, **kwargs: []
         code = harness.main()
     except BaseException as exc:
         print(f"{RUNNER_FAILED_MARKER}{type(exc).__name__}: {exc}", flush=True)
@@ -682,13 +686,26 @@ def check_runner_completion(output: str, returncode: int) -> None:
 
 
 @lru_cache(maxsize=None)
-def _suite_denominator(tools_root: Path) -> int:
+def _suite_populations(tools_root: Path) -> tuple[int, int]:
     harness = load_module("mtbattery_population", tools_root / "check-relay-lint-fixtures.py")
-    return len(harness.EXPECTED) + xroot_registration_count(harness)
+    static = len(harness.EXPECTED)
+    return static, static + xroot_registration_count(harness)
+
+
+def suite_populations(tools_root: Path) -> tuple[int, int]:
+    return _suite_populations(tools_root.resolve())
 
 
 def suite_denominator(tools_root: Path) -> int:
-    return _suite_denominator(tools_root.resolve())
+    return suite_populations(tools_root)[1]
+
+
+def suite_command(arm, command: tuple[str, ...]) -> tuple[str, ...]:
+    return command + ("--static-only",) if command == DEFAULT_SUITE and not reads_xroot(arm) else command
+
+
+def arm_population(arm, command, populations: tuple[int, int]) -> int:
+    return populations[0] if command == DEFAULT_SUITE and not reads_xroot(arm) else populations[1]
 
 
 @contextlib.contextmanager
@@ -709,9 +726,9 @@ def mutated_tools(arm, tools_root):
         yield copied
 
 
-def observe_suite(arm, tools_root: Path, command: tuple[str, ...]) -> SuiteObservation:
+def observe_suite(arm, tools_root: Path, command: tuple[str, ...], population: int | None = None) -> SuiteObservation:
     with mutated_tools(arm, tools_root) as copied:
-        completed = subprocess.run(command, cwd=copied.parent, capture_output=True,
+        completed = subprocess.run(suite_command(arm, command), cwd=copied.parent, capture_output=True,
                                    text=True, check=False,
                                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
     if command != DEFAULT_SUITE:
@@ -721,16 +738,19 @@ def observe_suite(arm, tools_root: Path, command: tuple[str, ...]) -> SuiteObser
         return SuiteObservation(passed, failed, frozenset(result_failures(output)), {}, completed.returncode)
     check_runner_completion(completed.stdout, completed.returncode)
     observation = parse_suite_output(completed.stdout, completed.returncode)
-    denominator = suite_denominator(tools_root)
+    denominator = population if population is not None else arm_population(arm, command, suite_populations(tools_root))
     if observation.passed + observation.failed != denominator:
         raise IncompleteSuiteError(observation.passed + observation.failed, denominator)
     return replace(observation, denominator=denominator)
 
 
-def visible_labels(arm, labels) -> frozenset[str]:
+def reads_xroot(arm: dict[str, object]) -> bool:
     rows = arm.get('rows', (arm.get('row'),))
-    xr = any(str(row).startswith('XR') for row in rows)
-    return frozenset(label for label in labels if xr or not label.startswith('xroot/'))
+    return any(str(row).startswith('XR') for row in rows)
+
+
+def visible_labels(arm, labels) -> frozenset[str]:
+    return frozenset(label for label in labels if reads_xroot(arm) or not label.startswith('xroot/'))
 
 
 @dataclass(frozen=True)
@@ -751,7 +771,7 @@ def static_raise_mismatch(universal_raises, suite_raises) -> list[str]:
             if universal_raises.get(label) != static.get(label)]
 
 
-def run_arm(arm, command, universal_baseline) -> ArmObservation:
+def run_arm(arm, command, universal_baseline, population: int | None = None) -> ArmObservation:
     with mutated_tools(arm, TOOLS) as copied:
         harness = load_module("mtbattery_arm_harness", copied / "check-relay-lint-fixtures.py")
         universal = exact_error_sets(harness)
@@ -759,7 +779,7 @@ def run_arm(arm, command, universal_baseline) -> ArmObservation:
                                 if universal.get((kind, rel)) != expected)
     universal_raises = {rel: value.exception_type for (_, rel), value in universal.items()
                         if isinstance(value, Raised)}
-    suite = observe_suite(arm, TOOLS, command)
+    suite = observe_suite(arm, TOOLS, command, population)
     if command == DEFAULT_SUITE:
         mismatch = static_raise_mismatch(universal_raises, suite.raised)
         if mismatch:
@@ -804,7 +824,7 @@ def classify_arm(arm, declared_kills, declared_raises, count_controls, observe):
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.suite_runner is not None:
-        return suite_runner_main(args.suite_runner)
+        return suite_runner_main(args.suite_runner, args.static_only)
     if not args.spec.is_file():
         raise SystemExit(f"spec does not exist: {args.spec}")
     sys.dont_write_bytecode = True
@@ -824,8 +844,9 @@ def main(argv: list[str]) -> int:
     errors.extend(control_errors)
     xroot_registrations = xroot_registration_count(harness)
     registration_denominator = len(harness.EXPECTED) + xroot_registrations
+    populations = (len(harness.EXPECTED), registration_denominator)
     declared_arm_count = len(spec.ARMS)
-    print(f"DENOMINATOR registrations={registration_denominator} declared_arms={declared_arm_count}")
+    print(f"DENOMINATOR registrations={registration_denominator} static={populations[0]} declared_arms={declared_arm_count}")
     universal_baseline = exact_error_sets(harness)
     exact_message_oracles = xroot_registrations + sum(
         rel in harness.EXPECTED_ERROR_SET for _kind, rel, _expected in harness.EXPECTED
@@ -846,11 +867,12 @@ def main(argv: list[str]) -> int:
     completed: list[str] = []
     for arm in selected:
         attempted.append(str(arm["name"]))
+        population = arm_population(arm, command, populations)
         declared = frozenset(arm["kills"])
         declared_raises = getattr(spec, 'RAISES', {}).get(str(arm['name']), {})
         try:
             observation, unstable = classify_arm(arm, declared, declared_raises, count_controls,
-                                                 lambda: run_arm(arm, command, universal_baseline))
+                                                 lambda: run_arm(arm, command, universal_baseline, population))
         except IncompleteSuiteError as exc:
             errors.append(f"A2 {arm['name']} incomplete-denominator={exc}")
             continue
@@ -871,12 +893,12 @@ def main(argv: list[str]) -> int:
             f"KILLED={sorted(observed)} EXPECTED={sorted(declared)} "
             f"RAISED={sorted(observation.raises.items())} "
             f"UNIVERSAL_EXACT={sorted(universal)} UNIVERSAL_MINUS_REGISTERED={sorted(universal_extra)} "
-            f"PASS={passed} FAIL={failed} TOTAL={passed + failed}/{registration_denominator} exit={code}"
+            f"PASS={passed} FAIL={failed} TOTAL={passed + failed}/{population} exit={code}"
         )
-        if passed + failed != registration_denominator:
+        if passed + failed != population:
             errors.append(
                 f"A2 {arm['name']} incomplete-denominator="
-                f"{passed + failed}/{registration_denominator}"
+                f"{passed + failed}/{population}"
             )
         if observed != declared:
             errors.append(f"O3 {arm['name']} observed={sorted(observed)} declared={sorted(declared)}")

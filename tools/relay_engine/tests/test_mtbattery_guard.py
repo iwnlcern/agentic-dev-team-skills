@@ -375,3 +375,100 @@ def main():
         self.assertEqual(len(guard.call_args.args[2]), 2)
         self.assertTrue(all('XR8' in arm.get('rows', (arm['row'],)) for arm in guard.call_args.args[2]))
         self.assertFalse(guard.call_args.args[3])
+
+
+class TestMutationPopulations(unittest.TestCase):
+    # A wrong population branch must either leak xroot results into static runs
+    # or falsely reject a complete custom/full run.
+    @contextlib.contextmanager
+    def tree(self, **kwargs):
+        with TestMutationRunner().tree(**kwargs) as (tools, arm):
+            path = tools / 'check-relay-lint-fixtures.py'
+            source = path.read_text().replace('def xroot_cases(path):\n    return []',
+                "def xroot_cases(path):\n    return ['xroot/one']\ndef xroot_generator_contract_errors():\n    return []")
+            source = source.replace('    if OUTSIDE:', '    if OUTSIDE:')
+            source = source.replace('    return int(failed)',
+                "    for label in xroot_cases(Path('.')):\n        print(f'{label}: expected=0 observed=1 FAIL')\n        failed = True\n    return int(failed)")
+            path.write_text(source)
+            yield tools, arm
+
+    def test_reads_xroot_agrees_with_visible_labels_for_every_spec_arm(self):
+        self.assertEqual(sum(mt.reads_xroot(a) for a in spec.ARMS), 39)
+        for arm in spec.ARMS:
+            self.assertEqual(bool(mt.visible_labels(arm, {'xroot/x'})), mt.reads_xroot(arm))
+
+    def test_static_mode_omits_xroot_lines(self):
+        with self.tree() as (tools, arm):
+            obs = mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertEqual(obs.denominator, 2)
+        self.assertEqual(obs.fail_labels, frozenset({'first'}))
+        self.assertEqual((obs.passed, obs.failed), (1, 1))
+
+    def test_static_mode_missing_static_line_is_incomplete(self):
+        with self.tree(truncated=True) as (tools, arm), self.assertRaises(mt.IncompleteSuiteError) as caught:
+            mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertEqual(str(caught.exception), '1/2')
+
+    def test_xr_arm_runs_the_whole_suite(self):
+        with self.tree() as (tools, arm):
+            arm['row'] = 'XR8'
+            obs = mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+        self.assertEqual(obs.denominator, 3)
+        self.assertEqual(obs.fail_labels, frozenset({'first', 'xroot/one'}))
+        self.assertEqual((obs.passed, obs.failed), (1, 2))
+
+    def test_static_runner_leaves_the_harness_file_and_proxy(self):
+        with self.tree(raises=True) as (tools, arm):
+            path = tools / 'check-relay-lint-fixtures.py'
+            before = path.read_bytes()
+            obs = mt.observe_suite(arm, tools, mt.DEFAULT_SUITE)
+            self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(obs.raised, {'first': 'IndexError'})
+        self.assertEqual(obs.denominator, 2)
+
+    def test_custom_command_unchanged_for_non_xr_arm(self):
+        self.assertEqual(mt.suite_command({'row': 'C8a'}, ('custom',)), ('custom',))
+        self.assertEqual(mt.suite_command({'row': 'XR8'}, mt.DEFAULT_SUITE), mt.DEFAULT_SUITE)
+
+    def test_arm_population_rule(self):
+        for row, command, expected in [('C8a', mt.DEFAULT_SUITE, 656), ('C8a', ('custom',), 786),
+                                       ('XR8', mt.DEFAULT_SUITE, 786), ('XR8', ('custom',), 786)]:
+            self.assertEqual(mt.arm_population({'row': row}, command, (656, 786)), expected)
+
+    @contextlib.contextmanager
+    def cheap_parent(self):
+        # Isolate reporting from the already-tested expensive preflight/oracles.
+        with mock.patch.object(mt, 'structural_errors', return_value=[]), \
+             mock.patch.object(mt, 'xroot_registration_count', return_value=130), \
+             mock.patch.object(mt, 'exact_error_sets', return_value={}), \
+             mock.patch.object(mt, 'validate_count_controls', return_value=({}, [])), \
+             mock.patch.object(mt, 'generated_and_registered_by_kind', return_value=({}, {})):
+            yield
+
+    def test_custom_command_full_population_is_complete(self):
+        import io
+        for count in (786, 785):
+            out = io.StringIO()
+            obs = mt.ArmObservation(frozenset({'x'}), {}, frozenset(), {}, count - 1, 1, 1)
+            with self.cheap_parent(), mock.patch.object(mt, 'run_arm', return_value=obs), contextlib.redirect_stdout(out):
+                mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'C1', '--', 'custom'])
+            lines = out.getvalue().splitlines()
+            arms = [line for line in lines if line.startswith('ARM=')]
+            self.assertEqual(len(arms), 2)
+            self.assertTrue(all(f'TOTAL={count}/786' in line for line in arms))
+            incomplete = [line for line in lines if 'incomplete-denominator' in line]
+            self.assertEqual(len(incomplete), 0 if count == 786 else 2)
+            if count == 785:
+                self.assertTrue(all('incomplete-denominator=785/786' in line for line in incomplete))
+
+    def test_main_denominator_line_names_both_populations(self):
+        import io
+        out = io.StringIO()
+        with self.cheap_parent(), contextlib.redirect_stdout(out):
+            mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'no-arm'])
+        lines = out.getvalue().splitlines()
+        denominator = [line for line in lines if line.startswith('DENOMINATOR ')]
+        self.assertEqual(len(denominator), 1)
+        self.assertIn('786', denominator[0])
+        self.assertIn('656', denominator[0])
+        self.assertFalse(any(line.startswith('ARM=') for line in lines))
