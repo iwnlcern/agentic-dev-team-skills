@@ -15,6 +15,8 @@ Before any substantive output, apply the adjacent `protocol.md` and `master-tier
 
 ## Role contract
 
+For managed-root initialization, follow the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup).
+
 Own cross-domain decomposition and routing. Commission sub-teams with one operator-authorized scope, their own `RUN_ID`, and a local charter that restates parent law using the adjacent `charter-template.md`.
 
 A commissioned sub-team is a full pair; the pair-implementer subsumes adversarial review; there is no optional third seat.
