@@ -6,6 +6,12 @@ import argparse
 import ast
 import contextlib
 import importlib.util
+import hashlib
+import json
+import pickle
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import shutil
@@ -13,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, asdict
 from functools import partial, lru_cache
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -159,6 +165,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--suite-runner", type=Path)
     parser.add_argument("--static-only", action="store_true")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--shuffle", type=int)
+    parser.add_argument("--worker-arm")
+    parser.add_argument("--run-file", type=Path)
     parser.add_argument("--only", metavar="ROW", action="append", default=[])
     parser.add_argument(
         "command",
@@ -166,6 +176,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="suite command after --; defaults to the base fixture suite",
     )
     args = parser.parse_args(argv)
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    if (args.worker_arm is None) != (args.run_file is None):
+        parser.error("--worker-arm and --run-file are required together")
     if args.spec is None and args.suite_runner is None:
         parser.error("--spec is required unless --suite-runner is supplied")
     if args.command[:1] == ["--"]:
@@ -821,10 +835,146 @@ def classify_arm(arm, declared_kills, declared_raises, count_controls, observe):
     return None, [f"UNSTABLE {arm['name']} moved={sorted(moved)} counts/exit={(first.passed, first.failed, first.exit)}->{(second.passed, second.failed, second.exit)}"]
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-    if args.suite_runner is not None:
-        return suite_runner_main(args.suite_runner, args.static_only)
+REPORT_MARKER = "MTBATTERY_REPORT "
+
+
+@dataclass(frozen=True)
+class ArmReport:
+    name: str
+    lines: tuple[str, ...]
+    errors: tuple[str, ...]
+    completed: bool
+
+
+@dataclass(frozen=True)
+class RunContext:
+    command: tuple[str, ...]
+    universal_baseline: dict
+    count_controls: dict
+    populations: tuple[int, int]
+
+
+def write_run_file(path: Path, context: RunContext) -> None:
+    # Private, locally-created run file; never an externally supplied artifact.
+    with path.open('xb') as stream:
+        pickle.dump(context, stream)
+
+
+def read_run_file(path: Path) -> RunContext:
+    with path.open('rb') as stream:
+        return pickle.load(stream)
+
+
+def arm_report(arm, spec: ModuleType, context: RunContext) -> ArmReport:
+    name = str(arm['name'])
+    population = arm_population(arm, context.command, context.populations)
+    declared = frozenset(arm['kills'])
+    declared_raises = getattr(spec, 'RAISES', {}).get(name, {})
+    try:
+        observation, unstable = classify_arm(
+            arm, declared, declared_raises, context.count_controls,
+            lambda: run_arm(arm, context.command, context.universal_baseline, population))
+    except IncompleteSuiteError as exc:
+        return ArmReport(name, (), (f"A2 {name} incomplete-denominator={exc}",), False)
+    except Exception as exc:
+        return ArmReport(name, (f"ARM={name} ROW={arm['row']} HARD-FAIL={exc}",),
+                         (f"{name}: {exc}",), False)
+    if observation is None:
+        return ArmReport(name, (), tuple(unstable), False)
+    observed, universal = observation.kills, observation.universal_kills
+    passed, failed, code = observation.passed, observation.failed, observation.exit
+    extra, errors = a2_extra(arm, observation, context.count_controls)
+    line = (
+        f"ARM={name} ROW={arm['row']} ROW_ANCHOR={arm['function']} ANCHOR=1 IMPORT=ok "
+        f"KILLED={sorted(observed)} EXPECTED={sorted(declared)} "
+        f"RAISED={sorted(observation.raises.items())} "
+        f"UNIVERSAL_EXACT={sorted(universal)} UNIVERSAL_MINUS_REGISTERED={sorted(extra)} "
+        f"PASS={passed} FAIL={failed} TOTAL={passed + failed}/{population} exit={code}"
+    )
+    if passed + failed != population:
+        errors.append(f"A2 {name} incomplete-denominator={passed + failed}/{population}")
+    if observed != declared:
+        errors.append(f"O3 {name} observed={sorted(observed)} declared={sorted(declared)}")
+    if observation.raises != declared_raises:
+        errors.append(f"O3 {name} raises observed={observation.raises} declared={declared_raises}")
+    if extra:
+        errors.append(f"A2 universal-exact-minus-registered {name}={sorted(extra)}")
+    if not observed:
+        errors.append(f"survivor {name}")
+    return ArmReport(name, (line,), tuple(errors), True)
+
+
+def worker_main(spec_path: Path, arm_name: str, run_file: Path) -> int:
+    spec = load_module('mtbattery_worker_spec', spec_path)
+    arm = next(arm for arm in spec.ARMS if arm['name'] == arm_name)
+    report = arm_report(arm, spec, read_run_file(run_file))
+    print(REPORT_MARKER + json.dumps(asdict(report)), flush=True)
+    return 0
+
+
+def start_order(arms, seed: int | None):
+    ordered = list(arms)
+    if seed is not None:
+        random.Random(seed).shuffle(ordered)
+    return ordered
+
+
+def decode_report(output: str, name: str) -> ArmReport:
+    lines = output.splitlines()
+    if len(lines) != 1 or not lines[0].startswith(REPORT_MARKER):
+        raise ValueError('expected exactly one worker record')
+    data = json.loads(lines[0][len(REPORT_MARKER):])
+    if not isinstance(data, dict) or set(data) != {'name', 'lines', 'errors', 'completed'}:
+        raise ValueError('invalid worker record fields')
+    if data['name'] != name or type(data['completed']) is not bool:
+        raise ValueError('invalid worker identity or completion')
+    for key in ('lines', 'errors'):
+        if not isinstance(data[key], list) or any(not isinstance(line, str) or '\n' in line or '\r' in line for line in data[key]):
+            raise ValueError('invalid worker lines')
+    return ArmReport(name, tuple(data['lines']), tuple(data['errors']), data['completed'])
+
+
+def run_workers(arms, jobs: int, seed: int | None, run_file: Path,
+                run_dir: Path, worker_command) -> list[ArmReport]:
+    def run(arm):
+        name = str(arm['name'])
+        status = 'not-started'
+        stderr = ''
+        try:
+            with tempfile.TemporaryDirectory(prefix='arm-', dir=run_dir) as raw:
+                env = {**os.environ, 'TMPDIR': raw, 'TEMP': raw, 'TMP': raw,
+                       'PYTHONDONTWRITEBYTECODE': '1'}
+                result = subprocess.run(worker_command(name), env=env, capture_output=True,
+                                        text=True, check=False)
+                status, stderr = result.returncode, result.stderr.strip()
+                if status:
+                    raise ValueError('worker exited without a successful record')
+                return decode_report(result.stdout, name)
+        except Exception as exc:
+            error = f"{name}: worker exit={status}: {exc}"
+            if stderr:
+                error += ' stderr=' + repr(stderr)
+            return ArmReport(name, (f"ARM={name} HARD-FAIL={error}",), (error,), False)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        pending = {str(arm['name']): pool.submit(run, arm) for arm in start_order(arms, seed)}
+        return [pending[str(arm['name'])].result() for arm in arms]
+
+
+def tree_digest(root: Path) -> dict[str, str]:
+    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob('*')) if path.is_file()}
+
+
+def digest_changes(before, after) -> list[str]:
+    return [f"source tools {('added' if path not in before else 'removed' if path not in after else 'changed')} {path}"
+            for path in sorted(before.keys() | after.keys()) if before.get(path) != after.get(path)]
+
+
+def emit(*args) -> None:
+    print(*args, flush=True)
+
+
+def battery_main(args) -> int:
     if not args.spec.is_file():
         raise SystemExit(f"spec does not exist: {args.spec}")
     sys.dont_write_bytecode = True
@@ -838,7 +988,7 @@ def main(argv: list[str]) -> int:
     errors = structural_errors(spec, harness, selected, not args.only)
     if errors:
         for error in errors:
-            print(f"ERROR {error}")
+            emit(f"ERROR {error}")
         return 7
     count_controls, control_errors = validate_count_controls(spec, harness)
     errors.extend(control_errors)
@@ -846,13 +996,13 @@ def main(argv: list[str]) -> int:
     registration_denominator = len(harness.EXPECTED) + xroot_registrations
     populations = (len(harness.EXPECTED), registration_denominator)
     declared_arm_count = len(spec.ARMS)
-    print(f"DENOMINATOR registrations={registration_denominator} static={populations[0]} declared_arms={declared_arm_count}")
+    emit(f"DENOMINATOR registrations={registration_denominator} static={populations[0]} declared_arms={declared_arm_count}")
     universal_baseline = exact_error_sets(harness)
     exact_message_oracles = xroot_registrations + sum(
         rel in harness.EXPECTED_ERROR_SET for _kind, rel, _expected in harness.EXPECTED
     )
     count_or_exit_oracles = registration_denominator - exact_message_oracles
-    print(
+    emit(
         f"ORACLES exact-message={exact_message_oracles} "
         f"count-or-exit={count_or_exit_oracles} universal={len(universal_baseline)}"
     )
@@ -860,67 +1010,56 @@ def main(argv: list[str]) -> int:
     kinds = set(generated) | set(registered)
     for kind in sorted(kinds):
         difference = generated.get(kind, set()) ^ registered.get(kind, set())
-        print(f"O2 KIND={kind} GENERATED={len(generated.get(kind, set()))} REGISTERED={len(registered.get(kind, set()))} DIFF={len(difference)}")
+        emit(f"O2 KIND={kind} GENERATED={len(generated.get(kind, set()))} REGISTERED={len(registered.get(kind, set()))} DIFF={len(difference)}")
         if difference:
             errors.append(f"O2 {kind} symmetric-difference={sorted(difference)}")
-    attempted: list[str] = []
-    completed: list[str] = []
-    for arm in selected:
-        attempted.append(str(arm["name"]))
-        population = arm_population(arm, command, populations)
-        declared = frozenset(arm["kills"])
-        declared_raises = getattr(spec, 'RAISES', {}).get(str(arm['name']), {})
-        try:
-            observation, unstable = classify_arm(arm, declared, declared_raises, count_controls,
-                                                 lambda: run_arm(arm, command, universal_baseline, population))
-        except IncompleteSuiteError as exc:
-            errors.append(f"A2 {arm['name']} incomplete-denominator={exc}")
-            continue
-        except Exception as exc:
-            print(f"ARM={arm['name']} ROW={arm['row']} HARD-FAIL={exc}")
-            errors.append(f"{arm['name']}: {exc}")
-            continue
-        if observation is None:
-            errors.extend(unstable)
-            continue
-        completed.append(str(arm["name"]))
-        observed, universal = observation.kills, observation.universal_kills
-        passed, failed, code = observation.passed, observation.failed, observation.exit
-        universal_extra, control_errors = a2_extra(arm, observation, count_controls)
-        errors.extend(control_errors)
-        print(
-            f"ARM={arm['name']} ROW={arm['row']} ROW_ANCHOR={arm['function']} ANCHOR=1 IMPORT=ok "
-            f"KILLED={sorted(observed)} EXPECTED={sorted(declared)} "
-            f"RAISED={sorted(observation.raises.items())} "
-            f"UNIVERSAL_EXACT={sorted(universal)} UNIVERSAL_MINUS_REGISTERED={sorted(universal_extra)} "
-            f"PASS={passed} FAIL={failed} TOTAL={passed + failed}/{population} exit={code}"
-        )
-        if passed + failed != population:
-            errors.append(
-                f"A2 {arm['name']} incomplete-denominator="
-                f"{passed + failed}/{population}"
-            )
-        if observed != declared:
-            errors.append(f"O3 {arm['name']} observed={sorted(observed)} declared={sorted(declared)}")
-        if observation.raises != declared_raises:
-            errors.append(f"O3 {arm['name']} raises observed={observation.raises} declared={declared_raises}")
-        if universal_extra:
-            errors.append(
-                f"A2 universal-exact-minus-registered {arm['name']}={sorted(universal_extra)}"
-            )
-        if not observed:
-            errors.append(f"survivor {arm['name']}")
+    before = tree_digest(TOOLS)
+    context = RunContext(command, universal_baseline, count_controls, populations)
+    with tempfile.TemporaryDirectory(prefix='mtbattery-run-') as raw:
+        run_dir = Path(raw)
+        run_file = run_dir / 'context'
+        write_run_file(run_file, context)
+        def worker_command(name):
+            return [sys.executable, '-B', str(Path(__file__).resolve()),
+                    '--spec', str(args.spec.resolve()), '--worker-arm', name,
+                    '--run-file', str(run_file)]
+        reports = run_workers(selected, args.jobs, args.shuffle, run_file, run_dir, worker_command)
+    attempted = [report.name for report in reports]
+    completed = [report.name for report in reports if report.completed]
+    for report in reports:
+        for line in report.lines:
+            emit(line)
+        errors.extend(report.errors)
+    errors.extend(digest_changes(before, tree_digest(TOOLS)))
     if not args.only and len(attempted) != declared_arm_count:
         errors.append(f"run completeness attempted={len(attempted)} declared={declared_arm_count}")
     if not args.only and len(completed) != declared_arm_count:
         errors.append(f"run completeness completed={len(completed)} declared={declared_arm_count}")
-    print(
+    emit(
         f"ARMS attempted={len(attempted)} completed={len(completed)} declared={declared_arm_count} "
         f"SURVIVORS={sum(error.startswith('survivor ') for error in errors)} ERRORS={len(errors)}"
     )
     for error in errors:
-        print(f"ERROR {error}")
+        emit(f"ERROR {error}")
     return 7 if errors else 0
+
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    sys.dont_write_bytecode = True
+    if args.suite_runner is not None:
+        return suite_runner_main(args.suite_runner, args.static_only)
+    if args.worker_arm is not None:
+        return worker_main(args.spec, args.worker_arm, args.run_file)
+    started = time.monotonic()
+    order = 'declared' if args.shuffle is None else f'shuffle:{args.shuffle}'
+    emit(f"RUN jobs={args.jobs} cpus={os.cpu_count()} order={order} "
+         f"executable={sys.executable} version={sys.version.replace(chr(10), ' ')} load={os.getloadavg()}")
+    try:
+        return battery_main(args)
+    finally:
+        emit(f"RUN wall_seconds={time.monotonic() - started:.6f} load={os.getloadavg()}")
 
 
 if __name__ == "__main__":

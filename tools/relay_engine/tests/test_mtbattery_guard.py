@@ -59,9 +59,20 @@ class TestMutationGuard(unittest.TestCase):
             yield
 
     def test_guard_green_on_head(self):
+        import os
+        import resource
+        def cpu_seconds():
+            usages = [resource.getrusage(who) for who in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)]
+            return sum(usage.ru_utime + usage.ru_stime for usage in usages)
+        load_start = os.getloadavg()
+        cpu_start = cpu_seconds()
         start = time.monotonic()
         self.assertEqual(mt.structural_errors(spec, harness, spec.ARMS, True), [])
-        print(f'GUARD_SECONDS={time.monotonic() - start:.6f}', flush=True)
+        wall = time.monotonic() - start
+        cpu = cpu_seconds() - cpu_start
+        load_end = os.getloadavg()
+        print(f'GUARD_SECONDS={wall:.6f} GUARD_CPU_SECONDS={cpu:.6f} '
+              f'GUARD_LOAD_START={load_start} GUARD_LOAD_END={load_end}', flush=True)
 
     def test_exact_error_sets_derives_from_observations(self):
         actual = mt.exact_error_sets(harness)
@@ -446,17 +457,17 @@ class TestMutationPopulations(unittest.TestCase):
             yield
 
     def test_custom_command_full_population_is_complete(self):
-        import io
+        arms = [a for a in spec.ARMS if a['row'] == 'C1']
+        self.assertEqual(len(arms), 2)
+        context = mt.RunContext(('custom',), {}, {}, (656, 786))
         for count in (786, 785):
-            out = io.StringIO()
             obs = mt.ArmObservation(frozenset({'x'}), {}, frozenset(), {}, count - 1, 1, 1)
-            with self.cheap_parent(), mock.patch.object(mt, 'run_arm', return_value=obs), contextlib.redirect_stdout(out):
-                mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'C1', '--', 'custom'])
-            lines = out.getvalue().splitlines()
-            arms = [line for line in lines if line.startswith('ARM=')]
-            self.assertEqual(len(arms), 2)
-            self.assertTrue(all(f'TOTAL={count}/786' in line for line in arms))
-            incomplete = [line for line in lines if 'incomplete-denominator' in line]
+            with mock.patch.object(mt, 'run_arm', return_value=obs):
+                reports = [mt.arm_report(arm, spec, context) for arm in arms]
+            lines = [line for report in reports for line in report.lines]
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(all(f'TOTAL={count}/786' in line for line in lines))
+            incomplete = [error for report in reports for error in report.errors if 'incomplete-denominator' in error]
             self.assertEqual(len(incomplete), 0 if count == 786 else 2)
             if count == 785:
                 self.assertTrue(all('incomplete-denominator=785/786' in line for line in incomplete))
@@ -472,3 +483,181 @@ class TestMutationPopulations(unittest.TestCase):
         self.assertIn('786', denominator[0])
         self.assertIn('656', denominator[0])
         self.assertFalse(any(line.startswith('ARM=') for line in lines))
+
+
+class TestMutationWorkers(unittest.TestCase):
+    # These controls catch shared scratch, completion-order output, retries,
+    # corrupt/missing records, and source writes across real process boundaries.
+    @contextlib.contextmanager
+    def workers(self, mode='normal'):
+        import sys
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            script = root / 'worker.py'
+            script.write_text('''import json, os, sys, time
+from pathlib import Path
+name, mode, root = sys.argv[1:]
+with (Path(root) / (name + '.starts')).open('a') as stream:
+    stream.write('start\\n')
+if mode == 'crash' and name == '0':
+    sys.exit(3)
+if mode == 'malformed':
+    print('MTBATTERY_REPORT {broken')
+    sys.exit(0)
+time.sleep((4-int(name)) * 0.02)
+line = name
+if mode == 'tmp':
+    assert os.environ['TMPDIR'] == os.environ['TEMP'] == os.environ['TMP']
+    assert Path(os.environ['TMPDIR']).is_dir()
+    assert sys.stdin.read(0) == ''
+    line = json.dumps([os.environ['TMPDIR'], os.environ['PYTHONDONTWRITEBYTECODE'], os.getpgrp()])
+if mode == 'write':
+    (Path(root) / 'source' / 'leak').write_text('unexpected')
+print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], completed=True)))
+''')
+            arms = [{'name': str(i)} for i in range(4)]
+            command = lambda name: [sys.executable, '-B', str(script), name, mode, str(root)]
+            yield root, arms, command
+
+    def test_start_order_declared_and_seeded(self):
+        self.assertEqual(mt.start_order(spec.ARMS, None), list(spec.ARMS))
+        first = mt.start_order(spec.ARMS, 297)
+        self.assertEqual(first, mt.start_order(spec.ARMS, 297))
+        self.assertCountEqual(first, spec.ARMS)
+        self.assertNotEqual(first, list(spec.ARMS))
+
+    def test_parse_jobs_default_and_bounds(self):
+        import io, os
+        argv = ['--spec', 'spec.py']
+        self.assertEqual(mt.parse_args(argv).jobs, os.cpu_count())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            mt.parse_args(argv + ['--jobs', '0'])
+
+    def test_run_workers_output_independent_of_jobs_and_order(self):
+        with self.workers() as (root, arms, command):
+            expected = [mt.ArmReport(str(i), (str(i),), (), True) for i in range(4)]
+            for jobs, seed in [(1, None), (3, None), (3, 1), (3, 2)]:
+                self.assertEqual(mt.run_workers(arms, jobs, seed, root/'context', root, command), expected)
+
+    def test_run_workers_give_each_worker_its_own_tmpdir(self):
+        import json, os
+        with self.workers('tmp') as (root, arms, command):
+            before = mt.tree_digest(root)
+            reports = mt.run_workers(arms[:3], 3, None, root/'context', root, command)
+            values = [json.loads(report.lines[0]) for report in reports]
+            self.assertEqual(len({v[0] for v in values}), 3)
+            for path, no_bytecode, group in values:
+                self.assertEqual(Path(path).parent, root)
+                self.assertFalse(Path(path).exists())
+                self.assertEqual(no_bytecode, '1')
+                self.assertEqual(group, os.getpgrp())
+            self.assertEqual(mt.tree_digest(root)['worker.py'], before['worker.py'])
+
+    def test_worker_without_record_is_hard_fail_started_once(self):
+        with self.workers('crash') as (root, arms, command):
+            reports = mt.run_workers(arms, 3, None, root/'context', root, command)
+            self.assertFalse(reports[0].completed)
+            self.assertIn('HARD-FAIL', reports[0].lines[0])
+            self.assertIn('0', reports[0].lines[0])
+            self.assertIn('3', reports[0].lines[0])
+            self.assertEqual(len(reports[0].errors), 1)
+            self.assertEqual((root/'0.starts').read_text(), 'start\n')
+            self.assertTrue(all(r.completed for r in reports[1:]))
+
+    def test_malformed_record_is_hard_fail(self):
+        with self.workers('malformed') as (root, arms, command):
+            reports = mt.run_workers(arms[:1], 1, None, root/'context', root, command)
+            self.assertFalse(reports[0].completed)
+            self.assertEqual(len(reports[0].errors), 1)
+
+    def test_worker_report_equals_in_process_report(self):
+        import io, json
+        with TestMutationPopulations().tree() as (tools, arm):
+            hp = tools/'check-relay-lint-fixtures.py'
+            hp.write_text(hp.read_text() + '\nFIXTURES = Path(__file__).parent\nA5_CWD = {}\nA5_SEAM = {}\n')
+            arm['kills'] = ['first']
+            sp = tools/'spec.py';sp.write_text('ARMS = '+repr([arm])+'\nRAISES = {}\n')
+            context = mt.RunContext(mt.DEFAULT_SUITE, {}, {}, (2, 3))
+            run_file = tools.parent/'context'
+            mt.write_run_file(run_file, context)
+            self.assertEqual(mt.read_run_file(run_file), context)
+            with mock.patch.object(mt, 'TOOLS', tools):
+                expected = mt.arm_report(arm, SimpleNamespace(RAISES={}), context)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(mt.worker_main(sp, arm['name'], run_file), 0)
+            lines = output.getvalue().splitlines();self.assertEqual(len(lines), 1)
+            record = json.loads(lines[0].removeprefix('MTBATTERY_REPORT '))
+            self.assertEqual(record, {'name': expected.name, 'lines': list(expected.lines),
+                                     'errors': list(expected.errors), 'completed': expected.completed})
+            self.assertTrue(expected.completed)
+            self.assertEqual(expected.errors, ())
+
+    def test_tree_digest_names_added_changed_and_removed(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw);(root/'changed').write_text('a');(root/'removed').write_text('b')
+            before = mt.tree_digest(root)
+            self.assertEqual(mt.digest_changes(before, mt.tree_digest(root)), [])
+            (root/'changed').write_text('z');(root/'removed').unlink()
+            (root/'__pycache__').mkdir();(root/'__pycache__/x.pyc').write_bytes(b'x')
+            changes = mt.digest_changes(before, mt.tree_digest(root))
+            self.assertEqual(len(changes), 3)
+            for path in ('changed', 'removed', '__pycache__/x.pyc'):
+                self.assertTrue(any(path in c for c in changes))
+
+    def test_real_worker_source_write_is_detected(self):
+        with self.workers('write') as (root, arms, command):
+            source = root/'source';source.mkdir();before = mt.tree_digest(source)
+            mt.run_workers(arms[:1], 1, None, root/'context', root, command)
+            changes = mt.digest_changes(before, mt.tree_digest(source))
+            self.assertEqual(len(changes), 1);self.assertIn('leak', changes[0])
+
+    def test_main_run_lines_bracket_the_run(self):
+        import io, sys
+        reports = [mt.ArmReport('dispatch-impl-false', ('first-report',), (), True),
+                   mt.ArmReport('dispatch-impl-true', ('second-report',), (), True)]
+        out = io.StringIO()
+        with TestMutationPopulations().cheap_parent(), mock.patch.object(mt, 'run_workers', return_value=reports), contextlib.redirect_stdout(out):
+            code = mt.main(['--spec', str(mt.TOOLS/'mtbattery-spec.py'), '--only', 'C1'])
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith('RUN '));self.assertIn(sys.executable, lines[0])
+        self.assertIn('jobs=', lines[0]);self.assertIn('order=declared', lines[0])
+        self.assertTrue(lines[-1].startswith('RUN '));self.assertIn('wall_seconds=', lines[-1])
+        self.assertLess(lines.index('first-report'), lines.index('second-report'))
+
+    def test_main_preflight_starts_no_worker(self):
+        import io
+        out = io.StringIO()
+        with mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']), \
+             mock.patch.object(mt, 'run_workers', side_effect=AssertionError('worker started')), contextlib.redirect_stdout(out):
+            self.assertEqual(mt.main(['--spec', str(mt.TOOLS/'mtbattery-spec.py')]), 7)
+        lines = out.getvalue().splitlines()
+        self.assertTrue(lines[0].startswith('RUN '));self.assertTrue(lines[-1].startswith('RUN '))
+
+    def test_main_reports_a_source_change(self):
+        import io
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            def write(*args, **kwargs):
+                (root/'leaked').write_text('oops')
+                return []
+            out = io.StringIO()
+            def load(name, path):
+                return spec if name == 'mtbattery_spec' else harness
+            with TestMutationPopulations().cheap_parent(), mock.patch.object(mt, 'TOOLS', root), \
+                 mock.patch.object(mt, 'load_module', side_effect=load), \
+                 mock.patch.object(mt, 'run_workers', side_effect=write), contextlib.redirect_stdout(out):
+                self.assertEqual(mt.main(['--spec', str(Path(__file__).parents[2]/'mtbattery-spec.py'), '--only', 'no-arm']), 7)
+            self.assertTrue(any(line.startswith('ERROR ') and 'leaked' in line for line in out.getvalue().splitlines()))
+
+    def test_arm_report_uses_context_populations(self):
+        context = mt.RunContext(mt.DEFAULT_SUITE, {}, {}, (656, 786))
+        arm = {'name': 'standin', 'row': 'C8a', 'function': 'f', 'kills': ['x']}
+        obs = mt.ArmObservation(frozenset({'x'}), {}, frozenset(), {}, 655, 1, 1)
+        with mock.patch.object(mt, 'suite_populations', side_effect=AssertionError('recount')), \
+             mock.patch.object(mt, 'suite_denominator', side_effect=AssertionError('recount')), \
+             mock.patch.object(mt, 'run_arm', return_value=obs) as run:
+            report = mt.arm_report(arm, SimpleNamespace(RAISES={}), context)
+        self.assertTrue(report.completed);self.assertEqual(report.errors, ())
+        self.assertEqual(run.call_args.args[3], 656)
