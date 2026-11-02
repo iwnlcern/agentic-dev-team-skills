@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 
@@ -230,43 +232,81 @@ def result_failures(output: str) -> set[str]:
     return failed
 
 
-def exact_error_sets(harness: ModuleType) -> dict[tuple[str, str], frozenset[str]]:
-    """Measure every registered fixture's full error-message set.
+class UnknownKindError(Exception):
+    """A registration kind has no defined invocation."""
 
-    The fixture harness deliberately permits registrations with only an
-    outcome/count oracle.  This independent universal oracle retains the
-    exact observed messages for *all* registrations, so an arm cannot hide a
-    changed message behind a weaker registered oracle.
-    """
+
+class RegistrationStop(Exception):
+    """A registration failed outside the selected linter call."""
+
+
+@dataclass(frozen=True)
+class Observation:
+    ok: bool
+    errors: tuple[str, ...]
+    warnings: tuple[str, ...]
+    raised: str | None = None
+
+
+@dataclass(frozen=True)
+class Raised:
+    exception_type: str
+
+
+def prepare_lint_call(lint, harness, kind: str, rel: str, target: Path):
+    """Resolve all arguments before entering the exception-as-kill boundary."""
+    if kind == "file":
+        return partial(lint.lint_file, target)
+    if kind == "file-root":
+        artifact_root = harness.FIXTURES / harness.FILE_ROOT_OF[rel]
+        return partial(lint.lint_file, target, artifact_root=artifact_root)
+    if kind == "template":
+        return partial(lint.lint_file, target, template_mode=True)
+    if kind == "index":
+        return partial(lint.lint_relay_index, target / "INDEX.md")
+    if kind == "index-rel":
+        return partial(lint.lint_relay_index, Path("INDEX.md"))
+    if kind == "root":
+        return partial(lint.lint_relay_root, target)
+    raise UnknownKindError(f"{kind} {rel}")
+
+
+def lint_observations(harness: ModuleType) -> dict[tuple[str, str], Observation]:
     import contextlib
 
     lint = harness.load_linter()
-    measured: dict[tuple[str, str], frozenset[str]] = {}
+    measured = {}
     for kind, rel, _expected in harness.EXPECTED:
-        target = harness.FIXTURES / rel
-        cwd_rel = harness.A5_CWD.get(rel)
-        working = harness.FIXTURES / cwd_rel if cwd_rel else None
-        context = (harness.a5_private_seam(rel) if rel in harness.A5_SEAM
-                   else contextlib.nullcontext((target, working)))
-        with context as (target, working):
-            old_cwd = os.getcwd()
-            try:
-                if working is not None:
-                    os.chdir(working)
-                if kind == "file":
-                    result = lint.lint_file(target)
-                elif kind == "template":
-                    result = lint.lint_file(target, template_mode=True)
-                elif kind == "index":
-                    result = lint.lint_relay_index(target / "INDEX.md")
-                elif kind == "index-rel":
-                    result = lint.lint_relay_index(Path("INDEX.md"))
-                else:
-                    result = lint.lint_relay_root(target)
-            finally:
-                os.chdir(old_cwd)
-        measured[(kind, rel)] = frozenset(result.errors)
+        try:
+            target = harness.FIXTURES / rel
+            cwd_rel = harness.A5_CWD.get(rel)
+            working = harness.FIXTURES / cwd_rel if cwd_rel else None
+            context = (harness.a5_private_seam(rel) if rel in harness.A5_SEAM
+                       else contextlib.nullcontext((target, working)))
+            with context as (target, working):
+                old_cwd = os.getcwd()
+                try:
+                    if working is not None:
+                        os.chdir(working)
+                    invoke = prepare_lint_call(lint, harness, kind, rel, target)
+                    try:
+                        result = invoke()
+                    except Exception as exc:
+                        observation = Observation(False, (), (), type(exc).__name__)
+                    else:
+                        observation = Observation(result.ok, tuple(result.errors), tuple(result.warnings))
+                    measured[(kind, rel)] = observation
+                finally:
+                    os.chdir(old_cwd)
+        except Exception as exc:
+            raise RegistrationStop(f"{kind} {rel}: {type(exc).__name__}: {exc}") from exc
     return measured
+
+
+def exact_error_sets(harness: ModuleType) -> dict[tuple[str, str], frozenset[str] | Raised]:
+    """Keep the universal error oracle independent of weaker registered answers."""
+    return {key: frozenset(obs.errors) if obs.raised is None else Raised(obs.raised)
+            for key, obs in lint_observations(harness).items()}
 
 
 def xroot_registration_count(harness: ModuleType) -> int:
@@ -439,6 +479,106 @@ def validate_spec(spec: ModuleType, selected: list[dict[str, object]], full_run:
             missing = inventory - represented.get(row, set())
             if missing:
                 errors.append(f"O1 row={row} unrepresented-reviewed-selectors={sorted(missing)!r}")
+    return errors
+
+
+EXPECTED_TABLES = frozenset({"EXPECTED", "EXPECTED_ERROR_SET", "EXPECTED_ERROR_COUNT", "EXPECTED_WARN_SET"})
+KNOWN_KINDS = frozenset({"file", "file-root", "template", "index", "index-rel", "root"})
+
+
+def g1_agreement(harness, observations) -> list[str]:
+    if not harness.EXPECTED:
+        return ["G1 empty registrations"]
+    errors = [f"G1 unknown table {name}" for name in sorted(vars(harness))
+              if name.startswith("EXPECTED") and name not in EXPECTED_TABLES]
+    for kind, rel, expected in harness.EXPECTED:
+        channels = []
+        obs = observations.get((kind, rel))
+        if kind not in KNOWN_KINDS:
+            channels.append("unknown-kind")
+        if obs is None:
+            channels.append("missing")
+        else:
+            if (0 if obs.ok else 1) != expected:
+                channels.append("exit")
+            for table, observed, channel in (
+                (harness.EXPECTED_ERROR_SET, sorted(obs.errors), "error-set"),
+                (harness.EXPECTED_WARN_SET, sorted(obs.warnings), "warning"),
+            ):
+                answer = table.get(rel)
+                if answer is not None and observed != sorted(answer):
+                    channels.append(channel)
+            count = harness.EXPECTED_ERROR_COUNT.get(rel)
+            if count is not None and len(obs.errors) != count:
+                channels.append("error-count")
+            if obs.raised is not None:
+                channels.append("raised")
+        if channels:
+            errors.append(f"G1 {kind} {rel} channels={','.join(channels)}")
+    return errors
+
+
+def g2_path_independence(observations, scratch_observations) -> list[str]:
+    if not observations or not scratch_observations:
+        return ["G2 empty observations"]
+    def normalized(obs):
+        return obs.ok, sorted(obs.errors), sorted(obs.warnings), obs.raised
+    return [f"G2 {kind} {rel} path-dependent observation"
+            for kind, rel in sorted(observations.keys() | scratch_observations.keys())
+            if (kind, rel) not in observations or (kind, rel) not in scratch_observations
+            or normalized(observations[(kind, rel)]) != normalized(scratch_observations[(kind, rel)])]
+
+
+def g3_anchors(spec, arms, full_run: bool) -> list[str]:
+    if not arms:
+        return ["G3 empty arms"]
+    return [f"G3 {error}" for error in validate_spec(spec, arms, full_run)]
+
+
+def xroot_labels(harness) -> frozenset[str]:
+    with tempfile.TemporaryDirectory(prefix="mtbattery-labels-") as raw:
+        return frozenset(label for label, *_ in harness.xroot_cases(Path(raw)))
+
+
+def g4_declarations(spec, harness, xroot_labels) -> list[str]:
+    if not spec.KILLS or not harness.EXPECTED or not spec.ARMS or not xroot_labels:
+        return ["G4 empty declaration population"]
+    known = {rel for _, rel, _ in harness.EXPECTED} | set(xroot_labels)
+    names = {arm['name'] for arm in spec.ARMS}
+    errors = []
+    raises = getattr(spec, 'RAISES', {})
+    for arm, labels in spec.KILLS.items():
+        if arm not in names:
+            errors.append(f"G4 unknown arm {arm}")
+        for label in sorted(set(labels) - known):
+            errors.append(f"G4 {arm} unknown kill label {label}")
+    for arm, raised in raises.items():
+        if arm not in names or arm not in spec.KILLS:
+            errors.append(f"G4 unknown raise arm {arm}")
+        for label in raised:
+            if label not in known:
+                errors.append(f"G4 {arm} unknown raise label {label}")
+            if label not in spec.KILLS.get(arm, ()):
+                errors.append(f"G4 {arm} raise absent from kills {label}")
+    errors.extend(f"G4 {error}" for error in validate_count_controls(spec, harness)[1])
+    return errors
+
+
+def structural_errors(spec, harness, spec_arms, full_run: bool) -> list[str]:
+    """Cheap structural checks, not a substitute for semantic mutation runs."""
+    try:
+        observations = lint_observations(harness)
+        errors = g1_agreement(harness, observations)
+        with tempfile.TemporaryDirectory(prefix="mtbattery-guard-") as raw:
+            copied = Path(raw) / "tools"
+            shutil.copytree(TOOLS, copied)
+            clear_bytecode(copied)
+            scratch = load_module("mtbattery_guard_harness", copied / "check-relay-lint-fixtures.py")
+            errors.extend(g2_path_independence(observations, lint_observations(scratch)))
+    except RegistrationStop as exc:
+        return [f"G1 {exc}"]
+    errors.extend(g3_anchors(spec, spec_arms, full_run))
+    errors.extend(g4_declarations(spec, harness, xroot_labels(harness)))
     return errors
 
 
