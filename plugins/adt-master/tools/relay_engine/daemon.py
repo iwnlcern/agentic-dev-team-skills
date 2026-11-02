@@ -815,9 +815,17 @@ class _SocketService:
 
 
 def _submit_handler(ledger, root, args, *, rules_version=None):
+    from relay_engine.envelope import draft_shape, shape_error
     try:
         body = base64.b64decode(args["body_b64"], validate=True)
-        envelope = parse_draft(body.decode("utf-8"))
+        text = body.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise errors.error_for("E-ENVELOPE") from exc
+    shape = draft_shape(text)
+    if shape is not None:
+        raise shape_error(shape)
+    try:
+        envelope = parse_draft(text)
     except (ValueError, UnicodeDecodeError, errors.EngineError) as exc:
         raise errors.error_for("E-ENVELOPE") from exc
     if args["envelope"] != envelope.headers:

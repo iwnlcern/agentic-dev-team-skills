@@ -64,6 +64,7 @@ def _hand_entries(ledger):
 
 
 def prepare_candidates(ledger, root, paths):
+    from relay_engine.envelope import draft_shape, shape_error
     candidates = []
     malformed = []
     for rel in paths:
@@ -73,7 +74,11 @@ def prepare_candidates(ledger, root, paths):
             continue
         try:
             body = root.open_read(rel)
-            envelope = parse_draft(body.decode("utf-8"))
+            text = body.decode("utf-8")
+            shape = draft_shape(text)
+            if shape is not None:
+                raise shape_error(shape)
+            envelope = parse_draft(text)
             match = _RELAY_NAME.fullmatch(rel.rsplit("/", 1)[-1])
             stamp = match.group(1).rstrip("Z")
             candidates.append((rel, stamp, body, envelope))
@@ -197,7 +202,9 @@ def show(ledger, target):
             "SELECT seq,rendered_path,origin,body_sha256,content_hash,body "
             "FROM relays WHERE seq=?", (seq,)).fetchone()
     if row is None:
-        raise errors.error_for("E-ENVELOPE")
+        root = ledger.execute("SELECT value FROM meta WHERE key='canonical_root'").fetchone()[0]
+        raise errors.error_for("E-PATH-ESCAPE", variant="relay-not-found",
+                               target=target, root=root)
     event = ledger.execute(
         "SELECT event FROM projection_events WHERE relay_seq=? "
         "ORDER BY seq DESC LIMIT 1", (row[0],)).fetchone()

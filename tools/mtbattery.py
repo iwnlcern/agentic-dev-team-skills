@@ -238,32 +238,33 @@ def exact_error_sets(harness: ModuleType) -> dict[tuple[str, str], frozenset[str
     exact observed messages for *all* registrations, so an arm cannot hide a
     changed message behind a weaker registered oracle.
     """
+    import contextlib
+
     lint = harness.load_linter()
     measured: dict[tuple[str, str], frozenset[str]] = {}
     for kind, rel, _expected in harness.EXPECTED:
         target = harness.FIXTURES / rel
         cwd_rel = harness.A5_CWD.get(rel)
-        seam_rel = harness.A5_SEAM.get(rel)
-        old_cwd = os.getcwd()
-        if cwd_rel:
-            os.chdir(harness.FIXTURES / cwd_rel)
-        if seam_rel:
-            os.chmod(harness.FIXTURES / seam_rel, 0)
-        try:
-            if kind == "file":
-                result = lint.lint_file(target)
-            elif kind == "template":
-                result = lint.lint_file(target, template_mode=True)
-            elif kind == "index":
-                result = lint.lint_relay_index(target / "INDEX.md")
-            elif kind == "index-rel":
-                result = lint.lint_relay_index(Path("INDEX.md"))
-            else:
-                result = lint.lint_relay_root(target)
-        finally:
-            if seam_rel:
-                os.chmod(harness.FIXTURES / seam_rel, 0o644)
-            os.chdir(old_cwd)
+        working = harness.FIXTURES / cwd_rel if cwd_rel else None
+        context = (harness.a5_private_seam(rel) if rel in harness.A5_SEAM
+                   else contextlib.nullcontext((target, working)))
+        with context as (target, working):
+            old_cwd = os.getcwd()
+            try:
+                if working is not None:
+                    os.chdir(working)
+                if kind == "file":
+                    result = lint.lint_file(target)
+                elif kind == "template":
+                    result = lint.lint_file(target, template_mode=True)
+                elif kind == "index":
+                    result = lint.lint_relay_index(target / "INDEX.md")
+                elif kind == "index-rel":
+                    result = lint.lint_relay_index(Path("INDEX.md"))
+                else:
+                    result = lint.lint_relay_root(target)
+            finally:
+                os.chdir(old_cwd)
         measured[(kind, rel)] = frozenset(result.errors)
     return measured
 

@@ -20,6 +20,7 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 def _validate(address, role_word=None, dispatch_ref=None):
+    from relay_engine.envelope import LINE_BREAKS
     if not isinstance(address, str) or _ADDRESS.fullmatch(address) is None:
         raise errors.error_for("E-ENVELOPE")
     if role_word is not None and (
@@ -28,7 +29,7 @@ def _validate(address, role_word=None, dispatch_ref=None):
         raise errors.error_for("E-ENVELOPE")
     if dispatch_ref is not None and (
             not isinstance(dispatch_ref, str) or not dispatch_ref or
-            "/" in dispatch_ref or "\n" in dispatch_ref):
+            "/" in dispatch_ref or any(char in LINE_BREAKS for char in dispatch_ref)):
         raise errors.error_for("E-ENVELOPE")
 
 
@@ -127,6 +128,7 @@ def _event(address, event, occupant_id, key_id, **extra):
 def register(ledger, root, address, role_word, dispatch_ref=None, *,
              replace=False, top=False):
     """Issue one occupancy and atomically bind its boot row when required."""
+    from relay_engine.envelope import _HEADER, LINE_BREAKS, draft_shape, shape_error
     _validate(address, role_word, dispatch_ref)
     run_id = _run_id(ledger)
     current = _latest(ledger, address)
@@ -161,7 +163,16 @@ def register(ledger, root, address, role_word, dispatch_ref=None, *,
             body = _boot_bytes(
                 address, role_word, run_id, dispatch, occupant_id,
                 None if commissioned is None else commissioned[0])
-            envelope = parse_draft(body.decode("utf-8"))
+            text = body.decode("utf-8")
+            shape = draft_shape(text)
+            if shape is not None:
+                header = _HEADER.fullmatch(text.splitlines()[shape.line - 1])
+                raise shape_error(shape, boot_field=header.group(1) if header else 'body')
+            if commissioned and commissioned[0] and any(
+                    char in LINE_BREAKS for char in commissioned[0]):
+                raise errors.error_for('E-DRAFT-SHAPE', variant='boot-field',
+                                       field='COMMISSIONED_BY')
+            envelope = parse_draft(text)
             admission = admit(
                 ledger, root, envelope, body, occupant_id,
                 seat_events=replacement + [_event(

@@ -93,7 +93,9 @@ class TestHistoryAudit(unittest.TestCase):
         baseline=json.loads((TOOLS/'relay-engine-fixtures/judging/base-order-cbc8f07.json').read_text())
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);snapshot(root)
-            self.assertEqual(collect(rules,root,baseline['roots']),collect(base_module('rules'),root,baseline['roots']))
+            from relay_engine.tests.test_draft_shape_lint import expected_shape_sweep
+            self.assertEqual(collect(rules,root,baseline['roots']),expected_shape_sweep(
+                collect(base_module('rules'),root,baseline['roots'])))
 
 
 class TestJudgmentContext(ContextDaemonCase):
