@@ -648,15 +648,9 @@ class TestGateReview(unittest.TestCase):
         )
         actual = json.loads((REPO / path).read_text())
 
-        # PL-v297-b2 task 10 preserves B8 while applying task 2's five rows
-        # and task 5's root warnings. Pin only those authorized fields to
-        # the post-B9/B8 B2 replay; all other baseline bytes still compare.
-        b2 = json.loads(
-            subprocess.check_output(
-                ["git", "show", "4a469852010d7bc62152ecfdea78d929a0632bc3:" + path],
-                cwd=REPO,
-            )
-        )
+        # PL-v297-b2 task 10 changes only these nine leaves in five rows.
+        # Pin their values independently of branch history so rebases and
+        # fresh clones keep the same check; compare every other leaf to main.
         fixture = "tools/relay-lint-fixtures/"
         moves = (
             ("index", fixture + "rootres/XR16-u2028-marker-decoy/INDEX.md", "errors"),
@@ -669,12 +663,22 @@ class TestGateReview(unittest.TestCase):
             ("single", fixture + "lockdigest/FLD24-u2028-field-decoy.md", "exit"),
             ("single", fixture + "rootres/XR16-u2028-marker-decoy/INDEX.md", "errors"),
         )
-        for group, row, field in moves:
-            base["verdicts"][group][row][field] = b2["verdicts"][group][row][field]
+        expected_values_sha256 = (
+            "bf343ef1cc182fdbc326259e39355d67311a25a960016ff231007cd1a3f18ca5"
+        )
 
         def same(candidate):
+            values = [
+                candidate["verdicts"][group][row][field]
+                for group, row, field in moves
+            ]
+            encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+            expected = copy.deepcopy(base["verdicts"])
+            for (group, row, field), value in zip(moves, values):
+                expected[group][row][field] = value
             return (
-                candidate["verdicts"] == base["verdicts"]
+                hashlib.sha256(encoded).hexdigest() == expected_values_sha256
+                and candidate["verdicts"] == expected
                 and candidate["manifest_sha256"] == base["manifest_sha256"]
             )
 
@@ -684,6 +688,11 @@ class TestGateReview(unittest.TestCase):
         row = next(iter(group.values()))
         row["warnings"].append("planted change")
         self.assertFalse(same(changed))
+
+        changed_leaf = copy.deepcopy(actual)
+        group, row, field = moves[0]
+        changed_leaf["verdicts"][group][row][field].append("planted B2 leaf change")
+        self.assertFalse(same(changed_leaf))
 
 
 # Real daemon/CLI transport keeps these tests independent of the helper's caller.
