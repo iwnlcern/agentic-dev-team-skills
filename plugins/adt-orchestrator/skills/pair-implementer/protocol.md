@@ -420,7 +420,7 @@ Permission is exit status 0 with `allowed` true and returned `relay`, `seat` and
 A result with `allowed` false exits 1, or 2 when its reasons include `authority.could-not-evaluate`, whatever else they include.
 A command that returns no result exits nonzero with a message on stderr.
 Every nonzero exit stops the act; a denial, a result that could not be evaluated, no result at all, and a client without this command are relayed as blockers to the governing seat.
-Quote the returned result object when one exists, including `external` when it is not empty; when there is no result, retain and quote the stderr code instead.
+Quote the returned result object when one exists, including `external` when it is not empty; when there is no result, retain and quote stderr, with its code when it prints one; an argument-parser error or an unexpected error prints none.
 An `external` entry on the `capacity` axis reports a limit of the cross-root read, not a gap in the lineage; it still stops the act and goes to the governing seat.
 Do not retry into a pass or fall back to reading the relay by eye.
 A command failure never turns a managed root into a hand-authored root.
@@ -486,15 +486,17 @@ A grant declaring the amendment’s digest as a field the check reads requires t
 - R8, control characters (`authority.shape-absent` for a grant; `authority.lineage-incomplete` for the pair-Planner lineage cases below): refused characters are C0 controls except tab, line feed and carriage return, DEL, U+0085, U+2028 and U+2029; other C1 controls are not refused.
   These characters void every grant.
   For a pair-Planner grant they also refuse the grant when present in any relay of its pair lineage.
-  Beyond that lineage, they are refused in the opener of each dispatch id the PLAN's `PARENT_DISPATCH_ID` chain reaches, whoever filed it, as `_opener_parent` in `tools/relay_engine/authority.py` decides: the opener is the first relay filed under the id, not counting a supersession ruling adopted from a parent root, and the chain stops at an id whose opener was filed after the relay that names it.
-  Other relays filed under those ids are not read for them, except as this rule's last sentence says.
+  Beyond that lineage, they are refused in the opener of each dispatch id the PLAN's `PARENT_DISPATCH_ID` chain reaches, whoever filed it, as `_opener_parent` in `tools/relay_engine/authority.py` decides: the opener is the first relay filed under the id, not counting a supersession ruling adopted from a parent root, and the chain stops at an id whose opener was not filed before the relay that names it.
+  An opener whose critical header conflicts ends the walk with `authority.header-conflict`; “filed” here means the root’s record order, not the filename stamp.
+  Other relays outside that lineage filed under those ids are not read for them, except as this rule's last sentence says.
   For a cross-root design they also refuse that pair-Planner grant when present in a relay of its foreign root that the engine counts toward selecting the design's review, with the refusal reported in `external`; which foreign relays count is the engine's, and this text does not restate it.
   For a pair-Planner grant, the `review-approval` and `foreign-control-character` axes are reported by the authority check alone, as `_external_evidence` in `tools/relay_engine/authority.py` decides; lint and admission do not report them.
   In pair lineage, a later PLAN or DESIGN by the same Planner, or a later review of that phase by the acting Implementer, after the corresponding lineage origin also denies the earlier grant with `authority.lineage-incomplete` if it contains one of these characters.
-- R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header, including the strict/legacy parsed-field comparison.
+- R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header.
+  `_conflict` in `tools/relay_engine/authority.py` also compares the fields read under the check’s fence rule with those read under the linters’ rule (Literal merge token); a critical-field line the first reads and the second hides gives `authority.header-conflict`, even when it repeats the header’s value.
   Critical fields are PHASE, FROM, TO, DISPATCH_ID, PARENT_DISPATCH_ID, DESIGN_LOCK_ID, DESIGN_DOC_ID, PLAN_LOCK_ID, DESIGN_ARTIFACT, DESIGN_SHA256, PLAN_ARTIFACT, PLAN_SHA256, PLAN_SOURCE_REPO, PLAN_SOURCE_COMMIT and the cross-root trigger fields.
-  Differing body repeats of noncritical fields such as SUBJECT or CC are not conflicts detected by this rule; fenced repeats are not read.
-- R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer.
+  Differing body repeats of noncritical fields such as SUBJECT or CC are not conflicts detected by this rule; repeats hidden by the check’s fence rule are not read.
+- R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer; `_check` in `tools/relay_engine/authority.py` also requires `TO` to equal the `--seat` value byte for byte.
 - R11, pair-Planner implementation grants (`authority.issuer-not-permitted`): any own-line `SCOPE_DIFF_RESULT`, in the header or body, that does not normalize to `all-in` refuses the grant.
   Normalization takes the value's first whitespace-delimited word, lowercased, and removes trailing `.`, `,`, `;`, `:`, `!` and `?`; an empty value refuses.
   Grants are still authored with `all-in`; this predicate describes the check, not a new authoring form.
