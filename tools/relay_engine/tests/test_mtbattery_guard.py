@@ -661,3 +661,29 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], 
             report = mt.arm_report(arm, SimpleNamespace(RAISES={}), context)
         self.assertTrue(report.completed);self.assertEqual(report.errors, ())
         self.assertEqual(run.call_args.args[3], 656)
+
+
+class TestMutationDiagnostics(unittest.TestCase):
+    def test_unstable_report_retains_both_observations(self):
+        import json
+        first = mt.ArmObservation(frozenset({'fixture'}), {'fixture': 'ValueError'},
+                                  frozenset({'fixture', 'hidden'}), {'fixture': 'ValueError'}, 1, 1, 1)
+        second = replace(first, raises={'fixture': 'TypeError'}, universal_raises={'fixture': 'TypeError'})
+        arm = {'name': 'standin', 'row': 'C8a', 'function': 'f', 'kills': ['fixture']}
+        context = mt.RunContext(mt.DEFAULT_SUITE, {}, {}, (2, 3))
+        with mock.patch.object(mt, 'run_arm', side_effect=[first, second]) as observe:
+            report = mt.arm_report(arm, SimpleNamespace(RAISES={}), context)
+        self.assertEqual(observe.call_count, 2)
+        self.assertFalse(report.completed)
+        self.assertEqual(len(report.errors), 1)
+        self.assertTrue(report.errors[0].startswith('UNSTABLE standin '))
+        self.assertIn(' observations=', report.errors[0])
+        records = json.loads(report.errors[0].split(' observations=', 1)[1])
+        self.assertEqual(records, [
+            {'kills': ['fixture'], 'raises': {'fixture': 'ValueError'},
+             'universal_kills': ['fixture', 'hidden'], 'universal_raises': {'fixture': 'ValueError'},
+             'passed': 1, 'failed': 1, 'exit': 1},
+            {'kills': ['fixture'], 'raises': {'fixture': 'TypeError'},
+             'universal_kills': ['fixture', 'hidden'], 'universal_raises': {'fixture': 'TypeError'},
+             'passed': 1, 'failed': 1, 'exit': 1},
+        ])

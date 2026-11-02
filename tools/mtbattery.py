@@ -832,7 +832,11 @@ def classify_arm(arm, declared_kills, declared_raises, count_controls, observe):
     moved = set(first.kills ^ second.kills) | set(first.universal_kills ^ second.universal_kills)
     for left, right in ((first.raises, second.raises), (first.universal_raises, second.universal_raises)):
         moved.update(label for label in left.keys() | right.keys() if left.get(label) != right.get(label))
-    return None, [f"UNSTABLE {arm['name']} moved={sorted(moved)} counts/exit={(first.passed, first.failed, first.exit)}->{(second.passed, second.failed, second.exit)}"]
+    records = [{**asdict(observation), 'kills': sorted(observation.kills),
+                'universal_kills': sorted(observation.universal_kills)}
+               for observation in (first, second)]
+    evidence = json.dumps(records, sort_keys=True, separators=(',', ':'))
+    return None, [f"UNSTABLE {arm['name']} moved={sorted(moved)} counts/exit={(first.passed, first.failed, first.exit)}->{(second.passed, second.failed, second.exit)} observations={evidence}"]
 
 
 REPORT_MARKER = "MTBATTERY_REPORT "
