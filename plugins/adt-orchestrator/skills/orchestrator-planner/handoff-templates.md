@@ -2,7 +2,8 @@
 
 # Orchestrator Handoff Templates
 
-The orchestrator-review visibility gate requires orchestrator-planner authority relays in the broad SET to CC `<run>.orchestrator-reviewer` unless the run has an operator-authored `ORCH_REVIEW_WAIVER`. This is visibility, not approval.
+The missing-visibility finding is decided by `orchestrator_review_gate_errors` in `tools/relay_engine/rules.py`; follow the protocol's reviewer-addressing convention.
+This is visibility, not approval.
 
 Use these relay-ready templates. Always write the routing relay; do not replace a non-PR routing relay with a review panel. Panels are for code/PR review or explicitly requested adversarial review of a written relay. Write full relays to the file-first transport described in `protocol.md`, preferably `.relays/<RUN_ID>/<cycle-id>/<PHASE>-<ROLE>-<timestamp>.md` (the `<timestamp>` is the real clock time at authoring — see the timestamp policy in `protocol.md`), then print the pointer context — `FROM` and a 3–6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. If the receiver cannot access the path, relay or attach the file contents.
 
@@ -28,7 +29,8 @@ Use minimal headers by default, including `FROM` / `TO` / `CC` for orchestrator-
 
 `HUMAN_GATE_REQUIRED: yes` if and only if this relay's requested next transition cannot occur without a fresh operator decision; the operator may answer directly or route the ask onward — the field marks who is being asked, not who must answer. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed and relay-lint warns on it; always annotate. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
 
-`DESIGN_LOCK_ID` and `PLAN_LOCK_ID` carry a lock value — a logical identity or repo-relative path, optionally annotated ` @ sha256 <hex>`; equality compares the unannotated value. Optional `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` fields carry filename-stem locators, and optional `DESIGN_SHA256` / `PLAN_SHA256` fields carry lowercase-hex sha256 byte-integrity values. Prefer the separate fields; the lock value itself admits only the optional ` @ sha256 <hex>` annotation, never a filename stem.
+For the pair's design lineage, `_lineage` in `tools/relay_engine/authority.py` compares the declared design identities directly; keep them identical across the lineage.
+Use the separate artifact and digest declarations checked by `lock_digest_shape_errors` in `tools/relay_engine/rules.py` to name and pin artifact bytes.
 
 Operator no-reviewer waiver, only when the run genuinely has no Orchestrator Reviewer:
 
@@ -696,7 +698,9 @@ This bare own-line token grants merge authority only to the named `TO` Implement
 
 Managed-root precondition: roster declared and recipient registered under the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup).
 
-Use this only during the orchestrator-planner `init` directive, after `sprint-doc-setup` has prepared the sprint tree and `.relays/<RUN_ID>/` substrate. Emit one relay per downstream seat and print the file pointer; the pointer is the operator's fallback for seats that are not yet armed, which every seat is before its boot acknowledgment binds it. This is an onboarding relay, not work authorization.
+Use this only during the orchestrator-planner `init` directive, after `sprint-doc-setup` has prepared the sprint tree and `.relays/<RUN_ID>/` substrate.
+Emit one relay per downstream seat and print its pointer as fallback; rely on the state reported by `readiness` in `tools/adapters/relay-monitor.py` through the status command before trusting automatic delivery.
+This is an onboarding relay, not work authorization.
 
 Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the target address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted. Render the segment one way in the id, `TO`, heading, and `SUBJECT`.
 
@@ -726,13 +730,15 @@ Sprint root: <repo-relative sprint doc root>
 Relay root: .relays/<RUN_ID>/
 INDEX: .relays/<RUN_ID>/INDEX.md
 Current authority: report-only onboarding. This boot relay grants no AUDIT, DESIGN, PLAN, IMPL, REVIEW-FOLD, MERGE, or LIVE-VERIFY work authority.
-Acknowledge identity, loaded skill, reachable relay root, and delivery state — one of `armed`, `waiting-for-binding`, `unavailable: <reason>`, `fallback: pointer` — as a measured claim: run `python3 <plugin-root>/tools/adapters/relay-monitor.py status` through the shell (and the `monitor` tool with action `list` on Codex) immediately before filing and quote its line; the acknowledgment you are filing is the relay that binds the watcher, so `waiting-for-binding (this filing binds)` is the honest first value.
+Acknowledge identity, loaded skill, reachable relay root, and the delivery state measured immediately before filing by `status` in `tools/adapters/relay-monitor.py`; on Codex, also inspect the monitor list.
+Copy the measured state returned by `readiness` in `tools/adapters/relay-monitor.py`, rather than predicting that the acknowledgment will bind or arm the watcher.
+After filing, measure status again: `bind` in `tools/adapters/relay-monitor.py` may leave the binding unchanged.
 Carry this relay's own `DISPATCH_ID` (`<run>-boot-<owner>-<role>`), not its parent id or directory name, and set `IN_REPLY_TO` to this relay's path; submit with `--admits-against` this relay's root-relative path as the hand-off pointer or INDEX row names it.
 Orchestrator Reviewer boot grants visibility/review context only, not approval authority.
 FINAL_GIT_STATUS_SHORT: <paste git status --short or unavailable — reason>
 ```
 
-Boot relays deliberately reuse `PHASE: SITREP` so the reviewer-boot relay remains exempt from the orchestrator-review visibility gate. Keep the `DISPATCH_ID` prefix and `SUBJECT: BOOT` distinguishers; a first-class `PHASE: BOOT` is deferred if the SITREP bucket-sharing becomes load-bearing.
+Keep `PHASE: SITREP` for these hand-authored onboarding relays; `orchestrator_review_in_broad_set` in `tools/relay_engine/rules.py` leaves them outside the reviewer-visibility gate.
 
 ## Template H — SITREP to another orchestrator/operator
 
