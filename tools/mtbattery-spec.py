@@ -437,6 +437,154 @@ KILLS.update({
     ],
 })
 
+
+# B13: additions attributed by a twice-run 22-tree walk (264 runs).
+# B9 X29/X30 additionally bisected at repeated 3a56e20/b39437c endpoints.
+
+# pair-target-false: linter/harness behaviour changed at 9734f9d.
+# plan_shape_warnings / plan_revision_ordinal_warning calling h27_pair_planner_address for PLAN without FROM.
+KILLS['pair-target-false'] = sorted(set(KILLS['pair-target-false']) | {
+    'addressing/T2-token-no-to.md',
+    'claude/A2-valid-downgrade.md',
+    'claude/B2-why-before-scan.md',
+    'claude/B3-yes-row-why.md',
+    'claude/B7-delegated-no-scopediff.md',
+    'claude/B8-deviation-dispatch.md',
+    'claude/C1-evasive-rows.md',
+    'claude/L3',
+    'lint-test/bad1.md',
+    'lint-test/bad3.md',
+    'lint-test/bad3b.md',
+    'lint-test/bad4.md',
+    'probes/N3-fenced-dispatch-inert.md',
+})
+
+# pair-target-false: registration added at 1374693.
+# check-relay-lint-fixtures.py PLANCONTRACT_EXPECTED.
+KILLS['pair-target-false'] = sorted(set(KILLS['pair-target-false']) | {
+    'plancontract/PC15-orchestrator-carrier/.relays/v29',
+})
+
+# pair-target-true: linter/harness behaviour changed at 9734f9d.
+# plan_shape_warnings plus EXPECTED_WARN_SET[AMB3].
+KILLS['pair-target-true'] = sorted(set(KILLS['pair-target-true']) | {
+    'ambiguity/AMB3-latest-wins',
+})
+
+# pair-target-true: registration added at 1374693.
+# check-relay-lint-fixtures.py PLANCONTRACT_EXPECTED.
+KILLS['pair-target-true'] = sorted(set(KILLS['pair-target-true']) | {
+    'plancontract/PC02-over-block/.relays/v29',
+    'plancontract/PC03-over-fenced/.relays/v29',
+    'plancontract/PC04-over-ratio-only/.relays/v29',
+    'plancontract/PC05-over-lines-only/.relays/v29',
+    'plancontract/PC06-over-bytes-only/.relays/v29',
+    'plancontract/PC07-over-longest-only/.relays/v29',
+    'plancontract/PC08-missing-locator/.relays/v29',
+    'plancontract/PC09-inline-body-over/.relays/v29',
+    'plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md',
+    'plancontract/PC12-ordinal-8/.relays/v29',
+    'plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md',
+})
+
+# dispatch-id-conflict-false: registration added before control at b7fc640.
+# check-relay-lint-fixtures.py EXPECTED humangate rows.
+# Pre-existing undeclared kills at 614b7ce, equal in both control runs.
+KILLS['dispatch-id-conflict-false'] = sorted(set(KILLS['dispatch-id-conflict-false']) | {
+    'humangate/HG1-bare-yes.md',
+    'humangate/HG2-annotated-yes.md',
+    'humangate/HG3-separator-only-yes.md',
+    'humangate/HG4-bare-no.md',
+})
+
+# dispatch-id-conflict-false: registration added at 2a7521f.
+# check-relay-lint-fixtures.py merge-token EXPECTED rows.
+KILLS['dispatch-id-conflict-false'] = sorted(set(KILLS['dispatch-id-conflict-false']) | {
+    'merge-token/MT10-field-grant-to-planner',
+    'merge-token/MT11-token-beside-denial',
+})
+
+# dispatch-id-conflict-false: registration added at 1374693.
+# check-relay-lint-fixtures.py PLANCONTRACT_EXPECTED.
+KILLS['dispatch-id-conflict-false'] = sorted(set(KILLS['dispatch-id-conflict-false']) | {
+    'plancontract/PC01-under-all/.relays/v29',
+    'plancontract/PC02-over-block/.relays/v29',
+    'plancontract/PC03-over-fenced/.relays/v29',
+    'plancontract/PC04-over-ratio-only/.relays/v29',
+    'plancontract/PC05-over-lines-only/.relays/v29',
+    'plancontract/PC06-over-bytes-only/.relays/v29',
+    'plancontract/PC07-over-longest-only/.relays/v29',
+    'plancontract/PC08-missing-locator/.relays/v29',
+    'plancontract/PC09-inline-body-over/.relays/v29',
+    'plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan-noroot.md',
+    'plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md',
+    'plancontract/PC10-draft-explicit-root/.relays/v29',
+    'plancontract/PC11-ordinal-7/.relays/v29',
+    'plancontract/PC12-ordinal-8/.relays/v29',
+    'plancontract/PC12-ordinal-8/.relays/v29/01-plan-20260801-130000.md',
+    'plancontract/PC13-date-suffix/.relays/v29',
+    'plancontract/PC14-fence-evasion/.relays/v29',
+    'plancontract/PC15-orchestrator-carrier/.relays/v29',
+})
+
+# xroot-verdict-true: registration added at d6cdc90.
+# xrootfixgen.py _authority_cases b9_pairs.
+KILLS['xroot-verdict-true'] = sorted(set(KILLS['xroot-verdict-true']) | {
+    'xroot/B9-peer-orchestrator-planner-orchestrator-reviewer',
+})
+
+# xroot-verdict-true: harness oracle behaviour changed at b39437c.
+# xrootfixgen.py _authority_cases X29/X30 expected_exit changed from 1 to 0.
+KILLS['xroot-verdict-true'] = sorted(set(KILLS['xroot-verdict-true']) | {
+    'xroot/X29-origin-tie',
+    'xroot/X30-review-tie',
+})
+
+# xroot-peer-tier-false: registration added at d6cdc90.
+# xrootfixgen.py _authority_cases b9_pairs.
+KILLS['xroot-peer-tier-false'] = sorted(set(KILLS['xroot-peer-tier-false']) | {
+    'xroot/B9-peer-orchestrator-planner-implementer',
+    'xroot/B9-peer-orchestrator-planner-planner',
+    'xroot/B9-peer-orchestrator-reviewer-orchestrator-reviewer',
+    'xroot/B9-peer-planner-master-reviewer',
+    'xroot/B9-peer-planner-orchestrator-planner',
+    'xroot/B9-peer-planner-orchestrator-reviewer',
+    'xroot/B9-peer-planner-planner',
+})
+
+# xroot-peer-tier-true: registration added at d6cdc90.
+# xrootfixgen.py _authority_cases b9_pairs.
+KILLS['xroot-peer-tier-true'] = sorted(set(KILLS['xroot-peer-tier-true']) | {
+    'xroot/B9-peer-orchestrator-planner-orchestrator-reviewer',
+})
+
+# xroot-peer-tier-true: harness oracle behaviour changed at b39437c.
+# xrootfixgen.py _authority_cases X29/X30 expected_exit changed from 1 to 0.
+KILLS['xroot-peer-tier-true'] = sorted(set(KILLS['xroot-peer-tier-true']) | {
+    'xroot/X29-origin-tie',
+    'xroot/X30-review-tie',
+})
+
+# pair-target-false raises: 9734f9d warning call sites, first-parent
+# transition 262513b -> d20efdf, repeated twice at both points.
+RAISES: dict[str, dict[str, str]] = {
+    "pair-target-false": {
+        'addressing/T2-token-no-to.md': 'IndexError',
+        'claude/A2-valid-downgrade.md': 'IndexError',
+        'claude/B2-why-before-scan.md': 'IndexError',
+        'claude/B3-yes-row-why.md': 'IndexError',
+        'claude/B7-delegated-no-scopediff.md': 'IndexError',
+        'claude/B8-deviation-dispatch.md': 'IndexError',
+        'claude/C1-evasive-rows.md': 'IndexError',
+        'claude/L3': 'IndexError',
+        'lint-test/bad1.md': 'IndexError',
+        'lint-test/bad3.md': 'IndexError',
+        'lint-test/bad3b.md': 'IndexError',
+        'lint-test/bad4.md': 'IndexError',
+        'probes/N3-fenced-dispatch-inert.md': 'IndexError',
+    },
+}
+
 _arm_names = {_arm["name"] for _arm in ARMS}
 if set(KILLS) != _arm_names:
     raise ValueError(
