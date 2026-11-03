@@ -164,9 +164,9 @@ Files: `tools/adapters/relay-monitor.py`, `tools/adapters/shell_lex.py`, `tools/
 
 Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `status`, `operator`, `replay`.
 State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell.
-The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` covers filings it receives, whose submit command the hook can read.
+The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies only to filings it binds from.
 For those filings, one as the bound seat in the bound root leaves progress where it is; any other moves that root's progress to the filing itself, skipping earlier undelivered relays even after a return filing.
-When the hook cannot read the submit command, binding and progress stay where they were and the hook prints a rebind line.
+For filings it does not bind from, binding and progress stay where they were, and the hook prints a rebind line for only some of them; `relay-monitor.py status` shows where the watcher is bound, and the absence of a rebind line does not.
 Check `relay-monitor.py status` for the intended root before trusting `relay-monitor.py replay`'s answer: replay re-prints skipped relays only for the root the watcher is bound to, together with ones already delivered.
 Check each against work already handled.
 Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` optional) bind without a hook, for hand-authored roots; `ADT_HOST` names the host explicitly.

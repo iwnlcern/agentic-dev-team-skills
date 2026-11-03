@@ -196,7 +196,8 @@ On a managed root, distinguish the root integrity report and history audit from 
 
 On a PLAN-phase relay, the cross-root design-edge gate is decided by `xroot_verify` in `tools/relay_engine/rules.py`; an engaged edge does not fall back to local discovery.
 The foreign design, DESIGN and DESIGN-REVIEW are read only as committed at `DESIGN_SOURCE_COMMIT`, so the foreign relay root must be committed at that pin; relays Git ignores, leaves untracked or only staged, or commits after the pin are not read.
-As `xroot_verify` decides, a foreign relay the pin does not hold makes the authority check refuse the grant with `authority.lineage-incomplete`; a foreign design file the pin does not hold instead refuses on the `byte` axis with `authority.could-not-evaluate`.
+When evidence needed for the cross-root edge is absent at the pin, the check refuses the grant with the reason for the axis `xroot_verify` reports: an authority-axis failure gives `authority.lineage-incomplete`, while a missing-file failure on the `byte` axis gives `authority.could-not-evaluate`.
+Read the reported axis rather than inferring which evidence is missing from the reason alone; when both a needed relay and the design file are absent, the reported failure depends on which check fails first.
 On a hand-authored root, root lint reports the edge failure as an error.
 On a managed root, admission admits the PLAN with the error finding `lineage.cross-root-design`; each surface is distinct from the authority check's refusal of the grant.
 Declaration, repository, commit, byte, authority-population, authority-owner, authority-parent, authority-verdict, ordering, ambiguity, and capacity failures are distinct axes carried by `XrootAxisError` in `tools/relay_engine/rules.py`; a seat uses the reported axis rather than treating every failure as a lineage gap.
@@ -204,7 +205,7 @@ The authority check refuses a declaration missing any of the seven edge fields, 
 The requirements of `DESIGN_LOCK_ID`, `DESIGN_RECORD_KIND: design-doc` and a pair-Planner carrier, and the conflict with a visible same-owner local DESIGN carrying the same `DESIGN_DOC_ID`, are reported by admission and lint but do not make the authority check refuse a grant over those four cases.
 Admission reports those cases with the error finding `lineage.cross-root-design`; both linters report errors on a hand-authored root, while the managed engine root’s default sweep omits these findings and its history audit reports them as warnings.
 The authority check reads a local design-review lineage from the root's record, not from relay files on disk, as `authorizations` in `tools/relay_engine/authority.py` decides.
-It needs no Git unless a relay in that lineage declares a plan source, which engages Git.
+It needs no Git unless a relay `_external_evidence` in `tools/relay_engine/authority.py` reads for the grant, in the lineage or among the ancestors it reads, declares a plan source or a cross-root design edge; either engages Git and can cause the grant to be refused.
 Under an engaged canonical pair-Planner PLAN edge, `DESIGN_SOURCE_PATH` is the paired foreign locator for `DESIGN_SHA256` in place of `DESIGN_ARTIFACT`.
 Path-form `DESIGN_LOCK_ID` and `PLAN_LOCK_ID` values gain the symmetric declaration `PLAN_SOURCE_REPO` plus `PLAN_SOURCE_COMMIT`; occurrence of either source field engages the same conflict-first repository, commit, literal-path, blob, and optional annotation-digest checks for each path-form lock with no local-path fallback, while absent and opaque lock values do not enter foreign path resolution.
 Only the canonical `DESIGN_LOCK_ID` slot is gated; ad hoc secondary carriers (`SECOND_DESIGN_LOCK` or any invented key) are invisible to the gate by design — a multi-lock plan's primary slot is the only gated one.
@@ -312,7 +313,8 @@ The Implementer still acts on the filed grant, not on the chat record alone.
 The live warning `review.gate-not-heard` is decided by `gate_checkpoint_findings` in `tools/relay_engine/rules.py`; it judges only grants that `merge_authorized` in that file accepts.
 A grant the authority check allows can therefore carry no checkpoint warning; a missing warning does not establish that the checkpoint was heard.
 A seat sees a reported warning in submit admission findings, a managed root's history audit, and either linter's sweep of a hand-authored root.
-The warning's subject is the evaluated grant; its first operand, when resolved, is the record selected through the grant's `PARENT_DISPATCH_ID`, which is the reviewer's record in v297's chain, followed by the effective request and reply that exist.
+The warning's subject is the evaluated grant; its operands are the record selected through the grant's `PARENT_DISPATCH_ID` (the reviewer's record in v297's chain) and the effective request and reply that exist.
+`_structural` in `tools/relay_engine/rules.py` stores these paths as a sorted set, in path order rather than by role.
 Operands and reason/disposition parameters appear in the admission finding; the history audit and linters print the reason and disposition state in the message.
 In an adopting run, a grant the function judges with no orchestrator Planner request parented to the record its `PARENT_DISPATCH_ID` names is not heard and warns, with the reason the function reports.
 The v297 chain, with the reviewer's record parented to the gate record and the grant parented to the reviewer's record, warns with `no-request`.
@@ -471,7 +473,8 @@ A pair-Planner grant’s own name without a digest answers `authority.could-not-
 When the counting step does not count an amendment, whatever the cause, including a review that fails a rule below, that step adds neither a pin nor a reason; R8 reads later relays independently and can still refuse a pair-Planner grant over one.
 An allowed answer alone therefore shows neither that a delta review counted nor that an amendment’s bytes are pinned.
 For a grant from operator, orchestrator or an orchestrator-planner-role address, the grant's own amendment digest supplies a pin in the declaring set that `_required_artifacts` reads, and the bytes must match it.
-For a pair-Planner grant declaring an amendment digest, `_required_artifacts` refuses with `authority.artifact-changed` unless that digest equals the pin supplied by its lineage or the counting step, whatever the bytes, including after a later counted carrier moves the pin.
+For a pair-Planner grant declaring an amendment digest, `_required_artifacts` requires that digest to equal the pin supplied by its lineage or the counting step, whatever the bytes, including after a later counted carrier moves the pin.
+If the lineage is otherwise complete, a mismatch gives `authority.artifact-changed`; if it is incomplete, the comparison is skipped and that mismatch adds no reason to `authority.lineage-incomplete`, which alone refuses the grant in the incomplete-lineage cases.
 The bytes must still match that pin; a declaration inside a fence or indented does not establish this grant-digest requirement.
 
 - R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with an empty line or a line holding only spaces and tabs on each side, or the corresponding file edge.
@@ -849,9 +852,9 @@ A `CC` arrival is context only: it grants no authority and asks for no reply, so
 A seat whose role gives it a standing duty toward copied relays still acts on that duty and files under it, not as a reply the copy asked for.
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
 A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it.
-The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies to filings it receives: those whose submit command the hook can read.
+The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies only to filings it binds from.
 For those filings, one as the bound seat in the bound root leaves delivery progress where it is; any other moves that root's progress to the filing itself, so earlier undelivered relays are skipped even after a return filing.
-When the hook cannot read the submit command, binding and progress stay where they were and the hook prints a rebind line.
+For filings it does not bind from, binding and progress stay where they were, and the hook prints a rebind line for only some of them; `relay-monitor.py status` shows where the watcher is bound, and the absence of a rebind line does not.
 Check `relay-monitor.py status` to confirm the watcher is back on the intended root before trusting `relay-monitor.py replay`'s answer: replay re-prints skipped relays only for the root the watcher is bound to.
 It can also print relays already delivered, so check each against work already handled.
 On Claude Code, an active plugin's monitor with the default `when` starts at session start and on plugin reload.
