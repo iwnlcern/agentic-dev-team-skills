@@ -916,23 +916,32 @@ CLEANUP_GRACE = 5.0
 _STOP = None
 
 
+class RunStopped(SystemExit):
+    """Orderly signal unwind outside asynchronous worker collection."""
+
+
 @contextlib.contextmanager
 def stop_scope(watch_parent=False, raise_on_stop=False):
     global _STOP
     if _STOP is not None:
         yield _STOP
         return
-    state = SimpleNamespace(event=threading.Event(), signal=None)
+    state = SimpleNamespace(event=threading.Event(), signal=None, launch=threading.Condition(),
+                            defer=False, selected=[], printed=set())
     old = {}
     finished = threading.Event()
     parent = int(os.environ.get('MTBATTERY_PARENT_PID', os.getppid()))
     def stop(signum, frame):
-        if state.event.is_set():
-            return
-        state.signal = signum
-        state.event.set()
-        if raise_on_stop:
-            raise SystemExit(128 + signum)
+        # Only worker threads hold this condition outside the handler. Command
+        # preparation runs without it, so it may safely deliver a signal.
+        with state.launch:
+            if state.event.is_set():
+                return
+            state.signal = signum
+            state.event.set()
+            state.launch.notify_all()
+        if raise_on_stop and not state.defer:
+            raise RunStopped(128 + signum)
     def watch():
         while not finished.wait(0.05):
             if os.getppid() != parent:
@@ -1076,23 +1085,41 @@ def unmutated_control(command, population: int) -> list[str]:
 def run_workers(arms, jobs: int, seed: int | None, run_file: Path,
                 run_dir: Path, worker_command, on_report=None) -> list[ArmReport]:
     with stop_scope() as stop:
-        launch_lock = threading.Lock()
+        scheduled = start_order(arms, seed)
+        tickets = {str(arm['name']): index for index, arm in enumerate(scheduled)}
+        next_launch = 0
         def unobserved(name):
             reason = f'stopped signal={stop.signal}'
             return ArmReport(name, (f'UNOBSERVED ARM={name} {reason}',), (f'{name}: {reason}',), False)
         def run(arm):
+            nonlocal next_launch
             name = str(arm['name'])
+            ticket = tickets[name]
+            admitted = False
             status, stderr, raw, process = 'not-started', '', None, None
             report = None
             try:
-                with launch_lock:
+                with stop.launch:
+                    while ticket != next_launch and not stop.event.is_set():
+                        stop.launch.wait()
                     if stop.event.is_set():
                         return unobserved(name)
-                    raw = Path(tempfile.mkdtemp(prefix='arm-', dir=run_dir))
-                    env = {**os.environ, 'TMPDIR': str(raw), 'TEMP': str(raw), 'TMP': str(raw),
-                           'PYTHONDONTWRITEBYTECODE': '1', 'MTBATTERY_PARENT_PID': str(os.getpid())}
-                    process = subprocess.Popen(worker_command(name), env=env,
-                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                # This ticket is reserved, but cancellation must remain able to
+                # publish while the command is prepared.
+                command = worker_command(name)
+                with stop.launch:
+                    if stop.event.is_set():
+                        return unobserved(name)
+                    try:
+                        raw = Path(tempfile.mkdtemp(prefix='arm-', dir=run_dir))
+                        env = {**os.environ, 'TMPDIR': str(raw), 'TEMP': str(raw), 'TMP': str(raw),
+                               'PYTHONDONTWRITEBYTECODE': '1', 'MTBATTERY_PARENT_PID': str(os.getpid())}
+                        process = subprocess.Popen(command, env=env,
+                                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    finally:
+                        next_launch += 1
+                        admitted = True
+                        stop.launch.notify_all()
                 while True:
                     if stop.event.is_set():
                         stop_child(process)
@@ -1118,6 +1145,11 @@ def run_workers(arms, jobs: int, seed: int | None, run_file: Path,
                     error += ' stderr=' + repr(stderr)
                 report = ArmReport(name, (f'ARM={name} HARD-FAIL={error}',), (error,), False)
             finally:
+                if not admitted:
+                    with stop.launch:
+                        if ticket == next_launch:
+                            next_launch += 1
+                        stop.launch.notify_all()
                 if process is not None:
                     if process.poll() is None:
                         stop_child(process)
@@ -1128,21 +1160,27 @@ def run_workers(arms, jobs: int, seed: int | None, run_file: Path,
                         report = replace(report, errors=report.errors + (cleanup_error,))
             return report
         received, prefix = {}, 0
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            pending = {pool.submit(run, arm): str(arm['name']) for arm in start_order(arms, seed)}
-            while pending:
-                if stop.event.is_set():
-                    for future in pending:
-                        future.cancel()
-                done, _ = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
-                for future in done:
-                    name = pending.pop(future)
-                    received[name] = unobserved(name) if future.cancelled() else future.result()
-                while prefix < len(arms) and str(arms[prefix]['name']) in received:
-                    if on_report is not None:
-                        on_report(received[str(arms[prefix]['name'])])
-                    prefix += 1
-        return [received[str(arm['name'])] for arm in arms]
+        prior_defer = stop.defer
+        stop.defer = True
+        try:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                pending = {pool.submit(run, arm): str(arm['name']) for arm in scheduled}
+                while pending:
+                    if stop.event.is_set():
+                        for future in pending:
+                            future.cancel()
+                    done, _ = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        name = pending.pop(future)
+                        received[name] = unobserved(name) if future.cancelled() else future.result()
+                    while prefix < len(arms) and str(arms[prefix]['name']) in received:
+                        if on_report is not None:
+                            on_report(received[str(arms[prefix]['name'])])
+                        prefix += 1
+            return [received[str(arm['name'])] for arm in arms]
+        finally:
+            stop.defer = prior_defer
+
 
 
 def tree_digest(root: Path) -> dict[str, str]:
@@ -1175,11 +1213,14 @@ def _battery_main(args, before) -> int:
         arm for arm in spec.ARMS
         if not args.only or set(str(row) for row in arm.get("rows", (arm["row"],))) & set(args.only)
     ]
+    if _STOP is not None:
+        _STOP.selected = selected
     def stopped_selection():
         if _STOP is None or not _STOP.event.is_set():
             return False
         for arm in selected:
             emit(f"UNOBSERVED ARM={arm['name']} stopped signal={_STOP.signal}")
+            _STOP.printed.add(str(arm['name']))
         return True
     known_rows = {str(row) for arm in spec.ARMS for row in arm.get('rows', (arm['row'],))}
     unknown = sorted(set(args.only) - known_rows)
@@ -1233,6 +1274,8 @@ def _battery_main(args, before) -> int:
         for line in report.lines:
             emit(line)
         streamed.add(report.name)
+        if _STOP is not None:
+            _STOP.printed.add(report.name)
     run_dir = Path(tempfile.mkdtemp(prefix='mtbattery-run-'))
     try:
         run_file = run_dir / 'context'
@@ -1295,8 +1338,15 @@ def main(argv: list[str]) -> int:
     emit(f"RUN jobs={args.jobs} cpus={os.cpu_count()} order={order} "
          f"executable={sys.executable} version={sys.version.replace(chr(10), ' ')} load={os.getloadavg()}")
     try:
-        with stop_scope() as stop:
-            code = battery_main(args)
+        with stop_scope(raise_on_stop=True) as stop:
+            try:
+                code = battery_main(args)
+            except RunStopped:
+                for arm in stop.selected:
+                    if str(arm['name']) not in stop.printed:
+                        emit(f"UNOBSERVED ARM={arm['name']} stopped signal={stop.signal}")
+                emit(f'ERROR stopped signal={stop.signal}')
+                return 7
             return 7 if stop.event.is_set() else code
     finally:
         emit(f"RUN wall_seconds={time.monotonic() - started:.6f} load={os.getloadavg()}")

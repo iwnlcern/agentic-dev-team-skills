@@ -1125,3 +1125,83 @@ class TestFoldStopBoundaries(unittest.TestCase):
                     self.assertEqual(code, 7)
                     self.assertIn(name, text)
                     self.assertIn('HARD-FAIL', text)
+
+
+class TestFoldReviewRegressions(unittest.TestCase):
+    def test_cancellation_during_command_preparation_starts_no_worker(self):
+        import os, signal, subprocess, sys
+        launches = []
+        original = subprocess.Popen
+        def spawn(*args, **kwargs):
+            launches.append(args[0])
+            return original(*args, **kwargs)
+        def command(name):
+            os.kill(os.getpid(), signal.SIGTERM)
+            self.assertTrue(mt._STOP.event.wait(2))
+            return [sys.executable, '-B', '-c', 'pass']
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(mt.subprocess, 'Popen', side_effect=spawn):
+            root = Path(raw)
+            reports = mt.run_workers([{'name': 'a'}, {'name': 'b'}], 1, None, root/'context', root, command)
+        self.assertEqual(launches, [])
+        self.assertTrue(all(not report.completed for report in reports))
+
+    def test_concurrent_launch_order_survives_thread_reordering(self):
+        import json, sys, threading
+        from concurrent.futures import ThreadPoolExecutor
+        second = threading.Event()
+        starts = []
+        class ReorderedPool(ThreadPoolExecutor):
+            def submit(self, fn, arm):
+                index = getattr(self, 'submitted', 0)
+                self.submitted = index + 1
+                def run():
+                    if index == 0:
+                        # Let the second submitted thread enter run first.
+                        second.wait(2)
+                        time.sleep(0.05)
+                    elif index == 1:
+                        second.set()
+                    return fn(arm)
+                return super().submit(run)
+        def command(name):
+            starts.append(name)
+            record = mt.REPORT_MARKER+json.dumps(dict(name=name, lines=['ARM='+name+' ok'], errors=[], completed=True))
+            return [sys.executable, '-B', '-c', 'print('+repr(record)+')']
+        arms = [{'name': name} for name in ('z', 'a', 'q', 'b')]
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(mt, 'ThreadPoolExecutor', ReorderedPool):
+            root = Path(raw)
+            reports = mt.run_workers(arms, 2, 297, root/'context', root, command)
+        self.assertEqual(starts, ['z', 'a', 'b', 'q'])
+        self.assertTrue(all(report.completed for report in reports))
+
+    def test_parent_preflight_stop_unwinds_child_and_reports_selection(self):
+        import os, signal, subprocess, sys
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw);driver = root/'driver.py'
+            (root/'spec.py').write_text("ARMS = [{'name': 'a', 'row': 'C1'}]\n")
+            driver.write_text('''import subprocess,sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+import mtbattery as mt
+root=Path(sys.argv[1])
+def preflight(*args):
+    subprocess.run([sys.executable, '-B', '-c', "import os,time; from pathlib import Path; Path(" + repr(str(root/'child.pid')) + ").write_text(str(os.getpid())); time.sleep(60)"])
+    return []
+with mock.patch.object(mt,'tree_digest',return_value={}), mock.patch.object(mt,'structural_errors',side_effect=preflight), mock.patch.object(mt,'load_module',return_value=SimpleNamespace(ARMS=[{'name':'a','row':'C1'}])):
+    raise SystemExit(mt.main(['--spec',str(root/'spec.py')]))
+''')
+            with (root/'output').open('w+') as out:
+                process = subprocess.Popen([sys.executable, '-B', str(driver), str(root)], stdout=out, stderr=out, start_new_session=True)
+                try:
+                    TestFoldLifecycle().wait_for(lambda: (root/'child.pid').exists())
+                    os.kill(process.pid, signal.SIGTERM)
+                    self.assertEqual(process.wait(timeout=6), 7)
+                    with self.assertRaises(ProcessLookupError): os.kill(int((root/'child.pid').read_text()), 0)
+                    output = (root/'output').read_text()
+                    self.assertIn('UNOBSERVED ARM=a', output)
+                    self.assertTrue(output.splitlines()[-1].startswith('RUN wall_seconds='))
+                finally:
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    process.wait()
