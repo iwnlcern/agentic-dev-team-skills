@@ -1,6 +1,7 @@
 # Agentic Dev Team Protocol
 
-Use this protocol for substantive relays, reviews, sitreps, plan verdicts, implementation reports, fold-ins, merge gates, or live-verification reports. It provides email-style relay addressing (`FROM` / `TO` / `CC`) so orchestrators can target exactly one acting addressee while giving context to boundary-adjacent agents; relay-lint substance checks and location-bound dispatch tokens; FOLD_SCOPE, addressed `DISPATCH MERGE`, duplicate/conflicting merge-authorization detection, DISPATCH_ID-scoped merge lineage, and a Claude Code auto-lint adapter; an explicit relay header schema with `PARENT_DISPATCH_ID` lineage gates for pair-Planner implementation dispatch, a ROLE/FROM proxy-authoring tripwire, and a reconciliation-layer row-truth check hook; and `PHASE: DESIGN-REVIEW` plus design-doc lineage gates — pair-Planner `PLAN` relays that lock a design document require an approved Implementer design review parent, while genuine audit-record, no-lock, and direct operator/orchestrator override paths remain cheap. The Orchestrator Reviewer visibility gate requires orchestrator-planner authority-bearing relays in the broad SET to address the reviewer in CC unless the run carries an operator-authored no-reviewer waiver.
+Use this protocol for substantive relays, reviews, sitreps, plan verdicts, implementation reports, fold-ins, merge gates, or live-verification reports. It provides email-style relay addressing (`FROM` / `TO` / `CC`) so orchestrators can target exactly one acting addressee while giving context to boundary-adjacent agents; relay-lint substance checks and location-bound dispatch tokens; FOLD_SCOPE, addressed `DISPATCH MERGE`, duplicate/conflicting merge-authorization detection, DISPATCH_ID-scoped merge lineage, and a Claude Code auto-lint adapter; an explicit relay header schema with `PARENT_DISPATCH_ID` lineage gates for pair-Planner implementation dispatch, a ROLE/FROM proxy-authoring tripwire, and a reconciliation-layer row-truth check hook; and `PHASE: DESIGN-REVIEW` plus design-doc lineage gates — pair-Planner `PLAN` relays that lock a design document require an approved Implementer design review parent, while genuine audit-record, no-lock, and direct operator/orchestrator override paths remain cheap.
+The visibility check in `orchestrator_review_gate_errors` in `tools/relay_engine/rules.py` accepts an orchestrator-reviewer-role address in `TO` or `CC`; address the run's reviewer on orchestrator authority relays unless the run has an operator-authored no-reviewer waiver.
 
 ## Scope note
 
@@ -43,7 +44,10 @@ TO:   <OWNER>.<role> [, ...]    # acting addressee(s); owns the reply; replies a
 CC:   <OWNER>.<role> [, ...]    # context only; no phase authority, no reply obligation; never pauses work in progress
 ```
 
-Roles in addresses are lowercase: `master-planner`, `master-reviewer`, `domain-planner`, `domain-reviewer`, `orchestrator-planner`, `orchestrator-reviewer`, `pair-planner`, `pair-implementer`, plus legacy `planner`, `implementer`, and `reviewer` (pair-tier-equivalent, accepted permanently). The tier lives in the role word; there is no tier header field. Review panels are not addressable roles; they report inline to the planner that spawned them. `operator` and `orchestrator` are special addresses. In a standalone run with no orchestrator seat, `FROM: orchestrator` is not a valid authoring address; a relay claiming it grants nothing. Addresses are compared case-insensitively and normalized to lowercase canonical form; non-canonical case may lint as a warning, but it must not split lineage ownership. Use `TO: operator` when a relay is explicitly asking for a human/operator judgment.
+Roles in addresses are lowercase: `master-planner`, `master-reviewer`, `domain-planner`, `domain-reviewer`, `orchestrator-planner`, `orchestrator-reviewer`, `pair-planner`, `pair-implementer`, plus legacy `planner`, `implementer`, and `reviewer` (pair-tier-equivalent, accepted permanently). The tier lives in the role word; there is no tier header field. Review panels are not addressable roles; they report inline to the planner that spawned them. `operator` and `orchestrator` are special addresses. In a standalone run with no orchestrator seat, `FROM: orchestrator` is not a valid authoring address; a relay claiming it grants nothing.
+The linters' `normalized_addr` and `validate_address_fields` in `tools/relay_engine/rules.py` normalize address case and can warn on non-canonical spelling.
+The current authority check's `_check` in `tools/relay_engine/authority.py` requires the grant's parsed `TO` value to match `--seat` with letter case included; trailing whitespace does not count.
+Use `TO: operator` when a relay is explicitly asking for a human/operator judgment.
 
 `TO` is required on orchestrator-tier or multi-pair relays and on any relay containing a live dispatch token. A missing `TO` means legacy phase-implied routing; such relays may lint dirty when a tool needs explicit routing.
 
@@ -118,20 +122,27 @@ Canonical fields: the protocol documents `ROLE`, `PHASE`, `AUTHORITY`, `DISPATCH
 `RUN_ID` names the run; managed-root admission requires it in the `valid_run_id` grammar in `tools/relay_engine/envelope.py`, and the linters do not read it.
 Local or display fields: `IN_REPLY_TO`, `BASE`, and `RELAY_PATH`. `IN_REPLY_TO` is relay-to-relay display/threading context and is not a gate input. `BASE` and `RELAY_PATH` are host bookkeeping. Do not invent a second threading scheme inside helper skills.
 
-`SUBJECT` joins the local/display field list beside `IN_REPLY_TO`, placed after `CC`; display-only, never a gate input.
+`SUBJECT` is display text placed after `CC`; `parse_draft` in `tools/relay_engine/envelope.py` requires a nonempty value for managed-root admission, while `_check` in `tools/relay_engine/authority.py` does not use its content to grant permission.
 
 ## Artifact identity, location, and integrity
 
 Identity, location, and integrity are three properties in three fields, never one.
-`DESIGN_LOCK_ID` and `PLAN_LOCK_ID` are lock values. A lock value is a logical identity or repo-relative path, optionally annotated ` @ sha256 <hex>`; equality compares the unannotated value.
+`DESIGN_LOCK_ID` and `PLAN_LOCK_ID` are lock values.
+A lock value is a logical identity or repo-relative path.
+Local design-review lineage in `lint_relay_root` in `tools/relay_engine/rules.py` compares the parsed `DESIGN_LOCK_ID` and `DESIGN_DOC_ID` values including any annotation; keep those values equal.
+For foreign path-form locks, follow the annotation check in `xroot_plan_gate` in `tools/relay_engine/rules.py`; it does not accept the `sha256` prefix that the local legacy-path reader `_declarations` in `tools/relay_engine/authority.py` accepts.
 Byte integrity rides `DESIGN_SHA256` / `PLAN_SHA256`: optional fields carrying the lowercase-hex sha256 of the referenced artifact's bytes as of the referencing relay; a legitimate amendment keeps the identity value and floats the digest forward in the next relay (the grill's fork-1 amendment policy, surviving on the digest field), so a digest mismatch with no acknowledging relay is the tamper signal.
-Location rides `DESIGN_ARTIFACT` / `PLAN_ARTIFACT`: optional locator fields carrying the artifact's filename stem, resolving to `designs/<stem>.md` or `plans/<stem>.md` under the owning sprint tree; consumers resolve through the locator field and never by parsing the identity value.
+Routed digest checking uses `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` stems: `a5_resolve_and_compare` in `tools/relay_engine/rules.py` probes the relay root, current working directory, and owning sprint tree under `designs/` or `plans/`.
+Other consumers do resolve path-form lock values; `_declarations` in `tools/relay_engine/authority.py` reads legacy artifact paths carried in the lock fields.
 
 `CHARTER_ARTIFACT` and `CHARTER_SHA256` are non-resolving display metadata and never gate inputs.
 The charter record is identified in lineage by equal `CHARTER_DOC_ID`/`DESIGN_DOC_ID`; no artifact-resolution behavior is added.
 New artifacts name their files by one stem grammar per document class — `designs/DD-<cycle>-<YYYYMMDD>.md`, `plans/PL-<cycle>-<YYYYMMDD>.md`, amendments and errata by suffix (`-erratum-N`, `-supplement-N`, `-amendment-N`) — and that stem is what the locator field carries.
 
-The routed digest check is fail-closed: a present digest requires its paired locator (`DESIGN_SHA256` with no `DESIGN_ARTIFACT` is the exact refusal, and the shape checks are gated on digest occurrence); exact-file mode checks field well-formedness only, root mode additionally resolves through the locator and compares; a locator without a digest fires no shape check, with the unconditional conflicting-duplicate refusal the one exception. These mechanics are owned by v29-detection rev25 and are cited here, not claimed by this text.
+Follow `lock_digest_shape_errors` in `tools/relay_engine/rules.py` for digest and locator pairing; its foreign-plan exception permits the applicable pair-Planner PLAN to use `DESIGN_SOURCE_PATH` for `DESIGN_SHA256`.
+Exact-file mode checks field well-formedness only; root mode additionally resolves through the locator and compares.
+A locator without a digest fires no shape check, with the unconditional conflicting-duplicate refusal the one exception.
+These mechanics are owned by v29-detection rev25 and are cited here, not claimed by this text.
 
 At lint scope, an acknowledging relay is any later relay carrying shape-valid locator and digest values for the same field pair and stem; the check treats the newest such declaration as current and adjudicates nothing about it.
 The limit is named rather than discoverable: a later shape-valid carrier therefore silences a digest mismatch at lint — including a carrier that is foreign, rejected, or structurally dirty under other checks.
@@ -172,7 +183,7 @@ The `plan shape` and `plan revision ordinal` lint warnings are advisory signals;
 When one fires, re-read the plan against this section before filing; neither warning changes any gate or verdict.
 For plan shape, the six thresholds are a fenced block over 80 interior lines, total fenced interior lines over 400, fenced-line ratio over 0.50 when total lines exceed 400, total lines over 1500, raw bytes over 65536, and longest line over 8000 Unicode code points.
 The ratio in the message is shown to two places while the test is the integer relation `2F > L`, where `F` is fenced interior lines and `L` is total lines, so a message reading `ratio 0.50 > 0.50` is correct.
-An external plan is measured through its locator; an inline plan is measured as the relay body.
+When plan-shape checking applies, `plan_shape_warnings` in `tools/relay_engine/rules.py` measures the first readable artifact reached through `PLAN_ARTIFACT`; if the locator is absent or resolves to no readable file, it measures the relay body and warns about the fallback.
 The plan revision ordinal warning fires at ordinal 8 or higher declared by the pair Planner's `DISPATCH_ID`; the median of the seven-cycle corpus scanned on 2026-09-13 is 5, and the warning text carries that constant.
 
 ## Design-review lineage gate
@@ -219,7 +230,8 @@ The following are intentionally out of scope: latest-non-superseded approve, sup
 
 ## Orchestrator-review visibility gate
 
-When `relay-lint --relay-root` is available, every orchestrator authority relay in the broad SET must address the run's Orchestrator Reviewer in `TO` or `CC`, or the run root must contain an operator-authored no-reviewer waiver.
+Address the run's own Orchestrator Reviewer in `TO` or `CC` on every orchestrator authority relay in the broad SET, unless the run has an operator-authored no-reviewer waiver.
+The mechanical visibility check in `orchestrator_review_gate_errors` in `tools/relay_engine/rules.py` accepts any orchestrator-reviewer-role address in either field; it does not verify that address belongs to this run.
 This is a **visibility gate**, not an approval gate: the reviewer sees the relay and reviews on its own cadence; the Orchestrator Planner does not wait for an approval verdict before writing or routing the relay.
 On a managed root, distinguish the root integrity report and history audit from the current authority check; see [Relay lint](#relay-lint) and [Authority check before acting](#authority-check-before-acting).
 
