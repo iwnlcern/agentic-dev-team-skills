@@ -143,7 +143,7 @@ class TestVersion(unittest.TestCase):
                 continue
             if path.is_file():
                 actual.add(relative.as_posix())
-        self.assertEqual(KIT_VERSION, "2.9.6")
+        self.assertEqual(KIT_VERSION, "2.9.7")
         self.assertEqual(ROSTER, EXPECTED_ROSTER)
         self.assertEqual(set(ROSTER), actual)
 
@@ -366,7 +366,7 @@ class TestVersion(unittest.TestCase):
             {
                 "fingerprint": _independent_fingerprint(TOOLS),
                 "install": os.path.realpath(TOOLS),
-                "kit": "2.9.6",
+                "kit": "2.9.7",
             },
         )
 
@@ -408,7 +408,7 @@ class TestVersion(unittest.TestCase):
                         {
                             "fingerprint_error": reason,
                             "install": os.path.realpath(staged),
-                            "kit": "2.9.6",
+                            "kit": "2.9.7",
                         },
                     )
 

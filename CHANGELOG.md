@@ -5,6 +5,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [2.9.7] — 2026-11-03
+
+A substantial production-fix release despite the patch-step number: authority verification, relay validation, watcher recovery, and the kit's operating guidance change together.
+
+- **B1 — authority verification (PR 31):** Adds the authority check and its lineage, artifact-pin and cross-root design verification.
+  A cross-root design edge requires the foreign relay root committed at the pinned commit; uncommitted foreign relay files cannot supply that evidence.
+- **B2 — draft shape and lint consistency (PR 40):** Relay submission refuses eight non-newline separators (U+000B, U+000C, U+001C, U+001D, U+001E, U+0085, U+2028 and U+2029), cycle or supersession controls outside the header or embedded in a header value, and verdict keys outside a grant's header or embedded in one of its header values with `E-DRAFT-SHAPE`.
+  Remove a post-header `VERDICT: n/a — …` line: moving it into the header denies the grant.
+  Seat registration refuses with `E-DRAFT-SHAPE` in a root whose stored commissioning record shows a cycle or supersession key with a colon in `commissioned_by`, where 2.9.6 registered the seat; the remedy is to re-commission the root.
+  In the measured roots, both linters gain errors on eight files: `v297-b2/PLAN-REVIEW-pair-implementer-20261026-015530.md`, `v297-b8/IMPL-pair-planner-20261018-141812.md`, the three `v295-b2/SITREP-pair-planner-` files stamped `20260912-224711`, `20260912-231617` and `20260913-025618`, the two kalshi grants `lip-s1-strat-c1-impl-or36-floor/IMPL-pair-planner-20261026-012213.md` and `lip-s1-strat-c1-impl-stage1-caps/IMPL-pair-planner-20261026-010639.md`, and `v295-b4/REVIEW-FOLD-pair-planner-20260914-013456.md`.
+  The SUBJECT-only merge claim in `v295-release/PLAN-pair-planner-20260924-142219.md` stops erroring.
+  Hand linters stop reading `.engine` files; root spelling no longer changes lint results, and missing-root or unknown-relay diagnostics replace misleading daemon-down reports.
+- **B3 — binding and recovery diagnostics (PR 30):** Separates receipt observations from delivery readiness, deduplicates identified hook calls, and makes recovery diagnostics inert while quoting complete recovery commands and identifying operator approval.
+- **B4 — implementation report lineage (PR 29):** Clarifies report parents and continuation lineage, with a consistent filled implementation-report example.
+- **B5 — reviewer checkpoints (PR 32):** Defines the addressed reviewer checkpoint and actionable reconciliation templates.
+- **B6 — authority guidance (PR 37):** Aligns the protocol, role skills and setup guidance with the merged authority predicates and adds validation of complete shipped grant examples.
+- **B7 — bounded watcher operations (PR 33):** Bounds bound-root calls and index reads, records follower exits, retains unavailable followers for recovery, and caps Stop-hook draining.
+- **B8 — checkpoint warning (PR 38):** Adds `review.gate-not-heard` to admission and both linters after explicit run adoption, with the reason for a missing or mismatched checkpoint.
+- **B9 — cross-root reader (PR 39):** Uses a bounded Git batch reader and an in-process immutable-object cache for foreign design candidates, with ordered failures and explicit capacity and deadline refusals.
+- **B10 — relay continuity (PR 35):** Defines how addressed arrivals affect ongoing work, when unrelated work waits for a checkpoint, and how interrupted work resumes.
+- **B11 — Codex session continuation (PR 34):** Distinguishes non-boot SessionStart events from startup, tells continuing seats to resume without another boot acknowledgment, and makes arming list-first and session-scoped.
+- **B12 — adapter test isolation (PR 36):** Detaches interactive-shell probes from the caller's terminal and adds terminal-preservation controls; production adapter behavior is unchanged by this bundle.
+- **B14 — release documentation:** Corrects the landed-warning, authority-reader, amendment-pin and watcher-binding descriptions, repairs required fields in shipped relay headers, and removes extra blank lines.
+  The shipped-documentation audit covers 1,804 text units and corrects 44 claim records, each independently checked, including the Python 3.11 minimum and explicit interpreter selection from `PATH`.
+- **Upgrade identity:** The engine fingerprint is `22f57b6819ff0c1e0214402a6bb943b122753f38f88ddcc428ca7c8db9cc2bec`, derived from the final engine roster at this head.
+  At the release commit, 954 of the engine suite's 955 tests ran and passed.
+  The cross-root corpus comparison carries its earlier Python 3.12.5 pass on the same engine behavior, with only the kit version string changed in production engine code.
+  Its two bounded Python 3.14.6 attempts did not finish; no completed run of that test on 3.14.6 is established.
+  Each root's eligible starter restarts that root's daemon from the refreshed checkout, and client and daemon refuse each other with `E-VERSION-MISMATCH` until both report kit 2.9.7 and this fingerprint.
+
+### Known limitations
+
+- **Watcher delivery gap:** Filing in another relay root or as another seat can skip relays the watcher had not delivered before returning.
+  After returning, confirm with `relay-monitor.py status` that the watcher is on that root before using `relay-monitor.py replay`, or read the root's `INDEX.md`, checking each relay against work already handled.
+  A later filing does not recover skipped delivery; a fix is planned for a later release.
+- **Cross-root authority gap:** The authority check allows a grant over four cross-root cases described in the protocol's cross-root design paragraph.
+  Admission reports the error finding `lineage.cross-root-design`, and both linters report errors on a hand-authored root.
+  Whether the authority check refuses those cases is planned for a later release.
+- **Host evidence limits:** 43 statements about host behavior remain unverified for the relevant host version or build.
+  For Codex, these appear in `shared/harness-codex.md` (15), `tools/adapters/README.md` (7), `tools/relay_engine/README.md` (4), `shared/protocol.md` (3), and `README.md` (2).
+  For Claude Code, these appear in `README.md` (5), `shared/protocol.md` (4), `tools/adapters/README.md` (2), and `tools/relay_engine/README.md` (1).
+  These unverified statements do not establish host capability.
+
 ## [2.9.6] — 2026-09-27
 
 This patch contains two defect fixes and a version bump, with no new feature.
