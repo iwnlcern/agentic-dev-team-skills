@@ -41,7 +41,7 @@ v2.9 claims the proven mechanics: decomposition/routing, commissioning, an arbit
 ledgers, and charters. It does not claim these provisional boundaries are mechanically enforced:
 
 1. nested-run lineage is declared, not verified — interim: sub-teams answer up via relays with the authorizing dispatch named in the local charter, escalations thread through named dispatch dirs, an unauthorized child trail is caught by reconciliation, not by a gate;
-2. rulings do not bind downward mechanically — interim: amendment cascade by relay (auto-delivered to armed seats, hand-relayed otherwise) and operator retire-and-reboot of stale sessions;
+2. downward ruling distribution remains explicit — follow `adopt_ruling` in `tools/relay_engine/supersede.py` for the mechanical effect of an adopted parent ruling; continue the amendment cascade by relay (auto-delivered to armed seats, hand-relayed otherwise) and operator retire-and-reboot of stale sessions;
 3. no containment — tier words state who implements; nothing confines a seat's writes.
 
 All three close when v29-engine lands; procedure text then updates in a v2.9.x edit with no label to lift.
@@ -173,9 +173,9 @@ implementation into governance seats.
 - **Superpowers** — the skills build on its brainstorming, planning, plan-execution, and review
   procedures. If it is not installed, the skills tell the agent to stop and report the missing
   prerequisite.
-- **Python 3** — only if you want `relay-lint` (in `tools/`). The skills reference it but degrade
-  gracefully: they note when it is unavailable rather than failing. Install the generated `tools/`
-  directory under your skills root, or point at it however your host resolves skills.
+- **Python 3** — required by the engine entry point `tools/relay`, `tools/relay-lint.py`, and the Python host-adapter entry points in `tools/adapters/`.
+  The skills can report that optional linting is unavailable; those Python entry points still require the interpreter.
+  Install the generated `tools/` directory under your skills root, or point at it however your host resolves skills.
 
 ## License
 

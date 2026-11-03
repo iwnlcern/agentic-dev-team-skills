@@ -48,7 +48,7 @@ Manual Claude Code installs instead merge `claude-code/settings-snippet.json` af
 
 ### Plugin-route pinning and manual-install resolution
 
-Every command in the plugin declaration sets `RELAY_LINT_SKILLS_ROOT` to `${CLAUDE_PLUGIN_ROOT}` for that invocation.
+Follow `tools/adapters/plugin-hooks.json` for plugin-route pinning: its linter and relay-guard commands assign `RELAY_LINT_SKILLS_ROOT`, while monitor commands pass `--plugin-root`.
 The hook therefore uses the byte-matched linter and relay engine shipped in the same plugin version instead of wandering to a stale shared root.
 The command-scoped assignment does not modify the user's environment.
 
@@ -93,7 +93,7 @@ tools/adapters/plugin-hooks.json
 Merge the JSON from `settings-snippet.json` into `~/.claude/settings.json` only for a manual Claude Code install after installing `tools/` to the shared skills root.
 The snippet invokes each hook as `bash <script>`, so it does not depend on a script's execute bit surviving the copy or extraction.
 
-The Write/Edit/MultiEdit normalizer lints relay `*.md` files under a `.relays/` or visible `relays/` path and skips non-relay and non-md writes.
+`route_path` in `tools/adapters/claude-code/relay-lint-posttooluse.sh` decides which Write/Edit/MultiEdit paths are linted, including the `.engine/` draft exemption.
 It also extracts relay targets declared by apply-patch envelopes delivered through the Bash or native patch payload forms.
 It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
 
@@ -223,7 +223,8 @@ This diagnostic triggers no automatic leader handover.
 Numeric fd duplication and close, including `2>&1`, `>&2` and `2>&-`, are accepted while a background ampersand remains unsupported.
 The relay guard retains its existing limitation for a file operand of `>&`, such as `>& relay.md`; this change does not add destination detection for that form.
 
-Inbound delivery needs no socket permission because the watcher reads the run's rendered `INDEX.md` and never calls the engine.
+Inbound delivery reads the run's rendered `INDEX.md` without a daemon socket call.
+For the follower's local engine identity invocation, see `leader_record` in `tools/adapters/relay-monitor.py`.
 A seat that also files its own relays needs a sandbox profile that permits the relay daemon's socket.
 A seat under a profile that refuses the socket binds its watcher once at setup with `python3 <plugin-root>/tools/adapters/relay-monitor.py bind --manual --session <session-id> --root <run-root> --anchor <relay-file>`, and every later delivery needs no action.
 The anchor is the root-relative `file` cell of an `INDEX.md` row this seat authored, because manual binding takes the seat from that row's `FROM` cell.
@@ -255,6 +256,9 @@ Operator notifications on macOS: run `python3 <plugin-root>/tools/adapters/relay
 
 The stdout log is the durable record of notified rows; the notification itself is best-effort.
 
-Incomplete hints are shell comments with shell-quoted, escaped receipt and operand text, so pasting the diagnostic cannot execute it.
+`rebind_line` in `tools/adapters/relay-monitor.py` formats incomplete hints as quoted, escaped diagnostic text.
+With the tested Bash 3.2.57 defaults, the leading `#` makes the pasted line a comment.
+Interactive zsh 5.9 without `INTERACTIVE_COMMENTS` instead attempts to run `#` as a command and reports command-not-found; the quoted receipt and operand values remain inert.
+Do not treat an incomplete hint as a runnable rebind command.
 Complete and inferred commands are emitted only for printable ASCII arguments; other text falls back to an escaped incomplete hint.
 Status fields also escape terminal controls and non-ASCII characters.
