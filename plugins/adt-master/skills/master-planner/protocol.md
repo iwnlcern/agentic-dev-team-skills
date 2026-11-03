@@ -194,13 +194,16 @@ The PLAN relay's parent edge points to the approving DESIGN-REVIEW; the DESIGN-R
 On a managed root, distinguish the root integrity report and history audit from the current authority check; see [Relay lint](#relay-lint) and [Authority check before acting](#authority-check-before-acting).
 
 On a PLAN-phase relay, the cross-root design-edge gate is decided by `xroot_verify` in `tools/relay_engine/rules.py`; an engaged edge does not fall back to local discovery.
-The foreign design, DESIGN and DESIGN-REVIEW are read only as committed at `DESIGN_SOURCE_COMMIT`, so the foreign relay root must be committed at that pin; relays Git ignores, leaves untracked or only staged, or commits after the pin are not read, and the authority check refuses a grant resting on the incomplete edge with `authority.lineage-incomplete`.
-On a hand-authored root, root lint reports the edge failure as an error; admission admits the PLAN with the error finding `lineage.cross-root-design`, which is distinct from the authority check’s refusal of the grant.
+The foreign design, DESIGN and DESIGN-REVIEW are read only as committed at `DESIGN_SOURCE_COMMIT`, so the foreign relay root must be committed at that pin; relays Git ignores, leaves untracked or only staged, or commits after the pin are not read.
+As `xroot_verify` decides, a foreign relay the pin does not hold makes the authority check refuse the grant with `authority.lineage-incomplete`; a foreign design file the pin does not hold instead refuses on the `byte` axis with `authority.could-not-evaluate`.
+On a hand-authored root, root lint reports the edge failure as an error.
+On a managed root, admission admits the PLAN with the error finding `lineage.cross-root-design`; each surface is distinct from the authority check's refusal of the grant.
 Declaration, repository, commit, byte, authority-population, authority-owner, authority-parent, authority-verdict, ordering, ambiguity, and capacity failures are distinct axes carried by `XrootAxisError` in `tools/relay_engine/rules.py`; a seat uses the reported axis rather than treating every failure as a lineage gap.
 The authority check refuses a declaration missing any of the seven edge fields, or failing the declaration checks in `rules.xroot_verify`, with `authority.could-not-evaluate` on the `declaration` axis, as `_external_evidence` in `tools/relay_engine/authority.py` decides.
 The requirements of `DESIGN_LOCK_ID`, `DESIGN_RECORD_KIND: design-doc` and a pair-Planner carrier, and the conflict with a visible same-owner local DESIGN carrying the same `DESIGN_DOC_ID`, are reported by admission and lint but do not make the authority check refuse a grant over those four cases.
 Admission reports those cases with the error finding `lineage.cross-root-design`; both linters report errors on a hand-authored root, while the managed engine root’s default sweep omits these findings and its history audit reports them as warnings.
-A local design-review lineage is read from disk and spawns no Git subprocess.
+The authority check reads a local design-review lineage from the root's record, not from relay files on disk, as `authorizations` in `tools/relay_engine/authority.py` decides.
+It needs no Git unless a relay in that lineage declares a plan source, which engages Git.
 Under an engaged canonical pair-Planner PLAN edge, `DESIGN_SOURCE_PATH` is the paired foreign locator for `DESIGN_SHA256` in place of `DESIGN_ARTIFACT`.
 Path-form `DESIGN_LOCK_ID` and `PLAN_LOCK_ID` values gain the symmetric declaration `PLAN_SOURCE_REPO` plus `PLAN_SOURCE_COMMIT`; occurrence of either source field engages the same conflict-first repository, commit, literal-path, blob, and optional annotation-digest checks for each path-form lock with no local-path fallback, while absent and opaque lock values do not enter foreign path resolution.
 Only the canonical `DESIGN_LOCK_ID` slot is gated; ad hoc secondary carriers (`SECOND_DESIGN_LOCK` or any invented key) are invisible to the gate by design — a multi-lock plan's primary slot is the only gated one.
@@ -305,9 +308,13 @@ Its silence is not proof that the operator actually disposed of the conditions.
 Without the well-formed line, an orchestrator grant after a held reply is not heard.
 The Implementer still acts on the filed grant, not on the chat record alone.
 
-The live warning `review.gate-not-heard` is decided by `gate_checkpoint_findings` in `tools/relay_engine/rules.py`; a seat sees it in submit admission findings, a managed root’s history audit, and either linter’s sweep of a hand-authored root.
-The warning’s subject is the evaluated grant; its operands are the gate record, effective request and effective reply that exist, and its reason and the disposition’s state are parameters.
-A grant with no orchestrator Planner request parented to the record its `PARENT_DISPATCH_ID` names warns with `no-request` on every grant, including a chain with the reviewer’s record parented to the gate record and the grant parented to the reviewer’s record.
+The live warning `review.gate-not-heard` is decided by `gate_checkpoint_findings` in `tools/relay_engine/rules.py`; it judges only grants that `merge_authorized` in that file accepts.
+A grant the authority check allows can therefore carry no checkpoint warning; a missing warning does not establish that the checkpoint was heard.
+A seat sees a reported warning in submit admission findings, a managed root's history audit, and either linter's sweep of a hand-authored root.
+The warning's subject is the evaluated grant; its first operand, when resolved, is the record selected through the grant's `PARENT_DISPATCH_ID`, which is the reviewer's record in v297's chain, followed by the effective request and reply that exist.
+Operands and reason/disposition parameters appear in the admission finding; the history audit and linters print the reason and disposition state in the message.
+In an adopting run, a grant the function judges with no orchestrator Planner request parented to the record its `PARENT_DISPATCH_ID` names is not heard and warns, with the reason the function reports.
+The v297 chain, with the reviewer's record parented to the gate record and the grant parented to the reviewer's record, warns with `no-request`.
 An adopting run files Template L between the gate record and the reply and parents the grant to the gate record, as the request/reply sequence above specifies.
 A new grant's warning is not suppressed merely because its gate record is known history.
 The warning never changes exit status, refuses, or blocks a merge in any context.
@@ -388,7 +395,8 @@ The linters split lines as Python’s `str.splitlines` does.
 The linters skip what `strip_inline_code_spans` and `strip_fenced_blocks` in the same file remove, which is not CommonMark's rule.
 On each line the linters skip from each odd-numbered backtick to the next, whatever the run lengths; a `~~~` fence hides nothing from them; and every line that starts, after any whitespace, with three backticks opens or closes a fence, whatever follows them, so an unclosed one hides every line after it.
 The authority check instead reads verdicts from the header only: a negative header verdict defeats the token with `authority.denied`, adding `authority.verdict-conflict` when positive and negative header verdicts occur together; a verdict line below the header neither grants nor denies (R6 below).
-As an authoring convention, a grantor who means a verdict to count writes it in the header; both readers see the verdict lines that `merge_authorization_verdict_lines` counts, while a header verdict under another verdict key is read by the authority check alone.
+As an authoring convention, a grantor who means a verdict to count writes it in the header; on a merge grant both readers see the verdict lines that `merge_authorization_verdict_lines` counts, while a header verdict under another verdict key is read by the authority check alone.
+On an implementation grant, the linters read no verdict line, so any header verdict there is read by the authority check alone.
 A field-form grant relay carries exactly one operational authorization-verdict line; duplicate/conflicting verdict lines are structural errors, and denied-only grants do not authorize a merge.
 The canonical token path is:
 
@@ -434,7 +442,7 @@ A resume is unchanged only when the seat establishes all three conditions:
 Anything the seat cannot establish is unknown, and unknown asks again.
 With all three established, an unchanged resume needs no new check.
 A changed artifact always requires a fresh answer; for the grant in hand, an approved amendment filed as a new file beside an unchanged base can make that answer yes.
-An artifact pinned by that grant’s lineage keeps its pin for that grant, as `_required_artifacts` in `tools/relay_engine/authority.py` decides; a relay outside the lineage cannot replace that pin, so an in-place edit stays `authority.artifact-changed` for that grant.
+An artifact pinned by that grant's lineage keeps its pin for that grant, as `_required_artifacts` in `tools/relay_engine/authority.py` decides; a relay outside the lineage cannot replace that pin, so an in-place edit of the pinned artifact is refused for that grant.
 An amendment pinned instead through later counted carriers and reviews takes its latest counted declaration’s digest, so a later counted carrier and review can move that pin.
 The check answers for a closed cycle through `authority.cycle-closed`; no supported cycle-state read is prescribed here.
 
@@ -461,7 +469,9 @@ A name without a digest in the declaring set also keeps that counting step from 
 A pair-Planner grant’s own name without a digest answers `authority.could-not-evaluate` only when nothing else pins the amendment.
 When the counting step does not count an amendment, whatever the cause, including a review that fails a rule below, that step adds neither a pin nor a reason; R8 reads later relays independently and can still refuse a pair-Planner grant over one.
 An allowed answer alone therefore shows neither that a delta review counted nor that an amendment’s bytes are pinned.
-A grant declaring the amendment’s digest as a field the check reads requires the bytes to match the applicable pin, with the latest declaring digest governing; a declaration inside a fence or indented does not establish that requirement.
+For a grant from operator, orchestrator or an orchestrator-planner-role address, the grant's own amendment digest supplies a pin in the declaring set that `_required_artifacts` reads, and the bytes must match it.
+For a pair-Planner grant declaring an amendment digest, `_required_artifacts` refuses with `authority.artifact-changed` unless that digest equals the pin supplied by its lineage or the counting step, whatever the bytes, including after a later counted carrier moves the pin.
+The bytes must still match that pin; a declaration inside a fence or indented does not establish this grant-digest requirement.
 
 - R1, token grants (`authority.shape-absent`): `DISPATCH IMPL` or `DISPATCH MERGE` is at column 0 on its own line, trailing spaces or tabs allowed, with an empty line or a line holding only spaces and tabs on each side, or the corresponding file edge.
   A `DISPATCH IMPL` token is live only in `PHASE: IMPL`; the `DISPATCH MERGE` phase binding is stated under Literal merge token.
@@ -492,10 +502,12 @@ A grant declaring the amendment’s digest as a field the check reads requires t
   For a pair-Planner grant, the `review-approval` and `foreign-control-character` axes are reported by the authority check alone, as `_external_evidence` in `tools/relay_engine/authority.py` decides; lint and admission do not report them.
   In pair lineage, a later PLAN or DESIGN by the same Planner, or a later review of that phase by the acting Implementer, after the corresponding lineage origin also denies the earlier grant with `authority.lineage-incomplete` if it contains one of these characters.
 - R9 (`authority.header-conflict`): in fence-stripped text each critical field has at most one distinct value, and the recorded header agrees with the written header.
-  `_conflict` in `tools/relay_engine/authority.py` also compares the fields read under the check’s fence rule with those read under the linters’ rule (Literal merge token); a critical-field line the first reads and the second hides gives `authority.header-conflict`, even when it repeats the header’s value.
+  `_conflict` in `tools/relay_engine/authority.py` also re-reads the critical fields after applying the linters' fence rule (Literal merge token) to the text the check's own fence rule leaves; this re-reading does not apply the linters' inline-code-span rule.
+  A critical-field line hidden in that re-reading gives `authority.header-conflict`, even when it repeats the header's value.
+  A line the linters hide in another way is not compared by this re-reading, so an allowed answer does not establish that the linters read the same critical fields.
   Critical fields are PHASE, FROM, TO, DISPATCH_ID, PARENT_DISPATCH_ID, DESIGN_LOCK_ID, DESIGN_DOC_ID, PLAN_LOCK_ID, DESIGN_ARTIFACT, DESIGN_SHA256, PLAN_ARTIFACT, PLAN_SHA256, PLAN_SOURCE_REPO, PLAN_SOURCE_COMMIT and the cross-root trigger fields.
   Differing body repeats of noncritical fields such as SUBJECT or CC are not conflicts detected by this rule; repeats hidden by the check’s fence rule are not read.
-- R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer; `_check` in `tools/relay_engine/authority.py` also requires `TO` to equal the `--seat` value byte for byte.
+- R10, grants on both routes (`authority.not-addressee`): exactly one addressee, an Implementer; `_check` in `tools/relay_engine/authority.py` requires that one `TO` address, as the header is read, to equal the `--seat` value, letter case included; whitespace after the address does not count.
 - R11, pair-Planner implementation grants (`authority.issuer-not-permitted`): any own-line `SCOPE_DIFF_RESULT`, in the header or body, that does not normalize to `all-in` refuses the grant.
   Normalization takes the value's first whitespace-delimited word, lowercased, and removes trailing `.`, `,`, `;`, `:`, `!` and `?`; an empty value refuses.
   Grants are still authored with `all-in`; this predicate describes the check, not a new authoring form.
@@ -836,8 +848,11 @@ A `CC` arrival is context only: it grants no authority and asks for no reply, so
 A seat whose role gives it a standing duty toward copied relays still acts on that duty and files under it, not as a reply the copy asked for.
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
 A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it.
-As `bind_from_receipt` in `tools/adapters/relay-monitor.py` decides, a filing as the bound seat in the bound root leaves delivery progress where it is; any other filing moves that root’s progress to the filing itself, so earlier undelivered relays are skipped even after a return filing.
-After returning, use `relay-monitor.py replay` to re-print skipped relays alongside relays already delivered, checking each against work already handled.
+The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies to filings it receives: those whose submit command the hook can read.
+For those filings, one as the bound seat in the bound root leaves delivery progress where it is; any other moves that root's progress to the filing itself, so earlier undelivered relays are skipped even after a return filing.
+When the hook cannot read the submit command, binding and progress stay where they were and the hook prints a rebind line.
+Check `relay-monitor.py status` to confirm the watcher is back on the intended root before trusting `relay-monitor.py replay`'s answer: replay re-prints skipped relays only for the root the watcher is bound to.
+It can also print relays already delivered, so check each against work already handled.
 On Claude Code, an active plugin's monitor with the default `when` starts at session start and on plugin reload.
 Plugin monitors don't start in non-interactive mode with the `-p` flag, and on some providers or with some settings they may need a minimum Claude Code version; see the [monitor documentation](https://code.claude.com/docs/en/plugins/components#monitors).
 On Codex the SessionStart hook supplies the arming context unless `ADT_CODEX_FORK=0`.
