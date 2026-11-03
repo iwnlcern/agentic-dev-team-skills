@@ -64,13 +64,16 @@ Create the INDEX and append the first boot row in one step; do not leave a newly
 
 The canonical marker value is a POSIX-separator path relative to the directory containing the INDEX (`.` and `..` permitted). A tracked absolute marker is a reviewer-detected conformance violation; untracked machine-local indexes may use absolute values. An existing index opts in by appending its first and only marker at end-of-file. A second recognized marker is a duplicate refusal, never an update mechanism. An index without a marker receives no resolution semantics or resolution check — there is no repo-root default or implied base.
 
-`INDEX.md` is append-oriented. The INDEX is exempt from relay-lint's per-relay checks; its own checks run in `--index` mode, which a per-file invocation must request explicitly. It uses exactly this schema:
+`INDEX.md` is append-oriented.
+`main` in `tools/relay-lint.py` decides explicit-file, index, and root-sweep routing; request `--index` explicitly when checking an individual INDEX.
+It uses exactly this schema:
 
 ```text
 | time | phase | role | dispatch | parent | from | to | cc | status | file |
 ```
 
-The `role` cell is the lowercase hyphenated role word from the address grammar; absent values are exactly `—`. The `status` cell is one kebab-case token with no spaces, parentheses, or sentences. Statuses use the three-way canonical / legacy-synonym / free partition and the full disposition table in the adjacent `protocol.md`: for the seven reserved meanings, new rows use `sent`, `dispatched`, `review-requested`, `approve`, `must-revise`, `returned`, or `complete`; a meaning outside those seven uses a free-tail token, while a legacy synonym is never emitted in a new row.
+`index_rows` in `tools/relay_engine/render.py` determines daemon-rendered `role` cells; absent values are exactly `—`.
+The `status` cell is one kebab-case token with no spaces, parentheses, or sentences. Statuses use the three-way canonical / legacy-synonym / free partition and the full disposition table in the adjacent `protocol.md`: for the seven reserved meanings, new rows use `sent`, `dispatched`, `review-requested`, `approve`, `must-revise`, `returned`, or `complete`; a meaning outside those seven uses a free-tail token, while a legacy synonym is never emitted in a new row.
 
 A `file` cell is either a path resolving under the declared root or the explicit literal `none — <short reason>`, which the resolution check skips by rule. The reason-bearing form is not an absence; bare `—` is not valid in the `file` cell.
 
@@ -140,14 +143,21 @@ SUBJECT:
 
 `PARENT_DISPATCH_ID` is the work-lineage edge used by lineage gates. `IN_REPLY_TO` is local/display threading only and is not a gate input. Do not invent another threading scheme.
 
-`SUBJECT` is local/display-only, placed after `CC`, and never a gate input.
+Place `SUBJECT` after `CC`.
+For its required managed-admission checks, follow `parse_draft` in `tools/relay_engine/envelope.py`; it is not an authority-check grant condition.
 
-Identity, location, and integrity are separate: `DESIGN_LOCK_ID` / `PLAN_LOCK_ID` carry a lock value — a logical identity or repo-relative path, optionally annotated ` @ sha256 <hex>` (equality on the unannotated value); optional `DESIGN_ARTIFACT` / `PLAN_ARTIFACT` fields carry filename-stem locators; optional `DESIGN_SHA256` / `PLAN_SHA256` fields carry lowercase-hex sha256 values for the referenced bytes. Beyond that annotation, never combine them. A present digest requires its paired locator under the routed fail-closed check; a locator without a digest is permitted. New artifact stems use `designs/DD-<cycle>-<YYYYMMDD>.md` and `plans/PL-<cycle>-<YYYYMMDD>.md`, with `-erratum-N`, `-supplement-N`, or `-amendment-N` suffixes for amendments and errata.
+For the pair's design lineage, `_lineage` in `tools/relay_engine/authority.py` compares the declared design identities directly; keep them identical across the lineage.
+Use the separate artifact and digest declarations checked by `lock_digest_shape_errors` in `tools/relay_engine/rules.py` to name and pin artifact bytes.
+For lock annotations, follow `_declarations` in `tools/relay_engine/authority.py` and `xroot_plan_gate` in `tools/relay_engine/rules.py` for the applicable local or foreign path.
+New artifact stems use `designs/DD-<cycle>-<YYYYMMDD>.md` and `plans/PL-<cycle>-<YYYYMMDD>.md`, with `-erratum-N`, `-supplement-N`, or `-amendment-N` suffixes for amendments and errata.
 
 ## Naming conventions
 
 - `RUN_ID`: short dotted or hyphenated run id, e.g. `site-qi-2026-06-19`.
-- `DISPATCH_ID`: authority-chain relays — PLAN, PLAN-REVIEW, IMPL, and the merge grant/claim pair — carry handoff-scoped ids, and each `PARENT_DISPATCH_ID` names its immediate predecessor; every other relay in the cycle carries the cycle id; one directory per cycle. PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id; non-authority-chain status relays carry the cycle id, never a handoff id. The directory is named by the cycle id; an authority-chain relay follows its parent lineage to that id and stays in the same directory rather than opening one named by its handoff id; the gated design-doc PLAN's parent edge names the approving DESIGN-REVIEW.
+- `DISPATCH_ID`: authority-chain relays — PLAN, PLAN-REVIEW, IMPL, and the merge grant/claim pair — carry handoff-scoped ids, and each `PARENT_DISPATCH_ID` names its immediate predecessor; every other relay in the cycle carries the cycle id; one directory per cycle. PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id; non-authority-chain status relays carry the cycle id, never a handoff id.
+  For a hand-authored root, keep an authority-chain relay in its cycle directory by following its parent lineage.
+  For an engine filing, use the receipt's path; `_dispatch_lane` and `_rendered_path` in `tools/relay_engine/ledger.py` determine that path.
+  The gated design-doc PLAN's parent edge names the approving DESIGN-REVIEW.
 - Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted. Spell the owner segment exactly once, the same way as in the address.
 - Addresses: dotted lowercase owner-role form, e.g. `qi-a.planner`, `qi-a.implementer`, `site-qi.orchestrator-planner`.
 - Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC. Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence. `relay-lint` fails an impossible or drifted stamp, and `relay-lint --index` fails an index whose `time` column decreases or disagrees with the filename it points at.

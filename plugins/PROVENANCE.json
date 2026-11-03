@@ -44,7 +44,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/domain-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -68,7 +68,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/domain-reviewer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -98,7 +98,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/master-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -122,7 +122,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/master-reviewer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -158,7 +158,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -194,13 +194,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "f28c08c31f6b04649ad33c9fb4caa89c969d31f4988517655b805dfe1816ce3d",
+    "sha256": "6bbaf52ec06122f6c88628c430d31dc5c984fdc348c330e8e8cf0639ed1d6ce0",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/orchestrator-reviewer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -218,7 +218,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-implementer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -242,7 +242,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/pair-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -266,7 +266,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-master/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "6ea0a0c33f40e20f5146b0534abede4a562cedf27754605e99db7bdd0f620432",
+    "sha256": "bbaae648aeb87d6921f355261cfca7d8770509a12bf7c25ba6607c54bdd2eca6",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
@@ -10676,7 +10676,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10712,13 +10712,13 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "f28c08c31f6b04649ad33c9fb4caa89c969d31f4988517655b805dfe1816ce3d",
+    "sha256": "6bbaf52ec06122f6c88628c430d31dc5c984fdc348c330e8e8cf0639ed1d6ce0",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10736,7 +10736,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-implementer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10760,7 +10760,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/pair-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -10784,7 +10784,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-orchestrator/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "6ea0a0c33f40e20f5146b0534abede4a562cedf27754605e99db7bdd0f620432",
+    "sha256": "bbaae648aeb87d6921f355261cfca7d8770509a12bf7c25ba6607c54bdd2eca6",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
@@ -21182,7 +21182,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-implementer/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -21206,7 +21206,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/pair-planner/harness-codex.md",
-    "sha256": "2508cf748ae1c7d1269593bbb7ca850970c1187e2181da9aff965c9039fab6a7",
+    "sha256": "8679b9e4a95ec3f203a2d24eb29dc3d22768000351212445f421131f7c27e76a",
     "source": "shared/harness-codex.md"
   },
   {
@@ -21230,7 +21230,7 @@
   {
     "kit_version": "2.9.6",
     "path": "adt-pair/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "6ea0a0c33f40e20f5146b0534abede4a562cedf27754605e99db7bdd0f620432",
+    "sha256": "bbaae648aeb87d6921f355261cfca7d8770509a12bf7c25ba6607c54bdd2eca6",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
