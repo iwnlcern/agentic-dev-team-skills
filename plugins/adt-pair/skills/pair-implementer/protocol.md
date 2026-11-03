@@ -724,7 +724,8 @@ For an IMPL action report, `PARENT_DISPATCH_ID` is the `DISPATCH_ID` of the addr
 `IN_REPLY_TO` may locate the dispatch file but does not substitute for this parent edge.
 This report-parent rule is independent of the report's own `DISPATCH_ID` allocation below.
 Allocation is mechanical: PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id, because that gate requires the pair; non-authority-chain status relays carry the cycle id, never a handoff id.
-The cycle directory is named by that cycle id. An authority-chain relay's handoff-scoped `DISPATCH_ID` does not create or select another directory; follow its `PARENT_DISPATCH_ID` lineage to the cycle id and file it in the existing cycle directory.
+For a hand-authored root, the cycle directory is named by that cycle id; follow an authority-chain relay's `PARENT_DISPATCH_ID` lineage to the cycle id and file it in the existing cycle directory.
+For an engine filing, use the receipt's path; `_dispatch_lane` and `_rendered_path` in `tools/relay_engine/ledger.py` determine that path.
 The cycle id is the stable directory identity established by the non-authority-chain relay that opens the cycle; this definition takes precedence over every other dispatch-id grammar.
 
 References to a relay are folder-qualified paths resolving against the declared root (`IN_REPLY_TO: v29-conventions/DESIGN-planner-20260806-165840.md`), never bare filenames.
@@ -800,7 +801,7 @@ One INDEX schema, stated once:
 
 The eight-column example is deleted as stale text (zero live instances in any corpus).
 
-The `role` cell is the lowercase hyphenated role word from the address grammar; absent values are exactly `—`.
+For a managed root's `role` cell, read `index_rows` in `tools/relay_engine/render.py`; absent values are exactly `—`.
 The `status` cell is one kebab-case token (no spaces, parentheses, or sentences).
 Sampling rule of record: the census ran over every operational INDEX root in each deployment (this kit 1, pdc 5, harness 9, personal-website 5 — twenty roots), matching the whole status cell case-insensitively, with meaning established from the matched rows' phase, seat, and target artifact.
 The partition is three-way — canonical, legacy synonym, free — derived from two rules rather than a bare list.
@@ -840,7 +841,8 @@ free (meaning outside the seven, or identity not demonstrated)
 
 The shipped merge/live-verification verdict list (`merge-blocked`, `merged-not-deployed`, `deployed-not-live-verified`, `failed-live-verification`, `complete`, `human-decision-required`) is that gate's verdict vocabulary, owned there; projecting those words into a status cell stays free, and this form reserves none of them on that ground (`complete` is reserved as the grill universe's close-out value, not as a merge verdict).
 Widening the reserved universe beyond the grill record was declined; a future cycle may reserve more tokens by one-line amendment under the same rules.
-The lint exemption is stated as a rule, not "normally": the INDEX is exempt from relay-lint's per-relay checks; its own checks run in `--index` mode, which a per-file invocation must request explicitly.
+`lint_relay_root` in `tools/relay-lint.py` exempts INDEX files from per-relay checks.
+For an explicit index check, use `--index <INDEX.md>`; `main` in `tools/relay-lint.py` sends ordinary file arguments to `lint_file`.
 
 ## Delivery mode
 
@@ -863,11 +865,11 @@ Once that relay is handled, the seat returns to the interrupted work unless that
 A `CC` arrival is context only: it grants no authority and asks for no reply, so nothing is owed or filed in response to it.
 A seat whose role gives it a standing duty toward copied relays still acts on that duty and files under it, not as a reply the copy asked for.
 An event line naming a seat other than the reader is inert, exactly as a mis-relayed pointer is.
-A seat is bound to its watcher by its own outgoing relays: the first relay a seat files (its boot acknowledgment) binds it.
+After filing, check `relay-monitor.py status`; `bind_from_receipt` in `tools/adapters/relay-monitor.py` determines whether the filing binds this watcher.
 The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies only to filings it binds from.
 For those filings, one as the bound seat in the bound root leaves delivery progress where it is; any other moves that root's progress to the filing itself, so earlier undelivered relays are skipped even after a return filing.
 For filings it does not bind from, binding and progress stay where they were, and the hook prints a rebind line for only some of them; `relay-monitor.py status` shows where the watcher is bound, and the absence of a rebind line does not.
-Check `relay-monitor.py status` to confirm the watcher is back on the intended root before trusting `relay-monitor.py replay`'s answer: replay re-prints skipped relays only for the root the watcher is bound to.
+Use `replay` in `tools/adapters/relay-monitor.py` to recover from retained session floors, then check each returned row against work already handled.
 It can also print relays already delivered, so check each against work already handled.
 On Claude Code, an active plugin's monitor with the default `when` starts at session start and on plugin reload.
 Plugin monitors don't start in non-interactive mode with the `-p` flag, and on some providers or with some settings they may need a minimum Claude Code version; see the [monitor documentation](https://code.claude.com/docs/en/plugins/components#monitors).
