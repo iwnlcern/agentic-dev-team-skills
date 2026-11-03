@@ -25,7 +25,7 @@ PHASE: <AUDIT | DESIGN | DESIGN-REVIEW | PLAN | PLAN-REVIEW | IMPL | REVIEW-FOLD
 AUTHORITY: <read-only | design-only | plan-only | review-only | implementation | fold-in-only | merge-gated | live-verify | report-only>
 DISPATCH_ID: <handoff id for authority-chain relay | cycle id otherwise>
 PARENT_DISPATCH_ID: <immediate predecessor dispatch id; required for pair-Planner DISPATCH IMPL and substantive IMPL action reports; for an IMPL action report, the authorizing dispatch's DISPATCH_ID; for a pair-Planner DISPATCH IMPL, the approving PLAN-REVIEW id; for a gated design-doc PLAN, the approving DESIGN-REVIEW id; see Relay transport>
-RUN_ID: <sprint/run id; local/router grouping, not a lint input>
+RUN_ID: <run id; required for managed-root admission in the valid_run_id grammar in tools/relay_engine/envelope.py; the linters do not read it>
 CEREMONY_TIER: <tiny | small | medium | large | production-risk>
 EVIDENCE_TARGET: <E1 | E2 | E3 | E4>
 HUMAN_GATE_REQUIRED: yes|no — <reason>
@@ -117,7 +117,8 @@ Canonical fields: the protocol documents `ROLE`, `PHASE`, `AUTHORITY`, `DISPATCH
 
 `PARENT_DISPATCH_ID` is the immediate predecessor edge that lineage gates walk; the gated design-doc PLAN's parent edge names the approving DESIGN-REVIEW. For pair-Planner-issued `DISPATCH IMPL` and substantive IMPL action reports, absence of this edge is itself a structural error; it is not a delegated-dispatch escape hatch. It is agent-authored, so the guarantee is confusion-robust only: relay-lint proves that a valid-shaped chain exists; it does not prove the reviewer semantically engaged the right plan. A future router-derived parent edge can make the same shape gate forgery-robust.
 
-Local or display fields: `RUN_ID`, `IN_REPLY_TO`, `BASE`, and `RELAY_PATH`. `IN_REPLY_TO` is relay-to-relay display/threading context and is not a gate input. `BASE` and `RELAY_PATH` are host bookkeeping. Do not invent a second threading scheme inside helper skills.
+`RUN_ID` names the run; managed-root admission requires it in the `valid_run_id` grammar in `tools/relay_engine/envelope.py`, and the linters do not read it.
+Local or display fields: `IN_REPLY_TO`, `BASE`, and `RELAY_PATH`. `IN_REPLY_TO` is relay-to-relay display/threading context and is not a gate input. `BASE` and `RELAY_PATH` are host bookkeeping. Do not invent a second threading scheme inside helper skills.
 
 `SUBJECT` joins the local/display field list beside `IN_REPLY_TO`, placed after `CC`; display-only, never a gate input.
 
