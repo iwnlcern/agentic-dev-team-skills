@@ -10,8 +10,10 @@ import hashlib
 import json
 import pickle
 import random
+import signal
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import os
 import re
 import shutil
@@ -742,7 +744,7 @@ def mutated_tools(arm, tools_root):
 
 def observe_suite(arm, tools_root: Path, command: tuple[str, ...], population: int | None = None) -> SuiteObservation:
     with mutated_tools(arm, tools_root) as copied:
-        completed = subprocess.run(suite_command(arm, command), cwd=copied.parent, capture_output=True,
+        completed = managed_run(suite_command(arm, command), cwd=copied.parent, capture_output=True,
                                    text=True, check=False,
                                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
     if command != DEFAULT_SUITE:
@@ -908,6 +910,102 @@ def arm_report(arm, spec: ModuleType, context: RunContext) -> ArmReport:
     return ArmReport(name, (line,), tuple(errors), True)
 
 
+# These bounds apply only after cancellation/death, never to a running arm.
+STOP_GRACE = 5.0
+CLEANUP_GRACE = 5.0
+_STOP = None
+
+
+@contextlib.contextmanager
+def stop_scope(watch_parent=False, raise_on_stop=False):
+    global _STOP
+    if _STOP is not None:
+        yield _STOP
+        return
+    state = SimpleNamespace(event=threading.Event(), signal=None)
+    old = {}
+    finished = threading.Event()
+    parent = int(os.environ.get('MTBATTERY_PARENT_PID', os.getppid()))
+    def stop(signum, frame):
+        if state.event.is_set():
+            return
+        state.signal = signum
+        state.event.set()
+        if raise_on_stop:
+            raise SystemExit(128 + signum)
+    def watch():
+        while not finished.wait(0.05):
+            if os.getppid() != parent:
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+    _STOP = state
+    watcher = None
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            old[signum] = signal.signal(signum, stop)
+        if watch_parent:
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+        yield state
+    finally:
+        finished.set()
+        if watcher is not None:
+            watcher.join()
+        for signum, handler in old.items():
+            signal.signal(signum, handler)
+        _STOP = None
+
+
+def stop_child(process):
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=STOP_GRACE)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def managed_run(command, *, cwd=None, env=None, capture_output=True, text=True, check=False):
+    # Retain a direct child handle until it has forwarded a stop and exited.
+    if _STOP is not None and _STOP.event.is_set():
+        return subprocess.CompletedProcess(command, 128 + (_STOP.signal or signal.SIGTERM), '', '')
+    child_env = {**(os.environ if env is None else env), 'MTBATTERY_PARENT_PID': str(os.getpid())}
+    with subprocess.Popen(command, cwd=cwd, env=child_env,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text) as process:
+        try:
+            while True:
+                if _STOP is not None and _STOP.event.is_set():
+                    stop_child(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=0.05)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            stop_child(process)
+            process.communicate()
+            raise
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if check:
+        result.check_returncode()
+    return result
+
+
+def cleanup_directory(path: Path) -> str | None:
+    until = time.monotonic() + CLEANUP_GRACE
+    while True:
+        try:
+            shutil.rmtree(path)
+            return None
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if time.monotonic() >= until:
+                return f'cleanup {path}: {exc}'
+            time.sleep(0.05)
+
+
 def worker_main(spec_path: Path, arm_name: str, run_file: Path) -> int:
     spec = load_module('mtbattery_worker_spec', spec_path)
     arm = next(arm for arm in spec.ARMS if arm['name'] == arm_name)
@@ -935,33 +1033,116 @@ def decode_report(output: str, name: str) -> ArmReport:
     for key in ('lines', 'errors'):
         if not isinstance(data[key], list) or any(not isinstance(line, str) or '\n' in line or '\r' in line for line in data[key]):
             raise ValueError('invalid worker lines')
-    return ArmReport(name, tuple(data['lines']), tuple(data['errors']), data['completed'])
+    report = ArmReport(name, tuple(data['lines']), tuple(data['errors']), data['completed'])
+    validate_report(report, name)
+    return report
+
+
+def validate_report(report: ArmReport, name: str) -> None:
+    if report.name != name:
+        raise ValueError('invalid worker identity')
+    if report.completed:
+        if len(report.lines) != 1 or not report.lines[0].startswith(f'ARM={name} '):
+            raise ValueError('completed worker requires exactly one matching ARM line')
+    elif not report.errors:
+        raise ValueError('incomplete worker requires an error')
+
+
+def unmutated_control(command, population: int) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix='mtbattery-control-') as raw:
+        copied = Path(raw) / 'tools'
+        shutil.copytree(TOOLS, copied)
+        clear_bytecode(copied)
+        result = managed_run(command, cwd=raw, capture_output=True, text=True,
+                                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1',
+                                     'TMPDIR': raw, 'TEMP': raw, 'TMP': raw})
+    try:
+        if command == DEFAULT_SUITE:
+            check_runner_completion(result.stdout, result.returncode)
+        observed = parse_suite_output(result.stdout + result.stderr, result.returncode)
+    except RunnerError as exc:
+        return [f'control invalid: {exc}']
+    errors = []
+    if observed.failed or observed.raised:
+        errors.append(f'control failing registrations={sorted(observed.fail_labels | observed.raised.keys())}')
+    if observed.passed + observed.failed != population:
+        errors.append(f'control incomplete-denominator={observed.passed + observed.failed}/{population}')
+    if observed.exit:
+        errors.append(f'control exit={observed.exit}')
+    emit(f'CONTROL PASS={observed.passed} FAIL={observed.failed} TOTAL={observed.passed + observed.failed}/{population} exit={observed.exit}')
+    return errors
 
 
 def run_workers(arms, jobs: int, seed: int | None, run_file: Path,
-                run_dir: Path, worker_command) -> list[ArmReport]:
-    def run(arm):
-        name = str(arm['name'])
-        status = 'not-started'
-        stderr = ''
-        try:
-            with tempfile.TemporaryDirectory(prefix='arm-', dir=run_dir) as raw:
-                env = {**os.environ, 'TMPDIR': raw, 'TEMP': raw, 'TMP': raw,
-                       'PYTHONDONTWRITEBYTECODE': '1'}
-                result = subprocess.run(worker_command(name), env=env, capture_output=True,
-                                        text=True, check=False)
-                status, stderr = result.returncode, result.stderr.strip()
-                if status:
+                run_dir: Path, worker_command, on_report=None) -> list[ArmReport]:
+    with stop_scope() as stop:
+        launch_lock = threading.Lock()
+        def unobserved(name):
+            reason = f'stopped signal={stop.signal}'
+            return ArmReport(name, (f'UNOBSERVED ARM={name} {reason}',), (f'{name}: {reason}',), False)
+        def run(arm):
+            name = str(arm['name'])
+            status, stderr, raw, process = 'not-started', '', None, None
+            report = None
+            try:
+                with launch_lock:
+                    if stop.event.is_set():
+                        return unobserved(name)
+                    raw = Path(tempfile.mkdtemp(prefix='arm-', dir=run_dir))
+                    env = {**os.environ, 'TMPDIR': str(raw), 'TEMP': str(raw), 'TMP': str(raw),
+                           'PYTHONDONTWRITEBYTECODE': '1', 'MTBATTERY_PARENT_PID': str(os.getpid())}
+                    process = subprocess.Popen(worker_command(name), env=env,
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                while True:
+                    if stop.event.is_set():
+                        stop_child(process)
+                    try:
+                        stdout, stderr = process.communicate(timeout=0.05)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                status = process.returncode
+                stderr = stderr.strip()
+                if stop.event.is_set() and not stdout.strip():
+                    report = unobserved(name)
+                elif status:
                     raise ValueError('worker exited without a successful record')
-                return decode_report(result.stdout, name)
-        except Exception as exc:
-            error = f"{name}: worker exit={status}: {exc}"
-            if stderr:
-                error += ' stderr=' + repr(stderr)
-            return ArmReport(name, (f"ARM={name} HARD-FAIL={error}",), (error,), False)
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        pending = {str(arm['name']): pool.submit(run, arm) for arm in start_order(arms, seed)}
-        return [pending[str(arm['name'])].result() for arm in arms]
+                else:
+                    report = decode_report(stdout, name)
+            except Exception as exc:
+                if process is not None:
+                    status = process.poll()
+                detail = f' signal={signal.Signals(-status).name}' if isinstance(status, int) and status < 0 else ''
+                error = f'{name}: worker exit={status}{detail}: {exc}'
+                if stderr:
+                    error += ' stderr=' + repr(stderr)
+                report = ArmReport(name, (f'ARM={name} HARD-FAIL={error}',), (error,), False)
+            finally:
+                if process is not None:
+                    if process.poll() is None:
+                        stop_child(process)
+                    process.communicate()
+                if raw is not None:
+                    cleanup_error = cleanup_directory(raw)
+                    if cleanup_error and report is not None:
+                        report = replace(report, errors=report.errors + (cleanup_error,))
+            return report
+        received, prefix = {}, 0
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            pending = {pool.submit(run, arm): str(arm['name']) for arm in start_order(arms, seed)}
+            while pending:
+                if stop.event.is_set():
+                    for future in pending:
+                        future.cancel()
+                done, _ = wait(pending, timeout=0.05, return_when=FIRST_COMPLETED)
+                for future in done:
+                    name = pending.pop(future)
+                    received[name] = unobserved(name) if future.cancelled() else future.result()
+                while prefix < len(arms) and str(arms[prefix]['name']) in received:
+                    if on_report is not None:
+                        on_report(received[str(arms[prefix]['name'])])
+                    prefix += 1
+        return [received[str(arm['name'])] for arm in arms]
 
 
 def tree_digest(root: Path) -> dict[str, str]:
@@ -979,6 +1160,12 @@ def emit(*args) -> None:
 
 
 def battery_main(args) -> int:
+    # Capture inputs before loading the spec or fixture harness.
+    before = tree_digest(TOOLS)
+    return _battery_main(args, before)
+
+
+def _battery_main(args, before) -> int:
     if not args.spec.is_file():
         raise SystemExit(f"spec does not exist: {args.spec}")
     sys.dont_write_bytecode = True
@@ -988,8 +1175,21 @@ def battery_main(args) -> int:
         arm for arm in spec.ARMS
         if not args.only or set(str(row) for row in arm.get("rows", (arm["row"],))) & set(args.only)
     ]
+    def stopped_selection():
+        if _STOP is None or not _STOP.event.is_set():
+            return False
+        for arm in selected:
+            emit(f"UNOBSERVED ARM={arm['name']} stopped signal={_STOP.signal}")
+        return True
+    known_rows = {str(row) for arm in spec.ARMS for row in arm.get('rows', (arm['row'],))}
+    unknown = sorted(set(args.only) - known_rows)
+    if unknown:
+        emit(f'ERROR unknown --only rows={unknown}')
+        return 7
     harness = load_module("mtbattery_denominator", TOOLS / "check-relay-lint-fixtures.py")
     errors = structural_errors(spec, harness, selected, not args.only)
+    if stopped_selection():
+        return 7
     if errors:
         for error in errors:
             emit(f"ERROR {error}")
@@ -1017,24 +1217,56 @@ def battery_main(args) -> int:
         emit(f"O2 KIND={kind} GENERATED={len(generated.get(kind, set()))} REGISTERED={len(registered.get(kind, set()))} DIFF={len(difference)}")
         if difference:
             errors.append(f"O2 {kind} symmetric-difference={sorted(difference)}")
-    before = tree_digest(TOOLS)
+    if stopped_selection():
+        return 7
+    if command != DEFAULT_SUITE or any(reads_xroot(arm) for arm in selected):
+        errors.extend(unmutated_control(command, populations[1]))
+        if stopped_selection():
+            return 7
+        if errors:
+            for error in errors:
+                emit(f'ERROR {error}')
+            return 7
     context = RunContext(command, universal_baseline, count_controls, populations)
-    with tempfile.TemporaryDirectory(prefix='mtbattery-run-') as raw:
-        run_dir = Path(raw)
+    streamed = set()
+    def stream(report):
+        for line in report.lines:
+            emit(line)
+        streamed.add(report.name)
+    run_dir = Path(tempfile.mkdtemp(prefix='mtbattery-run-'))
+    try:
         run_file = run_dir / 'context'
         write_run_file(run_file, context)
         def worker_command(name):
             return [sys.executable, '-B', str(Path(__file__).resolve()),
                     '--spec', str(args.spec.resolve()), '--worker-arm', name,
                     '--run-file', str(run_file)]
-        reports = run_workers(selected, args.jobs, args.shuffle, run_file, run_dir, worker_command)
+        reports = run_workers(selected, args.jobs, args.shuffle, run_file, run_dir, worker_command, on_report=stream)
+    finally:
+        cleanup_error = cleanup_directory(run_dir)
+        if cleanup_error:
+            errors.append(cleanup_error)
+    if len(reports) != len(selected):
+        errors.append(f'run record count={len(reports)} selected={len(selected)}')
+    checked = []
+    for arm, report in zip(selected, reports):
+        try:
+            validate_report(report, str(arm['name']))
+        except ValueError as exc:
+            name = str(arm['name'])
+            error = f'{name}: invalid worker record: {exc}'
+            report = ArmReport(name, (f'ARM={name} HARD-FAIL={error}',), (error,), False)
+        checked.append(report)
+    reports = checked
     attempted = [report.name for report in reports]
     completed = [report.name for report in reports if report.completed]
     for report in reports:
-        for line in report.lines:
-            emit(line)
+        if report.name not in streamed:
+            stream(report)
         errors.extend(report.errors)
     errors.extend(digest_changes(before, tree_digest(TOOLS)))
+    if len(attempted) != len(selected) or len(completed) != len(selected):
+        errors.append(f'run completeness attempted={len(attempted)} completed={len(completed)} selected={len(selected)}')
     if not args.only and len(attempted) != declared_arm_count:
         errors.append(f"run completeness attempted={len(attempted)} declared={declared_arm_count}")
     if not args.only and len(completed) != declared_arm_count:
@@ -1053,15 +1285,19 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     sys.dont_write_bytecode = True
     if args.suite_runner is not None:
-        return suite_runner_main(args.suite_runner, args.static_only)
+        with stop_scope(watch_parent=True, raise_on_stop=True):
+            return suite_runner_main(args.suite_runner, args.static_only)
     if args.worker_arm is not None:
-        return worker_main(args.spec, args.worker_arm, args.run_file)
+        with stop_scope(watch_parent=True, raise_on_stop=True):
+            return worker_main(args.spec, args.worker_arm, args.run_file)
     started = time.monotonic()
     order = 'declared' if args.shuffle is None else f'shuffle:{args.shuffle}'
     emit(f"RUN jobs={args.jobs} cpus={os.cpu_count()} order={order} "
          f"executable={sys.executable} version={sys.version.replace(chr(10), ' ')} load={os.getloadavg()}")
     try:
-        return battery_main(args)
+        with stop_scope() as stop:
+            code = battery_main(args)
+            return 7 if stop.event.is_set() else code
     finally:
         emit(f"RUN wall_seconds={time.monotonic() - started:.6f} load={os.getloadavg()}")
 

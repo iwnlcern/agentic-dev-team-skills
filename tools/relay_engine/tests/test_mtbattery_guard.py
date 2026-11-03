@@ -475,8 +475,8 @@ class TestMutationPopulations(unittest.TestCase):
     def test_main_denominator_line_names_both_populations(self):
         import io
         out = io.StringIO()
-        with self.cheap_parent(), contextlib.redirect_stdout(out):
-            mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'no-arm'])
+        with self.cheap_parent(), mock.patch.object(mt, 'run_workers', return_value=[]), contextlib.redirect_stdout(out):
+            mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'C1'])
         lines = out.getvalue().splitlines()
         denominator = [line for line in lines if line.startswith('DENOMINATOR ')]
         self.assertEqual(len(denominator), 1)
@@ -509,11 +509,11 @@ line = name
 if mode == 'tmp':
     assert os.environ['TMPDIR'] == os.environ['TEMP'] == os.environ['TMP']
     assert Path(os.environ['TMPDIR']).is_dir()
-    assert sys.stdin.read(0) == ''
-    line = json.dumps([os.environ['TMPDIR'], os.environ['PYTHONDONTWRITEBYTECODE'], os.getpgrp()])
+    fd = os.fstat(0)
+    line = json.dumps([os.environ['TMPDIR'], os.environ['PYTHONDONTWRITEBYTECODE'], os.getpgrp(), [fd.st_dev, fd.st_ino]])
 if mode == 'write':
     (Path(root) / 'source' / 'leak').write_text('unexpected')
-print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], completed=True)))
+print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' ' + line], errors=[], completed=True)))
 ''')
             arms = [{'name': str(i)} for i in range(4)]
             command = lambda name: [sys.executable, '-B', str(script), name, mode, str(root)]
@@ -535,7 +535,7 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], 
 
     def test_run_workers_output_independent_of_jobs_and_order(self):
         with self.workers() as (root, arms, command):
-            expected = [mt.ArmReport(str(i), (str(i),), (), True) for i in range(4)]
+            expected = [mt.ArmReport(str(i), (f'ARM={i} {i}',), (), True) for i in range(4)]
             for jobs, seed in [(1, None), (3, None), (3, 1), (3, 2)]:
                 self.assertEqual(mt.run_workers(arms, jobs, seed, root/'context', root, command), expected)
 
@@ -544,9 +544,11 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], 
         with self.workers('tmp') as (root, arms, command):
             before = mt.tree_digest(root)
             reports = mt.run_workers(arms[:3], 3, None, root/'context', root, command)
-            values = [json.loads(report.lines[0]) for report in reports]
+            values = [json.loads(report.lines[0].split(' ', 1)[1]) for report in reports]
             self.assertEqual(len({v[0] for v in values}), 3)
-            for path, no_bytecode, group in values:
+            for path, no_bytecode, group, descriptor in values:
+                fd = os.fstat(0)
+                self.assertEqual(descriptor, [fd.st_dev, fd.st_ino])
                 self.assertEqual(Path(path).parent, root)
                 self.assertFalse(Path(path).exists())
                 self.assertEqual(no_bytecode, '1')
@@ -614,8 +616,8 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], 
 
     def test_main_run_lines_bracket_the_run(self):
         import io, sys
-        reports = [mt.ArmReport('dispatch-impl-false', ('first-report',), (), True),
-                   mt.ArmReport('dispatch-impl-true', ('second-report',), (), True)]
+        reports = [mt.ArmReport('dispatch-impl-false', ('ARM=dispatch-impl-false first-report',), (), True),
+                   mt.ArmReport('dispatch-impl-true', ('ARM=dispatch-impl-true second-report',), (), True)]
         out = io.StringIO()
         with TestMutationPopulations().cheap_parent(), mock.patch.object(mt, 'run_workers', return_value=reports), contextlib.redirect_stdout(out):
             code = mt.main(['--spec', str(mt.TOOLS/'mtbattery-spec.py'), '--only', 'C1'])
@@ -624,7 +626,7 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], 
         self.assertTrue(lines[0].startswith('RUN '));self.assertIn(sys.executable, lines[0])
         self.assertIn('jobs=', lines[0]);self.assertIn('order=declared', lines[0])
         self.assertTrue(lines[-1].startswith('RUN '));self.assertIn('wall_seconds=', lines[-1])
-        self.assertLess(lines.index('first-report'), lines.index('second-report'))
+        self.assertLess(lines.index('ARM=dispatch-impl-false first-report'), lines.index('ARM=dispatch-impl-true second-report'))
 
     def test_main_preflight_starts_no_worker(self):
         import io
@@ -648,7 +650,7 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=[line], errors=[], 
             with TestMutationPopulations().cheap_parent(), mock.patch.object(mt, 'TOOLS', root), \
                  mock.patch.object(mt, 'load_module', side_effect=load), \
                  mock.patch.object(mt, 'run_workers', side_effect=write), contextlib.redirect_stdout(out):
-                self.assertEqual(mt.main(['--spec', str(Path(__file__).parents[2]/'mtbattery-spec.py'), '--only', 'no-arm']), 7)
+                self.assertEqual(mt.main(['--spec', str(Path(__file__).parents[2]/'mtbattery-spec.py'), '--only', 'C1']), 7)
             self.assertTrue(any(line.startswith('ERROR ') and 'leaked' in line for line in out.getvalue().splitlines()))
 
     def test_arm_report_uses_context_populations(self):
@@ -687,3 +689,439 @@ class TestMutationDiagnostics(unittest.TestCase):
              'universal_kills': ['fixture', 'hidden'], 'universal_raises': {'fixture': 'TypeError'},
              'passed': 1, 'failed': 1, 'exit': 1},
         ])
+
+
+class TestFoldValidation(unittest.TestCase):
+    # M2: malformed yet syntactically valid records must never earn completion.
+    def test_parent_rejects_invalid_record_shapes(self):
+        import json
+        records = [
+            dict(name='a', lines=[], errors=[], completed=True),
+            dict(name='a', lines=['ARM=forged ROW=C1'], errors=[], completed=True),
+            dict(name='a', lines=['ARM=a one', 'ARM=a two'], errors=[], completed=True),
+            dict(name='a', lines=[], errors=[], completed=False),
+            dict(name='wrong', lines=['ARM=a ok'], errors=[], completed=True),
+        ]
+        for record in records:
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                mt.decode_report(mt.REPORT_MARKER + json.dumps(record), 'a')
+        with self.assertRaises(ValueError):
+            mt.decode_report('', 'a')
+
+    def parent(self, reports, extra=(), hook=None):
+        import io
+        out = io.StringIO()
+        def workers(*args, **kwargs):
+            if hook:
+                hook(*args, **kwargs)
+            return reports
+        with TestMutationPopulations().cheap_parent(), \
+                mock.patch.object(mt, 'run_workers', side_effect=workers), contextlib.redirect_stdout(out):
+            code = mt.main(['--spec', str(Path(__file__).parents[2]/'mtbattery-spec.py'),
+                            '--only', 'C1', *extra])
+        return code, out.getvalue()
+
+    def reports(self):
+        return [mt.ArmReport(name, (f'ARM={name} valid',), (), True)
+                for name in ('dispatch-impl-false', 'dispatch-impl-true')]
+
+    def test_only_incomplete_is_not_success(self):
+        reports = self.reports()
+        reports[0] = replace(reports[0], completed=False, lines=())
+        code, output = self.parent(reports)
+        self.assertEqual(code, 7)
+        self.assertIn('completed=1', output)
+
+    def test_unknown_only_row_stops_before_workers(self):
+        def unexpected(*args, **kwargs):
+            self.fail('worker started for unknown selection')
+        code, output = self.parent(self.reports(), ['--only', 'NOSUCHROW'], unexpected)
+        self.assertEqual(code, 7)
+        self.assertIn('NOSUCHROW', output)
+
+    def test_digest_covers_changes_during_first_read(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tools = Path(raw)
+            path = tools/'changed';path.write_text('before')
+            def load(name, source):
+                path.write_text('after')
+                return spec if name == 'mtbattery_spec' else harness
+            with mock.patch.object(mt, 'TOOLS', tools), mock.patch.object(mt, 'load_module', side_effect=load):
+                code, output = self.parent(self.reports())
+        self.assertEqual(code, 7)
+        self.assertIn('source tools changed changed', output)
+
+    def test_full_population_unmutated_control(self):
+        import sys
+        # Real custom suite process; parent/arm orchestration stays real except
+        # expensive fixture preflight and the independently exercised workers.
+        for outcome, count, status, expected in [('FAIL', 2, 1, 7), ('PASS', 2, 0, 0),
+                                                 ('PASS', 1, 0, 7), ('PASS', 2, 3, 7)]:
+            with self.subTest(outcome=outcome, count=count, status=status), tempfile.TemporaryDirectory() as raw:
+                tools = Path(raw);(tools/'source').write_text('unmutated')
+                h = SimpleNamespace(EXPECTED=[('file', 'a', 0), ('file', 'b', 0)], EXPECTED_ERROR_SET={})
+                def load(name, source):
+                    return spec if name == 'mtbattery_spec' else h
+                command = [sys.executable, '-B', '-c',
+                           f"from pathlib import Path; assert Path('tools/source').read_text() == 'unmutated'; "
+                           f"print('a: expected=0 observed={int(outcome == 'FAIL')} {outcome}'); "
+                           + ("print('b: expected=0 observed=0 PASS'); " if count == 2 else '')
+                           + f'raise SystemExit({status})']
+                with mock.patch.object(mt, 'TOOLS', tools), mock.patch.object(mt, 'load_module', side_effect=load), \
+                     mock.patch.object(mt, 'xroot_registration_count', return_value=0):
+                    # cheap_parent supplies130; use a tiny full population of132.
+                    h.EXPECTED = h.EXPECTED[:2]
+                    # Override only the count boundary within the parent helper.
+                    old = TestMutationPopulations.cheap_parent
+                    @contextlib.contextmanager
+                    def cheap(instance):
+                        with old(instance), mock.patch.object(mt, 'xroot_registration_count', return_value=0):
+                            yield
+                    with mock.patch.object(TestMutationPopulations, 'cheap_parent', cheap):
+                        code, output = self.parent(self.reports(), ['--', *command])
+                self.assertEqual(code, expected, output)
+                if outcome == 'FAIL':
+                    self.assertIn('a', output)
+                    self.assertIn('control', output.lower())
+
+
+class TestFoldVerdicts(unittest.TestCase):
+    def test_verdict_errors_reach_parent_exit(self):
+        arm = {'name': 'dispatch-impl-false', 'row': 'C1', 'function': 'f', 'kills': ['x']}
+        context = mt.RunContext(mt.DEFAULT_SUITE, {}, {}, (2, 3))
+        good = mt.ArmObservation(frozenset({'x'}), {}, frozenset({'x'}), {}, 1, 1, 1)
+        cases = [('O3', replace(good, kills=frozenset({'y'}), universal_kills=frozenset({'y'}))),
+                 ('raises', replace(good, raises={'x': 'ValueError'})),
+                 ('universal-exact-minus-registered', replace(good, universal_kills=frozenset({'x', 'extra'}))),
+                 ('survivor', replace(good, kills=frozenset(), universal_kills=frozenset()))]
+        for tag, observed in cases:
+            with self.subTest(tag=tag), mock.patch.object(mt, 'run_arm', return_value=observed):
+                report = mt.arm_report(arm, SimpleNamespace(RAISES={}), context)
+                self.assertTrue(any(tag in error for error in report.errors), report)
+                reports = TestFoldValidation().reports();reports[0] = report
+                code, output = TestFoldValidation().parent(reports)
+                self.assertEqual(code, 7)
+                self.assertIn(tag, output)
+        reports = TestFoldValidation().reports()
+        reports[0] = replace(reports[0], errors=('worker evidence failed',))
+        code, output = TestFoldValidation().parent(reports)
+        self.assertEqual(code, 7);self.assertIn('worker evidence failed', output)
+
+    def test_arm_report_exceptions_are_errors(self):
+        arm = {'name': 'a', 'row': 'C1', 'function': 'f', 'kills': ['x']}
+        context = mt.RunContext(mt.DEFAULT_SUITE, {}, {}, (2, 3))
+        for exc, tag in [(mt.IncompleteSuiteError(1, 2), 'incomplete'), (RuntimeError('seeded'), 'seeded')]:
+            with self.subTest(tag=tag), mock.patch.object(mt, 'run_arm', side_effect=exc):
+                report = mt.arm_report(arm, SimpleNamespace(RAISES={}), context)
+                self.assertFalse(report.completed)
+                self.assertTrue(any(tag in error for error in report.errors), report)
+
+    def test_guard_composes_all_four_checks(self):
+        key = next(iter(observations))
+        changed = {**observations, key: replace(observations[key], ok=not observations[key].ok)}
+        for tag in ('G1', 'G2', 'G3', 'G4'):
+            arms = [spec.ARMS[0]]
+            local_spec = spec
+            first, second = observations, observations
+            if tag == 'G1': first = second = changed
+            if tag == 'G2': second = changed
+            if tag == 'G3': arms = [{**arms[0], 'original': 'missing-anchor-fold'}]
+            if tag == 'G4':
+                local_spec = SimpleNamespace(**{**vars(spec), 'KILLS': {**spec.KILLS, spec.ARMS[0]['name']: ['missing-fold-label']}})
+            with self.subTest(tag=tag), mock.patch.object(mt, 'lint_observations', side_effect=[first, second]), \
+                 mock.patch.object(mt, 'xroot_labels', return_value=labels):
+                errors = mt.structural_errors(local_spec, harness, arms, False)
+                self.assertTrue(any(error.startswith(tag+' ') for error in errors), errors)
+
+    def test_main_passes_jobs_and_shuffle(self):
+        seen = []
+        def workers(arms, jobs, seed, *args, **kwargs):
+            seen.append((jobs, seed))
+        code, _ = TestFoldValidation().parent(TestFoldValidation().reports(), ['--jobs', '2', '--shuffle', '297'], workers)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [(2, 297)])
+
+    def test_parent_preserves_nonalphabetic_declared_order(self):
+        import io
+        arms = [a for a in spec.ARMS if a['row'] == 'C1'][::-1]
+        local_spec = SimpleNamespace(**{**vars(spec), 'ARMS': arms})
+        def load(name, path):
+            return local_spec if name == 'mtbattery_spec' else harness
+        reports = TestFoldValidation().reports()[::-1]
+        with mock.patch.object(mt, 'load_module', side_effect=load):
+            code, output = TestFoldValidation().parent(reports)
+        self.assertEqual(code, 0)
+        self.assertLess(output.index('ARM=dispatch-impl-true '), output.index('ARM=dispatch-impl-false '))
+
+    def test_workers_apply_shuffle_and_job_bounds(self):
+        import json, sys
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw);script = root/'worker.py';events = root/'events'
+            script.write_text('''import json, os, sys, time
+name, events = sys.argv[1:]
+def record(kind):
+    fd = os.open(events, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try: os.write(fd, (kind + ' ' + name + '\\n').encode())
+    finally: os.close(fd)
+record('start')
+time.sleep(0.15)
+record('end')
+print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' ok'], errors=[], completed=True)))
+''')
+            arms = [{'name': name} for name in ('z', 'a', 'q', 'b')]
+            command = lambda name: [sys.executable, '-B', str(script), name, str(events)]
+            for jobs, seed in [(1, 297), (2, 297)]:
+                if events.exists(): events.unlink()
+                reports = mt.run_workers(arms, jobs, seed, root/'context', root, command)
+                self.assertEqual([r.name for r in reports], ['z', 'a', 'q', 'b'])
+                active = peak = 0;starts = []
+                for line in events.read_text().splitlines():
+                    kind, name = line.split()
+                    active += 1 if kind == 'start' else -1
+                    if kind == 'start': starts.append(name)
+                    peak = max(peak, active)
+                    self.assertLessEqual(active, jobs)
+                self.assertEqual(active, 0)
+                if jobs == 1:
+                    self.assertEqual(starts, [a['name'] for a in mt.start_order(arms, seed)])
+                else:
+                    self.assertGreater(peak, 1)
+
+
+class TestFoldLifecycle(unittest.TestCase):
+    # Child processes exercise signal delivery, descriptor inheritance and
+    # partial output across the actual worker scheduler, not mocked futures.
+    @contextlib.contextmanager
+    def driver(self, mode='block'):
+        import sys
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            worker = root/'worker.py'
+            worker.write_text('''import json, os, sys, time, signal
+from pathlib import Path
+import mtbattery as mt
+name, mode, root = sys.argv[1:]
+root = Path(root)
+(root / (name + '.pid')).write_text(str(os.getpid()))
+if mode == 'ordered':
+    if name == 'z':
+        while not (root/'release').exists(): time.sleep(0.01)
+    elif name == 'b':
+        while not (root/'last').exists(): time.sleep(0.01)
+else:
+    if name == 'a':
+        with mt.stop_scope(watch_parent=True):
+            result = mt.managed_run([sys.executable, '-B', mt.__file__, '--suite-runner', str(root/'harness.py')])
+            if result.returncode: raise SystemExit(7)
+print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' ok'], errors=[], completed=True)), flush=True)
+''')
+            (root/'harness.py').write_text("""import os, subprocess, sys
+from pathlib import Path
+from types import SimpleNamespace
+root = Path(__file__).parent
+(root/'child.pid').write_text(str(os.getpid()))
+def load_linter(): return SimpleNamespace()
+def main():
+    subprocess.run([sys.executable, '-c', "import os,time; from pathlib import Path; Path(" + repr(str(root/'grandchild.pid')) + ").write_text(str(os.getpid())); time.sleep(60)"])
+    return 0
+""")
+            driver = root/'driver.py'
+            driver.write_text('''import os, sys
+from pathlib import Path
+import mtbattery as mt
+root = Path(sys.argv[1]); mode = sys.argv[2]
+arms = [{'name': name} for name in ('z', 'a', 'b')]
+def command(name):
+    with (root/'starts').open('a') as f: f.write(name + '\\n')
+    return [sys.executable, '-B', str(root/'worker.py'), name, mode, str(root)]
+mt.emit('RUN start')
+try:
+    with mt.stop_scope():
+        reports = mt.run_workers(arms, 1 if mode == 'block' else 3, None, root/'context', root, command,
+                                 on_report=lambda report: [mt.emit(line) for line in report.lines])
+    code = 7 if any(r.errors for r in reports) else 0
+finally:
+    mt.emit('RUN end')
+raise SystemExit(code)
+''')
+            yield root, [sys.executable, '-B', str(driver), str(root), mode]
+
+    def wait_for(self, predicate, timeout=8):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if predicate(): return
+            time.sleep(0.02)
+        self.fail('child did not reach the synchronization point')
+
+    def test_stop_forwards_to_child_and_cancels_queue(self):
+        import os, signal, subprocess
+        for sig, group in [(signal.SIGTERM, False), (signal.SIGINT, True)]:
+            with self.subTest(signal=sig, group=group), self.driver() as (root, command):
+                with (root/'output').open('w+') as out:
+                    process = subprocess.Popen(command, stdout=out, stderr=out, start_new_session=True)
+                    try:
+                        self.wait_for(lambda: (root/'grandchild.pid').exists() or process.poll() is not None)
+                        self.assertIsNone(process.poll(), (root/'output').read_text())
+                        os.killpg(process.pid, sig) if group else os.kill(process.pid, sig)
+                        self.assertEqual(process.wait(timeout=10), 7)
+                        self.assertEqual((root/'starts').read_text().splitlines(), ['z', 'a'])
+                        output = (root/'output').read_text()
+                        self.assertIn('ARM=z ok', output)
+                        self.assertIn('UNOBSERVED ARM=a', output)
+                        self.assertIn('UNOBSERVED ARM=b', output)
+                        self.assertTrue(output.rstrip().endswith('RUN end'), output)
+                        self.assertFalse(list(root.glob('arm-*')))
+                        for name in ('a.pid', 'child.pid', 'grandchild.pid'):
+                            with self.assertRaises(ProcessLookupError): os.kill(int((root/name).read_text()), 0)
+                    finally:
+                        if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+
+    def test_ordered_prefix_flushes_before_last_finishes(self):
+        import os, signal, subprocess
+        with self.driver('ordered') as (root, command), (root/'output').open('w+') as out:
+            process = subprocess.Popen(command, stdout=out, stderr=out, start_new_session=True)
+            try:
+                self.wait_for(lambda: (root/'b.pid').exists() or process.poll() is not None)
+                self.assertIsNone(process.poll(), (root/'output').read_text())
+                self.assertNotIn('ARM=a ok', (root/'output').read_text())
+                (root/'release').touch()
+                self.wait_for(lambda: 'ARM=a ok' in (root/'output').read_text())
+                output = (root/'output').read_text()
+                self.assertLess(output.index('ARM=z ok'), output.index('ARM=a ok'))
+                self.assertNotIn('ARM=b ok', output)
+                (root/'last').touch()
+                self.assertEqual(process.wait(timeout=8), 0)
+            finally:
+                if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+    def test_suite_runner_notices_parent_death(self):
+        import os, signal, subprocess, sys
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); harness_path = root/'harness.py'; parent = root/'parent.py'
+            harness_path.write_text('''import time
+from types import SimpleNamespace
+def load_linter(): return SimpleNamespace(lint_file=lambda path: None)
+def main():
+    while True:
+        load_linter().lint_file('x')
+        time.sleep(0.02)
+''')
+            parent.write_text('''import os, subprocess, sys, time
+from pathlib import Path
+p = subprocess.Popen([sys.executable, '-B', sys.argv[1], '--suite-runner', sys.argv[2]], env={**os.environ, 'MTBATTERY_PARENT_PID': str(os.getpid())})
+Path(sys.argv[3]).write_text(str(p.pid))
+time.sleep(60)
+''')
+            with (root/'output').open('w+') as out:
+                process = subprocess.Popen([sys.executable, '-B', str(parent), mt.__file__, str(harness_path), str(root/'suite.pid')], stdout=out, stderr=out, start_new_session=True)
+                try:
+                    self.wait_for(lambda: (root/'suite.pid').exists())
+                    os.kill(process.pid, signal.SIGKILL);process.wait()
+                    pid = int((root/'suite.pid').read_text())
+                    def gone():
+                        try: os.kill(pid, 0)
+                        except ProcessLookupError: return True
+                        return False
+                    self.wait_for(gone)
+                finally:
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    process.wait()
+
+    def test_killed_worker_keeps_signal_and_reaps_suite(self):
+        import os, signal, subprocess
+        with self.driver() as (root, command), (root/'output').open('w+') as out:
+            process = subprocess.Popen(command, stdout=out, stderr=out, start_new_session=True)
+            try:
+                self.wait_for(lambda: (root/'grandchild.pid').exists())
+                os.kill(int((root/'a.pid').read_text()), signal.SIGKILL)
+                self.assertEqual(process.wait(timeout=8), 7)
+                output = (root/'output').read_text()
+                self.assertIn('SIGKILL', output)
+                for name in ('child.pid', 'grandchild.pid'):
+                    with self.assertRaises(ProcessLookupError): os.kill(int((root/name).read_text()), 0)
+                self.assertNotIn('Errno 66', output)
+                self.assertIn('ARM=b ok', output)
+                self.assertFalse(list(root.glob('arm-*')))
+            finally:
+                if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+    def test_worker_entry_unwinds_owned_subprocess(self):
+        import os, signal, subprocess, sys
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw);driver = root/'driver.py'
+            driver.write_text('''import subprocess, sys
+import mtbattery as mt
+def work(*args):
+    subprocess.run([sys.executable, '-c', "from pathlib import Path; import os,time; Path(" + repr(sys.argv[1]) + ").write_text(str(os.getpid())); time.sleep(60)"])
+    return 0
+mt.worker_main = work
+raise SystemExit(mt.main(['--spec', 'unused', '--worker-arm', 'standin', '--run-file', 'unused']))
+''')
+            with (root/'output').open('w+') as out:
+                process = subprocess.Popen([sys.executable, '-B', str(driver), str(root/'child.pid')], stdout=out, stderr=out, start_new_session=True)
+                try:
+                    self.wait_for(lambda: (root/'child.pid').exists())
+                    os.kill(process.pid, signal.SIGTERM)
+                    self.assertNotEqual(process.wait(timeout=7), 0)
+                    with self.assertRaises(ProcessLookupError): os.kill(int((root/'child.pid').read_text()), 0)
+                finally:
+                    try: os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    process.wait()
+
+
+class TestFoldStopBoundaries(unittest.TestCase):
+    def test_stop_during_control_names_unobserved_selection(self):
+        import os, signal
+        def stopped(*args):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return ['control stopped']
+        with mock.patch.object(mt, 'unmutated_control', side_effect=stopped):
+            code, output = TestFoldValidation().parent([], ['--', 'standin-command'])
+        self.assertEqual(code, 7)
+        for name in ('dispatch-impl-false', 'dispatch-impl-true'):
+            self.assertIn('UNOBSERVED ARM='+name, output)
+        self.assertTrue(output.splitlines()[-1].startswith('RUN wall_seconds='))
+
+    def test_run_directory_cleanup_preserves_worker_error(self):
+        original = shutil.rmtree
+        failed = []
+        def remove(path, *args, **kwargs):
+            if Path(path).name.startswith('mtbattery-run-'):
+                failed.append(Path(path))
+                raise OSError('seeded cleanup failure')
+            return original(path, *args, **kwargs)
+        reports = TestFoldValidation().reports()
+        reports[0] = replace(reports[0], errors=('worker exit=-9 signal=SIGKILL',), completed=False)
+        try:
+            with mock.patch.object(mt.shutil, 'rmtree', side_effect=remove), mock.patch.object(mt, 'CLEANUP_GRACE', 0):
+                code, output = TestFoldValidation().parent(reports)
+            self.assertEqual(code, 7)
+            self.assertIn('SIGKILL', output)
+            self.assertIn('cleanup', output)
+            self.assertTrue(any(str(path) in output for path in failed))
+        finally:
+            for path in set(failed):
+                if path.exists(): original(path)
+
+    def test_invalid_worker_records_fail_through_parent(self):
+        import json, subprocess, sys
+        name = 'dispatch-impl-false'
+        variants = ['', mt.REPORT_MARKER+json.dumps(dict(name=name, lines=[], errors=[], completed=True)),
+                    mt.REPORT_MARKER+json.dumps(dict(name=name, lines=['ARM=forged ok'], errors=[], completed=True)),
+                    mt.REPORT_MARKER+json.dumps(dict(name=name, lines=[], errors=[], completed=False))]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for output in variants:
+                with self.subTest(output=output):
+                    reports = mt.run_workers([{'name': name}], 1, None, root/'context', root,
+                        lambda _: [sys.executable, '-B', '-c', 'print('+repr(output)+')'])
+                    self.assertFalse(reports[0].completed)
+                    code, text = TestFoldValidation().parent(reports + TestFoldValidation().reports()[1:])
+                    self.assertEqual(code, 7)
+                    self.assertIn(name, text)
+                    self.assertIn('HARD-FAIL', text)
