@@ -44,8 +44,6 @@ ledgers, and charters. It does not claim these provisional boundaries are mechan
 2. downward ruling distribution remains explicit — follow `adopt_ruling` in `tools/relay_engine/supersede.py` for the mechanical effect of an adopted parent ruling; continue the amendment cascade by relay (auto-delivered to armed seats, hand-relayed otherwise) and operator retire-and-reboot of stale sessions;
 3. no containment — tier words state who implements; nothing confines a seat's writes.
 
-All three close when v29-engine lands; procedure text then updates in a v2.9.x edit with no label to lift.
-
 ### Three nested plugins, ten skills
 
 Each higher plugin contains the complete lower-tier bundle, so installing one plugin is enough for
@@ -173,7 +171,7 @@ implementation into governance seats.
 - **Superpowers** — the skills build on its brainstorming, planning, plan-execution, and review
   procedures. If it is not installed, the skills tell the agent to stop and report the missing
   prerequisite.
-- **Python 3** — required by the engine entry point `tools/relay`, `tools/relay-lint.py`, and the Python host-adapter entry points in `tools/adapters/`.
+- **Python 3.11 or newer** — required as the first `python3` on `PATH` by the engine entry point `tools/relay`, `tools/relay-lint.py`, and the Python host-adapter entry points in `tools/adapters/`.
   The skills can report that optional linting is unavailable; those Python entry points still require the interpreter.
   Install the generated `tools/` directory under your skills root, or point at it however your host resolves skills.
 
