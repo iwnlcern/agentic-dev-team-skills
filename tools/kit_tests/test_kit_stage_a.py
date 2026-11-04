@@ -5,7 +5,9 @@ Run: python3 -m unittest discover -s tools/kit_tests -v
 
 from __future__ import annotations
 
+import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -242,6 +244,44 @@ class TestVendoredBrainstorming(KitTreeCase):
         for needle in ("vendor/mattpocock/grill-me/", VENDORED_BRAINSTORMING, "LICENSES/mattpocock-skills-MIT.txt", VENDOR_LICENSE):
             self.assertIn(needle, license_section)
 
+
+
+LINK = re.compile(r"\]\(([^)\s]+)\)")
+
+
+def dead_relative_links(paths) -> list[str]:
+    """file:line target for every relative Markdown link whose target file does not exist."""
+    dead = []
+    for path in paths:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in LINK.finditer(line):
+                target = match.group(1)
+                if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target) or target.startswith("#"):
+                    continue
+                file_part = target.split("#", 1)[0]
+                if file_part and not (path.parent / file_part).exists():
+                    dead.append(f"{path}:{number} {target}")
+    return dead
+
+
+class TestItem12(KitTreeCase):
+    """A3: every relative link in canonical, derived and installed skills resolves."""
+
+    def test_relative_links_resolve(self):
+        paths = sorted(
+            path
+            for path in [*(ROOT / "skills").rglob("*.md"), *PLUGINS.glob("*/skills/**/*.md")]
+            if path.is_file()
+        )
+        self.assertGreater(len(paths), 50)
+        self.assertEqual(dead_relative_links(paths), [])
+
+    def test_dead_link_control_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Path(temporary) / "fixture.md"
+            (Path(temporary) / "present.md").write_text("x\n", encoding="utf-8")
+            fixture.write_text("[ok](present.md) [gone](../missing/SKILL.md#a) [web](https://example.com)\n", encoding="utf-8")
+            self.assertEqual(dead_relative_links([fixture]), [f"{fixture}:1 ../missing/SKILL.md#a"])
 
 if __name__ == "__main__":
     unittest.main()

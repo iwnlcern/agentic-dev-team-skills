@@ -60,7 +60,7 @@ See `protocol.md` § Continuation dispatch for continuations.
 
 ## Standalone pair (no orchestrator)
 
-For managed roots, follow the `sprint-doc-setup` skill's [Managed-root setup](../sprint-doc-setup/SKILL.md#managed-root-setup).
+For managed roots, follow the `sprint-doc-setup` skill's `Managed-root setup` section.
 
 - Operator-authored intake.
 - Report-and-hold to the operator after approving `DESIGN-REVIEW`.
