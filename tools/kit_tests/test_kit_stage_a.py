@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +63,14 @@ class KitTreeCase(unittest.TestCase):
         }
 
 
+CITED = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)` in `(tools/[^`]+\.py)`")
+
+
+def _section(text: str, heading: str) -> str:
+    assert text.count(f"\n{heading}\n") == 1, heading
+    return text.split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
 class TestWrongSentences(KitTreeCase):
     """A1: the three wrong shipped sentences are gone and their replacements name the deciding code."""
 
@@ -81,9 +90,15 @@ class TestWrongSentences(KitTreeCase):
         setup = {"skills/sprint-doc-setup/SKILL.md": self.canonical_text("skills/sprint-doc-setup/SKILL.md")}
         setup.update(self.installed_texts("skills/sprint-doc-setup/SKILL.md"))
         self.assertEqual(len(setup), 1 + len(TIERS))
+        expected = {
+            ("read_lint_context", "tools/relay_engine/daemon.py"),
+            ("notice_effect", "tools/relay_engine/roster.py"),
+            ("_relative", "tools/relay_engine/client.py"),
+            ("bind_from_receipt", "tools/adapters/relay-monitor.py"),
+        }
         for where, text in setup.items():
-            for code in ("read_lint_context", "notice_effect", "_relative", "relay-monitor.py"):
-                self.assertIn(code, text, f"{where}: moved-root sentence does not name {code}")
+            cited = set(CITED.findall(text))
+            self.assertTrue(expected <= cited, f"{where}: moved-root sentence cites {sorted(cited)}")
 
         protocol = {"shared/protocol.md": self.canonical_text("shared/protocol.md")}
         protocol.update(self.installed_shared_copies("protocol.md"))
@@ -91,20 +106,22 @@ class TestWrongSentences(KitTreeCase):
         for where, text in protocol.items():
             self.assertIn("`_role_slug`", text, f"{where}: filename role sentence does not name _role_slug")
 
-        changelog = self.canonical_text("CHANGELOG.md")
-        self.assertIn("after every kit update", changelog)
+        release = _section(self.canonical_text("CHANGELOG.md"), "## [2.9.5] — 2026-09-23")
+        hook_lines = [line for line in release.splitlines() if line.startswith("- **Codex arming and Stop drain hooks**")]
+        self.assertEqual(len(hook_lines), 1)
+        self.assertIn("after every kit update", hook_lines[0])
 
     def test_named_code_exists(self):
-        """Every function the corrected sentences name exists where they say."""
-        cases = (
-            ("tools/relay_engine/daemon.py", "def read_lint_context("),
-            ("tools/relay_engine/roster.py", "def notice_effect("),
-            ("tools/relay_engine/client.py", "def _relative("),
-            ("tools/relay_engine/ledger.py", "def _role_slug("),
-            ("tools/adapters/relay-monitor.py", "def bind_from_receipt("),
-        )
-        for rel, needle in cases:
-            self.assertIn(needle, self.canonical_text(rel), f"{rel} lacks {needle}")
+        """Every `function` in `file` that the corrected sentences cite is defined in that file."""
+        cited = set()
+        for rel in ("skills/sprint-doc-setup/SKILL.md", "shared/protocol.md"):
+            cited |= set(CITED.findall(self.canonical_text(rel)))
+        self.assertIn(("_role_slug", "tools/relay_engine/ledger.py"), cited)
+        self.assertGreaterEqual(len(cited), 5)
+        for name, rel in sorted(cited):
+            self.assertRegex(
+                self.canonical_text(rel), rf"(?m)^\s*(?:def|class) {re.escape(name)}\b", f"{rel} does not define {name}"
+            )
 
 
 BASE_COMMIT = "5f313bfa14a5e7a2a6efc9c1dac92be4356830af"
@@ -124,7 +141,7 @@ PRACTICES: dict[str, tuple[str, ...]] = {
     "orchestrator-planner": ALL_ROLES + PLANNER,
     "master-planner": ALL_ROLES + PLANNER,
     "domain-planner": ALL_ROLES + PLANNER,
-    "pair-implementer": ALL_ROLES + IMPLEMENTER,
+    "pair-implementer": ALL_ROLES + IMPLEMENTER + REVIEWER,
     "orchestrator-reviewer": ALL_ROLES + REVIEWER,
     "master-reviewer": ALL_ROLES + REVIEWER,
     "domain-reviewer": ALL_ROLES + REVIEWER,
@@ -155,7 +172,12 @@ class TestSuperpowersOut(KitTreeCase):
         for path, text in self.shipped_text_files().items():
             for number, line in enumerate(text.splitlines(), 1):
                 lowered = line.lower()
-                if "superpowers" in lowered and VENDORED_BRAINSTORMING not in line:
+                exempt = (
+                    VENDORED_BRAINSTORMING in line
+                    and "requires superpowers" not in lowered
+                    and "superpowers is mandatory" not in lowered
+                )
+                if "superpowers" in lowered and not exempt:
                     offenders.append(f"{path}:{number}: superpowers")
                 for name in PROCEDURE_NAMES:
                     if name in line:
@@ -252,7 +274,7 @@ class TestVendoredBrainstorming(KitTreeCase):
 
 
 
-LINK = re.compile(r"\]\(([^)\s]+)\)")
+LINK = re.compile(r"""\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)""")
 
 
 def dead_relative_links(paths) -> list[str]:
@@ -286,8 +308,14 @@ class TestItem12(KitTreeCase):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = Path(temporary) / "fixture.md"
             (Path(temporary) / "present.md").write_text("x\n", encoding="utf-8")
-            fixture.write_text("[ok](present.md) [gone](../missing/SKILL.md#a) [web](https://example.com)\n", encoding="utf-8")
-            self.assertEqual(dead_relative_links([fixture]), [f"{fixture}:1 ../missing/SKILL.md#a"])
+            fixture.write_text(
+                '[ok](present.md) [gone](../missing/SKILL.md#a) [web](https://example.com) [titled](gone.md "t")\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                dead_relative_links([fixture]),
+                [f"{fixture}:1 ../missing/SKILL.md#a", f"{fixture}:1 gone.md"],
+            )
 
 
 def _generator():
@@ -326,6 +354,18 @@ class TestIcon(KitTreeCase):
         width, height, depth, colour = struct.unpack(">IIBB", chunks[0][1][:10])
         self.assertEqual((width, height, depth, colour), (1024, 1024, 8, 3))
         self.assertLess(len(self.png), 2_000_000)
+        position = 8
+        for kind, data in chunks:
+            end = position + 8 + len(data)
+            (crc,) = struct.unpack(">I", self.png[end:end + 4])
+            self.assertEqual(crc, zlib.crc32(kind + data) & 0xFFFFFFFF, f"{kind!r} CRC")
+            position = end + 4
+        raw = zlib.decompress(b"".join(data for kind, data in chunks if kind == b"IDAT"))
+        self.assertEqual(len(raw), 1024 * (1 + 1024))
+        rows = [raw[row * 1025:(row + 1) * 1025] for row in range(1024)]
+        self.assertEqual({row[0] for row in rows}, {0}, "every row uses filter type 0")
+        palette_entries = len(chunks[1][1]) // 3
+        self.assertLess(max(max(row[1:]) for row in rows), palette_entries)
         for tier in TIERS:
             self.assertEqual((PLUGINS / tier / ".claude-plugin" / "icon.png").read_bytes(), self.png, tier)
 
@@ -342,6 +382,7 @@ class TestIcon(KitTreeCase):
             blocks += 1
             if header & 1:
                 break
+            self.assertEqual(length, 0xFFFF, f"non-final block {blocks} holds {length} bytes, not 65,535")
         self.assertEqual(len(stream), position + 4)
         self.assertGreater(blocks, 1)
 
@@ -371,13 +412,9 @@ class TestIcon(KitTreeCase):
                         walk(item)
 
             walk(json.loads(result.stdout))
-            self.assertNotIn("ICON_MISSING", [f.get("code") for f in findings], tier)
+            icon_codes = [f.get("code") for f in findings if str(f.get("code", "")).startswith("ICON_")]
+            self.assertEqual(icon_codes, [], tier)
             self.assertEqual([f for f in findings if f.get("severity") == "error"], [], tier)
-
-
-def _section(text: str, heading: str) -> str:
-    assert text.count(f"\n{heading}\n") == 1, heading
-    return text.split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
 
 
 class TestUpgradeDocs(KitTreeCase):

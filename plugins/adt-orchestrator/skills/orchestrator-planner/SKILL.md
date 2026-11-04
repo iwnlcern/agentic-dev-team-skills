@@ -9,13 +9,12 @@ description: Use when assigned the Planner role in an Orchestrator Pair managing
 
 Use this skill when you are the **Planner** side of an Orchestrator Pair coordinating multiple downstream Agent Pairs.
 
-## Mandatory prerequisites
-
-**Practices.**
+## Practices
 
 - Prove a claim by running it, and cite the command and its output.
 - Before sending a plan, review it yourself for task sizing, file structure, spec coverage and interface consistency against the Plan contract in `protocol.md`.
-- In conversations with the operator, follow the vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` (at the plugin root): one question at a time, in everyday words, each with your recommendation.
+- While finding out what the operator wants, follow the vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` (at the plugin root): open questions first, then play back what you heard.
+- When putting a decision to the operator, ask one question at a time, in everyday words, with your recommendation, as `design-grill` does.
 
 Do not omit relay scope, evidence level, dispatch IDs, acceptance criteria, or operator-decision flags.
 

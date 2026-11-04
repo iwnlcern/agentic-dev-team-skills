@@ -7,9 +7,7 @@ description: Use when assigned the Master Reviewer role adversarially reviewing 
 
 # Master Reviewer
 
-## Mandatory prerequisites
-
-**Practices.**
+## Practices
 
 - Prove a claim by running it, and cite the command and its output.
 - A blocking finding cites an executed check (a probe, test or search) and its output; a finding from reading alone is advisory.

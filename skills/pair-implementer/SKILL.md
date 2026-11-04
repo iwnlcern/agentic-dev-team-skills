@@ -7,13 +7,12 @@ description: Use when assigned the Pair Implementer role.
 
 Use this skill when you are the **Pair Implementer** in a two-seat pair-tier team. The role is model-agnostic: any capable agent may be the pair Implementer.
 
-## Mandatory prerequisites
-
-**Practices.**
+## Practices
 
 - Prove a claim by running it, and cite the command and its output.
 - Write the failing test first, watch it fail, then make it pass.
 - Reproduce a bug before fixing it.
+- A blocking finding cites an executed check (a probe, test or search) and its output; a finding from reading alone is advisory.
 - Work in a separate git worktree, never in the main checkout.
 - When the plan's tasks are done, push the branch, open the PR and stop; the merge is gated separately.
 

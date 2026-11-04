@@ -5,9 +5,7 @@ description: Use when assigned the Domain Reviewer role reviewing a domain spec 
 
 # Domain Reviewer
 
-## Mandatory prerequisites
-
-**Practices.**
+## Practices
 
 - Prove a claim by running it, and cite the command and its output.
 - A blocking finding cites an executed check (a probe, test or search) and its output; a finding from reading alone is advisory.

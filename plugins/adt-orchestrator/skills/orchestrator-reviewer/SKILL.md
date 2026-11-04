@@ -9,9 +9,7 @@ description: Use when assigned the adversarial reviewer role in an Orchestrator 
 
 Use this skill when you are the adversarial reviewer for an Orchestrator Pair. The role is model-agnostic and review-only.
 
-## Mandatory prerequisites
-
-**Practices.**
+## Practices
 
 - Prove a claim by running it, and cite the command and its output.
 - A blocking finding cites an executed check (a probe, test or search) and its output; a finding from reading alone is advisory.

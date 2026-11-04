@@ -19,13 +19,12 @@ This plugin tier installs this pair for subordinate operation under the run's go
 
 Use this skill when you are the **Pair Planner** in a two-seat pair-tier team. The role is model-agnostic: any capable agent may be the pair Planner.
 
-## Mandatory prerequisites
-
-**Practices.**
+## Practices
 
 - Prove a claim by running it, and cite the command and its output.
 - Before sending a plan, review it yourself for task sizing, file structure, spec coverage and interface consistency against the Plan contract in `protocol.md`.
-- In conversations with the operator, follow the vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` (at the plugin root): one question at a time, in everyday words, each with your recommendation.
+- While finding out what the operator wants, follow the vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` (at the plugin root): open questions first, then play back what you heard.
+- When putting a decision to the operator, ask one question at a time, in everyday words, with your recommendation, as `design-grill` does.
 
 Never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
 
