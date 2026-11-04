@@ -11,7 +11,7 @@ from unittest import mock
 from relay_engine import authority, rules
 from relay_engine.tests import xroot_b9_cases as cases, xroot_cache_cases as cc
 from relay_engine.tests import xroot_narrow_corpus as corpus
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 from relay_engine.tests import test_xroot_deadline as deadline_cases
 import xrootfixgen as xf
 

@@ -1,4 +1,4 @@
-"""Real-envelope fixture retained for preserved fold-5 reviewer probes."""
+"""Legacy real-envelope fixture shared by retained authority tests."""
 from relay_engine import ledger
 from relay_engine.tests import test_authority as h
 from relay_engine.tests.test_judging import body

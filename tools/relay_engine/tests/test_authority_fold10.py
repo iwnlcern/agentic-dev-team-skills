@@ -8,7 +8,7 @@ import tempfile
 from unittest import mock
 
 from relay_engine import rules
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 
 
 DESIGN = '''ROLE: Pair Planner

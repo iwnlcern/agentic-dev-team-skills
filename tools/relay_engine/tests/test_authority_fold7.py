@@ -2,7 +2,7 @@
 from unittest import mock
 
 from relay_engine import rules
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 from relay_engine.tests.test_judging import body
 
 
@@ -16,7 +16,7 @@ class TestAuthorityFold7(TestAuthorityFold5):
             raw = body(*a, **k)
             old = next(line for line in raw.splitlines() if line.startswith(b'SUBJECT:'))
             return raw.replace(old, subject.encode(), 1)
-        with mock.patch('relay_engine.tests.test_authority_fold5.body', side_effect=with_subject):
+        with mock.patch('relay_engine.tests.authority_legacy_fixtures.body', side_effect=with_subject):
             return super().add(*args, extra=extra, **kwargs)
 
     def grant_case(self, extra='', content='TOKEN', reasons=(), action='implement'):

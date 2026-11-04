@@ -1,5 +1,5 @@
 """Original shape controls with body-verdict expectations amended by E23."""
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 
 
 class TestAuthorityFold6(TestAuthorityFold5):
