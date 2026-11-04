@@ -86,6 +86,8 @@ class Step:
     argv: list
     legs: frozenset
     covers: tuple
+    # Passes only on a unittest summary of OK with tests run and none skipped (erratum 1 Q1).
+    summary: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -134,6 +136,18 @@ def _rel(repo, path):
     return path.relative_to(repo).as_posix()
 
 
+ADAPTER_SCRIPT = "tools/adapters/claude-code/test-adapter.sh"
+ADAPTER_MODULES = re.compile(r"-m unittest((?:\s+tools\.adapters\.tests\.\w+)+)")
+
+
+def adapter_modules(script):
+    """The adapter test modules test-adapter.sh runs, read from its unittest line(s)."""
+    names = set()
+    for match in ADAPTER_MODULES.finditer(Path(script).read_text()):
+        names.update(name.rsplit(".", 1)[1] for name in match.group(1).split())
+    return sorted(names)
+
+
 def step_table(repo):
     """Every step the tree offers, in run order: engine modules first, then the rest."""
     repo = Path(repo)
@@ -141,21 +155,23 @@ def step_table(repo):
     steps = []
     for path in sorted((repo / "tools/relay_engine/tests").glob("test_*.py")):
         module = "relay_engine.tests." + path.stem
-        steps.append(Step(module, [python, "-m", "unittest", module], BOTH, (_rel(repo, path),)))
-    adapter = repo / "tools/adapters/claude-code/test-adapter.sh"
+        steps.append(Step(module, [python, "-m", "unittest", module], BOTH, (_rel(repo, path),),
+                          summary=True))
+    adapter = repo / ADAPTER_SCRIPT
     if adapter.is_file():
-        # test-adapter.sh runs the adapter unittest modules itself (test-adapter.sh:887).
-        covers = (_rel(repo, adapter),) + tuple(
-            _rel(repo, p) for p in sorted((repo / "tools/adapters/tests").glob("test_*.py")))
-        steps.append(Step("test-adapter.sh", ["bash", _rel(repo, adapter)], BOTH, covers))
+        # Covers exactly the modules test-adapter.sh names (plan r4 change 2); any other
+        # adapter module is uncovered.  Its unittest block is held to the summary rule (T8).
+        covers = (ADAPTER_SCRIPT,) + tuple(f"tools/adapters/tests/{name}.py"
+                                           for name in adapter_modules(adapter))
+        steps.append(Step("test-adapter.sh", ["bash", ADAPTER_SCRIPT], BOTH, covers, summary=True))
     if (repo / "tools/kit_tests").is_dir():
         steps.append(Step("kit_tests", [python, "-m", "unittest", "discover", "-s", "tools/kit_tests"],
-                          BOTH, ("tools/kit_tests",)))
+                          BOTH, ("tools/kit_tests",), summary=True))
     if (repo / "tools/release_check_tests").is_dir():
         # Mac only: its Docker tests need the host's Docker.
         steps.append(Step("release_check_tests",
                           [python, "-m", "unittest", "discover", "-s", "tools/release_check_tests"],
-                          MAC, ("tools/release_check_tests",)))
+                          MAC, ("tools/release_check_tests",), summary=True))
     for relative, args, legs in KNOWN_CHECKS:
         if (repo / relative).is_file():
             step_id = " ".join([Path(relative).name, *args])
@@ -331,18 +347,17 @@ def _unattributed(since, directories):
     return entries
 
 
-def _is_unittest(argv):
-    return "-m" in argv and "unittest" in argv
-
-
 def _unittest_reason(log_path):
-    """None when the summary is OK with at least one test and no skips (AGENTS.md:18)."""
-    text = Path(log_path).read_text(errors="replace")
-    ran = [int(n) for n in re.findall(r"^Ran (\d+) tests? in ", text, re.MULTILINE)]
-    if not ran or ran[-1] == 0 or "NO TESTS RAN" in text:
+    """None when the last unittest summary is OK with at least one test and no skips
+    (AGENTS.md:18); the status read is the line after that summary's "Ran" line."""
+    lines = Path(log_path).read_text(errors="replace").splitlines()
+    ran = [i for i, line in enumerate(lines) if re.match(r"Ran \d+ tests? in ", line)]
+    if not ran or int(lines[ran[-1]].split()[1]) == 0:
         return "no-tests"
-    status = [line for line in text.splitlines() if line.startswith(("OK", "FAILED"))]
-    if status and status[-1].startswith("OK") and "skipped=" in status[-1]:
+    status = next((line for line in lines[ran[-1] + 1:] if line.strip()), "")
+    if status.startswith("NO TESTS RAN"):
+        return "no-tests"
+    if status.startswith("OK") and "skipped=" in status:
         return "skipped"
     return None
 
@@ -428,7 +443,8 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     sweeps = []
     errors = []
     try:
-        _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline)
+        _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline,
+                  {s.id for s in active if s.summary})
     except KeyboardInterrupt:
         STOP.set()
     except Exception as error:  # noqa: BLE001 - any runner failure still stops and writes
@@ -460,7 +476,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     return LegResult(leg, exit_code, results_path)
 
 
-def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline):
+def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline, summary_ids):
     """Start and reap steps, and sweep finished steps' leftovers, until all are done,
     the cap passes or the run is stopped."""
     while (pending or running or sweeps) and not STOP.is_set():
@@ -481,12 +497,12 @@ def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline)
             handle.close()
             row = rows[step_id]
             reason = None if code == 0 else f"exit {code}"
-            if _is_unittest(row["argv"]):
+            if step_id in summary_ids:
                 # The summary decides, so the verdict does not depend on the interpreter
                 # (3.12+ exits 5 on "NO TESTS RAN", 3.11 exits 0).
                 summary = _unittest_reason(row["log"])
-                if code == 0 or summary == "no-tests":
-                    reason = summary if summary else reason
+                if code == 0 or (summary == "no-tests" and code == 5):
+                    reason = summary or reason
             row.update(outcome="pass" if reason is None else "fail", reason=reason, exit_code=code,
                        wall_seconds=round(time.monotonic() - started, 3))
             sweeps.append(_Sweep(marker.encode(), proc.pid, row))

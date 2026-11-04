@@ -565,11 +565,86 @@ class StartRefusals(unittest.TestCase):
         self.assertEqual(code, 2, err)
         self.assertIn("not a directory", err)
 
+    def test_out_symlink_outside_home_refused(self):
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        target = Path(tempfile.mkdtemp(prefix="adt-release-check-target-"))
+        self.addCleanup(shutil.rmtree, target, True)
+        self.assertFalse(rc._under_home(str(target), dict(os.environ)), target)
+        link = repo.pids / "out-link"
+        link.symlink_to(target)
+        out = link / "out"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = rc.main(["full", "--leg", "mac", "--out", str(out)], repo=repo.root,
+                           environ=dict(os.environ), exclusions=())
+        self.assertEqual(code, 2, err.getvalue())
+        self.assertFalse((target / "out").exists(), "results were written outside $HOME")
+
     def test_out_dir_under_home_accepted(self):
         repo = FixtureRepo(self)
         repo.passing("test_a_ok")
         code, err = repo.run()
         self.assertEqual(code, 0, err)
+
+
+ADAPTER_SCRIPT = "tools/adapters/claude-code/test-adapter.sh"
+
+
+def adapter_repo(test_case, named, extra=(), skip=False):
+    """A fixture whose test-adapter.sh runs the named adapter modules, as the real one does."""
+    repo = FixtureRepo(test_case)
+    repo.passing("test_a_ok")
+    for directory in ("tools/adapters", "tools/adapters/tests"):
+        repo.tool(f"{directory}/__init__.py", "")
+    body = '''
+        import unittest
+        class T(unittest.TestCase):
+            def test_ok(self):
+                pass
+    '''
+    if skip:
+        body += '''
+            def test_skip(self):
+                self.skipTest("fixture skip")
+        '''
+    for name in (*named, *extra):
+        repo.tool(f"tools/adapters/tests/{name}.py", body)
+    modules = " ".join(f"tools.adapters.tests.{name}" for name in named)
+    script = repo.tool(ADAPTER_SCRIPT, f'''
+        echo "e1 cases: PASS"
+        if ! python3 -m unittest {modules} 2>"$TMPDIR/unittest.err.$$"; then
+          cat "$TMPDIR/unittest.err.$$" >&2; exit 1
+        fi
+        echo "PASS relay-monitor unittest"
+        cat "$TMPDIR/unittest.err.$$" >&2
+    ''')
+    script.chmod(0o755)
+    return repo
+
+
+class Coverage(unittest.TestCase):
+
+    def test_unnamed_adapter_module_is_uncovered(self):
+        repo = adapter_repo(self, ["test_named"], extra=["test_new"])
+        code, err = repo.run()
+        self.assertEqual(code, 2, err)
+        self.assertIn("tools/adapters/tests/test_new.py", err)
+        self.assertNotIn("tools/adapters/tests/test_named.py", err)
+        control = adapter_repo(self, ["test_named"])
+        self.assertEqual(rc.uncovered(control.root, rc.step_table(control.root), ()), [])
+
+    def test_adapter_block_skip_fails_step(self):
+        repo = adapter_repo(self, ["test_named"], skip=True)
+        code, err = repo.run()
+        self.assertEqual(code, 1, err)
+        step = repo.step("test-adapter.sh")
+        self.assertEqual((step["outcome"], step["reason"]), ("fail", "skipped"))
+        control = adapter_repo(self, ["test_named"])
+        code, err = control.run()
+        self.assertEqual(code, 0, err)
+        step = control.step("test-adapter.sh")
+        self.assertEqual((step["outcome"], step["reason"]), ("pass", None))
 
 
 class StepsAndResults(unittest.TestCase):
@@ -926,6 +1001,19 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(self.labelled(label), [], "a container of this run started after the leg ended")
         summary = json.loads((fixture.out / "release-check.json").read_text())
         self.assertTrue(summary["interrupted"])
+
+    def test_empty_module_fails_on_linux(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_empty", '''
+            HELPER = 1
+        ''')
+        fixture.finish()
+        code, err = fixture.run_legs("linux")
+        self.assertEqual(code, 1, err)
+        linux = json.loads((fixture.out / "linux" / "results.json").read_text())
+        self.assertEqual(linux["python"]["version"].rsplit(".", 1)[0], "3.11")
+        step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_empty")
+        self.assertEqual((step["outcome"], step["reason"], step["exit_code"]), ("fail", "no-tests", 0))
 
     def test_container_kill_is_not_green(self):
         fixture = LinuxFixture(self).finish()
