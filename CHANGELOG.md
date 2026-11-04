@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Kit 3.0 is a large change, not a patch; its migration steps will be listed here before the release.
+
+### Changed
+
+- Superpowers is no longer required: each role skill states the practices it relies on, and Planner skills read a trimmed brainstorming reference vendored at `vendor/obra/superpowers/brainstorming.md` (MIT, modified from Superpowers 7.0.0).
+- Every plugin ships a paper-airplane icon, drawn by the generator.
+- README gains an `## Upgrade` section covering session and daemon restart order, Codex hook re-approval and cache deletion, resumed Codex sessions, and the Python version.
+
+### Fixed
+
+- Three shipped statements were wrong: moving an engine-managed sprint root does break its engine record; a relay filename's role comes from the `ROLE` header; Codex re-approval of kit hooks recurs after every kit update.
+- A relative link in the derived pair-planner skill no longer dies one directory deeper.
+
 ## [2.9.7] — 2026-11-03
 
 A substantial production-fix release despite the patch-step number: authority verification, relay validation, watcher recovery, and the kit's operating guidance change together.

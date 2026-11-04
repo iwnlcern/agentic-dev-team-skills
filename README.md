@@ -122,6 +122,18 @@ Manual installs migrate by renaming the skill dirs (skill-dir names now equal ro
 - historical `agent-pair-planner` → `pair-planner`
 - historical `agent-pair-implementer` → `pair-implementer`
 
+## Upgrade
+
+Install a kit update once, at a point where every seat can restart, then work through these in order.
+
+- A running session keeps the plugin version it started with, so restart a root's seat sessions before restarting that root's daemon; a daemon on the newer kit refuses older seats with `E-VERSION-MISMATCH`.
+- `codex plugin add` deletes the previous version's cache while running Codex seats still use it, whereas Claude Code keeps the old copy under `.in_use`; restart Codex seats as soon as Codex is updated.
+- Codex holds every kit hook after every kit update ("plugin contents changed; hook approval required"); approve them again with `/hooks` in each Codex seat.
+- A resumed Codex session runs no hook until its first turn, so type once in it before expecting its relay watch to re-arm.
+- Under macOS's stock `/usr/bin/python3` (3.9) the bind hook exits 0 and records nothing, so put Python 3.11 or newer first on `PATH` before starting sessions.
+
+Recovery from a version mismatch, hook trust and the watcher are covered in [the adapter guide](tools/adapters/README.md).
+
 ## Usage
 
 Operator quickstart: open one session per seat and load its role skill. For a standalone pair, boot the

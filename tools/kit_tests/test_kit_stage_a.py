@@ -374,5 +374,40 @@ class TestIcon(KitTreeCase):
             self.assertNotIn("ICON_MISSING", [f.get("code") for f in findings], tier)
             self.assertEqual([f for f in findings if f.get("severity") == "error"], [], tier)
 
+
+def _section(text: str, heading: str) -> str:
+    assert text.count(f"\n{heading}\n") == 1, heading
+    return text.split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
+class TestUpgradeDocs(KitTreeCase):
+    """A5: the README upgrade section and the CHANGELOG entry."""
+
+    FACTS = (
+        ("/hooks", "after every kit update"),
+        ("codex plugin add", ".in_use"),
+        ("E-VERSION-MISMATCH", "before restarting"),
+        ("resumed Codex session", "first turn"),
+        ("/usr/bin/python3", "3.11"),
+    )
+
+    def test_readme_upgrade_names_five_facts(self):
+        upgrade = _section(self.canonical_text("README.md"), "## Upgrade")
+        lines = upgrade.splitlines()
+        for needles in self.FACTS:
+            matching = [line for line in lines if all(needle in line for needle in needles)]
+            self.assertEqual(len(matching), 1, f"Upgrade section needs one line stating {needles}")
+
+    def test_readme_links_resolve(self):
+        readme = ROOT / "README.md"
+        self.assertEqual(dead_relative_links([readme]), [])
+        upgrade = _section(readme.read_text(encoding="utf-8"), "## Upgrade")
+        self.assertIn("](tools/adapters/README.md)", upgrade)
+
+    def test_changelog_unreleased_states_size(self):
+        unreleased = _section(self.canonical_text("CHANGELOG.md"), "## [Unreleased]")
+        for needle in ("large change", "migration steps", "Superpowers", "brainstorming", "icon", "## Upgrade"):
+            self.assertIn(needle, unreleased)
+
 if __name__ == "__main__":
     unittest.main()
