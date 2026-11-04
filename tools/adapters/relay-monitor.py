@@ -7,6 +7,21 @@ Reads the run's rendered INDEX.md; never touches the engine record.
 
 from __future__ import annotations
 
+import os as _os
+import signal as _signal
+import sys as _sys
+import time as _time
+
+# A doorbell's stop handlers go in before anything else loads (fold 2 G4): a stop while the imports run is
+# remembered here and acted on by `follow`, so it still ends with one `stopped:` line and exit 0.
+_EARLY_STOP: list[int] = []
+if __name__ == "__main__" and _sys.argv[1:2] == ["follow"]:
+    for _signum in (_signal.SIGTERM, _signal.SIGHUP, _signal.SIGINT):
+        _signal.signal(_signum, lambda signum, _frame: _EARLY_STOP.append(signum))
+
+if __name__ == "__main__" and _os.environ.get("ADT_TEST_IMPORT_DELAY"):
+    _time.sleep(float(_os.environ["ADT_TEST_IMPORT_DELAY"]))  # test-only: stands in for slow imports (G4)
+
 import argparse
 import base64
 import contextlib
@@ -15,7 +30,6 @@ import errno
 import fcntl
 import json
 import os
-import platform
 import re
 import select
 import shlex
@@ -37,9 +51,12 @@ if _ADAPTERS_DIR not in sys.path:
 import window  # noqa: E402  (tools/adapters/window.py, shipped beside this file)
 
 ROOT_BUDGET = 1.0
-IDENTITY_BUDGET = 1.5  # both engine identity calls together; status/SessionStart fit 2 s (DD A6)
-STATUS_BUDGET = 1.8  # every read status and SessionStart make, engine calls included (fold F3)
-PS_BUDGET = 0.25  # one process start-time read on the status path (fold F3)
+# fold 2 G2: measured under 12 busy-loop processes, a healthy engine's cold identity check took at most
+# 0.214 s, and the worst combined case (wedged engine, hung `ps`, busy note) must stay at or under 1.6 s
+IDENTITY_BUDGET = 1.0  # both engine identity calls together; status/SessionStart fit 2 s (DD A6)
+STATUS_BUDGET = 1.3  # every read status and SessionStart make, engine calls included (fold F3)
+PS_BUDGET = 0.25  # one process start-time read on the status path, used only where the kernel will not say (F3, G3)
+WRITE_BUDGET = 0.1  # a note write on the status path; a busy note is skipped, never waited on (G2)
 IDENTITY_TTL = 60.0
 INDEX_MAX_BYTES = 16 * 1024 * 1024
 FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error", "window-gone", "terminated"})
@@ -60,6 +77,7 @@ TEST_CRASH_BEFORE_OUTPUT = os.environ.get("ADT_TEST_CRASH_BEFORE_OUTPUT") == "1"
 TEST_CRASH_AFTER_OUTPUT = os.environ.get("ADT_TEST_CRASH_AFTER_OUTPUT") == "1"
 TEST_SINK_ACCEPT = int(os.environ.get("ADT_TEST_SINK_ACCEPT") or 0)
 TEST_PAUSE_BEFORE_CLEANUP = os.environ.get("ADT_TEST_PAUSE_BEFORE_CLEANUP") or None
+TEST_STARTUP_DELAY = float(os.environ.get("ADT_TEST_STARTUP_DELAY") or 0)  # test-only: widen the startup gap (G1)
 CLAUDE_PAYLOAD_FIELDS = (
     "prompt_id",
     "effort",
@@ -253,19 +271,8 @@ class NoteStore:
 
 
 def process_start_time(pid: int, timeout: float = 5.0) -> str | None:
-    try:
-        if platform.system() == "Linux":
-            with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
-                return handle.read().rsplit(")", 1)[1].split()[19]
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=max(0.01, timeout),
-        ).stdout.strip()
-        return out or None
-    except (OSError, subprocess.SubprocessError, IndexError):
-        return None
+    """The process's start time from the kernel, `ps` only where the kernel will not say (fold 2 G3)."""
+    return window.process_start(pid, timeout)
 
 
 def own_identity(plugin_root: str | None) -> dict:
@@ -371,11 +378,20 @@ class WindowLock:
         self._fd = fd
         return True
 
-    def stamp(self, instance: str | None, pid: int | None = None, start_time: str | None = None) -> None:
-        os.ftruncate(self._fd, 0)
-        os.lseek(self._fd, 0, os.SEEK_SET)
-        os.write(self._fd, json.dumps({"instance": instance, "pid": pid, "start_time": start_time}).encode("utf-8"))
-        os.fsync(self._fd)
+    def stamp(self, instance: str | None, pid: int | None = None, start_time: str | None = None) -> bool:
+        """Write the holder's stamp; False, writing nothing, once the lock is released (a stop handler can
+        release it at any bytecode, so the descriptor is taken once and a closed one is not an error; G1)."""
+        fd = self._fd
+        if fd is None:
+            return False
+        try:
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, json.dumps({"instance": instance, "pid": pid, "start_time": start_time}).encode("utf-8"))
+            os.fsync(fd)
+        except OSError:
+            return False
+        return self._fd is not None
 
     def holder(self) -> dict | None:
         """The stamp the holder wrote, read without taking the lock (fold F2); a released lock reads None."""
@@ -1405,7 +1421,7 @@ def follow(args) -> int:
     if not valid_session_id(session):
         print("relay-monitor: invalid-session-id", file=sys.stderr)
         return 2
-    _STOP_SIGNAL.clear()
+    _STOP_SIGNAL[:] = _EARLY_STOP  # stops that arrived while the module loaded (G4)
     _STOP_RELEASE.clear()
     previous = {}
     if threading.current_thread() is threading.main_thread():
@@ -1436,14 +1452,14 @@ def _follow(args, session: str) -> int:
     if not leader.acquire():
         return 0  # another doorbell holds this window: an extra tier copy or a re-arm exits silently
     _STOP_RELEASE[:] = [leader]
+    if TEST_STARTUP_DELAY:
+        time.sleep(TEST_STARTUP_DELAY)
     started = process_start_time(os.getpid())
-    leader.stamp(None, os.getpid(), started)  # status reads `starting` from here, without the lock (F2)
-    if _STOP_SIGNAL:
-        return _stopped_at_startup(leader)
+    if _STOP_SIGNAL or not leader.stamp(None, os.getpid(), started):  # status reads `starting` from here (F2)
+        return _stopped_at_startup(leader)  # a stop before or during the stamp (fold 2 G1)
     me = leader_record(getattr(args, "plugin_root", None), started)
-    if _STOP_SIGNAL:
+    if _STOP_SIGNAL or not leader.stamp(me["instance"], me["pid"], me["start_time"]):
         return _stopped_at_startup(leader)  # stopped before any leader record was written
-    leader.stamp(me["instance"], me["pid"], me["start_time"])
     watch = (
         window.ExitWatch(win.pid, win.proc_start_utc)
         if win is not None and win.host == "claude-code" and win.pid is not None
@@ -2563,7 +2579,7 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
                 lambda n: n.update(
                     {"client_identity": client_id, "daemon_identity": daemon, "identity_cache": cache}
                 ),
-                timeout=_remaining(end),
+                timeout=min(WRITE_BUDGET, _remaining(end)),
             )
     reason = shown_exit_reason(note) if state == "unavailable" and note.get("leader") is None and note.get("exit") else note.get("reason")
     suffix = f": {reason}" if state == "unavailable" and reason else ""
@@ -2707,9 +2723,9 @@ def session_start(args) -> int:
         )
         lines = [status_line(store, plugin_root, end=end)]
 
-        def note_update(fn):  # a busy note is not waited on past the hook's 2 s (fold F3)
+        def note_update(fn):  # a busy note is not waited on (fold F3, G2)
             with contextlib.suppress(LockTimeout):
-                store.update(fn, timeout=_remaining(end))
+                store.update(fn, timeout=min(WRITE_BUDGET, _remaining(end)))
 
         if host in ("host-ambiguous", "host-unknown"):
             note_update(lambda n: set_reason(n, host))

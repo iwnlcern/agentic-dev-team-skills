@@ -144,7 +144,7 @@ class ExitWatchTests(unittest.TestCase):
         return p
 
     def start_of(self, pid):
-        return window.ps_process_table(pid)[2]
+        return window.process_start(pid)
 
     def test_exit_is_seen(self):
         p = self.sleeper()
@@ -176,6 +176,30 @@ class ExitWatchTests(unittest.TestCase):
             for _ in range(200):
                 self.assertFalse(watch.gone())
         self.assertEqual(spawned, [])
+
+
+
+class ProcessStartTests(unittest.TestCase):
+    """Fold 2 G3: a process's start time from the kernel, without starting `ps`."""
+
+    def test_start_time_from_the_kernel_starts_no_process(self):
+        before = time.time()
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(lambda: (p.kill(), p.wait(timeout=10)))
+        after = time.time()
+        spawned = []
+        real_run, real_popen = subprocess.run, subprocess.Popen
+        with mock.patch("subprocess.run", lambda *a, **k: spawned.append(a) or real_run(*a, **k)), \
+                mock.patch("subprocess.Popen", lambda *a, **k: spawned.append(a) or real_popen(*a, **k)):
+            start = window.process_start(p.pid)
+        self.assertEqual(spawned, [])
+        self.assertLessEqual(int(before) - 1, window.lstart_epoch(start))
+        self.assertLessEqual(window.lstart_epoch(start), int(after) + 1)
+
+    def test_start_time_of_a_gone_process_is_none(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait(timeout=10)
+        self.assertIsNone(window.process_start(p.pid))
 
 
 if __name__ == "__main__":

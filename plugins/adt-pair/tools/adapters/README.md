@@ -280,13 +280,15 @@ Each doorbell takes the window's lock without waiting; a second doorbell in the 
 A doorbell exits when its Claude Code window is gone (the window's process has exited, or its pid now names a process with another start time) or when it receives SIGTERM, SIGHUP or SIGINT, including during its own startup.
 Each exit prints exactly one line on stdout, `relay-monitor: stopped: window gone` or `relay-monitor: stopped: terminated`, records the exit in the note, frees the window lock and exits 0.
 A stopping doorbell writes no further arrival, and an arrival it wrote after the stop request is offered again by the next doorbell, so a stop loses no arrival and can repeat one.
-The window's exit is reported by the kernel (kqueue on macOS, a pidfd on Linux), so an idle doorbell starts no process to check it; the window's start time is read once, when the doorbell starts.
+The window's exit is reported by the kernel (kqueue on macOS, a pidfd on Linux), so an idle doorbell starts no process to check it; the window's start time is read once, from the kernel, when the doorbell starts.
+A stop that arrives in the first few tens of milliseconds, before Python has started running the doorbell's code, ends the process without the `stopped:` line.
 An engine outage is not an exit: the doorbell keeps polling.
 
 ### Bounded status
 
-`status` and SessionStart make every read under one 1.8 s deadline, with the engine's identity checks under a shared 1.5 s part of it, so both return within 2 s on a wedged engine, a hung `ps` or a busy note; a timed-out engine check shows `daemon=-` with `engine=wedged`.
-Neither takes the window lock or waits on the note's lock: the note is read whole without it, and a write that cannot get it in time is skipped.
+`status` and SessionStart make every read under one 1.3 s deadline, with the engine's identity checks under a shared 1.0 s part of it, so both return well within 2 s on a wedged engine, a hung `ps` or a busy note; a timed-out engine check shows `daemon=-` with `engine=wedged`.
+Neither takes the window lock or waits on the note's lock: the note is read whole without it, and a write that cannot get it within 0.1 s is skipped.
+Process start times come from the kernel (`proc_pidinfo` on macOS, `/proc` on Linux), so these paths start no `ps` where the kernel answers.
 The answer is cached in the note for 60 s per root and plugin root; a wedged answer is never cached.
 
 ### Host token logs

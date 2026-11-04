@@ -65,6 +65,14 @@ def _same_instant(a: str, b: str) -> bool:
         return False
 
 
+def _within_a_second(a: str, b: str) -> bool:
+    """Two lstart strings name the same start; the kernel and `ps` may round a start a second apart."""
+    try:
+        return abs(lstart_epoch(a) - lstart_epoch(b)) <= 1
+    except (ValueError, TypeError, AttributeError):
+        return True  # uncertainty reads alive
+
+
 def read_host_record(path: Path) -> dict | Literal["unreadable"] | None:
     """The first JSON object in a host record; `None` when absent, `"unreadable"` when present but not readable."""
     try:
@@ -80,13 +88,13 @@ def read_host_record(path: Path) -> dict | Literal["unreadable"] | None:
     return obj if isinstance(obj, dict) else "unreadable"
 
 
-def ps_process_table(pid: int) -> tuple[int, str, str] | None:
+def ps_process_table(pid: int, timeout: float = 5.0) -> tuple[int, str, str] | None:
     """(ppid, command name, lstart in UTC) for one pid, from `ps` with `TZ=UTC` and the C locale."""
     env = dict(os.environ, TZ="UTC", LC_ALL="C")
     try:
         out = subprocess.run(
             ["ps", "-o", "ppid=,lstart=,comm=", "-p", str(pid)],
-            capture_output=True, text=True, env=env, timeout=5, check=False,
+            capture_output=True, text=True, env=env, timeout=max(0.01, timeout), check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
@@ -98,6 +106,61 @@ def ps_process_table(pid: int) -> tuple[int, str, str] | None:
     except ValueError:
         return None
     return ppid, " ".join(out.strip().split(None, 6)[6:]), " ".join(fields[1:6])
+
+
+LSTART = "%a %b %d %H:%M:%S %Y"
+_LIBPROC: list = []
+
+
+def _kernel_start_epoch(pid: int) -> int | None:
+    """Start time in whole seconds since the epoch, read from the kernel: `proc_pidinfo` on macOS, `/proc` on
+    Linux; None when the kernel will not say (no such process, not permitted, another platform)."""
+    if pid <= 0:
+        return None
+    if os.path.isdir("/proc/self"):
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                ticks = int(handle.read().rsplit(")", 1)[1].split()[19])
+            with open("/proc/stat", encoding="utf-8") as handle:
+                btime = next(int(line.split()[1]) for line in handle if line.startswith("btime "))
+            return btime + ticks // os.sysconf("SC_CLK_TCK")  # procps truncates the same way
+        except (OSError, ValueError, IndexError, StopIteration):
+            return None
+    try:
+        import ctypes
+
+        if not _LIBPROC:
+            class _BsdInfo(ctypes.Structure):  # struct proc_bsdinfo, <sys/proc_info.h>
+                _fields_ = [(n, ctypes.c_uint32) for n in (
+                    "flags", "status", "xstatus", "pid", "ppid", "uid", "gid", "ruid", "rgid", "svuid", "svgid", "rfu")] + [
+                    ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)] + [(n, ctypes.c_uint32) for n in (
+                    "nfiles", "pgid", "pjobc", "tdev", "tpgid")] + [
+                    ("nice", ctypes.c_int32), ("start_tvsec", ctypes.c_uint64), ("start_tvusec", ctypes.c_uint64)]
+
+            _LIBPROC.extend([ctypes.CDLL("/usr/lib/libproc.dylib"), _BsdInfo])
+        lib, info_type = _LIBPROC
+        info = info_type()
+        filled = lib.proc_pidinfo(pid, 3, ctypes.c_uint64(0), ctypes.byref(info), ctypes.sizeof(info))  # PROC_PIDTBSDINFO
+        if filled != ctypes.sizeof(info) or info.pid != pid:
+            return None
+        return int(info.start_tvsec)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+
+
+def process_start(pid: int, timeout: float = 5.0) -> str | None:
+    """A process's start as a UTC `ps` lstart string, from the kernel without starting a process (fold 2 G3);
+    `ps` (bounded by `timeout`) only where the kernel will not say."""
+    epoch = _kernel_start_epoch(pid)
+    if epoch is None:
+        row = ps_process_table(pid, timeout)
+        if row is None:
+            return None
+        try:
+            epoch = lstart_epoch(row[2])
+        except (ValueError, TypeError):
+            return None
+    return time.strftime(LSTART, time.gmtime(epoch))
 
 
 def _is_shell(name: str) -> bool:
@@ -164,19 +227,19 @@ def window_identity(
 class ExitWatch:
     """Notices that a window process has exited, without starting a process per poll (fold F6).
 
-    One `ps` start-time check at construction tells a reused pid from the window itself; after that the
+    One start-time read at construction (`process_start`) tells a reused pid from the window itself; after that the
     kernel reports the exit: a kqueue `NOTE_EXIT` registration (macOS, BSD) or a pidfd (Linux), each tied
     to the process, not to its number.  Where neither exists, a signal-0 probe reads the pid, which cannot
     see a reuse after construction.  Uncertainty reads alive, as the doorbell's liveness always has.
     """
 
-    def __init__(self, pid: int, proc_start_utc: str | None, *, process_table: ProcessTable = ps_process_table):
+    def __init__(self, pid: int, proc_start_utc: str | None, *, start_reader: Callable[[int], str | None] = process_start):
         self.pid = pid
         self._kq = None
         self._fd = None
         self._gone = False
-        row = process_table(pid)
-        if row is not None and proc_start_utc and not _same_instant(row[2], proc_start_utc):
+        observed = start_reader(pid)
+        if observed is not None and proc_start_utc and not _within_a_second(observed, proc_start_utc):
             self._gone = True  # the pid now names another process: the window is gone
             return
         try:

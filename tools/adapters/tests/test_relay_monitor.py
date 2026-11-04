@@ -1657,6 +1657,23 @@ class BoundedStatusTests(TmpEnv):
         self.assertLess(elapsed, 2.0, proc.stdout + proc.stderr)
         self.assertTrue(proc.stdout.startswith("relay-monitor: "), proc.stdout + proc.stderr)
 
+    def test_combined_worst_case_leaves_headroom(self):
+        # fold 2 G2: wedged engine, hung `ps` and a held note lock together stay well inside SA3's 2 s
+        bindir = self.base / "bin"
+        bindir.mkdir()
+        (bindir / "ps").write_text("#!/bin/sh\nsleep 30\n")
+        (bindir / "ps").chmod(0o755)
+        env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+        payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
+        with self.store.state_lock():
+            for argv, stdin in ((["status", "--session", "sess"], ""), (["session-start", "--host", "claude-code"], payload)):
+                with self.subTest(mode=argv[0]):
+                    start = time.monotonic()
+                    proc = subprocess.run([sys.executable, str(SCRIPT), *argv, "--plugin-root", str(self.wedged)],
+                                          input=stdin, capture_output=True, text=True, env=env, timeout=40)
+                    self.assertLess(time.monotonic() - start, 1.6, proc.stdout + proc.stderr)
+                    self.assertIn("engine=wedged", proc.stdout)
+
     def test_session_start_bounded_while_state_lock_held(self):
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
         with self.store.state_lock():
@@ -1924,6 +1941,41 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
                 self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
                                  [b"relay-monitor: stopped: terminated"])
                 self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+
+    def test_sigterm_inside_the_startup_gap_stops_cleanly(self):
+        # fold 2 G1: a stop after the lock is taken and before the first stamp freed the lock, and the
+        # stamp then wrote through a closed descriptor (TypeError, rc 1, no stopped: line)
+        write_index(self.index, row(1, to="b.implementer"))
+        proc = self.spawn(extra_env=dict(self.seam(os.getpid()), ADT_TEST_STARTUP_DELAY="1.0"))
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        rc, lines, err = self.finish(proc)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
+                         [b"relay-monitor: stopped: terminated"])
+        self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+        self.assertIsNone(self.rm.WindowLock(self.rm.NoteStore("psess").load().get("window")
+                                             or "cc-%d-%d" % (os.getpid(), self.rm.window.lstart_epoch(utc_lstart(os.getpid())))).holder())
+
+    def test_sigterm_before_the_imports_finish_stops_cleanly(self):
+        # fold 2 G4: the stop handlers are installed before the module's imports, so a stop while they load
+        # still ends with one stopped: line and exit 0, not -15
+        write_index(self.index, row(1, to="b.implementer"))
+        proc = self.spawn(extra_env=dict(self.seam(os.getpid()), ADT_TEST_IMPORT_DELAY="1.0"))
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        rc, lines, err = self.finish(proc)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
+                         [b"relay-monitor: stopped: terminated"])
+        self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+
+    def test_stamp_after_release_writes_nothing(self):
+        lock = self.rm.WindowLock("w-gap")
+        self.assertTrue(lock.acquire())
+        lock.release()
+        lock.stamp("late", os.getpid(), "x")  # the stop handler released it first: no write, no error
+        self.assertIsNone(lock.holder())
 
     def test_leader_record_engine_call_has_the_identity_budget(self):
         seen = []
@@ -2252,12 +2304,12 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
         probe_module = types.SimpleNamespace(**{
             **vars(subprocess), "run": polling_probe if force_poll else subprocess.run,
         })
-        platform_module = types.SimpleNamespace(**{
-            **vars(self.rm.platform), "system": lambda: "Darwin",
-        }) if force_poll else self.rm.platform
+        # fold 2 G3: start times come from the kernel; the `ps` fallback is the remaining process probe, so
+        # force it (kernel read refused) and make its child enter the polling wait
+        kernel = (lambda pid: None) if force_poll else self.rm.window._kernel_start_epoch
         with (
-            mock.patch.object(self.rm, "subprocess", probe_module),
-            mock.patch.object(self.rm, "platform", platform_module),
+            mock.patch.object(self.rm.window, "subprocess", probe_module),
+            mock.patch.object(self.rm.window, "_kernel_start_epoch", kernel),
         ):
             self._exercise_note_wake()
         if force_poll:

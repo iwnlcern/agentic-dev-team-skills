@@ -73,6 +73,18 @@ class RecordingDict(dict):
         self._log.append(self._path + ("*",))
         return [(k, self._wrap(k, v)) for k, v in super().items()]
 
+    def __contains__(self, key):  # fold 2 G5: `"content" in message` is a read of that key
+        self._log.append(self._path + (key,))
+        return super().__contains__(key)
+
+    def __repr__(self):  # fold 2 G5: rendering a line renders its content
+        self._log.append(self._path + ("<repr>",))
+        return super().__repr__()
+
+    def __str__(self):
+        self._log.append(self._path + ("<repr>",))
+        return super().__repr__()
+
 
 def codex(tid, stamp):
     return FIX / "codex" / f"rollout-2026-11-01T{stamp}-{tid}.jsonl"
@@ -256,7 +268,7 @@ class SharedTests(HostLogTestCase):
         body_keys = {"content", "text", "thinking", "tool_use", "tool_result", "toolUseResult", "base_instructions"}
         touched = {p for p in paths
                    if body_keys & set(p) or (p and p[0] == "message" and p[-1] in ("input", "output", "*"))
-                   or p in (("*",), ("payload", "*"))}
+                   or p in (("*",), ("payload", "*")) or "<repr>" in p}
         self.assertEqual(touched, set())
         self.assertTrue(paths)  # the instrument saw the reads
 
@@ -270,6 +282,20 @@ class SharedTests(HostLogTestCase):
                 self.assertIsInstance(n, int)
                 self.assertGreaterEqual(n, 0)
             self.assertEqual(r.source, "host-log")
+
+    def test_cli_never_prints_content(self):
+        # fold 2 G5: every fixture through the CLI; the sentinel appears in neither stdout nor stderr
+        cases = [("claude-code", p) for p in sorted((FIX / "claude-code").rglob("*.jsonl"))]
+        cases += [("codex", p) for p in sorted((FIX / "codex").iterdir())]
+        self.assertGreater(len(cases), 10)
+        for host, path in cases:
+            with self.subTest(fixture=path.name):
+                proc = subprocess.run(
+                    [sys.executable, str(HERE.parent / "hostlogs.py"), "read", "--host", host, str(path)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr[-300:])
+                self.assertNotIn(SENTINEL, proc.stdout + proc.stderr)
 
     def test_cli_prints_one_object_per_line(self):
         out = subprocess.run(
