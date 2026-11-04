@@ -18,6 +18,15 @@ Do not remove evidence, gates, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply `protocol.md`. In read-only/report-only phases, if claiming no actions/edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
 
+## Verification requests
+
+Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.
+Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.
+Use the claim-kind table in DD-v3-authority A-OP2 for the quick set, waiver and held state on reviewer silence; the section pointer will be supplied by erratum when that table locks.
+At release only, run the release-readiness commands in DD-v3-tests § 3.2: `python3 tools/release-check.py full`, `python3 tools/release-check.py consumers`, `python3 tools/release-check.py frank` and `python3 tools/release-check.py docs`, or `python3 tools/release-check.py all` for all four.
+Cite each command's output file.
+`CC` is visibility only; it is not a verification request or a reply obligation.
+
 ## Role contract
 
 Review the Orchestrator Planner's problem decomposition, architecture choices, routing, sequencing, handoff quality, phase scope, duplicate/already-built gates, ceremony downgrades, boundary contracts, stale sitrep claims, and merge/live-verification plan, including addressed `DISPATCH MERGE` authority and anti-self-authorization.
@@ -33,7 +42,7 @@ Do not replace a missing relay with a review panel; require the relay to be writ
 You are booted at orchestrator `init`; follow the protocol's same-run reviewer CC convention for orchestrator-planner authority-bearing relays in the broad SET.
 The missing-visibility finding is decided by `orchestrator_review_gate_errors` in `tools/relay_engine/rules.py`; its absence does not establish that the CC convention was met.
 CC grants context, not action authority and not a reply obligation.
-Review those relays on your own cadence for decomposition, routing, ceremony, stale-state, boundary-contract, and verification risks.
+Use those copies as context for an addressed verification request; visibility alone does not assign review work.
 This is not a standing approval gate; do not require the Orchestrator Planner to wait for your approval before routing a relay unless the operator explicitly creates such a gate or the run has adopted reviewer checkpoints, in which case the merge grant waits for your addressed reply.
 
 For the two addressed checkpoints, see [Addressed checkpoint duties](#addressed-checkpoint-duties); their reply obligations are distinct from `CC` visibility.

@@ -72,6 +72,7 @@ Read-only/review-only. Review the pair Planner's design doc, not a CC'd sibling/
 When writing the verdict, see "What the check reads" in `protocol.md` § Authority check before acting.
 
 Review your pair Planner's written plan before implementation.
+Every codebase claim in a plan carries its search or probe; the reviewer re-runs at least the ones the plan's correctness rests on.
 A CC'd orchestrator PLAN is context only and is not yours to approve.
 Review decomposition and dependency order, declared interfaces and their consistency, named test behaviors and their assertions and discriminating controls, exact commands and expected outcomes, acceptance criteria, locked design, scope, boundary contract, out-of-scope lines, and hard escalation triggers.
 A review may not ask for code bodies; a missing body is not a finding.

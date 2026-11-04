@@ -50,11 +50,24 @@ Lens:
 Verdict: <block | must-fix | optional | approve>
 Evidence: <claim -> E0-E4 -> source>
 Findings:
-1. <severity> <file:line/behavior/evidence> — <issue> — <required change>
+FINDING: blocking <check-REF-index> <summary>
+Advisory: <reading-only observation and suggested follow-up>
 Boundary contract: <pass/fail/not applicable>
 Live verification impact: <none | required | missing>
 Optional fold-ins worth doing cheaply:
 ```
+
+A blocking finding uses the form above: its `REF` names the executed check's output.
+A finding from reading alone is `advisory`.
+For finding statuses (`open`, `fixed`, `fix-accepted`, `withdrawn`) and who may resolve them, use the record in DD-v3-engine § 8.
+No round cap applies; use DD-v3-engine § 8's state view for the round count and loop flag.
+
+## Verification rule
+
+Re-running a claim's own checks never verifies it alone.
+For text, run a probe with a control against the behaviour the sentence states.
+For tests, run a mutant the tests should catch.
+File the outputs and name them in the review.
 
 ## Consolidation rules
 
@@ -62,5 +75,5 @@ Optional fold-ins worth doing cheaply:
 - `must-fix` should be folded before merge.
 - `optional` is Implementer-discretion unless human-directed.
 - Nits do not block.
-- Findings without evidence become questions or are dropped.
+- Preserve reading-only findings as advisory observations.
 - After fold-ins, run a targeted check. Do not rerun the full panel unless directed or the fold changes design/blast radius.

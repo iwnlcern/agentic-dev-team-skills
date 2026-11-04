@@ -4,7 +4,10 @@
 
 Copy-paste these for Claude Code-style agent teams, subagents, or equivalent background workers. Reviewers are read-only unless explicitly reassigned.
 
-`HUMAN_GATE_REQUIRED: yes` if and only if the current relay's requested next transition cannot occur without a fresh operator decision. A `yes` names its ask in the annotation (`yes — <the decision>`); a bare `yes` is malformed and relay-lint warns on it; always annotate. Standing downstream gates are named only after `downstream:` or in prose; the field is free-form (`yes|no — <reason>`), not an enum. The field is a predicate re-evaluated at each relay, not a latch.
+Ask for an operator decision with a `KIND: QUESTION` relay addressed to `operator` (DD-v3-engine § 3).
+Write every operator question in plain language: explain the decision and its consequences without requiring knowledge of relay internals.
+Use `NEEDS: answer` for seat-to-seat questions.
+Follow `review-panels.md` § Verification rule for every spawned review.
 
 ## Shared review context
 
@@ -37,7 +40,10 @@ Reviewer rules:
 - Cite file:line, diff hunk, command/test output, or runtime evidence.
 - Label evidence E0-E4.
 - Return block/must-fix/optional/approve.
-- Convert weak claims into questions.
+- A blocking finding is `FINDING: blocking <check-REF-index> <summary>`; its `REF` names the executed check's output.
+- A finding from reading alone is `advisory`.
+- Follow `review-panels.md` § Verification rule; use DD-v3-engine § 8 for finding statuses and who may resolve them.
+- No round cap applies.
 ```
 
 ## Claude Code agent team — Team of 4
@@ -90,5 +96,5 @@ Each reviewer must cite evidence E0-E4 and return block/must-fix/optional/approv
 ```text
 Synthesize reviewer findings for <PR/branch>.
 
-Group by blocker, must-fix, optional, nit, rejected/weak. Preserve lens and evidence level. Drop duplicates after keeping strongest evidence. Convert E0-only findings into questions unless they require follow-up for safety. Mark what the Implementer must fold before merge. End with one verdict: <REVIEW-FOLD required | quick-check only | merge-gate ready | human decision required>.
+Group by blocker, must-fix, optional, nit, rejected/weak. Preserve lens and evidence level. Drop duplicates after keeping strongest evidence. Preserve reading-only findings as advisory; blocking findings name their executed check output. Mark what the Implementer must fold before merge. End with one verdict: <REVIEW-FOLD required | quick-check only | merge-gate ready | human decision required>.
 ```

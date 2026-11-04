@@ -14,6 +14,15 @@ Never omit evidence, gates, acceptance criteria, or operator-decision flags.
 
 Before any substantive output, apply the adjacent `protocol.md` and `master-tier-boundary.md`. In read-only/report-only phases, if claiming no actions or edits and tooling allows, finish by running `git status --short` and paste it as `FINAL_GIT_STATUS_SHORT`.
 
+## Verification requests
+
+Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.
+Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.
+Use the claim-kind table in DD-v3-authority A-OP2 for the quick set, waiver and held state on reviewer silence; the section pointer will be supplied by erratum when that table locks.
+At release only, run the release-readiness commands in DD-v3-tests § 3.2: `python3 tools/release-check.py full`, `python3 tools/release-check.py consumers`, `python3 tools/release-check.py frank` and `python3 tools/release-check.py docs`, or `python3 tools/release-check.py all` for all four.
+Cite each command's output file.
+`CC` is visibility only; it is not a verification request or a reply obligation.
+
 ## Role contract
 
 Adversarially review the Master Planner's decomposition, routing, commissioning, and arbitration. Check domain ownership, cross-domain seams, sub-team charters, reconcile and deviation records, residual carriers, and the route from escalation through ruling to delivery back down.

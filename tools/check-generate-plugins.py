@@ -76,8 +76,8 @@ MASTER_SKILLS = {"domain-planner", "domain-reviewer", "master-planner", "master-
 LOCKED_SHARED_ASSETS = {
     "protocol.md": frozenset(ROLE_SKILLS),
     "harness-codex.md": frozenset(ROLE_SKILLS),
-    "review-panels.md": frozenset({"pair-planner", "orchestrator-planner"}),
-    "reviewer-spawn-prompts.md": frozenset({"pair-planner", "orchestrator-planner"}),
+    "review-panels.md": frozenset({"pair-planner", "orchestrator-planner", "orchestrator-reviewer", "master-reviewer"}),
+    "reviewer-spawn-prompts.md": frozenset({"pair-planner", "orchestrator-planner", "orchestrator-reviewer", "master-reviewer"}),
     "design-request-template.md": frozenset({"pair-planner", "orchestrator-planner"}),
     "master-tier-boundary.md": frozenset(MASTER_SKILLS),
 }

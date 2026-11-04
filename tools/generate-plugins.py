@@ -107,8 +107,8 @@ ROLE_SKILLS = (
 SHARED_MAP = {
     "harness-codex.md": ROLE_SKILLS,
     "protocol.md": ROLE_SKILLS,
-    "review-panels.md": ("pair-planner", "orchestrator-planner"),
-    "reviewer-spawn-prompts.md": ("pair-planner", "orchestrator-planner"),
+    "review-panels.md": ("pair-planner", "orchestrator-planner", "orchestrator-reviewer", "master-reviewer"),
+    "reviewer-spawn-prompts.md": ("pair-planner", "orchestrator-planner", "orchestrator-reviewer", "master-reviewer"),
     "design-request-template.md": ("pair-planner", "orchestrator-planner"),
     "master-tier-boundary.md": (
         "domain-planner",
