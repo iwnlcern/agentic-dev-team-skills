@@ -72,35 +72,24 @@ fi
 if [ "${RELAY_LINT_NO_FRESHNESS:-0}" = "1" ]; then
   extra_args+=(--no-freshness)
 fi
+# route_path: 0 = a relay to lint; 1 = not a relay path; 3 = a relay root's INDEX.md, which the engine
+# renders and is never linted (v3-design-amend-9).
 route_path() {
-  mode="file"
   case "$file_path" in
     */.engine/*) return 1 ;;
-    */.relays/INDEX.md|*/.relays/*/INDEX.md|*/relays/INDEX.md|*/relays/*/INDEX.md) mode="--index" ;;
-    */.relays/*.md|*/relays/*.md) mode="file" ;;
+    */.relays/INDEX.md|*/.relays/*/INDEX.md|*/relays/INDEX.md|*/relays/*/INDEX.md) return 3 ;;
+    */.relays/*.md|*/relays/*.md) return 0 ;;
     *) return 1 ;;
   esac
-  return 0
 }
 run_lint() {
-  if [ "$mode" = "--index" ]; then
-    out="$("$@" --index "$file_path" 2>&1)" || rc=$?
-  else
-    out="$("$@" "$file_path" ${extra_args+"${extra_args[@]}"} 2>&1)" || rc=$?
-  fi
+  out="$("$@" "$file_path" ${extra_args+"${extra_args[@]}"} 2>&1)" || rc=$?
 }
 lint_current_path() {
   rc=0
   out=""
 if [ -f "$skills_root/tools/relay" ] && [ -d "$skills_root/tools/relay_engine" ]; then
   run_lint python3 "$skills_root/tools/relay" lint
-elif [ -f "$skills_root/tools/relay-lint.py" ]; then
-  run_lint python3 "$skills_root/tools/relay-lint.py"
-elif [ -f "$HOME/.agents/skills/tools/relay-lint.py" ]; then
-  run_lint python3 "$HOME/.agents/skills/tools/relay-lint.py"
-elif [ -f "$HOME/.codex/skills/tools/relay-lint.py" ]; then
-  # deprecated Codex root, retained for back-compat
-  run_lint python3 "$HOME/.codex/skills/tools/relay-lint.py"
 else
   echo "relay-lint-hook: linter not found at any installed location; relay $file_path UNLINTED" >&2
   return 2
@@ -126,16 +115,19 @@ if [ "$kind" = "FILE" ]; then
 fi
 
 linted=0
+indexed=0
 failed=0
 envelope_ref="$(printf '%s\n' "$norm" | sed -n '2p')"
 while IFS= read -r file_path; do
   [ -n "$file_path" ] || continue
-  route_path || continue
+  route=0; route_path || route=$?
+  if [ "$route" -eq 3 ]; then indexed=$((indexed + 1)); continue; fi
+  [ "$route" -eq 0 ] || continue
   linted=$((linted + 1))
   lint_current_path || failed=1
 done < <(printf '%s\n' "$norm" | sed '1,2d')
 
-if [ "$linted" -eq 0 ] && [ "$envelope_ref" = "RELAYREF" ]; then
+if [ "$linted" -eq 0 ] && [ "$indexed" -eq 0 ] && [ "$envelope_ref" = "RELAYREF" ]; then
   echo "relay-lint-hook: patch references relay paths but no lintable target could be extracted (deletes, moves-away, or malformed markers); relay targets may be UNLINTED — lint manually before handoff" >&2
   exit 2
 fi

@@ -3134,7 +3134,6 @@ report.write_text(json.dumps(state))
             "git status",
             "tools/relay show d.md",
             "python3 tools/relay lint d.md",
-            "python3 tools/relay-lint.py d.md",
             "python3 tools/adapters/relay-monitor.py status",
             "echo 'tools/relay submit d.md'",
         ):

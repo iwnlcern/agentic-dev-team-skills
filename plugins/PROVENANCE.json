@@ -320,7 +320,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/bash-relay-guard.sh",
-    "sha256": "dfa8dd3678f860fc3534d537ec59575d128bcf5d84cfa757a17fa7d21a0ab37b",
+    "sha256": "f04fd73177fb7eb54363e0bb00e68a74c673c2638041fc2c2f8d8bf3e67f357f",
     "source": "tools/adapters/claude-code/bash-relay-guard.sh"
   },
   {
@@ -332,7 +332,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/relay-lint-posttooluse.sh",
-    "sha256": "aa66f1577425dc85d7f7c3ad326a94b06860be4d14c8fe90910f93dd21691e1d",
+    "sha256": "7342955902e1fe6a40dd8c5491910516e6e6716954b3dbf180c85733670a9a30",
     "source": "tools/adapters/claude-code/relay-lint-posttooluse.sh"
   },
   {
@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "ed0558bdf2b10cfe5268601a4816b8a549fbf5be7c392b99022ca5a2a0486fdb",
+    "sha256": "ad97cca2a0c3538e131e5fd6b15de4c43aa2eadbb560e4863b871ee8db81a9f7",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -464,7 +464,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "65ef9c9557dfac92ce5ab8fe070fb10da63b0ddf92ddd59e6b4bcaf45e67a358",
+    "sha256": "6b770f18ab1403925c5e1bf968d89d56f1cf2141dee24659e0a1aa7f578a4ef3",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -10976,7 +10976,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/bash-relay-guard.sh",
-    "sha256": "dfa8dd3678f860fc3534d537ec59575d128bcf5d84cfa757a17fa7d21a0ab37b",
+    "sha256": "f04fd73177fb7eb54363e0bb00e68a74c673c2638041fc2c2f8d8bf3e67f357f",
     "source": "tools/adapters/claude-code/bash-relay-guard.sh"
   },
   {
@@ -10988,7 +10988,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/relay-lint-posttooluse.sh",
-    "sha256": "aa66f1577425dc85d7f7c3ad326a94b06860be4d14c8fe90910f93dd21691e1d",
+    "sha256": "7342955902e1fe6a40dd8c5491910516e6e6716954b3dbf180c85733670a9a30",
     "source": "tools/adapters/claude-code/relay-lint-posttooluse.sh"
   },
   {
@@ -11000,7 +11000,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "ed0558bdf2b10cfe5268601a4816b8a549fbf5be7c392b99022ca5a2a0486fdb",
+    "sha256": "ad97cca2a0c3538e131e5fd6b15de4c43aa2eadbb560e4863b871ee8db81a9f7",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11120,7 +11120,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "65ef9c9557dfac92ce5ab8fe070fb10da63b0ddf92ddd59e6b4bcaf45e67a358",
+    "sha256": "6b770f18ab1403925c5e1bf968d89d56f1cf2141dee24659e0a1aa7f578a4ef3",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -21548,7 +21548,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/bash-relay-guard.sh",
-    "sha256": "dfa8dd3678f860fc3534d537ec59575d128bcf5d84cfa757a17fa7d21a0ab37b",
+    "sha256": "f04fd73177fb7eb54363e0bb00e68a74c673c2638041fc2c2f8d8bf3e67f357f",
     "source": "tools/adapters/claude-code/bash-relay-guard.sh"
   },
   {
@@ -21560,7 +21560,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/relay-lint-posttooluse.sh",
-    "sha256": "aa66f1577425dc85d7f7c3ad326a94b06860be4d14c8fe90910f93dd21691e1d",
+    "sha256": "7342955902e1fe6a40dd8c5491910516e6e6716954b3dbf180c85733670a9a30",
     "source": "tools/adapters/claude-code/relay-lint-posttooluse.sh"
   },
   {
@@ -21572,7 +21572,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "ed0558bdf2b10cfe5268601a4816b8a549fbf5be7c392b99022ca5a2a0486fdb",
+    "sha256": "ad97cca2a0c3538e131e5fd6b15de4c43aa2eadbb560e4863b871ee8db81a9f7",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -21692,7 +21692,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "65ef9c9557dfac92ce5ab8fe070fb10da63b0ddf92ddd59e6b4bcaf45e67a358",
+    "sha256": "6b770f18ab1403925c5e1bf968d89d56f1cf2141dee24659e0a1aa7f578a4ef3",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
