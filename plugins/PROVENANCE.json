@@ -10484,7 +10484,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/addresses.py",
-    "sha256": "aff17ef4d54173ca27de4a4f7a825e275598456300291307c8bc51ac4b0b0119",
+    "sha256": "c1f6085e37fd47473fa00a3b58b748ed1c6de703b2077cf9b218d05c2dd1cd80",
     "source": "tools/relay_engine/addresses.py"
   },
   {
@@ -21020,7 +21020,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/addresses.py",
-    "sha256": "aff17ef4d54173ca27de4a4f7a825e275598456300291307c8bc51ac4b0b0119",
+    "sha256": "c1f6085e37fd47473fa00a3b58b748ed1c6de703b2077cf9b218d05c2dd1cd80",
     "source": "tools/relay_engine/addresses.py"
   },
   {
@@ -31484,7 +31484,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/addresses.py",
-    "sha256": "aff17ef4d54173ca27de4a4f7a825e275598456300291307c8bc51ac4b0b0119",
+    "sha256": "c1f6085e37fd47473fa00a3b58b748ed1c6de703b2077cf9b218d05c2dd1cd80",
     "source": "tools/relay_engine/addresses.py"
   },
   {

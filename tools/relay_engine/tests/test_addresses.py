@@ -5,7 +5,9 @@ reads as its ASCII look-alike in this file.
 """
 
 import ast
+import copy
 import dataclasses
+import pickle
 import sys
 import unittest
 from pathlib import Path
@@ -251,6 +253,131 @@ class TestModuleBoundary(unittest.TestCase):
         self.assertLessEqual(roots, set(sys.stdlib_module_names))
         control = self.imported_roots(ENGINE_DIR / "seats.py")
         self.assertIn("relay_engine", control)
+
+    @staticmethod
+    def dynamic_imports(source):
+        """Names through which source could load a module at run time."""
+        found = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                found.update(alias.name for alias in node.names
+                             if alias.name.split(".")[0] == "importlib")
+            elif isinstance(node, ast.ImportFrom) and node.module and (
+                    node.module.split(".")[0] == "importlib"):
+                found.add(node.module)
+            elif isinstance(node, ast.Name) and node.id == "__import__":
+                found.add("__import__")
+            elif isinstance(node, ast.Attribute) and node.attr == "__import__":
+                found.add("__import__")
+        return found
+
+    def test_no_dynamic_imports(self):
+        source = Path(addresses.__file__).read_text(encoding="utf-8")
+        self.assertEqual(self.dynamic_imports(source), set())
+        for control in ("import importlib",
+                        "from importlib import import_module",
+                        "__import__('relay_engine.seats')",
+                        "import builtins\nbuiltins.__import__('relay_engine')"):
+            with self.subTest(control=control):
+                self.assertTrue(self.dynamic_imports(control))
+
+
+class TestPanelFold(RefusalAssertions, unittest.TestCase):
+    """Rows from the PR #49 test-lens panel; each pins a planted fault."""
+
+    def test_every_role_word_parses(self):
+        for role in sorted(ROLE_WORDS):
+            with self.subTest(role=role):
+                self.assertEqual(parse_address("x." + role),
+                                 Address(team="x", role=role))
+
+    def test_reason_does_not_flip(self):
+        cyrillic_es = chr(0x0441)
+        cyrillic_ie = chr(0x0435)
+        for token, reason in (
+                ("x_y", Reason.NOT_AN_ADDRESS),
+                ("x_y@pdc", Reason.NOT_AN_ADDRESS),
+                ("p" + cyrillic_es + "c", Reason.NOT_AN_ADDRESS),
+                ("a" * 65 + ".pl_anner", Reason.BAD_CHARACTER),
+                ("x.planner@p dc", Reason.WHITESPACE_IN_TOKEN),
+                ("x.plann" + cyrillic_ie + "r", Reason.BAD_CHARACTER)):
+            with self.subTest(token=ascii(token)):
+                self.assertRefused(parse_address, token, reason)
+
+    def test_casefold_look_alikes_are_bad_character(self):
+        kelvin, dotless_i, long_s = chr(0x212A), chr(0x0131), chr(0x017F)
+        for token in ("x" + kelvin + ".planner", dotless_i + "x.planner",
+                      "x.planner@" + long_s + "dc", "x.p" + long_s + "anner"):
+            with self.subTest(token=ascii(token)):
+                self.assertRefused(parse_address, token, Reason.BAD_CHARACTER)
+        for kind in ("project", "repository", "team"):
+            for value in (kelvin, "p" + dotless_i, long_s + "dc"):
+                with self.subTest(kind=kind, value=ascii(value)):
+                    self.assertRefused(lambda v: validate_name(kind, v),
+                                       value, Reason.BAD_CHARACTER)
+
+    def test_other_whitespace_at_list_edge_is_kept(self):
+        for code in (0x0B, 0x0C, 0x1C, 0x1F, 0x85, 0x2028):
+            edge = chr(code)
+            for raw, token in (("a.planner," + edge + "b.planner",
+                                edge + "b.planner"),
+                               ("a.planner" + edge + ",b.planner",
+                                "a.planner" + edge)):
+                with self.subTest(raw=ascii(raw)):
+                    with self.assertRaises(AddressRefused) as caught:
+                        parse_address_list(raw)
+                    self.assertIs(caught.exception.reason,
+                                  Reason.WHITESPACE_IN_TOKEN)
+                    self.assertEqual(caught.exception.token, token)
+
+    def test_constant_and_exception_types(self):
+        for constant in (ROLE_WORDS, SPECIAL_ADDRESSES, RESERVED_SENDERS):
+            self.assertIsInstance(constant, frozenset)
+        self.assertTrue(issubclass(AddressRefused, ValueError))
+
+    def test_validate_name_kind_must_be_a_known_string(self):
+        for kind in (["project"], {"team"}, None, 1, b"project", "Project"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(ValueError) as caught:
+                    validate_name(kind, "pdc")
+                self.assertNotIsInstance(caught.exception, AddressRefused)
+
+    def test_refusal_survives_copy_and_pickle(self):
+        original = None
+        try:
+            parse_address("x.pair-planner")
+        except AddressRefused as refused:
+            original = refused
+        self.assertIsNotNone(original)
+        for clone in (copy.copy(original), copy.deepcopy(original),
+                      pickle.loads(pickle.dumps(original))):
+            with self.subTest(clone=type(clone)):
+                self.assertIsInstance(clone, AddressRefused)
+                self.assertIs(clone.reason, Reason.UNKNOWN_ROLE)
+                self.assertEqual(clone.token, "x.pair-planner")
+                self.assertEqual(clone.canonical, "planner")
+                self.assertEqual(str(clone), str(original))
+
+    def test_all_names_the_interface(self):
+        self.assertEqual(set(addresses.__all__), {
+            "ROLE_WORDS", "RETIRED_ROLE_ALIASES", "SPECIAL_ADDRESSES",
+            "RESERVED_SENDERS", "Reason", "AddressRefused", "Address",
+            "parse_address", "parse_address_list", "render", "validate_name"})
+        for name in addresses.__all__:
+            self.assertTrue(hasattr(addresses, name), name)
+
+    def test_render_refuses_an_address_parse_cannot_produce(self):
+        for address in (Address(),
+                        Address(team="x", role="wizard"),
+                        Address(team="x", role="planner", special="operator"),
+                        Address(special="system"),
+                        Address(team="X", role="planner"),
+                        Address(team="x", role="planner", project=""),
+                        Address(team=1, role="planner")):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError) as caught:
+                    render(address)
+                self.assertNotIsInstance(caught.exception, AddressRefused)
 
 
 if __name__ == "__main__":

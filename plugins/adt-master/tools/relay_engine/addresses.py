@@ -27,6 +27,21 @@ import re
 import types
 
 
+__all__ = [
+    "ROLE_WORDS",
+    "RETIRED_ROLE_ALIASES",
+    "SPECIAL_ADDRESSES",
+    "RESERVED_SENDERS",
+    "Reason",
+    "AddressRefused",
+    "Address",
+    "parse_address",
+    "parse_address_list",
+    "render",
+    "validate_name",
+]
+
+
 ROLE_WORDS = frozenset({
     "planner",
     "implementer",
@@ -82,6 +97,9 @@ class AddressRefused(ValueError):
         self.reason = reason
         self.token = token
         self.canonical = canonical
+
+    def __reduce__(self):
+        return (type(self), (self.reason, self.token, self.canonical))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -157,12 +175,23 @@ def parse_address_list(raw):
 
 
 def render(address):
-    """Return the token ``parse_address`` reads back as ``address``."""
+    """Return the token ``parse_address`` reads back as ``address``.
+
+    An ``Address`` that ``parse_address`` cannot produce is a caller error
+    and raises plain ``ValueError``.
+    """
     if address.special is not None:
-        return address.special
-    token = "%s.%s" % (address.team, address.role)
-    if address.project is not None:
-        token += "@" + address.project
+        token = str(address.special)
+    else:
+        token = "%s.%s" % (address.team, address.role)
+        if address.project is not None:
+            token += "@%s" % (address.project,)
+    try:
+        parsed = parse_address(token)
+    except AddressRefused:
+        parsed = None
+    if parsed != address:
+        raise ValueError("not a parseable address: %r" % (address,))
     return token
 
 
@@ -171,7 +200,7 @@ def validate_name(kind, value):
 
     An unknown ``kind`` is a caller error and raises plain ``ValueError``.
     """
-    if kind not in _NAME_LIMITS:
+    if not isinstance(kind, str) or kind not in _NAME_LIMITS:
         raise ValueError("unknown name kind %r" % (kind,))
     fault = (_character_fault(value) or
              _name_fault(value, _NAME_LIMITS[kind]))
