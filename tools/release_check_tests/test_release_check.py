@@ -1,10 +1,12 @@
 """Tests for tools/release-check.py (DD-v3-tests § 3.2, PL-v3-tests-1 Task 1)."""
 
 import contextlib
+import fnmatch
 import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -506,6 +508,62 @@ class RealTree(unittest.TestCase):
 
     def test_real_tree_is_covered(self):
         self.assertEqual(rc.uncovered(REPO, rc.step_table(REPO), rc.EXCLUSIONS), [])
+
+
+TESTING_MD = REPO / "tools" / "TESTING.md"
+TICKED = re.compile(r"`([^`]+)`")
+
+
+def trap_lines(text):
+    """Trap entries: list items of the form - `glob`[, `glob`] → `target`[, `target`]."""
+    return [line for line in text.splitlines() if line.startswith("- `") and " → " in line]
+
+
+def resolve_target(repo, target):
+    if "/" in target:
+        return (repo / target).exists()
+    candidates = [repo / "tools" / target, repo / "tools/adapters/claude-code" / target]
+    if not target.endswith((".py", ".sh")):
+        candidates = [repo / "tools/relay_engine/tests" / f"{target}.py",
+                      repo / "tools/adapters/tests" / f"{target}.py"]
+    return any(c.exists() for c in candidates)
+
+
+def trap_problems(repo, text):
+    tracked = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True, text=True,
+                             check=True).stdout.splitlines()
+    problems = []
+    lines = trap_lines(text)
+    if not lines:
+        problems.append("no trap lines found")
+    for line in lines:
+        left, right = line.split(" → ", 1)
+        for glob in TICKED.findall(left):
+            if not any(fnmatch.fnmatchcase(path, glob) for path in tracked):
+                problems.append(f"glob {glob} matches no tracked file")
+        targets = TICKED.findall(right)
+        if not targets:
+            problems.append(f"no target on line: {line}")
+        for target in targets:
+            if not resolve_target(repo, target):
+                problems.append(f"target {target} does not exist")
+    return problems
+
+
+class TestingDoc(unittest.TestCase):
+
+    def test_testing_md_trap_list_resolves(self):
+        text = TESTING_MD.read_text()
+        self.assertEqual(trap_problems(REPO, text), [])
+        self.assertIn("release-check.py full", text)
+
+    def test_trap_list_control_names_a_renamed_module(self):
+        text = TESTING_MD.read_text()
+        self.assertIn("`test_version`", text)
+        broken = text.replace("`test_version`", "`test_version_renamed`", 1)
+        self.assertIn("target test_version_renamed does not exist", trap_problems(REPO, broken))
+        broken = text.replace("`shared/**`", "`no-such-dir/**`", 1)
+        self.assertIn("glob no-such-dir/** matches no tracked file", trap_problems(REPO, broken))
 
 
 if __name__ == "__main__":
