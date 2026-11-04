@@ -355,6 +355,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/hostlogs.py",
+    "sha256": "d9eae8b86a833fe27cc363b85bbc4610334e3b2266c10b13a7a9301eedb7700a",
+    "source": "tools/adapters/hostlogs.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/plugin-hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -385,9 +391,75 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/claude-code/partial.jsonl",
+    "sha256": "5c7b8053593216613dcc5a48e8d10b7ed7f846c486e7e53143a9dc00dee0ae1e",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/partial.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-a-fork.jsonl",
+    "sha256": "5457ac1e0a2cb006049461fe8342e6a70d1506cd74833ae4c144ce9678c0c404",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-a-fork.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent.jsonl",
+    "sha256": "ded9da7f0e63f86c665c4f9b759c53d622ad44965f6d08119e1ed3f377c189de",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent/subagents/agent-x1.jsonl",
+    "sha256": "4a1cb206bfd95dcef3c6e5ff0cccd1c05dc7ef7fd40ee07e0266389fbc52917b",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent/subagents/agent-x1.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl",
+    "sha256": "af8f0ee16d3ad3d2d0ffbb1d607f4c9d7199fd8089336cf95d2a27250d71ab8a",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl.bak",
+    "sha256": "a36af18efb835e18e48843bda057f85618d48cceee41f89fd03eba542b1479a7",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl.bak"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-05-00-01a00000-0000-7000-8000-00000000000b.jsonl",
+    "sha256": "b5018e90d2bf08f2025dcfeaefe9245a259c0427e7147ec792b0d134093ddfc9",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-05-00-01a00000-0000-7000-8000-00000000000b.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-06-00-01a00000-0000-7000-8000-00000000000c.jsonl",
+    "sha256": "82301092af45e4f8f55c7ac63e3a3d692df8fecd01be560614f583039972824f",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-06-00-01a00000-0000-7000-8000-00000000000c.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-07-00-01a00000-0000-7000-8000-00000000000d.jsonl",
+    "sha256": "e2baa0b87f01983cdaaca3ff66a5940c09fa8f2de59324de445b7f77cc5cc397",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-07-00-01a00000-0000-7000-8000-00000000000d.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-08-00-01a00000-0000-7000-8000-00000000000f.jsonl",
+    "sha256": "3c459ea9b180eb01b1b9eb44c847d095f748b3807ab652f1286778fe59baac96",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-08-00-01a00000-0000-7000-8000-00000000000f.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/scope_proof.sh",
     "sha256": "db467d28d264efe795d243eb6096b316e779562f344ac0dad7a0304f702d92d8",
     "source": "tools/adapters/tests/scope_proof.sh"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_hostlogs.py",
+    "sha256": "99edb3e2f2a320a70a551732b5671e953a935c077996ebdabe63c8b8f61771fe",
+    "source": "tools/adapters/tests/test_hostlogs.py"
   },
   {
     "kit_version": "2.9.7",
@@ -10939,6 +11011,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/hostlogs.py",
+    "sha256": "d9eae8b86a833fe27cc363b85bbc4610334e3b2266c10b13a7a9301eedb7700a",
+    "source": "tools/adapters/hostlogs.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/plugin-hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -10969,9 +11047,75 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/claude-code/partial.jsonl",
+    "sha256": "5c7b8053593216613dcc5a48e8d10b7ed7f846c486e7e53143a9dc00dee0ae1e",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/partial.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-a-fork.jsonl",
+    "sha256": "5457ac1e0a2cb006049461fe8342e6a70d1506cd74833ae4c144ce9678c0c404",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-a-fork.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent.jsonl",
+    "sha256": "ded9da7f0e63f86c665c4f9b759c53d622ad44965f6d08119e1ed3f377c189de",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent/subagents/agent-x1.jsonl",
+    "sha256": "4a1cb206bfd95dcef3c6e5ff0cccd1c05dc7ef7fd40ee07e0266389fbc52917b",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent/subagents/agent-x1.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl",
+    "sha256": "af8f0ee16d3ad3d2d0ffbb1d607f4c9d7199fd8089336cf95d2a27250d71ab8a",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl.bak",
+    "sha256": "a36af18efb835e18e48843bda057f85618d48cceee41f89fd03eba542b1479a7",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl.bak"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-05-00-01a00000-0000-7000-8000-00000000000b.jsonl",
+    "sha256": "b5018e90d2bf08f2025dcfeaefe9245a259c0427e7147ec792b0d134093ddfc9",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-05-00-01a00000-0000-7000-8000-00000000000b.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-06-00-01a00000-0000-7000-8000-00000000000c.jsonl",
+    "sha256": "82301092af45e4f8f55c7ac63e3a3d692df8fecd01be560614f583039972824f",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-06-00-01a00000-0000-7000-8000-00000000000c.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-07-00-01a00000-0000-7000-8000-00000000000d.jsonl",
+    "sha256": "e2baa0b87f01983cdaaca3ff66a5940c09fa8f2de59324de445b7f77cc5cc397",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-07-00-01a00000-0000-7000-8000-00000000000d.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-08-00-01a00000-0000-7000-8000-00000000000f.jsonl",
+    "sha256": "3c459ea9b180eb01b1b9eb44c847d095f748b3807ab652f1286778fe59baac96",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-08-00-01a00000-0000-7000-8000-00000000000f.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/scope_proof.sh",
     "sha256": "db467d28d264efe795d243eb6096b316e779562f344ac0dad7a0304f702d92d8",
     "source": "tools/adapters/tests/scope_proof.sh"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_hostlogs.py",
+    "sha256": "99edb3e2f2a320a70a551732b5671e953a935c077996ebdabe63c8b8f61771fe",
+    "source": "tools/adapters/tests/test_hostlogs.py"
   },
   {
     "kit_version": "2.9.7",
@@ -21439,6 +21583,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/hostlogs.py",
+    "sha256": "d9eae8b86a833fe27cc363b85bbc4610334e3b2266c10b13a7a9301eedb7700a",
+    "source": "tools/adapters/hostlogs.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/plugin-hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -21469,9 +21619,75 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/claude-code/partial.jsonl",
+    "sha256": "5c7b8053593216613dcc5a48e8d10b7ed7f846c486e7e53143a9dc00dee0ae1e",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/partial.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-a-fork.jsonl",
+    "sha256": "5457ac1e0a2cb006049461fe8342e6a70d1506cd74833ae4c144ce9678c0c404",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-a-fork.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent.jsonl",
+    "sha256": "ded9da7f0e63f86c665c4f9b759c53d622ad44965f6d08119e1ed3f377c189de",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent/subagents/agent-x1.jsonl",
+    "sha256": "4a1cb206bfd95dcef3c6e5ff0cccd1c05dc7ef7fd40ee07e0266389fbc52917b",
+    "source": "tools/adapters/tests/fixtures/hostlogs/claude-code/sess-b-parent/subagents/agent-x1.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl",
+    "sha256": "af8f0ee16d3ad3d2d0ffbb1d607f4c9d7199fd8089336cf95d2a27250d71ab8a",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl.bak",
+    "sha256": "a36af18efb835e18e48843bda057f85618d48cceee41f89fd03eba542b1479a7",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-00-00-01a00000-0000-7000-8000-00000000000a.jsonl.bak"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-05-00-01a00000-0000-7000-8000-00000000000b.jsonl",
+    "sha256": "b5018e90d2bf08f2025dcfeaefe9245a259c0427e7147ec792b0d134093ddfc9",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-05-00-01a00000-0000-7000-8000-00000000000b.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-06-00-01a00000-0000-7000-8000-00000000000c.jsonl",
+    "sha256": "82301092af45e4f8f55c7ac63e3a3d692df8fecd01be560614f583039972824f",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-06-00-01a00000-0000-7000-8000-00000000000c.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-07-00-01a00000-0000-7000-8000-00000000000d.jsonl",
+    "sha256": "e2baa0b87f01983cdaaca3ff66a5940c09fa8f2de59324de445b7f77cc5cc397",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-07-00-01a00000-0000-7000-8000-00000000000d.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-08-00-01a00000-0000-7000-8000-00000000000f.jsonl",
+    "sha256": "3c459ea9b180eb01b1b9eb44c847d095f748b3807ab652f1286778fe59baac96",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-08-00-01a00000-0000-7000-8000-00000000000f.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/scope_proof.sh",
     "sha256": "db467d28d264efe795d243eb6096b316e779562f344ac0dad7a0304f702d92d8",
     "source": "tools/adapters/tests/scope_proof.sh"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_hostlogs.py",
+    "sha256": "99edb3e2f2a320a70a551732b5671e953a935c077996ebdabe63c8b8f61771fe",
+    "source": "tools/adapters/tests/test_hostlogs.py"
   },
   {
     "kit_version": "2.9.7",
