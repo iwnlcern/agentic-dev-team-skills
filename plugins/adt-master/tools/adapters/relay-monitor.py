@@ -382,12 +382,14 @@ class WindowLock:
             return None
 
     def release(self) -> None:
-        if self._fd is not None:
+        """Idempotent; also called from the stop-signal handler, so the descriptor is taken first."""
+        fd, self._fd = self._fd, None
+        if fd is not None:
             with contextlib.suppress(OSError):
-                os.ftruncate(self._fd, 0)
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-            os.close(self._fd)
-            self._fd = None
+                os.ftruncate(fd, 0)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def window_alive(win: window.Window | None) -> bool:
@@ -409,10 +411,25 @@ def window_alive(win: window.Window | None) -> bool:
 
 
 _STOP_SIGNAL: list[int] = []
+_STOP_RELEASE: list["WindowLock"] = []
 
 
 def _request_stop(signum, _frame) -> None:
-    _STOP_SIGNAL.append(signum)  # checked at the top of each poll; no work inside the handler
+    """Free the window at once, so a doorbell started right after the stop takes it (final review I1).
+
+    The loop acts on the stop at its next check; until then delivery is refused, because a stopping
+    doorbell skips delivery and a successor's leader record fences the old instance's frames.
+    """
+    _STOP_SIGNAL.append(signum)
+    for lock in _STOP_RELEASE:
+        lock.release()
+
+
+def record_own_exit(note: dict, *, reason: str, instance: str) -> None:
+    """Record a stop exit unless a successor already took the window and wrote its own leader record."""
+    holder = (note.get("leader") or {}).get("instance")
+    if holder in (None, instance):
+        record_exit(note, reason=reason, detail=None, instance=instance)
 
 
 def stop_line(fd: int, reason: str) -> None:
@@ -1401,6 +1418,7 @@ def follow(args) -> int:
         sweep_owner_files(store)  # eventual cleanup of unreferenced owner files (P5-R1)
     sink, pacer = FdSink(sys.stdout.fileno()), Pacer()
     _STOP_SIGNAL.clear()
+    _STOP_RELEASE[:] = [leader]
     previous = {}
     if threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGTERM, signal.SIGHUP):
@@ -1414,7 +1432,7 @@ def follow(args) -> int:
             stop = "terminated" if _STOP_SIGNAL else None if window_alive(win) else "window gone"
             if stop:
                 store.update(
-                    lambda n: record_exit(n, reason=stop.replace(" ", "-"), detail=None, instance=me["instance"]),
+                    lambda n: record_own_exit(n, reason=stop.replace(" ", "-"), instance=me["instance"]),
                     timeout=2.0,
                 )
                 leader.release()
@@ -1504,6 +1522,8 @@ def follow(args) -> int:
                 if time.monotonic() < backoff_until:
                     time.sleep(min(POLL_INDEX, backoff_until - time.monotonic()))
                     continue
+                if _STOP_SIGNAL:
+                    continue  # a stopping doorbell delivers nothing; the loop top records the exit
                 last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
                 snap = read_index(Path(binding.root) / "INDEX.md")
                 last_error = snap.error
@@ -1563,6 +1583,7 @@ def follow(args) -> int:
             leader.release()
         raise
     finally:
+        _STOP_RELEASE.clear()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
 

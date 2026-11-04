@@ -1,8 +1,9 @@
 """Host-log token readers (DD-v3-adapter § 4.6, O9).
 
 Reads token counts and identifiers from Claude Code session logs and Codex rollouts; never message content.
-Each line is checked for its type marker before it is decoded, so user and tool lines are never decoded,
-and every field is read through `_dig`, named paths only.
+Each line is checked for its type marker before it is decoded, so lines without the marker are never decoded
+(a user line whose content happens to carry the marker bytes is decoded, then rejected on its `type`), and
+every field is read through `_dig`, named paths only, so content fields are never read.
 
 Column meanings (measured, plan PL-v3-adapter-a M1): `input` is uncached input on both hosts — Claude Code
 reports it that way, Codex includes cache reads in `input_tokens`, so Codex `input = input_tokens −

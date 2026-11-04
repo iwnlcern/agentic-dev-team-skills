@@ -1659,6 +1659,23 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
                 self.assertEqual(note["exit"]["reason"], "terminated")
                 self.assert_window_free()
 
+    def test_stop_then_start_hands_the_window_over(self):
+        # final review I1: a host that stops a doorbell and starts another in the same window at once
+        # (Codex `monitor stop` then `monitor start`; a Monitor-tool restart) must end with one live doorbell
+        write_index(self.index, row(1, to="b.implementer"))
+        first = self.spawn(extra_env=self.seam(os.getpid()))
+        self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+        first.send_signal(signal.SIGTERM)
+        time.sleep(0.2)
+        second = self.spawn(extra_env=self.seam(os.getpid()))
+        rc, lines, _ = self.finish(first)
+        self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: terminated"]))
+        time.sleep(3.0)  # past POLL_NOTE: the old doorbell has acted on its stop
+        self.assertIsNone(second.poll(), "the replacement doorbell exited: the window has no doorbell")
+        note = self.rm.NoteStore("psess").load()
+        self.assertEqual((note.get("leader") or {}).get("pid"), second.pid)  # the old exit did not clear it
+        self.assertIsNone(note.get("exit"))
+
     def test_engine_outage_does_not_exit(self):
         write_index(self.index, row(1, to="b.implementer"))
         proc = self.spawn(extra_env=self.seam(os.getpid()))
