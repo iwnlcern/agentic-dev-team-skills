@@ -391,16 +391,30 @@ class TestItem11Fold(TestItem11Diagnostics):
                                        '--root', str(self.root)),
                           'E-FILE-MISSING', str(self.base / 'gone.txt'), 'no such file')
 
-    def test_from_file_utf8_under_any_locale(self):  # D6
+    def test_from_file_utf8_under_any_locale(self):  # D6, gate G-E1
+        """--from-file is UTF-8 whatever the locale.  Two files, because which one catches a
+        reader that decodes with the locale's encoding depends on that encoding: under
+        ISO-8859-1 (the mac leg) such a reader accepts the Latin-1 file; under ASCII (the linux
+        leg, which lacks en_US.ISO8859-1) it refuses the UTF-8 file."""
         latin = self.base / 'latin.txt'
         latin.write_bytes(b'p.planner Planner caf\xe9\n')
+        utf8 = self.base / 'utf8.txt'
+        utf8.write_bytes(b'p.planner Planner caf\xc3\xa9\n')
         env = dict(os.environ, LC_ALL='en_US.ISO8859-1', LANG='en_US.ISO8859-1',
                    PYTHONUTF8='0')
         env.pop('PYTHONIOENCODING', None)
         probe = subprocess.run([sys.executable, '-c',
                                 'import locale; print(locale.getpreferredencoding(False))'],
                                env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
-        self.assertEqual(probe.stdout.strip().upper().replace('-', ''), 'ISO88591')
+        encoding = probe.stdout.strip()
+        self.assertNotEqual(encoding.upper().replace('-', ''), 'UTF8',
+                            'the control needs a locale whose preferred encoding is not UTF-8;'
+                            ' got %r' % encoding)
         self.assert_typed(self.run_cli('seat', 'declare', '--from-file', str(latin), '--key', 'k',
                                        '--root', str(self.root), env=env),
                           'E-FILE-MISSING', 'not UTF-8 text')
+        # the UTF-8 file gets past the read to a later rule
+        returncode, _, stderr = self.run_cli('seat', 'declare', '--from-file', str(utf8),
+                                             '--key', 'k', '--root', str(self.root), env=env)
+        self.assertNotEqual(self.code(stderr), 'E-FILE-MISSING', stderr)
+        self.assertNotIn('unexpected error', stderr)
