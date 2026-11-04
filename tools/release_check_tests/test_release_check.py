@@ -16,6 +16,7 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "tools" / "release-check.py"
@@ -193,6 +194,135 @@ class CapAndDescendants(unittest.TestCase):
         code, err = repo.run("--workers", "1")
         self.assertEqual(code, 0, err)
         self.assertEqual(repo.step("relay_engine.tests.test_a_reaps")["leaked"], [])
+
+
+# Starts argv in a new session with its working directory at cwd and stdio on /dev/null,
+# leaving it behind when the step exits (its parent becomes init).
+DETACH = textwrap.dedent('''
+    def detach(argv, cwd, pidfile):
+        pid = os.fork()
+        if pid == 0:
+            os.setsid()
+            os.chdir(cwd)
+            null = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):
+                os.dup2(null, fd)
+            os.execv(argv[0], argv)
+        with open(pidfile, "w") as handle:
+            handle.write(str(pid))
+''')
+
+
+def kill_pidfile(path):
+    try:
+        os.kill(int(Path(path).read_text()), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+
+
+class Sweep(unittest.TestCase):
+
+    def test_platform_binary_orphan_is_reported_not_killed(self):
+        repo = FixtureRepo(self)
+        shell, python, rooted = (repo.pids / n for n in ("shell", "python", "rooted"))
+        for path in (shell, python, rooted):
+            self.addCleanup(kill_pidfile, path)
+        repo.module("test_a_detaches", DETACH + textwrap.dedent(f'''
+            class T(unittest.TestCase):
+                def test_detach(self):
+                    detach(["/bin/sh", "-c", "while :; do sleep 1; done"], os.getcwd(), {str(shell)!r})
+                    detach([sys.executable, "-c", "import time; time.sleep(60)"], os.getcwd(),
+                           {str(python)!r})
+                    detach(["/bin/sleep", "60"], "/", {str(rooted)!r})
+        '''))
+        code, err = repo.run("--workers", "1")
+        self.assertEqual(code, 0, err)
+        results = repo.results()
+        listed = {entry["pid"]: entry for entry in results["unattributed"]}
+        shell_pid, python_pid, rooted_pid = (int(p.read_text()) for p in (shell, python, rooted))
+        self.assertIn(shell_pid, listed, results["unattributed"])
+        self.assertEqual(os.path.realpath(listed[shell_pid]["cwd"]), os.path.realpath(repo.root))
+        self.assertTrue(alive(shell_pid), "an unattributed process was killed")
+        step = repo.step("relay_engine.tests.test_a_detaches")
+        self.assertIn(python_pid, step["leaked"])
+        self.assertTrue(wait_gone(python_pid), "the attributable Python child survived")
+        self.assertNotIn(rooted_pid, listed, "a process outside the repository was listed")
+        self.assertNotIn(rooted_pid, step["leaked"])
+
+    def test_non_utf8_environment_does_not_crash(self):
+        bystander = subprocess.Popen(
+            [os.fsencode(sys.executable), b"-c", b"import time; time.sleep(60)", b"caf\xe9"],
+            env={**os.environb, b"X_BYTES": b"caf\xe9"}, stdin=subprocess.DEVNULL)
+        self.addCleanup(bystander.wait)
+        self.addCleanup(bystander.kill)
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        code, err = repo.run("--workers", "1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(repo.step("relay_engine.tests.test_a_ok")["outcome"], "pass")
+
+    def test_internal_error_still_stops_and_writes(self):
+        repo = FixtureRepo(self)
+        slow_pid = repo.pids / "slow"
+        repo.module("test_a_quick", '''
+            class T(unittest.TestCase):
+                def test_quick(self):
+                    time.sleep(1)
+        ''')
+        repo.module("test_b_slow", f'''
+            class T(unittest.TestCase):
+                def test_slow(self):
+                    open({str(slow_pid)!r}, "w").write(str(os.getpid()))
+                    time.sleep(60)
+        ''')
+        with mock.patch.object(rc, "_listing", side_effect=RuntimeError("injected sweep failure")):
+            code, err = repo.run("--workers", "2")
+        self.assertEqual(code, 2, err)
+        results = repo.results()
+        self.assertIn("injected sweep failure", results["error"])
+        self.assertEqual(results["exit"], 2)
+        self.assertEqual(repo.step("relay_engine.tests.test_b_slow")["outcome"], "unfinished")
+        self.assertTrue(wait_gone(int(slow_pid.read_text())), "a running step survived the error")
+
+    def test_forking_leftover_is_fully_stopped(self):
+        repo = FixtureRepo(self)
+        forked = repo.pids / "forked"
+        forked.mkdir()
+
+        def kill_forked():
+            for entry in forked.iterdir():
+                with contextlib.suppress(OSError, ValueError):
+                    os.kill(int(entry.name), signal.SIGKILL)
+        self.addCleanup(kill_forked)
+        # A leftover that ignores SIGTERM and forks every 20 ms, so children appear between
+        # any listing of the step's processes and the kill that follows it.
+        repo.module("test_a_forks", f'''
+            import signal
+            class T(unittest.TestCase):
+                def test_fork(self):
+                    if os.fork() == 0:
+                        os.setsid()
+                        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                        while True:
+                            if os.fork() == 0:
+                                open(os.path.join({str(forked)!r}, str(os.getpid())), "w").close()
+                                time.sleep(30)
+                                os._exit(0)
+                            while True:
+                                try:
+                                    if os.waitpid(-1, os.WNOHANG)[0] == 0:
+                                        break
+                                except ChildProcessError:
+                                    break
+                            time.sleep(0.02)
+                    while len(os.listdir({str(forked)!r})) < 10:
+                        time.sleep(0.02)
+        ''')
+        code, err = repo.run("--workers", "1")
+        self.assertEqual(code, 0, err)
+        time.sleep(1)
+        survivors = [int(e.name) for e in forked.iterdir() if alive(int(e.name))]
+        self.assertEqual(survivors, [], f"{len(survivors)} of {len(list(forked.iterdir()))} forked children survived")
 
 
 DRIVER = textwrap.dedent('''
@@ -464,13 +594,14 @@ class StepsAndResults(unittest.TestCase):
         results = repo.results()
         for field in ("leg", "commit", "os", "python", "workers", "load", "claude_bin",
                       "claude_version", "cap_seconds", "started", "finished", "exclusions",
-                      "steps", "exit"):
+                      "steps", "exit", "unattributed", "error"):
             self.assertIn(field, results)
         self.assertEqual(results["leg"], "mac")
         self.assertEqual(results["commit"], commit)
         self.assertEqual(set(results["python"]), {"path", "version"})
         self.assertEqual(set(results["load"]), {"start", "end"})
         self.assertEqual(results["exit"], 0)
+        self.assertEqual((results["unattributed"], results["error"]), ([], None))
         self.assertEqual(results["exclusions"],
                          [{"path": "tools/check-old.py", "reason": exclusion.reason}])
         for step in results["steps"]:
@@ -629,6 +760,21 @@ class LinuxLeg(unittest.TestCase):
         linux = json.loads((fixture.out / "linux" / "results.json").read_text())
         self.assertEqual(linux["machine"], native)
         self.assertTrue(linux["image"].startswith("sha256:"), linux["image"])
+
+    def test_linux_sweep_stops_setsid_daemon(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_daemon", '''
+            class T(unittest.TestCase):
+                def test_daemon(self):
+                    daemonize(os.path.join(os.environ["TMPDIR"], "daemon.pid"))
+        ''')
+        fixture.finish()
+        code, err = fixture.run_legs("linux")
+        self.assertEqual(code, 0, err)
+        linux = json.loads((fixture.out / "linux" / "results.json").read_text())
+        step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_daemon")
+        self.assertEqual(len(step["leaked"]), 1, step)
+        self.assertEqual(linux["unattributed"], [])
 
     def test_interrupt_kills_the_container(self):
         fixture = LinuxFixture(self)

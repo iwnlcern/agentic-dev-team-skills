@@ -30,6 +30,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -37,6 +38,11 @@ REPO = Path(__file__).resolve().parents[1]
 MARKER = "ADT_RELEASE_STEP"
 KILL_GRACE_SECONDS = 10.0
 POLL_SECONDS = 0.05
+# SIGKILL passes over a step's leftovers before the runner stops trying (plan r4 L6).
+SWEEP_ROUNDS = 5
+# macOS hides these binaries' environment from a non-root process, so a marker cannot
+# attribute them (plan r4 change 1); detached ones are listed, never killed.
+PLATFORM_DIRS = ("/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/System/")
 BOTH = frozenset({"mac", "linux"})
 MAC = frozenset({"mac"})
 DOCKERFILE = Path(__file__).resolve().parent / "release-check.Dockerfile"
@@ -174,30 +180,39 @@ def uncovered(repo, steps, exclusions):
     return problems
 
 
-def _marked_pids(marker):
-    """Pids of this user's processes whose environment carries MARKER=marker."""
-    needle = f"{MARKER}={marker}"
-    found = set()
+def _listing():
+    """(pid, pgid, markers) for this user's live processes; markers are the MARKER values
+    found in each environment.  Read as bytes: any process's environment may hold bytes
+    that are not UTF-8.  Zombies are skipped (they hold no environment and are not running)."""
+    prefix = f"{MARKER}=".encode()
+    procs = []
     if sys.platform.startswith("linux"):
-        for entry in Path("/proc").iterdir():
+        for entry in os.scandir("/proc"):
             if not entry.name.isdigit():
                 continue
             try:
-                environ = (entry / "environ").read_bytes().split(b"\0")
-            except OSError:
+                environ = Path(entry.path, "environ").read_bytes().split(b"\0")
+                stat = Path(entry.path, "stat").read_bytes().rsplit(b")", 1)[1].split()
+            except (OSError, IndexError):
                 continue
-            if needle.encode() in environ:
-                found.add(int(entry.name))
+            if stat[0] == b"Z":
+                continue
+            markers = frozenset(e[len(prefix):] for e in environ if e.startswith(prefix))
+            procs.append((int(entry.name), int(stat[2]), markers))
     else:
         listing = subprocess.run(
-            ["ps", "-E", "-ww", "-o", "pid=,command=", "-U", str(os.getuid())],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+            ["ps", "-E", "-ww", "-o", "pid=,pgid=,stat=,command=", "-U", str(os.getuid())],
+            capture_output=True, stdin=subprocess.DEVNULL, check=True).stdout
         for line in listing.splitlines():
             fields = line.split()
-            if fields and fields[0].isdigit() and needle in fields[1:]:
-                found.add(int(fields[0]))
-    found.discard(os.getpid())
-    return sorted(found)
+            if len(fields) < 3 or not (fields[0].isdigit() and fields[1].isdigit()):
+                continue
+            if fields[2].startswith(b"Z"):
+                continue
+            markers = frozenset(f[len(prefix):] for f in fields[3:] if f.startswith(prefix))
+            procs.append((int(fields[0]), int(fields[1]), markers))
+    me = os.getpid()
+    return [p for p in procs if p[0] != me]
 
 
 def _signal(pid, sig, group=False):
@@ -207,19 +222,94 @@ def _signal(pid, sig, group=False):
         pass
 
 
-def _stop_marked(marker, grace=KILL_GRACE_SECONDS):
-    """SIGTERM every marked process, SIGKILL what is left after the grace; return the pids found."""
-    pids = _marked_pids(marker)
-    for pid in pids:
-        _signal(pid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    remaining = pids
-    while remaining and time.monotonic() < deadline:
-        time.sleep(POLL_SECONDS)
-        remaining = _marked_pids(marker)
-    for pid in remaining:
-        _signal(pid, signal.SIGKILL)
-    return pids
+@dataclasses.dataclass
+class _Sweep:
+    """One step's processes: those carrying its marker or in its process group.
+
+    SIGTERM on sight, SIGKILL from kill_at, up to SWEEP_ROUNDS passes; sweeps advance
+    between scheduler polls, so a slow leftover never holds up the other steps.
+    A step's pid is not reused while its process group has members, so matching the
+    group stays safe for the sweep's life."""
+    marker: bytes
+    pgid: int
+    row: dict
+    exclude: int = None
+    kill_at: float = None
+    rounds: int = 0
+    seen: set = dataclasses.field(default_factory=set)
+    signalled: set = dataclasses.field(default_factory=set)
+
+    def finish(self, survivors=()):
+        self.row["leaked"] = sorted(self.seen - {self.exclude})
+        if survivors:
+            print(f"release-check: {self.row['id']}: {sorted(survivors)} survived "
+                  f"{SWEEP_ROUNDS} SIGKILL rounds", file=sys.stderr)
+
+
+def _advance_sweeps(sweeps):
+    """One pass over the pending sweeps; finished ones leave the list."""
+    listing = _listing()
+    now = time.monotonic()
+    for sweep in list(sweeps):
+        alive = {pid for pid, group, markers in listing
+                 if sweep.marker in markers or group == sweep.pgid}
+        sweep.seen |= alive
+        if not alive:
+            sweep.finish()
+            sweeps.remove(sweep)
+            continue
+        if sweep.kill_at is None:
+            sweep.kill_at = now + KILL_GRACE_SECONDS
+        if now < sweep.kill_at:
+            for pid in alive - sweep.signalled:
+                _signal(pid, signal.SIGTERM)
+            sweep.signalled |= alive
+        elif sweep.rounds < SWEEP_ROUNDS:
+            for pid in alive:
+                _signal(pid, signal.SIGKILL)
+            sweep.rounds += 1
+        else:
+            sweep.finish(alive)
+            sweeps.remove(sweep)
+
+
+def _unattributed(since, directories):
+    """mac: the user's parent-1 platform binaries started at or after `since` whose working
+    directory is under one of `directories` (plan r4 change 1).  Listed, never killed."""
+    if sys.platform.startswith("linux"):
+        return []
+    listing = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid=,ppid=,lstart=,comm="],
+                             capture_output=True, stdin=subprocess.DEVNULL, check=True,
+                             env={**os.environ, "LC_ALL": "C"}).stdout
+    candidates = {}
+    for line in listing.splitlines():
+        fields = line.split(None, 7)
+        if len(fields) < 8 or fields[1] != b"1":
+            continue
+        command = os.fsdecode(fields[7].strip())
+        if not command.startswith(PLATFORM_DIRS):
+            continue
+        started = datetime.datetime.strptime(os.fsdecode(b" ".join(fields[2:7])), "%a %b %d %H:%M:%S %Y")
+        if started >= since:
+            candidates[int(fields[0])] = (command, started)
+    if not candidates:
+        return []
+    lsof = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(map(str, candidates))],
+                          capture_output=True, stdin=subprocess.DEVNULL).stdout
+    cwds, pid = {}, None
+    for line in lsof.splitlines():
+        if line.startswith(b"p"):
+            pid = int(line[1:])
+        elif line.startswith(b"n") and pid is not None:
+            cwds[pid] = os.fsdecode(line[1:])
+    roots = [os.path.realpath(d) for d in directories]
+    entries = []
+    for pid, (command, started) in sorted(candidates.items()):
+        cwd = cwds.get(pid)
+        if cwd and any(cwd == r or cwd.startswith(r + os.sep) for r in roots):
+            entries.append({"pid": pid, "command": command, "cwd": cwd,
+                            "started": started.isoformat(timespec="seconds")})
+    return entries
 
 
 def _is_unittest(argv):
@@ -301,6 +391,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
         "workers": workers, "load": {"start": list(os.getloadavg()), "end": None},
         "claude_bin": claude_bin, "claude_version": claude_version, "cap_seconds": cap_seconds,
         "machine": platform.machine(), "image": environ.get("ADT_IMAGE_ID"), "interrupted": False,
+        "unattributed": [], "error": None,
         "started": _now(), "finished": None,
         "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions],
         "steps": [], "exit": None,
@@ -311,36 +402,49 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
         rows[step.id] = {"id": step.id, "argv": list(step.argv), "outcome": "unfinished",
                          "reason": None, "exit_code": None, "wall_seconds": 0.0, "log": str(log), "leaked": []}
 
+    since = datetime.datetime.now().replace(microsecond=0)
     deadline = time.monotonic() + cap_seconds
     pending = list(active)
     running = {}
+    sweeps = []
+    errors = []
     try:
-        _schedule(pending, running, rows, base_env, repo, workers, deadline)
+        _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline)
     except KeyboardInterrupt:
         STOP.set()
+    except Exception as error:  # noqa: BLE001 - any runner failure still stops and writes
+        traceback.print_exc()
+        errors.append(f"{type(error).__name__}: {error}")
     if STOP.is_set():
         results["interrupted"] = True
-    _stop_running(running, rows)
+    _stop_all(running, sweeps, rows, errors)
     for step in pending:
         Path(rows[step.id]["log"]).touch()
+    try:
+        results["unattributed"] = _unattributed(since, (repo, leg_out))
+    except Exception as error:  # noqa: BLE001
+        errors.append(f"unattributed scan: {type(error).__name__}: {error}")
+    results["error"] = "; ".join(errors) or None
 
     results["steps"] = [rows[s.id] for s in active]
     results["load"]["end"] = list(os.getloadavg())
     results["finished"] = _now()
-    exit_code = 0 if all(r["outcome"] == "pass" for r in results["steps"]) else 1
+    exit_code = 2 if errors else 0 if all(r["outcome"] == "pass" for r in results["steps"]) else 1
     results["exit"] = exit_code
     results_path = leg_out / "results.json"
     results_path.write_text(json.dumps(results, indent=2) + "\n")
     failed = [r["id"] for r in results["steps"] if r["outcome"] != "pass"]
     print(f"release-check: {leg} leg exit {exit_code}; {len(failed)} of {len(active)} steps not green"
           + (" (interrupted)" if results["interrupted"] else "")
+          + (f" (runner error: {results['error']})" if errors else "")
           + (": " + ", ".join(failed) if failed else ""), file=sys.stderr)
     return LegResult(leg, exit_code, results_path)
 
 
-def _schedule(pending, running, rows, base_env, repo, workers, deadline):
-    """Start and reap steps until all finish, the cap passes or the run is stopped."""
-    while (pending or running) and not STOP.is_set():
+def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline):
+    """Start and reap steps, and sweep finished steps' leftovers, until all are done,
+    the cap passes or the run is stopped."""
+    while (pending or running or sweeps) and not STOP.is_set():
         while pending and len(running) < workers and time.monotonic() < deadline:
             step = pending.pop(0)
             marker = uuid.uuid4().hex
@@ -366,31 +470,40 @@ def _schedule(pending, running, rows, base_env, repo, workers, deadline):
                     reason = summary if summary else reason
             row.update(outcome="pass" if reason is None else "fail", reason=reason, exit_code=code,
                        wall_seconds=round(time.monotonic() - started, 3))
-            row["leaked"] = _stop_marked(marker)
+            sweeps.append(_Sweep(marker.encode(), proc.pid, row))
             del running[step_id]
+        if sweeps:
+            _advance_sweeps(sweeps)
         if time.monotonic() >= deadline:
             break
-        if pending or running:
+        if pending or running or sweeps:
             time.sleep(POLL_SECONDS)
 
 
-def _stop_running(running, rows):
-    """The cap's (and an interrupt's) stop path: groups and marked descendants, then SIGKILL."""
-    if not running:
-        return
-    for proc, marker, _, _ in running.values():
+def _stop_all(running, sweeps, rows, errors):
+    """The cap's (and an interrupt's, and an error's) stop path: every running step's group
+    and marked processes and every pending sweep, under one shared grace, then SIGKILL."""
+    now = time.monotonic()
+    for step_id, (proc, marker, _, _) in running.items():
         _signal(proc.pid, signal.SIGTERM, group=True)
-        for pid in _marked_pids(marker):
-            _signal(pid, signal.SIGTERM)
-    grace_end = time.monotonic() + KILL_GRACE_SECONDS
-    while time.monotonic() < grace_end and (
-            any(p.poll() is None for p, _, _, _ in running.values())
-            or any(_marked_pids(m) for _, m, _, _ in running.values())):
-        time.sleep(POLL_SECONDS)
-    for step_id, (proc, marker, started, handle) in running.items():
+        sweeps.append(_Sweep(marker.encode(), proc.pid, rows[step_id], exclude=proc.pid,
+                             kill_at=now + KILL_GRACE_SECONDS))
+    while sweeps:
+        for proc, _, _, _ in running.values():
+            proc.poll()
+        try:
+            _advance_sweeps(sweeps)
+        except Exception as error:  # noqa: BLE001 - fall back to the groups the runner made
+            traceback.print_exc()
+            errors.append(f"stop path: {type(error).__name__}: {error}")
+            for sweep in sweeps:
+                _signal(sweep.pgid, signal.SIGKILL, group=True)
+                sweep.finish()
+            sweeps.clear()
+        if sweeps:
+            time.sleep(POLL_SECONDS)
+    for step_id, (proc, _, started, handle) in running.items():
         _signal(proc.pid, signal.SIGKILL, group=True)
-        for pid in _marked_pids(marker):
-            _signal(pid, signal.SIGKILL)
         proc.wait()
         handle.close()
         rows[step_id].update(exit_code=proc.returncode,
