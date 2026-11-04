@@ -86,7 +86,7 @@ Urgency, “just fix it now,” or “ship today” is not dispatch; inline, quo
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
 Pair roles:
-- Planner audits via Superpowers brainstorming and surfaces design questions.
+- Planner audits and surfaces design questions.
 - Implementer runs independent audit and answers questions.
 - Planner does not implement or spawn Implementer.
 
@@ -167,7 +167,7 @@ BASE: <branch@sha | unknown>
 FINAL_GIT_STATUS_SHORT: <paste exact output or unavailable — reason>
 
 Phase scope — DESIGN.
-Current scope: Planner uses Superpowers brainstorming; Implementer answers design questions, challenges alternatives with evidence, and flags product-semantics decisions.
+Current scope: Planner holds the design conversation with the operator; Implementer answers design questions, challenges alternatives with evidence, and flags product-semantics decisions.
 Not in current scope: source/test edits, implementation branches, commits, PRs, scaffolding, or prototype implementation.
 Implementation begins only after a bare, unfenced, un-backticked own-line `DISPATCH IMPL` token in a later relay whose `TO` addresses the Implementer, or in a direct message to that single Implementer.
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
@@ -199,7 +199,7 @@ Out of scope:
 - <files/features/tests + why>
 
 Deliverable:
-Design lock via Superpowers brainstorming, recorded as DESIGN_DOC_ID, with selected option, rejected alternatives, operator decisions/defaults, boundary contract, acceptance criteria draft, open questions, and evidence levels. Design Q&A may stay inline; the design lock is file-first. After writing the design doc, the pair Planner must send Template I `TO: <team>.implementer`; a design `TO` the orchestrator with the Implementer only on `CC` is not a DESIGN-REVIEW request.
+Design lock, recorded as DESIGN_DOC_ID, with selected option, rejected alternatives, operator decisions/defaults, boundary contract, acceptance criteria draft, open questions, and evidence levels. Design Q&A may stay inline; the design lock is file-first. After writing the design doc, the pair Planner must send Template I `TO: <team>.implementer`; a design `TO` the orchestrator with the Implementer only on `CC` is not a DESIGN-REVIEW request.
 ```
 
 ## Template C — DESIGN-REVIEW handoff
@@ -376,7 +376,7 @@ PARENT_DISPATCH_ID: <the approving PLAN-REVIEW dispatch id on the later dispatch
 If `SCOPE_DIFF_RESULT: deviation-present`, do not issue `DISPATCH IMPL`; relay the plan plus justification to the orchestrator and wait.
 
 Deliverable:
-Written plan via Superpowers writing-plans + Implementer plan review + SCOPE_DIFF if delegated dispatch is being considered + ACTIONS_GIT_REF + FINAL_GIT_STATUS_SHORT when claiming no edits. No PR yet.
+Written plan + Implementer plan review + SCOPE_DIFF if delegated dispatch is being considered + ACTIONS_GIT_REF + FINAL_GIT_STATUS_SHORT when claiming no edits. No PR yet.
 ```
 
 ## Template E — IMPL dispatch
@@ -424,12 +424,12 @@ Before acting, run the check and cite its answer as instructed in `protocol.md` 
 This bare own-line token grants implementation to the `TO` addressee only, for the locked plan only. CC'd, non-addressed, or cross-reading agents treat it as inert. Pair-Planner-issued dispatches must parent to the Implementer's approving PLAN-REVIEW relay; absence of the parent edge is a structural error. Direct operator/orchestrator dispatch is the override path.
 
 Required:
-1. Use Superpowers `using-git-worktrees` from <base>.
-2. Use Superpowers `executing-plans` task-by-task.
+1. Work in a separate git worktree from <base>.
+2. Execute the plan task by task, each task test-first.
 3. Keep scope locked to PLAN_LOCK_ID <id>.
 4. Stop if the plan is materially wrong, already built, or missing a downstream consumer.
 5. Run required tests/verification.
-6. Use Superpowers `finishing-a-development-branch`.
+6. Push the branch.
 7. Open PR against <target branch>.
 
 Locked acceptance criteria:

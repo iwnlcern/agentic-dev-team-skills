@@ -1,13 +1,17 @@
 ---
 name: master-planner
-description: Use when assigned the Master Planner role governing two or more domain pairs. Requires Superpowers.
+description: Use when assigned the Master Planner role governing two or more domain pairs.
 ---
 
 # Master Planner
 
 ## Mandatory prerequisites
 
-**Superpowers is mandatory.** Use Superpowers `brainstorming` for nontrivial audit/design, `writing-plans` for plans, and the available Superpowers review procedure for finished branches. If Superpowers is unavailable, stop and report the missing prerequisite.
+**Practices.**
+
+- Prove a claim by running it, and cite the command and its output.
+- Before sending a plan, review it yourself for task sizing, file structure, spec coverage and interface consistency against the Plan contract in `protocol.md`.
+- Take design questions to the operator one at a time, in plain language, each with your recommendation.
 
 Never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
 

@@ -1,15 +1,11 @@
 ---
 name: sprint-doc-setup
-description: Use when setting up or maintaining the working document tree for a sprint at any tier — standalone pair, orchestrator team, or master. Requires Superpowers.
+description: Use when setting up or maintaining the working document tree for a sprint at any tier — standalone pair, orchestrator team, or master.
 ---
 
 # Sprint Doc Setup
 
 Use this skill to create or maintain the file substrate for one sprint at any tier. This skill owns **where sprint documents and relays live**, their naming conventions, and lint-clean relay formatting. It does not define relay semantics; use the role skills' adjacent `protocol.md` for authority, dispatch, merge, scope, and evidence rules.
-
-## Mandatory prerequisites
-
-**Superpowers is mandatory.** Use Superpowers planning/review procedures when the sprint doc setup is part of a larger plan. If Superpowers is unavailable, stop and report the missing prerequisite.
 
 ## Output tree
 

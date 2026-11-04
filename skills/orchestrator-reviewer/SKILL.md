@@ -1,6 +1,6 @@
 ---
 name: orchestrator-reviewer
-description: Use when assigned the adversarial reviewer role in an Orchestrator Pair. Requires Superpowers.
+description: Use when assigned the adversarial reviewer role in an Orchestrator Pair.
 ---
 
 # Orchestrator Reviewer
@@ -9,7 +9,10 @@ Use this skill when you are the adversarial reviewer for an Orchestrator Pair. T
 
 ## Mandatory prerequisites
 
-**Superpowers is mandatory.** Use the closest Superpowers brainstorming/review procedure for independent review. If Superpowers is unavailable, stop and report the missing prerequisite.
+**Practices.**
+
+- Prove a claim by running it, and cite the command and its output.
+- A blocking finding cites an executed check (a probe, test or search) and its output; a finding from reading alone is advisory.
 
 Do not remove evidence, gates, acceptance criteria, or operator-decision flags.
 
@@ -53,7 +56,7 @@ Ask:
 - Are operator-judgment decisions surfaced instead of guessed?
 - Are `FROM` / `TO` / `CC` fields present where routing is ambiguous, does `ROLE` match `FROM`, and does only the `TO` addressee receive action authority?
 - Has anyone mistaken a merge, green tests, or deploy for live proof?
-- Does a new-feature/`still-open` bundle carry a design lock (Superpowers brainstorming) before its plan lock?
+- Does a new-feature/`still-open` bundle carry a design lock (the pair Planner's design conversation with the operator) before its plan lock?
 - Is the orchestrator inserting a standing post-plan approval gate? Flag it as too heavy by default — the pair's Implementer plan review is the plan gate. Verify instead that PLAN dispatches delegate conditional `DISPATCH IMPL` authority, define the deviation triggers (scope/boundary-contract deviation, hard trigger, cross-bundle collision), and address any future dispatch token to exactly one Implementer-role `TO` addressee.
 
 ## Verdicts

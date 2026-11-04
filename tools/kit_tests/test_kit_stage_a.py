@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s tools/kit_tests -v
 
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,93 @@ class TestWrongSentences(KitTreeCase):
         )
         for rel, needle in cases:
             self.assertIn(needle, self.canonical_text(rel), f"{rel} lacks {needle}")
+
+
+BASE_COMMIT = "5f313bfa14a5e7a2a6efc9c1dac92be4356830af"
+
+ALL_ROLES = ("Prove a claim by running it, and cite the command and its output.",)
+PLANNER = ("task sizing", "file structure", "spec coverage", "interface consistency")
+IMPLEMENTER = (
+    "Write the failing test first",
+    "Reproduce a bug before fixing it",
+    "Work in a separate git worktree",
+    "push the branch, open the PR and stop",
+)
+REVIEWER = ("A blocking finding cites an executed check",)
+
+PRACTICES: dict[str, tuple[str, ...]] = {
+    "pair-planner": ALL_ROLES + PLANNER,
+    "orchestrator-planner": ALL_ROLES + PLANNER,
+    "master-planner": ALL_ROLES + PLANNER,
+    "domain-planner": ALL_ROLES + PLANNER,
+    "pair-implementer": ALL_ROLES + IMPLEMENTER,
+    "orchestrator-reviewer": ALL_ROLES + REVIEWER,
+    "master-reviewer": ALL_ROLES + REVIEWER,
+    "domain-reviewer": ALL_ROLES + REVIEWER,
+}
+
+PROCEDURE_NAMES = ("writing-plans", "executing-plans", "using-git-worktrees", "finishing-a-development-branch")
+VENDORED_BRAINSTORMING = "vendor/obra/superpowers/brainstorming.md"
+
+
+def _base_text(rel: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{BASE_COMMIT}:{rel}"], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _description(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("description: "):
+            return line[len("description: "):]
+    raise AssertionError("no description line")
+
+
+class TestSuperpowersOut(KitTreeCase):
+    """A2: no Superpowers dependency; each role skill states its own practices."""
+
+    def test_no_superpowers_dependency(self):
+        offenders = []
+        for path, text in self.shipped_text_files().items():
+            for number, line in enumerate(text.splitlines(), 1):
+                lowered = line.lower()
+                if "superpowers" in lowered and VENDORED_BRAINSTORMING not in line:
+                    offenders.append(f"{path}:{number}: superpowers")
+                for name in PROCEDURE_NAMES:
+                    if name in line:
+                        offenders.append(f"{path}:{number}: {name}")
+                if "`brainstorming`" in line:
+                    offenders.append(f"{path}:{number}: `brainstorming`")
+        self.assertEqual(offenders, [])
+
+    def test_kept_practices_in_every_role_copy(self):
+        for skill, phrases in PRACTICES.items():
+            rel = f"skills/{skill}/SKILL.md"
+            copies = {rel: self.canonical_text(rel)}
+            variant = ROOT / "skills" / "variants" / skill / "SKILL.md"
+            if variant.is_file():
+                copies[f"skills/variants/{skill}/SKILL.md"] = variant.read_text(encoding="utf-8")
+            installed = self.installed_texts(rel)
+            self.assertTrue(installed, f"{skill} is not installed in any tier")
+            copies.update({f"plugins/{tier}/{rel}": text for tier, text in installed.items()})
+            for where, text in copies.items():
+                for phrase in phrases:
+                    self.assertIn(phrase, text, f"{where} lacks practice {phrase!r}")
+
+    def test_descriptions_keep_use_when(self):
+        suffix = " Requires Superpowers."
+        edited = 0
+        for path in sorted((ROOT / "skills").glob("*/SKILL.md")):
+            rel = path.relative_to(ROOT).as_posix()
+            base = _description(_base_text(rel))
+            now = _description(path.read_text(encoding="utf-8"))
+            self.assertNotIn("Superpowers", now, rel)
+            if base.endswith(suffix):
+                edited += 1
+                self.assertEqual(now, base[: -len(suffix)], rel)
+            else:
+                self.assertEqual(now, base, rel)
+        self.assertEqual(edited, 9)
 
 
 if __name__ == "__main__":
