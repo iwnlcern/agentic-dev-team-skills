@@ -30,6 +30,12 @@ _MUTATIONS = re.compile(r"\b(?:mergePullRequest|updateRef|enablePullRequestAutoM
 
 @dataclass(frozen=True)
 class Match:
+    """An effect to check; unparsed targets must be refused or resolved first.
+
+    A single match never authorizes several targets. Compound merges lose the
+    pin; ambiguous pushes carry no ref and the ``unparsed`` flag.
+    """
+
     effect: str
     repository: str | None = None
     ref: str | None = None
@@ -50,7 +56,12 @@ class RefUpdate:
 
 
 def table() -> dict:
-    """Return fresh JSON data; callers add repository-specific refs and paths."""
+    """Return fresh JSON data; callers add repository-specific refs and paths.
+
+    ``refused_paths`` names symbolic key roles, not filesystem locations.
+    Consumers must resolve those roles to their installed key paths before
+    supplying ``classify_tool``'s refused_paths; labels alone protect no files.
+    """
     return {
         "protected_refs": ["refs/heads/main"],
         "refused_paths": ["frank operator key", "Jev key", "prompt-hook key", "other seat keys"],
@@ -90,13 +101,16 @@ def parse_prepush(stdin_text: str) -> list[RefUpdate]:
 
 
 def _option(words: Sequence[str], *names: str) -> str | None:
+    value = None
     for index, word in enumerate(words):
         for name in names:
             if word == name and index + 1 < len(words):
-                return words[index + 1]
-            if word.startswith(name + "="):
-                return word[len(name) + 1:]
-    return None
+                value = words[index + 1]
+            elif word.startswith(name + "="):
+                value = word[len(name) + 1:]
+            elif len(name) == 2 and word.startswith(name) and len(word) > 2:
+                value = word[2:]
+    return value
 
 
 def _head(value: object) -> str | None:
@@ -124,33 +138,52 @@ def _unparsed(text: str, paths: Sequence[str]) -> Match | None:
     return Match(effect, flags=frozenset({"unparsed"}))
 
 
-def _unwrap(words: list[str]) -> list[str]:
-    if words and os.path.basename(words[0]) == "env":
-        words = words[1:]
-        while words and words[0].startswith("-"):
-            option = words.pop(0)
-            if option in ("-u", "--unset", "-C", "--chdir") and words:
-                words.pop(0)
-            if option == "--":
-                break
-    while words and _ASSIGN.match(words[0]):
-        words = words[1:]
-    return words
+def _unwrap(words: list[str], depth: int) -> tuple[list[str], list[str], int]:
+    assignments = []
+    while words:
+        if _ASSIGN.match(words[0]):
+            assignments.append(words[0])
+            words = words[1:]
+        elif words[0] in ("if", "then", "elif", "while", "until", "do", "!", "{", "}"):
+            words = words[1:]
+        elif os.path.basename(words[0]) == "env":
+            depth += 1
+            if depth > 10:
+                raise ValueError("wrapper depth exceeded")
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                option, words = words[0], words[1:]
+                if option in ("-u", "--unset", "-C", "--chdir") and words:
+                    words = words[1:]
+                if option == "--":
+                    break
+        else:
+            break
+    return words, assignments, depth
 
 
-def _command(words: list[str], paths: Sequence[str], depth: int) -> Match | None:
+def _command(words: list[str], paths: Sequence[str], depth: int,
+             inherited: Sequence[str]) -> Match | None:
     original = words
-    words = _unwrap(words)
+    try:
+        words, assignments, depth = _unwrap(words, depth)
+    except ValueError:
+        return _unparsed(" ".join(original), paths)
+    configuration = [*inherited, *(word for word in assignments if word.startswith("GIT_CONFIG_"))]
     if not words:
         return None
+    for word in words:
+        for path in paths:
+            if os.path.normpath(word) == os.path.normpath(path):
+                return Match("key-file-read", path=path)
     program = os.path.basename(words[0])
     args = words[1:]
     if program in ("bash", "sh", "zsh"):
         for index, arg in enumerate(args):
             if arg.startswith("-") and "c" in arg[1:] and index + 1 < len(args):
-                return _shell(args[index + 1], paths, depth + 1)
+                return _shell(args[index + 1], paths, depth + 1, configuration)
     if program == "git":
-        if "--no-verify" in args or any("core.hookspath" in word.lower() for word in original):
+        if "--no-verify" in args or any("core.hookspath" in word.lower() for word in [*original, *configuration]):
             return Match("hook-bypass")
         # Git global options precede the subcommand; none of them consumes push.
         index = 0
@@ -158,10 +191,21 @@ def _command(words: list[str], paths: Sequence[str], depth: int) -> Match | None
             option = args[index]
             index += 2 if option in ("-C", "-c", "--git-dir", "--work-tree", "--namespace") else 1
         if index < len(args) and args[index] == "push":
-            refs = args[index + 1:]
-            ref = next((part.rsplit(":", 1)[-1].lstrip("+") for part in reversed(refs)
-                        if not part.startswith("-")), None)
-            return Match("protected-push", ref=ref)
+            positional = []
+            tail = args[index + 1:]
+            cursor = 0
+            while cursor < len(tail):
+                word = tail[cursor]
+                if word in ("--repo", "--receive-pack", "--exec", "--push-option", "-o"):
+                    cursor += 2
+                    continue
+                if not word.startswith("-"):
+                    positional.append(word)
+                cursor += 1
+            refs = positional if _option(tail, "--repo") else positional[1:]
+            ref = refs[0].rsplit(":", 1)[-1].lstrip("+") if len(refs) == 1 else None
+            flags = frozenset({"unparsed"}) if ref is None else frozenset()
+            return Match("protected-push", ref=ref, flags=flags)
     if program == "gh":
         repository = _option(args, "--repo", "-R")
         # gh permits its repository/hostname global options before the command.
@@ -171,7 +215,8 @@ def _command(words: list[str], paths: Sequence[str], depth: int) -> Match | None
             tail = args[2:]
             pr = int(tail[0]) if tail and tail[0].isdigit() else None
             head = _head(_option(tail, "--match-head-commit"))
-            flags = {flag for flag in ("auto", "admin") if "--" + flag in tail}
+            flags = {flag for flag in ("auto", "admin")
+                     if any(word == "--" + flag or word.startswith("--" + flag + "=") for word in tail)}
             if head:
                 flags.add("pinned")
             return Match("pr-merge", repository=repository, pr=pr, head=head, flags=frozenset(flags))
@@ -196,14 +241,113 @@ def _command(words: list[str], paths: Sequence[str], depth: int) -> Match | None
     return None
 
 
-def _shell(text: str, paths: Sequence[str], depth: int = 0) -> Match | None:
-    path = _refused(text, paths)
-    if path:
-        return Match("key-file-read", path=path)
+def _comment_start(text: str, index: int) -> bool:
+    return text[index] == "#" and (index == 0 or text[index - 1].isspace()
+                                   or text[index - 1] in ";&|(){}")
+
+
+def _backtick_end(text: str, start: int) -> int:
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == "`":
+            return index
+        else:
+            index += 1
+    raise ValueError("unclosed command substitution")
+
+
+def _substitution_end(text: str, start: int) -> int:
+    """Find a $() boundary without letting quoted/comment parentheses close it."""
+    contexts = [None]
+    quote = None
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif char == "`":
+            index = _backtick_end(text, index)
+        elif char == "$" and text[index:index + 2] == "$(":
+            contexts.append(quote)
+            quote = None
+            index += 1
+        elif char == "(" and quote is None:
+            contexts.append(None)
+        elif char == ")" and quote is None:
+            quote = contexts.pop()
+            if not contexts:
+                return index
+        elif quote is None and _comment_start(text, index):
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            index = newline
+        index += 1
+    raise ValueError("unclosed command substitution")
+
+
+def _shell_parts(text: str) -> tuple[str, list[str]]:
+    """Separate executable substitutions and discard non-executable comments."""
+    cleaned, substitutions = [], []
+    quote = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'":
+            if text[index:index + 2] != "\\\n":
+                cleaned.append(text[index:index + 2])
+            index += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif char == "$" and text[index:index + 2] == "$(":
+            end = _substitution_end(text, index + 1)
+            substitutions.append(text[index + 2:end])
+            cleaned.append("__adt_substitution__")
+            index = end + 1
+            continue
+        elif char == "`":
+            end = _backtick_end(text, index)
+            substitutions.append(text[index + 1:end])
+            cleaned.append("__adt_substitution__")
+            index = end + 1
+            continue
+        elif quote is None and _comment_start(text, index):
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            index = newline
+            char = "\n"
+        cleaned.append(char)
+        index += 1
+    return "".join(cleaned), substitutions
+
+
+def _shell(text: str, paths: Sequence[str], depth: int = 0,
+           inherited: Sequence[str] = ()) -> Match | None:
     if depth > 10:
         return _unparsed(text, paths)
     try:
-        lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()\n")
+        cleaned, substitutions = _shell_parts(text)
+        path = _refused(cleaned, paths)
+        if path:
+            return Match("key-file-read", path=path)
+        lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=";&|(){}\n")
         lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
         lexer.commenters = ""
@@ -211,10 +355,11 @@ def _shell(text: str, paths: Sequence[str], depth: int = 0) -> Match | None:
     except ValueError:
         return _unparsed(text, paths)
     segment = []
-    matches = []
+    matches = [match for command in substitutions
+               if (match := _shell(command, paths, depth + 1, inherited)) is not None]
     for word in [*words, ";"]:
-        if all(char in ";&|()\n" for char in word):
-            match = _command(segment, paths, depth)
+        if all(char in ";&|(){}\n" for char in word):
+            match = _command(segment, paths, depth, inherited)
             if match:
                 matches.append(match)
             segment = []
@@ -227,6 +372,8 @@ def _shell(text: str, paths: Sequence[str], depth: int = 0) -> Match | None:
     if len(matches) > 1 and any(match.effect == "pr-merge" for match in matches):
         # One Match cannot authorize two targets. Let the unpinned-merge rule refuse it.
         return Match("pr-merge", flags=frozenset({"compound", "unparsed"}))
+    if len(matches) > 1:
+        return Match("protected-push", flags=frozenset({"compound", "unparsed"}))
     return matches[0] if matches else None
 
 

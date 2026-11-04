@@ -118,6 +118,57 @@ class TestGuardrail(unittest.TestCase):
         self.assertEqual(match.effect, "pr-merge")
         self.assertNotIn("pinned", match.flags)
 
+    def test_effective_option_values(self):
+        for method in ("-XPUT", "-XDELETE"):
+            self.effect(f"gh api {method} repos/O/R/git/refs/heads/main", "api-ref-write")
+        for flag in ("auto", "admin"):
+            match = self.command(f"gh pr merge 12 --match-head-commit {HEAD} --{flag}=true")
+            self.assertIn(flag, match.flags)
+        for options in ("-ROther/Repo", "--repo O/R --repo Other/Repo"):
+            self.assertEqual(self.command(f"gh pr merge 12 {options}").repository, "Other/Repo")
+        other = "b" * 40
+        self.assertEqual(self.command(f"gh pr merge 12 --match-head-commit {HEAD} --match-head-commit={other}").head, other)
+        self.assertNotIn("pinned", self.command(f"gh pr merge 12 --match-head-commit {HEAD} --match-head-commit invalid").flags)
+        self.assertIsNone(self.command("gh api -XGET repos/O/R/git/refs/heads/main"))
+
+    def test_comment_cannot_pin_merge(self):
+        match = self.command(f"gh pr merge 12 # --match-head-commit {HEAD}")
+        self.assertIsNone(match.head)
+        self.assertNotIn("pinned", match.flags)
+        self.assertEqual(self.command(f"gh pr merge 12 --match-head-commit {HEAD} # note").head, HEAD)
+        self.assertIsNone(self.command("echo ready # gh pr merge 12"))
+
+    def test_shell_constructs(self):
+        for command in ("if true; then gh pr merge 12; fi", "{ gh pr merge 12; }",
+                        "if gh pr merge 12; then echo done; fi", "! gh pr merge 12",
+                        'echo "$(gh pr merge 12)"', "echo `gh pr merge 12`",
+                        'echo "$(echo x; gh pr merge 12)"'):
+            with self.subTest(command=command):
+                self.effect(command, "pr-merge")
+        for command in ("echo '$(gh pr merge 12)'", "echo '`gh pr merge 12`'"):
+            self.assertIsNone(self.command(command), command)
+
+    def test_wrapper_composition_and_context(self):
+        for command in ("FOO=1 env gh pr merge 12", "env FOO=1 env gh pr merge 12"):
+            self.effect(command, "pr-merge")
+        self.effect('env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath '
+                    'GIT_CONFIG_VALUE_0=/tmp bash -c "git commit -m x"', "hook-bypass")
+        self.assertIsNone(self.command('env FOO=1 bash -c "git status"'))
+        self.assertIsNotNone(self.command("env " * 12 + "gh pr view 12"))
+
+    def test_literal_key_path_spellings(self):
+        for path in ('/keys/"operator.key"', '/keys/../keys/operator.key'):
+            self.assertEqual(self.effect(f"cat {path}", "key-file-read").path, REFUSED[0])
+        self.assertIsNone(self.command('cat /keys/"ordinary.key"'))
+
+    def test_multiple_push_targets(self):
+        for command in ("git push origin HEAD:main HEAD:topic",
+                        "git push origin HEAD:topic; git push origin HEAD:main"):
+            match = self.effect(command, "protected-push")
+            self.assertIsNone(match.ref)
+            self.assertIn("unparsed", match.flags)
+        self.assertEqual(self.command("git push origin HEAD:topic").ref, "topic")
+
     def test_parse_prepush(self):
         rows = g.parse_prepush(f"refs/heads/a {HEAD} refs/heads/main {'b'*40}\n"
                               f"refs/heads/a {'c'*40} refs/heads/v3 {HEAD}\n"
