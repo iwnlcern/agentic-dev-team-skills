@@ -409,6 +409,18 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_window.py",
+    "sha256": "5a479b117faf3edb8c2b0bd6ecddd0de2aefc04867ee10ee9f24e6639a296971",
+    "source": "tools/adapters/tests/test_window.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/window.py",
+    "sha256": "65c0430ee0935bd265f8b883e4718ac95eb76daf7a81128d2c170a90df44d86d",
+    "source": "tools/adapters/window.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/check-relay-lint-fixtures.py",
     "sha256": "7caa96a88202669445bf6f5da7b0d134f19e19ae8586132f28dd078fb216240f",
     "source": "tools/check-relay-lint-fixtures.py"
@@ -10981,6 +10993,18 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_window.py",
+    "sha256": "5a479b117faf3edb8c2b0bd6ecddd0de2aefc04867ee10ee9f24e6639a296971",
+    "source": "tools/adapters/tests/test_window.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/window.py",
+    "sha256": "65c0430ee0935bd265f8b883e4718ac95eb76daf7a81128d2c170a90df44d86d",
+    "source": "tools/adapters/window.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/check-relay-lint-fixtures.py",
     "sha256": "7caa96a88202669445bf6f5da7b0d134f19e19ae8586132f28dd078fb216240f",
     "source": "tools/check-relay-lint-fixtures.py"
@@ -21466,6 +21490,18 @@
     "path": "adt-pair/tools/adapters/tests/test_shell_lex.py",
     "sha256": "5dd94d2391ff6a66e1a94bb2e8c993270faad386458c6c5d2dce8a5adc1078ad",
     "source": "tools/adapters/tests/test_shell_lex.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_window.py",
+    "sha256": "5a479b117faf3edb8c2b0bd6ecddd0de2aefc04867ee10ee9f24e6639a296971",
+    "source": "tools/adapters/tests/test_window.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/window.py",
+    "sha256": "65c0430ee0935bd265f8b883e4718ac95eb76daf7a81128d2c170a90df44d86d",
+    "source": "tools/adapters/window.py"
   },
   {
     "kit_version": "2.9.7",
