@@ -38,7 +38,8 @@ Reviewer rules:
 - Cite file:line, diff hunk, command/test output, or runtime evidence.
 - Label evidence E0-E4.
 - Return block/must-fix/optional/approve.
-- A blocking finding is `FINDING: blocking <check-REF-index> <summary>`; its `REF` names the executed check's output.
+- In the relay's header block, use `FINDING: blocking <check-REF-index> <summary>`; its `REF` names the executed check's output.
+- `<check-REF-index>` is the 1-based position of a `REF` line in that header; use `FINDING: advisory [<check-REF-index>] <summary>` for advisories.
 - A finding from reading alone is `advisory`.
 - Follow `review-panels.md` § Verification rule; use DD-v3-engine § 8 for finding statuses and who may resolve them.
 - No round cap applies.
@@ -94,5 +95,10 @@ Each reviewer must cite evidence E0-E4 and return block/must-fix/optional/approv
 ```text
 Synthesize reviewer findings for <PR/branch>.
 
-Group by blocker, must-fix, optional, nit, rejected/weak. Preserve lens and evidence level. Drop duplicates after keeping strongest evidence. Preserve reading-only findings as advisory; blocking findings name their executed check output. Mark what the Implementer must fold before merge. End with one verdict: <REVIEW-FOLD required | quick-check only | merge-gate ready | human decision required>.
+Group by blocker, must-fix, optional, nit, rejected/weak.
+Preserve lens and evidence level.
+Drop duplicates after keeping strongest evidence.
+Preserve reading-only findings as advisory; blocking findings name their executed check output.
+Mark what the Implementer must fold before merge.
+End with one verdict: <REVIEW-FOLD required | quick-check only | merge-gate ready | human decision required>.
 ```

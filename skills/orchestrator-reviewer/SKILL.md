@@ -20,8 +20,9 @@ Before any substantive output, apply `protocol.md`. In read-only/report-only pha
 
 Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.
 Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.
-Use the claim-kind table in DD-v3-authority A-OP2 for the quick set, waiver and held state on reviewer silence; the section pointer will be supplied by erratum when that table locks.
-At release only, run the release-readiness commands in DD-v3-tests § 3.2: `python3 tools/release-check.py full`, `python3 tools/release-check.py consumers`, `python3 tools/release-check.py frank` and `python3 tools/release-check.py docs`, or `python3 tools/release-check.py all` for all four.
+The claim kinds are the authority pair's (DD-v3-authority A-OP2); until its table is published, verify every claim by the rule above.
+At release only, for the kit repository's own release, run `python3 tools/release-check.py full --out <dir under $HOME>`.
+The release runner's planned subcommands are `consumers`, `frank`, `docs` and `all` (DD-v3-tests § 3.2); each must exist at the release head.
 Cite each command's output file.
 `CC` is visibility only; it is not a verification request or a reply obligation.
 

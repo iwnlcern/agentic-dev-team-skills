@@ -45,22 +45,32 @@ For **C++**, explicitly check RAII, ownership/lifetimes, dangling references, `c
 
 ## Reviewer output
 
+In the relay's header block:
+
+```text
+FINDING: blocking <check-REF-index> <summary>
+FINDING: advisory [<check-REF-index>] <summary>
+```
+
+Put `FINDING` lines in the relay's header block; `<check-REF-index>` is the 1-based position of a `REF` line in that header.
+Square brackets mark the optional advisory index; omit them in an actual line.
+The finding syntax is decided by `_findings` in `tools/relay_engine/header.py`; the status set is `_FINDING_STATUS` in `tools/relay_engine/schema.py`.
+
+In the review body:
+
 ```text
 Lens:
 Verdict: <block | must-fix | optional | approve>
 Evidence: <claim -> E0-E4 -> source>
-Findings:
-FINDING: blocking <check-REF-index> <summary>
-Advisory: <reading-only observation and suggested follow-up>
 Boundary contract: <pass/fail/not applicable>
 Live verification impact: <none | required | missing>
 Optional fold-ins worth doing cheaply:
 ```
 
-A blocking finding uses the form above: its `REF` names the executed check's output.
+A blocking finding's `REF` names the executed check's output.
 A finding from reading alone is `advisory`.
-For finding statuses (`open`, `fixed`, `fix-accepted`, `withdrawn`) and who may resolve them, use the record in DD-v3-engine § 8.
-No round cap applies; use DD-v3-engine § 8's state view for the round count and loop flag.
+For who may resolve a finding, use DD-v3-engine § 8.
+No round cap applies; the loop signal is in DD-v3-engine § 8 and the round count in § 9.
 
 ## Verification rule
 
@@ -71,7 +81,8 @@ File the outputs and name them in the review.
 
 ## Consolidation rules
 
-- `block` prevents merge until fixed or human-overridden.
+- A blocking finding blocks until `fix-accepted` or `withdrawn`; only the raiser or the orchestrator resolves it (DD-v3-engine § 8).
+- Panel verdicts `block` and `must-fix` map to `blocking` findings; `optional` maps to `advisory`.
 - `must-fix` should be folded before merge.
 - `optional` is Implementer-discretion unless human-directed.
 - Nits do not block.

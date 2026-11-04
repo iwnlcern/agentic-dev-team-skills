@@ -128,7 +128,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-reviewer/SKILL.md",
-    "sha256": "b979c187d5b7863d8bd98f4de7617314ab5683764b03bcd719a8a02adb4c3cd0",
+    "sha256": "2ccc00c907a78f716a996061b1e0be97365b828fb649cb3443fa5424de96f0f9",
     "source": "skills/master-reviewer/SKILL.md"
   },
   {
@@ -152,13 +152,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-reviewer/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-reviewer/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -200,13 +200,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-planner/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-planner/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -218,7 +218,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "afe9f95a4b67a2458a3a55cba310a43d89c789c5f5fc0a52f254a2459858f128",
+    "sha256": "24f25146437da3c33983e9955494e47868a06a7621f265fd5e3971dd1d88b76a",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -236,19 +236,19 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-reviewer/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-reviewer/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-implementer/SKILL.md",
-    "sha256": "15e770abf32a99ed28a25a8afdc43fecfc825d01788d1e202bb3e20ae655e593",
+    "sha256": "fc43f88cfd940c8603737e435ddb0e9c16da256c192a97f9cfa062184d61d71f",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
@@ -266,7 +266,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-planner/SKILL.md",
-    "sha256": "663b6858b2e7cd7d24b9fcf90b7d3e8c56ec02bcfee58173a4edce205cb1e8a0",
+    "sha256": "9f1c77b3c09b3058d92f88d3c751027d135d411f2c89c4fefb15b5ff610853b3",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -290,13 +290,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-planner/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-planner/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -10766,13 +10766,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-planner/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-planner/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -10784,7 +10784,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "afe9f95a4b67a2458a3a55cba310a43d89c789c5f5fc0a52f254a2459858f128",
+    "sha256": "24f25146437da3c33983e9955494e47868a06a7621f265fd5e3971dd1d88b76a",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -10802,19 +10802,19 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-implementer/SKILL.md",
-    "sha256": "15e770abf32a99ed28a25a8afdc43fecfc825d01788d1e202bb3e20ae655e593",
+    "sha256": "fc43f88cfd940c8603737e435ddb0e9c16da256c192a97f9cfa062184d61d71f",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
@@ -10832,7 +10832,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-planner/SKILL.md",
-    "sha256": "663b6858b2e7cd7d24b9fcf90b7d3e8c56ec02bcfee58173a4edce205cb1e8a0",
+    "sha256": "9f1c77b3c09b3058d92f88d3c751027d135d411f2c89c4fefb15b5ff610853b3",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -10856,13 +10856,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-planner/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-planner/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {
@@ -21296,7 +21296,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-implementer/SKILL.md",
-    "sha256": "e970b161ddf261c8003c92a9d170c13ad5f07990f104b59d26c9037448809f9d",
+    "sha256": "e7cc9b2cad5b77cc55df6b3f30e325112ac6c4413ba1ef6b20214584729dcdc7",
     "source": "skills/pair-implementer/SKILL.md"
   },
   {
@@ -21314,7 +21314,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-planner/SKILL.md",
-    "sha256": "6d354fa6df97e9a80f003faea726b57a309040c878244f9faca0cb38845daa67",
+    "sha256": "2ac6bd79ce0e3eef7873c692bcd26f827c032e9cc1cf091ea8c2d7a7af95446b",
     "source": "skills/pair-planner/SKILL.md"
   },
   {
@@ -21338,13 +21338,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-planner/review-panels.md",
-    "sha256": "6f61bffd40a7fbb2f33823ac69ba3a68fa80b7a1a6ab3c0e8ce39a6b2bc9447d",
+    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
     "source": "shared/review-panels.md"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-planner/reviewer-spawn-prompts.md",
-    "sha256": "c1411dc3870c7453b360b879b62a18f1cd04e48b490c935072df2caef43fe18f",
+    "sha256": "8b2cae033f22f50a381aec5f12e9fe4b45a68b03bf98e870f0ef5ff101f72e70",
     "source": "shared/reviewer-spawn-prompts.md"
   },
   {

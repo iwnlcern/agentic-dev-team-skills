@@ -1,78 +1,135 @@
 """B-2: shipped reviewer instructions and their packaging contract."""
 
-from test_kit_stage_a import KitTreeCase, PLUGINS, ROOT
+import ast
+import re
 
+from test_kit_stage_a import KitTreeCase, PLUGINS, ROOT, _generator, _section
 
 REVIEWERS = {
     "orchestrator-reviewer": ("adt-orchestrator", "adt-master"),
     "master-reviewer": ("adt-master",),
 }
 ASSETS = ("review-panels.md", "reviewer-spawn-prompts.md")
+VERIFICATION_RULE = [
+    "Re-running a claim's own checks never verifies it alone.",
+    "For text, run a probe with a control against the behaviour the sentence states.",
+    "For tests, run a mutant the tests should catch.",
+    "File the outputs and name them in the review.",
+]
+REMOVED = (
+    "become questions or are dropped",
+    "Findings without evidence",
+    "Convert weak claims into questions",
+    "Convert E0-only findings into questions",
+    "Review those relays on your own cadence",
+)
+PLAN_CLAIMS = "Every codebase claim in a plan carries its search or probe; the reviewer re-runs at least the ones the plan's correctness rests on, and for each completeness claim also derives its own search with a control."
+RELEASE = "At release only, for the kit repository's own release, run `python3 tools/release-check.py full --out <dir under $HOME>`."
+AUTHORITY = "The claim kinds are the authority pair's (DD-v3-authority A-OP2); until its table is published, verify every claim by the rule above."
+QUESTION = "Ask for an operator decision with a `KIND: QUESTION` relay addressed to `operator` (DD-v3-engine § 3)."
+PLAIN = "Write every operator question in plain language: explain the decision and its consequences without requiring knowledge of relay internals."
+
+
+def lines(text):
+    return text.splitlines()
 
 
 class TestReviewRules(KitTreeCase):
+    def shared_copies(self, name):
+        return {f"shared/{name}": self.canonical_text(f"shared/{name}"), **self.installed_shared_copies(name)}
+
     def test_blocking_finding_needs_check(self):
+        wanted = {
+            "review-panels.md": [
+                "FINDING: blocking <check-REF-index> <summary>",
+                "FINDING: advisory [<check-REF-index>] <summary>",
+                "Put `FINDING` lines in the relay's header block; `<check-REF-index>` is the 1-based position of a `REF` line in that header.",
+                "A blocking finding's `REF` names the executed check's output.",
+                "A finding from reading alone is `advisory`.",
+                "The finding syntax is decided by `_findings` in `tools/relay_engine/header.py`; the status set is `_FINDING_STATUS` in `tools/relay_engine/schema.py`.",
+                "No round cap applies; the loop signal is in DD-v3-engine § 8 and the round count in § 9.",
+            ],
+            "reviewer-spawn-prompts.md": [
+                "- In the relay's header block, use `FINDING: blocking <check-REF-index> <summary>`; its `REF` names the executed check's output.",
+                "- `<check-REF-index>` is the 1-based position of a `REF` line in that header; use `FINDING: advisory [<check-REF-index>] <summary>` for advisories.",
+                "- A finding from reading alone is `advisory`.",
+            ],
+        }
         for name in ASSETS:
-            copies = {f"shared/{name}": self.canonical_text(f"shared/{name}")}
-            copies.update(self.installed_shared_copies(name))
-            for where, text in copies.items():
+            for where, text in self.shared_copies(name).items():
                 with self.subTest(where=where):
-                    self.assertIn("FINDING: blocking <check-REF-index> <summary>", text)
-                    self.assertIn("REF` names the executed check's output", text)
-                    self.assertIn("reading alone is `advisory`", text)
-                    self.assertNotIn("become questions or are dropped", text)
-        panels = self.canonical_text("shared/review-panels.md")
-        self.assertIn("DD-v3-engine § 8", panels)
-        self.assertIn("No round cap", panels)
+                    body = _section(text, "## Reviewer output" if name == ASSETS[0] else "## Shared review context")
+                    for line in wanted[name]:
+                        self.assertIn(line, lines(body))
+                    for gone in REMOVED:
+                        self.assertNotIn(gone, text)
+                    if name == ASSETS[0]:
+                        consolidation = lines(_section(text, "## Consolidation rules"))
+                        self.assertIn("- A blocking finding blocks until `fix-accepted` or `withdrawn`; only the raiser or the orchestrator resolves it (DD-v3-engine § 8).", consolidation)
+                        self.assertIn("- Panel verdicts `block` and `must-fix` map to `blocking` findings; `optional` maps to `advisory`.", consolidation)
+                        self.assertIn("- Preserve reading-only findings as advisory observations.", consolidation)
 
     def test_reviewer_verification_rule(self):
-        panels = self.canonical_text("shared/review-panels.md")
-        for rule in (
-            "Re-running a claim's own checks never verifies it",
-            "text, run a probe with a control",
-            "tests, run a mutant",
-            "File the outputs and name them",
-        ):
-            self.assertIn(rule, panels)
+        for where, text in self.shared_copies("review-panels.md").items():
+            with self.subTest(where=where):
+                self.assertEqual([line for line in lines(_section(text, "## Verification rule")) if line.strip()], VERIFICATION_RULE)
         for role, tiers in REVIEWERS.items():
             paths = [ROOT / "skills" / role / "SKILL.md"]
-            paths.extend(PLUGINS / tier / "skills" / role / "SKILL.md" for tier in tiers)
+            paths += [PLUGINS / tier / "skills" / role / "SKILL.md" for tier in tiers]
             for path in paths:
                 with self.subTest(path=path):
                     text = path.read_text(encoding="utf-8")
-                    self.assertIn("`review-panels.md` § Verification rule", text)
-                    if path.is_relative_to(PLUGINS):
-                        self.assertTrue((path.parent / "review-panels.md").is_file())
-                    for phrase in ("verification request addressed `TO`", "DD-v3-authority", "DD-v3-tests § 3.2", "At release only", "`CC` is visibility"):
-                        self.assertIn(phrase, text)
+                    body = lines(_section(text, "## Verification requests"))
+                    for line in ("Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.", "Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.", AUTHORITY, RELEASE, "The release runner's planned subcommands are `consumers`, `frank`, `docs` and `all` (DD-v3-tests § 3.2); each must exist at the release head.", "Cite each command's output file.", "`CC` is visibility only; it is not a verification request or a reply obligation."):
+                        self.assertIn(line, body)
+                    for gone in REMOVED:
+                        self.assertNotIn(gone, text)
+                    if role == "orchestrator-reviewer":
+                        self.assertIn("Use those copies as context for an addressed verification request; visibility alone does not assign review work.", lines(_section(text, "## Orchestrator-review visibility gate")))
+        # Check every installed adjacent pointer, including spawn prompts.
+        paths = list(PLUGINS.glob("*/skills/*/reviewer-spawn-prompts.md"))
+        paths += [PLUGINS / tier / "skills" / role / "SKILL.md" for role, tiers in REVIEWERS.items() for tier in tiers]
+        for path in paths:
+            pointers = re.findall(r"`([a-z-]+\.md)` § (Verification rule|Verification[a-z ]*)", path.read_text(encoding="utf-8"))
+            self.assertTrue(pointers, str(path))
+            for name, heading in pointers:
+                target = path.parent / name
+                self.assertTrue(target.is_file(), str(target))
+                self.assertIn(f"## {heading}", lines(target.read_text(encoding="utf-8")))
 
     def test_reviewer_skills_receive_review_panels(self):
+        # Independent consumer row expectation catches a green reversion of the mirror.
+        module = ast.parse(self.canonical_text("tools/check-generate-plugins.py"))
+        mapping = next(n.value for n in module.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "LOCKED_SHARED_ASSETS" for t in n.targets))
+        rows = {ast.literal_eval(k): v for k, v in zip(mapping.keys, mapping.values)}
+        for name in ASSETS:
+            self.assertEqual(set(ast.literal_eval(rows[name].args[0])), {"pair-planner", "orchestrator-planner", "orchestrator-reviewer", "master-reviewer"})
         for role, tiers in REVIEWERS.items():
             self.assertEqual(set(self.installed_texts(f"skills/{role}/SKILL.md")), set(tiers))
             for tier in tiers:
                 for name in ASSETS:
                     with self.subTest(tier=tier, role=role, name=name):
-                        banner = f"<!-- GENERATED by tools/generate-plugins.py from shared/{name} — kit v2.9.7. Do not edit; edit the canonical source. -->\n\n"
+                        banner = f"<!-- GENERATED by tools/generate-plugins.py from shared/{name} — kit v{_generator().KIT_VERSION}. Do not edit; edit the canonical source. -->\n\n"
                         expected = banner.encode() + (ROOT / "shared" / name).read_bytes()
                         path = PLUGINS / tier / "skills" / role / name
                         self.assertTrue(path.is_file(), str(path))
                         self.assertEqual(path.read_bytes(), expected)
 
     def test_plan_claims_carry_searches(self):
-        for role in ("pair-planner", "pair-implementer"):
+        anchors = {"pair-planner": "Decompose it into right-sized tasks with their file structure, and review it yourself before sending it (see Practices).", "pair-implementer": "Review your pair Planner's written plan before implementation."}
+        for role, anchor in anchors.items():
             rel = f"skills/{role}/SKILL.md"
-            copies = {rel: self.canonical_text(rel)}
-            copies.update(self.installed_texts(rel))
+            copies = {rel: self.canonical_text(rel), **self.installed_texts(rel)}
             for where, text in copies.items():
                 with self.subTest(role=role, where=where):
-                    self.assertIn("Every codebase claim in a plan carries its search or probe", text)
-                    self.assertIn("reviewer re-runs at least the ones the plan's correctness rests on", text)
+                    body = lines(text)
+                    self.assertEqual(body.count(PLAN_CLAIMS), 1)
+                    self.assertEqual(body[body.index(anchor) + 1], PLAN_CLAIMS)
 
     def test_spawn_prompts_question_rule(self):
-        copies = {"canonical": self.canonical_text("shared/reviewer-spawn-prompts.md")}
-        copies.update(self.installed_shared_copies("reviewer-spawn-prompts.md"))
-        for where, text in copies.items():
+        for where, text in self.shared_copies("reviewer-spawn-prompts.md").items():
             with self.subTest(where=where):
-                self.assertNotIn("HUMAN_GATE_REQUIRED", text)
-                for phrase in ("KIND: QUESTION", "`operator`", "plain language", "`review-panels.md` § Verification rule"):
-                    self.assertIn(phrase, text)
+                self.assertIsNone(re.search(r"human[\s_-]*gate[\s_-]*required", text, re.I))
+                intro = lines(text.split("## Shared review context", 1)[0])
+                for line in (QUESTION, PLAIN, "Use `NEEDS: answer` for seat-to-seat questions.", "Follow `review-panels.md` § Verification rule for every spawned review."):
+                    self.assertIn(line, intro)
