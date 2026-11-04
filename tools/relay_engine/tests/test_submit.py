@@ -311,9 +311,22 @@ class TestRefusals(Store):
                                 hashlib.sha256(b"n\n").hexdigest()))
 
     def test_home_is_the_password_entry(self):
-        with mock.patch.dict(os.environ, {"HOME": "/nonexistent"}):
-            self.assertEqual(submit._home(), os.path.realpath(
-                __import__("pwd").getpwuid(os.getuid()).pw_dir))
+        # the entry is mocked, so the assertion holds on a host whose uid has
+        # none (the linux release leg's container); it still ignores $HOME
+        with tempfile.TemporaryDirectory() as name:
+            entry = mock.Mock(pw_dir=name)
+            with mock.patch.dict(os.environ, {"HOME": "/nonexistent"}), \
+                    mock.patch("pwd.getpwuid", return_value=entry) as getpwuid:
+                self.assertEqual(submit._home(), os.path.realpath(
+                    __import__("pwd").getpwuid(os.getuid()).pw_dir))
+            self.assertEqual(getpwuid.call_args_list[0], mock.call(os.getuid()))
+
+    def test_no_password_entry_refuses_home_path(self):  # PR-3 fold Q1(a)
+        missing = KeyError("getpwuid(): uid not found: %d" % os.getuid())
+        with mock.patch("pwd.getpwuid", side_effect=missing):
+            error = self.refused("E-REF-UNRESOLVED", draft(refs=("file:~/notes.txt",)), line=6)
+            self.assertIn("no home directory in the password database", error.cause)
+            self.submit(draft())  # control: a draft with no ~/ path still admits
 
 
 class TestIds(Store):

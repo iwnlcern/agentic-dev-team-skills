@@ -363,8 +363,15 @@ def _resolve(conn, ctx, spec):
                                        header._display(project or ctx.sender.project_id, 40)))
         return {"target_type": "relay", "target_relay_id": row[0]}
     if spec.kind == "path":
-        path = (os.path.join(_home(), spec.path[2:]) if spec.path.startswith("~/")
-                else spec.path)
+        path = spec.path
+        if path.startswith("~/"):
+            try:
+                home = _home()
+            except KeyError:  # a uid with no password entry is a real host (PR-3 fold Q1)
+                raise errors.error_for(
+                    "E-REF-UNRESOLVED", value=header._display(spec.text),
+                    reason="this user has no home directory in the password database") from None
+            path = os.path.join(home, path[2:])
         return {"target_type": "path", "target_path": path,
                 "digest_at_submit": refs.file_digest(Path(path))}
     checkout = ctx.directory.checkout(spec.repo)
