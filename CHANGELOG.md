@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Kit 3.0 is a large change, not a patch; its migration steps will be listed here before the release.
+
+### Changed
+
+- Superpowers is no longer required: each role skill states the practices it relies on, and Planner skills read a trimmed brainstorming reference vendored at `vendor/obra/superpowers/brainstorming.md` (MIT, modified from Superpowers 7.0.0).
+- Every plugin ships a paper-airplane icon, drawn by the generator.
+- README gains an `## Upgrade` section covering session and daemon restart order, Codex hook re-approval and cache deletion, resumed Codex sessions, and the Python version.
+
+### Fixed
+
+- Three shipped statements were wrong: moving an engine-managed sprint root does break its engine record; a relay filename's role comes from the `ROLE` header; Codex re-approval of kit hooks recurs after every kit update.
+- A relative link in the derived pair-planner skill no longer dies one directory deeper.
+
 ## [2.9.7] — 2026-11-03
 
 A substantial production-fix release despite the patch-step number: authority verification, relay validation, watcher recovery, and the kit's operating guidance change together.
@@ -71,7 +84,7 @@ B2's delivery adapters shipped in PR 25:
 
 - **Every generated plugin declares an always-on `relay-monitor` watcher** (`monitors/monitors.json`) that re-reads the run's rendered `INDEX.md` and delivers each addressed row to the session as one JSON line; a PostToolUse hook binds the seat after every `tools/relay submit` with a visible receipt.
   The engine is unaltered; the terminal pointer block remains mandatory as the fallback.
-- **Codex arming and Stop drain hooks** for the kit's Codex fork; stock Codex stays fallback-only; `adt-codex` launcher; one-time `/hooks` re-trust.
+- **Codex arming and Stop drain hooks** for the kit's Codex fork; stock Codex stays fallback-only; `adt-codex` launcher; Codex asks to re-approve each kit hook with `/hooks` after every kit update.
 - **Operator notification mode** (`relay-monitor.py operator`, macOS `osascript`) and `replay` for loss-marker recovery.
 - **Relay guard narrowed** to quote-aware write destinations under a relay root (the four read-only false positives are silent; a stderr redirect into a relay file still fires).
 - Protocol gains the Delivery-mode section; role skills and templates state the delivery state in the boot acknowledgment.
@@ -121,7 +134,7 @@ A distribution-hardening patch: the relay engine ships inside every plugin bundl
 - **Engine distribution.**
   The relay engine and CLI ship inside all three plugin bundles under `tools/`, with adapter-ladder resolution switched to the bundled engine and version/fingerprint identity reporting (`relay version`) for consumer repointing.
 - **Dual-host relay-lint hooks.**
-  `hooks/hooks.json` ships in every bundle: the PostToolUse normalizer gains additive apply_patch envelope-target coverage — exact-target lint with silent-clean success, an explicit noisy UNLINTED fallback, and per-pass dedup of repeated identical targets — while the Bash guard is unchanged by the hooks work itself — its only change this release is the ladder switch above; a live-Codex witness proves the one-time trust prompt, blocked-invalid feedback, and silent-clean behavior on codex-cli 0.149.0.
+  `hooks/hooks.json` ships in every bundle: the PostToolUse normalizer gains additive apply_patch envelope-target coverage — exact-target lint with silent-clean success, an explicit noisy UNLINTED fallback, and per-pass dedup of repeated identical targets — while the Bash guard is unchanged by the hooks work itself — its only change this release is the ladder switch above; a live-Codex witness proves the one-time trust prompt, blocked-invalid feedback, and silent-clean behavior on codex-cli 0.149.0; later releases re-prompt after every kit update (see the 2.9.5 entry).
 - **Codex plugin install route.**
   The README's Codex section now leads with the verified `codex plugin marketplace add` / `codex plugin add` route; manual `.agents/skills` copy is the documented fallback for air-gapped installs.
 - **Derived pair-skill variants (option C).**

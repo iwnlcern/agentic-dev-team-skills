@@ -122,6 +122,18 @@ Manual installs migrate by renaming the skill dirs (skill-dir names now equal ro
 - historical `agent-pair-planner` → `pair-planner`
 - historical `agent-pair-implementer` → `pair-implementer`
 
+## Upgrade
+
+Install a kit update once, at a point where every seat can restart, then work through these in order.
+
+- A running session keeps the plugin version it started with, so restart a root's seat sessions before restarting that root's daemon; a daemon on the newer kit refuses older seats with `E-VERSION-MISMATCH`.
+- `codex plugin add` deletes the previous version's cache while running Codex seats still use it, whereas Claude Code keeps each version folder that a running session still uses, marking it with per-session files in that folder's `.in_use` directory; restart Codex seats as soon as Codex is updated.
+- Codex holds every kit hook after every kit update ("plugin contents changed; hook approval required"); approve them again with `/hooks` in each Codex seat.
+- A resumed Codex session runs no hook until its first turn, so type once in it before expecting its relay watch to re-arm.
+- Under macOS's stock `/usr/bin/python3` (3.9) the bind hook exits 0 and records nothing, so put Python 3.11 or newer first on `PATH` before starting sessions.
+
+Recovery from a version mismatch, hook trust and the watcher are covered in [the adapter guide](tools/adapters/README.md).
+
 ## Usage
 
 Operator quickstart: open one session per seat and load its role skill. For a standalone pair, boot the
@@ -168,17 +180,17 @@ implementation into governance seats.
 
 ## Requirements
 
-- **Superpowers** — the skills build on its brainstorming, planning, plan-execution, and review
-  procedures. If it is not installed, the skills tell the agent to stop and report the missing
-  prerequisite.
+- **Superpowers is not needed.** Each role skill states the practices it relies on, and the Planner skills read a trimmed brainstorming reference vendored with the kit.
+  Keeping Superpowers enabled still adds its `using-superpowers` start-of-session text (3,192 bytes in Superpowers 7.0.0) to every session.
 - **Python 3.11 or newer** — required as the first `python3` on `PATH` by the engine entry point `tools/relay`, `tools/relay-lint.py`, and the Python host-adapter entry points in `tools/adapters/`.
   The skills can report that optional linting is unavailable; those Python entry points still require the interpreter.
   Install the generated `tools/` directory under your skills root, or point at it however your host resolves skills.
 
 ## License
 
-Apache-2.0 — see `LICENSE`. The vendored `grill-me` skill under `vendor/mattpocock/grill-me/` is MIT
-© 2026 Matt Pocock; its license is in `LICENSES/`.
+Apache-2.0 — see `LICENSE`.
+The vendored `grill-me` skill under `vendor/mattpocock/grill-me/` is MIT © 2026 Matt Pocock; its license is `LICENSES/mattpocock-skills-MIT.txt`.
+The vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` is modified from Superpowers 7.0.0 and is MIT © 2025 Jesse Vincent; its license is `LICENSES/obra-superpowers-MIT.txt`.
 
 ## Status
 

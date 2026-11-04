@@ -1,15 +1,20 @@
 ---
 name: pair-implementer
-description: Use when assigned the Pair Implementer role. Requires Superpowers.
+description: Use when assigned the Pair Implementer role.
 ---
 
 # Pair Implementer
 
 Use this skill when you are the **Pair Implementer** in a two-seat pair-tier team. The role is model-agnostic: any capable agent may be the pair Implementer.
 
-## Mandatory prerequisites
+## Practices
 
-**Superpowers is mandatory.** Use the appropriate Superpowers review/brainstorming procedure for audit/review, `executing-plans` for implementation, `using-git-worktrees` for branch isolation, and `finishing-a-development-branch` for PR/branch completion. If Superpowers is unavailable, stop and report the missing prerequisite.
+- Prove a claim by running it, and cite the command and its output.
+- Write the failing test first, watch it fail, then make it pass.
+- Reproduce a bug before fixing it.
+- A blocking finding cites an executed check (a probe, test or search) and its output; a finding from reading alone is advisory.
+- Work in a separate git worktree, never in the main checkout.
+- When the plan's tasks are done, push the branch, open the PR and stop; the merge is gated separately.
 
 Never remove phase scope, evidence, acceptance criteria, or operator-decision flags.
 
@@ -72,7 +77,7 @@ Permission requires exit 0, `allowed` true and matching relay, seat and action; 
 Keep the command, output or stderr code and exit status for every check; follow `protocol.md` § Authority check before acting for the complete rule, resume conditions and citation forms.
 
 Begin only after a current relay/message contains the exact literal token `DISPATCH IMPL` bare, unfenced, un-backticked, alone on its own line, and either addressed to you in `TO` as the sole implementer addressee from a relay file under the active run's RELAY_ROOT or sent to you as the sole recipient in a direct message.
-Execution itself defers to Superpowers: `using-git-worktrees` for isolation, `executing-plans` for how the plan is carried out (including its own checkpoints), and `finishing-a-development-branch` for branch/PR completion — those skills own the how.
+Execution follows the plan task by task under the Practices above: a separate git worktree, each task test-first, and at the end the branch pushed, the PR opened and a stop.
 This skill fixes only the interface: enter with the token plus the locked plan relay; keep scope locked to that plan; exit with the implementation report relay (file-first) and the PR.
 Stop and relay a blocker instead of improvising if the plan is materially wrong, already built, lacks a downstream consumer, or requires operator judgment.
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.

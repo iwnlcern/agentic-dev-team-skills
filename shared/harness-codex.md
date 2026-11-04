@@ -24,7 +24,7 @@ Claude Code is this kit's default harness and has no such file.
 
 The procedure in `protocol.md` § Authority check before acting is the same on Codex and does not depend on hooks.
 
-- Plugin-route installs ship the relay-write adapter through `hooks/hooks.json`; Codex presents a one-time content-hash trust prompt when the hook or its script bytes are first encountered or change.
+- Plugin-route installs ship the relay-write adapter through `hooks/hooks.json`; Codex asks to approve the hook when it or its script bytes are first encountered and again whenever they change, which includes every kit update.
 - Manual installs and users who decline that prompt run the linter before every handoff: `python3 <skills-root>/tools/relay-lint.py <relay>`, where `<skills-root>` is the directory the skills were installed into.
 
 ## Instructions files

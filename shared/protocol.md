@@ -162,8 +162,6 @@ For each task it declares the files to create or modify with line anchors, inter
 It carries no implementation bodies, full test bodies, or operational scripts for the Implementer's every step.
 A fenced block is a signature, a command line with its expected output, a file:line pointer, or a schema excerpt.
 
-Inside this kit, this section overrides the code-content bullets of writing-plans (superpowers 6.3.0) No Placeholders rule (“code blocks required for code steps”, “repeat the code”, “without actual test code”) and the placeholder scan in its self-review; the failing-test and minimal-implementation steps keep their place and order and lose their code blocks.
-Writing-plans remains the decomposition procedure: task right-sizing, file structure, bite-sized steps, and the spec-coverage and type-consistency self-review.
 Exact execution binds these items, the bound items: scope rows and out-of-scope lines, acceptance criteria, boundary contracts, task boundaries, declared interfaces, named test behaviors with their assertions, and TDD order; it does not bind snippet bytes.
 The Implementer writes the real code and tests in the worktree under TDD; on other details the worktree wins, and the IMPL report records each difference as a one-line note per task; the approved plan artifact stays untouched during IMPL, and a correction to it takes the post-approve fold below.
 Adding a test or a discriminating control is in bounds.
@@ -743,7 +741,7 @@ RELAY_ROOT=.relays/<RUN_ID>
 <RELAY_ROOT>/INDEX.md
 ```
 
-In a relay filename, `<ROLE>` is the hyphenated lowercase role word from the address grammar, with no spaces.
+In a relay filename, `<ROLE>` comes from the relay's `ROLE` header, not from the address: `_role_slug` in `tools/relay_engine/ledger.py` builds it, so `ROLE: Pair Implementer` files as `pair-implementer` while the address role word is `implementer`.
 
 The relay root is literal `.relays` (a rule, not a default) anchored beside the sprint or lane documents it serves, with exactly one run level `.relays/<RUN_ID>/`.
 The effective root of a run is recorded once, by the INDEX `root:` marker; a `RELAY_ROOT` override or operator-directed divergence is valid only when so recorded.

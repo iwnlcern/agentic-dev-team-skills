@@ -1,13 +1,16 @@
 ---
 name: domain-planner
-description: Use when assigned the Domain Planner role owning a domain spec of record. Requires Superpowers.
+description: Use when assigned the Domain Planner role owning a domain spec of record.
 ---
 
 # Domain Planner
 
-## Mandatory prerequisites
+## Practices
 
-**Superpowers is mandatory.** Use relevant Superpowers procedures for brainstorming, planning, and review. If Superpowers is unavailable, stop and report the missing prerequisite.
+- Prove a claim by running it, and cite the command and its output.
+- Before sending a plan, review it yourself for task sizing, file structure, spec coverage and interface consistency against the Plan contract in `protocol.md`.
+- While finding out what the operator wants, follow the vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` (at the plugin root): open questions first, then play back what you heard.
+- When putting a decision to the operator, ask one question at a time, in everyday words, with your recommendation, as `design-grill` does.
 
 Never omit phase scope, evidence level, acceptance criteria, or operator-decision flags.
 
