@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s tools/kit_tests -v
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -99,6 +100,10 @@ class TestWrongSentences(KitTreeCase):
         for where, text in setup.items():
             cited = set(CITED.findall(text))
             self.assertTrue(expected <= cited, f"{where}: moved-root sentence cites {sorted(cited)}")
+            lint_lines = [line for line in text.splitlines() if line.startswith("- root lint")]
+            self.assertEqual(len(lint_lines), 1, f"{where}: one moved-root lint bullet")
+            for case in ("while the daemon runs", "with the daemon stopped, root lint finds no usable record"):
+                self.assertIn(case, lint_lines[0], f"{where}: lint bullet does not state {case!r}")
 
         protocol = {"shared/protocol.md": self.canonical_text("shared/protocol.md")}
         protocol.update(self.installed_shared_copies("protocol.md"))
@@ -368,6 +373,13 @@ class TestIcon(KitTreeCase):
         self.assertLess(max(max(row[1:]) for row in rows), palette_entries)
         for tier in TIERS:
             self.assertEqual((PLUGINS / tier / ".claude-plugin" / "icon.png").read_bytes(), self.png, tier)
+
+    def test_icon_sha256_pinned(self):
+        """The approved look: a change to the drawing must update this pin in the same commit."""
+        pinned = "907c9ce9469cb4b41613efc438783b8a21a1f6f1053a35544a9ab7e6b6ea900a"
+        self.assertEqual(hashlib.sha256(self.png).hexdigest(), pinned)
+        for tier in TIERS:
+            self.assertEqual(hashlib.sha256((PLUGINS / tier / ".claude-plugin" / "icon.png").read_bytes()).hexdigest(), pinned, tier)
 
     def test_icon_bytes_independent_of_compressor(self):
         stream = b"".join(data for kind, data in _png_chunks(self.png) if kind == b"IDAT")

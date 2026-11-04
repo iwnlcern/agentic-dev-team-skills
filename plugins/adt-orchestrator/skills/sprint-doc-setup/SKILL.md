@@ -36,7 +36,7 @@ A hand-authored root moves with its tree.
 An engine-managed root does not: its engine record keeps the path it was registered at.
 The daemon keeps serving a moved root, also after a restart, but four things break:
 
-- root lint finds no usable record (`read_lint_context` in `tools/relay_engine/daemon.py`), so it names no mismatch and silently re-judges every filed relay;
+- root lint behaves as on an unmoved root while the daemon runs, because it reads the daemon's record, but with the daemon stopped, root lint finds no usable record (`read_lint_context` in `tools/relay_engine/daemon.py`), so it names no mismatch and silently re-judges every filed relay;
 - a relay that would raise an engine notice is refused with `E-DAEMON-DOWN` while the daemon runs, because the notice opens the root at the recorded path (`notice_effect` in `tools/relay_engine/roster.py`);
 - absolute key and draft paths that still name the old place are refused with `E-PATH-ESCAPE` (`_relative` in `tools/relay_engine/client.py`);
 - watcher bindings keep the old root's path (`bind_from_receipt` in `tools/adapters/relay-monitor.py`).

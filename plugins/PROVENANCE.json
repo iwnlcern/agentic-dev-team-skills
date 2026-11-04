@@ -278,7 +278,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "990be9cf38e87bdb6534928fd8e75c71f1e9719a33f9922ad89b8186b70ea5d6",
+    "sha256": "1829cec03b8ffb32f50bde5f6497fe511086917d0ddec9f996f06c20111ae279",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
@@ -10814,7 +10814,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "990be9cf38e87bdb6534928fd8e75c71f1e9719a33f9922ad89b8186b70ea5d6",
+    "sha256": "1829cec03b8ffb32f50bde5f6497fe511086917d0ddec9f996f06c20111ae279",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
@@ -21278,7 +21278,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/sprint-doc-setup/SKILL.md",
-    "sha256": "990be9cf38e87bdb6534928fd8e75c71f1e9719a33f9922ad89b8186b70ea5d6",
+    "sha256": "1829cec03b8ffb32f50bde5f6497fe511086917d0ddec9f996f06c20111ae279",
     "source": "skills/sprint-doc-setup/SKILL.md"
   },
   {
