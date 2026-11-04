@@ -131,11 +131,15 @@ class SessionIdentityTests(TmpEnv):
             42,
         )
         for session in invalid:
-            for constructor in (self.rm.NoteStore, self.rm.LeaderLock):
+            for constructor in (self.rm.NoteStore,):
                 with self.subTest(session=session, store=constructor.__name__):
                     with self.assertRaisesRegex(ValueError, "invalid-session-id"):
                         constructor(session)
         self.assertFalse((self.base / "adt-relay-monitor").exists())
+        for key in ("a..b", "a b", "$(x)", "é", "", None, 42):
+            with self.subTest(window_key=key):
+                with self.assertRaisesRegex(ValueError, "invalid-window-key"):
+                    self.rm.WindowLock(key)
 
     def test_normal_session_ids_store_inside_note_directory(self):
         for session in (
@@ -301,7 +305,7 @@ class NoteStoreTests(TmpEnv):
         self.assertIsNone(rm.resolve_session(ns()))
 
 
-class LeaderLockTests(TmpEnv):
+class WindowLockTests(TmpEnv):
     def test_probe_out_of_range_pid_reads_dead(self):
         for pid in (2**31, 2**63, -(2**63)-1):
             with self.subTest(pid=pid):
@@ -314,15 +318,15 @@ class LeaderLockTests(TmpEnv):
         with mock.patch.object(self.rm, "os", probe_os):
             self.assertEqual(self.rm.process_probe(os.getpid()), "alive")
 
-    def test_second_acquire_blocks_probe_reports_held_and_instance_is_readable(self):
-        a = self.rm.LeaderLock("s")
-        b = self.rm.LeaderLock("s")
-        self.assertTrue(a.acquire(blocking=False))
+    def test_window_lock_second_acquire_fails_and_holder_is_readable(self):
+        a = self.rm.WindowLock("w-s")
+        b = self.rm.WindowLock("w-s")
+        self.assertTrue(a.acquire())
         a.stamp("inst-a")
-        self.assertFalse(b.acquire(blocking=False))
+        self.assertFalse(b.acquire())
         self.assertEqual(b.holder_instance(), "inst-a")
         a.release()
-        self.assertTrue(b.acquire(blocking=False))
+        self.assertTrue(b.acquire())
         b.release()
 
     def test_leader_record_matches_live_process(self):
@@ -1410,6 +1414,79 @@ class FollowProcessMixin:
         return out
 
 
+def utc_lstart(pid):
+    """A live process's start time as `ps` prints it with TZ=UTC (the window test seam's format)."""
+    out = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        capture_output=True, text=True, env=dict(os.environ, TZ="UTC", LC_ALL="C"), check=True,
+    ).stdout
+    return " ".join(out.split())
+
+
+class WindowDoorbellTests(FollowProcessMixin, TmpEnv):
+    """One doorbell per window (DD-v3-adapter § 4.2, A4; plan Task 2)."""
+
+    def window_env(self, pid=None):
+        pid = pid or os.getpid()
+        return {"ADT_WINDOW_PID": str(pid), "ADT_WINDOW_START": utc_lstart(pid)}
+
+    def window_key(self, pid=None):
+        pid = pid or os.getpid()
+        return "cc-%d-%d" % (pid, self.rm.window.lstart_epoch(utc_lstart(pid)))
+
+    def other_window(self):
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (sleeper.kill(), sleeper.wait()))
+        return sleeper.pid
+
+    def test_second_doorbell_in_window_exits_silently(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        first = self.spawn(extra_env=self.window_env())
+        self.wait_note(lambda n: n.get("leader") and n.get("window") == self.window_key())
+        second = self.spawn(extra_env=self.window_env())
+        second.wait(timeout=8)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.stdout.read(), b"")
+        self.assertEqual(second.stderr.read(), b"")
+        self.assertIsNone(first.poll())
+
+    def test_no_standby_records_are_written(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        self.spawn(extra_env=self.window_env())
+        self.wait_note(lambda n: n.get("leader"))
+        second = self.spawn(extra_env=self.window_env())
+        second.wait(timeout=8)
+        self.assertNotIn("standbys", self.rm.NoteStore("psess").load())
+
+    def test_lock_released_on_exit_admits_next(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        first = self.spawn(extra_env=self.window_env())
+        old = self.wait_note(lambda n: n.get("leader"))["leader"]["instance"]
+        first.kill()
+        first.wait(timeout=8)
+        nxt = self.spawn(extra_env=self.window_env())
+        self.wait_note(lambda n: n.get("leader") and n["leader"]["instance"] != old)
+        self.assertIsNone(nxt.poll())
+
+    def test_status_reports_window_holder(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        self.spawn(extra_env=self.window_env())
+        self.wait_note(lambda n: n.get("leader") and n.get("window"))
+        state, note = self.rm.readiness(self.rm.NoteStore("psess"))
+        self.assertNotIn(state, ("starting", "not-started", "standby-only"))
+        line = self.rm.status_line(self.rm.NoteStore("psess"), None).splitlines()[0]
+        self.assertIn(" window=%s " % self.window_key(), line + " ")
+
+    def test_different_windows_both_run(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        a = self.spawn(extra_env=self.window_env())
+        self.wait_note(lambda n: n.get("leader"))
+        b = self.spawn(extra_env=self.window_env(self.other_window()))
+        time.sleep(2.0)
+        self.assertIsNone(a.poll())
+        self.assertIsNone(b.poll())
+
+
 class FollowProcessTests(FollowProcessMixin, TmpEnv):
     """
     Real subprocess witnesses: crash injection, takeover on real streams, backlog
@@ -1712,7 +1789,7 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
             )
         )
         index_before = self.rm.index_signature(self.index)
-        lock = self.rm.LeaderLock("scan-session")
+        lock = self.rm.WindowLock("sess-scan-session")
         self.addCleanup(lock.release)
         seen = []
 
@@ -1730,7 +1807,7 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
 
         with (
             mock.patch.object(self.rm, "deliver_once", side_effect=scan),
-            mock.patch.object(self.rm, "LeaderLock", return_value=lock),
+            mock.patch.object(self.rm, "WindowLock", return_value=lock),
             mock.patch.object(self.rm, "FdSink", return_value=self.rm.ByteSink()),
             mock.patch.object(self.rm, "time", types.SimpleNamespace(**{
                 **vars(time), "sleep": mock.Mock(side_effect=StopLoop),
@@ -1761,9 +1838,9 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
             self.assertIsNone(after["leader"])
         with self.subTest("progress"):
             self.assertEqual(after["progress"], progress)
-        probe = self.rm.LeaderLock("psess")
+        probe = self.rm.WindowLock(after["window"])
         self.addCleanup(probe.release)
-        self.assertTrue(probe.acquire(blocking=False))
+        self.assertTrue(probe.acquire())
 
     def test_crash_after_flush_before_persist_reemits_exactly_one_row(self):
         write_index(
@@ -1784,37 +1861,6 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
         self.assertEqual(
             [g["file"] for g in got], ["lane/r2.md", "lane/r3.md"]
         )  # r2 once more (the ruled bound), then r3
-
-    def test_three_followers_one_leader_and_takeover_on_real_streams(self):
-        write_index(self.index, row(1, to="b.implementer"))
-        procs = [self.spawn(anchor="lane/r1.md") for _ in range(3)]
-        note = self.wait_note(
-            lambda n: self.bound(n) and len(n.get("standbys", [])) == 2
-        )
-        old_leader = note["leader"]["instance"]
-        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
-        outputs = [self.read_lines(p, 1, timeout=4.0) for p in procs]
-        leaders = [i for i, o in enumerate(outputs) if o]
-        self.assertEqual(len(leaders), 1)
-        procs[leaders[0]].kill()
-        procs[leaders[0]].wait()
-        self.wait_note(
-            lambda n: n.get("leader")
-            and n["leader"]["instance"] != old_leader
-            and self.bound(n)
-        )  # takeover observed before the next arrival
-        write_index(
-            self.index,
-            row(1, to="b.implementer")
-            + row(2, to="b.implementer")
-            + row(3, to="b.implementer"),
-        )
-        outputs = [
-            self.read_lines(p, 1, timeout=6.0) if i != leaders[0] else []
-            for i, p in enumerate(procs)
-        ]
-        self.assertEqual(sum(1 for o in outputs if o), 1)
-        self.assertEqual([o[0]["file"] for o in outputs if o], ["lane/r3.md"])
 
     def test_backlog_above_pace_is_delivered_paced_without_loss(self):
         self.index.write_text(HEADER)  # bind at a header-only index: sentinel cursor
@@ -2940,8 +2986,8 @@ report.write_text(json.dumps(state))
         command = f"tools/relay submit d.md --key {self.key} --root {self.root}"
         self.assertEqual(self.run_bind(self.payload(command, self.receipt)), 0)
         leader = self.rm.leader_record()
-        lock = self.rm.LeaderLock("sess")
-        self.assertTrue(lock.acquire(blocking=False))
+        lock = self.rm.WindowLock("sess-sess")
+        self.assertTrue(lock.acquire())
         self.addCleanup(lock.release)
         lock.stamp(leader["instance"])
         self.store.update(
@@ -4194,9 +4240,9 @@ else:
                 self.store.path.unlink(missing_ok=True)
                 self.bind_and_rows(1)
                 leader = self.rm.leader_record()
-                lock = self.rm.LeaderLock("sess")
+                lock = self.rm.WindowLock("sess-sess")
                 if path == "shared-follower":
-                    self.assertTrue(lock.acquire(blocking=False))
+                    self.assertTrue(lock.acquire())
                     lock.stamp(leader["instance"])
                 observation = {"reason": "submit-near-miss", "receipts": ["lane/seen.md"], "root_provenance": "none"}
                 self.store.update(lambda n: (n.update(phase="unavailable", reason="index-missing", leader=leader if path == "shared-follower" else None, bind_observation=observation), n["progress"].update({str(self.root): {"file": "lane/r1.md", "position": 1}})))
@@ -4227,11 +4273,11 @@ else:
                 self.store.path.unlink(missing_ok=True)
                 write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
                 leader = self.rm.leader_record()
-                lock = self.rm.LeaderLock("sess")
+                lock = self.rm.WindowLock("sess-sess")
                 owner = None
                 has_leader = case != "no-leader"
                 if has_leader:
-                    self.assertTrue(lock.acquire(blocking=False))
+                    self.assertTrue(lock.acquire())
                     lock.stamp(leader["instance"])
                 try:
                     def seed(n):
@@ -4343,8 +4389,8 @@ else:
                 self.store.path.unlink(missing_ok=True)
                 self.bind_and_rows(0)
                 leader = self.rm.leader_record()
-                lock = self.rm.LeaderLock("sess")
-                self.assertTrue(lock.acquire(blocking=False))
+                lock = self.rm.WindowLock("sess-sess")
+                self.assertTrue(lock.acquire())
                 lock.stamp(leader["instance"])
                 try:
                     self.store.update(lambda n: n.update(leader=leader, phase="following", host=host))
@@ -5336,8 +5382,8 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         self.assertNotIn("bind --manual", line)
 
     def _live_status(self, phase="following", bound=True):
-        lock = self.rm.LeaderLock("sess")
-        self.assertTrue(lock.acquire(blocking=False))
+        lock = self.rm.WindowLock("sess-sess")
+        self.assertTrue(lock.acquire())
         self.addCleanup(lock.release)
         me = self.rm.leader_record()
         lock.stamp(me["instance"])
@@ -5452,34 +5498,13 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
             self.assertTrue(text.splitlines()[0].endswith("identity=mismatch"))
             self.assertTrue(text.splitlines()[1].startswith("remedy: "))
 
-    def test_tiers_mixed_on_differing_identity(self):
-        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{"identity": {"kit": "1", "fp": "b"}}]}
-        with mock.patch.object(self.rm, "process_liveness", return_value=self.rm.PROC_UNKNOWN):
-            self.assertTrue(self.rm.tiers_mixed(note))
-            self.store.update(lambda n: n.update(note))
-            self.assertTrue(self._status().splitlines()[0].endswith("tiers=mixed"))
-            note["standbys"][0]["identity"]["fp"] = "a"
-            self.assertFalse(self.rm.tiers_mixed(note))
-
-    def test_tiers_mixed_ignores_dead_record(self):
-        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{"identity": {"kit": "2", "fp": "b"}}]}
-        with mock.patch.object(self.rm, "process_liveness", side_effect=[self.rm.PROC_ALIVE, self.rm.PROC_DEAD]):
-            self.assertFalse(self.rm.tiers_mixed(note))
-
-    def test_record_without_identity_counts_as_different(self):
-        note = {"leader": {"identity": {"kit": "1", "fp": "a"}}, "standbys": [{}]}
-        with mock.patch.object(self.rm, "process_liveness", return_value=self.rm.PROC_ALIVE):
-            self.assertTrue(self.rm.tiers_mixed(note))
-            note["leader"] = {}
-            self.assertFalse(self.rm.tiers_mixed(note))
-
     def test_leader_record_carries_own_install_identity(self):
         with mock.patch.object(self.rm, "run_relay", return_value=({"kit": "2.9.7", "fingerprint": "abc"}, 0)):
             self.assertEqual(self.rm.leader_record()["identity"], {"kit": "2.9.7", "fp": "abc"})
 
     def test_status_returns_word_for_out_of_range_leader_pid(self):
-        lock = self.rm.LeaderLock("sess")
-        self.assertTrue(lock.acquire(blocking=False))
+        lock = self.rm.WindowLock("sess-sess")
+        self.assertTrue(lock.acquire())
         self.addCleanup(lock.release)
         lock.stamp("oversized")
         self.store.update(lambda n: n.update({
@@ -5489,17 +5514,11 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
             "relay-monitor: starting "
         ))
 
-    def test_status_returns_word_for_out_of_range_standby_pid(self):
-        self.store.update(lambda n: n.update({"standbys": [{"pid": 2**31}]}))
-        self.assertTrue(self.rm.status_line(self.store, None).startswith(
-            "relay-monitor: not-started "
-        ))
-
     def test_refused_probe_never_reads_dead(self):
         rm = self.rm
         leader = rm.leader_record()
-        lock = rm.LeaderLock("sess")
-        self.assertTrue(lock.acquire(blocking=False))
+        lock = rm.WindowLock("sess-sess")
+        self.assertTrue(lock.acquire())
         self.addCleanup(lock.release)
         lock.stamp(leader["instance"])
         self.store.update(
@@ -5527,32 +5546,11 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
                 ):
                     self.assertEqual(rm.readiness(self.store)[0], expected)
 
-    def test_standby_with_refused_probe_counts(self):
-        rm = self.rm
-        self.store.update(
-            lambda note: note.update(
-                {"standbys": [{"pid": os.getpid(), "start_time": "A"}]}
-            )
-        )
-        for error, expected in (
-            (errno.EPERM, "standby-only"),
-            (errno.EINVAL, "standby-only"),
-            (errno.ESRCH, "not-started"),
-        ):
-            with self.subTest(error=error):
-                with (
-                    mock.patch.object(
-                        rm.os, "kill", side_effect=OSError(error, "probe failed")
-                    ),
-                    mock.patch.object(rm, "process_start_time", return_value=None),
-                ):
-                    self.assertEqual(rm.readiness(self.store)[0], expected)
-
     def test_readiness_states_tied_to_lock_holder(self):
         rm = self.rm
         self.assertEqual(rm.readiness(self.store)[0], "not-started")
-        lock = rm.LeaderLock("sess")
-        lock.acquire(blocking=False)
+        lock = rm.WindowLock("sess-sess")
+        lock.acquire()
         self.assertEqual(
             rm.readiness(self.store)[0], "starting"
         )  # lock held, no stamp, no record
@@ -5586,10 +5584,8 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         )
         self.assertEqual(rm.readiness(self.store)[0], "armed")
         lock.release()
-        self.store.update(
-            lambda n: n.update({"binding_degraded": None, "standbys": [me]})
-        )
-        self.assertEqual(rm.readiness(self.store)[0], "standby-only")
+        self.store.update(lambda n: n.update({"binding_degraded": None}))
+        self.assertEqual(rm.readiness(self.store)[0], "not-started")  # no doorbell holds the window
 
     def test_real_stopped_daemon_classification_and_status_remedy(self):
         self.store.update(lambda note: note.update({"root": str(self.root)}))
@@ -6736,8 +6732,8 @@ finally:
 
     def test_legacy_leader_sequence_follows_contract(self):
         self._seed_exit()
-        lock = self.rm.LeaderLock("psess")
-        self.assertTrue(lock.acquire(blocking=False))
+        lock = self.rm.WindowLock("sess-psess")
+        self.assertTrue(lock.acquire())
         legacy = self.rm.leader_record()
         lock.stamp(legacy["instance"])
         try:
