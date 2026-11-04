@@ -236,6 +236,15 @@ class TestReviewFocus(Refused):
         self.assertEqual(header.parse(draft(replace("TO", "v3-engine.planner"))).to,
                          ("v3-engine.planner",))
 
+    def test_question_to_operator_only(self):
+        question = ["KIND: QUESTION", "NEEDS: answer", "SUBJECT: decide", "BUNDLE: b1"]
+        for to in ("v3-engine.implementer", "operator, v3-engine.implementer"):
+            with self.subTest(to=to):
+                error = self.refused(draft(question + ["TO: " + to]), "E-QUESTION-ADDRESS", line=5)
+                self.assertIn("operator", error.remedy)
+        parsed = header.parse(draft(question + ["TO: operator", "CC: v3.orchestrator-planner"]))
+        self.assertEqual((parsed.to, parsed.cc), (("operator",), ("v3.orchestrator-planner",)))
+
     def test_other_address_rules(self):
         self.assertEqual(header.parse(draft(replace("TO", "operator"))).to, ("operator",))
         self.assertEqual(header.parse(draft(replace("TO", "pdc.planner@pdc"))).to,
@@ -281,7 +290,7 @@ class TestReviewFocus(Refused):
                      "E-HEADER-CRLF", "E-HEADER-BOM", "E-HEADER-SIZE", "E-BODY-SIZE",
                      "E-FIELD-ENUM", "E-FIELD-REQUIRED", "E-FIELD-FORBIDDEN",
                      "E-FIELD-LENGTH", "E-FIELD-SHAPE", "E-ADDRESS",
-                     "E-FINDING-NO-CHECK", "E-DRAFT-UTF8"):
+                     "E-FINDING-NO-CHECK", "E-DRAFT-UTF8", "E-QUESTION-ADDRESS"):
             with self.subTest(code=code):
                 self.assertIn(code, errors.ERRORS)
                 cause, remedy = errors.explain_for(code)

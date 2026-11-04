@@ -281,6 +281,9 @@ _HEADER_TEXT = {
     "error-draft-utf8-cause": "the draft is not UTF-8 text: an invalid byte sequence starts at byte offset {offset} (the first byte is offset 0)",
     "error-draft-utf8-remedy": "save the draft as UTF-8",
     "error-draft-utf8-explain": "a draft, header and body alike, is UTF-8 text",
+    "error-question-address-cause": "line {line}: a QUESTION goes to operator alone, and TO is {value}",
+    "error-question-address-remedy": "address the QUESTION to operator alone; to ask a seat, use another kind with NEEDS: answer",
+    "error-question-address-explain": "QUESTION is reserved for decision items in the operator's queue",
     "error-field-required-cause": "the draft has no {field} line: {rule}",
     "error-field-required-remedy": "add the missing line",
     "error-field-required-explain": "required fields depend on KIND and NEEDS",
@@ -389,6 +392,7 @@ ERRORS = {
     "E-FINDING-NO-CHECK": _spec("finding-no-check", "integrity"),
     "E-FIELD-SHAPE": _spec("field-shape", "integrity"),
     "E-DRAFT-UTF8": _spec("draft-utf8", "integrity"),
+    "E-QUESTION-ADDRESS": _spec("question-address", "integrity"),
     "E-SQLITE-VERSION": _spec("sql-version", "client"),
 }
 

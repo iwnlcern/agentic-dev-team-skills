@@ -292,6 +292,9 @@ def _validate(values, seen, body, header_bytes, validate_address):
     seen_addresses = set()
     to = _addresses(first["TO"][0], "TO", first["TO"][1], validate_address,
                     seen_addresses)
+    if kind == "QUESTION" and to != ("operator",):
+        raise _refuse("E-QUESTION-ADDRESS", line=first["TO"][0],
+                      value=_display(first["TO"][1]))
     cc = ()
     if "CC" in first:
         cc = _addresses(first["CC"][0], "CC", first["CC"][1],

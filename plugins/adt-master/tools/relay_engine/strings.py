@@ -92,6 +92,7 @@ _CODE_VALUES = {
     "E-FINDING-NO-CHECK",
     "E-FIELD-SHAPE",
     "E-DRAFT-UTF8",
+    "E-QUESTION-ADDRESS",
     "E-SQLITE-VERSION",
 }
 _OPS = {
