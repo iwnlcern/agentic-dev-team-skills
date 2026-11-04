@@ -24,6 +24,7 @@ assert ENGINE_SET == (
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
+    "relay_engine/addresses.py",
     "relay_engine/authority.py",
     "relay_engine/cli.py",
     "relay_engine/client.py",
