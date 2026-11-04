@@ -33,7 +33,11 @@ Use repo-root-relative paths. The listed standard directories are a fixed vocabu
 
 Whether the relay substrate is tracked or gitignored is operator discretion with no fixed default. Declare the choice and record it in the run's ROADMAP. This repository's gitignored, public-facing selection is already recorded; do not infer that selection for another run.
 
-`docs/sprints/active/` and `docs/sprints/archive/` are first-class; completing or parking a sprint moves its directory; the move is recorded by relay. Compatible with the declared-root marker: roots travel with the tree. A stale external path is resolved by the move relay.
+`docs/sprints/active/` and `docs/sprints/archive/` are first-class; completing or parking a sprint moves its directory, and the move is recorded by relay.
+A hand-authored root moves with its tree.
+An engine-managed root does not: its engine record keeps the path it was registered at.
+A running daemon keeps serving the moved root, but root lint's stopped-daemon reader refuses it (`read_lint_context` in `tools/relay_engine/daemon.py`), engine notices fail because they open the root at the recorded path (`notice_effect` in `tools/relay_engine/roster.py`), absolute key and draft paths that still name the old place are refused (`_relative` in `tools/relay_engine/client.py`), and watcher bindings keep the old root (`tools/adapters/relay-monitor.py`).
+A closed sprint loses nothing by this, since only the engine's own commands read the record; do not move a root whose work must continue.
 
 ## Relay tree convention
 

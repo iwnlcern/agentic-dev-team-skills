@@ -745,7 +745,7 @@ RELAY_ROOT=.relays/<RUN_ID>
 <RELAY_ROOT>/INDEX.md
 ```
 
-In a relay filename, `<ROLE>` is the hyphenated lowercase role word from the address grammar, with no spaces.
+In a relay filename, `<ROLE>` comes from the relay's `ROLE` header, not from the address: `_role_slug` in `tools/relay_engine/ledger.py` builds it, so `ROLE: Pair Implementer` files as `pair-implementer` while the address role word is `implementer`.
 
 The relay root is literal `.relays` (a rule, not a default) anchored beside the sprint or lane documents it serves, with exactly one run level `.relays/<RUN_ID>/`.
 The effective root of a run is recorded once, by the INDEX `root:` marker; a `RELAY_ROOT` override or operator-directed divergence is valid only when so recorded.

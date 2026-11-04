@@ -18,6 +18,7 @@ Instructions for coding agents working on this repository.
   Inspect the unittest result summary for `OK` with no skipped tests; diagnostic stdout may follow it.
   `TestCensus.test_census_artifact_schema` in `tools/relay_engine/tests/test_e2e_chain.py` checks the required results environment.
   The run leaves an unretained temporary directory under the system temp root; it does not produce the engine lane's persisted acceptance artifacts, whose retained-environment proof sequence lives in that lane's plan.
+- Kit tests: `python3 -m unittest discover -s tools/kit_tests`
 - Lint one relay: `python3 tools/relay-lint.py <file>`
 
 ## Rules
