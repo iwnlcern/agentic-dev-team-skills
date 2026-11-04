@@ -101,6 +101,10 @@ _CODE_VALUES = {
     "E-REF-RANGE",
     "E-REF-TIMEOUT",
     "E-REF-GIT-ENVIRONMENT",
+    "E-FILE-MISSING",
+    "E-ROOT-NOT-FOUND",
+    "E-CARRIER-INVALID",
+    "E-CARRIER-FIELD",
 }
 _OPS = {
     "seat.declare", "submit", "seat.register", "seat.replace", "seat.stand_down",

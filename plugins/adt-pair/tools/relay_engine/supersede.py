@@ -71,14 +71,17 @@ def export_ruling(ledger, ruling_path, child_run_id):
 
 def adopt_ruling(ledger, root, bundle):
     from relay_engine.envelope import draft_shape, shape_error
-    fields, bundle_digest = parse_record(bundle)
+    try:
+        fields, bundle_digest = parse_record(bundle)
+    except ValueError as exc:  # jcs.parse_record's framing and digest checks
+        raise errors.error_for("E-CARRIER-INVALID") from exc
     required = {
         "v", "parent_root_uuid", "child_run_id", "commissioning_path",
         "dispatch_content_digest", "ruling_seq", "ruling_stamp",
         "ruling_path", "ruling_content_digest", "ruling_body_b64",
     }
     if set(fields) != required or fields["v"] != 1:
-        raise errors.error_for("E-ENVELOPE")
+        raise errors.error_for("E-CARRIER-FIELD")
     run_row = ledger.execute(
         "SELECT value FROM meta WHERE key='run_id'").fetchone()
     if run_row is None or run_row[0] != fields["child_run_id"]:

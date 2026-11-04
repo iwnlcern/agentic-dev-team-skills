@@ -28,7 +28,12 @@ def _command_root(args, fresh=False):
     if fresh:
         return os.path.realpath(os.path.abspath(args.root or os.getcwd()))
     if args.root is not None:
-        return client.discover_root(args.root)
+        try:
+            return client.discover_root(args.root)
+        except FileNotFoundError as exc:
+            raise errors.error_for(
+                "E-ROOT-NOT-FOUND",
+                directory=os.path.realpath(os.path.abspath(args.root))) from exc
     try:
         root_name = client.discover_root()
     except FileNotFoundError as exc:
@@ -126,7 +131,9 @@ def _cmd_seat_declare(args):
         try:
             lines = Path(args.from_file).read_text().splitlines()
         except (OSError, UnicodeError) as exc:
-            raise errors.error_for("E-HEADER", field="ADDRESS") from exc
+            raise errors.error_for(
+                "E-FILE-MISSING", path=os.path.abspath(args.from_file),
+                reason=_read_failure(exc)) from exc
         entries = [line.split(maxsplit=1) for line in lines if line.strip()]
         if any(len(entry) != 2 for entry in entries):
             raise errors.error_for("E-HEADER", field="ROLE")
@@ -157,6 +164,18 @@ def _cmd_seat_show(args):
 def _cmd_roster(args):
     return _emit_result(client.request(
         _command_root(args), "roster", {}, timeout=args.timeout))
+
+
+def _read_failure(exc):
+    if isinstance(exc, UnicodeError):
+        return "not UTF-8 text"
+    if isinstance(exc, FileNotFoundError):
+        return "no such file"
+    if isinstance(exc, IsADirectoryError):
+        return "a directory"
+    if isinstance(exc, PermissionError):
+        return "permission denied"
+    return "unreadable"
 
 
 def _read_carrier(path):

@@ -98,8 +98,9 @@ class TestAdoptedSupersession(unittest.TestCase):
             child_engine = ensure_engine_dir(child.dirfd)
             ledger = init_schema(child_engine, child.path)
             try:
-                with self.assertRaises(ValueError):
+                with self.assertRaises(errors.EngineError) as caught:
                     supersede.adopt_ruling(ledger, child, bytes(bundle))
+                self.assertEqual(caught.exception.code, "E-CARRIER-INVALID")
                 self.assertEqual(ledger.execute(
                     "SELECT COUNT(*) FROM supersession_edges").fetchone()[0],
                     0)

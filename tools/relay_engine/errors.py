@@ -354,6 +354,32 @@ strings.register_inventory({
         lambda v: isinstance(v, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){2}", v) is not None,
 })
 
+# Item 11 diagnostics (DD-v3-engine § 10): typed codes instead of
+# misattributed or untyped failures.
+_ITEM11_REASONS = {"no such file", "a directory", "permission denied",
+                   "not UTF-8 text", "unreadable"}
+strings.register_inventory({
+    "error-file-missing-cause": "the file {path} cannot be read: {reason}",
+    "error-file-missing-remedy": "pass the path of a readable UTF-8 text file",
+    "error-file-missing-explain": "a --from-file argument names an existing regular file of UTF-8 text",
+    "error-root-not-found-cause": "no relay root at or above {directory}, the --root given",
+    "error-root-not-found-remedy": "pass --root with a relay root's path: the directory that holds .engine/",
+    "error-root-not-found-explain": "--root names a relay root or a directory inside one",
+    "error-carrier-invalid-cause": "the carrier is not a framed record; it may be truncated or edited",
+    "error-carrier-invalid-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
+    "error-carrier-invalid-explain": "a ruling carrier is a framed record whose digest matches its bytes",
+    "error-carrier-field-cause": "the carrier is a framed record, but not a version 1 ruling carrier",
+    "error-carrier-field-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
+    "error-carrier-field-explain": "a ruling carrier holds exactly the fields relay export-ruling writes",
+}, {
+    ("error-file-missing-cause", "path"):
+        lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+    ("error-file-missing-cause", "reason"):
+        lambda v: isinstance(v, str) and v in _ITEM11_REASONS,
+    ("error-root-not-found-cause", "directory"):
+        lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+})
+
 
 # v3 references (DD-v3-engine § 6): one code per refusal rule.
 _REF_TEXT = {
@@ -456,6 +482,10 @@ ERRORS = {
     "E-REF-RANGE": _spec("ref-range", "integrity"),
     "E-REF-TIMEOUT": _spec("ref-timeout", "command"),
     "E-REF-GIT-ENVIRONMENT": _spec("ref-git-environment", "client"),
+    "E-FILE-MISSING": _spec("file-missing", "client"),
+    "E-ROOT-NOT-FOUND": _spec("root-not-found", "client"),
+    "E-CARRIER-INVALID": _spec("carrier-invalid", "command"),
+    "E-CARRIER-FIELD": _spec("carrier-field", "command"),
 }
 
 ERROR_VARIANTS = {
@@ -588,9 +618,12 @@ def error_for(code, *, variant=None, **params):
         rel = params.get("rel")
         if not _is_not_found_rel(rel):
             params["rel"] = _rejected(rel)
-    if code == "E-NO-ROOT":
+    if code in ("E-NO-ROOT", "E-ROOT-NOT-FOUND"):
         if not strings._is_show_absolute(params.get("directory")):
             params["directory"] = _rejected(params.get("directory"))
+    if code == "E-FILE-MISSING":
+        if not strings._is_show_absolute(params.get("path")):
+            params["path"] = _rejected(params.get("path"))
     if (code, variant) == ("E-PATH-ESCAPE", "relay-not-found"):
         for field, validator in (("root", strings._is_show_absolute),
                                  ("target", strings._is_show_text)):

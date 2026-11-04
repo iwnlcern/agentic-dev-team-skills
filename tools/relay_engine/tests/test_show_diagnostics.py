@@ -121,7 +121,7 @@ class TestShowDiagnostics(unittest.TestCase):
                 rc, _, err = self.run_cli(self.empty, *command, '--root', str(self.root))
                 self.assertEqual(rc, 1)
                 self.assertTrue(err.startswith('E-DAEMON-DOWN\n'), err)
-        for root, expected in ((self.empty, 'unexpected error'), (self.repo, 'E-DAEMON-DOWN')):
+        for root, expected in ((self.empty, 'E-ROOT-NOT-FOUND'), (self.repo, 'E-DAEMON-DOWN')):
             rc, _, err = self.run_cli(self.empty, 'status', '--root', str(root))
             self.assertEqual(rc, 1)
             self.assertTrue(err.startswith(expected + '\n'), err)
@@ -232,3 +232,79 @@ class TestShowDiagnostics(unittest.TestCase):
         self.assertTrue(err.getvalue().startswith('E-PATH-ESCAPE\n'))
         self.assertNotIn('hint:', err.getvalue())
         self.assertNotIn('unexpected error', err.getvalue())
+
+
+class TestItem11Diagnostics(unittest.TestCase):
+    """Item 11 (DD-v3-engine § 10): typed diagnostics through the real CLI."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name).resolve()
+        self.root = self.base / 'root'
+        self.root.mkdir()
+        self.outside = self.base / 'outside'
+        self.outside.mkdir()
+        self.cid, did = cid_did()
+        self.running = RunningDaemon(str(self.root), did, socket_name=str(self.base / 's')).start()
+        self.addCleanup(self.running.stop)
+
+    def run_cli(self, *args):
+        result = subprocess.run([sys.executable, str(RELAY), *args], cwd=self.base,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        return result.returncode, result.stdout.decode(), result.stderr.decode()
+
+    def code(self, stderr):
+        return stderr.splitlines()[0] if stderr else ''
+
+    def assert_ready(self):
+        returncode, stdout, stderr = self.run_cli('status', '--root', str(self.root))
+        self.assertEqual((returncode, stderr), (0, ''))
+        self.assertEqual(json.loads(stdout)['daemon']['state'], 'ready')
+
+    def declare_from(self, path):
+        return self.run_cli('seat', 'declare', '--from-file', str(path), '--key', 'k',
+                            '--root', str(self.root))
+
+    def test_from_file_missing(self):
+        missing = self.base / 'missing.txt'
+        returncode, _, stderr = self.declare_from(missing)
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-FILE-MISSING'))
+        self.assertIn(str(missing), stderr)
+        self.assertIn('no such file', stderr)
+        # positive control: a readable file gets past the read to a later rule
+        present = self.base / 'present.txt'
+        present.write_text('p.planner Planner\n')
+        returncode, _, stderr = self.declare_from(present)
+        self.assertNotEqual(self.code(stderr), 'E-FILE-MISSING')
+
+    def test_from_file_directory(self):
+        returncode, _, stderr = self.declare_from(self.outside)
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-FILE-MISSING'))
+        self.assertIn(str(self.outside), stderr)
+        self.assertIn('directory', stderr)
+
+    def test_root_outside(self):
+        returncode, _, stderr = self.run_cli('status', '--root', str(self.outside))
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-ROOT-NOT-FOUND'))
+        self.assertIn(str(self.outside), stderr)
+        self.assertNotIn('unexpected error', stderr)
+        self.assert_ready()  # positive control: the served root answers
+
+    def test_corrupt_carrier(self):
+        carrier = self.base / 'corrupt.bundle'
+        carrier.write_bytes(b'not a record')
+        returncode, _, stderr = self.run_cli('adopt-ruling', str(carrier), '--root', str(self.root))
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-CARRIER-INVALID'))
+        self.assertNotIn('E-DAEMON-DOWN', stderr)
+        self.assert_ready()
+
+    def test_wrong_field_carrier(self):
+        from relay_engine.jcs import frame_record
+        carrier = self.base / 'wrong.bundle'
+        carrier.write_bytes(frame_record({'v': 1, 'x': 1}))
+        returncode, _, stderr = self.run_cli('adopt-ruling', str(carrier), '--root', str(self.root))
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-CARRIER-FIELD'))
+        self.assert_ready()
+
