@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import select
 import signal
 import subprocess
@@ -1486,6 +1487,82 @@ class WindowDoorbellTests(FollowProcessMixin, TmpEnv):
         time.sleep(2.0)
         self.assertIsNone(a.poll())
         self.assertIsNone(b.poll())
+
+
+def script_digest8():
+    import hashlib
+
+    return hashlib.sha256(SCRIPT.read_bytes()).hexdigest()[:8]
+
+
+def kit_version():
+    text = (REPO / "tools" / "relay_engine" / "version.py").read_text()
+    return re.search(r'^KIT_VERSION = "([^"]+)"', text, re.M).group(1)
+
+
+class BoundedStatusTests(TmpEnv):
+    """`status` and SessionStart fit the locked 2 s on a wedged engine and name the doorbell (DD § 4.4, A6; Task 4)."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.rm.NoteStore("sess")
+        self.store.update(lambda n: n.update(root=str(self.root)))
+        self.wedged = self.base / "wedged-plugin"
+        (self.wedged / "tools").mkdir(parents=True)
+        (self.wedged / "tools" / "relay").write_text("import time\ntime.sleep(30)\n")
+
+    def timed(self, argv, stdin=""):
+        start = time.monotonic()
+        proc = subprocess.run([sys.executable, str(SCRIPT), *argv], input=stdin, capture_output=True, text=True,
+                              env=dict(os.environ), timeout=40)
+        return time.monotonic() - start, proc
+
+    def test_status_returns_within_two_seconds_on_wedged_engine(self):
+        elapsed, proc = self.timed(["status", "--session", "sess", "--plugin-root", str(self.wedged)])
+        self.assertLess(elapsed, 2.0, proc.stdout)
+        first = proc.stdout.splitlines()[0] + " "
+        self.assertIn(" daemon=- ", first)
+        self.assertIn(" engine=wedged ", first)
+
+    def test_session_start_is_bounded_too(self):
+        payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
+        elapsed, proc = self.timed(
+            ["session-start", "--host", "claude-code", "--plugin-root", str(self.wedged)], stdin=payload
+        )
+        self.assertLess(elapsed, 2.0, proc.stdout)
+        self.assertIn("engine=wedged", json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
+
+    def test_status_names_own_version(self):
+        leader = self.rm.leader_record(None)
+        self.store.update(lambda n: n.update(leader=leader))
+        line = self.rm.status_line(self.store, None).splitlines()[0] + " "
+        self.assertIn(" doorbell=%s@%s " % (kit_version(), script_digest8()), line)
+
+    def test_identity_cache_reused_within_60s(self):
+        calls, clock = [], [1000.0]
+
+        def relay(plugin_root, *argv, **kw):
+            calls.append(argv[0])
+            if argv[0] == "version":
+                return {"kit": "9", "fingerprint": "f" * 16}, 0
+            return {"daemon": {"identity": {"kit": "9", "fp": "f" * 16}}}, 0
+
+        fake_time = types.SimpleNamespace(**{**vars(time), "time": lambda: clock[0]})
+        with mock.patch.object(self.rm, "run_relay", relay), mock.patch.object(self.rm, "time", fake_time):
+            self.rm.status_line(self.store, None)
+            clock[0] += 1
+            self.rm.status_line(self.store, None)
+            self.assertEqual(calls.count("version"), 1)
+            clock[0] += 61  # negative control: the cache has expired
+            self.rm.status_line(self.store, None)
+            self.assertEqual(calls.count("version"), 2)
+
+    def test_own_identity_without_plugin_root(self):
+        for root in (None, ""):
+            with self.subTest(plugin_root=root):
+                self.assertEqual(self.rm.own_identity(root), {"kit": kit_version(), "sha": script_digest8()})
+        line = self.rm.status_line(self.store, "").splitlines()[0]
+        self.assertIn("doorbell=", line)
 
 
 class DoorbellExitTests(FollowProcessMixin, TmpEnv):
@@ -5372,7 +5449,7 @@ class StatusTests(TmpEnv):
     def _b7_status_probe(self,body):
         setup="""
 index.write_text(header+one);(root/'lane'/'r1.md').write_text('relay')
-store=m.NoteStore('fifo');store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',bind_observation=dict(reason='unsupported-syntax',root=str(root),root_provenance='command',receipts=['lane/r1.md'])))
+store=m.NoteStore('fifo');store.update(lambda n:n.update(identity_cache=None,seat='b.implementer',root=str(root),binding_source='hook',bind_observation=dict(reason='unsupported-syntax',root=str(root),root_provenance='command',receipts=['lane/r1.md'])))
 commands=[];hint_calls=[];old_hint=m.rebind_line
 engine=str(root/'.engine');isdir=m.os.path.isdir
 def relay(plugin_root,*argv,**kw):
@@ -5431,7 +5508,7 @@ t.assertGreater(durations[0],1.0-{delay!r}-.2)
             with self.subTest(mode=mode):
                 self._b7_status_probe(f"""
 def slow_relay(plugin_root,*argv,**kw):
-    threading.Event().wait(1.5)
+    threading.Event().wait(0.6)  # two calls fit the 1.5 s identity budget (DD A6) yet exceed the 1.0 s root budget
     return relay(plugin_root,*argv,**kw)
 m.run_relay=slow_relay
 output=invoke({mode!r})
@@ -5798,7 +5875,7 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
             ),
         ):
             with self.subTest(expected=expected):
-                self.store.update(lambda note: note.update({"root": str(root)}))
+                self.store.update(lambda note: note.update({"root": str(root), "identity_cache": None}))
                 with mock.patch.object(
                     self.rm,
                     "run_relay",
@@ -7325,7 +7402,7 @@ for token in ('index-missing','index-malformed','index-unreadable','root-stalled
                 self.index.unlink(missing_ok=True)
                 os.mkfifo(self.index)
                 self._child(f'''
-store=m.NoteStore('fifo');store.update(lambda n:n.update(seat='b.implementer',root=str(root),binding_source='hook',progress={{str(root):dict(file=None,position=0)}},bind_observation=dict(reason='unsupported-syntax',receipts=['lane/r1.md'],root=str(root),root_provenance='command')))
+store=m.NoteStore('fifo');store.update(lambda n:n.update(identity_cache=None,seat='b.implementer',root=str(root),binding_source='hook',progress={{str(root):dict(file=None,position=0)}},bind_observation=dict(reason='unsupported-syntax',receipts=['lane/r1.md'],root=str(root),root_provenance='command')))
 (root/'lane'/'r1.md').write_text('relay')
 m.run_relay=lambda *a,**k:({{}},0)
 mode={mode!r};start=time.monotonic()

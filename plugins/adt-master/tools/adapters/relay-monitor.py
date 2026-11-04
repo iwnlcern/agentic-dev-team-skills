@@ -37,6 +37,8 @@ if _ADAPTERS_DIR not in sys.path:
 import window  # noqa: E402  (tools/adapters/window.py, shipped beside this file)
 
 ROOT_BUDGET = 1.0
+IDENTITY_BUDGET = 1.5  # both engine identity calls together; status/SessionStart fit 2 s (DD A6)
+IDENTITY_TTL = 60.0
 INDEX_MAX_BYTES = 16 * 1024 * 1024
 FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error", "window-gone", "terminated"})
 INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed", "index-unreadable", "root-stalled"})
@@ -264,7 +266,34 @@ def process_start_time(pid: int) -> str | None:
         return None
 
 
-def leader_record() -> dict:
+def own_identity(plugin_root: str | None) -> dict:
+    """This file's own code: the kit version of the tree it ships in and the first 8 hex of its sha256.
+
+    The kit comes from the plugin manifest under `plugin_root`, else from the tree this file sits in
+    (manifest, then `tools/relay_engine/version.py`), so an empty plugin root still names a kit (V-c).
+    """
+    import hashlib
+
+    here = Path(__file__).resolve()
+    try:
+        sha = hashlib.sha256(here.read_bytes()).hexdigest()[:8]
+    except OSError:
+        sha = "unknown"
+    kit = None
+    for base in ([Path(plugin_root)] if plugin_root else []) + [here.parents[2]]:
+        for manifest in (base / ".claude-plugin" / "plugin.json", base / ".codex-plugin" / "plugin.json"):
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                kit = json.loads(manifest.read_text(encoding="utf-8")).get("version") or None
+            if kit:
+                return {"kit": kit, "sha": sha}
+        with contextlib.suppress(OSError):
+            found = re.search(r'^KIT_VERSION = "([^"]+)"', (base / "tools" / "relay_engine" / "version.py").read_text(encoding="utf-8"), re.M)
+            if found:
+                return {"kit": found.group(1), "sha": sha}
+    return {"kit": kit, "sha": sha}
+
+
+def leader_record(plugin_root: str | None = None) -> dict:
     version, rc = run_relay(None, "version")
     identity = None
     if rc == 0 and isinstance(version, dict) and version.get("kit") and version.get("fingerprint"):
@@ -274,6 +303,7 @@ def leader_record() -> dict:
         "start_time": process_start_time(os.getpid()),
         "instance": str(uuid.uuid4()),
         "identity": identity,
+        "doorbell": own_identity(plugin_root),
     }
 
 
@@ -1354,7 +1384,7 @@ def follow(args) -> int:
     store, leader = NoteStore(session), WindowLock(window_key)
     if not leader.acquire():
         return 0  # another doorbell holds this window: an extra tier copy or a re-arm exits silently
-    me = leader_record()
+    me = leader_record(getattr(args, "plugin_root", None))
     leader.stamp(me["instance"])
     store.update(
         lambda n: (n.pop("standbys", None), n.update(
@@ -2315,6 +2345,8 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
             text=True,
             timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        return {"code": "E-WEDGED", "detail": f"no answer within {timeout:.1f}s"}, 124
     except (OSError, subprocess.SubprocessError) as exc:
         return {"code": "E-EXEC", "detail": str(exc)}, 1
     text = proc.stdout.strip() or proc.stderr.strip()
@@ -2324,8 +2356,11 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
         return {"raw": proc.stderr.strip() or text}, proc.returncode
 
 
-def check_identity(plugin_root: str | None, root: str | None):
-    client, rc = run_relay(plugin_root, "version")
+def check_identity(plugin_root: str | None, root: str | None, budget: float = IDENTITY_BUDGET):
+    end = time.monotonic() + budget  # one deadline across both engine calls (DD A6, item 8)
+    client, rc = run_relay(plugin_root, "version", timeout=max(0.05, end - time.monotonic()))
+    if isinstance(client, dict) and client.get("code") == "E-WEDGED":
+        return "wedged", {"kit": None, "fp": None}, None
     client = client if isinstance(client, dict) else {}
     client_id = (
         {"kit": client.get("kit"), "fp": client.get("fingerprint")}
@@ -2339,7 +2374,9 @@ def check_identity(plugin_root: str | None, root: str | None):
         return "unchecked", client_id, None
     if not engine.value:
         return "hand-root", client_id, None
-    status_doc, rc = run_relay(plugin_root, "status", "--root", root)
+    if end - time.monotonic() <= 0.05:
+        return "wedged", client_id, None
+    status_doc, rc = run_relay(plugin_root, "status", "--root", root, timeout=end - time.monotonic())
     status_doc = status_doc if isinstance(status_doc, dict) else {}
     if rc != 0:
         raw = status_doc.get("raw") or ""
@@ -2439,10 +2476,15 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
     state, note = readiness(store)
     ident, client_id, daemon = "unchecked", {}, None
     if note.get("root"):
-        ident, client_id, daemon = check_identity(plugin_root, note.get("root"))
+        cache, now = note.get("identity_cache") or {}, time.time()
+        if cache.get("root") == note["root"] and 0 <= now - float(cache.get("at") or 0) < IDENTITY_TTL:
+            ident, client_id, daemon = cache.get("ident"), cache.get("client") or {}, cache.get("daemon")
+        else:
+            ident, client_id, daemon = check_identity(plugin_root, note.get("root"))
+            cache = {"root": note["root"], "at": now, "ident": ident, "client": client_id, "daemon": daemon}
         store.update(
             lambda n: n.update(
-                {"client_identity": client_id, "daemon_identity": daemon}
+                {"client_identity": client_id, "daemon_identity": daemon, "identity_cache": cache}
             )
         )
     reason = shown_exit_reason(note) if state == "unavailable" and note.get("leader") is None and note.get("exit") else note.get("reason")
@@ -2459,7 +2501,10 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         "hand-root": "hand-root",
         "daemon-down": "down",
         "unchecked": "-",
+        "wedged": "-",
     }.get(ident, fp(daemon))
+    own = (note.get("leader") or {}).get("doorbell") or {}
+    doorbell_txt = f"{own.get('kit') or '-'}@{own.get('sha') or '-'}" if own else "-"
     record = note.get("bind_observation") or {}
     observed = record.get("reason")
     miss = "submit-near-miss" if observed == "submit-near-miss" else note.get("submit_miss")
@@ -2468,8 +2513,9 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         f"relay-monitor: {state}{suffix} "
         f"seat={note.get('seat') or '-'} "
         f"root={note.get('root') or '-'} cursor={cur} "
-        f"binding={binding} window={note.get('window') or '-'} client={fp(client_id)} "
+        f"binding={binding} window={note.get('window') or '-'} doorbell={doorbell_txt} client={fp(client_id)} "
         f"daemon={daemon_txt} "
+        f"{'engine=wedged ' if ident == 'wedged' else ''}"
         f"updated={note.get('updated') or '-'}"
         f"{' miss=' + miss if miss else ''}"
         f"{' last-bind=' + last_bind if last_bind else ''}"
