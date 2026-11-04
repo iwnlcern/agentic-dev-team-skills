@@ -195,6 +195,82 @@ class CapAndDescendants(unittest.TestCase):
         self.assertEqual(repo.step("relay_engine.tests.test_a_reaps")["leaked"], [])
 
 
+DRIVER = textwrap.dedent('''
+    import importlib.util, sys
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("release_check", sys.argv[1])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.exit(module.main(sys.argv[3:], repo=Path(sys.argv[2]), exclusions=()))
+''')
+
+
+def start_driver(repo, *argv):
+    """The runner in its own process (so a test can signal it), on a fixture repository."""
+    driver = repo.pids / "driver.py"
+    driver.write_text(DRIVER)
+    return subprocess.Popen([sys.executable, str(driver), str(SCRIPT), str(repo.repo), *argv],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+
+
+def wait_for(path, seconds=20.0):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+class Interrupts(unittest.TestCase):
+
+    def interrupted_run(self, sig):
+        repo = FixtureRepo(self)
+        repo.repo = repo.root
+        module_pid = repo.pids / "module"
+        child_pid = repo.pids / "grandchild"
+        repo.module("test_a_slow", f'''
+            class T(unittest.TestCase):
+                def test_slow(self):
+                    daemonize({str(child_pid)!r})
+                    open({str(module_pid)!r}, "w").write(str(os.getpid()))
+                    time.sleep(60)
+        ''')
+        repo.passing("test_b_pending")
+        driver = start_driver(repo, "full", "--leg", "mac", "--workers", "1", "--out", str(repo.out))
+        self.addCleanup(driver.kill)
+        self.assertTrue(wait_for(module_pid), "fixture module never started")
+        driver.send_signal(sig)
+        output, _ = driver.communicate(timeout=60)
+        self.assertEqual(driver.returncode, 1, output)
+        self.assertTrue(wait_gone(int(module_pid.read_text())), "step survived the interrupt")
+        self.assertTrue(wait_gone(int(child_pid.read_text())), "setsid grandchild survived")
+        self.assertEqual(repo.step("relay_engine.tests.test_a_slow")["outcome"], "unfinished")
+        self.assertEqual(repo.step("relay_engine.tests.test_b_pending")["outcome"], "unfinished")
+        self.assertTrue(repo.results()["interrupted"])
+
+    def test_sigint_stops_steps_and_writes_results(self):
+        self.interrupted_run(signal.SIGINT)
+
+    def test_sigterm_stops_steps_and_writes_results(self):
+        self.interrupted_run(signal.SIGTERM)
+
+
+class UsedOut(unittest.TestCase):
+
+    def test_used_out_dir_refused(self):
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        code, err = repo.run()
+        self.assertEqual(code, 0, err)
+        first = (repo.out / "mac" / "results.json").read_text()
+        code, err = repo.run()
+        self.assertEqual(code, 2)
+        self.assertIn("already holds", err)
+        self.assertEqual((repo.out / "mac" / "results.json").read_text(), first)
+
+
 class ValidatorPin(unittest.TestCase):
 
     def test_validator_pinned_to_real_path(self):
@@ -311,6 +387,38 @@ class StepsAndResults(unittest.TestCase):
         self.assertEqual(repo.step("relay_engine.tests.test_b_fails")["outcome"], "fail")
         self.assertEqual(repo.step("relay_engine.tests.test_a_ok")["outcome"], "pass")
 
+    def test_skipped_test_fails_step(self):
+        repo = FixtureRepo(self)
+        repo.module("test_a_skips", '''
+            class T(unittest.TestCase):
+                def test_ok(self):
+                    pass
+                def test_skip(self):
+                    self.skipTest("fixture skip")
+        ''')
+        code, err = repo.run()
+        self.assertEqual(code, 1, err)
+        step = repo.step("relay_engine.tests.test_a_skips")
+        self.assertEqual((step["outcome"], step["reason"]), ("fail", "skipped"))
+
+    def test_empty_module_fails_step(self):
+        repo = FixtureRepo(self)
+        repo.module("test_a_empty", '''
+            HELPER = 1
+        ''')
+        code, err = repo.run()
+        self.assertEqual(code, 1, err)
+        step = repo.step("relay_engine.tests.test_a_empty")
+        self.assertEqual((step["outcome"], step["reason"]), ("fail", "no-tests"))
+
+    def test_passing_module_has_no_reason(self):
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        code, err = repo.run()
+        self.assertEqual(code, 0, err)
+        step = repo.step("relay_engine.tests.test_a_ok")
+        self.assertEqual((step["outcome"], step["reason"]), ("pass", None))
+
     def test_all_passing_exits_zero(self):
         repo = FixtureRepo(self)
         repo.passing("test_a_ok")
@@ -366,8 +474,8 @@ class StepsAndResults(unittest.TestCase):
         self.assertEqual(results["exclusions"],
                          [{"path": "tools/check-old.py", "reason": exclusion.reason}])
         for step in results["steps"]:
-            self.assertEqual(set(step), {"id", "argv", "outcome", "exit_code", "wall_seconds",
-                                         "log", "leaked"})
+            self.assertEqual(set(step), {"id", "argv", "outcome", "reason", "exit_code",
+                                         "wall_seconds", "log", "leaked"})
             self.assertIsInstance(step["wall_seconds"], (int, float))
             self.assertTrue(Path(step["log"]).is_file())
 
@@ -419,14 +527,17 @@ class DockerArgs(unittest.TestCase):
     def test_mount_args_are_readonly_binds(self):
         worktree = Path("/Users/someone/worktrees/w")
         common = Path("/Users/someone/repo/.git")
-        args = rc.docker_args(worktree, common, Path("/Users/someone/out"), "img:tag", "abc123")
+        args = rc.docker_args(worktree, common, Path("/Users/someone/out"), "img:tag", "abc123",
+                              platform="linux/arm64")
         self.assertNotIn("-v", args)
         self.assertNotIn("--volume", args)
         mounts = [args[i + 1] for i, a in enumerate(args) if a == "--mount"]
         self.assertIn(f"type=bind,src={worktree},dst={worktree},readonly", mounts)
         self.assertIn(f"type=bind,src={common},dst={common},readonly", mounts)
         self.assertIn("type=bind,src=/Users/someone/out/linux,dst=/out", mounts)
-        self.assertTrue(any(m.startswith("type=tmpfs,dst=/scratch") for m in mounts))
+        self.assertIn("--init", args)
+        self.assertEqual(args[args.index("--tmpfs") + 1], "/scratch:rw,exec,mode=1777")
+        self.assertEqual(args[args.index("--platform") + 1], "linux/arm64")
         self.assertIn("ADT_EXPECTED_HEAD=abc123", args)
         self.assertEqual(args[args.index("-w") + 1], str(worktree))
 
@@ -440,7 +551,7 @@ class LinuxLeg(unittest.TestCase):
     def readonly_args(self, fixture, expected_head=None):
         common = rc.common_git_dir(fixture.repo)
         return rc.docker_args(fixture.repo, common, fixture.out, self.image,
-                              expected_head or fixture.head)
+                              expected_head or fixture.head, platform=rc.native_platform(docker_binary()))
 
     def test_preflight_rejects_writable_mount(self):
         fixture = LinuxFixture(self).finish()
@@ -457,6 +568,94 @@ class LinuxLeg(unittest.TestCase):
         result = fixture.container(self.readonly_args(fixture, expected_head="0" * 40))
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("HEAD", result.stdout + result.stderr)
+
+    ORPHAN = '''
+        import signal
+        class T(unittest.TestCase):
+            def test_orphan_reaped(self):
+                read, write = os.pipe()
+                if os.fork() == 0:
+                    if os.fork() == 0:
+                        os.write(write, str(os.getpid()).encode()); time.sleep(60); os._exit(0)
+                    os._exit(0)
+                orphan = int(os.read(read, 32))
+                os.kill(orphan, signal.SIGKILL)
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(orphan, 0)
+                    except ProcessLookupError:
+                        return
+                    time.sleep(0.05)
+                self.fail("killed orphan still answers kill(pid, 0)")
+    '''
+
+    def test_orphan_is_reaped_on_linux(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_orphan", self.ORPHAN)
+        fixture.finish()
+        args = self.readonly_args(fixture)
+        result = fixture.container(args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        linux = json.loads((fixture.out / "linux" / "results.json").read_text())
+        step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_orphan")
+        self.assertEqual(step["outcome"], "pass")
+        control = fixture.container([a for a in args if a != "--init"])
+        self.assertEqual(control.returncode, 1, control.stdout + control.stderr)
+
+    def test_scratch_is_executable_on_linux(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_exec", '''
+            import subprocess, tempfile
+            class T(unittest.TestCase):
+                def test_exec(self):
+                    script = os.path.join(tempfile.gettempdir(), "fixture.sh")
+                    with open(script, "w") as handle:
+                        handle.write("#!/bin/sh\\necho exec-ok\\n")
+                    os.chmod(script, 0o755)
+                    self.assertEqual(subprocess.run([script], capture_output=True, text=True,
+                                                    check=True).stdout.strip(), "exec-ok")
+        ''')
+        fixture.finish()
+        code, err = fixture.run_legs("linux")
+        self.assertEqual(code, 0, err)
+
+    def test_linux_leg_runs_native_platform(self):
+        fixture = LinuxFixture(self).finish()
+        code, err = fixture.run_legs("linux")
+        self.assertEqual(code, 0, err)
+        native = subprocess.run([docker_binary(), "info", "--format", "{{.Architecture}}"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        linux = json.loads((fixture.out / "linux" / "results.json").read_text())
+        self.assertEqual(linux["machine"], native)
+        self.assertTrue(linux["image"].startswith("sha256:"), linux["image"])
+
+    def test_interrupt_kills_the_container(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_slow", '''
+            class T(unittest.TestCase):
+                def test_slow(self):
+                    time.sleep(120)
+        ''')
+        fixture.finish()
+        before = self.running_containers()
+        driver = start_driver(fixture, "full", "--leg", "linux", "--workers", "2",
+                              "--out", str(fixture.out))
+        self.addCleanup(driver.kill)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (self.running_containers() - before):
+            time.sleep(0.2)
+        started = self.running_containers() - before
+        self.assertTrue(started, "the linux leg's container never started")
+        driver.send_signal(signal.SIGINT)
+        output, _ = driver.communicate(timeout=90)
+        self.assertNotEqual(driver.returncode, 0, output)
+        self.assertFalse(self.running_containers() & started, "container survived the interrupt")
+
+    def running_containers(self):
+        listing = subprocess.run([docker_binary(), "ps", "-q", "--filter", f"ancestor={self.image}"],
+                                 capture_output=True, text=True, check=True).stdout
+        return set(listing.split())
 
     def test_git_works_in_linked_worktree(self):
         fixture = LinuxFixture(self, linked=True).finish(linked=True)
@@ -497,6 +696,8 @@ class MissingDocker(unittest.TestCase):
         code, err = fixture.run_legs("linux", environ=environ)
         self.assertEqual(code, 2, err)
         self.assertIn("docker", err)
+        fixture.out = fixture.out.parent / (fixture.out.name + "-both")
+        self.addCleanup(shutil.rmtree, fixture.out, True)
         code, err = fixture.run_legs("both", environ=environ)
         self.assertEqual(code, 2, err)
         summary = json.loads((fixture.out / "release-check.json").read_text())
@@ -556,6 +757,17 @@ class TestingDoc(unittest.TestCase):
         text = TESTING_MD.read_text()
         self.assertEqual(trap_problems(REPO, text), [])
         self.assertIn("release-check.py full", text)
+
+    def test_module_command_sets_the_results_environment(self):
+        # test_e2e_chain skips its census test without these (test_e2e_chain.py:425-436).
+        text = TESTING_MD.read_text()
+        command = next(line for line in text.splitlines() if "relay_engine.tests.<module>" in line)
+        for name in ("RELAY_ENGINE_RESULTS_ROOT=", "RELAY_ENGINE_MATRIX_RUN=", "PYTHONPATH=tools"):
+            self.assertIn(name, command)
+
+    def test_trap_list_names_adapters(self):
+        lines = trap_lines(TESTING_MD.read_text())
+        self.assertTrue(any("`tools/adapters/**`" in line for line in lines))
 
     def test_trap_list_control_names_a_renamed_module(self):
         text = TESTING_MD.read_text()

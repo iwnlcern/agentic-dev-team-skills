@@ -4,7 +4,8 @@
 # python:3.11-slim, Python 3.11.18, pulled 2026-11-04.
 FROM python:3.11-slim@sha256:db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893
 
-# git: engine tests and the preflight read history; bash: test-adapter.sh.
+# git: engine tests and the preflight read history; bash: test-adapter.sh;
+# zsh: test_relay_monitor's shell-inertness tests run hints in zsh (early run, 2026-11-04).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git bash \
+    && apt-get install -y --no-install-recommends git bash zsh \
     && rm -rf /var/lib/apt/lists/*

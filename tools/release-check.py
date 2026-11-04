@@ -22,11 +22,13 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -43,6 +45,10 @@ CONTAINER_SCRATCH = "/scratch"
 CONTAINER_PLAN = "container-plan.json"
 # Host-side wait beyond the container's own cap and kill grace before it is killed.
 CONTAINER_MARGIN_SECONDS = 120
+DOCKER_PLATFORMS = {"aarch64": "linux/arm64", "arm64": "linux/arm64",
+                    "x86_64": "linux/amd64", "amd64": "linux/amd64"}
+# Set when the run is interrupted; legs stop their steps (or container) and record it.
+STOP = threading.Event()
 
 
 class SetupError(Exception):
@@ -216,6 +222,22 @@ def _stop_marked(marker, grace=KILL_GRACE_SECONDS):
     return pids
 
 
+def _is_unittest(argv):
+    return "-m" in argv and "unittest" in argv
+
+
+def _unittest_reason(log_path):
+    """None when the summary is OK with at least one test and no skips (AGENTS.md:18)."""
+    text = Path(log_path).read_text(errors="replace")
+    ran = [int(n) for n in re.findall(r"^Ran (\d+) tests? in ", text, re.MULTILINE)]
+    if not ran or ran[-1] == 0 or "NO TESTS RAN" in text:
+        return "no-tests"
+    status = [line for line in text.splitlines() if line.startswith(("OK", "FAILED"))]
+    if status and status[-1].startswith("OK") and "skipped=" in status[-1]:
+        return "skipped"
+    return None
+
+
 def _pin_validator(environ):
     """Resolve CLAUDE_BIN, else the first claude on PATH, to its real (versioned) path."""
     candidate = environ.get("CLAUDE_BIN") or shutil.which("claude", path=environ.get("PATH"))
@@ -278,6 +300,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
         "python": {"path": sys.executable, "version": platform.python_version()},
         "workers": workers, "load": {"start": list(os.getloadavg()), "end": None},
         "claude_bin": claude_bin, "claude_version": claude_version, "cap_seconds": cap_seconds,
+        "machine": platform.machine(), "image": environ.get("ADT_IMAGE_ID"), "interrupted": False,
         "started": _now(), "finished": None,
         "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions],
         "steps": [], "exit": None,
@@ -286,12 +309,38 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     for index, step in enumerate(active):
         log = logs / f"{index:03d}-{step.id.replace('/', '_').replace(' ', '_')}.log"
         rows[step.id] = {"id": step.id, "argv": list(step.argv), "outcome": "unfinished",
-                         "exit_code": None, "wall_seconds": 0.0, "log": str(log), "leaked": []}
+                         "reason": None, "exit_code": None, "wall_seconds": 0.0, "log": str(log), "leaked": []}
 
     deadline = time.monotonic() + cap_seconds
     pending = list(active)
     running = {}
-    while pending or running:
+    try:
+        _schedule(pending, running, rows, base_env, repo, workers, deadline)
+    except KeyboardInterrupt:
+        STOP.set()
+    if STOP.is_set():
+        results["interrupted"] = True
+    _stop_running(running, rows)
+    for step in pending:
+        Path(rows[step.id]["log"]).touch()
+
+    results["steps"] = [rows[s.id] for s in active]
+    results["load"]["end"] = list(os.getloadavg())
+    results["finished"] = _now()
+    exit_code = 0 if all(r["outcome"] == "pass" for r in results["steps"]) else 1
+    results["exit"] = exit_code
+    results_path = leg_out / "results.json"
+    results_path.write_text(json.dumps(results, indent=2) + "\n")
+    failed = [r["id"] for r in results["steps"] if r["outcome"] != "pass"]
+    print(f"release-check: {leg} leg exit {exit_code}; {len(failed)} of {len(active)} steps not green"
+          + (" (interrupted)" if results["interrupted"] else "")
+          + (": " + ", ".join(failed) if failed else ""), file=sys.stderr)
+    return LegResult(leg, exit_code, results_path)
+
+
+def _schedule(pending, running, rows, base_env, repo, workers, deadline):
+    """Start and reap steps until all finish, the cap passes or the run is stopped."""
+    while (pending or running) and not STOP.is_set():
         while pending and len(running) < workers and time.monotonic() < deadline:
             step = pending.pop(0)
             marker = uuid.uuid4().hex
@@ -308,7 +357,14 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
                 continue
             handle.close()
             row = rows[step_id]
-            row.update(outcome="pass" if code == 0 else "fail", exit_code=code,
+            reason = None if code == 0 else f"exit {code}"
+            if _is_unittest(row["argv"]):
+                # The summary decides, so the verdict does not depend on the interpreter
+                # (3.12+ exits 5 on "NO TESTS RAN", 3.11 exits 0).
+                summary = _unittest_reason(row["log"])
+                if code == 0 or summary == "no-tests":
+                    reason = summary if summary else reason
+            row.update(outcome="pass" if reason is None else "fail", reason=reason, exit_code=code,
                        wall_seconds=round(time.monotonic() - started, 3))
             row["leaked"] = _stop_marked(marker)
             del running[step_id]
@@ -317,38 +373,29 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
         if pending or running:
             time.sleep(POLL_SECONDS)
 
-    if running:
-        for proc, marker, _, _ in running.values():
-            _signal(proc.pid, signal.SIGTERM, group=True)
-            for pid in _marked_pids(marker):
-                _signal(pid, signal.SIGTERM)
-        grace_end = time.monotonic() + KILL_GRACE_SECONDS
-        while time.monotonic() < grace_end and (
-                any(p.poll() is None for p, _, _, _ in running.values())
-                or any(_marked_pids(m) for _, m, _, _ in running.values())):
-            time.sleep(POLL_SECONDS)
-        for step_id, (proc, marker, started, handle) in running.items():
-            _signal(proc.pid, signal.SIGKILL, group=True)
-            for pid in _marked_pids(marker):
-                _signal(pid, signal.SIGKILL)
-            proc.wait()
-            handle.close()
-            rows[step_id].update(exit_code=proc.returncode,
-                                 wall_seconds=round(time.monotonic() - started, 3))
-    for step in pending:
-        Path(rows[step.id]["log"]).touch()
 
-    results["steps"] = [rows[s.id] for s in active]
-    results["load"]["end"] = list(os.getloadavg())
-    results["finished"] = _now()
-    exit_code = 0 if all(r["outcome"] == "pass" for r in results["steps"]) else 1
-    results["exit"] = exit_code
-    results_path = leg_out / "results.json"
-    results_path.write_text(json.dumps(results, indent=2) + "\n")
-    failed = [r["id"] for r in results["steps"] if r["outcome"] != "pass"]
-    print(f"release-check: {leg} leg exit {exit_code}; {len(failed)} of {len(active)} steps not green"
-          + (": " + ", ".join(failed) if failed else ""), file=sys.stderr)
-    return LegResult(leg, exit_code, results_path)
+def _stop_running(running, rows):
+    """The cap's (and an interrupt's) stop path: groups and marked descendants, then SIGKILL."""
+    if not running:
+        return
+    for proc, marker, _, _ in running.values():
+        _signal(proc.pid, signal.SIGTERM, group=True)
+        for pid in _marked_pids(marker):
+            _signal(pid, signal.SIGTERM)
+    grace_end = time.monotonic() + KILL_GRACE_SECONDS
+    while time.monotonic() < grace_end and (
+            any(p.poll() is None for p, _, _, _ in running.values())
+            or any(_marked_pids(m) for _, m, _, _ in running.values())):
+        time.sleep(POLL_SECONDS)
+    for step_id, (proc, marker, started, handle) in running.items():
+        _signal(proc.pid, signal.SIGKILL, group=True)
+        for pid in _marked_pids(marker):
+            _signal(pid, signal.SIGKILL)
+        proc.wait()
+        handle.close()
+        rows[step_id].update(exit_code=proc.returncode,
+                             wall_seconds=round(time.monotonic() - started, 3))
+    running.clear()
 
 
 def common_git_dir(repo):
@@ -361,21 +408,28 @@ def common_git_dir(repo):
     return Path(result.stdout.strip())
 
 
+def image_id(docker, tag):
+    result = subprocess.run([docker, "image", "inspect", "--format", "{{.Id}}", tag],
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    return result.stdout.strip() or None
+
+
 def image_tag():
     return "adt-release-check:" + hashlib.sha256(DOCKERFILE.read_bytes()).hexdigest()[:12]
 
 
-def ensure_image(docker):
-    """Build the linux leg's image when its tag (from the Dockerfile's digest) is absent."""
+def ensure_image(docker, platform=None):
+    """Build the linux leg's image for the native platform when its tag is absent or foreign."""
     tag = image_tag()
+    platform = platform or native_platform(docker)
     try:
-        present = subprocess.run([docker, "image", "inspect", tag], capture_output=True,
-                                 stdin=subprocess.DEVNULL).returncode == 0
-        if present:
+        present = subprocess.run([docker, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}",
+                                  tag], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if present.returncode == 0 and present.stdout.strip() == platform:
             return tag
         with open(DOCKERFILE, "rb") as dockerfile:
-            built = subprocess.run([docker, "build", "-q", "-t", tag, "-"], stdin=dockerfile,
-                                   capture_output=True, text=True)
+            built = subprocess.run([docker, "build", "-q", "--platform", platform, "-t", tag, "-"],
+                                   stdin=dockerfile, capture_output=True, text=True)
     except OSError as error:
         raise SetupError(f"docker could not run ({docker}): {error}") from error
     if built.returncode != 0:
@@ -383,23 +437,41 @@ def ensure_image(docker):
     return tag
 
 
-def docker_args(worktree, common_git_dir, out, image, expected_head, extra=()):
+def native_platform(docker):
+    """The host's native Docker platform, so the linux leg never runs under emulation."""
+    try:
+        arch = subprocess.run([docker, "info", "--format", "{{.Architecture}}"], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    except OSError as error:
+        raise SetupError(f"docker could not run ({docker}): {error}") from error
+    if arch not in DOCKER_PLATFORMS:
+        raise SetupError(f"docker reports an unknown host architecture {arch!r}")
+    return DOCKER_PLATFORMS[arch]
+
+
+def docker_args(worktree, common_git_dir, out, image, expected_head, extra=(), platform=None,
+                image_id=None):
     """Arguments after the docker binary for the linux leg's container."""
     worktree = Path(worktree)
     common = Path(common_git_dir)
     sources = [worktree]
     if common != worktree and worktree not in common.parents:
         sources.append(common)
-    args = ["run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}"]
+    # --init: an init process, not the runner, is PID 1 and reaps orphans (erratum 1 E1).
+    args = ["run", "--rm", "--init", "--user", f"{os.getuid()}:{os.getgid()}"]
+    if platform:
+        args += ["--platform", platform]
     for source in sources:
         # A linked worktree's .git names the common directory by absolute host path,
         # so both are mounted at their host paths, read-only.
         args += ["--mount", f"type=bind,src={source},dst={source},readonly"]
     args += ["--mount", f"type=bind,src={Path(out) / 'linux'},dst={CONTAINER_OUT}"]
-    args += ["--mount", f"type=tmpfs,dst={CONTAINER_SCRATCH},tmpfs-mode=1777"]
+    # Docker's tmpfs mount is noexec by default; tests run scripts they write (erratum 1 E2).
+    args += ["--tmpfs", f"{CONTAINER_SCRATCH}:rw,exec,mode=1777"]
     for key, value in (("ADT_EXPECTED_HEAD", expected_head),
                        ("ADT_SOURCE_MOUNTS", os.pathsep.join(str(s) for s in sources)),
-                       ("TMPDIR", CONTAINER_SCRATCH), ("HOME", CONTAINER_SCRATCH)):
+                       ("TMPDIR", CONTAINER_SCRATCH), ("HOME", CONTAINER_SCRATCH),
+                       ("ADT_IMAGE_ID", image_id or "")):
         args += ["-e", f"{key}={value}"]
     args += ["-w", str(worktree), image, "python3", "tools/release-check.py", "full", "--leg", "linux",
              "--in-container", "--out", CONTAINER_OUT, *extra]
@@ -462,9 +534,11 @@ def _run_linux_host(steps, args, repo, environ, exclusions):
         docker = environ.get("DOCKER") or shutil.which("docker", path=environ.get("PATH"))
         if not docker or not os.access(docker, os.X_OK):
             raise SetupError(f"docker not found (DOCKER={environ.get('DOCKER')!r}, PATH lookup)")
-        image = ensure_image(docker)
+        platform_name = native_platform(docker)
+        image = ensure_image(docker, platform_name)
         command = docker_args(repo, common_git_dir(repo), args.out, image, _commit(repo) or "",
-                              extra=["--workers", str(args.workers), "--cap-seconds", str(args.cap_seconds)])
+                              extra=["--workers", str(args.workers), "--cap-seconds", str(args.cap_seconds)],
+                              platform=platform_name, image_id=image_id(docker, image))
     except SetupError as error:
         print(f"release-check: linux leg setup error: {error}", file=sys.stderr)
         return 2
@@ -473,9 +547,12 @@ def _run_linux_host(steps, args, repo, environ, exclusions):
     command = [docker, command[0], "--name", name] + command[1:]
     with open(leg_dir / "docker.log", "wb") as log:
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-        try:
-            code = proc.wait(timeout=args.cap_seconds + KILL_GRACE_SECONDS + CONTAINER_MARGIN_SECONDS)
-        except subprocess.TimeoutExpired:
+        give_up = time.monotonic() + args.cap_seconds + KILL_GRACE_SECONDS + CONTAINER_MARGIN_SECONDS
+        while proc.poll() is None and not STOP.is_set() and time.monotonic() < give_up:
+            time.sleep(0.2)
+        code = proc.poll()
+        if code is None:
+            # Interrupted, or the container outlived its own cap: stop it.
             subprocess.run([docker, "kill", name], capture_output=True, stdin=subprocess.DEVNULL)
             proc.wait()
             code = 1
@@ -505,8 +582,22 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
     full.add_argument("--in-container", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    if args.in_container:
-        return _run_in_container(args, repo, environ)
+    STOP.clear()
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        def _terminate(signum, frame):
+            raise KeyboardInterrupt
+        previous = signal.signal(signal.SIGTERM, _terminate)
+    try:
+        if args.in_container:
+            return _run_in_container(args, repo, environ)
+        return _run_host(args, repo, environ, exclusions)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def _run_host(args, repo, environ, exclusions):
     if not _under_home(args.out, environ):
         print(f"release-check: --out {args.out} is not under $HOME; macOS purges /tmp and "
               "/var/folders, so results there may vanish before they are cited", file=sys.stderr)
@@ -515,6 +606,11 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
         for exclusion in exclusions:
             print(f"release-check: --release refuses exclusion {exclusion.path} ({exclusion.reason})",
                   file=sys.stderr)
+        return 2
+    used = [p for p in ("release-check.json", "mac", "linux") if os.path.lexists(Path(args.out) / p)]
+    if used:
+        print(f"release-check: --out {args.out} already holds results ({', '.join(used)}); "
+              "choose a new directory so no stale result is cited", file=sys.stderr)
         return 2
     steps = step_table(repo)
     problems = uncovered(repo, steps, exclusions)
@@ -529,11 +625,23 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         linux = (pool.submit(_run_linux_host, steps, args, repo, environ, exclusions)
                  if "linux" in legs else None)
-        if "mac" in legs:
-            exits["mac"] = run_leg("mac", steps, args.workers, args.cap_seconds, out, repo=repo,
-                                   environ=environ, exclusions=exclusions).exit
-        if linux is not None:
-            exits["linux"] = linux.result()
+        try:
+            if "mac" in legs:
+                exits["mac"] = run_leg("mac", steps, args.workers, args.cap_seconds, out, repo=repo,
+                                       environ=environ, exclusions=exclusions).exit
+            if linux is not None:
+                while True:
+                    try:
+                        exits["linux"] = linux.result(timeout=0.5)
+                        break
+                    except concurrent.futures.TimeoutError:
+                        continue
+        except KeyboardInterrupt:
+            STOP.set()
+            if linux is not None:
+                exits["linux"] = linux.result()
+            if "mac" in legs:
+                exits.setdefault("mac", 1)
     overall = 2 if 2 in exits.values() else 1 if 1 in exits.values() else 0
     summary = {"commit": _commit(repo), "finished": _now(), "exit": overall,
                "legs": {leg: {"exit": code, "results": str(out / leg / "results.json")}

@@ -12,9 +12,11 @@ Every check names the decision its result can change, or it does not run (R250.5
 No test asserts a wall-clock duration as pass or fail.
 A test that starts a long-lived child (a daemon, a server, a watcher) passes it the inherited environment, because the release check finds a step's leftover descendants by an environment marker (`ADT_RELEASE_STEP`); a child started with an environment built from scratch escapes that sweep.
 
-Run one engine module from the repository root:
+Run one engine module from the repository root, with the results environment the engine tests require (`test_e2e_chain` skips its census test without it):
 
-    PYTHONPATH=tools python3 -m unittest relay_engine.tests.<module>
+    PYTHONPATH=tools PYTHONWARNINGS=error::ResourceWarning RELAY_ENGINE_RESULTS_ROOT="$(mktemp -d "$HOME/.cache/relay-engine-results.XXXXXX")" RELAY_ENGINE_MATRIX_RUN="$(python3 -c 'import uuid; print(uuid.uuid4())')" python3 -m unittest relay_engine.tests.<module>
+
+The summary must read `OK` with no `skipped=` count; the release check fails a module that skips a test or runs none.
 
 Run the release runner's own tests (they need Docker):
 
@@ -39,7 +41,8 @@ Each entry was re-measured on the tree by searching the test modules and checks 
 
 - `skills/**`, `shared/**`, `vendor/**`, `LICENSE*`, `tools/generate-plugins.py` → `test_e2e_chain`, `test_cold_install`, `test_version`, `check-generate-plugins.py`, `generate-plugins.py`
 - `plugins/**` → `test_version`, `test_e2e_chain`, `check-generate-plugins.py`, `generate-plugins.py`
-- `tools/relay_engine/*.py` → `test_version`, `test_e2e_chain`, `test_cold_install`, `check-generate-plugins.py`
+- `tools/relay_engine/*.py` → `test_version`, `test_e2e_chain`, `test_cold_install`, `check-generate-plugins.py`, `generate-plugins.py`
+- `tools/adapters/**` → `test-adapter.sh`, `check-generate-plugins.py`, `generate-plugins.py`
 - `tools/relay_engine/errors.py`, `tools/relay_engine/strings.py` → `test_errors`, `test_strings_gate`
 - `tools/relay-lint-fixtures/**` → `test_lint_relay_root_record`, `test_judging`, `test_judging_agreement`, `test_draft_shape_lint`, `test_finding_tags`, `test_e2e_chain`, `test_gate_review`, `test_human_gate`, `test_parity`, `test_merge_claim`, `test_fixture_seam_copy`, `test_mtbattery_guard`, `capture_order_baseline`, `test-adapter.sh`, `check-relay-lint-fixtures.py`, `check-fixture-readme-census.py`, `check-timestamp-drift.py`, `check-generate-plugins.py`
 
@@ -47,6 +50,7 @@ Notes on the entries:
 
 - A new or removed engine module also changes the engine roster (`version.py` `ROSTER`) and `LOCKED_ENGINE_SET` in `check-generate-plugins.py`, which those tests compare.
 - A new error code also joins `_CODE_VALUES` (`tools/relay_engine/strings.py`), the all-members list the string gate checks.
+- Engine modules and `tools/adapters/` ship into `plugins/` (`generate-plugins.py` `ENGINE_SET` and `TOOLS_SET`), so a change there also needs regenerated plugins and `generate-plugins.py --check`.
 - `test_cold_install` reads `skills/` through `ruled_manifest`, which it imports from `test_e2e_chain`, and `test_version` reads `skills/`, `shared/`, `vendor/` and `LICENSE*` through the generator's `generate_tree`.
 - The `tools/relay-lint-fixtures/**` entry lasts until those fixtures are deleted (DD-v3-tests stage 4).
 - The kit pair adds the entry for `tools/kit_tests/` when that directory lands.
