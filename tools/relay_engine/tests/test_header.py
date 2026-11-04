@@ -141,7 +141,8 @@ class TestParse(Refused):
 
     def test_body_never_read(self):
         noisy = ("VERDICT: approve\nKIND: MERGE-GATE\n```\nTO: operator\n```\n"
-                 "~~~\nDISPATCH IMPL\n~~~\nFINDING: blocking 9 x\n")
+                 "~~~\nDISPATCH IMPL\n~~~\nFINDING: blocking 9 x\n"
+                 "\nKIND: AUDIT\nTO: x.planner\n\nSUBJECT: after a second empty line\n")
         with_body = header.parse(draft(body=noisy))
         empty = header.parse(draft(body=""))
         for name in ("kind", "to", "cc", "parent", "bundle", "verdict", "needs",
@@ -207,10 +208,20 @@ class TestReviewFocus(Refused):
         self.assertIn("byte-order mark", error.cause)
 
     def test_empty_address_item_refused(self):
+        seen = []
+
+        def recording(value):
+            seen.append(value)
+            header.syntactic_address(value)
+
         for value in ("a.planner, , b.planner", "a.planner,", ", a.planner"):
             with self.subTest(value=value):
-                error = self.refused(draft(replace("TO", value)), "E-ADDRESS", line=2)
-                self.assertIn("empty", error.cause)
+                with self.assertRaises(errors.EngineError) as caught:
+                    header.parse(draft(replace("TO", value)), validate_address=recording)
+                self.assertEqual(caught.exception.code, "E-ADDRESS")
+                self.assertEqual(caught.exception.params["line"], 2)
+                self.assertEqual(caught.exception.params["reason"], "empty list item")
+        self.assertNotIn("", seen)  # the validator never sees an empty item
         self.assertEqual(header.parse(draft(replace("TO", "a.planner, b.planner"))).to,
                          ("a.planner", "b.planner"))
 
@@ -297,5 +308,161 @@ class TestReviewFocus(Refused):
                 self.assertTrue(cause and remedy)
 
 
+
+REVIEW = ["KIND: PLAN-REVIEW", "TO: v3-engine.planner", "NEEDS: act", "SUBJECT: s",
+          "PARENT: #3", "VERDICT: must-revise"]
+
+
+class TestPanelFold1(Refused):
+    """PR-1 panel fold 1 (v3-engine-pr1-review-1): M1-M6, M9 boundaries, O6, O7."""
+
+    def sized(self, header_bytes):
+        """A valid draft whose header block, with its empty line, is exactly header_bytes long."""
+        lines = list(BASE)
+        size = len("\n".join(lines)) + 2
+        pad = header_bytes - size - len("\nREF: file:/")
+        lines.append("REF: file:/" + "x" * pad)
+        data = draft(lines)
+        self.assertEqual(data.index(b"\n\n") + 2, header_bytes)
+        return data
+
+    def test_long_key_is_typed(self):  # M1
+        for key in ("A" * 64, "A" * 65, "A" * 8000):
+            with self.subTest(length=len(key)):
+                error = self.refused(draft(BASE + [key + ": x"]), "E-HEADER-UNKNOWN-KEY", line=6)
+                self.assertLessEqual(len(error.params["key"]), 64)
+                error = self.refused(draft(BASE + [key + ":"]), "E-HEADER-EMPTY", line=6)
+                self.assertLessEqual(len(error.params["key"]), 64)
+
+    def test_parse_raises_only_typed_errors(self):  # M1 corpus
+        import random
+        rng = random.Random(20261104)
+        seeds = [draft(), draft(REVIEW + ["REF: file:/a", "FINDING: blocking 1 probe fails"]),
+                 draft(["KIND: REVIEW-FOLD", "TO: a.planner", "NEEDS: review", "SUBJECT: s",
+                        "PARENT: #2", "FIXES: F1 " + "0" * 40, "RESOLVE: F2 withdrawn r"])]
+        alphabet = b"AZ:_ -#\n\r\t\x00\xc3\xa9\xff09@.,F" + bytes(range(32, 127))
+        outcomes = {"draft": 0, "refused": 0}
+        for _ in range(4000):
+            data = bytearray(rng.choice(seeds))
+            for _ in range(rng.randint(1, 6)):
+                op, at = rng.randrange(3), rng.randrange(len(data) + 1)
+                if op == 0:
+                    data[at:at] = bytes([rng.choice(alphabet)]) * rng.choice((1, 1, 70))
+                elif op == 1 and data:
+                    del data[min(at, len(data) - 1)]
+                elif data:
+                    data[min(at, len(data) - 1)] = rng.choice(alphabet)
+            try:
+                header.parse(bytes(data))
+                outcomes["draft"] += 1
+            except errors.EngineError:
+                outcomes["refused"] += 1
+        self.assertGreater(outcomes["draft"], 0)
+        self.assertGreater(outcomes["refused"], 0)
+
+    def test_unterminated_header_causes(self):  # M2
+        body = "x" * 9000 + "\n"
+        crlf = ("\r\n".join(BASE) + "\r\n\r\n" + body).encode()
+        self.refused(crlf, "E-HEADER-CRLF", line=1)
+        spaced = ("\n".join(BASE) + "\n \n" + body).encode()
+        self.refused(spaced, "E-HEADER-GRAMMAR", line=6)
+        plain = ("\n".join(BASE) + "\n" + "REF: file:/" + "y" * 9000 + "\n").encode()
+        error = self.refused(plain, "E-HEADER-SIZE")
+        self.assertIn("8192", error.cause)
+        self.assertNotIn(str(len(plain)), error.cause)  # never the whole draft's size
+
+    def test_unterminated_header_names_any_line_rule(self):  # M2, superset
+        body = "x" * 9000 + "\n"
+        v2 = ("## SITREP — title\nROLE: Planner\n" + "\n".join(BASE) + "\n" + body).encode()
+        self.refused(v2, "E-HEADER-TITLE-LINE", line=1)
+        unknown = ("\n".join(BASE) + "\nROLE: Planner\n" + body).encode()
+        self.refused(unknown, "E-HEADER-UNKNOWN-KEY", line=6)
+        bad = ("\n".join(BASE) + "\n").encode() + b"SUBJECT: \xff\n" + body.encode()
+        error = self.refused(bad, "E-DRAFT-UTF8")
+        self.assertEqual(error.params["line"], 6)
+        # a long last line cut at the cap is never judged on its cut bytes
+        cut = ("\n".join(BASE) + "\nREF: file:/" + "\u00e9" * 5000 + "\n").encode()
+        self.refused(cut, "E-HEADER-SIZE")
+
+    def test_header_cap_boundary(self):  # M3, H6, M13b
+        header.parse(self.sized(8192))
+        error = self.refused(self.sized(8193), "E-HEADER-SIZE")
+        self.assertIn("8193", error.cause)
+
+    def test_value_pieces_are_shape(self):  # M4
+        for line in ("RESOLVE: F1", "RESOLVE: F1  withdrawn r", "RESOLVE: F1 withdrawn  r"):
+            with self.subTest(line=line):
+                self.refused(draft(BASE + [line]), "E-FIELD-SHAPE", line=6)
+        for line in ("FINDING: blocking  1 s", "FINDING: advisory  s", "FINDING: advisory s  t",
+                     "FINDING: blocking 1234567 s", "FINDING: blocking 0 s", "FINDING: blocking 01 s"):
+            with self.subTest(line=line):
+                self.refused(draft(REVIEW + ["REF: file:/a", line]), "E-FIELD-SHAPE", line=8)
+        fold = ["KIND: REVIEW-FOLD", "TO: a.planner", "NEEDS: review", "SUBJECT: s", "PARENT: #2"]
+        self.refused(draft(fold + ["FIXES: F1  " + "0" * 40]), "E-FIELD-SHAPE", line=6)
+        parsed = header.parse(draft(REVIEW + ["REF: file:/a", "FINDING: advisory s t"]))
+        self.assertEqual(parsed.findings[0].summary, "s t")
+
+    def test_remedies_are_true(self):  # M6
+        first = self.refused(draft(["# title"] + BASE), "E-HEADER-TITLE-LINE", line=1)
+        self.assertIn("SUBJECT", first.remedy)
+        late = self.refused(draft(BASE + ["# Findings"]), "E-HEADER-TITLE-LINE", line=6)
+        self.assertIn("empty line", late.remedy)
+        self.assertNotIn("SUBJECT", late.remedy)
+        advisory = self.refused(draft(REVIEW + ["FINDING: advisory 2 flaky runs seen"]),
+                                "E-FINDING-NO-CHECK", line=7)
+        self.assertNotIn("advisory", advisory.remedy)
+        blocking = self.refused(draft(REVIEW + ["FINDING: blocking probe fails"]),
+                                "E-FINDING-NO-CHECK", line=7)
+        self.assertIn("advisory", blocking.remedy)
+        both = self.refused(draft(BASE + ["PARENT: #2"]), "E-FIELD-FORBIDDEN", line=5)
+        self.assertIn("inherits", both.remedy)
+        self.assertNotIn("KIND", both.remedy)
+
+    def test_boundaries(self):  # M9 header survivors H1-H5, H7, H10
+        fold = ["KIND: REVIEW-FOLD", "TO: a.planner", "NEEDS: review", "SUBJECT: s", "PARENT: #2"]
+        ok, bad = header.parse, self.refused
+        ok(draft(REVIEW + ["FINDING: advisory " + "s" * 200]))
+        bad(draft(REVIEW + ["FINDING: advisory " + "s" * 201]), "E-FIELD-LENGTH", line=7)
+        ok(draft(BASE + ["RESOLVE: F1 withdrawn " + "r" * 200]))
+        bad(draft(BASE + ["RESOLVE: F1 withdrawn " + "r" * 201]), "E-FIELD-LENGTH", line=6)
+        ok(draft(REVIEW + ["REF: file:/a", "FINDING: blocking 1 s"]))
+        bad(draft(REVIEW + ["REF: file:/a", "FINDING: blocking 0 s"]), "E-FIELD-SHAPE", line=8)
+        ok(draft(replace("BUNDLE", None) + ["PARENT: #1"]))
+        bad(draft(replace("BUNDLE", None) + ["PARENT: #0"]), "E-FIELD-SHAPE", line=5)
+        ok(draft(fold + ["FIXES: F1 " + "a" * 40]))
+        ok(draft(fold + ["FIXES: F1 " + "a" * 64]))
+        for commit in ("a" * 39, "a" * 41, "a" * 63, "a" * 65, "A" * 40):
+            with self.subTest(commit=len(commit)):
+                bad(draft(fold + ["FIXES: F1 " + commit]), "E-FIELD-SHAPE", line=6)
+        bad(draft(fold + ["FIXES: F0 " + "a" * 40]), "E-FIELD-SHAPE", line=6)
+        ok(draft(BASE + ["RESOLVE: F1 withdrawn r"]))
+        bad(draft(BASE + ["RESOLVE: F0 withdrawn r"]), "E-FIELD-SHAPE", line=6)
+        ok(draft(replace("BUNDLE", "b" * 48)))
+        bad(draft(replace("BUNDLE", "b" * 49)), "E-FIELD-SHAPE", line=5)
+        ok(draft(REVIEW + ["REF: file:/a", "FINDING: advisory 1 s"]))
+        bad(draft(REVIEW + ["REF: file:/a", "FINDING: advisory 5 s"]), "E-FINDING-NO-CHECK", line=8)
+
+    def test_display_escapes(self):  # M9 H8, O6
+        for char, shown in (("\t", "\\u0009"), (" ", "\\u00a0"), ("​", "\\u200b"),
+                            ("﻿", "\\ufeff"), ("‮", "\\u202e")):
+            with self.subTest(char=repr(char)):
+                error = self.refused(draft(replace("KIND", "SITREP" + char + "X")), "E-FIELD-ENUM", line=1)
+                self.assertIn(shown, error.cause)
+                self.assertNotIn(char, error.cause)
+
+    def test_utf8_names_the_header_line(self):  # O6
+        error = self.refused(b"KIND: SITREP\nTO: \xff\n\nbody", "E-DRAFT-UTF8")
+        self.assertEqual((error.params["offset"], error.params["line"]), (17, 2))
+        self.assertIn("header line 2", error.cause)
+        error = self.refused(draft() + b"\xff", "E-DRAFT-UTF8")
+        self.assertIn("body", error.cause)
+
+    def test_alias_reason_matches_platform(self):  # O7
+        error = self.refused(draft(replace("TO", "v3-engine.pair-planner")), "E-ADDRESS", line=2)
+        self.assertEqual(error.params["reason"], "unknown role word")
+        self.assertIn("planner", error.remedy)
+
+
 if __name__ == "__main__":
     unittest.main()
+

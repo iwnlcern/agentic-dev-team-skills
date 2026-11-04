@@ -5,7 +5,7 @@ Every reader of a v3 draft calls ``parse``; no rule reads the body.
 
 from dataclasses import dataclass
 import re
-from typing import Callable
+import unicodedata
 
 from relay_engine import errors
 
@@ -96,7 +96,6 @@ ROLE_WORDS = frozenset({
     "domain-planner", "domain-reviewer"})
 _ALIASES = {"pair-planner": "planner", "pair-implementer": "implementer"}
 
-_KEY = re.compile(r"[A-Z][A-Z_]*")
 _LINE = re.compile(r"([A-Z][A-Z_]*): (\S(?:.*\S)?)", re.DOTALL)
 _EMPTY = re.compile(r"[A-Z][A-Z_]*:[ \t]*")
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -107,20 +106,31 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 _FINDING_HANDLE = re.compile(r"F[1-9][0-9]{0,17}")
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _INDEX = re.compile(r"[1-9][0-9]{0,5}")
+_DIGITS = re.compile(r"[0-9]+")
 
 
 def _display(text, limit=80):
-    """Show untrusted header text with every control escaped, bounded."""
+    """Show untrusted header text bounded, with every control, format,
+    separator and non-space blank character escaped."""
     out = []
     for char in text[:limit]:
         code = ord(char)
-        if code < 32 or 127 <= code <= 159 or char in "  ":
+        if (code < 32 or 127 <= code <= 159 or char != " " and
+                unicodedata.category(char) in _HIDDEN):
             out.append("\\u%04x" % code)
         else:
             out.append(char)
     if len(text) > limit:
         out.append("...")
     return "".join(out) or "(empty)"
+
+
+_HIDDEN = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"})
+
+
+def _short_key(key):
+    """A key bounded for the message: at most 64 characters."""
+    return key if len(key) <= 64 else key[:61] + "..."
 
 
 def _refuse(code, variant=None, **params):
@@ -167,7 +177,7 @@ def _address_problem(value):
     if _TEAM.fullmatch(team) is None:
         return "team name outside [a-z0-9][a-z0-9-]{0,63}", None
     if role in _ALIASES:
-        return "retired role alias", _ALIASES[role]
+        return "unknown role word", _ALIASES[role]
     if role not in ROLE_WORDS:
         return "unknown role word", None
     return None, None
@@ -181,6 +191,9 @@ def parse(data, validate_address=syntactic_address):
     try:
         data.decode("utf-8")
     except UnicodeDecodeError as bad:
+        if bad.start < len(header):
+            raise _refuse("E-DRAFT-UTF8", variant="header", offset=bad.start,
+                          line=data.count(b"\n", 0, bad.start) + 1) from None
         raise _refuse("E-DRAFT-UTF8", offset=bad.start) from None
     lines = header.split(b"\n") if header else []
     seen = {}
@@ -189,7 +202,7 @@ def parse(data, validate_address=syntactic_address):
         key, value = _read_line(number, raw)
         spec = _SPECS.get(key)
         if spec is None:
-            raise _refuse("E-HEADER-UNKNOWN-KEY", line=number, key=key)
+            raise _refuse("E-HEADER-UNKNOWN-KEY", line=number, key=_short_key(key))
         if spec.count != "0-n" and key in seen:
             raise _refuse("E-HEADER-DUPLICATE", line=number, field=key)
         seen.setdefault(key, number)
@@ -201,7 +214,7 @@ def _split(data):
     separator = data.find(b"\n\n", 0, HEADER_CAP + 2)
     if separator < 0:
         if len(data) > HEADER_CAP:
-            raise _refuse("E-HEADER-SIZE", size=len(data), limit=HEADER_CAP)
+            _unterminated(data[:HEADER_CAP])
         header = data[:-1] if data.endswith(b"\n") else data
         return header, b"", len(data)
     header_bytes = separator + 2
@@ -211,6 +224,27 @@ def _split(data):
     if len(body) > BODY_CAP:
         raise _refuse("E-BODY-SIZE", size=len(body), limit=BODY_CAP)
     return data[:separator], body, header_bytes
+
+
+def _unterminated(prefix):
+    """No empty line within the cap: name the first line rule a complete line
+    in the scanned bytes breaks (a carriage return first, as for a CRLF-saved
+    draft), else the size.  The last piece may be cut at the cap, so it is
+    never judged."""
+    offset = 0
+    for number, raw in enumerate(prefix.split(b"\n")[:-1], start=1):
+        if b"\r" in raw:
+            raise _refuse("E-HEADER-CRLF", line=number)
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError as bad:
+            raise _refuse("E-DRAFT-UTF8", variant="header",
+                          offset=offset + bad.start, line=number) from None
+        key, _ = _read_line(number, raw)
+        if key not in _SPECS:
+            raise _refuse("E-HEADER-UNKNOWN-KEY", line=number, key=_short_key(key))
+        offset += len(raw) + 1
+    raise _refuse("E-HEADER-SIZE", variant="unterminated", limit=HEADER_CAP)
 
 
 def _read_line(number, raw):
@@ -226,12 +260,14 @@ def _read_line(number, raw):
             raise _refuse("E-HEADER-CONTROL", line=number, column=column,
                           codepoint="U+%04X" % code)
     if text.startswith("#"):
-        raise _refuse("E-HEADER-TITLE-LINE", line=number)
+        if number == 1:
+            raise _refuse("E-HEADER-TITLE-LINE", line=number)
+        raise _refuse("E-HEADER-TITLE-LINE", variant="late", line=number)
     match = _LINE.fullmatch(text)
     if match is None:
         if _EMPTY.fullmatch(text):
             raise _refuse("E-HEADER-EMPTY", line=number,
-                          key=text.split(":", 1)[0])
+                          key=_short_key(text.split(":", 1)[0]))
         raise _refuse("E-HEADER-GRAMMAR", line=number, value=_display(text))
     return match.group(1), match.group(2)
 
@@ -313,7 +349,8 @@ def _validate(values, seen, body, header_bytes, validate_address):
     if "BUNDLE" in first:
         number, bundle = first["BUNDLE"]
         if parent is not None:
-            raise _refuse("E-FIELD-FORBIDDEN", line=number, field="BUNDLE",
+            raise _refuse("E-FIELD-FORBIDDEN", variant="bundle", line=number,
+                          field="BUNDLE",
                           rule="BUNDLE opens a lineage, so it never sits beside PARENT")
         if _BUNDLE.fullmatch(bundle) is None:
             _shape(number, "BUNDLE", bundle, "[a-z0-9][a-z0-9-]{0,47}")
@@ -351,31 +388,36 @@ def _verdict(kind, needs, entry):
 
 
 def _findings(kind, needs, entries, ref_count):
+    form = "<blocking|advisory> [<REF line number>] <summary>, one space between words"
     result = []
     for number, value in entries:
         if kind not in FINDING_KINDS or needs == "review":
             raise _refuse("E-FIELD-FORBIDDEN", line=number, field="FINDING",
                           rule="FINDING sits only on replies of DESIGN-REVIEW, "
                                "PLAN-REVIEW, REVIEW and MERGE-GATE")
-        severity, _, rest = value.partition(" ")
+        pieces = value.split(" ")
+        if "" in pieces or len(pieces) < 2:
+            _shape(number, "FINDING", value, form)
+        severity, rest = pieces[0], pieces[1:]
         _enum(number, "FINDING", severity, SEVERITIES)
-        first_word, _, after = rest.partition(" ")
         index = None
-        summary = rest
-        if _INDEX.fullmatch(first_word):
-            index, summary = int(first_word), after
-        if not summary:
-            _shape(number, "FINDING", value,
-                   "<blocking|advisory> [<REF line number>] <summary>")
+        if _DIGITS.fullmatch(rest[0]):
+            if _INDEX.fullmatch(rest[0]) is None:
+                _shape(number, "FINDING", value, form)
+            index, rest = int(rest[0]), rest[1:]
+        if not rest:
+            _shape(number, "FINDING", value, form)
+        summary = " ".join(rest)
+        if len(summary) > 200:
+            raise _refuse("E-FIELD-LENGTH", line=number, field="FINDING",
+                          length=len(summary), limit=200)
         if index is None and severity == "blocking":
             raise _refuse("E-FINDING-NO-CHECK", line=number, cited="none",
                           count=ref_count)
         if index is not None and index > ref_count:
-            raise _refuse("E-FINDING-NO-CHECK", line=number,
-                          cited=str(index), count=ref_count)
-        if len(summary) > 200:
-            raise _refuse("E-FIELD-LENGTH", line=number, field="FINDING",
-                          length=len(summary), limit=200)
+            raise _refuse("E-FINDING-NO-CHECK",
+                          variant=None if severity == "blocking" else "advisory",
+                          line=number, cited=str(index), count=ref_count)
         result.append(FindingSpec(severity, index, summary))
     return tuple(result)
 
@@ -396,16 +438,18 @@ def _fixes(kind, entries):
 
 
 def _resolves(entries):
+    form = "F<n> <fix-accepted|fix-refused|withdrawn> <reason>, one space between words"
     result = []
     for number, value in entries:
-        handle, _, rest = value.partition(" ")
-        status, _, reason = rest.partition(" ")
-        if _FINDING_HANDLE.fullmatch(handle) is None:
-            _shape(number, "RESOLVE", value,
-                   "F<n> <fix-accepted|fix-refused|withdrawn> <reason>")
+        pieces = value.split(" ")
+        if ("" in pieces or len(pieces) < 3 or
+                _FINDING_HANDLE.fullmatch(pieces[0]) is None):
+            _shape(number, "RESOLVE", value, form)
+        handle, status = pieces[0], pieces[1]
         _enum(number, "RESOLVE", status, RESOLUTIONS)
-        if not reason:
-            _shape(number, "RESOLVE", value,
-                   "F<n> <fix-accepted|fix-refused|withdrawn> <reason>")
+        reason = " ".join(pieces[2:])
+        if len(reason) > 200:
+            raise _refuse("E-FIELD-LENGTH", line=number, field="RESOLVE",
+                          length=len(reason), limit=200)
         result.append((handle, status, reason))
     return tuple(result)

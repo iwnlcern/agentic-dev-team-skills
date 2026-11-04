@@ -259,6 +259,8 @@ _HEADER_TEXT = {
     "error-header-control-explain": "a header value is one line of printable text",
     "error-header-title-line-cause": "line {line} is a title line; a v3 draft starts with header lines",
     "error-header-title-line-remedy": "delete the title line and put its text in SUBJECT",
+    "error-header-title-line-late-cause": "line {line} starts with #, so no empty line separates the header from the body",
+    "error-header-title-line-late-remedy": "put one empty line between the last header line and the body",
     "error-header-title-line-explain": "the subject line replaces the v2 title line",
     "error-header-crlf-cause": "line {line} ends with a carriage return",
     "error-header-crlf-remedy": "save the draft with LF line endings",
@@ -267,6 +269,8 @@ _HEADER_TEXT = {
     "error-header-bom-remedy": "save the draft as UTF-8 without a byte-order mark",
     "error-header-bom-explain": "the first header line starts at the first byte",
     "error-header-size-cause": "the header block is {size} bytes; the limit is {limit}",
+    "error-header-size-unterminated-cause": "no empty line ends the header block within its first {limit} bytes",
+    "error-header-size-unterminated-remedy": "end the header with one empty line; if the header itself is that long, move detail into the body",
     "error-header-size-remedy": "move detail from the header into the body",
     "error-header-size-explain": "sizes are checked before any parse; the header block is at most 8 KiB",
     "error-body-size-cause": "the body is {size} bytes; the limit is {limit}",
@@ -278,7 +282,8 @@ _HEADER_TEXT = {
     "error-field-shape-cause": "line {line}: {field} value {value} does not have the form {form}",
     "error-field-shape-remedy": "write the value in the field's form",
     "error-field-shape-explain": "fields with a fixed form refuse any other spelling",
-    "error-draft-utf8-cause": "the draft is not UTF-8 text: an invalid byte sequence starts at byte offset {offset} (the first byte is offset 0)",
+    "error-draft-utf8-cause": "the draft is not UTF-8 text: an invalid byte sequence starts at byte offset {offset} (the first byte is offset 0), in the body",
+    "error-draft-utf8-header-cause": "the draft is not UTF-8 text: an invalid byte sequence starts at byte offset {offset} (the first byte is offset 0), on header line {line}",
     "error-draft-utf8-remedy": "save the draft as UTF-8",
     "error-draft-utf8-explain": "a draft, header and body alike, is UTF-8 text",
     "error-question-address-cause": "line {line}: a QUESTION goes to operator alone, and TO is {value}",
@@ -289,6 +294,7 @@ _HEADER_TEXT = {
     "error-field-required-explain": "required fields depend on KIND and NEEDS",
     "error-field-forbidden-cause": "line {line}: {field} is not allowed here: {rule}",
     "error-field-forbidden-remedy": "remove the line, or change KIND or NEEDS so the field applies",
+    "error-field-forbidden-bundle-remedy": "remove BUNDLE: a relay with a PARENT inherits its parent's bundle",
     "error-field-forbidden-explain": "some fields belong only to certain kinds, or only to replies",
     "error-field-length-cause": "line {line}: {field} is {length} characters; the limit is {limit}",
     "error-field-length-remedy": "shorten the value and put detail in the body",
@@ -299,6 +305,8 @@ _HEADER_TEXT = {
     "error-address-alias-remedy": "write the role word {canonical}",
     "error-finding-no-check-cause": "line {line}: the finding cites REF line {cited}, and the header has {count} REF lines",
     "error-finding-no-check-remedy": "add a REF line naming the executed check's output and cite its number (1 for the first REF line), or mark the finding advisory",
+    "error-finding-no-check-advisory-cause": "line {line}: the finding starts with the number {cited}, read as a REF line, and the header has {count} REF lines",
+    "error-finding-no-check-advisory-remedy": "cite an existing REF line by its number (1 for the first), or start the summary with a word",
     "error-finding-no-check-explain": "a blocking finding cites the REF line that records its executed check",
 }
 
@@ -309,7 +317,7 @@ def _is_line(value):
 
 def _is_header_key(value):
     return (isinstance(value, str) and len(value) <= 64 and
-            re.fullmatch(r"[A-Z][A-Z_]*", value) is not None)
+            re.fullmatch(r"[A-Z][A-Z_]*(?:\.\.\.)?", value) is not None)
 
 
 def _is_header_text(value):
@@ -332,11 +340,16 @@ strings.register_inventory(_HEADER_TEXT, _HEADER_VALIDATORS)
 
 strings.register_inventory({
     "error-sql-version-cause": "the embedded SQL library is version {found}; the engine needs {minimum} or newer",
-    "error-sql-version-remedy": "run the engine with a Python whose embedded SQL library is 3.37.0 or newer",
+    "error-sql-version-remedy": "run the engine with a Python whose embedded SQL library is at least the minimum named in the cause",
+    "error-schema-mismatch-cause": "the store file holds {found}",
+    "error-schema-mismatch-remedy": "point the engine at an empty file, or at a store that this engine version created",
+    "error-schema-mismatch-explain": "the engine creates its tables only in an empty file and opens only a store of its own schema version and table definitions",
     "error-sql-version-explain": "the engine's tables are strict tables, which need SQL library 3.37.0 or newer",
 }, {
     ("error-sql-version-cause", "found"):
         lambda v: isinstance(v, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){2}", v) is not None,
+    ("error-schema-mismatch-cause", "found"):
+        lambda v: strings._is_show_text(v) and len(v) <= 200,
     ("error-sql-version-cause", "minimum"):
         lambda v: isinstance(v, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){2}", v) is not None,
 })
@@ -394,6 +407,7 @@ ERRORS = {
     "E-DRAFT-UTF8": _spec("draft-utf8", "integrity"),
     "E-QUESTION-ADDRESS": _spec("question-address", "integrity"),
     "E-SQLITE-VERSION": _spec("sql-version", "client"),
+    "E-SCHEMA-MISMATCH": _spec("schema-mismatch", "integrity"),
 }
 
 ERROR_VARIANTS = {
@@ -410,6 +424,21 @@ ERROR_VARIANTS = {
         _spec("envelope-edge", "integrity"),
     ("E-PATH-ESCAPE", "not-found"):
         _spec("not-found", "policy"),
+    ("E-DRAFT-UTF8", "header"): ErrorSpec(
+        "error-draft-utf8-header-cause", "error-draft-utf8-remedy",
+        "error-draft-utf8-explain", "integrity"),
+    ("E-HEADER-SIZE", "unterminated"): ErrorSpec(
+        "error-header-size-unterminated-cause", "error-header-size-unterminated-remedy",
+        "error-header-size-explain", "integrity"),
+    ("E-HEADER-TITLE-LINE", "late"): ErrorSpec(
+        "error-header-title-line-late-cause", "error-header-title-line-late-remedy",
+        "error-header-title-line-explain", "integrity"),
+    ("E-FINDING-NO-CHECK", "advisory"): ErrorSpec(
+        "error-finding-no-check-advisory-cause", "error-finding-no-check-advisory-remedy",
+        "error-finding-no-check-explain", "integrity"),
+    ("E-FIELD-FORBIDDEN", "bundle"): ErrorSpec(
+        "error-field-forbidden-cause", "error-field-forbidden-bundle-remedy",
+        "error-field-forbidden-explain", "integrity"),
     ("E-ADDRESS", "alias"): ErrorSpec(
         "error-address-cause", "error-address-alias-remedy",
         "error-address-explain", "integrity"),

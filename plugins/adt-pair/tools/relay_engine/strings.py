@@ -94,6 +94,7 @@ _CODE_VALUES = {
     "E-DRAFT-UTF8",
     "E-QUESTION-ADDRESS",
     "E-SQLITE-VERSION",
+    "E-SCHEMA-MISMATCH",
 }
 _OPS = {
     "seat.declare", "submit", "seat.register", "seat.replace", "seat.stand_down",
