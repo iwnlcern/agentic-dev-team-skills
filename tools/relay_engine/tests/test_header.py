@@ -1,5 +1,9 @@
 """v3 relay header: field registry, the one parser, and its refusal codes (DD-v3-engine § 3, § 5)."""
 
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import time
 import unittest
 
@@ -504,6 +508,59 @@ class TestGateAdvisories(Refused):
                          "he\u200bllo")
         error = self.refused(draft(replace("NEEDS", "no\u200bne")), "E-FIELD-ENUM", line=3)
         self.assertIn("\\u200b", error.cause)
+
+
+
+PDC_SWEEPER = Path("/Users/jack/Programming/pdc/tools/inbox-sweep.py")
+
+
+class TestMirrorHeader(unittest.TestCase):
+    """Task 8: mirror header lines in today's spelling, read by pdc's inbox sweeper."""
+
+    def test_lines_and_order(self):
+        self.assertEqual(
+            header.render_mirror_header("t.planner", ["t.implementer", "u.planner"],
+                                        ["v.orchestrator-planner"], "t/IMPL-x-20261104-010000.md"),
+            ["FROM: t.planner", "TO: t.implementer, u.planner", "CC: v.orchestrator-planner",
+             "IN_REPLY_TO: t/IMPL-x-20261104-010000.md"])
+        self.assertEqual(header.render_mirror_header("t.planner", ["t.implementer"], [], None),
+                         ["FROM: t.planner", "TO: t.implementer"])
+
+    def test_refuses_values_that_forge_lines(self):
+        good = ("t.planner", ["t.implementer"], [], "t/a.md")
+        for index, bad in ((0, "t.planner\nTO: x.y"), (0, ""), (1, ["a.b, c.d"]),
+                           (1, ["a b"]), (1, []), (2, ["c.d\r"]), (3, "t/a.md\nFROM: x.y"),
+                           (3, ""), (1, ["a.b\u2028"]), (1, ["a.b,c.d"]),
+                           (3, "t/a.md\u2028FROM: x.y"), (3, "t/a.md\u2029")):
+            args = list(good)
+            args[index] = bad
+            with self.subTest(index=index, bad=bad):
+                with self.assertRaises(ValueError):
+                    header.render_mirror_header(*args)
+
+    def sweep(self, seat, reply_parent):
+        with tempfile.TemporaryDirectory() as name:
+            team = Path(name, "master", "relays", "t")
+            team.mkdir(parents=True)
+            inbound = "IMPL-pair-planner-20261104-010000.md"
+            (team / inbound).write_text("\n".join(header.render_mirror_header(
+                "t.planner", [seat], ["v.orchestrator-planner"], None)) + "\n\nplease act\n")
+            (team / "IMPL-pair-implementer-20261104-010100.md").write_text("\n".join(
+                header.render_mirror_header(seat, ["t.planner"], [],
+                                            "t/" + inbound if reply_parent else None))
+                + "\n\ndone\n")
+            result = subprocess.run(
+                [sys.executable, "-I", str(PDC_SWEEPER), seat, "--all", "--root", name],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, cwd=name)
+        rows = [line.split() for line in result.stdout.splitlines() if inbound in line]
+        return result.returncode, rows
+
+    @unittest.skipUnless(PDC_SWEEPER.is_file(), "pdc checkout absent: %s" % PDC_SWEEPER)
+    def test_pdc_sweeper_consumed(self):
+        code, rows = self.sweep("t.implementer", reply_parent=True)
+        self.assertEqual((code, [row[1] for row in rows]), (0, ["consumed"]))
+        code, rows = self.sweep("t.implementer", reply_parent=False)  # control
+        self.assertEqual((code, [row[1] for row in rows]), (1, ["UNREAD"]))
 
 
 if __name__ == "__main__":

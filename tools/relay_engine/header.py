@@ -317,6 +317,33 @@ def _addresses(number, field, value, validate_address, seen_addresses):
     return tuple(result)
 
 
+
+def _mirror_value(what, value, address):
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("%s must be non-empty text without edge whitespace" % what)
+    if any(unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp")
+           for c in value):
+        raise ValueError("%s holds a control or line-break character" % what)
+    if address and ("," in value or any(c.isspace() for c in value)):
+        raise ValueError("%s must be one address without commas or spaces" % what)
+    return value
+
+
+def render_mirror_header(sender, to, cc, parent_mirror_path):
+    """FROM, TO, CC (when any) and IN_REPLY_TO (when a parent exists) lines,
+    in that order and in 2.9.7's spelling, for readers of the mirror tree
+    such as pdc's inbox sweeper; a value that could forge a line is refused."""
+    if isinstance(to, str) or isinstance(cc, str) or not to:
+        raise ValueError("TO must be a non-empty sequence of addresses; CC a sequence")
+    lines = ["FROM: " + _mirror_value("FROM", sender, True),
+             "TO: " + ", ".join(_mirror_value("TO", seat, True) for seat in to)]
+    if cc:
+        lines.append("CC: " + ", ".join(_mirror_value("CC", seat, True) for seat in cc))
+    if parent_mirror_path is not None:
+        lines.append("IN_REPLY_TO: " + _mirror_value("IN_REPLY_TO", parent_mirror_path, False))
+    return lines
+
+
 def _enum(number, field, value, allowed):
     if value not in allowed:
         raise _refuse("E-FIELD-ENUM", line=number, field=field,
