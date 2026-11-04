@@ -331,7 +331,7 @@ DRIVER = textwrap.dedent('''
     spec = importlib.util.spec_from_file_location("release_check", sys.argv[1])
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    sys.exit(module.main(sys.argv[3:], repo=Path(sys.argv[2]), exclusions=()))
+    sys.exit(module.main(sys.argv[3:], repo=Path(sys.argv[2]), exclusions=(), history=()))
 ''')
 
 
@@ -782,18 +782,19 @@ class LinuxFixture(FixtureRepo):
             self.repo = self.linked_dir
         return self
 
-    def run_legs(self, leg, environ=None):
+    def run_legs(self, leg, environ=None, history=()):
         argv = ["full", "--leg", leg, "--out", str(self.out), "--workers", "2"]
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = rc.main(argv, repo=self.repo,
-                           environ=dict(os.environ if environ is None else environ), exclusions=())
+                           environ=dict(os.environ if environ is None else environ), exclusions=(),
+                           history=history)
         return code, err.getvalue()
 
     def container(self, args):
         """Run the leg's container directly with the given docker arguments."""
         (self.out / "linux").mkdir(parents=True, exist_ok=True)
-        rc.write_container_plan(self.out / "linux", rc.step_table(self.repo), "linux", ())
+        rc.write_container_plan(self.out / "linux", rc.step_table(self.repo), "linux", (), ())
         return subprocess.run([docker_binary()] + args, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL)
 
@@ -818,6 +819,29 @@ class DockerArgs(unittest.TestCase):
         self.assertEqual(args[args.index("-w") + 1], str(worktree))
 
 
+class Preflight(unittest.TestCase):
+
+    def environ(self, mounts):
+        head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        return {"ADT_SOURCE_MOUNTS": os.pathsep.join(map(str, mounts)), "ADT_EXPECTED_HEAD": head}
+
+    def test_preflight_rejects_missing_mount(self):
+        missing = SCRATCH_BASE / "no-such-mount"
+        self.assertEqual(rc.preflight(REPO, self.environ([missing])),
+                         [f"source mount {missing} does not exist"])
+
+    def test_preflight_rejects_unprobeable_mount(self):
+        SCRATCH_BASE.mkdir(parents=True, exist_ok=True)
+        locked = Path(tempfile.mkdtemp(prefix="locked-", dir=SCRATCH_BASE))
+        self.addCleanup(shutil.rmtree, locked, True)
+        self.addCleanup(locked.chmod, 0o755)
+        locked.chmod(0o555)
+        problems = rc.preflight(REPO, self.environ([locked]))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith(f"source mount {locked} could not be probed"), problems)
+
+
 class LinuxLeg(unittest.TestCase):
 
     @classmethod
@@ -838,6 +862,47 @@ class LinuxLeg(unittest.TestCase):
         self.assertIn(f"source mount {fixture.repo} accepts a write", result.stdout + result.stderr)
         control = fixture.container(args)
         self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+
+    def test_preflight_rejects_missing_history(self):
+        fixture = LinuxFixture(self).finish()
+        code, err = fixture.run_legs("linux", history=("0123abc",))
+        self.assertEqual(code, 2, err)
+        self.assertIn("git show 0123abc: fails in the container",
+                      (fixture.out / "linux" / "docker.log").read_text())
+        fixture.out = fixture.out.parent / (fixture.out.name + "-control")
+        self.addCleanup(shutil.rmtree, fixture.out, True)
+        code, err = fixture.run_legs("linux", history=(fixture.head[:7],))
+        self.assertEqual(code, 0, err)
+
+    def test_container_runs_as_host_uid(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_refused", '''
+            import tempfile
+            class T(unittest.TestCase):
+                def test_refused(self):
+                    path = os.path.join(tempfile.gettempdir(), "unreadable")
+                    open(path, "w").close()
+                    os.chmod(path, 0)
+                    with self.assertRaises(PermissionError):
+                        open(path)
+        ''')
+        fixture.finish()
+        code, err = fixture.run_legs("linux")
+        self.assertEqual(code, 0, err)
+
+    def test_scratch_env_in_container(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_scratch", '''
+            import tempfile
+            class T(unittest.TestCase):
+                def test_scratch(self):
+                    self.assertEqual((os.environ.get("TMPDIR"), os.environ.get("HOME")),
+                                     ("/scratch", "/scratch"))
+                    self.assertEqual(tempfile.gettempdir(), "/scratch")
+        ''')
+        fixture.finish()
+        code, err = fixture.run_legs("linux")
+        self.assertEqual(code, 0, err)
 
     def test_preflight_rejects_head_mismatch(self):
         fixture = LinuxFixture(self).finish()
@@ -958,7 +1023,16 @@ class LinuxLeg(unittest.TestCase):
         return linux
 
     def test_interrupt_kills_the_container(self):
+        # Another container of the same image (another worktree's check) must not be taken for
+        # this run's: containers are found by this run's label (plan r4 T11).
+        bystander = subprocess.run([docker_binary(), "run", "-d", "--rm", "--label",
+                                    f"{rc.RUN_LABEL}=bystander-{os.getpid()}", self.image, "sleep", "300"],
+                                   capture_output=True, text=True, check=True).stdout.strip()
+        self.addCleanup(subprocess.run, [docker_binary(), "rm", "-f", bystander], capture_output=True)
         linux = self.interrupted_linux_leg({"test_b_slow": self.STARTS.format(name="test_b_slow")})
+        running = subprocess.run([docker_binary(), "ps", "-q", "--no-trunc", "--filter", f"id={bystander}"],
+                                 capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(running, [bystander], "the bystander container was stopped")
         step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_slow")
         self.assertEqual(step["outcome"], "unfinished")
 

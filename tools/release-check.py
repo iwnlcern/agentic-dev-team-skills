@@ -17,6 +17,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import datetime
+import errno
 import fnmatch
 import hashlib
 import json
@@ -57,6 +58,9 @@ DOCKER_STOP_MARGIN_SECONDS = 20
 # Each linux-leg container carries this label with the run's id (plan r4 T11).
 RUN_LABEL = "adt.release-check.run"
 CONTAINER_RECORD = "container.json"
+# History the tests read from pinned commits must resolve in the container (DD AC 14):
+# test_gate_review's PRE_B8_BASE.
+PINNED_HISTORY = ("2138c1c",)
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 DOCKER_PLATFORMS = {"aarch64": "linux/arm64", "arm64": "linux/arm64",
                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
@@ -634,22 +638,30 @@ def docker_args(worktree, common_git_dir, out, image, expected_head, extra=(), p
     return args
 
 
-def write_container_plan(leg_dir, steps, leg, exclusions):
-    """The host's step selection, which the container runs as given."""
+def write_container_plan(leg_dir, steps, leg, exclusions, history=PINNED_HISTORY):
+    """The host's step selection, which the container runs as given, and the pinned history
+    its preflight resolves."""
     plan = {"step_ids": [s.id for s in steps if leg in s.legs and not _excluded(s, exclusions)],
-            "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions]}
+            "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions],
+            "history": list(history)}
     path = Path(leg_dir) / CONTAINER_PLAN
     path.write_text(json.dumps(plan, indent=2) + "\n")
     return path
 
 
-def preflight(repo, environ):
+def preflight(repo, environ, history=()):
     """In the container: problems that make the leg's results untrustworthy."""
     problems = []
     for source in filter(None, environ.get("ADT_SOURCE_MOUNTS", "").split(os.pathsep)):
+        if not os.path.isdir(source):
+            problems.append(f"source mount {source} does not exist")
+            continue
         try:
             handle, probe = tempfile.mkstemp(dir=source, prefix=".release-check-write-probe-")
-        except OSError:
+        except OSError as error:
+            # Only a read-only file system is the refusal the leg needs (DD AC 14).
+            if error.errno != errno.EROFS:
+                problems.append(f"source mount {source} could not be probed: {error}")
             continue
         os.close(handle)
         os.unlink(probe)
@@ -658,21 +670,23 @@ def preflight(repo, environ):
     head = _commit(repo)
     if not head or head != expected:
         problems.append(f"HEAD {head} in the container does not equal the host's {expected or '(unset)'}")
-    elif subprocess.run(["git", "-C", str(repo), "show", f"{head}:AGENTS.md"], capture_output=True,
-                        stdin=subprocess.DEVNULL).returncode != 0:
-        problems.append(f"git show {head}:AGENTS.md fails in the container")
+        return problems
+    for ref in (f"{head}:AGENTS.md", *(f"{commit}:" for commit in history)):
+        if subprocess.run(["git", "-C", str(repo), "show", ref], capture_output=True,
+                          stdin=subprocess.DEVNULL).returncode != 0:
+            problems.append(f"git show {ref} fails in the container")
     return problems
 
 
 def _run_in_container(args, repo, environ):
     out = Path(args.out)
-    problems = preflight(repo, environ)
+    plan = json.loads((out / CONTAINER_PLAN).read_text())
+    problems = preflight(repo, environ, plan.get("history", ()))
     for problem in problems:
         print(f"preflight: {problem}", flush=True)
     if problems:
         return 2
     print("preflight: clean", flush=True)
-    plan = json.loads((out / CONTAINER_PLAN).read_text())
     table = {s.id: s for s in step_table(repo)}
     missing = [step_id for step_id in plan["step_ids"] if step_id not in table]
     if missing:
@@ -711,7 +725,7 @@ def _stop_container(docker, label, proc):
         subprocess.run([docker, "rm", "-f", *leftover], capture_output=True, stdin=subprocess.DEVNULL)
 
 
-def _run_linux_host(steps, args, repo, environ, exclusions):
+def _run_linux_host(steps, args, repo, environ, exclusions, history=PINNED_HISTORY):
     leg_dir = Path(args.out) / "linux"
     leg_dir.mkdir(parents=True, exist_ok=True)
     results_path = leg_dir / "results.json"
@@ -735,7 +749,7 @@ def _run_linux_host(steps, args, repo, environ, exclusions):
     except Stopped as stopped:
         print(f"release-check: linux leg {stopped}", file=sys.stderr)
         return LegResult("linux", 1)
-    write_container_plan(leg_dir, steps, "linux", exclusions)
+    write_container_plan(leg_dir, steps, "linux", exclusions, history)
     command = [docker, command[0], "--name", name, "--label", label] + command[1:]
     with open(leg_dir / "docker.log", "wb") as log:
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
@@ -773,7 +787,7 @@ def _under_home(path, environ):
     return real == home or real.startswith(home + os.sep)
 
 
-def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
+def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS, history=PINNED_HISTORY):
     environ = dict(os.environ if environ is None else environ)
     parser = argparse.ArgumentParser(prog="release-check.py", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -794,7 +808,7 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
     try:
         if args.in_container:
             return _run_in_container(args, repo, environ)
-        return _run_host(args, repo, environ, exclusions)
+        return _run_host(args, repo, environ, exclusions, history)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -810,7 +824,7 @@ def _guarded(leg, function, *args, **kwargs):
         return LegResult(leg, 2)
 
 
-def _run_host(args, repo, environ, exclusions):
+def _run_host(args, repo, environ, exclusions, history):
     if not _under_home(args.out, environ):
         print(f"release-check: --out {args.out} is not under $HOME; macOS purges /tmp and "
               "/var/folders, so results there may vanish before they are cited", file=sys.stderr)
@@ -839,8 +853,8 @@ def _run_host(args, repo, environ, exclusions):
     legs = ("mac", "linux") if args.leg == "both" else (args.leg,)
     legs_run = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        linux = (pool.submit(_guarded, "linux", _run_linux_host, steps, args, repo, environ, exclusions)
-                 if "linux" in legs else None)
+        linux = (pool.submit(_guarded, "linux", _run_linux_host, steps, args, repo, environ, exclusions,
+                             history) if "linux" in legs else None)
         if "mac" in legs:
             legs_run["mac"] = _guarded("mac", run_leg, "mac", steps, args.workers, args.cap_seconds, out,
                                        repo=repo, environ=environ, exclusions=exclusions)
