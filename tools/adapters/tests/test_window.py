@@ -1,5 +1,7 @@
 """Window and host identity (DD-v3-adapter § 4.1, P12; plan PL-v3-adapter-a Task 1)."""
+import inspect
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -195,6 +197,33 @@ class ProcessStartTests(unittest.TestCase):
         self.assertEqual(spawned, [])
         self.assertLessEqual(int(before) - 1, window.lstart_epoch(start))
         self.assertLessEqual(window.lstart_epoch(start), int(after) + 1)
+
+    def test_process_row_reads_the_kernel_where_linux_offers_it(self):
+        # G-A1 linux leg: the window walk reads (ppid, name, start) from /proc on Linux, so a host without
+        # `ps` still finds its window; macOS keeps `ps` for the walk, whose command names differ from the kernel's
+        spawned = []
+        real_run = subprocess.run
+        with mock.patch("subprocess.run", lambda *a, **k: spawned.append(a) or real_run(*a, **k)):
+            row = window.process_row(os.getpid())
+        self.assertIsNotNone(row)
+        ppid, name, start = row
+        self.assertEqual(ppid, os.getppid())
+        self.assertTrue(name)
+        self.assertEqual(window.lstart_epoch(start), window.lstart_epoch(window.process_start(os.getpid())))
+        if os.path.isdir("/proc/self"):
+            self.assertEqual(spawned, [])
+            with open("/proc/self/comm", encoding="utf-8") as handle:
+                self.assertEqual(name, handle.read().strip())
+        else:
+            self.assertEqual([a[0][0] for a in spawned], ["ps"])
+
+    def test_process_row_of_a_gone_process_is_none(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait(timeout=10)
+        self.assertIsNone(window.process_row(p.pid))
+
+    def test_window_identity_defaults_to_process_row(self):
+        self.assertIs(inspect.signature(window.window_identity).parameters["process_table"].default, window.process_row)
 
     def test_start_time_of_a_gone_process_is_none(self):
         p = subprocess.Popen([sys.executable, "-c", "pass"])

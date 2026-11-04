@@ -289,6 +289,7 @@ An engine outage is not an exit: the doorbell keeps polling.
 `status` and SessionStart make every read under one 1.3 s deadline, with the engine's identity checks under a shared 1.0 s part of it, so both return well within 2 s on a wedged engine, a hung `ps` or a busy note; a timed-out engine check shows `daemon=-` with `engine=wedged`.
 Neither takes the window lock or waits on the note's lock: the note is read whole without it, and a write that cannot get it within 0.1 s is skipped.
 Process start times come from the kernel (`proc_pidinfo` on macOS, `/proc` on Linux), so these paths start no `ps` where the kernel answers.
+On Linux the window lookup also reads each ancestor's parent and name from `/proc`, so a host without `ps` still finds its window; macOS reads them from `ps`.
 The answer is cached in the note for 60 s per root and plugin root; a wedged answer is never cached.
 
 ### Host token logs

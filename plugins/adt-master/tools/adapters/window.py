@@ -163,6 +163,27 @@ def process_start(pid: int, timeout: float = 5.0) -> str | None:
     return time.strftime(LSTART, time.gmtime(epoch))
 
 
+def process_row(pid: int, timeout: float = 5.0) -> tuple[int, str, str] | None:
+    """(ppid, command name, lstart in UTC) for one pid: from `/proc` on Linux, so a host without `ps` still finds
+    its window (G-A1 linux leg); elsewhere from `ps`, whose macOS command names the kernel's 16-byte name would
+    not match.  `/proc/<pid>/comm` is the name procps prints for `comm`, so both sources give the same row."""
+    if not os.path.isdir("/proc/self"):
+        return ps_process_table(pid, timeout)
+    if pid <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            stat = handle.read()
+        name = stat[stat.index("(") + 1:stat.rindex(")")]
+        ppid = int(stat.rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    epoch = _kernel_start_epoch(pid)
+    if epoch is None:
+        return None
+    return ppid, name, time.strftime(LSTART, time.gmtime(epoch))
+
+
 def _is_shell(name: str) -> bool:
     return os.path.basename(name).lstrip("-") in SHELLS
 
@@ -194,7 +215,7 @@ def window_identity(
     pid: int,
     *,
     sessions_dir: Path | None = None,
-    process_table: ProcessTable = ps_process_table,
+    process_table: ProcessTable = process_row,
 ) -> Window | None:
     """The window `pid` runs in, or `None` when it cannot be determined."""
     if resolve_host(environ) == "codex":

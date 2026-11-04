@@ -1444,12 +1444,16 @@ class FollowProcessMixin:
 
 
 def utc_lstart(pid):
-    """A live process's start time as `ps` prints it with TZ=UTC (the window test seam's format)."""
-    out = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)],
-        capture_output=True, text=True, env=dict(os.environ, TZ="UTC", LC_ALL="C"), check=True,
-    ).stdout
-    return " ".join(out.split())
+    """A live process's start time in `ps`'s TZ=UTC lstart format (the window test seam's format), read the
+    way the doorbell reads it: from the kernel, so the tests run where no `ps` is installed (G-A1 linux leg)."""
+    if str(HERE.parent) not in sys.path:
+        sys.path.insert(0, str(HERE.parent))
+    import window  # the module relay-monitor.py imports, beside it
+
+    start = window.process_start(pid)
+    if start is None:
+        raise AssertionError(f"no start time for live pid {pid}")
+    return start
 
 
 def bounded(fn, timeout=5.0):
@@ -1884,10 +1888,14 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
         self.assertEqual([d["file"] for d in self.read_lines(proc, 1)], ["lane/r2.md"])  # still delivering
 
     def stop_mid_backlog(self, signum, rows=6, lag=0.5):
-        """L's p2e shape: the host stops reading at the stop, closes the stream `lag` later, starts a successor."""
+        """L's p2e shape: the host stops reading at the stop, closes the stream `lag` later, starts a successor.
+
+        The first doorbell holds after its first row until the stop arrives (`ADT_TEST_PAUSE_AFTER_FIRST_ROW`), so
+        the stop always lands mid-backlog: unheld, a fast writer on a loaded machine emptied the backlog into the
+        unread pipe between the host's read and the signal, a loss no version can prevent (G-A1 linux leg)."""
         write_index(self.index, row(1, to="b.implementer"))
         pace = {"ADT_PACE_LINES": "100000", "ADT_PACE_WINDOW": "1"}
-        first = self.spawn(extra_env=dict(self.seam(os.getpid()), **pace))
+        first = self.spawn(extra_env=dict(self.seam(os.getpid()), ADT_TEST_PAUSE_AFTER_FIRST_ROW="10", **pace))
         self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
         write_index(self.index, "".join(row(k, to="b.implementer") for k in range(1, rows + 1)))
         fd, buf = first.stdout.fileno(), b""
@@ -2083,6 +2091,9 @@ m.follow(SimpleNamespace(session='psess',host='claude-code',root=None,anchor={an
         if anchor: env['ADT_RELAY_ANCHOR']=anchor
         p=subprocess.Popen([sys.executable,'-c',code],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
         self.addCleanup(self._b7_stop,p)
+        # each case's windows time the follower, not its start: the leader record lands before the first read,
+        # after Python's start and the engine identity call, which a loaded machine stretches (G-A1 linux leg)
+        self.wait_note(lambda n:(n.get('leader') or {}).get('pid')==p.pid,timeout=8)
         return p,gate,marker,counts
 
     def _b7_seed(self, file='lane/r1.md', position=1):
@@ -2105,9 +2116,11 @@ def startup_poll(pid):
     time.sleep(.001)
     return original_start(pid)
 m.process_start_time=startup_poll
+first=[]
 def read(path):
     calls.append('read')
     if len(calls)==1:
+        first.append(time.monotonic())  # the shared budget starts at the first root read, not at startup (G-A1)
         t.assertEqual(m.bounded_root_call(lambda:threading.Event().wait(.6)).kind,'ok')
     return original(path)
 def signature(path):
@@ -2116,10 +2129,9 @@ class End(BaseException): pass
 def stop(seconds): raise End()
 m.read_index=read;m.index_signature=signature
 with mock.patch.dict(os.environ,ADT_SEAT='b.implementer',ADT_RELAY_ROOT=str(root)),mock.patch.object(m,'time',SimpleNamespace(**{**vars(time),'sleep':stop})):
-    start=time.monotonic()
     try: m.follow(args())
     except End: pass
-    t.assertLess(time.monotonic()-start,1.25)
+    t.assertLess(time.monotonic()-first[0],1.25)  # one 1.0 s budget for both calls; two would pass 1.6 s
 t.assertEqual(calls,['read','signature','read'])
 t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
 """)
@@ -2305,11 +2317,17 @@ t.assertEqual(m.NoteStore('fifo').load()['reason'],'root-stalled')
             **vars(subprocess), "run": polling_probe if force_poll else subprocess.run,
         })
         # fold 2 G3: start times come from the kernel; the `ps` fallback is the remaining process probe, so
-        # force it (kernel read refused) and make its child enter the polling wait
+        # force it (kernel read refused) and make its child enter the polling wait; the `ps` it starts is a
+        # stand-in printing this process's real row, so the case runs where no `ps` is installed (G-A1)
         kernel = (lambda pid: None) if force_poll else self.rm.window._kernel_start_epoch
+        bindir = pathlib.Path(tempfile.mkdtemp(dir=self.base))
+        (bindir / "ps").write_text("#!/bin/sh\necho '%d %s python3'\n" % (os.getppid(), utc_lstart(os.getpid())))
+        (bindir / "ps").chmod(0o755)
+        path = f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}" if force_poll else os.environ.get("PATH", "")
         with (
             mock.patch.object(self.rm.window, "subprocess", probe_module),
             mock.patch.object(self.rm.window, "_kernel_start_epoch", kernel),
+            mock.patch.dict(os.environ, {"PATH": path}),
         ):
             self._exercise_note_wake()
         if force_poll:

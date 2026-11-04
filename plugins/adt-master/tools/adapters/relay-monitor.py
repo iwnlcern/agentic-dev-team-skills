@@ -78,6 +78,10 @@ TEST_CRASH_AFTER_OUTPUT = os.environ.get("ADT_TEST_CRASH_AFTER_OUTPUT") == "1"
 TEST_SINK_ACCEPT = int(os.environ.get("ADT_TEST_SINK_ACCEPT") or 0)
 TEST_PAUSE_BEFORE_CLEANUP = os.environ.get("ADT_TEST_PAUSE_BEFORE_CLEANUP") or None
 TEST_STARTUP_DELAY = float(os.environ.get("ADT_TEST_STARTUP_DELAY") or 0)  # test-only: widen the startup gap (G1)
+# test-only: hold after this process's first written row until a stop arrives or this many seconds pass, so a
+# test's stop lands mid-backlog on any machine load (G-A1 linux leg)
+TEST_PAUSE_AFTER_FIRST_ROW = float(os.environ.get("ADT_TEST_PAUSE_AFTER_FIRST_ROW") or 0)
+_PAUSED: list[bool] = []
 CLAUDE_PAYLOAD_FIELDS = (
     "prompt_id",
     "effort",
@@ -1336,6 +1340,11 @@ def deliver_once(
                     return result
                 if TEST_CRASH_AFTER_FLUSH or TEST_CRASH_AFTER_OUTPUT:
                     os._exit(9)
+                if TEST_PAUSE_AFTER_FIRST_ROW and not _PAUSED:
+                    _PAUSED.append(True)
+                    held = time.monotonic() + TEST_PAUSE_AFTER_FIRST_ROW
+                    while time.monotonic() < held and not _STOP_SIGNAL:
+                        time.sleep(0.01)
                 if stop is not None and stop():
                     result.aborted = "stopped"  # the host may have stopped reading: the successor offers it again
                     return result
