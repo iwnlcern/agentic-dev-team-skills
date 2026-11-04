@@ -1228,6 +1228,36 @@ class TestingDoc(unittest.TestCase):
         lines = trap_lines(TESTING_MD.read_text())
         self.assertTrue(any("`tools/adapters/**`" in line for line in lines))
 
+    # Rows measured by the one rule TESTING.md states (direct or through an imported helper,
+    # minus the runner's exclusion table); counts from PL-v3-tests-1 r4 erratum 1.
+    MEASURED_ROWS = {"`tools/relay-lint.py`": 38, "`tools/relay-engine-fixtures/**`": 23,
+                     "`tools/relay-lint-fixtures/**`": 26, "`tools/check-relay-lint-fixtures.py`": 5,
+                     "`tools/relay`": 3, "`tools/measure-plan-shape.py`": 1, "`tools/**`": 4}
+
+    def row(self, glob):
+        lines = [line for line in trap_lines(TESTING_MD.read_text()) if line.split(" → ")[0] == f"- {glob}"]
+        self.assertEqual(len(lines), 1, glob)
+        return TICKED.findall(lines[0].split(" → ", 1)[1])
+
+    def test_trap_rows_follow_the_measured_rule(self):
+        for glob, count in self.MEASURED_ROWS.items():
+            targets = self.row(glob)
+            self.assertEqual(len(targets), count, (glob, targets))
+            self.assertEqual(len(set(targets)), count, glob)
+            excluded = [t for t in targets if any(fnmatch.fnmatchcase(f"tools/relay_engine/tests/{t}.py", e.path)
+                                                  or fnmatch.fnmatchcase(f"tools/{t}", e.path)
+                                                  for e in rc.EXCLUSIONS)]
+            self.assertEqual(excluded, [], glob)
+        self.assertIn("test-adapter.sh", self.row("`tools/relay_engine/*.py`"))
+        self.assertEqual(set(self.row("`tools/**`")),
+                         {"test_version", "test_identity_matrix", "test_mtbattery_guard", "check-generate-plugins.py"})
+        self.assertNotIn("capture_order_baseline", TESTING_MD.read_text())
+
+    def test_descendant_rule_states_the_macos_residual(self):
+        text = TESTING_MD.read_text()
+        self.assertIn("`unattributed`", text)
+        self.assertIn("process group", text)
+
     def test_trap_list_control_names_a_renamed_module(self):
         text = TESTING_MD.read_text()
         self.assertIn("`test_version`", text)
