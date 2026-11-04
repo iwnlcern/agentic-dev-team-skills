@@ -205,9 +205,12 @@ _TABLES = (
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS relays_parent ON relays (parent_id)",
+    "CREATE INDEX IF NOT EXISTS relays_project_id ON relays (project_id, id)",
     "CREATE INDEX IF NOT EXISTS relays_bundle ON relays (bundle_id)",
-    "CREATE INDEX IF NOT EXISTS relays_sender ON relays (sender_seat_id)",
+    "CREATE INDEX IF NOT EXISTS relays_sender_kind ON relays (sender_seat_id, kind)",
     "CREATE INDEX IF NOT EXISTS recipients_seat ON recipients (seat_id)",
+    "CREATE INDEX IF NOT EXISTS recipients_open ON recipients (relay_id)"
+    " WHERE role = 'to' AND answered_by IS NULL",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges (from_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_relay ON edges (target_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_git ON edges (target_repository_id, target_path)",

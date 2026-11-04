@@ -306,6 +306,7 @@ _HEADER_TEXT = {
     "error-finding-no-check-cause": "line {line}: the finding cites REF line {cited}, and the header has {count} REF lines",
     "error-finding-no-check-remedy": "add a REF line naming the executed check's output and cite its number (1 for the first REF line), or mark the finding advisory",
     "error-finding-no-check-advisory-cause": "line {line}: the finding starts with the number {cited}, read as a REF line, and the header has {count} REF lines",
+    "error-finding-no-check-relay-cause": "line {line}: the finding's check, REF line {cited}, names relay {value}; a blocking finding's check is a local path or a Git-pinned file",
     "error-finding-no-check-advisory-remedy": "cite an existing REF line by its number (1 for the first), or start the summary with a word",
     "error-finding-no-check-explain": "a blocking finding cites the REF line that records its executed check",
 }
@@ -561,6 +562,9 @@ ERROR_VARIANTS = {
         "error-header-title-line-explain", "integrity"),
     ("E-FINDING-NO-CHECK", "advisory"): ErrorSpec(
         "error-finding-no-check-advisory-cause", "error-finding-no-check-advisory-remedy",
+        "error-finding-no-check-explain", "integrity"),
+    ("E-FINDING-NO-CHECK", "relay"): ErrorSpec(
+        "error-finding-no-check-relay-cause", "error-finding-no-check-remedy",
         "error-finding-no-check-explain", "integrity"),
     ("E-FIELD-FORBIDDEN", "bundle"): ErrorSpec(
         "error-field-forbidden-cause", "error-field-forbidden-bundle-remedy",

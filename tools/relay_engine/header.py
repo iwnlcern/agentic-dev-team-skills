@@ -8,6 +8,7 @@ import re
 import unicodedata
 
 from relay_engine import errors
+from relay_engine import refs as reference
 
 
 HEADER_CAP = 8192
@@ -406,7 +407,7 @@ def _validate(values, seen, body, header_bytes, validate_address):
 
     verdict = _verdict(kind, needs, first.get("VERDICT"))
     refs = tuple(value for _, value in lists["REF"])
-    findings = _findings(kind, needs, lists["FINDING"], len(refs))
+    findings = _findings(kind, needs, lists["FINDING"], refs)
     fixes = _fixes(kind, lists["FIXES"])
     resolves = _resolves(lists["RESOLVE"])
     return Draft(kind=kind, to=to, cc=cc, parent=parent, bundle=bundle,
@@ -433,7 +434,8 @@ def _verdict(kind, needs, entry):
     return _enum(entry[0], "VERDICT", entry[1], allowed)
 
 
-def _findings(kind, needs, entries, ref_count):
+def _findings(kind, needs, entries, ref_values):
+    ref_count = len(ref_values)
     form = "<blocking|advisory> [<REF line number>] <summary>, one space between words"
     result = []
     for number, value in entries:
@@ -464,8 +466,21 @@ def _findings(kind, needs, entries, ref_count):
             raise _refuse("E-FINDING-NO-CHECK",
                           variant=None if severity == "blocking" else "advisory",
                           line=number, cited=str(index), count=ref_count)
+        if severity == "blocking" and _names_relay(ref_values[index - 1]):
+            # DD § 8: the check is a local path or a Git-pinned file (PR-3 fold S1)
+            raise _refuse("E-FINDING-NO-CHECK", variant="relay", line=number,
+                          cited=str(index), value=_display(ref_values[index - 1]))
         result.append(FindingSpec(severity, index, summary))
     return tuple(result)
+
+
+def _names_relay(text):
+    """True when the REF spells a relay; a REF that does not parse is its own
+    line's refusal at submit, so it is not judged here."""
+    try:
+        return reference.parse_ref(text).kind == "relay"
+    except errors.EngineError:
+        return False
 
 
 def _fixes(kind, entries):

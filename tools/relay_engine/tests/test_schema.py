@@ -18,8 +18,8 @@ TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
 
 INDEXES = {
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
-               ("sender_seat_id",)},
-    "recipients": {("seat_id",)},
+               ("sender_seat_id", "kind"), ("project_id", "id")},
+    "recipients": {("seat_id",), ("relay_id",)},
     "edges": {("from_relay_id",), ("target_relay_id",),
               ("target_repository_id", "target_path"), ("target_path",)},
     "findings": {("bundle_id", "status"), ("raised_in",), ("resolved_in",)},
@@ -117,7 +117,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 15)
+        self.assertEqual(len(named), 17)
 
 
 class TestChecks(Store):

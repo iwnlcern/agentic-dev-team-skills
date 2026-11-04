@@ -1,9 +1,11 @@
 """v3 submit pipeline (DD-v3-engine § 4, § 5, § 6, § 8, E-OP2; plan Task 4, erratum 1).
 
 Order: size and header (``header.parse``) -> addresses through the
-``Directory`` -> ``PARENT`` membership -> bundle (roots open or join one,
-children inherit) -> references resolved and digested -> ``FINDING``,
-``FIXES`` and ``RESOLVE`` rules -> id, handle and time -> one transaction.
+``Directory`` -> ``PARENT`` membership -> references resolved and digested,
+all before the write lock (relays are append-only, so nothing resolved here
+can vanish) -> then one write transaction: ``FIXES`` and ``RESOLVE`` rules in
+header line order -> id, handle and time -> bundle (roots open or join one,
+children inherit) -> rows, with the sender's activity.
 A refused submit writes exactly one ``refusals`` row and nothing else; an
 engine fault writes nothing.  No rule reads the body.
 """
@@ -13,6 +15,7 @@ import hashlib
 import os
 from pathlib import Path
 import pwd
+import re
 import secrets
 import sqlite3
 from typing import Callable, Protocol
@@ -55,12 +58,44 @@ class GitState:
     porcelain_sha256: str
 
 
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _check_git_state(state):
+    """A caller error is a ValueError here, never a raw IntegrityError at the
+    write (PR-3 fold S6, as O5 rules for other caller errors)."""
+    if state is None:
+        return
+    if not isinstance(state, GitState):
+        raise ValueError("git_state is a GitState or None")
+    if not (isinstance(state.porcelain_sha256, str) and _SHA256.fullmatch(state.porcelain_sha256)):
+        raise ValueError("git_state.porcelain_sha256 is 64 lowercase hex digits")
+    count = state.dirty_paths
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("git_state.dirty_paths is a count")
+    if state.repository_id is None:
+        if (state.head_commit, state.branch, count) != (None, None, 0):
+            raise ValueError("a git_state with no repository has no head, branch or dirty paths")
+        return
+    if not (isinstance(state.repository_id, str) and state.repository_id):
+        raise ValueError("git_state.repository_id is a non-empty string or None")
+    if state.head_commit is not None and not (isinstance(state.head_commit, str)
+                                              and _OBJECT_ID.fullmatch(state.head_commit)):
+        raise ValueError("git_state.head_commit is a full lowercase object id or None")
+    if state.branch is not None and not (isinstance(state.branch, str) and state.branch):
+        raise ValueError("git_state.branch is a non-empty string or None")
+
+
 @dataclass(frozen=True)
 class SubmitContext:
     sender: SeatRef
     git_state: GitState | None
     now_ms: Callable[[], int]
     directory: Directory
+
+    def __post_init__(self):
+        _check_git_state(self.git_state)
 
 
 @dataclass(frozen=True)
@@ -165,12 +200,15 @@ def _admit(conn, ctx, data, now):
     draft = header.parse(data)
     lines = _Lines(data, draft.header_bytes)
     sender = ctx.sender
+    # Before the write lock: a slow checkout or a large file digest holds no
+    # lock (PR-3 fold S2); relays and recipients rows are append-only.
+    recipients = _recipients(ctx, draft, lines)
+    parent = _parent(conn, sender, draft, lines)
+    targets = _references(conn, ctx, draft, lines)
+    transitions = _transitions(draft, lines)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        recipients = _recipients(ctx, draft, lines)
-        parent = _parent(conn, sender, draft, lines)
-        targets = _references(conn, ctx, draft, lines)
-        _check_findings(conn, sender, draft, lines)
+        _check_findings(conn, sender, transitions)
         handle, created, relay_id = _identity(conn, sender.project_id, now)
         bundle_id = (parent[1] if parent is not None
                      else _bundle(conn, sender, draft.bundle, created))
@@ -183,7 +221,8 @@ def _admit(conn, ctx, data, now):
             (relay_id, handle, sender.project_id, sender.team_instance_id, bundle_id,
              draft.kind, draft.verdict, draft.needs, draft.subject,
              None if parent is None else parent[0], sender.seat_id, sender.role, created,
-             hashlib.sha256(draft.body).hexdigest(), meta_digest(draft), len(draft.body),
+             hashlib.sha256(draft.body).hexdigest(),
+             meta_digest(draft, None if parent is None else parent[0], targets), len(draft.body),
              draft.header_bytes, git_state_id))
         conn.execute("INSERT INTO bodies (relay_id, body) VALUES (?, ?)",
                      (relay_id, draft.body))
@@ -197,9 +236,14 @@ def _admit(conn, ctx, data, now):
                 (new_uuid7(created), relay_id, draft.parent, parent[0]))
         edge_ids = _write_references(conn, relay_id, created, targets)
         _write_findings(conn, sender, draft, relay_id, bundle_id, edge_ids, created)
-        _write_transitions(conn, sender, draft, lines, relay_id, created)
+        _write_transitions(conn, sender, transitions, relay_id, created)
         if parent is not None:
             _write_answered_by(conn, parent[0], sender.seat_id, relay_id)
+        # an admission is the sender's activity (PR-3 fold R6), committed with it
+        conn.execute("INSERT INTO seat_activity (seat_id, last_request_at) VALUES (?, ?)"
+                     " ON CONFLICT (seat_id) DO UPDATE SET last_request_at ="
+                     " max(last_request_at, excluded.last_request_at)",
+                     (sender.seat_id, created))
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
@@ -208,13 +252,24 @@ def _admit(conn, ctx, data, now):
     return Admitted(relay_id, handle, created)
 
 
-def meta_digest(draft):
+_DIGEST_TARGET = {"relay": ("target_relay_id",), "path": ("target_path",),
+                  "git": ("target_repository_id", "target_commit", "target_path",
+                          "target_line_start", "target_line_end")}
+
+
+def meta_digest(draft, parent_id=None, targets=()):
     """sha256 of the parsed fields in JCS form (DD § 5, erratum E1): list
-    whitespace is gone after parsing, and addresses are never case-folded."""
+    whitespace is gone after parsing, and addresses are never case-folded.
+    PARENT and each REF enter as their resolved targets, so equivalent
+    spellings converge (PR-3 fold S10): #<n>, #<n>@<project> and the UUID of
+    one relay; ~/ and the path it expands to; a branch and its commit."""
     fields = {
         "kind": draft.kind, "to": list(draft.to), "cc": list(draft.cc),
-        "parent": draft.parent, "bundle": draft.bundle, "verdict": draft.verdict,
-        "needs": draft.needs, "subject": draft.subject, "refs": list(draft.refs),
+        "parent": parent_id, "bundle": draft.bundle, "verdict": draft.verdict,
+        "needs": draft.needs, "subject": draft.subject,
+        "refs": [{"type": target["target_type"],
+                  **{column: target.get(column) for column in _DIGEST_TARGET[target["target_type"]]}}
+                 for _, target in targets],
         "findings": [{"severity": f.severity, "check": f.check_index, "summary": f.summary}
                      for f in draft.findings],
         "fixes": [list(fix) for fix in draft.fixes],
@@ -344,14 +399,16 @@ def _write_references(conn, relay_id, created, targets):
 
 
 def _identity(conn, project_id, now):
-    """Handle max+1, time strictly after the project's last, id after its last."""
-    handle, last_created = conn.execute(
-        "SELECT coalesce(max(handle), 0) + 1, max(created_at) FROM relays WHERE project_id = ?",
-        (project_id,)).fetchone()
+    """Handle max+1, time strictly after the project's last, id after its last.
+    One aggregate per statement, so each reads one end of its index (S7)."""
+    last_handle = conn.execute("SELECT max(handle) FROM relays WHERE project_id = ?",
+                               (project_id,)).fetchone()[0]
+    last_created = conn.execute("SELECT max(created_at) FROM relays WHERE project_id = ?",
+                                (project_id,)).fetchone()[0]
     created = now if last_created is None else max(now, last_created + 1)
     last_id = conn.execute("SELECT max(id) FROM relays WHERE project_id = ?",
                            (project_id,)).fetchone()[0]
-    return handle, created, new_uuid7(created, last_id)
+    return (last_handle or 0) + 1, created, new_uuid7(created, last_id)
 
 
 def _write_git_state(conn, state, created):
@@ -372,33 +429,48 @@ def _finding(conn, project_id, handle_text):
         " WHERE project_id = ? AND handle = ?", (project_id, int(handle_text[1:]))).fetchone()
 
 
-_RESOLVE_FROM = {"fix-accepted": ("fixed",), "fix-refused": ("fixed",),
-                 "withdrawn": ("open", "fixed")}
-_RESOLVE_TO = {"fix-accepted": "fix-accepted", "fix-refused": "open", "withdrawn": "withdrawn"}
+# DD § 8: each transition's allowed from-statuses, and its to-status
+_FROM = {"fixes": ("open",), "fix-accepted": ("fixed",), "fix-refused": ("fixed",),
+         "withdrawn": ("open", "fixed")}
+_TO = {"fixes": "fixed", "fix-accepted": "fix-accepted", "fix-refused": "open",
+       "withdrawn": "withdrawn"}
 
 
-def _check_findings(conn, sender, draft, lines):
-    """FIXES and RESOLVE rules against current statuses, in line order, as if
-    each earlier line of the same draft had applied."""
+@dataclass(frozen=True)
+class _Transition:
+    line: int
+    field: str  # FIXES or RESOLVE
+    handle_text: str
+    transition: str  # fixes, fix-accepted, fix-refused or withdrawn
+    commit: str | None
+    reason: str | None
+
+
+def _transitions(draft, lines):
+    """FIXES and RESOLVE lines as one list in header line order (PR-3 fold S8)."""
+    result = [_Transition(lines.of("FIXES", index), "FIXES", handle_text, "fixes", commit, None)
+              for index, (handle_text, commit) in enumerate(draft.fixes)]
+    result += [_Transition(lines.of("RESOLVE", index), "RESOLVE", handle_text, transition, None,
+                           reason)
+               for index, (handle_text, transition, reason) in enumerate(draft.resolves)]
+    return sorted(result, key=lambda item: item.line)
+
+
+def _check_findings(conn, sender, transitions):
+    """FIXES and RESOLVE rules against current statuses, in header line order,
+    as if each earlier line of the same draft had applied."""
     status = {}
-    for index, (handle_text, _) in enumerate(draft.fixes):
-        line = lines.of("FIXES", index)
-        row = _known(conn, sender, handle_text, "FIXES", line)
+    for item in transitions:
+        row = _known(conn, sender, item.handle_text, item.field, item.line)
+        if (item.field == "RESOLVE" and row[2] != sender.seat_id
+                and not (sender.role == ORCHESTRATOR_ROLE)):
+            raise errors.error_for("E-RESOLVE-NOT-RAISER", line=item.line, value=item.handle_text)
         current = status.get(row[0], row[1])
-        if current != "open":
-            raise errors.error_for("E-RESOLVE-STATE", line=line, field="FIXES",
-                                   transition="fixes", value=handle_text, status=current)
-        status[row[0]] = "fixed"
-    for index, (handle_text, transition, _) in enumerate(draft.resolves):
-        line = lines.of("RESOLVE", index)
-        row = _known(conn, sender, handle_text, "RESOLVE", line)
-        if row[2] != sender.seat_id and not (sender.role == ORCHESTRATOR_ROLE):
-            raise errors.error_for("E-RESOLVE-NOT-RAISER", line=line, value=handle_text)
-        current = status.get(row[0], row[1])
-        if current not in _RESOLVE_FROM[transition]:
-            raise errors.error_for("E-RESOLVE-STATE", line=line, field="RESOLVE",
-                                   transition=transition, value=handle_text, status=current)
-        status[row[0]] = _RESOLVE_TO[transition]
+        if current not in _FROM[item.transition]:
+            raise errors.error_for("E-RESOLVE-STATE", line=item.line, field=item.field,
+                                   transition=item.transition, value=item.handle_text,
+                                   status=current)
+        status[row[0]] = _TO[item.transition]
 
 
 def _known(conn, sender, handle_text, field, line):
@@ -411,9 +483,8 @@ def _known(conn, sender, handle_text, field, line):
 def _write_findings(conn, sender, draft, relay_id, bundle_id, edge_ids, created):
     if not draft.findings:
         return
-    next_handle = conn.execute(
-        "SELECT coalesce(max(handle), 0) + 1 FROM findings WHERE project_id = ?",
-        (sender.project_id,)).fetchone()[0]
+    next_handle = (conn.execute("SELECT max(handle) FROM findings WHERE project_id = ?",
+                                (sender.project_id,)).fetchone()[0] or 0) + 1
     for offset, finding in enumerate(draft.findings):
         finding_id = new_uuid7(created)
         check_edge = (None if finding.check_index is None
@@ -426,19 +497,22 @@ def _write_findings(conn, sender, draft, relay_id, bundle_id, edge_ids, created)
         _event(conn, finding_id, relay_id, "raised", "open", "open", None, None, created)
 
 
-def _write_transitions(conn, sender, draft, lines, relay_id, created):
-    for handle_text, commit in draft.fixes:
-        row = _finding(conn, sender.project_id, handle_text)
-        conn.execute("UPDATE findings SET status = 'fixed', fixed_commit = ? WHERE id = ?",
-                     (commit, row[0]))
-        _event(conn, row[0], relay_id, "fixes", row[1], "fixed", commit, None, created)
-    for handle_text, transition, reason in draft.resolves:
-        row = _finding(conn, sender.project_id, handle_text)
-        to_status = _RESOLVE_TO[transition]
-        closed = to_status in ("fix-accepted", "withdrawn")
-        conn.execute("UPDATE findings SET status = ?, resolved_in = ?, reason = ? WHERE id = ?",
-                     (to_status, relay_id if closed else None, reason, row[0]))
-        _event(conn, row[0], relay_id, transition, row[1], to_status, None, reason, created)
+def _write_transitions(conn, sender, transitions, relay_id, created):
+    """Each line's update and event, in header line order; each reads the
+    status the line before it wrote."""
+    for item in transitions:
+        row = _finding(conn, sender.project_id, item.handle_text)
+        to_status = _TO[item.transition]
+        if item.field == "FIXES":
+            conn.execute("UPDATE findings SET status = 'fixed', fixed_commit = ? WHERE id = ?",
+                         (item.commit, row[0]))
+        else:
+            closed = to_status in ("fix-accepted", "withdrawn")
+            conn.execute("UPDATE findings SET status = ?, resolved_in = ?, reason = ?"
+                         " WHERE id = ?", (to_status, relay_id if closed else None, item.reason,
+                                           row[0]))
+        _event(conn, row[0], relay_id, item.transition, row[1], to_status, item.commit,
+               item.reason, created)
 
 
 def _event(conn, finding_id, relay_id, transition, from_status, to_status, commit, reason,

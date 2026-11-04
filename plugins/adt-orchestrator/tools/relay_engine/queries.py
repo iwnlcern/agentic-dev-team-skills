@@ -8,6 +8,7 @@ schema's indexes; no query reads every body.
 """
 
 from dataclasses import dataclass
+import difflib
 from pathlib import Path
 
 from relay_engine import errors
@@ -171,11 +172,18 @@ def lineage(conn, relay_id, max_depth=256):
     return [RelayRow(*row) for row in conn.execute(_LINEAGE_SQL, (relay_id, max_depth))]
 
 
-def parent_candidates(conn, seat_id, bundle_id=None, kind=None):
-    """Handles of the relays this seat may name as PARENT (DD E-OP2)."""
+def parent_candidates(conn, seat_id, bundle_id=None, kind=None, *, project_id=None):
+    """Handles of the relays this seat may name as PARENT (DD E-OP2), in one
+    project; the operator's queue spans projects, so it names one (PR-3 R4)."""
+    if seat_id == OPERATOR_SEAT_ID and project_id is None:
+        raise ValueError("the operator's candidates need a project_id: handles repeat across"
+                         " projects")
     sql = ("SELECT handle FROM relays WHERE (sender_seat_id = ? OR id IN"
            " (SELECT relay_id FROM recipients WHERE seat_id = ?))")
     params = [seat_id, seat_id]
+    if project_id is not None:
+        sql += " AND project_id = ?"
+        params.append(project_id)
     if bundle_id is not None:
         sql += " AND bundle_id = ?"
         params.append(bundle_id)
@@ -232,19 +240,23 @@ def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=ID
     admission of its newest open must-act relay ("idle", naming that relay).
     A seat with an unanswered QUESTION to the operator is never flagged; CC
     and the operator, who is not a seat, never flag."""
+    # Both rules start from the open TO rows (recipients_open, a partial index),
+    # so their cost follows open work, not the project's history (PR-3 R2);
+    # CROSS JOIN keeps that join order.  A QUESTION exempts its own project (R12).
     exempt = ("NOT EXISTS (SELECT 1 FROM relays q JOIN recipients o ON o.relay_id = q.id"
-              " WHERE q.kind = 'QUESTION' AND q.sender_seat_id = c.seat_id AND o.role = 'to'"
+              " WHERE q.sender_seat_id = c.seat_id AND q.kind = 'QUESTION'"
+              " AND q.project_id = r.project_id AND o.role = 'to'"
               " AND o.answered_by IS NULL) AND c.seat_id != ?")
     flags = [Flag("unopened", *row) for row in conn.execute(
         "SELECT r.id, r.handle, c.seat_id, r.created_at FROM recipients c"
-        " JOIN relays r ON r.id = c.relay_id"
+        " CROSS JOIN relays r ON r.id = c.relay_id"
         " WHERE r.project_id = ? AND c.role = 'to' AND r.needs != 'none'"
         " AND c.opened_at IS NULL AND c.answered_by IS NULL AND r.created_at <= ? AND "
         + exempt, (project_id, now_ms - unopened_ms, OPERATOR_SEAT_ID))]
     newest = {}  # seat -> (created_at, handle, relay id, last activity) of its newest open must-act
     for relay_id, handle, seat_id, created, active in conn.execute(
             "SELECT r.id, r.handle, c.seat_id, r.created_at, a.last_request_at FROM recipients c"
-            " JOIN relays r ON r.id = c.relay_id"
+            " CROSS JOIN relays r ON r.id = c.relay_id"
             " LEFT JOIN seat_activity a ON a.seat_id = c.seat_id"
             " WHERE r.project_id = ? AND c.role = 'to' AND r.needs IN ('act', 'answer')"
             " AND c.answered_by IS NULL AND " + exempt, (project_id, OPERATOR_SEAT_ID)):
@@ -316,17 +328,30 @@ def cited_range_changed(conn, edge_id, commit, checkout):
         return True
     before = refs.read_blob(checkout, cited_blob).split(b"\n")
     after = refs.read_blob(checkout, now_blob).split(b"\n")
-    if len(after) < end:
-        return True
-    return before[start - 1:end] != after[start - 1:end]
+    return _range_touched(before, after, start - 1, end)
 
 
-def record_token_counts(conn, seat_id, bundle_id, source, counts, at_ms=None):
+def _range_touched(before, after, low, high):
+    """Whether the diff from before to after changes lines [low, high) of
+    before: a hunk that replaces or removes one of them, or inserts between
+    two of them.  The range maps through hunks elsewhere, so a line inserted
+    above it moves it but does not change it (PR-3 fold R5)."""
+    matcher = difflib.SequenceMatcher(None, before, after, autojunk=False)
+    for tag, i1, i2, _, _ in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if i1 == i2:  # a pure insertion before line i1
+            if low < i1 < high:
+                return True
+        elif i1 < high and i2 > low:
+            return True
+    return False
+
+
+def record_token_counts(conn, seat_id, bundle_id, source, counts, *, at_ms):
+    """at_ms is the caller's clock, as every other write here takes it (PR-3 R13)."""
     if source not in TOKEN_SOURCES:
         raise ValueError("token source must be one of %s" % ", ".join(sorted(TOKEN_SOURCES)))
-    if at_ms is None:
-        import time
-        at_ms = time.time_ns() // 1_000_000
     conn.execute(
         "INSERT INTO token_counts (seat_id, bundle_id, source, input, output, cache_read,"
         " cache_write, copied_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -364,8 +389,11 @@ def bundle_metrics(conn, bundle_id):
 
 
 def loop_flags(conn, bundle_id, checkout):
-    """Finding handles whose check path overlaps the paths changed by the
-    previous round's fixing commits (DD § 8); this refuses nothing."""
+    """Finding handles whose check or subject path overlaps the paths changed
+    by the previous round's fixing commits (DD § 8); this refuses nothing.
+    A finding's check path is its check REF's Git path; its subject paths are
+    the Git paths its relay's other REF lines name, those no finding of the
+    relay cites as its check (PR-3 fold R3)."""
     rounds = [rid for (rid,) in conn.execute(
         "SELECT DISTINCT r.id FROM relays r JOIN findings f ON f.raised_in = r.id"
         " WHERE r.bundle_id = ? ORDER BY r.created_at", (bundle_id,))]
@@ -376,11 +404,15 @@ def loop_flags(conn, bundle_id, checkout):
                                       " WHERE raised_in = ? AND fixed_commit IS NOT NULL",
                                       (previous,)):
             changed |= refs.changed_paths(checkout, commit)
+        subjects = {path for (path,) in conn.execute(
+            "SELECT target_path FROM edges WHERE from_relay_id = ? AND kind = 'ref'"
+            " AND target_type = 'git' AND id NOT IN (SELECT check_edge_id FROM findings"
+            " WHERE raised_in = ? AND check_edge_id IS NOT NULL)", (current, current))}
         for handle, path in conn.execute(
                 "SELECT f.handle, e.target_path FROM findings f"
                 " LEFT JOIN edges e ON e.id = f.check_edge_id AND e.target_type = 'git'"
                 " WHERE f.raised_in = ? ORDER BY f.handle", (current,)):
-            if path is not None and path in changed:
+            if (subjects | ({path} - {None})) & changed:
                 flagged.append(handle)
     return flagged
 

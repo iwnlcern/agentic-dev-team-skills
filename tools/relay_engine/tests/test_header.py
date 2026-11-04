@@ -184,6 +184,31 @@ class TestParse(Refused):
                    "SUBJECT: s", "PARENT: #3", "FINDING: advisory x"]
         self.refused(draft(request), "E-FIELD-FORBIDDEN", line=6)
 
+    def test_blocking_check_is_not_a_relay(self):  # PR-3 fold S1, DD § 8
+        review = ["KIND: REVIEW", "TO: v3-engine.planner", "NEEDS: act",
+                  "SUBJECT: s", "PARENT: #3", "VERDICT: must-revise"]
+        uuid = "0190a1b2-c3d4-7e5f-8a9b-0123456789ab"
+        for ref in ("#1", "#2@q", uuid):
+            with self.subTest(ref=ref):
+                error = self.refused(draft(review + ["REF: file:/a", "REF: " + ref,
+                                                     "FINDING: blocking 2 probe fails"]),
+                                     "E-FINDING-NO-CHECK", line=9)
+                self.assertEqual(error.cause_key, "error-finding-no-check-relay-cause")
+                self.assertIn("names relay " + ref, error.cause)
+                self.assertIn("REF line 2", error.cause)
+                self.assertEqual(error.remedy_key, "error-finding-no-check-remedy")
+                # an advisory finding may cite a relay: DD § 8 lets it omit a check
+                parsed = header.parse(draft(review + ["REF: " + ref,
+                                                      "FINDING: advisory 1 see the thread"]))
+                self.assertEqual(parsed.findings[0].check_index, 1)
+        for ref in ("file:/a", "bivpak@main:src/a.py#L2"):
+            with self.subTest(ref=ref):
+                parsed = header.parse(draft(review + ["REF: " + ref,
+                                                      "FINDING: blocking 1 probe fails"]))
+                self.assertEqual(parsed.findings[0].check_index, 1)
+        # a malformed relay-looking REF is the REF line's refusal, left to submit
+        header.parse(draft(review + ["REF: #0x", "FINDING: blocking 1 probe fails"]))
+
     def test_fixes_and_resolves(self):
         fold = ["KIND: REVIEW-FOLD", "TO: v3-engine.planner", "NEEDS: review",
                 "SUBJECT: s", "PARENT: #3"]
@@ -537,6 +562,24 @@ class TestMirrorHeader(unittest.TestCase):
             with self.subTest(index=index, bad=bad):
                 with self.assertRaises(ValueError):
                     header.render_mirror_header(*args)
+
+    def test_every_line_separator_refused(self):  # PR-3 fold R8: what str.splitlines splits on
+        good = ("t.planner", ["t.implementer"], [], "t/a.md")
+        for char in ("\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+                     "\u2028", "\u2029"):
+            for index, bad in ((0, "t.planner" + char + "TO: x.y"), (1, ["a.b" + char]),
+                               (2, [char + "c.d"]), (3, "t/a.md" + char + "FROM: x.y")):
+                args = list(good)
+                args[index] = bad
+                with self.subTest(char=repr(char), index=index):
+                    self.assertGreater(len(("x" + char + "y").splitlines()), 1)
+                    with self.assertRaises(ValueError):
+                        header.render_mirror_header(*args)
+        with self.subTest("draft header"):
+            for char in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85"):
+                with self.assertRaises(errors.EngineError) as caught:
+                    header.parse(draft(replace("SUBJECT", "a" + char + "b")))
+                self.assertEqual(caught.exception.code, "E-HEADER-CONTROL")
 
     def sweep(self, seat, reply_parent):
         with tempfile.TemporaryDirectory() as name:

@@ -5,12 +5,15 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import unittest
+import multiprocessing
 from pathlib import Path
 from unittest import mock
 
 from relay_engine import errors
 from relay_engine import header
+from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
 from relay_engine.tests.test_refs import Repo, clean_git_environment, git
@@ -27,6 +30,7 @@ PLANNER = SEATS["v3-engine.planner"]
 IMPL = SEATS["v3-engine.implementer"]
 OTHER = SEATS["v3-other.planner"]
 ORCH = SEATS["v3.orchestrator-planner"]
+FOREIGN = submit.SeatRef("seat-x", "v3-engine.planner", "planner", "t9", "q")
 TABLES = ("relays", "bodies", "recipients", "edges", "git_states", "bundles",
           "findings", "finding_events", "refusals")
 GIT_STATE = submit.GitState("repo-1", "a" * 40, "main", 2, "0" * 64)
@@ -270,7 +274,21 @@ class TestRefusals(Store):
             ("E-REF-UNRESOLVED", draft(refs=("#1", "nowhere@main:x")), 7),
             ("E-REF-UNRESOLVED", draft(refs=("#5",)), 6),
         )
+        review = ["KIND: REVIEW", "TO: v3-engine.planner", "NEEDS: act", "SUBJECT: s",
+                  "PARENT: #1", "VERDICT: must-revise"]
+        cases += (  # PR-3 fold S12: the parser's and the rules' codes, each through submit()
+            ("E-HEADER-CRLF", b"KIND: SITREP\r\nTO: v3-engine.planner\n\nbody", 1),
+            ("E-HEADER-CONTROL", draft(subject="a\x0bb"), 5),
+            ("E-FIELD-ENUM", draft(needs="soon"), 4),
+            ("E-FIELD-SHAPE", draft(parent="#0"), 3),
+            ("E-FINDING-NO-CHECK", ("\n".join(review + ["REF: #1", "FINDING: blocking 1 x"])
+                                    + "\n\nbody").encode(), 8),
+            ("E-REF-SPELLING", draft(refs=("nope",)), 6),
+            ("E-PARENT-NOT-MEMBER", draft(parent="#2"), 3),
+            ("E-FINDING-UNKNOWN", draft(resolves=("F9 withdrawn moot",)), 6),
+        )
         self.submit(draft())  # handle 1 exists for the REF #1 control
+        self.submit(draft(to="v3-other.planner"), sender=OTHER)  # #2, which PLANNER is not on
         for code, data, line in cases:
             with self.subTest(code=code, line=line):
                 self.refused(code, data, line=line)
@@ -409,15 +427,392 @@ class TestFindings(Store):
                                               fixes=("F2 " + "c" * 40,)), line=6)
 
 
+    def raise_finding(self):
+        """A fresh review by IMPL with one blocking finding; its handle text."""
+        request = self.submit(draft(kind="REVIEW", needs="review", to="v3-engine.implementer"))
+        review = self.submit(draft(
+            kind="REVIEW", verdict="must-revise", parent="#%d" % request.handle,
+            refs=("file:%s/out.txt" % self.check,), findings=("blocking 1 x",)), sender=IMPL)
+        return "F%d" % self.conn.execute("SELECT handle FROM findings WHERE raised_in = ?",
+                                         (review.relay_id,)).fetchone()[0], review
+
+    def bring(self, status):
+        handle, review = self.raise_finding()
+        steps = {"open": [], "fixed": ["fixes"], "fix-accepted": ["fixes", "fix-accepted"],
+                 "withdrawn": ["withdrawn"]}[status]
+        for step in steps:
+            if step == "fixes":
+                self.fold((handle + " " + "c" * 40,))
+            else:
+                self.resolve((handle + " " + step + " r",), parent="#%d" % review.handle)
+        return handle, review
+
+    def test_every_transition_pinned(self):  # PR-3 fold S4 (M1, M2, M14), DD § 8
+        allowed = {("fixes", "open"): "fixed", ("fix-accepted", "fixed"): "fix-accepted",
+                   ("fix-refused", "fixed"): "open", ("withdrawn", "open"): "withdrawn",
+                   ("withdrawn", "fixed"): "withdrawn"}
+        for transition in ("fixes", "fix-accepted", "fix-refused", "withdrawn"):
+            for status in ("open", "fixed", "fix-accepted", "withdrawn"):
+                with self.subTest(transition=transition, status=status):
+                    handle, review = self.bring(status)
+                    number = int(handle[1:])
+                    if transition == "fixes":
+                        data = draft(kind="REVIEW-FOLD", parent="#%d" % review.handle,
+                                     to="v3-engine.implementer", fixes=(handle + " " + "e" * 40,))
+                        sender = PLANNER
+                    else:
+                        data = draft(parent="#%d" % review.handle, to="v3-engine.planner",
+                                     resolves=(handle + " " + transition + " why",))
+                        sender = IMPL
+                    if (transition, status) not in allowed:
+                        self.refused("E-RESOLVE-STATE", data, sender=sender, line=6)
+                        self.assertEqual(self.status(number)[0], status)
+                        continue
+                    admitted = self.submit(data, sender=sender)
+                    to_status, fixed, resolved_in, reason = self.status(number)
+                    self.assertEqual(to_status, allowed[(transition, status)])
+                    closed = to_status in ("fix-accepted", "withdrawn")
+                    self.assertEqual(resolved_in, admitted.relay_id if closed else None)
+                    if transition == "fixes":
+                        self.assertEqual(fixed, "e" * 40)
+                    else:
+                        self.assertEqual(reason, "why")
+
+    def test_check_edge_is_the_cited_ref(self):  # panel survivor M6
+        with tempfile.NamedTemporaryFile(dir=self.check, delete=False) as handle:
+            handle.write(b"second check\n")
+        request = self.submit(draft(kind="REVIEW", needs="review", to="v3-engine.implementer"))
+        review = self.submit(draft(
+            kind="REVIEW", verdict="must-revise", parent="#%d" % request.handle,
+            refs=("file:%s/out.txt" % self.check, "file:" + handle.name),
+            findings=("blocking 2 second", "blocking 1 first")), sender=IMPL)
+        self.assertEqual(self.conn.execute(
+            "SELECT f.summary, e.ordinal FROM findings f JOIN edges e ON e.id = f.check_edge_id"
+            " WHERE f.raised_in = ? ORDER BY f.handle", (review.relay_id,)).fetchall(),
+            [("second", 2), ("first", 1)])
+
+    def test_status_carried_across_lines(self):  # PR-3 fold S4 (M15)
+        self.fold(("F1 " + "c" * 40,))
+        self.refused("E-RESOLVE-STATE", draft(
+            parent="#%d" % self.review.handle, to="v3-engine.planner",
+            resolves=("F1 fix-refused not yet", "F1 fix-accepted now")), sender=IMPL, line=7)
+        both = self.resolve(("F1 fix-refused not yet", "F1 withdrawn moot"))
+        self.assertEqual(self.status(1), ("withdrawn", "c" * 40, both.relay_id, "moot"))
+
+    def ordered(self, *lines):
+        head = ["KIND: REVIEW-FOLD", "TO: v3-engine.planner",
+                "PARENT: #%d" % self.review.handle, "NEEDS: none", "SUBJECT: s"]
+        return ("\n".join(head + list(lines)) + "\n\nbody\n").encode("utf-8")
+
+    def events(self, relay_id):
+        return self.conn.execute(
+            "SELECT f.handle, e.transition, e.from_status, e.to_status FROM finding_events e"
+            " JOIN findings f ON f.id = e.finding_id WHERE e.relay_id = ? ORDER BY e.id",
+            (relay_id,)).fetchall()
+
+    def test_header_line_order(self):  # PR-3 fold S8
+        self.refused("E-RESOLVE-STATE", self.ordered("RESOLVE: F1 withdrawn moot",
+                                                     "FIXES: F1 " + "c" * 40), sender=IMPL, line=7)
+        fixed_then = self.submit(self.ordered("FIXES: F1 " + "c" * 40, "RESOLVE: F1 withdrawn moot"),
+                                 sender=IMPL)
+        self.assertEqual(self.events(fixed_then.relay_id),
+                         [(1, "fixes", "open", "fixed"), (1, "withdrawn", "fixed", "withdrawn")])
+        handle, review = self.bring("fixed")
+        self.review = review
+        refused_then = self.submit(self.ordered("RESOLVE: %s fix-refused again" % handle,
+                                                "FIXES: %s %s" % (handle, "d" * 40)), sender=IMPL)
+        number = int(handle[1:])
+        self.assertEqual(self.events(refused_then.relay_id),
+                         [(number, "fix-refused", "fixed", "open"), (number, "fixes", "open", "fixed")])
+        self.assertEqual(self.status(number), ("fixed", "d" * 40, None, "again"))
+
+
+class TestProjectScope(Store):  # PR-3 fold S5: one witness per project filter
+    def test_bundle_name_per_project(self):  # M3
+        mine = self.submit(draft(bundle="b1"))
+        theirs = self.submit(draft(bundle="b1"), sender=FOREIGN)
+        self.assertNotEqual(self.relay(mine.relay_id)["bundle_id"],
+                            self.relay(theirs.relay_id)["bundle_id"])
+        self.assertEqual(sorted(self.conn.execute("SELECT project_id, name FROM bundles")),
+                         [("p", "b1"), ("q", "b1")])
+
+    def test_handle_per_project(self):  # M4
+        self.submit(draft(), sender=FOREIGN)  # q's #1 is the store's first row
+        mine = self.submit(draft(to="v3-engine.implementer"))
+        child = self.submit(draft(parent="#1", refs=("#1",)))
+        self.assertEqual(self.relay(child.relay_id)["parent_id"], mine.relay_id)
+        self.assertEqual(self.conn.execute(
+            "SELECT target_relay_id FROM edges WHERE from_relay_id = ? AND kind = 'ref'",
+            (child.relay_id,)).fetchone()[0], mine.relay_id)
+
+    def test_ref_names_its_project(self):  # M5
+        self.submit(draft(), sender=FOREIGN)
+        q2 = self.submit(draft(), sender=FOREIGN)
+        self.submit(draft())
+        p2 = self.submit(draft())
+        cites = self.submit(draft(refs=("#2@q", "#2@p", "#2")))
+        self.assertEqual([row[0] for row in self.conn.execute(
+            "SELECT target_relay_id FROM edges WHERE from_relay_id = ? ORDER BY ordinal",
+            (cites.relay_id,))], [q2.relay_id, p2.relay_id, p2.relay_id])
+
+    def review_with_finding(self, requester, reviewer, to):
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(b"FAILED\n")
+        self.addCleanup(os.unlink, handle.name)
+        request = self.submit(draft(kind="REVIEW", needs="review", to=reviewer.address),
+                              sender=requester)
+        return self.submit(draft(kind="REVIEW", verdict="must-revise",
+                                 parent="#%d" % request.handle, to=to,
+                                 refs=("file:" + os.path.realpath(handle.name),),
+                                 findings=("blocking 1 x",)), sender=reviewer)
+
+    def test_finding_handles_per_project(self):  # M20, M21
+        self.review_with_finding(FOREIGN, FOREIGN, "v3-engine.planner")  # q's F1 comes first
+        review = self.review_with_finding(PLANNER, IMPL, "v3-engine.planner")
+        self.assertEqual(self.conn.execute("SELECT project_id, handle FROM findings ORDER BY rowid")
+                         .fetchall(), [("q", 1), ("p", 1)])
+        self.submit(draft(parent="#%d" % review.handle, resolves=("F1 withdrawn moot",)),
+                    sender=IMPL)
+        self.assertEqual(sorted(self.conn.execute("SELECT project_id, status FROM findings")),
+                         [("p", "withdrawn"), ("q", "open")])
+
+
+def _hammer(path, address, count, barrier, queue):
+    """One submitter process for the two-process admission test (S3)."""
+    conn = submit.open_store(path)
+    ctx = submit.SubmitContext(SEATS[address], None, lambda: 1_700_000_000_000, FakeDirectory())
+    seen = []
+    try:
+        barrier.wait(60)
+        for _ in range(count):
+            try:
+                submit.submit(conn, ctx, draft())
+            except Exception as error:  # every failure is counted, typed or not
+                seen.append("%s: %s" % (type(error).__name__, error))
+    finally:
+        conn.close()
+        queue.put((address, seen))
+
+
+class TestConcurrency(Store):  # PR-3 fold S2, S3
+    def test_two_processes_admit_every_draft(self):  # S3, acceptance 9
+        spawn = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as name:
+            path = os.path.join(name, "store")
+            submit.open_store(path).close()
+            barrier, queue = spawn.Barrier(2), spawn.Queue()
+            workers = [spawn.Process(target=_hammer, args=(path, address, 300, barrier, queue))
+                       for address in ("v3-engine.planner", "v3-engine.implementer")]
+            for worker in workers:
+                worker.start()
+            results = dict(queue.get(timeout=120) for _ in workers)
+            for worker in workers:
+                worker.join(30)
+            self.assertEqual(results, {"v3-engine.planner": [], "v3-engine.implementer": []})
+            conn = sqlite3.connect(path)
+            try:
+                rows = conn.execute("SELECT handle, id, created_at, sender_seat_id FROM relays"
+                                    " ORDER BY handle").fetchall()
+            finally:
+                conn.close()
+        self.assertEqual([row[0] for row in rows], list(range(1, 601)))
+        self.assertEqual([row[1] for row in rows], sorted(row[1] for row in rows))
+        self.assertTrue(all(b[2] > a[2] for a, b in zip(rows, rows[1:])))
+        senders = [row[3] for row in rows]
+        self.assertTrue(any(a != b for a, b in zip(senders, senders[1:])))  # they interleaved
+
+    def test_reference_resolution_holds_no_write_lock(self):  # S2
+        with tempfile.TemporaryDirectory() as name:
+            path = os.path.join(name, "store")
+            check = Path(os.path.realpath(name)) / "check.txt"
+            check.write_bytes(b"ok\n")
+            submit.open_store(path).close()
+            inside, release, result = threading.Event(), threading.Event(), {}
+            digest = refs.file_digest
+
+            def slow(target):
+                inside.set()
+                release.wait(30)
+                return digest(target)
+
+            def first():
+                conn = submit.open_store(path)
+                try:
+                    result["a"] = submit.submit(conn, self.ctx(), draft(refs=("file:" + str(check),)))
+                except BaseException as error:
+                    result["a"] = error
+                finally:
+                    conn.close()
+
+            with mock.patch.object(refs, "file_digest", slow):
+                thread = threading.Thread(target=first)
+                thread.start()
+                try:
+                    self.assertTrue(inside.wait(30))
+                    conn = sqlite3.connect(path, timeout=0.5)  # a held write lock fails fast
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    try:
+                        second = submit.submit(conn, self.ctx(IMPL), draft())
+                        with self.assertRaises(errors.EngineError) as caught:
+                            submit.submit(conn, self.ctx(IMPL), b"KIND: SITREP\nROLE: x\n\nbody")
+                        self.assertEqual(caught.exception.code, "E-HEADER-UNKNOWN-KEY")
+                        self.assertEqual(conn.execute("SELECT count(*) FROM refusals").fetchone(),
+                                         (1,))
+                    finally:
+                        conn.close()
+                finally:
+                    release.set()
+                    thread.join(30)
+        self.assertIsInstance(result["a"], submit.Admitted)
+        self.assertEqual((second.handle, result["a"].handle), (1, 2))
+
+
+def vm_steps(conn, call):
+    """SQLite virtual-machine steps a call runs: work that grows with the rows
+    a statement visits, and no wall clock (PR-3 fold S7, R14)."""
+    count = [0]
+
+    def tick():
+        count[0] += 1
+        return 0
+
+    conn.set_progress_handler(tick, 1)
+    try:
+        call()
+    finally:
+        conn.set_progress_handler(None, 1)
+    return count[0]
+
+
+class TestSubmitCost(Store):  # PR-3 fold S7
+    def seed(self, count):
+        """count relays of project p from earlier seats, one finding per ten."""
+        rows, last = [], None
+        for n in range(1, count + 1):
+            last = submit.new_uuid7(1_000 + n, last)
+            rows.append((last, n, 1_000 + n))
+        self.conn.executemany(
+            "INSERT INTO relays (id, handle, project_id, kind, needs, subject, sender_seat_id,"
+            " created_at, body_sha256, meta_sha256, body_bytes, header_bytes)"
+            " VALUES (?, ?, 'p', 'SITREP', 'none', 's', 'old', ?, ?, ?, 0, 0)",
+            [(rid, n, at, "a" * 64, "a" * 64) for rid, n, at in rows])
+        self.conn.executemany(
+            "INSERT INTO findings (id, handle, project_id, raised_in, raiser_seat_id, severity,"
+            " summary, status) VALUES (?, ?, 'p', ?, 'old', 'advisory', 's', 'withdrawn')",
+            [("f%07d" % n, n // 10 + 1, rid) for rid, n, _ in rows if n % 10 == 0])
+        self.conn.commit()
+
+    def steps(self, count):
+        self.setUp()
+        self.seed(count)
+        check = Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(lambda: __import__("shutil").rmtree(check))
+        (check / "out.txt").write_bytes(b"FAILED\n")
+        request = {}
+        root = vm_steps(self.conn, lambda: request.setdefault("r", self.submit(draft(
+            kind="REVIEW", needs="review", to="v3-engine.implementer"))))
+        reply = vm_steps(self.conn, lambda: self.submit(draft(
+            kind="REVIEW", verdict="must-revise", parent="#%d" % request["r"].handle,
+            refs=("file:%s/out.txt" % check, "#%d" % (count // 2)),
+            findings=("blocking 1 x",)), sender=IMPL))
+        return {"root": root, "reply": reply}
+
+    def test_submit_cost_flat(self):
+        record = {count: self.steps(count) for count in (1_000, 50_000)}
+        print("submit cost (SQLite VM steps):", record)
+        for name in ("root", "reply"):
+            small, large = record[1_000][name], record[50_000][name]
+            self.assertLess(large, small * 1.5, record)
+
+
+class TestContext(Store):  # PR-3 fold S6
+    def test_git_state_validated(self):
+        good = (GIT_STATE, None, submit.GitState(None, None, None, 0, "0" * 64),
+                submit.GitState("repo-1", "b" * 64, None, 0, "f" * 64))
+        for state in good:
+            with self.subTest(state=state):
+                submit.SubmitContext(PLANNER, state, self.now, self.directory)
+        bad = (submit.GitState("repo-1", "abc", "main", 2, "0" * 64),
+               submit.GitState("repo-1", "A" * 40, "main", 2, "0" * 64),
+               submit.GitState("repo-1", "a" * 40, "main", -1, "0" * 64),
+               submit.GitState("repo-1", "a" * 40, "main", "2", "0" * 64),
+               submit.GitState("repo-1", "a" * 40, "main", True, "0" * 64),
+               submit.GitState("repo-1", "a" * 40, "main", 2, "F" * 64),
+               submit.GitState("repo-1", "a" * 40, "main", 2, "0" * 63),
+               submit.GitState("", "a" * 40, "main", 2, "0" * 64),
+               submit.GitState("repo-1", "a" * 40, "", 2, "0" * 64),
+               submit.GitState(None, "a" * 40, None, 0, "0" * 64),
+               submit.GitState(None, None, "main", 0, "0" * 64),
+               submit.GitState(None, None, None, 3, "0" * 64),
+               ("repo-1", "a" * 40, "main", 2, "0" * 64))
+        for state in bad:
+            with self.subTest(state=state):
+                with self.assertRaises(ValueError):
+                    submit.SubmitContext(PLANNER, state, self.now, self.directory)
+        self.assertEqual(self.counts(), dict.fromkeys(TABLES, 0))
+
+
+class TestActivity(Store):  # PR-3 fold R6
+    def test_admission_is_activity(self):
+        admitted = self.submit(draft())
+        self.assertEqual(self.conn.execute("SELECT seat_id, last_request_at FROM seat_activity")
+                         .fetchall(), [(PLANNER.seat_id, admitted.created_at_ms)])
+        self.clock -= 10_000  # an earlier clock never moves activity back
+        later = self.submit(draft())
+        self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity")
+                         .fetchone()[0], later.created_at_ms)
+        with mock.patch.object(submit, "_write_answered_by", side_effect=RuntimeError("fault")):
+            with self.assertRaises(RuntimeError):
+                self.submit(draft(parent="#1"), sender=PLANNER)
+        self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity")
+                         .fetchone()[0], later.created_at_ms)  # it commits with the admission
+        self.refused("E-PARENT-UNKNOWN", draft(parent="#99"), sender=IMPL, line=3)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM seat_activity").fetchone(), (1,))
+        # a later activity, such as a read, is never moved back by an admission
+        self.conn.execute("UPDATE seat_activity SET last_request_at = ?", (later.created_at_ms + 10**6,))
+        self.conn.commit()
+        self.submit(draft())
+        self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity")
+                         .fetchone()[0], later.created_at_ms + 10**6)
+
+
 class TestDigest(Store):
     def test_metadata_digest_converges(self):  # erratum E1
         tight = self.submit(draft(to="v3-engine.planner,v3-engine.implementer"))
         spaced = self.submit(draft(to="v3-engine.planner, v3-engine.implementer"))
         other = self.submit(draft(to="v3-engine.planner, v3-other.planner"))
+        copied = self.submit(draft(to="v3-engine.planner,v3-engine.implementer",
+                                   cc="v3.orchestrator-planner"))
         digest = lambda a: self.relay(a.relay_id)["meta_sha256"]
         self.assertEqual(digest(tight), digest(spaced))
         self.assertNotEqual(digest(tight), digest(other))
+        self.assertNotEqual(digest(tight), digest(copied))  # CC is a field of the digest
         self.assertRegex(digest(tight), r"\A[0-9a-f]{64}\Z")
+
+    def test_digest_over_resolved_targets(self):  # PR-3 fold S10, DD § 5
+        root = self.submit(draft())
+        digest = lambda a: self.relay(a.relay_id)["meta_sha256"]
+        by_handle = self.submit(draft(parent="#1", refs=("#1",)))
+        by_id = self.submit(draft(parent=root.relay_id, refs=("#1@p",)))
+        self.assertEqual(digest(by_handle), digest(by_id))
+        other = self.submit(draft(parent="#1", refs=("#2",)))
+        self.assertNotEqual(digest(by_handle), digest(other))
+        with tempfile.TemporaryDirectory() as name:
+            home = Path(os.path.realpath(name))
+            (home / "n.txt").write_bytes(b"n\n")
+            with mock.patch.object(submit, "_home", return_value=str(home)):
+                tilde = self.submit(draft(refs=("file:~/n.txt",)))
+                plain = self.submit(draft(refs=("file:" + str(home / "n.txt"),)))
+        self.assertEqual(digest(tilde), digest(plain))
+        repo = Repo({"src/a.py": "one\ntwo\n"})
+        self.addCleanup(repo.close)
+        self.directory.checkouts["bivpak"] = repo.path
+        commit = git(repo.path, "rev-parse", "main")
+        named = self.submit(draft(refs=("bivpak@main:src/a.py#L2",)))
+        pinned = self.submit(draft(refs=("bivpak@%s:src/a.py#L2" % commit,)))
+        self.assertEqual(digest(named), digest(pinned))
+        wider = self.submit(draft(refs=("bivpak@main:src/a.py#L1-L2",)))
+        self.assertNotEqual(digest(named), digest(wider))
 
 
 if __name__ == "__main__":
