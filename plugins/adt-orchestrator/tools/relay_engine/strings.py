@@ -90,6 +90,7 @@ _CODE_VALUES = {
     "E-FIELD-LENGTH",
     "E-ADDRESS",
     "E-FINDING-NO-CHECK",
+    "E-SQLITE-VERSION",
 }
 _OPS = {
     "seat.declare", "submit", "seat.register", "seat.replace", "seat.stand_down",

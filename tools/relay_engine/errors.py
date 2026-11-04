@@ -322,6 +322,17 @@ for _key, _template in _HEADER_TEXT.items():
         }.get(_field, _is_header_text)
 strings.register_inventory(_HEADER_TEXT, _HEADER_VALIDATORS)
 
+strings.register_inventory({
+    "error-sql-version-cause": "the embedded SQL library is version {found}; the engine needs {minimum} or newer",
+    "error-sql-version-remedy": "run the engine with a Python whose embedded SQL library is 3.37.0 or newer",
+    "error-sql-version-explain": "the engine's tables are strict tables, which need SQL library 3.37.0 or newer",
+}, {
+    ("error-sql-version-cause", "found"):
+        lambda v: isinstance(v, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){2}", v) is not None,
+    ("error-sql-version-cause", "minimum"):
+        lambda v: isinstance(v, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){2}", v) is not None,
+})
+
 
 def _spec(stem, cls):
     return ErrorSpec("error-%s-cause" % stem,
@@ -371,6 +382,7 @@ ERRORS = {
     "E-FIELD-LENGTH": _spec("field-length", "integrity"),
     "E-ADDRESS": _spec("address", "integrity"),
     "E-FINDING-NO-CHECK": _spec("finding-no-check", "integrity"),
+    "E-SQLITE-VERSION": _spec("sql-version", "client"),
 }
 
 ERROR_VARIANTS = {
