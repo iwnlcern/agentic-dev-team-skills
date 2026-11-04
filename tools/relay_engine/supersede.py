@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from relay_engine import errors
+from relay_engine import strings
 from relay_engine.envelope import parse_draft
 from relay_engine.jcs import frame_record, parse_record
 from relay_engine.ledger import admit
@@ -126,11 +127,15 @@ def adopt_ruling(ledger, root, bundle):
     except (ValueError, UnicodeDecodeError, errors.EngineError) as exc:
         raise errors.error_for("E-ENVELOPE") from exc
     target_path = envelope.headers.get("SUPERSEDES")
+    if target_path is None:
+        raise _carrier_field("ruling_body_b64", "the ruling names no SUPERSEDES target")
     target = ledger.execute(
         "SELECT seq FROM relays WHERE rendered_path=?", (target_path,)
     ).fetchone()
     if target is None:
-        raise errors.error_for("E-ENVELOPE")
+        shown = (target_path if strings._is_show_text(target_path) and len(target_path) <= 300
+                 else errors._rejected_identity(target_path))
+        raise errors.error_for("E-CARRIER-INVALID", variant="target", path=shown)
     eligible = (envelope.from_seat == "operator" or
                 envelope.from_seat.endswith(".orchestrator-planner"))
     adopted_path = "adopted/%s.md" % bundle_digest

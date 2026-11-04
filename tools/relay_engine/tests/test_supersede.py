@@ -114,7 +114,7 @@ class TestAdoptedSupersession(unittest.TestCase):
 class TestCarrierFields(TestAdoptedSupersession):
     """PR-4 fold D1, D2: every malformed carrier gets a carrier code, never E-ENVELOPE."""
 
-    def adopt(self, data):
+    def adopt(self, data, with_target=True):
         with tempfile.TemporaryDirectory() as child_name:
             child = Root(child_name)
             child_engine = ensure_engine_dir(child.dirfd)
@@ -122,9 +122,11 @@ class TestCarrierFields(TestAdoptedSupersession):
             try:
                 establish_run_identity(ledger, "child", base64.b64decode(
                     self.record_result["record_b64"]))
-                target_text = relay("child", "target", "child.planner", "child.implementer")
-                admit(ledger, child, parse_draft(target_text), target_text.encode(), None,
-                      origin="hand", stamp="20260808-010000", rendered_path="child/target.md")
+                if with_target:
+                    target_text = relay("child", "target", "child.planner", "child.implementer")
+                    admit(ledger, child, parse_draft(target_text), target_text.encode(), None,
+                          origin="hand", stamp="20260808-010000",
+                          rendered_path="child/target.md")
                 try:
                     supersede.adopt_ruling(ledger, child, data)
                 except errors.EngineError as error:
@@ -181,6 +183,27 @@ class TestCarrierFields(TestAdoptedSupersession):
         self.assertIn(b'"v":1.0', line)
         data = line + b"\n" + hashlib.sha256(line).hexdigest().encode() + b"\n"
         self.assertEqual(self.adopt(data).code, "E-CARRIER-FIELD")
+
+    def test_absent_target_names_it(self):  # planner answer to the fold report
+        error = self.adopt(self.framed(self.fields()), with_target=False)
+        self.assertEqual(error.code, "E-CARRIER-INVALID")
+        self.assertIn("child/target.md", error.cause)
+        self.assertIn("root that holds", error.remedy)
+        self.assertNotIn("envelope", error.remedy)
+        self.assertIsNone(self.adopt(self.framed(self.fields())))  # control: target present
+
+    def test_ruling_without_supersedes_names_it(self):  # same answer; a hand-made carrier
+        import hashlib
+        body = base64.b64decode(self.fields()["ruling_body_b64"])
+        lines = body.split(b"\n")
+        kept = [line for line in lines if not line.startswith(b"SUPERSEDES:")]
+        self.assertEqual(len(lines) - len(kept), 1)  # the control body names one target
+        stripped = b"\n".join(kept)
+        error = self.altered(ruling_body_b64=base64.b64encode(stripped).decode(),
+                             ruling_content_digest=hashlib.sha256(stripped).hexdigest())
+        self.assertEqual(error.code, "E-CARRIER-INVALID")
+        self.assertIn("ruling_body_b64", error.cause)
+        self.assertIn("names no SUPERSEDES target", error.cause)
 
     def test_body_faults_name_the_field(self):  # D1, C2
         import hashlib

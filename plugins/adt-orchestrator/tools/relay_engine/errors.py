@@ -371,6 +371,8 @@ strings.register_inventory({
     "error-carrier-invalid-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
     "error-carrier-invalid-explain": "a ruling carrier is a framed record whose digest matches its bytes",
     "error-carrier-invalid-field-cause": "the carrier's {field} cannot be used: {reason}",
+    "error-carrier-invalid-target-cause": "the carried ruling supersedes {path}, which this root does not hold",
+    "error-carrier-invalid-target-remedy": "adopt the carrier in the root that holds the superseded relay, or ask the exporter which root that is",
     "error-carrier-field-cause": "the carrier is a framed record, but not a version 1 ruling carrier",
     "error-carrier-field-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
     "error-carrier-field-explain": "a ruling carrier holds exactly the fields relay export-ruling writes",
@@ -383,7 +385,10 @@ strings.register_inventory({
         lambda v: isinstance(v, str) and v in {"ruling_body_b64", "ruling_content_digest"},
     ("error-carrier-invalid-field-cause", "reason"):
         lambda v: isinstance(v, str) and v in {
-            "not base64", "not UTF-8 text", "does not match the carried body"},
+            "not base64", "not UTF-8 text", "does not match the carried body",
+            "the ruling names no SUPERSEDES target"},
+    ("error-carrier-invalid-target-cause", "path"):
+        lambda v: strings._is_rejected(v) or (strings._is_show_text(v) and len(v) <= 300),
     ("error-root-not-found-cause", "directory"):
         lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
 })
@@ -530,6 +535,9 @@ ERROR_VARIANTS = {
         "error-address-explain", "integrity"),
     ("E-CARRIER-INVALID", "field"): ErrorSpec(
         "error-carrier-invalid-field-cause", "error-carrier-invalid-remedy",
+        "error-carrier-invalid-explain", "command"),
+    ("E-CARRIER-INVALID", "target"): ErrorSpec(
+        "error-carrier-invalid-target-cause", "error-carrier-invalid-target-remedy",
         "error-carrier-invalid-explain", "command"),
 }
 
