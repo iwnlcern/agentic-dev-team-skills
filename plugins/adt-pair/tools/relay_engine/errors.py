@@ -238,6 +238,91 @@ strings.register_inventory(
 )
 
 
+
+# v3 header refusals (DD-v3-engine § 3, § 5, § 10): one code per rule; the
+# cause names the line and the refused text, the remedy needs no incident value.
+_HEADER_TEXT = {
+    "error-header-grammar-cause": "line {line}: {value} is not a header line of the form KEY: value (capital ASCII letters and underscores, a colon, one space, a value with no space at either end)",
+    "error-header-grammar-remedy": "rewrite the line as KEY: value, or end the header block with an empty line before it",
+    "error-header-grammar-explain": "every line from the first line to the first empty line is a header line",
+    "error-header-grammar-utf8-cause": "line {line} is not UTF-8 text",
+    "error-header-grammar-utf8-remedy": "save the draft as UTF-8",
+    "error-header-unknown-key-cause": "line {line}: {key} is not a v3 header field",
+    "error-header-unknown-key-remedy": "use only the fields the v3 header defines; write anything else in the body",
+    "error-header-unknown-key-explain": "a header field exists only when a program reads its value",
+    "error-header-duplicate-cause": "line {line}: {field} appears again; it takes one value",
+    "error-header-duplicate-remedy": "keep one line for each single-valued field",
+    "error-header-duplicate-explain": "KIND, TO, CC, PARENT, BUNDLE, VERDICT, NEEDS and SUBJECT take one line each",
+    "error-header-empty-cause": "line {line}: {key} has no value",
+    "error-header-empty-remedy": "give the field a value, or remove the line",
+    "error-header-empty-explain": "a header line always carries a value",
+    "error-header-control-cause": "line {line}, column {column}: {codepoint} is a control or line-separator character",
+    "error-header-control-remedy": "remove the character; the header allows tab and no other control character",
+    "error-header-control-explain": "a header value is one line of printable text",
+    "error-header-title-line-cause": "line {line} is a title line; a v3 draft starts with header lines",
+    "error-header-title-line-remedy": "delete the title line and put its text in SUBJECT",
+    "error-header-title-line-explain": "the subject line replaces the v2 title line",
+    "error-header-crlf-cause": "line {line} ends with a carriage return",
+    "error-header-crlf-remedy": "save the draft with LF line endings",
+    "error-header-crlf-explain": "header lines end with a line feed alone",
+    "error-header-bom-cause": "line {line} starts with a UTF-8 byte-order mark",
+    "error-header-bom-remedy": "save the draft as UTF-8 without a byte-order mark",
+    "error-header-bom-explain": "the first header line starts at the first byte",
+    "error-header-size-cause": "the header block is {size} bytes; the limit is {limit}",
+    "error-header-size-remedy": "move detail from the header into the body",
+    "error-header-size-explain": "sizes are checked before any parse; the header block is at most 8 KiB",
+    "error-body-size-cause": "the body is {size} bytes; the limit is {limit}",
+    "error-body-size-remedy": "put long material in an evidence file and point to it with REF",
+    "error-body-size-explain": "sizes are checked before any parse; the body is at most 64 KiB",
+    "error-field-enum-cause": "line {line}: {field} value {value} is not allowed; allowed: {allowed}",
+    "error-field-enum-remedy": "use an allowed value for the field",
+    "error-field-enum-explain": "fields with a closed set or a fixed form refuse any other value",
+    "error-field-required-cause": "the draft has no {field} line: {rule}",
+    "error-field-required-remedy": "add the missing line",
+    "error-field-required-explain": "required fields depend on KIND and NEEDS",
+    "error-field-forbidden-cause": "line {line}: {field} is not allowed here: {rule}",
+    "error-field-forbidden-remedy": "remove the line, or change KIND or NEEDS so the field applies",
+    "error-field-forbidden-explain": "some fields belong only to certain kinds, or only to replies",
+    "error-field-length-cause": "line {line}: {field} is {length} characters; the limit is {limit}",
+    "error-field-length-remedy": "shorten the value and put detail in the body",
+    "error-field-length-explain": "length limits count characters, not bytes",
+    "error-address-cause": "line {line}: {field} address {value} is refused: {reason}",
+    "error-address-remedy": "write each address as <team>.<role>, <team>.<role>@<project> or operator, in lowercase, once across TO and CC",
+    "error-address-explain": "addresses follow one grammar and are never case-folded",
+    "error-address-alias-remedy": "write the role word {canonical}",
+    "error-finding-no-check-cause": "line {line}: the finding cites REF line {cited}, and the header has {count} REF lines",
+    "error-finding-no-check-remedy": "add a REF line naming the executed check's output and cite its number (1 for the first REF line), or mark the finding advisory",
+    "error-finding-no-check-explain": "a blocking finding cites the REF line that records its executed check",
+}
+
+
+def _is_line(value):
+    return strings._is_count(value) and value >= 1
+
+
+def _is_header_key(value):
+    return (isinstance(value, str) and len(value) <= 64 and
+            re.fullmatch(r"[A-Z][A-Z_]*", value) is not None)
+
+
+def _is_header_text(value):
+    return strings._is_show_text(value) and len(value) <= 512
+
+
+_HEADER_VALIDATORS = {}
+for _key, _template in _HEADER_TEXT.items():
+    for _field in strings._placeholders(_template):
+        _HEADER_VALIDATORS[(_key, _field)] = {
+            "line": _is_line, "column": _is_line,
+            "size": strings._is_count, "limit": strings._is_count,
+            "length": strings._is_count, "count": strings._is_count,
+            "key": _is_header_key, "field": _is_header_key,
+            "codepoint": lambda v: (isinstance(v, str) and
+                                    re.fullmatch(r"U\+[0-9A-F]{4,6}", v) is not None),
+        }.get(_field, _is_header_text)
+strings.register_inventory(_HEADER_TEXT, _HEADER_VALIDATORS)
+
+
 def _spec(stem, cls):
     return ErrorSpec("error-%s-cause" % stem,
                      "error-%s-remedy" % stem,
@@ -270,6 +355,22 @@ ERRORS = {
     "E-DAEMON-STOPPING": _spec("daemon-stopping", "wire"),
     "E-CONTEXT-BUDGET": _spec("context-budget", "wire"),
     "E-VERSION-MISMATCH": _spec("version-mismatch", "policy"),
+    "E-HEADER-GRAMMAR": _spec("header-grammar", "integrity"),
+    "E-HEADER-UNKNOWN-KEY": _spec("header-unknown-key", "integrity"),
+    "E-HEADER-DUPLICATE": _spec("header-duplicate", "integrity"),
+    "E-HEADER-EMPTY": _spec("header-empty", "integrity"),
+    "E-HEADER-CONTROL": _spec("header-control", "integrity"),
+    "E-HEADER-TITLE-LINE": _spec("header-title-line", "integrity"),
+    "E-HEADER-CRLF": _spec("header-crlf", "integrity"),
+    "E-HEADER-BOM": _spec("header-bom", "integrity"),
+    "E-HEADER-SIZE": _spec("header-size", "integrity"),
+    "E-BODY-SIZE": _spec("body-size", "integrity"),
+    "E-FIELD-ENUM": _spec("field-enum", "integrity"),
+    "E-FIELD-REQUIRED": _spec("field-required", "integrity"),
+    "E-FIELD-FORBIDDEN": _spec("field-forbidden", "integrity"),
+    "E-FIELD-LENGTH": _spec("field-length", "integrity"),
+    "E-ADDRESS": _spec("address", "integrity"),
+    "E-FINDING-NO-CHECK": _spec("finding-no-check", "integrity"),
 }
 
 ERROR_VARIANTS = {
@@ -286,6 +387,12 @@ ERROR_VARIANTS = {
         _spec("envelope-edge", "integrity"),
     ("E-PATH-ESCAPE", "not-found"):
         _spec("not-found", "policy"),
+    ("E-HEADER-GRAMMAR", "utf8"): ErrorSpec(
+        "error-header-grammar-utf8-cause", "error-header-grammar-utf8-remedy",
+        "error-header-grammar-explain", "integrity"),
+    ("E-ADDRESS", "alias"): ErrorSpec(
+        "error-address-cause", "error-address-alias-remedy",
+        "error-address-explain", "integrity"),
 }
 
 POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}
