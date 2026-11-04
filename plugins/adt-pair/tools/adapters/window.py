@@ -13,8 +13,10 @@ nearest run of shells, never chosen by host process name.
 from __future__ import annotations
 
 import calendar
+import errno
 import json
 import os
+import select
 import subprocess
 import time
 from dataclasses import dataclass
@@ -157,3 +159,61 @@ def window_identity(
         if not _is_shell(name):
             return _claude_window(proc, lstart, "structural")
     return None
+
+
+class ExitWatch:
+    """Notices that a window process has exited, without starting a process per poll (fold F6).
+
+    One `ps` start-time check at construction tells a reused pid from the window itself; after that the
+    kernel reports the exit: a kqueue `NOTE_EXIT` registration (macOS, BSD) or a pidfd (Linux), each tied
+    to the process, not to its number.  Where neither exists, a signal-0 probe reads the pid, which cannot
+    see a reuse after construction.  Uncertainty reads alive, as the doorbell's liveness always has.
+    """
+
+    def __init__(self, pid: int, proc_start_utc: str | None, *, process_table: ProcessTable = ps_process_table):
+        self.pid = pid
+        self._kq = None
+        self._fd = None
+        self._gone = False
+        row = process_table(pid)
+        if row is not None and proc_start_utc and not _same_instant(row[2], proc_start_utc):
+            self._gone = True  # the pid now names another process: the window is gone
+            return
+        try:
+            if hasattr(select, "kqueue"):
+                kq = select.kqueue()
+                try:
+                    kq.control([select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD,
+                                              fflags=select.KQ_NOTE_EXIT)], 0, 0)
+                except BaseException:
+                    kq.close()
+                    raise
+                self._kq = kq
+            elif hasattr(os, "pidfd_open"):
+                self._fd = os.pidfd_open(pid)
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                self._gone = True
+
+    def gone(self) -> bool:
+        if self._gone:
+            return True
+        try:
+            if self._kq is not None:
+                self._gone = any(e.fflags & select.KQ_NOTE_EXIT for e in self._kq.control(None, 4, 0))
+            elif self._fd is not None:
+                self._gone = bool(select.select([self._fd], [], [], 0)[0])
+            else:
+                os.kill(self.pid, 0)
+        except ProcessLookupError:
+            self._gone = True
+        except OSError:
+            pass
+        return self._gone
+
+    def close(self) -> None:
+        kq, fd, self._kq, self._fd = self._kq, self._fd, None, None
+        if kq is not None:
+            kq.close()
+        if fd is not None:
+            os.close(fd)

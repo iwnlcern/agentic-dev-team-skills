@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -679,6 +680,32 @@ class DeliveryTests(TmpEnv):
         super().setUp()
         self.store = self.rm.NoteStore("sess")
         self.inst = "leader-1"
+
+    def test_stop_requested_before_delivery_writes_nothing(self):
+        # fold F1: the stop is checked under the state lock before each row
+        self.bind()
+        write_index(self.index, "".join(row(k, to="b.implementer") for k in range(1, 4)))
+        sink = self.rm.ByteSink()
+        result, _ = self.deliver(sink=sink, stop=lambda: True)
+        self.assertEqual((bytes(sink.buf), result.aborted), (b"", "stopped"))
+        self.assertIsNone(self.store.load()["progress"][str(self.root)]["file"])
+
+    def test_stop_during_a_write_leaves_that_row_for_the_successor(self):
+        # fold F1: a row written after the stop request does not advance progress, so it is offered again
+        self.bind()
+        write_index(self.index, "".join(row(k, to="b.implementer") for k in range(1, 4)))
+        stopped = []
+
+        class StoppingSink(self.rm.ByteSink):
+            def write(inner, data):
+                stopped.append(True)
+                return super().write(data)
+
+        sink = StoppingSink()
+        result, _ = self.deliver(sink=sink, stop=lambda: bool(stopped))
+        self.assertEqual([json.loads(l)["file"] for l in bytes(sink.buf).splitlines()], ["lane/r1.md"])
+        self.assertEqual(result.aborted, "stopped")
+        self.assertIsNone(self.store.load()["progress"][str(self.root)]["file"])
 
     def bind(self, anchor=None):
         cur = dict(self.rm.SENTINEL) if anchor is None else anchor
@@ -1375,7 +1402,7 @@ class FollowProcessMixin:
             env=env,
         )
         self.addCleanup(
-            lambda: (p.kill(), p.wait(), p.stdout.close(), p.stderr.close())
+            lambda: (p.kill(), p.wait(timeout=10), p.stdout.close(), p.stderr.close())
         )
         return p
 
@@ -1423,6 +1450,26 @@ def utc_lstart(pid):
         capture_output=True, text=True, env=dict(os.environ, TZ="UTC", LC_ALL="C"), check=True,
     ).stdout
     return " ".join(out.split())
+
+
+def bounded(fn, timeout=5.0):
+    """Run `fn` in a thread and fail fast if it blocks (fold T3: a blocking-lock regression fails in seconds)."""
+    box = {}
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # re-raised in the caller
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise AssertionError(f"blocked for more than {timeout} s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 class WindowDoorbellTests(FollowProcessMixin, TmpEnv):
@@ -1474,10 +1521,55 @@ class WindowDoorbellTests(FollowProcessMixin, TmpEnv):
         write_index(self.index, row(1, to="b.implementer"))
         self.spawn(extra_env=self.window_env())
         self.wait_note(lambda n: n.get("leader") and n.get("window"))
-        state, note = self.rm.readiness(self.rm.NoteStore("psess"))
+        state, note = bounded(lambda: self.rm.readiness(self.rm.NoteStore("psess")))
         self.assertNotIn(state, ("starting", "not-started", "standby-only"))
-        line = self.rm.status_line(self.rm.NoteStore("psess"), None).splitlines()[0]
+        line = bounded(lambda: self.rm.status_line(self.rm.NoteStore("psess"), None)).splitlines()[0]
         self.assertIn(" window=%s " % self.window_key(), line + " ")
+
+    def test_readiness_never_takes_the_window_lock(self):
+        # fold F2: a probe that takes the lock, even briefly, makes a doorbell starting then exit silently
+        write_index(self.index, row(1, to="b.implementer"))
+        self.spawn(extra_env=self.window_env())
+        self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following" and n.get("window"))
+
+        def refuse(_lock):
+            raise AssertionError("readiness took the window lock")
+
+        with mock.patch.object(self.rm.WindowLock, "acquire", refuse):
+            state, _ = bounded(lambda: self.rm.readiness(self.rm.NoteStore("psess")))
+        self.assertEqual(state, "armed")
+
+    def test_doorbell_started_during_a_probe_keeps_running(self):
+        # fold F2, C's p9 shape: start a doorbell while a readiness probe runs; the no-probe control first
+        write_index(self.index, row(1, to="b.implementer"))
+        win = self.other_window()
+        env = self.window_env(win)
+        store = self.rm.NoteStore("psess")
+        store.update(lambda n: n.update(window="cc-%d-%d" % (win, self.rm.window.lstart_epoch(utc_lstart(win)))))
+        started = []
+
+        def start_doorbell():
+            started.append(self.spawn(extra_env=env))
+            time.sleep(1.5)  # long enough for a doorbell that lost the lock to have exited
+
+        start_doorbell()  # control: no probe running
+        self.assertIsNone(started[0].poll())
+        started[0].kill()
+        started[0].wait(timeout=10)
+        bounded(lambda: self.rm.readiness(store, _between=start_doorbell), timeout=10)
+        self.assertIsNone(started[1].poll(), "the doorbell started during the probe exited")
+
+    def test_real_window_path_uses_the_host_record(self):
+        # fold T2: no ADT_WINDOW_* seam; HOME holds a sessions record for this test process, the doorbell's parent
+        home = self.base / "home"
+        sessions = home / ".claude" / "sessions"
+        sessions.mkdir(parents=True)
+        start = utc_lstart(os.getpid())
+        (sessions / f"{os.getpid()}.json").write_text(json.dumps({"pid": os.getpid(), "procStart": start}))
+        write_index(self.index, row(1, to="b.implementer"))
+        self.spawn(extra_env={"HOME": str(home)})
+        note = self.wait_note(lambda n: n.get("leader") and n.get("window"))
+        self.assertEqual(note["window"], "cc-%d-%d" % (os.getpid(), self.rm.window.lstart_epoch(start)))
 
     def test_different_windows_both_run(self):
         write_index(self.index, row(1, to="b.implementer"))
@@ -1533,10 +1625,86 @@ class BoundedStatusTests(TmpEnv):
         self.assertIn("engine=wedged", json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
 
     def test_status_names_own_version(self):
-        leader = self.rm.leader_record(None)
+        # fold T1: the cell comes from the leader record, not from the status process's own file
+        leader = dict(self.rm.leader_record(None), doorbell={"kit": "7.7.7", "sha": "abcdef12"})
         self.store.update(lambda n: n.update(leader=leader))
         line = self.rm.status_line(self.store, None).splitlines()[0] + " "
-        self.assertIn(" doorbell=%s@%s " % (kit_version(), script_digest8()), line)
+        self.assertIn(" doorbell=7.7.7@abcdef12 ", line)
+        self.assertNotIn(script_digest8(), line)
+
+    def fake_plugin(self, name, relay_source):
+        root = self.base / name
+        (root / "tools").mkdir(parents=True)
+        (root / "tools" / "relay").write_text(relay_source)
+        return root
+
+    def test_status_bounded_when_engine_status_hangs(self):
+        # fold F3, T's c2 stub: `version` answers at once and `status` hangs
+        stub = self.fake_plugin("status-wedge", (
+            "import json, sys, time\n"
+            "if sys.argv[1] == 'version':\n"
+            "    print(json.dumps({'kit': '9.9.9', 'fingerprint': 'f' * 16}))\n"
+            "    sys.exit(0)\n"
+            "time.sleep(30)\n"))
+        elapsed, proc = self.timed(["status", "--session", "sess", "--plugin-root", str(stub)])
+        self.assertLess(elapsed, 2.0, proc.stdout)
+        self.assertIn(" engine=wedged ", proc.stdout.splitlines()[0] + " ")
+
+    def test_status_bounded_while_state_lock_held(self):
+        # fold F3: another process holding the note's state lock must not hold status past 2 s
+        with self.store.state_lock():
+            elapsed, proc = self.timed(["status", "--session", "sess", "--plugin-root", str(self.wedged)])
+        self.assertLess(elapsed, 2.0, proc.stdout + proc.stderr)
+        self.assertTrue(proc.stdout.startswith("relay-monitor: "), proc.stdout + proc.stderr)
+
+    def test_session_start_bounded_while_state_lock_held(self):
+        payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
+        with self.store.state_lock():
+            elapsed, proc = self.timed(
+                ["session-start", "--host", "claude-code", "--plugin-root", str(self.wedged)], stdin=payload)
+        self.assertLess(elapsed, 2.0, proc.stdout + proc.stderr)
+        self.assertIn("relay-monitor: ", json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
+
+    def test_status_bounded_with_hung_ps(self):
+        # fold F3: a hung `ps` (process start time) shares the 2 s deadline
+        bindir = self.base / "bin"
+        bindir.mkdir()
+        (bindir / "ps").write_text("#!/bin/sh\nsleep 30\n")
+        (bindir / "ps").chmod(0o755)
+        leader = {"pid": os.getpid(), "start_time": "Tue Nov  3 09:00:00 2026", "instance": "i-1",
+                  "identity": None, "doorbell": {"kit": "1", "sha": "1"}}
+        self.store.update(lambda n: n.update(leader=leader, window="cc-1-1"))
+        lock = self.rm.WindowLock("cc-1-1")
+        self.assertTrue(lock.acquire())
+        self.addCleanup(lock.release)
+        lock.stamp("i-1")
+        start = time.monotonic()
+        proc = subprocess.run([sys.executable, str(SCRIPT), "status", "--session", "sess", "--plugin-root", str(self.wedged)],
+                              capture_output=True, text=True, timeout=40,
+                              env=dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}"))
+        self.assertLess(time.monotonic() - start, 2.0, proc.stdout + proc.stderr)
+
+    def test_identity_cache_keyed_by_plugin_root_and_never_wedged(self):
+        # fold F3/M3: another plugin root is its own cache entry; a wedged answer is never reused
+        calls, answers = [], {"a": "ok", "b": "ok"}
+
+        def relay(plugin_root, *argv, **kw):
+            calls.append((plugin_root, argv[0]))
+            if answers[plugin_root] == "wedged":
+                return {"code": "E-WEDGED", "detail": "x"}, 124
+            if argv[0] == "version":
+                return {"kit": "9", "fingerprint": "f" * 16}, 0
+            return {"daemon": {"identity": {"kit": "9", "fp": "f" * 16}}}, 0
+
+        with mock.patch.object(self.rm, "run_relay", relay):
+            self.rm.status_line(self.store, "a")
+            self.rm.status_line(self.store, "b")
+            self.assertEqual([c for c in calls if c[1] == "version"], [("a", "version"), ("b", "version")])
+            answers["a"] = "wedged"
+            self.store.update(lambda n: n.pop("identity_cache", None))
+            self.assertIn("engine=wedged", self.rm.status_line(self.store, "a"))
+            answers["a"] = "ok"
+            self.assertNotIn("engine=wedged", self.rm.status_line(self.store, "a"))
 
     def test_identity_cache_reused_within_60s(self):
         calls, clock = [], [1000.0]
@@ -1561,8 +1729,6 @@ class BoundedStatusTests(TmpEnv):
         for root in (None, ""):
             with self.subTest(plugin_root=root):
                 self.assertEqual(self.rm.own_identity(root), {"kit": kit_version(), "sha": script_digest8()})
-        line = self.rm.status_line(self.store, "").splitlines()[0]
-        self.assertIn("doorbell=", line)
 
 
 class DoorbellExitTests(FollowProcessMixin, TmpEnv):
@@ -1677,15 +1843,137 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
         self.assertIsNone(note.get("exit"))
 
     def test_engine_outage_does_not_exit(self):
+        # fold T4: the doorbell runs from a tree whose `tools/relay` fails on every call
+        tree = self.base / "outage-tree"
+        (tree / "tools" / "adapters").mkdir(parents=True)
+        for name in ("relay-monitor.py", "window.py"):
+            shutil.copyfile(SCRIPT.parent / name, tree / "tools" / "adapters" / name)
+        (tree / "tools" / "relay").write_text("import sys\nprint('E-DAEMON-DOWN', file=sys.stderr)\nsys.exit(3)\n")
+        write_index(self.index, row(1, to="b.implementer"))
+        env = dict(os.environ, ADT_SEAT="b.implementer", ADT_RELAY_ROOT=str(self.root), **self.seam(os.getpid()))
+        script = tree / "tools" / "adapters" / "relay-monitor.py"
+        proc = subprocess.Popen([sys.executable, str(script), "follow", "--host", "claude-code", "--session", "psess"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait(timeout=10), proc.stdout.close(), proc.stderr.close()))
+        self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+        for _ in range(3):  # every engine call this tree makes fails while the doorbell runs
+            status = subprocess.run([sys.executable, str(script), "status", "--session", "psess"],
+                                    capture_output=True, text=True, timeout=10, env=env)
+            self.assertNotIn(" daemon=ok", status.stdout)
+            time.sleep(1.0)
+        self.assertIsNone(proc.poll())
+        self.assertEqual(self.rm.NoteStore("psess").load()["phase"], "following")
+        write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
+        self.assertEqual([d["file"] for d in self.read_lines(proc, 1)], ["lane/r2.md"])  # still delivering
+
+    def stop_mid_backlog(self, signum, rows=6, lag=0.5):
+        """L's p2e shape: the host stops reading at the stop, closes the stream `lag` later, starts a successor."""
+        write_index(self.index, row(1, to="b.implementer"))
+        pace = {"ADT_PACE_LINES": "100000", "ADT_PACE_WINDOW": "1"}
+        first = self.spawn(extra_env=dict(self.seam(os.getpid()), **pace))
+        self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+        write_index(self.index, "".join(row(k, to="b.implementer") for k in range(1, rows + 1)))
+        fd, buf = first.stdout.fileno(), b""
+        os.set_blocking(fd, False)
+        while b"\n" not in buf:  # the host reads its first arrival, in small reads as L's probe does
+            if select.select([fd], [], [], 0.05)[0]:
+                buf += os.read(fd, 400)
+        shown = {json.loads(l)["file"] for l in buf.split(b"\n")[:-1]}
+        first.send_signal(signum)
+        time.sleep(lag)
+        first.stdout.close()
+        first.wait(timeout=10)
+        second = self.spawn(extra_env=dict(self.seam(os.getpid()), **pace))
+        wanted = {f"lane/r{k}.md" for k in range(2, rows + 1)}
+        later = {d["file"] for d in self.read_lines(second, len(wanted), timeout=6.0)}  # re-offers may repeat
+        second.kill()
+        second.wait(timeout=10)
+        lost = sorted(wanted - shown - later)
+        return lost, dict(first=sorted(shown), second=sorted(later), rc=first.returncode,
+                          progress=self.rm.NoteStore("psess").load()["progress"])
+
+    def test_stop_mid_backlog_loses_no_arrival(self):
+        # fold F1: a stopping doorbell writes no further row and leaves progress at the last row it wrote
+        lost, detail = self.stop_mid_backlog(signal.SIGTERM)
+        self.assertEqual(lost, [], detail)
+
+    def test_stop_mid_backlog_control_sigkill(self):
+        # the differential's control: a killed doorbell cannot write on, and lost nothing before F1 either
+        lost, detail = self.stop_mid_backlog(signal.SIGKILL)
+        self.assertEqual(lost, [], detail)
+
+    def test_sigint_stops_like_sigterm(self):
         write_index(self.index, row(1, to="b.implementer"))
         proc = self.spawn(extra_env=self.seam(os.getpid()))
         self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
-        store = self.rm.NoteStore("psess")
-        for _ in range(3):  # no daemon serves this root: every engine call is an outage
-            self.assertIn(" daemon=down ", self.rm.status_line(store, None).splitlines()[0] + " ")
-            time.sleep(1.0)
-        self.assertIsNone(proc.poll())
-        self.assertEqual(store.load()["phase"], "following")
+        proc.send_signal(signal.SIGINT)
+        rc, lines, err = self.finish(proc)
+        self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: terminated"]), err)
+        self.assertIsNone(self.rm.NoteStore("psess").load()["leader"])
+
+    def test_sigterm_during_startup_prints_one_line(self):
+        # fold F7: handlers exist before the leader record; a stop in the first 100 ms leaves no leader
+        for delay in (0.1, 0.2):
+            with self.subTest(delay=delay):
+                write_index(self.index, row(1, to="b.implementer"))
+                proc = self.spawn(extra_env=self.seam(os.getpid()))
+                time.sleep(delay)
+                proc.send_signal(signal.SIGTERM)
+                rc, lines, err = self.finish(proc)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
+                                 [b"relay-monitor: stopped: terminated"])
+                self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+
+    def test_leader_record_engine_call_has_the_identity_budget(self):
+        seen = []
+
+        def relay(plugin_root, *argv, timeout=10.0):
+            seen.append((argv, timeout))
+            return {}, 1
+
+        with mock.patch.object(self.rm, "run_relay", relay):
+            self.rm.leader_record(None)
+        self.assertEqual([a for a, _ in seen], [("version",)])
+        self.assertLessEqual(seen[0][1], self.rm.IDENTITY_BUDGET)
+
+
+class IdleCostTests(TmpEnv):
+    """Fold F6: an idle bound doorbell starts no process per liveness poll (L C3: ps 59 times a minute)."""
+
+    def test_idle_bound_doorbell_spawns_nothing_per_poll(self):
+        class StopLoop(Exception):
+            pass
+
+        write_index(self.index, row(1, to="b.implementer"))
+        spawns, marks = [], []
+        real_run, real_popen = subprocess.run, subprocess.Popen
+
+        def counting_run(*a, **kw):
+            spawns.append(a[0] if a else kw.get("args"))
+            return real_run(*a, **kw)
+
+        class CountingPopen(real_popen):
+            def __init__(self, *a, **kw):
+                spawns.append(a[0] if a else kw.get("args"))
+                super().__init__(*a, **kw)
+
+        def sleep(_seconds):
+            marks.append(len(spawns))
+            if len(marks) > 12:
+                raise StopLoop()
+
+        env = {"ADT_SEAT": "b.implementer", "ADT_RELAY_ROOT": str(self.root),
+               "ADT_WINDOW_PID": str(os.getpid()), "ADT_WINDOW_START": utc_lstart(os.getpid())}
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch("subprocess.run", counting_run),
+            mock.patch("subprocess.Popen", CountingPopen),
+            mock.patch.object(self.rm, "time", types.SimpleNamespace(**{**vars(time), "sleep": sleep})),
+        ):
+            with self.assertRaises(StopLoop):
+                self.rm.follow(ns(session="idle-sess", host="claude-code"))
+        self.assertEqual(marks[12] - marks[2], 0, spawns[marks[2]:])
 
 
 class FollowProcessTests(FollowProcessMixin, TmpEnv):
@@ -5710,8 +5998,9 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         self.store.update(lambda n: n.update({
             "leader": {"pid": 2**31, "instance": "oversized"},
         }))
+        # fold F2: holding is read from the stamp's process, and no process has this pid
         self.assertTrue(self.rm.status_line(self.store, None).startswith(
-            "relay-monitor: starting "
+            "relay-monitor: not-started "
         ))
 
     def test_refused_probe_never_reads_dead(self):
@@ -5734,8 +6023,8 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         for error, observed, expected in (
             (errno.EPERM, None, "armed"),
             (errno.EINVAL, None, "armed"),
-            (errno.ESRCH, None, "starting"),
-            (errno.EPERM, "different-start", "starting"),
+            (errno.ESRCH, None, "not-started"),  # fold F2: the stamp's process is gone, so nobody holds it
+            (errno.EPERM, "different-start", "not-started"),
         ):
             with self.subTest(error=error, observed=observed):
                 with (
@@ -5751,11 +6040,12 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         self.assertEqual(rm.readiness(self.store)[0], "not-started")
         lock = rm.WindowLock("sess-sess")
         lock.acquire()
+        lock.stamp(None, os.getpid(), rm.process_start_time(os.getpid()))  # fold F2: follow's first stamp
         self.assertEqual(
             rm.readiness(self.store)[0], "starting"
-        )  # lock held, no stamp, no record
+        )  # lock taken, no leader record yet
         me = rm.leader_record()
-        lock.stamp(me["instance"])
+        lock.stamp(me["instance"], me["pid"], me["start_time"])  # fold F2: the stamp follow writes
         self.store.update(
             lambda n: n.update({"leader": me, "phase": "waiting-for-binding"})
         )
@@ -5768,12 +6058,14 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         )
         self.assertEqual(rm.readiness(self.store)[0], "armed")
         self.assertEqual(
-            rm.readiness(self.store, _between=lambda: lock.stamp("someone-else"))[0],
+            rm.readiness(self.store, _between=lambda: self.store.update(
+                lambda n: n.update({"leader": {**me, "instance": "someone-else"}})))[0],
             "starting",
-        )  # takeover between the probe and the record read
-        lock.stamp(me["instance"])
+        )  # takeover between the stamp read and the record read (fold F2)
+        lock.stamp(me["instance"], me["pid"], "1970")
         self.store.update(lambda n: n.update({"leader": {**me, "start_time": "1970"}}))
-        self.assertEqual(rm.readiness(self.store)[0], "starting")  # pid reuse
+        self.assertEqual(rm.readiness(self.store)[0], "not-started")  # pid reuse: the stamp's process is gone (F2)
+        lock.stamp(me["instance"], me["pid"], me["start_time"])
         self.store.update(
             lambda n: n.update(
                 {

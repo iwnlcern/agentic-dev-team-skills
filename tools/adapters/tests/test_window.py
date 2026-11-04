@@ -1,9 +1,12 @@
 """Window and host identity (DD-v3-adapter § 4.1, P12; plan PL-v3-adapter-a Task 1)."""
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import window  # noqa: E402
@@ -130,6 +133,49 @@ class CodexTests(WindowTestCase):
         w = self.identity(table, 10, {"CODEX_THREAD_ID": "01a1-thread", "CLAUDE_CODE_SESSION_ID": "c-1"})
         self.assertEqual((w.host, w.key, w.thread_id, w.source), ("codex", "cx-01a1-thread", "01a1-thread", "thread"))
         self.assertEqual(table.calls, [])
+
+
+class ExitWatchTests(unittest.TestCase):
+    """Fold F6: window liveness without a process spawn per poll."""
+
+    def sleeper(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait(timeout=10)))
+        return p
+
+    def start_of(self, pid):
+        return window.ps_process_table(pid)[2]
+
+    def test_exit_is_seen(self):
+        p = self.sleeper()
+        watch = window.ExitWatch(p.pid, self.start_of(p.pid))
+        self.addCleanup(watch.close)
+        self.assertFalse(watch.gone())
+        p.kill()
+        p.wait(timeout=10)
+        end = time.monotonic() + 2.0
+        while not watch.gone() and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertTrue(watch.gone())
+        self.assertTrue(watch.gone())  # stays gone once seen
+
+    def test_reused_pid_is_gone_at_once(self):
+        p = self.sleeper()
+        watch = window.ExitWatch(p.pid, "Tue Nov  3 09:00:00 2026")
+        self.addCleanup(watch.close)
+        self.assertTrue(watch.gone())
+
+    def test_polls_start_no_process(self):
+        p = self.sleeper()
+        watch = window.ExitWatch(p.pid, self.start_of(p.pid))
+        self.addCleanup(watch.close)
+        spawned = []
+        real_run, real_popen = subprocess.run, subprocess.Popen
+        with mock.patch("subprocess.run", lambda *a, **k: spawned.append(a) or real_run(*a, **k)), \
+                mock.patch("subprocess.Popen", lambda *a, **k: spawned.append(a) or real_popen(*a, **k)):
+            for _ in range(200):
+                self.assertFalse(watch.gone())
+        self.assertEqual(spawned, [])
 
 
 if __name__ == "__main__":
