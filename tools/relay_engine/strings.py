@@ -99,6 +99,8 @@ _CODE_VALUES = {
     "E-REF-UNRESOLVED",
     "E-REF-AMBIGUOUS",
     "E-REF-RANGE",
+    "E-REF-TIMEOUT",
+    "E-REF-GIT-ENVIRONMENT",
 }
 _OPS = {
     "seat.declare", "submit", "seat.register", "seat.replace", "seat.stand_down",
