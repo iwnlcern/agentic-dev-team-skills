@@ -354,6 +354,45 @@ strings.register_inventory({
         lambda v: isinstance(v, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){2}", v) is not None,
 })
 
+# Item 11 diagnostics (DD-v3-engine § 10): typed codes instead of
+# misattributed or untyped failures.
+def _is_reason(value):
+    """A short reason: a fixed phrase or an errno text (fold C9)."""
+    return strings._is_show_text(value) and len(value) <= 80
+
+strings.register_inventory({
+    "error-file-missing-cause": "the file {path} cannot be read: {reason}",
+    "error-file-missing-remedy": "pass the path of an existing regular file you can read; a --from-file list is UTF-8 text",
+    "error-file-missing-explain": "a file argument names an existing regular file, read without following a FIFO, and a carrier is never read through a symlink",
+    "error-root-not-found-cause": "no relay root at or above {directory}, the --root given: {reason}",
+    "error-root-not-found-remedy": "pass --root with a relay root's path: the directory that holds .engine/",
+    "error-root-not-found-explain": "--root names a relay root or a directory inside one",
+    "error-carrier-invalid-cause": "the carrier is not a framed record; it may be truncated or edited",
+    "error-carrier-invalid-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
+    "error-carrier-invalid-explain": "a ruling carrier is a framed record whose digest matches its bytes",
+    "error-carrier-invalid-field-cause": "the carrier's {field} cannot be used: {reason}",
+    "error-carrier-invalid-target-cause": "the carried ruling supersedes {path}, which this root does not hold",
+    "error-carrier-invalid-target-remedy": "adopt the carrier in the root that holds the superseded relay, or ask the exporter which root that is",
+    "error-carrier-field-cause": "the carrier is a framed record, but not a version 1 ruling carrier",
+    "error-carrier-field-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
+    "error-carrier-field-explain": "a ruling carrier holds exactly the fields relay export-ruling writes",
+}, {
+    ("error-file-missing-cause", "path"):
+        lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+    ("error-file-missing-cause", "reason"): _is_reason,
+    ("error-root-not-found-cause", "reason"): _is_reason,
+    ("error-carrier-invalid-field-cause", "field"):
+        lambda v: isinstance(v, str) and v in {"ruling_body_b64", "ruling_content_digest"},
+    ("error-carrier-invalid-field-cause", "reason"):
+        lambda v: isinstance(v, str) and v in {
+            "not base64", "not UTF-8 text", "does not match the carried body",
+            "the ruling names no SUPERSEDES target"},
+    ("error-carrier-invalid-target-cause", "path"):
+        lambda v: strings._is_rejected(v) or (strings._is_show_text(v) and len(v) <= 300),
+    ("error-root-not-found-cause", "directory"):
+        lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+})
+
 
 # v3 references (DD-v3-engine § 6): one code per refusal rule.
 _REF_TEXT = {
@@ -456,6 +495,10 @@ ERRORS = {
     "E-REF-RANGE": _spec("ref-range", "integrity"),
     "E-REF-TIMEOUT": _spec("ref-timeout", "command"),
     "E-REF-GIT-ENVIRONMENT": _spec("ref-git-environment", "client"),
+    "E-FILE-MISSING": _spec("file-missing", "client"),
+    "E-ROOT-NOT-FOUND": _spec("root-not-found", "client"),
+    "E-CARRIER-INVALID": _spec("carrier-invalid", "command"),
+    "E-CARRIER-FIELD": _spec("carrier-field", "command"),
 }
 
 ERROR_VARIANTS = {
@@ -490,6 +533,12 @@ ERROR_VARIANTS = {
     ("E-ADDRESS", "alias"): ErrorSpec(
         "error-address-cause", "error-address-alias-remedy",
         "error-address-explain", "integrity"),
+    ("E-CARRIER-INVALID", "field"): ErrorSpec(
+        "error-carrier-invalid-field-cause", "error-carrier-invalid-remedy",
+        "error-carrier-invalid-explain", "command"),
+    ("E-CARRIER-INVALID", "target"): ErrorSpec(
+        "error-carrier-invalid-target-cause", "error-carrier-invalid-target-remedy",
+        "error-carrier-invalid-explain", "command"),
 }
 
 POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}
@@ -588,9 +637,12 @@ def error_for(code, *, variant=None, **params):
         rel = params.get("rel")
         if not _is_not_found_rel(rel):
             params["rel"] = _rejected(rel)
-    if code == "E-NO-ROOT":
+    if code in ("E-NO-ROOT", "E-ROOT-NOT-FOUND"):
         if not strings._is_show_absolute(params.get("directory")):
             params["directory"] = _rejected(params.get("directory"))
+    if code == "E-FILE-MISSING":
+        if not strings._is_show_absolute(params.get("path")):
+            params["path"] = _rejected(params.get("path"))
     if (code, variant) == ("E-PATH-ESCAPE", "relay-not-found"):
         for field, validator in (("root", strings._is_show_absolute),
                                  ("target", strings._is_show_text)):

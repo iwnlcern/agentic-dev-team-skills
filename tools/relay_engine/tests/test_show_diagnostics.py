@@ -121,7 +121,7 @@ class TestShowDiagnostics(unittest.TestCase):
                 rc, _, err = self.run_cli(self.empty, *command, '--root', str(self.root))
                 self.assertEqual(rc, 1)
                 self.assertTrue(err.startswith('E-DAEMON-DOWN\n'), err)
-        for root, expected in ((self.empty, 'unexpected error'), (self.repo, 'E-DAEMON-DOWN')):
+        for root, expected in ((self.empty, 'E-ROOT-NOT-FOUND'), (self.repo, 'E-DAEMON-DOWN')):
             rc, _, err = self.run_cli(self.empty, 'status', '--root', str(root))
             self.assertEqual(rc, 1)
             self.assertTrue(err.startswith(expected + '\n'), err)
@@ -232,3 +232,189 @@ class TestShowDiagnostics(unittest.TestCase):
         self.assertTrue(err.getvalue().startswith('E-PATH-ESCAPE\n'))
         self.assertNotIn('hint:', err.getvalue())
         self.assertNotIn('unexpected error', err.getvalue())
+
+
+class TestItem11Diagnostics(unittest.TestCase):
+    """Item 11 (DD-v3-engine § 10): typed diagnostics through the real CLI."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name).resolve()
+        self.root = self.base / 'root'
+        self.root.mkdir()
+        self.outside = self.base / 'outside'
+        self.outside.mkdir()
+        self.cid, did = cid_did()
+        self.running = RunningDaemon(str(self.root), did, socket_name=str(self.base / 's')).start()
+        self.addCleanup(self.running.stop)
+
+    def run_cli(self, *args, env=None):
+        result = subprocess.run([sys.executable, str(RELAY), *args], cwd=self.base,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=env, timeout=60)
+        return result.returncode, result.stdout.decode(), result.stderr.decode()
+
+    def code(self, stderr):
+        return stderr.splitlines()[0] if stderr else ''
+
+    def assert_ready(self):
+        returncode, stdout, stderr = self.run_cli('status', '--root', str(self.root))
+        self.assertEqual((returncode, stderr), (0, ''))
+        self.assertEqual(json.loads(stdout)['daemon']['state'], 'ready')
+
+    def declare_from(self, path):
+        return self.run_cli('seat', 'declare', '--from-file', str(path), '--key', 'k',
+                            '--root', str(self.root))
+
+    def test_from_file_missing(self):
+        missing = self.base / 'missing.txt'
+        returncode, _, stderr = self.declare_from(missing)
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-FILE-MISSING'))
+        self.assertIn(str(missing), stderr)
+        self.assertIn('no such file', stderr)
+        # positive control: a readable file gets past the read to a later rule
+        present = self.base / 'present.txt'
+        present.write_text('p.planner Planner\n')
+        returncode, _, stderr = self.declare_from(present)
+        self.assertNotEqual(self.code(stderr), 'E-FILE-MISSING')
+
+    def test_from_file_directory(self):
+        returncode, _, stderr = self.declare_from(self.outside)
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-FILE-MISSING'))
+        self.assertIn(str(self.outside), stderr)
+        self.assertIn('directory', stderr)
+
+    def test_root_outside(self):
+        returncode, _, stderr = self.run_cli('status', '--root', str(self.outside))
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-ROOT-NOT-FOUND'))
+        self.assertIn(str(self.outside), stderr)
+        self.assertNotIn('unexpected error', stderr)
+        self.assert_ready()  # positive control: the served root answers
+
+    def test_corrupt_carrier(self):
+        carrier = self.base / 'corrupt.bundle'
+        carrier.write_bytes(b'not a record')
+        returncode, _, stderr = self.run_cli('adopt-ruling', str(carrier), '--root', str(self.root))
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-CARRIER-INVALID'))
+        self.assertNotIn('E-DAEMON-DOWN', stderr)
+        self.assert_ready()
+
+    def test_wrong_field_carrier(self):
+        from relay_engine.jcs import frame_record
+        carrier = self.base / 'wrong.bundle'
+        carrier.write_bytes(frame_record({'v': 1, 'x': 1}))
+        returncode, _, stderr = self.run_cli('adopt-ruling', str(carrier), '--root', str(self.root))
+        self.assertEqual((returncode, self.code(stderr)), (1, 'E-CARRIER-FIELD'))
+        self.assert_ready()
+
+
+class TestItem11Fold(TestItem11Diagnostics):
+    """PR-4 fold D3-D7: every unusable --root or file argument gets its typed code."""
+
+    def assert_typed(self, result, code, *phrases):
+        returncode, _, stderr = result
+        self.assertEqual((returncode, self.code(stderr)), (1, code), stderr)
+        self.assertNotIn('unexpected error', stderr)
+        for phrase in phrases:
+            self.assertIn(phrase, stderr)
+
+    def locked(self, path):
+        path.mkdir()
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, 0o700)
+        return path
+
+    def test_root_failures(self):  # D3
+        regular = self.base / 'file.txt'
+        regular.write_text('x\n')
+        daemon_json = self.root / '.engine' / 'daemon.json'
+        self.assertTrue(daemon_json.is_file())
+        os.symlink('loop', self.base / 'loop')
+        cases = [(regular, 'not a directory'), (daemon_json, 'not a directory'),
+                 (self.base / 'loop', 'too many levels of symbolic links'),
+                 (self.base / ('x' * 300), 'file name too long')]
+        if os.geteuid() != 0:
+            cases.append((self.locked(self.base / 'locked') / 'inner', 'permission denied'))
+        for path, reason in cases:
+            with self.subTest(reason=reason):
+                self.assert_typed(self.run_cli('status', '--root', str(path)),
+                                  'E-ROOT-NOT-FOUND', reason)
+        self.assert_typed(self.run_cli('status', '--root', str(self.outside)),
+                          'E-ROOT-NOT-FOUND', str(self.outside),
+                          'no directory at or above it holds .engine/')
+        self.assert_ready()
+
+    def carriers(self):
+        os.mkfifo(self.base / 'fifo')
+        target = self.base / 'real.bundle'
+        target.write_bytes(b'x')
+        os.symlink(target, self.base / 'link.bundle')
+        return ((self.base / 'missing.bundle', 'no such file'),
+                (self.outside, 'a directory'),
+                (self.base / 'fifo', 'a FIFO'),
+                (self.base / 'link.bundle', 'a symlink'))
+
+    def test_carrier_file_arguments(self):  # D4, D5
+        cases = self.carriers()
+        for path, reason in cases:
+            for command in ('adopt-ruling', 'adopt-commission'):
+                with self.subTest(command=command, reason=reason):
+                    self.assert_typed(self.run_cli(command, str(path), '--root', str(self.root)),
+                                      'E-FILE-MISSING', str(path), reason)
+        fresh = self.base / 'fresh'
+        fresh.mkdir()
+        for path, reason in cases:
+            with self.subTest(command='daemon start', reason=reason):
+                self.assert_typed(self.run_cli('daemon', 'start', '--root', str(fresh),
+                                               '--commissioned-by', str(path)),
+                                  'E-FILE-MISSING', str(path), reason)
+        self.assertFalse((fresh / '.engine').exists())  # refused before any launch
+        self.assert_ready()
+
+    def test_from_file_reasons(self):  # D5, D7
+        os.mkfifo(self.base / 'fifo')
+        latin = self.base / 'latin.txt'
+        latin.write_bytes(b'p.planner Planner caf\xe9\n')
+        cases = [(self.base / 'fifo', 'a FIFO'), (latin, 'not UTF-8 text')]
+        if os.geteuid() != 0:
+            denied = self.base / 'denied.txt'
+            denied.write_text('p.planner Planner\n')
+            os.chmod(denied, 0)
+            self.addCleanup(os.chmod, denied, 0o600)
+            cases.append((denied, 'permission denied'))
+        for path, reason in cases:
+            with self.subTest(reason=reason):
+                self.assert_typed(self.declare_from(path), 'E-FILE-MISSING', str(path), reason)
+        # a relative argument is shown as the absolute path it names (M6)
+        self.assert_typed(self.run_cli('seat', 'declare', '--from-file', 'gone.txt', '--key', 'k',
+                                       '--root', str(self.root)),
+                          'E-FILE-MISSING', str(self.base / 'gone.txt'), 'no such file')
+
+    def test_from_file_utf8_under_any_locale(self):  # D6, gate G-E1
+        """--from-file is UTF-8 whatever the locale.  Two files, because which one catches a
+        reader that decodes with the locale's encoding depends on that encoding: under
+        ISO-8859-1 (the mac leg) such a reader accepts the Latin-1 file; under ASCII (the linux
+        leg, which lacks en_US.ISO8859-1) it refuses the UTF-8 file."""
+        latin = self.base / 'latin.txt'
+        latin.write_bytes(b'p.planner Planner caf\xe9\n')
+        utf8 = self.base / 'utf8.txt'
+        utf8.write_bytes(b'p.planner Planner caf\xc3\xa9\n')
+        env = dict(os.environ, LC_ALL='en_US.ISO8859-1', LANG='en_US.ISO8859-1',
+                   PYTHONUTF8='0')
+        env.pop('PYTHONIOENCODING', None)
+        probe = subprocess.run([sys.executable, '-c',
+                                'import locale; print(locale.getpreferredencoding(False))'],
+                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        encoding = probe.stdout.strip()
+        self.assertNotEqual(encoding.upper().replace('-', ''), 'UTF8',
+                            'the control needs a locale whose preferred encoding is not UTF-8;'
+                            ' got %r' % encoding)
+        self.assert_typed(self.run_cli('seat', 'declare', '--from-file', str(latin), '--key', 'k',
+                                       '--root', str(self.root), env=env),
+                          'E-FILE-MISSING', 'not UTF-8 text')
+        # the UTF-8 file gets past the read to a later rule
+        returncode, _, stderr = self.run_cli('seat', 'declare', '--from-file', str(utf8),
+                                             '--key', 'k', '--root', str(self.root), env=env)
+        self.assertNotEqual(self.code(stderr), 'E-FILE-MISSING', stderr)
+        self.assertNotIn('unexpected error', stderr)

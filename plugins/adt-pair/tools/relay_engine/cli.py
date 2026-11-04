@@ -2,6 +2,8 @@
 
 import argparse
 import base64
+import errno
+import fcntl
 import os
 from pathlib import Path
 import stat
@@ -28,7 +30,12 @@ def _command_root(args, fresh=False):
     if fresh:
         return os.path.realpath(os.path.abspath(args.root or os.getcwd()))
     if args.root is not None:
-        return client.discover_root(args.root)
+        try:
+            return client.discover_root(args.root)
+        except (OSError, ValueError) as exc:  # client.discover_root is platform's
+            raise errors.error_for(
+                "E-ROOT-NOT-FOUND", directory=_shown_path(args.root, resolve=True),
+                reason=_root_failure(exc)) from exc
     try:
         root_name = client.discover_root()
     except FileNotFoundError as exc:
@@ -41,7 +48,7 @@ def _command_root(args, fresh=False):
 def _cmd_daemon_start(args):
     root = _command_root(args, fresh=True)
     commissioning_record = (None if args.commissioned_by is None else
-                            _read_carrier(args.commissioned_by))
+                            _read_regular(args.commissioned_by, follow=False))
     if not daemon.launch(root, socket_override=args.socket,
                          timeout=args.timeout, top_seat=args.seat,
                          top_role=args.role, top_dispatch=args.dispatch,
@@ -123,10 +130,11 @@ def _cmd_seat_declare(args):
     if args.from_file:
         if args.address is not None or args.role is not None:
             raise errors.error_for("E-HEADER", field="ADDRESS")
+        data = _read_regular(args.from_file, follow=True)
         try:
-            lines = Path(args.from_file).read_text().splitlines()
-        except (OSError, UnicodeError) as exc:
-            raise errors.error_for("E-HEADER", field="ADDRESS") from exc
+            lines = data.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise _file_missing(args.from_file, "not UTF-8 text") from exc
         entries = [line.split(maxsplit=1) for line in lines if line.strip()]
         if any(len(entry) != 2 for entry in entries):
             raise errors.error_for("E-HEADER", field="ROLE")
@@ -159,15 +167,76 @@ def _cmd_roster(args):
         _command_root(args), "roster", {}, timeout=args.timeout))
 
 
-def _read_carrier(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def _shown_path(path, resolve=False):
+    """The argument as an absolute path for a message (resolved for a root,
+    as typed for a file, so a symlink shows as itself), or an
+    unrecognized-input stand-in."""
+    try:
+        shown = os.path.abspath(path)
+        if resolve:
+            shown = os.path.realpath(shown)
+    except (OSError, ValueError):
+        shown = None
+    if isinstance(shown, str) and strings._is_show_absolute(shown):
+        return shown
+    return errors._rejected_identity(os.fspath(path))
+
+
+def _errno_text(exc, nofollow=False):
+    if nofollow and exc.errno == errno.ELOOP:
+        return "a symlink"
+    known = {errno.ENOENT: "no such file", errno.EISDIR: "a directory",
+             errno.EACCES: "permission denied", errno.EPERM: "permission denied"}
+    if exc.errno in known:
+        return known[exc.errno]
+    return (exc.strerror or "cannot be opened").lower()
+
+
+def _root_failure(exc):
+    if isinstance(exc, ValueError):
+        return "the path holds a NUL character"
+    if isinstance(exc, FileNotFoundError) and exc.errno is None:
+        return "no directory at or above it holds .engine/"  # the walk reached /
+    if exc.errno == errno.ENOENT:
+        return "no such directory"
+    return _errno_text(exc)
+
+
+def _file_missing(path, reason):
+    return errors.error_for("E-FILE-MISSING", path=_shown_path(path), reason=reason)
+
+
+def _read_regular(path, follow):
+    """The bytes of a regular file.  The open never waits (a FIFO is refused
+    at once) and never follows a final symlink unless follow is set."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (0 if follow else os.O_NOFOLLOW)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise _file_missing(path, _errno_text(exc, nofollow=not follow)) from exc
+    except ValueError as exc:
+        raise _file_missing(path, "the path holds a NUL character") from exc
     try:
         info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            raise _file_missing(path, "a directory")
+        if stat.S_ISFIFO(info.st_mode):
+            raise _file_missing(path, "a FIFO")
         if not stat.S_ISREG(info.st_mode):
-            raise OSError("regular carrier required")
-        data = os.read(fd, info.st_size + 1)
+            raise _file_missing(path, "not a regular file")
+        fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+        chunks = []
+        while True:
+            try:
+                chunk = os.read(fd, 1 << 16)
+            except OSError as exc:
+                raise _file_missing(path, _errno_text(exc)) from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+        data = b"".join(chunks)
         if len(data) != info.st_size:
-            raise OSError("carrier changed during read")
+            raise _file_missing(path, "changed while being read")
         return data
     finally:
         os.close(fd)
@@ -181,7 +250,7 @@ def _cmd_commission(args):
 
 def _cmd_adopt_commission(args):
     return _emit_result(client.adopt_commission(
-        _command_root(args), _read_carrier(args.record),
+        _command_root(args), _read_regular(args.record, follow=False),
         timeout=args.timeout))
 
 
@@ -193,7 +262,7 @@ def _cmd_export_ruling(args):
 
 def _cmd_adopt_ruling(args):
     return _emit_result(client.adopt_ruling(
-        _command_root(args), _read_carrier(args.bundle),
+        _command_root(args), _read_regular(args.bundle, follow=False),
         timeout=args.timeout))
 
 
