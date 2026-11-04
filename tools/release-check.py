@@ -7,13 +7,18 @@ failed.  The runner never turns a failure green.
 
 Usage: python3 tools/release-check.py full --out DIR [--leg mac|linux|both]
            [--workers N] [--cap-seconds S] [--release]
+The linux leg runs the same script inside a pinned container
+(tools/release-check.Dockerfile) with the worktree and its common Git directory
+mounted read-only at their host paths.
 Exit: 0 all green, 1 any step failed or unfinished, 2 setup error.
 """
 
 import argparse
+import concurrent.futures
 import dataclasses
 import datetime
 import fnmatch
+import hashlib
 import json
 import os
 import platform
@@ -21,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -31,6 +37,16 @@ KILL_GRACE_SECONDS = 10.0
 POLL_SECONDS = 0.05
 BOTH = frozenset({"mac", "linux"})
 MAC = frozenset({"mac"})
+DOCKERFILE = Path(__file__).resolve().parent / "release-check.Dockerfile"
+CONTAINER_OUT = "/out"
+CONTAINER_SCRATCH = "/scratch"
+CONTAINER_PLAN = "container-plan.json"
+# Host-side wait beyond the container's own cap and kill grace before it is killed.
+CONTAINER_MARGIN_SECONDS = 120
+
+
+class SetupError(Exception):
+    """A leg could not start: exit 2."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,11 +247,12 @@ class LegResult:
     results_path: Path
 
 
-def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
+def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, exclusions=EXCLUSIONS,
+            leg_dir=None):
     """Run one leg's steps under the cap; write out/<leg>/results.json and one log per step."""
     environ = dict(os.environ if environ is None else environ)
     repo = Path(repo)
-    leg_out = Path(out) / leg
+    leg_out = Path(leg_dir) if leg_dir is not None else Path(out) / leg
     logs = leg_out / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     engine_results = leg_out / "engine-results"
@@ -334,6 +351,140 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     return LegResult(leg, exit_code, results_path)
 
 
+def common_git_dir(repo):
+    """The repository's common Git directory, absolute (a linked worktree's .git names it)."""
+    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
+                             "--git-common-dir"], capture_output=True, text=True,
+                            stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise SetupError(f"{repo} is not a Git repository: {result.stderr.strip()}")
+    return Path(result.stdout.strip())
+
+
+def image_tag():
+    return "adt-release-check:" + hashlib.sha256(DOCKERFILE.read_bytes()).hexdigest()[:12]
+
+
+def ensure_image(docker):
+    """Build the linux leg's image when its tag (from the Dockerfile's digest) is absent."""
+    tag = image_tag()
+    try:
+        present = subprocess.run([docker, "image", "inspect", tag], capture_output=True,
+                                 stdin=subprocess.DEVNULL).returncode == 0
+        if present:
+            return tag
+        with open(DOCKERFILE, "rb") as dockerfile:
+            built = subprocess.run([docker, "build", "-q", "-t", tag, "-"], stdin=dockerfile,
+                                   capture_output=True, text=True)
+    except OSError as error:
+        raise SetupError(f"docker could not run ({docker}): {error}") from error
+    if built.returncode != 0:
+        raise SetupError(f"docker build of {tag} failed: {built.stderr.strip()[-800:]}")
+    return tag
+
+
+def docker_args(worktree, common_git_dir, out, image, expected_head, extra=()):
+    """Arguments after the docker binary for the linux leg's container."""
+    worktree = Path(worktree)
+    common = Path(common_git_dir)
+    sources = [worktree]
+    if common != worktree and worktree not in common.parents:
+        sources.append(common)
+    args = ["run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}"]
+    for source in sources:
+        # A linked worktree's .git names the common directory by absolute host path,
+        # so both are mounted at their host paths, read-only.
+        args += ["--mount", f"type=bind,src={source},dst={source},readonly"]
+    args += ["--mount", f"type=bind,src={Path(out) / 'linux'},dst={CONTAINER_OUT}"]
+    args += ["--mount", f"type=tmpfs,dst={CONTAINER_SCRATCH},tmpfs-mode=1777"]
+    for key, value in (("ADT_EXPECTED_HEAD", expected_head),
+                       ("ADT_SOURCE_MOUNTS", os.pathsep.join(str(s) for s in sources)),
+                       ("TMPDIR", CONTAINER_SCRATCH), ("HOME", CONTAINER_SCRATCH)):
+        args += ["-e", f"{key}={value}"]
+    args += ["-w", str(worktree), image, "python3", "tools/release-check.py", "full", "--leg", "linux",
+             "--in-container", "--out", CONTAINER_OUT, *extra]
+    return args
+
+
+def write_container_plan(leg_dir, steps, leg, exclusions):
+    """The host's step selection, which the container runs as given."""
+    plan = {"step_ids": [s.id for s in steps if leg in s.legs and not _excluded(s, exclusions)],
+            "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions]}
+    path = Path(leg_dir) / CONTAINER_PLAN
+    path.write_text(json.dumps(plan, indent=2) + "\n")
+    return path
+
+
+def preflight(repo, environ):
+    """In the container: problems that make the leg's results untrustworthy."""
+    problems = []
+    for source in filter(None, environ.get("ADT_SOURCE_MOUNTS", "").split(os.pathsep)):
+        try:
+            handle, probe = tempfile.mkstemp(dir=source, prefix=".release-check-write-probe-")
+        except OSError:
+            continue
+        os.close(handle)
+        os.unlink(probe)
+        problems.append(f"source mount {source} accepts a write")
+    expected = environ.get("ADT_EXPECTED_HEAD", "")
+    head = _commit(repo)
+    if not head or head != expected:
+        problems.append(f"HEAD {head} in the container does not equal the host's {expected or '(unset)'}")
+    elif subprocess.run(["git", "-C", str(repo), "show", f"{head}:AGENTS.md"], capture_output=True,
+                        stdin=subprocess.DEVNULL).returncode != 0:
+        problems.append(f"git show {head}:AGENTS.md fails in the container")
+    return problems
+
+
+def _run_in_container(args, repo, environ):
+    out = Path(args.out)
+    problems = preflight(repo, environ)
+    for problem in problems:
+        print(f"preflight: {problem}", flush=True)
+    if problems:
+        return 2
+    print("preflight: clean", flush=True)
+    plan = json.loads((out / CONTAINER_PLAN).read_text())
+    table = {s.id: s for s in step_table(repo)}
+    missing = [step_id for step_id in plan["step_ids"] if step_id not in table]
+    if missing:
+        print(f"release-check: the container's tree lacks steps {missing}", flush=True)
+        return 2
+    exclusions = tuple(Exclusion(**e) for e in plan["exclusions"])
+    return run_leg("linux", [table[i] for i in plan["step_ids"]], args.workers, args.cap_seconds, out,
+                   repo=repo, environ=environ, exclusions=exclusions, leg_dir=out).exit
+
+
+def _run_linux_host(steps, args, repo, environ, exclusions):
+    leg_dir = Path(args.out) / "linux"
+    leg_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        docker = environ.get("DOCKER") or shutil.which("docker", path=environ.get("PATH"))
+        if not docker or not os.access(docker, os.X_OK):
+            raise SetupError(f"docker not found (DOCKER={environ.get('DOCKER')!r}, PATH lookup)")
+        image = ensure_image(docker)
+        command = docker_args(repo, common_git_dir(repo), args.out, image, _commit(repo) or "",
+                              extra=["--workers", str(args.workers), "--cap-seconds", str(args.cap_seconds)])
+    except SetupError as error:
+        print(f"release-check: linux leg setup error: {error}", file=sys.stderr)
+        return 2
+    write_container_plan(leg_dir, steps, "linux", exclusions)
+    name = "adt-release-check-" + uuid.uuid4().hex[:12]
+    command = [docker, command[0], "--name", name] + command[1:]
+    with open(leg_dir / "docker.log", "wb") as log:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            code = proc.wait(timeout=args.cap_seconds + KILL_GRACE_SECONDS + CONTAINER_MARGIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            subprocess.run([docker, "kill", name], capture_output=True, stdin=subprocess.DEVNULL)
+            proc.wait()
+            code = 1
+    if code not in (0, 1, 2):
+        code = 2
+    print(f"release-check: linux leg exit {code} (container log {leg_dir / 'docker.log'})", file=sys.stderr)
+    return code
+
+
 def _under_home(path, environ):
     home = os.path.realpath(environ.get("HOME") or str(Path.home()))
     real = os.path.realpath(path)
@@ -351,8 +502,11 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
     full.add_argument("--cap-seconds", type=int, default=1800)
     full.add_argument("--release", action="store_true",
                       help="release-head run: refuse while any exclusion remains")
+    full.add_argument("--in-container", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
+    if args.in_container:
+        return _run_in_container(args, repo, environ)
     if not _under_home(args.out, environ):
         print(f"release-check: --out {args.out} is not under $HOME; macOS purges /tmp and "
               "/var/folders, so results there may vanish before they are cited", file=sys.stderr)
@@ -368,13 +522,25 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
         for problem in problems:
             print(f"release-check: refusing to start: {problem}", file=sys.stderr)
         return 2
-    if args.leg != "mac":
-        print("release-check: the linux leg is not available in this revision", file=sys.stderr)
-        return 2
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    return run_leg("mac", steps, args.workers, args.cap_seconds, out, repo=repo, environ=environ,
-                   exclusions=exclusions).exit
+    legs = ("mac", "linux") if args.leg == "both" else (args.leg,)
+    exits = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        linux = (pool.submit(_run_linux_host, steps, args, repo, environ, exclusions)
+                 if "linux" in legs else None)
+        if "mac" in legs:
+            exits["mac"] = run_leg("mac", steps, args.workers, args.cap_seconds, out, repo=repo,
+                                   environ=environ, exclusions=exclusions).exit
+        if linux is not None:
+            exits["linux"] = linux.result()
+    overall = 2 if 2 in exits.values() else 1 if 1 in exits.values() else 0
+    summary = {"commit": _commit(repo), "finished": _now(), "exit": overall,
+               "legs": {leg: {"exit": code, "results": str(out / leg / "results.json")}
+                        for leg, code in exits.items()}}
+    (out / "release-check.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"release-check: overall exit {overall} ({out / 'release-check.json'})", file=sys.stderr)
+    return overall
 
 
 if __name__ == "__main__":

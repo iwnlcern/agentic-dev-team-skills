@@ -370,6 +370,138 @@ class StepsAndResults(unittest.TestCase):
             self.assertTrue(Path(step["log"]).is_file())
 
 
+def docker_binary():
+    return shutil.which("docker")
+
+
+class LinuxFixture(FixtureRepo):
+    """A committed fixture repository the linux leg can run: it carries the runner itself."""
+
+    def __init__(self, test_case, linked=False):
+        super().__init__(test_case)
+        (self.root / "tools" / "release-check.py").write_text(SCRIPT.read_text())
+        (self.root / "AGENTS.md").write_text("fixture\n")
+        self.passing("test_a_ok")
+        self.head = None
+        self.repo = self.root
+        if linked:
+            self.linked_dir = self.root.parent / (self.root.name + "-wt")
+            test_case.addCleanup(shutil.rmtree, self.linked_dir, True)
+
+    def finish(self, linked=False):
+        self.head = self.commit()
+        if linked:
+            subprocess.run(["git", "-C", str(self.root), "worktree", "add", "-q", "--detach",
+                            str(self.linked_dir), "HEAD"], check=True)
+            self.repo = self.linked_dir
+        return self
+
+    def run_legs(self, leg, environ=None):
+        argv = ["full", "--leg", leg, "--out", str(self.out), "--workers", "2"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = rc.main(argv, repo=self.repo,
+                           environ=dict(os.environ if environ is None else environ), exclusions=())
+        return code, err.getvalue()
+
+    def container(self, args):
+        """Run the leg's container directly with the given docker arguments."""
+        (self.out / "linux").mkdir(parents=True, exist_ok=True)
+        rc.write_container_plan(self.out / "linux", rc.step_table(self.repo), "linux", ())
+        return subprocess.run([docker_binary()] + args, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL)
+
+
+class DockerArgs(unittest.TestCase):
+
+    def test_mount_args_are_readonly_binds(self):
+        worktree = Path("/Users/someone/worktrees/w")
+        common = Path("/Users/someone/repo/.git")
+        args = rc.docker_args(worktree, common, Path("/Users/someone/out"), "img:tag", "abc123")
+        self.assertNotIn("-v", args)
+        self.assertNotIn("--volume", args)
+        mounts = [args[i + 1] for i, a in enumerate(args) if a == "--mount"]
+        self.assertIn(f"type=bind,src={worktree},dst={worktree},readonly", mounts)
+        self.assertIn(f"type=bind,src={common},dst={common},readonly", mounts)
+        self.assertIn("type=bind,src=/Users/someone/out/linux,dst=/out", mounts)
+        self.assertTrue(any(m.startswith("type=tmpfs,dst=/scratch") for m in mounts))
+        self.assertIn("ADT_EXPECTED_HEAD=abc123", args)
+        self.assertEqual(args[args.index("-w") + 1], str(worktree))
+
+
+class LinuxLeg(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.image = rc.ensure_image(docker_binary())
+
+    def readonly_args(self, fixture, expected_head=None):
+        common = rc.common_git_dir(fixture.repo)
+        return rc.docker_args(fixture.repo, common, fixture.out, self.image,
+                              expected_head or fixture.head)
+
+    def test_preflight_rejects_writable_mount(self):
+        fixture = LinuxFixture(self).finish()
+        args = self.readonly_args(fixture)
+        writable = [a.replace(f"dst={fixture.repo},readonly", f"dst={fixture.repo}") for a in args]
+        result = fixture.container(writable)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn(f"source mount {fixture.repo} accepts a write", result.stdout + result.stderr)
+        control = fixture.container(args)
+        self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+
+    def test_preflight_rejects_head_mismatch(self):
+        fixture = LinuxFixture(self).finish()
+        result = fixture.container(self.readonly_args(fixture, expected_head="0" * 40))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("HEAD", result.stdout + result.stderr)
+
+    def test_git_works_in_linked_worktree(self):
+        fixture = LinuxFixture(self, linked=True).finish(linked=True)
+        self.assertNotEqual(rc.common_git_dir(fixture.repo), fixture.repo / ".git")
+        result = fixture.container(self.readonly_args(fixture))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("preflight: clean", result.stdout + result.stderr)
+
+    def test_linux_only_failure_fails_whole_check(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_linux_only", '''
+            class T(unittest.TestCase):
+                def test_platform(self):
+                    if sys.platform.startswith("linux"):
+                        self.fail("fails only on linux")
+        ''')
+        fixture.finish()
+        code, err = fixture.run_legs("both")
+        self.assertEqual(code, 1, err)
+        mac = json.loads((fixture.out / "mac" / "results.json").read_text())
+        linux = json.loads((fixture.out / "linux" / "results.json").read_text())
+        step = "relay_engine.tests.test_b_linux_only"
+        self.assertEqual(next(s for s in mac["steps"] if s["id"] == step)["outcome"], "pass")
+        self.assertEqual(next(s for s in linux["steps"] if s["id"] == step)["outcome"], "fail")
+        self.assertEqual(linux["python"]["version"].rsplit(".", 1)[0], "3.11")
+        summary = json.loads((fixture.out / "release-check.json").read_text())
+        self.assertEqual(summary["exit"], 1)
+        self.assertEqual({leg: summary["legs"][leg]["exit"] for leg in ("mac", "linux")},
+                         {"mac": 0, "linux": 1})
+
+
+class MissingDocker(unittest.TestCase):
+
+    def test_missing_docker_is_setup_error(self):
+        fixture = LinuxFixture(self).finish()
+        environ = dict(os.environ)
+        environ["DOCKER"] = str(fixture.pids / "no-such-docker")
+        code, err = fixture.run_legs("linux", environ=environ)
+        self.assertEqual(code, 2, err)
+        self.assertIn("docker", err)
+        code, err = fixture.run_legs("both", environ=environ)
+        self.assertEqual(code, 2, err)
+        summary = json.loads((fixture.out / "release-check.json").read_text())
+        self.assertEqual(summary["legs"]["linux"]["exit"], 2)
+        self.assertEqual(summary["legs"]["mac"]["exit"], 0)
+
+
 class RealTree(unittest.TestCase):
 
     def test_real_tree_is_covered(self):
