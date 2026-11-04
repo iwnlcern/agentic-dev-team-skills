@@ -270,5 +270,34 @@ def _require_matching(conn, names):
     elif row[1] != ddl_digest():
         found = "v3 schema version %s with other table definitions" % SCHEMA_V3
     else:
-        return
+        difference = _definition_difference(conn)
+        if difference is None:
+            return
+        found = "v3 schema version %s with %s" % (SCHEMA_V3, difference)
     raise errors.error_for("E-SCHEMA-MISMATCH", found=found)
+
+
+def _definitions(conn):
+    return {(kind, name): sql for kind, name, sql in conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+
+
+def _definition_difference(conn):
+    """The first way the file's own definitions differ from the ones this
+    engine builds (A13), or None; the version record alone is not trusted."""
+    expected_conn = sqlite3.connect(":memory:")
+    try:
+        for statement in _TABLES + _INDEXES + _TRIGGERS:
+            expected_conn.execute(statement)
+        expected = _definitions(expected_conn)
+    finally:
+        expected_conn.close()
+    found = _definitions(conn)
+    for (kind, name) in sorted(set(found) - set(expected)):
+        return "an extra %s %s" % (kind, header._display(name, 60))
+    for (kind, name) in sorted(set(expected) - set(found)):
+        return "no %s %s" % (kind, header._display(name, 60))
+    for key in sorted(expected):
+        if found[key] != expected[key]:
+            return "a changed %s %s" % (key[0], header._display(key[1], 60))
+    return None

@@ -247,6 +247,12 @@ def _unterminated(prefix):
     raise _refuse("E-HEADER-SIZE", variant="unterminated", limit=HEADER_CAP)
 
 
+# bidirectional controls reorder how a value reads (A12); other format
+# characters stay admitted and are escaped wherever refusal text shows them
+_BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+                           "\u2066\u2067\u2068\u2069")
+
+
 def _read_line(number, raw):
     if number == 1 and raw.startswith(b"\xef\xbb\xbf"):
         raise _refuse("E-HEADER-BOM", line=number)
@@ -256,7 +262,7 @@ def _read_line(number, raw):
     for column, char in enumerate(text, start=1):
         code = ord(char)
         if ((code < 32 and char != "\t") or 127 <= code <= 159 or
-                char in "  "):
+                char in "\u2028\u2029" or char in _BIDI_CONTROLS):
             raise _refuse("E-HEADER-CONTROL", line=number, column=column,
                           codepoint="U+%04X" % code)
     if text.startswith("#"):
@@ -272,8 +278,21 @@ def _read_line(number, raw):
     return match.group(1), match.group(2)
 
 
+_LIST_FORM = "<address>, <address> with one ASCII space or none after each comma"
+
+
 def _addresses(number, field, value, validate_address, seen_addresses):
-    items = [item.strip() for item in value.split(",")]
+    """Items split at commas; the only whitespace beside a comma is one ASCII
+    space after it (A11), and nothing is stripped.  Whitespace inside an item
+    is the address grammar's to refuse."""
+    items = value.split(",")
+    for index, item in enumerate(items):
+        if index and item.startswith(" "):
+            item = item[1:]
+        if item[:1].isspace() or item[-1:].isspace():
+            raise _refuse("E-FIELD-SHAPE", line=number, field=field,
+                          value=_display(value), form=_LIST_FORM)
+        items[index] = item
     result = []
     for item in items:
         if not item:

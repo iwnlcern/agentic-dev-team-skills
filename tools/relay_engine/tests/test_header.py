@@ -269,7 +269,7 @@ class TestReviewFocus(Refused):
         self.assertIn("more than once", error.cause)
 
     def test_controls_and_separators_in_header(self):
-        for char in ("\r", "\x00", "\x1b", "\x7f", "\x85", " ", " "):
+        for char in ("\r", "\x00", "\x1b", "\x7f", "\x85", "\u2028", "\u2029"):
             with self.subTest(char=repr(char)):
                 self.refused(draft(replace("SUBJECT", "a" + char + "b")),
                              "E-HEADER-CONTROL", line=4)
@@ -443,8 +443,8 @@ class TestPanelFold1(Refused):
         bad(draft(REVIEW + ["REF: file:/a", "FINDING: advisory 5 s"]), "E-FINDING-NO-CHECK", line=8)
 
     def test_display_escapes(self):  # M9 H8, O6
-        for char, shown in (("\t", "\\u0009"), (" ", "\\u00a0"), ("​", "\\u200b"),
-                            ("﻿", "\\ufeff"), ("‮", "\\u202e")):
+        for char, shown in (("\t", "\\u0009"), ("\u00a0", "\\u00a0"), ("\u200b", "\\u200b"),
+                            ("\ufeff", "\\ufeff"), ("\u2060", "\\u2060")):  # U+202E is refused since A12
             with self.subTest(char=repr(char)):
                 error = self.refused(draft(replace("KIND", "SITREP" + char + "X")), "E-FIELD-ENUM", line=1)
                 self.assertIn(shown, error.cause)
@@ -461,6 +461,49 @@ class TestPanelFold1(Refused):
         error = self.refused(draft(replace("TO", "v3-engine.pair-planner")), "E-ADDRESS", line=2)
         self.assertEqual(error.params["reason"], "unknown role word")
         self.assertIn("planner", error.remedy)
+
+
+
+class TestGateAdvisories(Refused):
+    """PR-1 gate advisories A11, A12 (v3-engine/SITREP-pair-planner-20261104-061814.md)."""
+
+    def test_address_list_whitespace_refused(self):  # A11
+        for value in ("a.planner, b.planner", "a.planner,b.planner"):  # positive controls
+            with self.subTest(value=value):
+                self.assertEqual(header.parse(draft(replace("TO", value))).to,
+                                 ("a.planner", "b.planner"))
+        for value, shown in (("a.planner,\u00a0b.planner", "\\u00a0"),
+                             ("a.planner,\u3000b.planner", "\\u3000"),
+                             ("a.planner,\tb.planner", "\\u0009"),
+                             ("a.planner ,b.planner", "a.planner ,"),
+                             ("a.planner,  b.planner", ",  b")):
+            with self.subTest(value=repr(value)):
+                error = self.refused(draft(replace("TO", value)), "E-FIELD-SHAPE", line=2)
+                self.assertEqual(error.params["field"], "TO")
+                self.assertIn(shown, error.cause)
+        # whitespace at either end of the value is the line grammar's refusal, as before
+        error = self.refused(draft(replace("TO", "a.planner, b.planner\u00a0")),
+                             "E-HEADER-GRAMMAR", line=2)
+        self.assertIn("\\u00a0", error.cause)
+        # whitespace inside an item is the address grammar's refusal, as before
+        self.refused(draft(replace("TO", "v3 engine.planner")), "E-ADDRESS", line=2)
+        cc = BASE + ["CC: c.planner,\u00a0d.planner"]
+        error = self.refused(draft(cc), "E-FIELD-SHAPE", line=6)
+        self.assertEqual(error.params["field"], "CC")
+
+    def test_bidi_controls_refused(self):  # A12
+        for code in (0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+                     0x2066, 0x2067, 0x2068, 0x2069):
+            with self.subTest(code="U+%04X" % code):
+                error = self.refused(draft(replace("SUBJECT", "he" + chr(code) + "llo")),
+                                     "E-HEADER-CONTROL", line=4)
+                self.assertEqual(error.params["codepoint"], "U+%04X" % code)
+                self.assertEqual(error.params["column"], 12)
+        # other format characters stay admitted, and refusal text escapes them
+        self.assertEqual(header.parse(draft(replace("SUBJECT", "he\u200bllo"))).subject,
+                         "he\u200bllo")
+        error = self.refused(draft(replace("NEEDS", "no\u200bne")), "E-FIELD-ENUM", line=3)
+        self.assertIn("\\u200b", error.cause)
 
 
 if __name__ == "__main__":

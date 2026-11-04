@@ -271,6 +271,27 @@ class TestVersioning(Store):
                 self.assertIn(phrase, caught.exception.cause)
                 self.assertEqual(self.objects(conn), before)
 
+    def test_changed_definitions_refused(self):  # A13
+        changes = (
+            ("CREATE TABLE extra (x INTEGER) STRICT", "an extra table extra"),
+            ("ALTER TABLE bodies ADD COLUMN note TEXT", "a changed table bodies"),
+            ("DROP INDEX findings_bundle_status", "no index findings_bundle_status"),
+            ("DROP TRIGGER relays_handle_fixed", "no trigger relays_handle_fixed"),
+        )
+        for statement, phrase in changes:
+            with self.subTest(statement=statement):
+                conn = self.connect()
+                conn.execute(statement)
+                conn.commit()
+                before = self.objects(conn)
+                with self.assertRaises(errors.EngineError) as caught:
+                    schema.init_v3(conn)
+                self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")
+                self.assertIn(phrase, caught.exception.cause)
+                self.assertEqual(self.objects(conn), before)  # nothing written
+        conn = self.connect()
+        schema.init_v3(conn)  # positive control: an unchanged store opens
+
     def test_init_atomic(self):
         conn = self.connect(init=False)
         broken = schema._INDEXES + ("CREATE INDEX IF NOT EXISTS broken ON no_such_table (x)",)

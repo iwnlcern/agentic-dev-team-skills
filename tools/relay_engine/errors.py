@@ -254,7 +254,7 @@ _HEADER_TEXT = {
     "error-header-empty-cause": "line {line}: {key} has no value",
     "error-header-empty-remedy": "give the field a value, or remove the line",
     "error-header-empty-explain": "a header line always carries a value",
-    "error-header-control-cause": "line {line}, column {column}: {codepoint} is a control or line-separator character",
+    "error-header-control-cause": "line {line}, column {column}: {codepoint} is a control, line-separator or bidirectional-control character",
     "error-header-control-remedy": "remove the character; the header allows tab and no other control character",
     "error-header-control-explain": "a header value is one line of printable text",
     "error-header-title-line-cause": "line {line} is a title line; a v3 draft starts with header lines",

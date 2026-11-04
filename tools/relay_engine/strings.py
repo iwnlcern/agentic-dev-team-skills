@@ -41,7 +41,6 @@ INVENTORY = {
     "judging.failed": "admission judging failed; the relay is admitted with judgment status failed",
     "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
     "authority.grant-shape-absent": "MERGE-GATE addressed to an Implementer carries no authorization shape and no verdict; it grants nothing",
-    "authority.check-not-cited": "report of implementation or merge carries no AUTHORITY_CHECK line",
     "external.could-not-evaluate": "{gate} could not be evaluated: {cause}",
     "routing.unknown-address": "address not on this root's roster: {addresses}; known: {known}; notice to the top seat: {notice}",
     "explain-heading": "{code}",
