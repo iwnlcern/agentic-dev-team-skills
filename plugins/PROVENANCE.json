@@ -308,7 +308,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "0341b094272a18d8be2afa4e3bc99a480fda8ad4e58670a6031c5c061099b22b",
+    "sha256": "2998f82c7a9cbbdba3ad454abc968671fd9b9d622ff36b988bed52bacc162184",
     "source": "tools/adapters/README.md"
   },
   {
@@ -356,7 +356,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/hostlogs.py",
-    "sha256": "632f67559614355a5c1aef936d9cecf3c9c55053ef8ea332fa6b513c772e8572",
+    "sha256": "5fdb9a3cb08788e7230dcea3000ee3b795651400526a403db6da838a9773e2e8",
     "source": "tools/adapters/hostlogs.py"
   },
   {
@@ -451,6 +451,24 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-09-00-01a00000-0000-7000-8000-000000000011.jsonl",
+    "sha256": "7d3ea4c18c9112f7374158356f31d5ea6123a9f4d559935941118d16af14a8a5",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-09-00-01a00000-0000-7000-8000-000000000011.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-10-00-01a00000-0000-7000-8000-000000000012.jsonl",
+    "sha256": "1946fd36f43e263ba0f7c6e2374544d634b69ee3c44b670511c9354b58cb7372",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-10-00-01a00000-0000-7000-8000-000000000012.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-11-00-01a00000-0000-7000-8000-000000000013.jsonl",
+    "sha256": "8348771e4d2d9069ee372a4f543ccfc149d115d0e1f5007dcc0781f3e517b099",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-11-00-01a00000-0000-7000-8000-000000000013.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/scope_proof.sh",
     "sha256": "db467d28d264efe795d243eb6096b316e779562f344ac0dad7a0304f702d92d8",
     "source": "tools/adapters/tests/scope_proof.sh"
@@ -458,7 +476,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_hostlogs.py",
-    "sha256": "99edb3e2f2a320a70a551732b5671e953a935c077996ebdabe63c8b8f61771fe",
+    "sha256": "ed9b602a67a761e673310ef722361d7f0b76649fb5bf334386598b6ef797ed29",
     "source": "tools/adapters/tests/test_hostlogs.py"
   },
   {
@@ -10964,7 +10982,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "0341b094272a18d8be2afa4e3bc99a480fda8ad4e58670a6031c5c061099b22b",
+    "sha256": "2998f82c7a9cbbdba3ad454abc968671fd9b9d622ff36b988bed52bacc162184",
     "source": "tools/adapters/README.md"
   },
   {
@@ -11012,7 +11030,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/hostlogs.py",
-    "sha256": "632f67559614355a5c1aef936d9cecf3c9c55053ef8ea332fa6b513c772e8572",
+    "sha256": "5fdb9a3cb08788e7230dcea3000ee3b795651400526a403db6da838a9773e2e8",
     "source": "tools/adapters/hostlogs.py"
   },
   {
@@ -11107,6 +11125,24 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-09-00-01a00000-0000-7000-8000-000000000011.jsonl",
+    "sha256": "7d3ea4c18c9112f7374158356f31d5ea6123a9f4d559935941118d16af14a8a5",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-09-00-01a00000-0000-7000-8000-000000000011.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-10-00-01a00000-0000-7000-8000-000000000012.jsonl",
+    "sha256": "1946fd36f43e263ba0f7c6e2374544d634b69ee3c44b670511c9354b58cb7372",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-10-00-01a00000-0000-7000-8000-000000000012.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-11-00-01a00000-0000-7000-8000-000000000013.jsonl",
+    "sha256": "8348771e4d2d9069ee372a4f543ccfc149d115d0e1f5007dcc0781f3e517b099",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-11-00-01a00000-0000-7000-8000-000000000013.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/scope_proof.sh",
     "sha256": "db467d28d264efe795d243eb6096b316e779562f344ac0dad7a0304f702d92d8",
     "source": "tools/adapters/tests/scope_proof.sh"
@@ -11114,7 +11150,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_hostlogs.py",
-    "sha256": "99edb3e2f2a320a70a551732b5671e953a935c077996ebdabe63c8b8f61771fe",
+    "sha256": "ed9b602a67a761e673310ef722361d7f0b76649fb5bf334386598b6ef797ed29",
     "source": "tools/adapters/tests/test_hostlogs.py"
   },
   {
@@ -21536,7 +21572,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "0341b094272a18d8be2afa4e3bc99a480fda8ad4e58670a6031c5c061099b22b",
+    "sha256": "2998f82c7a9cbbdba3ad454abc968671fd9b9d622ff36b988bed52bacc162184",
     "source": "tools/adapters/README.md"
   },
   {
@@ -21584,7 +21620,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/hostlogs.py",
-    "sha256": "632f67559614355a5c1aef936d9cecf3c9c55053ef8ea332fa6b513c772e8572",
+    "sha256": "5fdb9a3cb08788e7230dcea3000ee3b795651400526a403db6da838a9773e2e8",
     "source": "tools/adapters/hostlogs.py"
   },
   {
@@ -21679,6 +21715,24 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-09-00-01a00000-0000-7000-8000-000000000011.jsonl",
+    "sha256": "7d3ea4c18c9112f7374158356f31d5ea6123a9f4d559935941118d16af14a8a5",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-09-00-01a00000-0000-7000-8000-000000000011.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-10-00-01a00000-0000-7000-8000-000000000012.jsonl",
+    "sha256": "1946fd36f43e263ba0f7c6e2374544d634b69ee3c44b670511c9354b58cb7372",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-10-00-01a00000-0000-7000-8000-000000000012.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-11-00-01a00000-0000-7000-8000-000000000013.jsonl",
+    "sha256": "8348771e4d2d9069ee372a4f543ccfc149d115d0e1f5007dcc0781f3e517b099",
+    "source": "tools/adapters/tests/fixtures/hostlogs/codex/rollout-2026-11-01T10-11-00-01a00000-0000-7000-8000-000000000013.jsonl"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/scope_proof.sh",
     "sha256": "db467d28d264efe795d243eb6096b316e779562f344ac0dad7a0304f702d92d8",
     "source": "tools/adapters/tests/scope_proof.sh"
@@ -21686,7 +21740,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_hostlogs.py",
-    "sha256": "99edb3e2f2a320a70a551732b5671e953a935c077996ebdabe63c8b8f61771fe",
+    "sha256": "ed9b602a67a761e673310ef722361d7f0b76649fb5bf334386598b6ef797ed29",
     "source": "tools/adapters/tests/test_hostlogs.py"
   },
   {

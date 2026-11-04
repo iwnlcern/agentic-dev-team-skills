@@ -24,6 +24,54 @@ N = "01a00000-0000-7000-8000-00000000000c"
 FK = "01a00000-0000-7000-8000-00000000000d"
 X = "01a00000-0000-7000-8000-00000000000e"
 NAME_ONLY = "01a00000-0000-7000-8000-00000000000f"
+F1 = "01a00000-0000-7000-8000-000000000011"
+F2 = "01a00000-0000-7000-8000-000000000012"
+F3 = "01a00000-0000-7000-8000-000000000013"
+P3 = "01a00000-0000-7000-8000-000000000014"
+
+
+def births(**by_stem):
+    """An injected birth-time source: file stem -> birth time (absent stems have none, as on Linux)."""
+    return lambda path: by_stem.get(pathlib.Path(path).stem.replace("-", "_"))
+
+
+class RecordingDict(dict):
+    """A decoded line that records every key read, plain access included, under its full path."""
+
+    def __init__(self, data, path, log):
+        super().__init__(data)
+        self._path, self._log = path, log
+
+    def _wrap(self, key, value):
+        if isinstance(value, dict):
+            return RecordingDict(value, self._path + (key,), self._log)
+        if isinstance(value, list):
+            return [self._wrap(key, v) for v in value]
+        return value
+
+    def __getitem__(self, key):
+        self._log.append(self._path + (key,))
+        return self._wrap(key, super().__getitem__(key))
+
+    def get(self, key, default=None):
+        self._log.append(self._path + (key,))
+        return self._wrap(key, super().get(key, default))
+
+    def __iter__(self):
+        self._log.append(self._path + ("*",))
+        return super().__iter__()
+
+    def keys(self):
+        self._log.append(self._path + ("*",))
+        return super().keys()
+
+    def values(self):
+        self._log.append(self._path + ("*",))
+        return [self._wrap(k, v) for k, v in super().items()]
+
+    def items(self):
+        self._log.append(self._path + ("*",))
+        return [(k, self._wrap(k, v)) for k, v in super().items()]
 
 
 def codex(tid, stamp):
@@ -72,21 +120,66 @@ class ClaudeCodeTests(HostLogTestCase):
         self.assertEqual([(r.host_session_id, r.turn_id) for r in second], [("sess-a-fork", "req_3")])
 
     def test_in_run_owner_is_session_with_earliest_first_line(self):
-        # the fork's session id sorts first and its first line carries the same timestamp (as measured);
-        # the parent's file was created first, so the parent owns the shared requests
+        # the fork's first usage line carries the parent's timestamp (as measured), so first lines tie;
+        # the injected birth times say the parent's file came first, so the parent owns the shared requests
         parent, fork = self.staged("sess-b-parent.jsonl", "sess-a-fork.jsonl")
-        rows = self.rows(hostlogs.read_claude_code([fork, parent], self.owners))
+        birth = births(sess_b_parent=100.0, sess_a_fork=200.0)
+        rows = self.rows(hostlogs.read_claude_code([fork, parent], self.owners, birth=birth))
         owners = {r.turn_id: r.host_session_id for r in rows}
         self.assertEqual(sorted(r.turn_id for r in rows), ["req_1", "req_2", "req_3"])  # each request counted once
-        if hasattr(parent.stat(), "st_birthtime"):
-            self.assertEqual(owners, {"req_1": "sess-b-parent", "req_2": "sess-b-parent", "req_3": "sess-a-fork"})
-        # without birth times the fallback (first timestamp, then session id) cannot tell a fork from its
-        # parent; counts stay right and only the copied history's attribution can move (documented)
+        self.assertEqual(owners, {"req_1": "sess-b-parent", "req_2": "sess-b-parent", "req_3": "sess-a-fork"})
+
+    def test_owner_without_birth_times_is_smallest_session_id(self):
+        # no birth source (Linux): first lines tie, so the smaller session id owns the shared requests
+        parent, fork = self.staged("sess-b-parent.jsonl", "sess-a-fork.jsonl")
+        rows = self.rows(hostlogs.read_claude_code([parent, fork], self.owners, birth=births()))
+        self.assertEqual({r.turn_id: r.host_session_id for r in rows},
+                         {"req_1": "sess-a-fork", "req_2": "sess-a-fork", "req_3": "sess-a-fork"})
+
+    def test_earliest_first_usage_line_beats_birth_time(self):
+        # p12 shape: a fork copies a later window of its parent, then the parent's file is re-created
+        # (restore or copy), so its birth time is later; the parent's own first usage line is still earlier
+        cc = self.tmp / "cc"
+        cc.mkdir()
+
+        def line(sess, ts, rid):
+            return json.dumps({"type": "assistant", "sessionId": sess, "timestamp": ts, "requestId": rid,
+                               "message": {"id": "m" + rid, "content": SENTINEL,
+                                           "usage": {"input_tokens": 1, "output_tokens": 1}}},
+                              separators=(",", ":")) + "\n"
+
+        parent, fork = cc / "b-parent.jsonl", cc / "a-fork.jsonl"
+        parent.write_text(line("b-parent", "2026-09-23T11:00:00Z", "r0") + line("b-parent", "2026-10-23T23:20:00Z", "r1")
+                          + line("b-parent", "2026-10-23T23:21:00Z", "r2"))
+        fork.write_text(line("a-fork", "2026-10-23T23:20:00Z", "r1") + line("a-fork", "2026-10-23T23:21:00Z", "r2")
+                        + line("a-fork", "2026-11-04T10:00:00Z", "r3"))
+        birth = births(a_fork=100.0, b_parent=200.0)
+        rows = self.rows(hostlogs.read_claude_code([parent, fork], self.owners, birth=birth))
+        self.assertEqual({r.turn_id: r.host_session_id for r in rows},
+                         {"r0": "b-parent", "r1": "b-parent", "r2": "b-parent", "r3": "a-fork"})
 
     def test_partial_last_line_is_skipped_not_fatal(self):
         (partial,) = self.staged("partial.jsonl")
         rows = self.rows(hostlogs.read_claude_code([partial], self.owners))
         self.assertEqual([r.turn_id for r in rows], ["req_p1"])
+
+    def test_non_string_session_id_falls_back_to_file_stem(self):
+        path = self.tmp / "cc" / "stem-session.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"type": "assistant", "sessionId": 7, "timestamp": "2026-11-01T10:00:00Z",
+                                    "requestId": "req_t", "message": {"usage": {"input_tokens": 1}}},
+                                   separators=(",", ":")) + "\n")
+        (row,) = self.rows(hostlogs.read_claude_code([path], self.owners))
+        self.assertEqual(row.host_session_id, "stem-session")
+
+    def test_deeply_nested_line_is_skipped_not_fatal(self):
+        path = self.tmp / "cc" / "deep.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        deep = '{"type":"assistant","x":' + "[" * 200000 + "]" * 200000 + "}\n"
+        ok = json.dumps({"type": "assistant", "sessionId": "deep", "timestamp": "2026-11-01T10:00:00Z",
+                         "requestId": "req_d", "message": {"usage": {"input_tokens": 1}}}, separators=(",", ":")) + "\n"
+        path.write_text(deep + ok)
+        self.assertEqual([r.turn_id for r in self.rows(hostlogs.read_claude_code([path], self.owners))], ["req_d"])
 
     def test_claude_column_mapping(self):
         (parent,) = self.staged("sess-b-parent.jsonl")
@@ -124,6 +217,19 @@ class CodexTests(HostLogTestCase):
         (row,) = self.rows(hostlogs.read_codex([codex(NAME_ONLY, "10-08-00")]))
         self.assertEqual(row.host_session_id, X)  # the thread its records carry, never the file name
 
+    def test_codex_record_from_another_thread_is_skipped(self):
+        # DD § 4.6 own-thread records only: a copy of thread A's record inside F1's rollout is not F1's
+        items = hostlogs.read_codex([codex(F1, "10-09-00")])
+        self.assertEqual([(r.host_session_id, r.turn_id) for r in self.rows(items)], [(F1, "resp_o1")])
+
+    def test_codex_record_without_thread_keys_to_first_session_meta(self):
+        (row,) = self.rows(hostlogs.read_codex([codex(F2, "10-10-00")]))
+        self.assertEqual((row.host_session_id, row.turn_id), (F2, "resp_n1"))
+
+    def test_codex_forked_helper_keeps_its_parent(self):
+        (row,) = self.rows(hostlogs.read_codex([codex(F3, "10-11-00")]))
+        self.assertEqual((row.host_session_id, row.parent_host_session_id), (F3, P3))
+
 
 class SharedTests(HostLogTestCase):
     def test_helper_rows_carry_parent(self):
@@ -134,20 +240,23 @@ class SharedTests(HostLogTestCase):
         self.assertEqual((cx.host_session_id, cx.parent_host_session_id), (H, A))
 
     def test_never_reads_content(self):
+        # every parsed line is a RecordingDict, so any key read is seen, through _dig or plain access
         paths = []
-        real_dig = hostlogs._dig
+        real_decode = hostlogs._decode
 
-        def recording_dig(obj, *path):
-            paths.append(path)
-            return real_dig(obj, *path)
+        def recording_decode(raw):
+            obj = real_decode(raw)
+            return RecordingDict(obj, (), paths) if isinstance(obj, dict) else obj
 
         cc = self.staged("sess-b-parent.jsonl", "sess-a-fork.jsonl", "partial.jsonl", "sess-b-parent/subagents/agent-x1.jsonl")
         cx = sorted((FIX / "codex").iterdir())
-        with mock.patch.object(hostlogs, "_dig", recording_dig):
+        with mock.patch.object(hostlogs, "_decode", recording_decode):
             items = hostlogs.read_claude_code(cc, self.owners) + hostlogs.read_codex(cx)
         self.assertNotIn(SENTINEL, json.dumps([vars(i) for i in items]))
         body_keys = {"content", "text", "thinking", "tool_use", "tool_result", "toolUseResult", "base_instructions"}
-        touched = {p for p in paths if body_keys & set(p) or (p and p[0] == "message" and p[-1] in ("input", "output"))}
+        touched = {p for p in paths
+                   if body_keys & set(p) or (p and p[0] == "message" and p[-1] in ("input", "output", "*"))
+                   or p in (("*",), ("payload", "*"))}
         self.assertEqual(touched, set())
         self.assertTrue(paths)  # the instrument saw the reads
 

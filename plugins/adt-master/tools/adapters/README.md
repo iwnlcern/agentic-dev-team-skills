@@ -291,7 +291,8 @@ The answer is cached in the note for 60 s per root.
 `python3 tools/adapters/hostlogs.py read --host <claude-code|codex> [--owners <file>] <path>...` prints one JSON object per turn from host logs: token counts and identifiers only, never message content.
 `input` is uncached input on both hosts (Codex `input_tokens` minus `cached_input_tokens`), and `output` includes reasoning on both hosts.
 Claude Code rows are one per `requestId`; `--owners` keeps a forked session's copied requests with the session that first owned them.
-Codex rows are one per `response_id`, keyed by the thread the record carries; `.bak` rollouts are skipped and a rollout without a `token_usage_record` is reported as missing.
+Within one read, a request copied into several sessions belongs to the session whose own first usage line is earliest, then to the file created first where the filesystem records creation times, then to the smaller session id.
+Codex rows are one per `response_id`, keyed by the rollout's own thread (its first `session_meta`); a record naming another thread is a copy of that thread's record and is skipped; `.bak` rollouts are skipped and a rollout without a `token_usage_record` of its own is reported as missing.
 
 ### Host facts
 

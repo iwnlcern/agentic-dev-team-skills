@@ -19,8 +19,9 @@ import os
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 _decode = json.loads
 
@@ -32,6 +33,10 @@ def _dig(obj, *path):
             return None
         obj = obj.get(key)
     return obj
+
+
+def _str(value) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _count(value) -> int:
@@ -64,7 +69,7 @@ class OwnerMap:
     """Which session owns each Claude Code `requestId` (forks copy earlier records under a new session id).
 
     The first owner written keeps a request in every later run; within one run the owner is the session
-    that started first (the order key given to `claim`), ties broken by the smaller session id.
+    that started first (the `start_order` given to `claim`), ties broken by the smaller session id.
     """
 
     def __init__(self, path: Path):
@@ -74,7 +79,7 @@ class OwnerMap:
         except (OSError, ValueError):
             data = {}
         self._written = {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(data, dict) else {}
-        self._pending: dict[str, tuple[str, str]] = {}
+        self._pending: dict[str, tuple[tuple, str]] = {}
 
     def owner(self, request_id: str) -> str | None:
         if request_id in self._written:
@@ -82,11 +87,11 @@ class OwnerMap:
         pending = self._pending.get(request_id)
         return pending[1] if pending else None
 
-    def claim(self, request_id: str, session_id: str, session_first_line_utc: str) -> str:
-        """Offer `session_id` as owner; `session_first_line_utc` is the session's start order key."""
+    def claim(self, request_id: str, session_id: str, start_order: tuple) -> str:
+        """Offer `session_id` as owner; `start_order` sorts sessions by when they began (`_start_order`)."""
         if request_id in self._written:
             return self._written[request_id]
-        candidate = (session_first_line_utc or "~", session_id)
+        candidate = (start_order, session_id)
         current = self._pending.get(request_id)
         if current is None or candidate < current:
             self._pending[request_id] = candidate
@@ -111,21 +116,37 @@ def _lines(path: Path, markers: tuple[bytes, ...]):
                 continue
             try:
                 yield _decode(raw)
-            except ValueError:
+            except (ValueError, RecursionError):  # a malformed or absurdly nested line is skipped, never fatal
                 continue
 
 
-def _start_order(path: Path, first_ts: str | None) -> str:
-    """When a session file began: its birth time where the filesystem records one, else its first timestamp.
-
-    A fork copies earlier records with their original timestamps, first line included (measured), so only
-    the file's creation separates a fork from its parent.
-    """
+def _birth_time(path: Path) -> float | None:
+    """The file's creation time where the filesystem records one (macOS, BSD), else None (Linux)."""
     try:
-        birth = os.stat(path).st_birthtime
+        return os.stat(path).st_birthtime
     except (AttributeError, OSError):
-        birth = None
-    return "%020.6f" % birth if birth is not None else "~" + (first_ts or "")
+        return None
+
+
+def _epoch(stamp) -> float | None:
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _start_order(first_ts, birth: float | None) -> tuple:
+    """When a session began (plan PL-v3-adapter-a Task 5 owner rule, fold v3-adapter-a-review-1 F4).
+
+    First by the session's own first assistant-usage timestamp; a fork copies a window of its parent with the
+    original timestamps, so a parent whose history starts earlier wins whatever its file's age.  A fork that
+    copies from the parent's first line ties there (measured: 189 of 189), so the file's birth time breaks
+    the tie where the filesystem records one; the smaller session id breaks any tie left.
+    """
+    first = _epoch(first_ts)
+    return (first is None, first or 0.0, birth is None, birth or 0.0)
 
 
 def _claude_session(path: Path) -> tuple[str | None, str | None]:
@@ -136,7 +157,8 @@ def _claude_session(path: Path) -> tuple[str | None, str | None]:
     return None, None
 
 
-def read_claude_code(paths: Iterable[Path], owners: OwnerMap) -> list[TokenRow | Missing]:
+def read_claude_code(paths: Iterable[Path], owners: OwnerMap, *,
+                     birth: Callable[[Path], float | None] = _birth_time) -> list[TokenRow | Missing]:
     files = []
     for path in map(Path, paths):
         helper_id, parent = _claude_session(path)
@@ -151,7 +173,7 @@ def read_claude_code(paths: Iterable[Path], owners: OwnerMap) -> list[TokenRow |
                     continue
                 stamp = _dig(line, "timestamp")
                 first_ts = first_ts or stamp
-                session = session or _dig(line, "sessionId") or path.stem
+                session = session or _str(_dig(line, "sessionId")) or path.stem
                 turns.setdefault(turn, (usage, stamp))
         except OSError as exc:
             files.append(Missing(str(path), f"unreadable: {type(exc).__name__}"))
@@ -159,7 +181,7 @@ def read_claude_code(paths: Iterable[Path], owners: OwnerMap) -> list[TokenRow |
         if session is None:
             files.append(Missing(str(path), "no assistant usage"))
             continue
-        files.append((path, session, parent, _start_order(path, first_ts), turns))
+        files.append((path, session, parent, _start_order(first_ts, birth(path)), turns))
     for entry in files:
         if not isinstance(entry, Missing):
             _, session, _, order, turns = entry
@@ -194,22 +216,26 @@ def read_codex(paths: Iterable[Path]) -> list[TokenRow | Missing]:
     for path in map(Path, paths):
         if path.name.endswith(".bak"):
             continue
-        own, parent, records = None, None, 0
+        own, parent, records, foreign = None, None, 0, 0
         try:
             for line in _lines(path, (b'"session_meta"', b'"token_usage_record"')):
                 kind = _dig(line, "type")
                 if kind == "session_meta":
                     if own is None:  # a forked rollout's second session_meta is not its own (measured)
-                        own = _dig(line, "payload", "id")
-                        parent = _dig(line, "payload", "source", "subagent", "thread_spawn", "parent_thread_id")
+                        own = _str(_dig(line, "payload", "id"))
+                        parent = _str(_dig(line, "payload", "source", "subagent", "thread_spawn", "parent_thread_id"))
                     continue
                 if kind != "token_usage_record":
                     continue
                 usage = _dig(line, "payload", "usage")
                 turn = _dig(line, "payload", "response_id")
-                thread = _dig(line, "payload", "thread_id") or own
-                if not isinstance(usage, dict) or not isinstance(turn, str) or not isinstance(thread, str):
+                stated = _dig(line, "payload", "thread_id")
+                if not isinstance(usage, dict) or not isinstance(turn, str) or not isinstance(own, str):
                     continue
+                if stated is not None and stated != own:
+                    foreign += 1  # DD § 4.6 own-thread records only; measured copies sit in their own rollout too
+                    continue
+                thread = own
                 records += 1
                 if (thread, turn) in seen:
                     continue
@@ -219,7 +245,7 @@ def read_codex(paths: Iterable[Path]) -> list[TokenRow | Missing]:
                 stamp = _dig(line, "timestamp")
                 out.append(TokenRow(
                     host_kind="codex", host_session_id=thread, turn_id=turn,
-                    parent_host_session_id=parent if thread == own else None,
+                    parent_host_session_id=parent,
                     host_time_utc=stamp if isinstance(stamp, str) else "",
                     input=max(0, total_in - cached), output=_count(_dig(usage, "output_tokens")),
                     reasoning_output=_count(reasoning) if reasoning is not None else None, reasoning_in_output=True,
@@ -229,7 +255,7 @@ def read_codex(paths: Iterable[Path]) -> list[TokenRow | Missing]:
             out.append(Missing(str(path), f"unreadable: {type(exc).__name__}"))
             continue
         if records == 0:
-            out.append(Missing(str(path), "no token_usage_record"))
+            out.append(Missing(str(path), "only other threads' records" if foreign else "no token_usage_record"))
     return out
 
 
