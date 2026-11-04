@@ -5,8 +5,14 @@ Run: python3 -m unittest discover -s tools/kit_tests -v
 
 from __future__ import annotations
 
+import importlib.util
+import json
+import os
 import re
+import shutil
+import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -282,6 +288,91 @@ class TestItem12(KitTreeCase):
             (Path(temporary) / "present.md").write_text("x\n", encoding="utf-8")
             fixture.write_text("[ok](present.md) [gone](../missing/SKILL.md#a) [web](https://example.com)\n", encoding="utf-8")
             self.assertEqual(dead_relative_links([fixture]), [f"{fixture}:1 ../missing/SKILL.md#a"])
+
+
+def _generator():
+    tools = str(ROOT / "tools")
+    if sys.path[:1] != [tools]:
+        sys.path.insert(0, tools)
+    spec = importlib.util.spec_from_file_location("kit_generate_plugins", ROOT / "tools" / "generate-plugins.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert Path(sys.modules["relay_engine.version"].__file__).resolve().is_relative_to(ROOT), "relay_engine imported from another tree"
+    return module
+
+
+def _png_chunks(png: bytes) -> list[tuple[bytes, bytes]]:
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    chunks, position = [], 8
+    while position < len(png):
+        (length,) = struct.unpack(">I", png[position:position + 4])
+        kind = png[position + 4:position + 8]
+        chunks.append((kind, png[position + 8:position + 8 + length]))
+        position += 12 + length
+    return chunks
+
+
+class TestIcon(KitTreeCase):
+    """A4: one generated paper-airplane PNG, identical everywhere, found by the validator."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.png = _generator().render_icon_png()
+
+    def test_icon_deterministic_and_valid(self):
+        self.assertEqual(self.png, _generator().render_icon_png())
+        chunks = _png_chunks(self.png)
+        self.assertEqual([kind for kind, _ in chunks], [b"IHDR", b"PLTE", b"IDAT", b"IEND"])
+        width, height, depth, colour = struct.unpack(">IIBB", chunks[0][1][:10])
+        self.assertEqual((width, height, depth, colour), (1024, 1024, 8, 3))
+        self.assertLess(len(self.png), 2_000_000)
+        for tier in TIERS:
+            self.assertEqual((PLUGINS / tier / ".claude-plugin" / "icon.png").read_bytes(), self.png, tier)
+
+    def test_icon_bytes_independent_of_compressor(self):
+        stream = b"".join(data for kind, data in _png_chunks(self.png) if kind == b"IDAT")
+        self.assertEqual(stream[:2], b"\x78\x01")
+        position, blocks = 2, 0
+        while True:
+            header = stream[position]
+            self.assertEqual((header >> 1) & 3, 0, f"block {blocks} is not stored")
+            length, complement = struct.unpack("<HH", stream[position + 1:position + 5])
+            self.assertEqual(length ^ 0xFFFF, complement)
+            position += 5 + length
+            blocks += 1
+            if header & 1:
+                break
+        self.assertEqual(len(stream), position + 4)
+        self.assertGreater(blocks, 1)
+
+    def test_icon_clears_validator(self):
+        selected = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
+        self.assertTrue(selected, "Claude Code validator not found; set CLAUDE_BIN")
+        claude = shutil.which(str(selected))
+        self.assertTrue(claude, f"Claude Code validator is not executable: {selected}")
+        version = subprocess.run([claude, "--version"], capture_output=True, text=True, check=True).stdout.strip()
+        print(f"validator: {claude} {version}")
+        for tier in TIERS:
+            result = subprocess.run(
+                [claude, "plugin", "validate", "--json", str(PLUGINS / tier)],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            findings = []
+
+            def walk(value):
+                if isinstance(value, dict):
+                    if "code" in value or "severity" in value:
+                        findings.append(value)
+                    for item in value.values():
+                        walk(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        walk(item)
+
+            walk(json.loads(result.stdout))
+            self.assertNotIn("ICON_MISSING", [f.get("code") for f in findings], tier)
+            self.assertEqual([f for f in findings if f.get("severity") == "error"], [], tier)
 
 if __name__ == "__main__":
     unittest.main()

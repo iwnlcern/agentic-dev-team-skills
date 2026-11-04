@@ -225,7 +225,7 @@ def file_map(root: Path) -> dict[str, tuple[str, int, bytes]]:
 
 
 def expected_generated_mode(relative: str, source: str) -> int:
-    if relative.endswith("/.claude-plugin/plugin.json"):
+    if relative.endswith(("/.claude-plugin/plugin.json", "/.claude-plugin/icon.png")):
         return 0o644
     return stat.S_IMODE((ROOT / source).lstat().st_mode)
 
@@ -331,12 +331,13 @@ def canonical_source_map() -> dict[str, str]:
         record(plugin, ROOT / "LICENSE", Path("LICENSE"))
         record_tree(plugin, ROOT / "LICENSES", Path("LICENSES"))
         sources[f"{plugin}/.claude-plugin/plugin.json"] = "tools/generate-plugins.py"
+        sources[f"{plugin}/.claude-plugin/icon.png"] = "tools/generate-plugins.py"
     return sources
 
 
 def expected_plugin_files(plugin: str) -> set[str]:
     """Derive a plugin's locked file inventory from canonical inputs, not the generator."""
-    expected = {".claude-plugin/plugin.json"}
+    expected = {".claude-plugin/plugin.json", ".claude-plugin/icon.png"}
     skills = PLUGINS[plugin]
     for skill in skills:
         source = (

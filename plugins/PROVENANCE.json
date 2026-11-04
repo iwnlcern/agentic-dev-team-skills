@@ -1,6 +1,12 @@
 [
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/.claude-plugin/icon.png",
+    "sha256": "907c9ce9469cb4b41613efc438783b8a21a1f6f1053a35544a9ab7e6b6ea900a",
+    "source": "tools/generate-plugins.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/.claude-plugin/plugin.json",
     "sha256": "e0a0dea83eee1c83c680471d2859d4f934d2438a74ff47a8f2559257feb532e8",
     "source": "tools/generate-plugins.py"
@@ -10633,6 +10639,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/.claude-plugin/icon.png",
+    "sha256": "907c9ce9469cb4b41613efc438783b8a21a1f6f1053a35544a9ab7e6b6ea900a",
+    "source": "tools/generate-plugins.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/.claude-plugin/plugin.json",
     "sha256": "651d5b03518ec0668789973f42b288531426cb7f4e090e5c8573ebb0f350349e",
     "source": "tools/generate-plugins.py"
@@ -21160,6 +21172,12 @@
     "path": "adt-orchestrator/vendor/obra/superpowers/brainstorming.md",
     "sha256": "4f69aba9377773be0fbf27664eb06c3de7e7df5a152934321532ce3039d774f3",
     "source": "vendor/obra/superpowers/brainstorming.md"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/.claude-plugin/icon.png",
+    "sha256": "907c9ce9469cb4b41613efc438783b8a21a1f6f1053a35544a9ab7e6b6ea900a",
+    "source": "tools/generate-plugins.py"
   },
   {
     "kit_version": "2.9.7",

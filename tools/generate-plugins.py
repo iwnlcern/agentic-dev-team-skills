@@ -9,8 +9,10 @@ import importlib
 import json
 import shutil
 import stat
+import struct
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 from typing import Iterable
 
@@ -183,6 +185,120 @@ def copy_tree(source: Path, destination: Path) -> None:
         copy_file(file_path, destination / file_path.relative_to(source))
 
 
+ICON_SIZE = 1024
+ICON_LEVELS = 8
+ICON_BACKGROUND = (0x1F, 0x4F, 0xBF)
+ICON_FOREGROUND = (0xFF, 0xFF, 0xFF)
+# A paper airplane flying up and to the right: the upper wing and the body,
+# separated by a fold that narrows to the nose.
+ICON_TRIANGLES = (
+    ((812.0, 212.0), (196.0, 468.0), (470.0, 560.0)),
+    ((812.0, 212.0), (488.0, 584.0), (560.0, 812.0)),
+)
+
+
+def _icon_edges(triangle):
+    """Half-planes a*x + b*y + c >= 0 (unit normals) whose intersection is the triangle."""
+    (x0, y0), (x1, y1), (x2, y2) = triangle
+    orientation = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+    edges = []
+    for (ax, ay), (bx, by) in (((x0, y0), (x1, y1)), ((x1, y1), (x2, y2)), ((x2, y2), (x0, y0))):
+        a, b = ay - by, bx - ax
+        if orientation < 0:
+            a, b = -a, -b
+        length = (a * a + b * b) ** 0.5
+        a, b = a / length, b / length
+        edges.append((a, b, -(a * ax + b * ay)))
+    return edges
+
+
+def _icon_coverage_row(edges, yc, row):
+    """Raise row[x] to this triangle's coverage of pixel x, for one pixel row centred at yc."""
+    lo_outer, hi_outer, lo_inner, hi_inner = 0.0, float(ICON_SIZE), 0.0, float(ICON_SIZE)
+    for a, b, c in edges:
+        k = b * yc + c
+        for threshold, inner in ((-0.5, False), (0.5, True)):
+            if a > 0:
+                bound = (threshold - k) / a
+                if inner:
+                    lo_inner = max(lo_inner, bound)
+                else:
+                    lo_outer = max(lo_outer, bound)
+            elif a < 0:
+                bound = (threshold - k) / a
+                if inner:
+                    hi_inner = min(hi_inner, bound)
+                else:
+                    hi_outer = min(hi_outer, bound)
+            elif k < threshold:
+                if inner:
+                    lo_inner, hi_inner = 1.0, 0.0
+                else:
+                    return
+    start = max(0, int(lo_outer - 0.5))
+    stop = min(ICON_SIZE, int(hi_outer + 0.5) + 1)
+    for x in range(start, stop):
+        xc = x + 0.5
+        if lo_inner <= xc <= hi_inner:
+            coverage = 1.0
+        else:
+            coverage = min(a * xc + b * yc + c for a, b, c in edges) + 0.5
+            coverage = max(0.0, min(1.0, coverage))
+        level = int(coverage * ICON_LEVELS + 0.5)
+        if level > row[x]:
+            row[x] = level
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _stored_zlib(data: bytes) -> bytes:
+    """A zlib stream of stored deflate blocks only, so no compressor implementation shapes the bytes."""
+    out = bytearray(b"\x78\x01")
+    position = 0
+    while True:
+        block = data[position:position + 0xFFFF]
+        position += len(block)
+        final = position >= len(data)
+        out += bytes([1 if final else 0]) + struct.pack("<HH", len(block), len(block) ^ 0xFFFF) + block
+        if final:
+            break
+    out += struct.pack(">I", zlib.adler32(data) & 0xFFFFFFFF)
+    return bytes(out)
+
+
+def render_icon_png() -> bytes:
+    """The kit's plugin icon: a 1024 px, palette PNG of a paper airplane, byte-identical on every run."""
+    palette = bytearray()
+    for level in range(ICON_LEVELS + 1):
+        for back, fore in zip(ICON_BACKGROUND, ICON_FOREGROUND):
+            palette.append(back + ((fore - back) * level + ICON_LEVELS // 2) // ICON_LEVELS)
+    edge_sets = [_icon_edges(triangle) for triangle in ICON_TRIANGLES]
+    raw = bytearray()
+    for y in range(ICON_SIZE):
+        row = bytearray(ICON_SIZE)
+        for edges in edge_sets:
+            _icon_coverage_row(edges, y + 0.5, row)
+        raw += b"\x00" + row
+    header = struct.pack(">IIBBBBB", ICON_SIZE, ICON_SIZE, 8, 3, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"PLTE", bytes(palette))
+        + _png_chunk(b"IDAT", _stored_zlib(bytes(raw)))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+
+def write_icon(destination: Path, output: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(render_icon_png())
+    destination.chmod(0o644)
+    GENERATED_SOURCES[destination.relative_to(output).as_posix()] = "tools/generate-plugins.py"
+
+
 def write_plugin_manifest(plugin: str, data: dict[str, object], destination: Path) -> None:
     payload = {
         "author": {"name": "Jack Li"},
@@ -312,6 +428,7 @@ def generate_tree(output: Path) -> None:
         record_tree(ROOT / "LICENSES", plugin_root / "LICENSES", output)
         manifest = plugin_root / ".claude-plugin" / "plugin.json"
         write_plugin_manifest(plugin, data, manifest)
+        write_icon(plugin_root / ".claude-plugin" / "icon.png", output)
     write_provenance(output)
 
 
