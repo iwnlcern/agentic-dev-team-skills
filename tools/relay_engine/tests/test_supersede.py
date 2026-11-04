@@ -110,5 +110,98 @@ class TestAdoptedSupersession(unittest.TestCase):
                 child.close()
 
 
+
+class TestCarrierFields(TestAdoptedSupersession):
+    """PR-4 fold D1, D2: every malformed carrier gets a carrier code, never E-ENVELOPE."""
+
+    def adopt(self, data):
+        with tempfile.TemporaryDirectory() as child_name:
+            child = Root(child_name)
+            child_engine = ensure_engine_dir(child.dirfd)
+            ledger = init_schema(child_engine, child.path)
+            try:
+                establish_run_identity(ledger, "child", base64.b64decode(
+                    self.record_result["record_b64"]))
+                target_text = relay("child", "target", "child.planner", "child.implementer")
+                admit(ledger, child, parse_draft(target_text), target_text.encode(), None,
+                      origin="hand", stamp="20260808-010000", rendered_path="child/target.md")
+                try:
+                    supersede.adopt_ruling(ledger, child, data)
+                except errors.EngineError as error:
+                    return error
+                return None
+            finally:
+                ledger.close()
+                os.close(child_engine)
+                child.close()
+
+    def fields(self):
+        from relay_engine.jcs import parse_record
+        return parse_record(base64.b64decode(self.bundle_result["bundle_b64"]))[0]
+
+    def framed(self, fields):
+        from relay_engine.jcs import frame_record
+        return frame_record(fields)
+
+    def altered(self, **changes):
+        fields = self.fields()
+        for name, value in changes.items():
+            if value is KeyError:
+                del fields[name]
+            else:
+                fields[name] = value
+        return self.adopt(self.framed(fields))
+
+    def test_control_adopts(self):
+        self.assertIsNone(self.adopt(self.framed(self.fields())))
+
+    def test_deep_nesting_is_invalid(self):  # D1, C1
+        import hashlib
+        line = b"[" * 200000 + b"]" * 200000
+        data = line + b"\n" + hashlib.sha256(line).hexdigest().encode() + b"\n"
+        self.assertEqual(self.adopt(data).code, "E-CARRIER-INVALID")
+
+    def test_wrong_types_are_field(self):  # D1
+        for name, value in (("ruling_body_b64", 5), ("ruling_body_b64", None),
+                            ("ruling_body_b64", ["x"]), ("ruling_content_digest", 5),
+                            ("child_run_id", 7), ("ruling_seq", "1"), ("ruling_seq", True),
+                            ("ruling_stamp", None)):
+            with self.subTest(name=name, value=value):
+                self.assertEqual(self.altered(**{name: value}).code, "E-CARRIER-FIELD")
+
+    def test_version_and_field_set(self):  # D2
+        for changes in ({"v": True}, {"v": 2}, {"extra": "x"}, {"ruling_path": KeyError}):
+            with self.subTest(changes=repr(changes)):
+                self.assertEqual(self.altered(**changes).code, "E-CARRIER-FIELD")
+        # JCS writes 1.0 as 1, so a carrier holding 1.0 is framed by hand
+        import hashlib
+        import json
+        line = json.dumps(self.fields(), sort_keys=True, separators=(",", ":")).replace(
+            '"v":1', '"v":1.0').encode()
+        self.assertIn(b'"v":1.0', line)
+        data = line + b"\n" + hashlib.sha256(line).hexdigest().encode() + b"\n"
+        self.assertEqual(self.adopt(data).code, "E-CARRIER-FIELD")
+
+    def test_body_faults_name_the_field(self):  # D1, C2
+        import hashlib
+        latin = b"caf\xe9\n"
+        cases = (
+            ({"ruling_body_b64": "!!!not base64!!!"}, "ruling_body_b64", "not base64"),
+            ({"ruling_body_b64": base64.b64encode(latin).decode(),
+              "ruling_content_digest": hashlib.sha256(latin).hexdigest()},
+             "ruling_body_b64", "not UTF-8 text"),
+            ({"ruling_content_digest": "0" * 64}, "ruling_content_digest",
+             "does not match the carried body"),
+        )
+        for changes, field, reason in cases:
+            with self.subTest(field=field, reason=reason):
+                error = self.altered(**changes)
+                self.assertEqual(error.code, "E-CARRIER-INVALID")
+                self.assertIn(field, error.cause)
+                self.assertIn(reason, error.cause)
+                self.assertNotIn("envelope", error.remedy)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -356,26 +356,34 @@ strings.register_inventory({
 
 # Item 11 diagnostics (DD-v3-engine § 10): typed codes instead of
 # misattributed or untyped failures.
-_ITEM11_REASONS = {"no such file", "a directory", "permission denied",
-                   "not UTF-8 text", "unreadable"}
+def _is_reason(value):
+    """A short reason: a fixed phrase or an errno text (fold C9)."""
+    return strings._is_show_text(value) and len(value) <= 80
+
 strings.register_inventory({
     "error-file-missing-cause": "the file {path} cannot be read: {reason}",
-    "error-file-missing-remedy": "pass the path of a readable UTF-8 text file",
-    "error-file-missing-explain": "a --from-file argument names an existing regular file of UTF-8 text",
-    "error-root-not-found-cause": "no relay root at or above {directory}, the --root given",
+    "error-file-missing-remedy": "pass the path of an existing regular file you can read; a --from-file list is UTF-8 text",
+    "error-file-missing-explain": "a file argument names an existing regular file, read without following a FIFO, and a carrier is never read through a symlink",
+    "error-root-not-found-cause": "no relay root at or above {directory}, the --root given: {reason}",
     "error-root-not-found-remedy": "pass --root with a relay root's path: the directory that holds .engine/",
     "error-root-not-found-explain": "--root names a relay root or a directory inside one",
     "error-carrier-invalid-cause": "the carrier is not a framed record; it may be truncated or edited",
     "error-carrier-invalid-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
     "error-carrier-invalid-explain": "a ruling carrier is a framed record whose digest matches its bytes",
+    "error-carrier-invalid-field-cause": "the carrier's {field} cannot be used: {reason}",
     "error-carrier-field-cause": "the carrier is a framed record, but not a version 1 ruling carrier",
     "error-carrier-field-remedy": "export the ruling again with relay export-ruling and adopt the new file unchanged",
     "error-carrier-field-explain": "a ruling carrier holds exactly the fields relay export-ruling writes",
 }, {
     ("error-file-missing-cause", "path"):
         lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
-    ("error-file-missing-cause", "reason"):
-        lambda v: isinstance(v, str) and v in _ITEM11_REASONS,
+    ("error-file-missing-cause", "reason"): _is_reason,
+    ("error-root-not-found-cause", "reason"): _is_reason,
+    ("error-carrier-invalid-field-cause", "field"):
+        lambda v: isinstance(v, str) and v in {"ruling_body_b64", "ruling_content_digest"},
+    ("error-carrier-invalid-field-cause", "reason"):
+        lambda v: isinstance(v, str) and v in {
+            "not base64", "not UTF-8 text", "does not match the carried body"},
     ("error-root-not-found-cause", "directory"):
         lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
 })
@@ -520,6 +528,9 @@ ERROR_VARIANTS = {
     ("E-ADDRESS", "alias"): ErrorSpec(
         "error-address-cause", "error-address-alias-remedy",
         "error-address-explain", "integrity"),
+    ("E-CARRIER-INVALID", "field"): ErrorSpec(
+        "error-carrier-invalid-field-cause", "error-carrier-invalid-remedy",
+        "error-carrier-invalid-explain", "command"),
 }
 
 POLICY_CODES = {code for code, spec in ERRORS.items() if spec.cls == "policy"}

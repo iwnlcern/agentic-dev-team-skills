@@ -69,18 +69,30 @@ def export_ruling(ledger, ruling_path, child_run_id):
     return {"bundle_b64": base64.b64encode(bundle).decode("ascii")}
 
 
+# the fields relay export-ruling writes, each with its exact JSON type (a bool
+# is not an int here, and 1.0 is not 1)
+_CARRIER_TYPES = {
+    "v": int, "parent_root_uuid": str, "child_run_id": str,
+    "commissioning_path": str, "dispatch_content_digest": str,
+    "ruling_seq": int, "ruling_stamp": str, "ruling_path": str,
+    "ruling_content_digest": str, "ruling_body_b64": str,
+}
+
+
+def _carrier_field(field, reason):
+    return errors.error_for("E-CARRIER-INVALID", variant="field", field=field, reason=reason)
+
+
 def adopt_ruling(ledger, root, bundle):
     from relay_engine.envelope import draft_shape, shape_error
     try:
         fields, bundle_digest = parse_record(bundle)
-    except ValueError as exc:  # jcs.parse_record's framing and digest checks
+    except (ValueError, RecursionError) as exc:  # framing, digest, JSON, nesting
         raise errors.error_for("E-CARRIER-INVALID") from exc
-    required = {
-        "v", "parent_root_uuid", "child_run_id", "commissioning_path",
-        "dispatch_content_digest", "ruling_seq", "ruling_stamp",
-        "ruling_path", "ruling_content_digest", "ruling_body_b64",
-    }
-    if set(fields) != required or fields["v"] != 1:
+    if set(fields) != set(_CARRIER_TYPES) or any(
+            type(fields[name]) is not kind for name, kind in _CARRIER_TYPES.items()):
+        raise errors.error_for("E-CARRIER-FIELD")
+    if fields["v"] != 1:
         raise errors.error_for("E-CARRIER-FIELD")
     run_row = ledger.execute(
         "SELECT value FROM meta WHERE key='run_id'").fetchone()
@@ -98,9 +110,14 @@ def adopt_ruling(ledger, root, bundle):
             raise errors.error_for("commission-conflict")
     try:
         body = base64.b64decode(fields["ruling_body_b64"], validate=True)
+    except ValueError as exc:
+        raise _carrier_field("ruling_body_b64", "not base64") from exc
+    if hashlib.sha256(body).hexdigest() != fields["ruling_content_digest"]:
+        raise _carrier_field("ruling_content_digest", "does not match the carried body")
+    try:
         text = body.decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise errors.error_for("E-ENVELOPE") from exc
+    except UnicodeDecodeError as exc:
+        raise _carrier_field("ruling_body_b64", "not UTF-8 text") from exc
     shape = draft_shape(text)
     if shape is not None:
         raise shape_error(shape)
@@ -108,9 +125,6 @@ def adopt_ruling(ledger, root, bundle):
         envelope = parse_draft(text)
     except (ValueError, UnicodeDecodeError, errors.EngineError) as exc:
         raise errors.error_for("E-ENVELOPE") from exc
-    digest = hashlib.sha256(body).hexdigest()
-    if digest != fields["ruling_content_digest"]:
-        raise errors.error_for("E-ENVELOPE")
     target_path = envelope.headers.get("SUPERSEDES")
     target = ledger.execute(
         "SELECT seq FROM relays WHERE rendered_path=?", (target_path,)
