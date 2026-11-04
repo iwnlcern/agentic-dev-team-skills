@@ -19,6 +19,7 @@ import platform
 import re
 import select
 import shlex
+import signal
 import subprocess
 import stat
 import sys
@@ -37,7 +38,7 @@ import window  # noqa: E402  (tools/adapters/window.py, shipped beside this file
 
 ROOT_BUDGET = 1.0
 INDEX_MAX_BYTES = 16 * 1024 * 1024
-FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error"})
+FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error", "window-gone", "terminated"})
 INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed", "index-unreadable", "root-stalled"})
 SIGNATURE_STALLED = object()
 NOTE_VERSION = 1
@@ -357,6 +358,37 @@ class WindowLock:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
             os.close(self._fd)
             self._fd = None
+
+
+def window_alive(win: window.Window | None) -> bool:
+    """Parent liveness for a Claude Code window: its pid alive with the same start time (DD § 4.2, B1).
+
+    Codex windows and undetermined windows are never judged gone here; uncertainty reads alive.
+    """
+    if win is None or win.host != "claude-code" or win.pid is None:
+        return True
+    if process_probe(win.pid) == PROC_DEAD:
+        return False
+    row = window.ps_process_table(win.pid)
+    if row is None or not win.proc_start_utc:
+        return True
+    try:
+        return window.lstart_epoch(row[2]) == window.lstart_epoch(win.proc_start_utc)
+    except (ValueError, TypeError):
+        return True
+
+
+_STOP_SIGNAL: list[int] = []
+
+
+def _request_stop(signum, _frame) -> None:
+    _STOP_SIGNAL.append(signum)  # checked at the top of each poll; no work inside the handler
+
+
+def stop_line(fd: int, reason: str) -> None:
+    """The doorbell's one exit line on its stdout (the host shows it in the conversation)."""
+    with contextlib.suppress(OSError):
+        os.write(fd, f"relay-monitor: stopped: {reason}\n".encode("ascii"))
 
 
 def session_window_key(session: str) -> str:
@@ -1338,17 +1370,32 @@ def follow(args) -> int:
     with store.state_lock():
         sweep_owner_files(store)  # eventual cleanup of unreferenced owner files (P5-R1)
     sink, pacer = FdSink(sys.stdout.fileno()), Pacer()
+    _STOP_SIGNAL.clear()
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous[signum] = signal.signal(signum, _request_stop)
     last_sig = last_note = None
     last_error = None
     pending = True
     backoff_until = 0.0
     try:
         while True:
+            stop = "terminated" if _STOP_SIGNAL else None if window_alive(win) else "window gone"
+            if stop:
+                store.update(
+                    lambda n: record_exit(n, reason=stop.replace(" ", "-"), detail=None, instance=me["instance"]),
+                    timeout=2.0,
+                )
+                leader.release()
+                stop_line(sys.stdout.fileno(), stop)
+                return 0
             with root_budget():
                 note = store.load()
                 binding = resolve_binding(note, os.environ, args)
                 if binding is None:
-                    store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
+                    if note.get("phase") != "waiting-for-binding":
+                        store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
                     time.sleep(POLL_NOTE)
                     continue
                 if binding.source == "env":
@@ -1485,6 +1532,9 @@ def follow(args) -> int:
         finally:
             leader.release()
         raise
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 MODES["follow"] = follow

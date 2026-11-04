@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import select
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1485,6 +1486,112 @@ class WindowDoorbellTests(FollowProcessMixin, TmpEnv):
         time.sleep(2.0)
         self.assertIsNone(a.poll())
         self.assertIsNone(b.poll())
+
+
+class DoorbellExitTests(FollowProcessMixin, TmpEnv):
+    """The doorbell's own exits in stage A: window gone, terminated; nothing else (DD § 4.2, A5; plan Task 3)."""
+
+    def seam(self, pid, start=None):
+        return {"ADT_WINDOW_PID": str(pid), "ADT_WINDOW_START": start or utc_lstart(pid)}
+
+    def sleeper(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
+        return p
+
+    def finish(self, proc, timeout=10):
+        proc.wait(timeout=timeout)
+        return proc.returncode, proc.stdout.read().splitlines(), proc.stderr.read()
+
+    def assert_window_free(self):
+        key = self.rm.NoteStore("psess").load()["window"]
+        lock = self.rm.WindowLock(key)
+        self.assertTrue(lock.acquire())
+        lock.release()
+
+    def test_unbound_doorbell_does_not_rewrite_note_each_poll(self):
+        class StopLoop(Exception):
+            pass
+
+        saves, marks = [], []
+        real_save = self.rm.NoteStore.save
+
+        def counting_save(store, note):
+            saves.append(1)
+            return real_save(store, note)
+
+        def sleep(_seconds):
+            marks.append(len(saves))
+            if len(marks) > 5:
+                raise StopLoop()
+
+        with (
+            mock.patch.object(self.rm.NoteStore, "save", counting_save),
+            mock.patch.object(self.rm, "time", types.SimpleNamespace(**{**vars(time), "sleep": sleep})),
+        ):
+            with self.assertRaises(StopLoop):
+                self.rm.follow(ns(session="unbound-sess", host="claude-code"))
+        self.assertLessEqual(marks[5] - marks[0], 1, marks)
+
+    def test_window_gone_exits_with_one_line(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        win = self.sleeper()
+        proc = self.spawn(extra_env=self.seam(win.pid))
+        self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+        win.kill()
+        win.wait()
+        rc, lines, _ = self.finish(proc)
+        self.assertEqual(rc, 0)
+        self.assertEqual(lines[-1:], [b"relay-monitor: stopped: window gone"])
+        self.assertEqual(sum(1 for l in lines if l.startswith(b"relay-monitor: stopped:")), 1)
+        self.assert_window_free()
+
+    def test_pid_reuse_is_not_alive(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        proc = self.spawn(extra_env=self.seam(os.getpid(), "Tue Nov  3 09:00:00 2026"))
+        rc, lines, _ = self.finish(proc)
+        self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: window gone"]))
+
+    def test_unbound_doorbell_still_exits_when_window_goes(self):
+        win = self.sleeper()
+        env = {k: v for k, v in os.environ.items() if k not in ("ADT_SEAT", "ADT_RELAY_ROOT")}
+        env.update(self.seam(win.pid))
+        proc = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "follow", "--host", "claude-code", "--session", "psess"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        )
+        self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
+        self.wait_note(lambda n: n.get("leader") and n.get("phase") == "waiting-for-binding")
+        win.kill()
+        win.wait()
+        rc, lines, _ = self.finish(proc)
+        self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: window gone"]))
+        self.assert_window_free()
+
+    def test_sigterm_cleans_up(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum):
+                write_index(self.index, row(1, to="b.implementer"))
+                proc = self.spawn(extra_env=self.seam(os.getpid()))
+                self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+                proc.send_signal(signum)
+                rc, lines, _ = self.finish(proc)
+                self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: terminated"]))
+                note = self.rm.NoteStore("psess").load()
+                self.assertIsNone(note["leader"])
+                self.assertEqual(note["exit"]["reason"], "terminated")
+                self.assert_window_free()
+
+    def test_engine_outage_does_not_exit(self):
+        write_index(self.index, row(1, to="b.implementer"))
+        proc = self.spawn(extra_env=self.seam(os.getpid()))
+        self.wait_note(lambda n: self.bound(n) and n.get("phase") == "following")
+        store = self.rm.NoteStore("psess")
+        for _ in range(3):  # no daemon serves this root: every engine call is an outage
+            self.assertIn(" daemon=down ", self.rm.status_line(store, None).splitlines()[0] + " ")
+            time.sleep(1.0)
+        self.assertIsNone(proc.poll())
+        self.assertEqual(store.load()["phase"], "following")
 
 
 class FollowProcessTests(FollowProcessMixin, TmpEnv):
