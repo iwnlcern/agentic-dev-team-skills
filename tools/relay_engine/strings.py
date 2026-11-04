@@ -90,6 +90,8 @@ _CODE_VALUES = {
     "E-FIELD-LENGTH",
     "E-ADDRESS",
     "E-FINDING-NO-CHECK",
+    "E-FIELD-SHAPE",
+    "E-DRAFT-UTF8",
     "E-SQLITE-VERSION",
 }
 _OPS = {

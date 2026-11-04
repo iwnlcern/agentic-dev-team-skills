@@ -243,10 +243,8 @@ strings.register_inventory(
 # cause names the line and the refused text, the remedy needs no incident value.
 _HEADER_TEXT = {
     "error-header-grammar-cause": "line {line}: {value} is not a header line of the form KEY: value (capital ASCII letters and underscores, a colon, one space, a value with no space at either end)",
-    "error-header-grammar-remedy": "rewrite the line as KEY: value, or end the header block with an empty line before it",
+    "error-header-grammar-remedy": "rewrite the line as KEY: value with one space after the colon and no space at either end of the value, or end the header block with an empty line before it",
     "error-header-grammar-explain": "every line from the first line to the first empty line is a header line",
-    "error-header-grammar-utf8-cause": "line {line} is not UTF-8 text",
-    "error-header-grammar-utf8-remedy": "save the draft as UTF-8",
     "error-header-unknown-key-cause": "line {line}: {key} is not a v3 header field",
     "error-header-unknown-key-remedy": "use only the fields the v3 header defines; write anything else in the body",
     "error-header-unknown-key-explain": "a header field exists only when a program reads its value",
@@ -277,6 +275,12 @@ _HEADER_TEXT = {
     "error-field-enum-cause": "line {line}: {field} value {value} is not allowed; allowed: {allowed}",
     "error-field-enum-remedy": "use an allowed value for the field",
     "error-field-enum-explain": "fields with a closed set or a fixed form refuse any other value",
+    "error-field-shape-cause": "line {line}: {field} value {value} does not have the form {form}",
+    "error-field-shape-remedy": "write the value in the field's form",
+    "error-field-shape-explain": "fields with a fixed form refuse any other spelling",
+    "error-draft-utf8-cause": "the draft is not UTF-8 text: an invalid byte sequence starts at byte offset {offset} (the first byte is offset 0)",
+    "error-draft-utf8-remedy": "save the draft as UTF-8",
+    "error-draft-utf8-explain": "a draft, header and body alike, is UTF-8 text",
     "error-field-required-cause": "the draft has no {field} line: {rule}",
     "error-field-required-remedy": "add the missing line",
     "error-field-required-explain": "required fields depend on KIND and NEEDS",
@@ -316,6 +320,7 @@ for _key, _template in _HEADER_TEXT.items():
             "line": _is_line, "column": _is_line,
             "size": strings._is_count, "limit": strings._is_count,
             "length": strings._is_count, "count": strings._is_count,
+            "offset": strings._is_count,
             "key": _is_header_key, "field": _is_header_key,
             "codepoint": lambda v: (isinstance(v, str) and
                                     re.fullmatch(r"U\+[0-9A-F]{4,6}", v) is not None),
@@ -382,6 +387,8 @@ ERRORS = {
     "E-FIELD-LENGTH": _spec("field-length", "integrity"),
     "E-ADDRESS": _spec("address", "integrity"),
     "E-FINDING-NO-CHECK": _spec("finding-no-check", "integrity"),
+    "E-FIELD-SHAPE": _spec("field-shape", "integrity"),
+    "E-DRAFT-UTF8": _spec("draft-utf8", "integrity"),
     "E-SQLITE-VERSION": _spec("sql-version", "client"),
 }
 
@@ -399,9 +406,6 @@ ERROR_VARIANTS = {
         _spec("envelope-edge", "integrity"),
     ("E-PATH-ESCAPE", "not-found"):
         _spec("not-found", "policy"),
-    ("E-HEADER-GRAMMAR", "utf8"): ErrorSpec(
-        "error-header-grammar-utf8-cause", "error-header-grammar-utf8-remedy",
-        "error-header-grammar-explain", "integrity"),
     ("E-ADDRESS", "alias"): ErrorSpec(
         "error-address-cause", "error-address-alias-remedy",
         "error-address-explain", "integrity"),

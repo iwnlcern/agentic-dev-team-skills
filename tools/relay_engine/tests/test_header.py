@@ -95,8 +95,9 @@ class TestParse(Refused):
         uuid = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
         lines = replace("BUNDLE", None) + ["PARENT: " + uuid]
         self.assertEqual(header.parse(draft(lines)).parent, uuid)
-        self.refused(draft(replace("BUNDLE", None) + ["PARENT: twelve"]),
-                     "E-FIELD-ENUM", line=5)
+        error = self.refused(draft(replace("BUNDLE", None) + ["PARENT: twelve"]),
+                             "E-FIELD-SHAPE", line=5)
+        self.assertIn("#<n>", error.cause)
 
     def test_each_refusal_rule(self):
         good = draft()
@@ -114,7 +115,7 @@ class TestParse(Refused):
             "E-FIELD-FORBIDDEN": (BASE + ["VERDICT: approve"], 6, BASE),
             "E-FIELD-LENGTH": (BASE[:3] + ["SUBJECT: " + "x" * 401] + BASE[4:], 4,
                                BASE[:3] + ["SUBJECT: " + "x" * 400] + BASE[4:]),
-            "E-FIELD-ENUM (shape)": (BASE[:4] + ["BUNDLE: B_1"], 5, BASE[:4] + ["BUNDLE: b-1"]),
+            "E-FIELD-SHAPE": (BASE[:4] + ["BUNDLE: B_1"], 5, BASE[:4] + ["BUNDLE: b-1"]),
             "E-ADDRESS": (["KIND: SITREP", "TO: v3-engine.Planner"] + BASE[2:], 2, BASE),
         }
         self.assertEqual(subject, "SUBJECT: hello")
@@ -172,6 +173,7 @@ class TestParse(Refused):
         self.assertEqual(parsed.findings, (header.FindingSpec("advisory", None, "reading only"),))
         parsed = header.parse(draft(review + ["REF: file:/a", "FINDING: blocking 1 probe fails"]))
         self.assertEqual(parsed.findings, (header.FindingSpec("blocking", 1, "probe fails"),))
+        self.refused(draft(review + ["FINDING: blocking"]), "E-FIELD-SHAPE", line=7)
         self.refused(draft(BASE + ["FINDING: advisory x"]), "E-FIELD-FORBIDDEN", line=6)
         request = ["KIND: PLAN-REVIEW", "TO: v3-engine.planner", "NEEDS: review",
                    "SUBJECT: s", "PARENT: #3", "FINDING: advisory x"]
@@ -182,12 +184,12 @@ class TestParse(Refused):
                 "SUBJECT: s", "PARENT: #3"]
         parsed = header.parse(draft(fold + ["FIXES: F4 0123456789abcdef0123456789abcdef01234567"]))
         self.assertEqual(parsed.fixes, (("F4", "0123456789abcdef0123456789abcdef01234567"),))
-        self.refused(draft(fold + ["FIXES: F4 not-a-commit"]), "E-FIELD-ENUM", line=6)
+        self.refused(draft(fold + ["FIXES: F4 not-a-commit"]), "E-FIELD-SHAPE", line=6)
         self.refused(draft(BASE + ["FIXES: F4 0123456"]), "E-FIELD-FORBIDDEN", line=6)
         parsed = header.parse(draft(BASE + ["RESOLVE: F4 withdrawn the probe was wrong"]))
         self.assertEqual(parsed.resolves, (("F4", "withdrawn", "the probe was wrong"),))
         self.refused(draft(BASE + ["RESOLVE: F4 rejected why"]), "E-FIELD-ENUM", line=6)
-        self.refused(draft(BASE + ["RESOLVE: F4 withdrawn"]), "E-FIELD-ENUM", line=6)
+        self.refused(draft(BASE + ["RESOLVE: F4 withdrawn"]), "E-FIELD-SHAPE", line=6)
 
 
 class TestReviewFocus(Refused):
@@ -257,19 +259,29 @@ class TestReviewFocus(Refused):
         for line in ("SUBJECT:hello", "SUBJECT:  hello", " SUBJECT: hello",
                      "SUBJECT： hello", "SUBJECT: hello ", "ＳUBJECT: hello"):
             with self.subTest(line=line):
-                self.refused(draft(BASE[:3] + [line] + BASE[4:]), "E-HEADER-GRAMMAR", line=4)
+                error = self.refused(draft(BASE[:3] + [line] + BASE[4:]),
+                                     "E-HEADER-GRAMMAR", line=4)
+                self.assertIn("space", error.remedy)
 
-    def test_body_bytes_need_not_be_utf8(self):
-        self.refused(b"KIND: SITREP\nTO: \xff\n\nbody", "E-HEADER-GRAMMAR", line=2)
-        parsed = header.parse(draft()[:-len(b"body text\n")] + b"\xff\xfe raw")
-        self.assertEqual(parsed.body, b"\xff\xfe raw")
+    def test_draft_must_be_utf8(self):
+        error = self.refused(b"KIND: SITREP\nTO: \xff\n\nbody", "E-DRAFT-UTF8")
+        self.assertEqual(error.params["offset"], 17)
+        good = draft()
+        error = self.refused(good + b"tail \xc3(", "E-DRAFT-UTF8")
+        self.assertEqual(error.params["offset"], len(good) + 5)
+        # positive control: non-ASCII UTF-8 in header and body parses
+        parsed = header.parse(draft(replace("SUBJECT", "caf\u00e9"), body="na\u00efve \u2014 ok\n"))
+        self.assertEqual(parsed.body, "na\u00efve \u2014 ok\n".encode("utf-8"))
+        # size is still checked first
+        self.refused(draft(body="x" * 65537) + b"\xff", "E-BODY-SIZE")
 
     def test_every_refusal_renders(self):
         for code in ("E-HEADER-GRAMMAR", "E-HEADER-UNKNOWN-KEY", "E-HEADER-DUPLICATE",
                      "E-HEADER-EMPTY", "E-HEADER-CONTROL", "E-HEADER-TITLE-LINE",
                      "E-HEADER-CRLF", "E-HEADER-BOM", "E-HEADER-SIZE", "E-BODY-SIZE",
                      "E-FIELD-ENUM", "E-FIELD-REQUIRED", "E-FIELD-FORBIDDEN",
-                     "E-FIELD-LENGTH", "E-ADDRESS", "E-FINDING-NO-CHECK"):
+                     "E-FIELD-LENGTH", "E-FIELD-SHAPE", "E-ADDRESS",
+                     "E-FINDING-NO-CHECK", "E-DRAFT-UTF8"):
             with self.subTest(code=code):
                 self.assertIn(code, errors.ERRORS)
                 cause, remedy = errors.explain_for(code)

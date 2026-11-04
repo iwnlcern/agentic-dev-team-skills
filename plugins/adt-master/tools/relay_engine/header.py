@@ -178,6 +178,10 @@ def parse(data, validate_address=syntactic_address):
     if not isinstance(data, bytes):
         raise TypeError("draft bytes required")
     header, body, header_bytes = _split(data)
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as bad:
+        raise _refuse("E-DRAFT-UTF8", offset=bad.start) from None
     lines = header.split(b"\n") if header else []
     seen = {}
     values = []  # (line number, key, value) in header order
@@ -214,10 +218,7 @@ def _read_line(number, raw):
         raise _refuse("E-HEADER-BOM", line=number)
     if raw.endswith(b"\r"):
         raise _refuse("E-HEADER-CRLF", line=number)
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise _refuse("E-HEADER-GRAMMAR", variant="utf8", line=number) from None
+    text = raw.decode("utf-8")  # the whole draft decoded in parse()
     for column, char in enumerate(text, start=1):
         code = ord(char)
         if ((code < 32 and char != "\t") or 127 <= code <= 159 or
@@ -269,8 +270,8 @@ def _enum(number, field, value, allowed):
 
 
 def _shape(number, field, value, form):
-    raise _refuse("E-FIELD-ENUM", line=number, field=field,
-                  value=_display(value), allowed=form)
+    raise _refuse("E-FIELD-SHAPE", line=number, field=field,
+                  value=_display(value), form=form)
 
 
 def _validate(values, seen, body, header_bytes, validate_address):
@@ -360,15 +361,15 @@ def _findings(kind, needs, entries, ref_count):
         summary = rest
         if _INDEX.fullmatch(first_word):
             index, summary = int(first_word), after
+        if not summary:
+            _shape(number, "FINDING", value,
+                   "<blocking|advisory> [<REF line number>] <summary>")
         if index is None and severity == "blocking":
             raise _refuse("E-FINDING-NO-CHECK", line=number, cited="none",
                           count=ref_count)
         if index is not None and index > ref_count:
             raise _refuse("E-FINDING-NO-CHECK", line=number,
                           cited=str(index), count=ref_count)
-        if not summary:
-            _shape(number, "FINDING", value,
-                   "<blocking|advisory> [<REF line number>] <summary>")
         if len(summary) > 200:
             raise _refuse("E-FIELD-LENGTH", line=number, field="FINDING",
                           length=len(summary), limit=200)
