@@ -49,8 +49,15 @@ DOCKERFILE = Path(__file__).resolve().parent / "release-check.Dockerfile"
 CONTAINER_OUT = "/out"
 CONTAINER_SCRATCH = "/scratch"
 CONTAINER_PLAN = "container-plan.json"
-# Host-side wait beyond the container's own cap and kill grace before it is killed.
+# Host-side wait beyond the container's own cap and kill grace before it is stopped.
 CONTAINER_MARGIN_SECONDS = 120
+# docker stop's timeout beyond the in-container grace, so the runner inside finishes its
+# own grace and writes results before Docker's SIGKILL (plan r4 L4; review 4 B1 probe).
+DOCKER_STOP_MARGIN_SECONDS = 20
+# Each linux-leg container carries this label with the run's id (plan r4 T11).
+RUN_LABEL = "adt.release-check.run"
+CONTAINER_RECORD = "container.json"
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 DOCKER_PLATFORMS = {"aarch64": "linux/arm64", "arm64": "linux/arm64",
                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
 # Set when the run is interrupted; legs stop their steps (or container) and record it.
@@ -59,6 +66,18 @@ STOP = threading.Event()
 
 class SetupError(Exception):
     """A leg could not start: exit 2."""
+
+
+class Stopped(Exception):
+    """The run was interrupted before the leg started its steps."""
+
+
+def _request_stop(signum, frame):
+    """SIGINT, SIGTERM and SIGHUP: stop once; later signals are ignored until results are written."""
+    if not STOP.is_set():
+        STOP.set()
+        print(f"release-check: {signal.Signals(signum).name}: stopping the steps and writing results; "
+              "further interrupts are ignored until then", file=sys.stderr, flush=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -356,7 +375,7 @@ def _now():
 class LegResult:
     leg: str
     exit: int
-    results_path: Path
+    results_path: Path = None
 
 
 def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, exclusions=EXCLUSIONS,
@@ -540,13 +559,21 @@ def ensure_image(docker, platform=None):
                                   tag], capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if present.returncode == 0 and present.stdout.strip() == platform:
             return tag
-        with open(DOCKERFILE, "rb") as dockerfile:
-            built = subprocess.run([docker, "build", "-q", "--platform", platform, "-t", tag, "-"],
-                                   stdin=dockerfile, capture_output=True, text=True)
+        with open(DOCKERFILE, "rb") as dockerfile, tempfile.TemporaryFile() as errors:
+            build = subprocess.Popen([docker, "build", "-q", "--platform", platform, "-t", tag, "-"],
+                                     stdin=dockerfile, stdout=subprocess.DEVNULL, stderr=errors)
+            while build.poll() is None:
+                if STOP.is_set():
+                    build.terminate()
+                    build.wait()
+                    raise Stopped(f"interrupted during docker build of {tag}")
+                time.sleep(0.2)
+            errors.seek(0)
+            stderr = errors.read().decode(errors="replace")
     except OSError as error:
         raise SetupError(f"docker could not run ({docker}): {error}") from error
-    if built.returncode != 0:
-        raise SetupError(f"docker build of {tag} failed: {built.stderr.strip()[-800:]}")
+    if build.returncode != 0:
+        raise SetupError(f"docker build of {tag} failed: {stderr.strip()[-800:]}")
     return tag
 
 
@@ -640,9 +667,41 @@ def _run_in_container(args, repo, environ):
                    repo=repo, environ=environ, exclusions=exclusions, leg_dir=out).exit
 
 
+def _labelled(docker, label):
+    listing = subprocess.run([docker, "ps", "-aq", "--filter", f"label={label}"], capture_output=True,
+                             text=True, stdin=subprocess.DEVNULL)
+    return listing.stdout.split()
+
+
+def _stop_container(docker, label, proc):
+    """Stop this run's container so the runner inside writes its results: docker stop with a
+    timeout beyond the in-container grace, retried until `docker run` exits (the container
+    may not exist yet), then docker kill as the last resort."""
+    timeout = int(KILL_GRACE_SECONDS) + DOCKER_STOP_MARGIN_SECONDS
+    give_up = time.monotonic() + timeout + CONTAINER_MARGIN_SECONDS
+    while proc.poll() is None:
+        containers = _labelled(docker, label)
+        if containers:
+            subprocess.run([docker, "stop", "-t", str(timeout), *containers], capture_output=True,
+                           stdin=subprocess.DEVNULL)
+        if proc.poll() is None and time.monotonic() > give_up:
+            subprocess.run([docker, "kill", *_labelled(docker, label)], capture_output=True,
+                           stdin=subprocess.DEVNULL)
+            proc.kill()
+        time.sleep(0.2)
+    proc.wait()
+    leftover = _labelled(docker, label)
+    if leftover:
+        subprocess.run([docker, "rm", "-f", *leftover], capture_output=True, stdin=subprocess.DEVNULL)
+
+
 def _run_linux_host(steps, args, repo, environ, exclusions):
     leg_dir = Path(args.out) / "linux"
     leg_dir.mkdir(parents=True, exist_ok=True)
+    results_path = leg_dir / "results.json"
+    run_id = uuid.uuid4().hex
+    name, label = f"adt-release-check-{run_id[:12]}", f"{RUN_LABEL}={run_id}"
+    (leg_dir / CONTAINER_RECORD).write_text(json.dumps({"name": name, "label": label}) + "\n")
     try:
         docker = environ.get("DOCKER") or shutil.which("docker", path=environ.get("PATH"))
         if not docker or not os.access(docker, os.X_OK):
@@ -652,27 +711,44 @@ def _run_linux_host(steps, args, repo, environ, exclusions):
         command = docker_args(repo, common_git_dir(repo), args.out, image, _commit(repo) or "",
                               extra=["--workers", str(args.workers), "--cap-seconds", str(args.cap_seconds)],
                               platform=platform_name, image_id=image_id(docker, image))
+        if STOP.is_set():
+            raise Stopped("interrupted before the container started")
     except SetupError as error:
         print(f"release-check: linux leg setup error: {error}", file=sys.stderr)
-        return 2
+        return LegResult("linux", 2)
+    except Stopped as stopped:
+        print(f"release-check: linux leg {stopped}", file=sys.stderr)
+        return LegResult("linux", 1)
     write_container_plan(leg_dir, steps, "linux", exclusions)
-    name = "adt-release-check-" + uuid.uuid4().hex[:12]
-    command = [docker, command[0], "--name", name] + command[1:]
+    command = [docker, command[0], "--name", name, "--label", label] + command[1:]
     with open(leg_dir / "docker.log", "wb") as log:
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         give_up = time.monotonic() + args.cap_seconds + KILL_GRACE_SECONDS + CONTAINER_MARGIN_SECONDS
         while proc.poll() is None and not STOP.is_set() and time.monotonic() < give_up:
             time.sleep(0.2)
-        code = proc.poll()
-        if code is None:
-            # Interrupted, or the container outlived its own cap: stop it.
-            subprocess.run([docker, "kill", name], capture_output=True, stdin=subprocess.DEVNULL)
-            proc.wait()
-            code = 1
-    if code not in (0, 1, 2):
+        overdue = proc.poll() is None and not STOP.is_set()
+        # An interrupt that lands before the container exists stops a leg that ran nothing.
+        before_start = proc.poll() is None and STOP.is_set() and not _labelled(docker, label)
+        if proc.poll() is None:
+            _stop_container(docker, label, proc)
+    code = proc.returncode
+    written = results_path.is_file()
+    if before_start and not written:
+        print(f"release-check: linux leg interrupted before its container started (exit {code})",
+              file=sys.stderr)
+        code = 1
+    elif overdue:
+        print("release-check: linux leg container outlived its own cap; stopped", file=sys.stderr)
+        code = 2
+    elif code not in (0, 1, 2):
+        print(f"release-check: linux leg container exited {code}, not the runner's 0, 1 or 2",
+              file=sys.stderr)
+        code = 2
+    elif code in (0, 1) and not written:
+        print(f"release-check: linux leg exited {code} but wrote no {results_path}", file=sys.stderr)
         code = 2
     print(f"release-check: linux leg exit {code} (container log {leg_dir / 'docker.log'})", file=sys.stderr)
-    return code
+    return LegResult("linux", code, results_path if written else None)
 
 
 def _under_home(path, environ):
@@ -696,18 +772,26 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS):
     args = parser.parse_args(argv)
 
     STOP.clear()
-    previous = None
+    previous = {}
     if threading.current_thread() is threading.main_thread():
-        def _terminate(signum, frame):
-            raise KeyboardInterrupt
-        previous = signal.signal(signal.SIGTERM, _terminate)
+        previous = {sig: signal.signal(sig, _request_stop) for sig in STOP_SIGNALS}
     try:
         if args.in_container:
             return _run_in_container(args, repo, environ)
         return _run_host(args, repo, environ, exclusions)
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _guarded(leg, function, *args, **kwargs):
+    """A leg that raises is a runner error: exit 2, with the traceback on stderr."""
+    try:
+        return function(*args, **kwargs)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        print(f"release-check: {leg} leg runner error", file=sys.stderr)
+        return LegResult(leg, 2)
 
 
 def _run_host(args, repo, environ, exclusions):
@@ -719,6 +803,9 @@ def _run_host(args, repo, environ, exclusions):
         for exclusion in exclusions:
             print(f"release-check: --release refuses exclusion {exclusion.path} ({exclusion.reason})",
                   file=sys.stderr)
+        return 2
+    if os.path.lexists(args.out) and not os.path.isdir(args.out):
+        print(f"release-check: --out {args.out} exists and is not a directory", file=sys.stderr)
         return 2
     used = [p for p in ("release-check.json", "mac", "linux") if os.path.lexists(Path(args.out) / p)]
     if used:
@@ -734,31 +821,25 @@ def _run_host(args, repo, environ, exclusions):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     legs = ("mac", "linux") if args.leg == "both" else (args.leg,)
-    exits = {}
+    legs_run = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        linux = (pool.submit(_run_linux_host, steps, args, repo, environ, exclusions)
+        linux = (pool.submit(_guarded, "linux", _run_linux_host, steps, args, repo, environ, exclusions)
                  if "linux" in legs else None)
-        try:
-            if "mac" in legs:
-                exits["mac"] = run_leg("mac", steps, args.workers, args.cap_seconds, out, repo=repo,
-                                       environ=environ, exclusions=exclusions).exit
-            if linux is not None:
-                while True:
-                    try:
-                        exits["linux"] = linux.result(timeout=0.5)
-                        break
-                    except concurrent.futures.TimeoutError:
-                        continue
-        except KeyboardInterrupt:
-            STOP.set()
-            if linux is not None:
-                exits["linux"] = linux.result()
-            if "mac" in legs:
-                exits.setdefault("mac", 1)
+        if "mac" in legs:
+            legs_run["mac"] = _guarded("mac", run_leg, "mac", steps, args.workers, args.cap_seconds, out,
+                                       repo=repo, environ=environ, exclusions=exclusions)
+        if linux is not None:
+            # Polled, so the main thread keeps taking signals while the linux leg runs.
+            while not linux.done():
+                time.sleep(0.2)
+            legs_run["linux"] = linux.result()
+    exits = {leg: result.exit for leg, result in legs_run.items()}
     overall = 2 if 2 in exits.values() else 1 if 1 in exits.values() else 0
     summary = {"commit": _commit(repo), "finished": _now(), "exit": overall,
-               "legs": {leg: {"exit": code, "results": str(out / leg / "results.json")}
-                        for leg, code in exits.items()}}
+               "interrupted": STOP.is_set(),
+               "legs": {leg: {"exit": result.exit,
+                              "results": str(result.results_path) if result.results_path else None}
+                        for leg, result in legs_run.items()}}
     (out / "release-check.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"release-check: overall exit {overall} ({out / 'release-check.json'})", file=sys.stderr)
     return overall

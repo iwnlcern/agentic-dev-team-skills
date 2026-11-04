@@ -335,13 +335,39 @@ DRIVER = textwrap.dedent('''
 ''')
 
 
-def start_driver(repo, *argv):
+def start_driver(repo, *argv, env=None):
     """The runner in its own process (so a test can signal it), on a fixture repository."""
     driver = repo.pids / "driver.py"
     driver.write_text(DRIVER)
     return subprocess.Popen([sys.executable, str(driver), str(SCRIPT), str(repo.repo), *argv],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
+                            stderr=subprocess.STDOUT, text=True, env=env)
+
+
+def stop_driver(driver):
+    if driver.poll() is None:
+        driver.kill()
+    driver.communicate()
+
+
+IGNORES_SIGTERM = '''
+    import signal
+    class T(unittest.TestCase):
+        def test_stubborn(self):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            open({pidfile!r}, "w").write(str(os.getpid()))
+            time.sleep(120)
+'''
+
+
+def wait_for_path(path, seconds=20.0):
+    """Wait until path exists; a .json record must also be complete (it ends with a newline)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.exists() and (path.suffix != ".json" or path.read_text().endswith("\n")):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def wait_for(path, seconds=20.0):
@@ -369,7 +395,7 @@ class Interrupts(unittest.TestCase):
         ''')
         repo.passing("test_b_pending")
         driver = start_driver(repo, "full", "--leg", "mac", "--workers", "1", "--out", str(repo.out))
-        self.addCleanup(driver.kill)
+        self.addCleanup(stop_driver, driver)
         self.assertTrue(wait_for(module_pid), "fixture module never started")
         driver.send_signal(sig)
         output, _ = driver.communicate(timeout=60)
@@ -385,6 +411,42 @@ class Interrupts(unittest.TestCase):
 
     def test_sigterm_stops_steps_and_writes_results(self):
         self.interrupted_run(signal.SIGTERM)
+
+    def test_sighup_stops_and_writes(self):
+        self.interrupted_run(signal.SIGHUP)
+
+    def stubborn_repo(self):
+        repo = FixtureRepo(self)
+        repo.repo = repo.root
+        pidfile = repo.pids / "stubborn"
+        self.addCleanup(kill_pidfile, pidfile)
+        repo.module("test_a_stubborn", IGNORES_SIGTERM.format(pidfile=str(pidfile)))
+        return repo, pidfile
+
+    def test_cap_escalates_to_sigkill(self):
+        repo, pidfile = self.stubborn_repo()
+        driver = start_driver(repo, "full", "--leg", "mac", "--workers", "1", "--cap-seconds", "2",
+                              "--out", str(repo.out))
+        self.addCleanup(stop_driver, driver)
+        output, _ = driver.communicate(timeout=60)
+        self.assertEqual(driver.returncode, 1, output)
+        self.assertTrue(wait_gone(int(pidfile.read_text())), "a SIGTERM-ignoring step survived the cap")
+        self.assertEqual(repo.step("relay_engine.tests.test_a_stubborn")["outcome"], "unfinished")
+
+    def test_second_interrupt_during_grace(self):
+        repo, pidfile = self.stubborn_repo()
+        driver = start_driver(repo, "full", "--leg", "mac", "--workers", "1", "--out", str(repo.out))
+        self.addCleanup(stop_driver, driver)
+        self.assertTrue(wait_for(pidfile), "fixture module never started")
+        driver.send_signal(signal.SIGINT)
+        time.sleep(1)
+        driver.send_signal(signal.SIGINT)
+        output, _ = driver.communicate(timeout=60)
+        self.assertEqual(driver.returncode, 1, output)
+        self.assertTrue((repo.out / "mac" / "results.json").is_file(), output)
+        self.assertTrue(wait_gone(int(pidfile.read_text())), "the step was not SIGKILLed")
+        self.assertEqual(repo.step("relay_engine.tests.test_a_stubborn")["outcome"], "unfinished")
+        self.assertTrue(repo.results()["interrupted"])
 
 
 class UsedOut(unittest.TestCase):
@@ -494,6 +556,14 @@ class StartRefusals(unittest.TestCase):
                                environ=dict(os.environ), exclusions=())
             self.assertEqual(code, 2, path)
             self.assertFalse(os.path.exists(path), path)
+
+    def test_out_is_file_is_setup_error(self):
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        repo.out.write_text("not a directory\n")
+        code, err = repo.run()
+        self.assertEqual(code, 2, err)
+        self.assertIn("not a directory", err)
 
     def test_out_dir_under_home_accepted(self):
         repo = FixtureRepo(self)
@@ -776,32 +846,113 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(len(step["leaked"]), 1, step)
         self.assertEqual(linux["unattributed"], [])
 
-    def test_interrupt_kills_the_container(self):
+    STARTS = '''
+        class T(unittest.TestCase):
+            def test_slow(self):
+                open(os.path.join(os.environ["RELAY_ENGINE_RESULTS_ROOT"], {name!r}), "w").close()
+                time.sleep(120)
+    '''
+
+    def interrupted_linux_leg(self, modules):
+        """Interrupt a linux leg once every named module has started; return its records."""
         fixture = LinuxFixture(self)
-        fixture.module("test_b_slow", '''
-            class T(unittest.TestCase):
-                def test_slow(self):
-                    time.sleep(120)
-        ''')
+        for name, body in modules.items():
+            fixture.module(name, body)
         fixture.finish()
-        before = self.running_containers()
-        driver = start_driver(fixture, "full", "--leg", "linux", "--workers", "2",
+        driver = start_driver(fixture, "full", "--leg", "linux", "--workers", str(len(modules)),
                               "--out", str(fixture.out))
-        self.addCleanup(driver.kill)
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and not (self.running_containers() - before):
+        self.addCleanup(stop_driver, driver)
+        label = self.run_label(fixture)
+        self.addCleanup(self.remove_labelled, label)
+        started = fixture.out / "linux" / "engine-results"
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and not all((started / n).exists() for n in modules):
             time.sleep(0.2)
-        started = self.running_containers() - before
-        self.assertTrue(started, "the linux leg's container never started")
+        self.assertTrue(all((started / n).exists() for n in modules), "the steps never started")
+        driver.send_signal(signal.SIGINT)
+        output, _ = driver.communicate(timeout=120)
+        self.assertEqual(driver.returncode, 1, output)
+        self.assertEqual(self.labelled(label), [], "a container of this run survived the interrupt")
+        results = fixture.out / "linux" / "results.json"
+        self.assertTrue(results.is_file(), output)
+        summary = json.loads((fixture.out / "release-check.json").read_text())
+        self.assertTrue(summary["interrupted"])
+        self.assertEqual(summary["legs"]["linux"]["results"], str(results))
+        linux = json.loads(results.read_text())
+        self.assertTrue(linux["interrupted"])
+        return linux
+
+    def test_interrupt_kills_the_container(self):
+        linux = self.interrupted_linux_leg({"test_b_slow": self.STARTS.format(name="test_b_slow")})
+        step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_slow")
+        self.assertEqual(step["outcome"], "unfinished")
+
+    def test_linux_interrupt_writes_results(self):
+        stubborn = self.STARTS.format(name="test_b_stubborn").replace(
+            "def test_slow(self):", "def test_slow(self):\n                import signal; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)")
+        linux = self.interrupted_linux_leg({"test_b_plain": self.STARTS.format(name="test_b_plain"),
+                                            "test_b_stubborn": stubborn})
+        outcomes = {s["id"]: s["outcome"] for s in linux["steps"]}
+        self.assertEqual(outcomes["relay_engine.tests.test_b_stubborn"], "unfinished")
+        self.assertEqual(outcomes["relay_engine.tests.test_b_plain"], "unfinished")
+
+    def fake_docker(self, fixture, run_lines):
+        """A docker that runs `run_lines` for `docker run` and passes everything else through."""
+        script = fixture.pids / "docker"
+        script.write_text(f"#!/bin/sh\nif [ \"$1\" = run ]; then\n{run_lines}\nfi\n"
+                          f"exec {docker_binary()} \"$@\"\n")
+        script.chmod(0o755)
+        return script
+
+    def test_interrupt_during_docker_setup(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_slow", self.STARTS.format(name="test_b_slow"))
+        fixture.finish()
+        mark = fixture.pids / "docker-run-called"
+        docker = self.fake_docker(fixture, f": > {mark}\nsleep 3")
+        driver = start_driver(fixture, "full", "--leg", "linux", "--out", str(fixture.out),
+                              env={**os.environ, "DOCKER": str(docker)})
+        self.addCleanup(stop_driver, driver)
+        label = self.run_label(fixture)
+        self.addCleanup(self.remove_labelled, label)
+        self.assertTrue(wait_for_path(mark), "docker run was never called")
+        self.assertEqual(self.labelled(label), [], "the container was already visible")
         driver.send_signal(signal.SIGINT)
         output, _ = driver.communicate(timeout=90)
-        self.assertNotEqual(driver.returncode, 0, output)
-        self.assertFalse(self.running_containers() & started, "container survived the interrupt")
+        self.assertEqual(driver.returncode, 1, output)
+        self.assertEqual(self.labelled(label), [], output)
+        time.sleep(5)
+        self.assertEqual(self.labelled(label), [], "a container of this run started after the leg ended")
+        summary = json.loads((fixture.out / "release-check.json").read_text())
+        self.assertTrue(summary["interrupted"])
 
-    def running_containers(self):
-        listing = subprocess.run([docker_binary(), "ps", "-q", "--filter", f"ancestor={self.image}"],
+    def test_container_kill_is_not_green(self):
+        fixture = LinuxFixture(self).finish()
+        base = fixture.out
+        for name, lines in (("killed", "exit 137"), ("daemon-error", "exit 125"),
+                            ("no-results", "exit 0")):
+            fixture.out = base.parent / f"{base.name}-{name}"
+            self.addCleanup(shutil.rmtree, fixture.out, True)
+            docker = self.fake_docker(fixture, lines)
+            code, err = fixture.run_legs("linux", environ={**os.environ, "DOCKER": str(docker)})
+            self.assertEqual(code, 2, f"{name}: {err}")
+            summary = json.loads((fixture.out / "release-check.json").read_text())
+            self.assertEqual(summary["legs"]["linux"], {"exit": 2, "results": None}, name)
+
+    def run_label(self, fixture, seconds=60.0):
+        record = fixture.out / "linux" / "container.json"
+        self.assertTrue(wait_for_path(record, seconds), "the leg wrote no container record")
+        return json.loads(record.read_text())["label"]
+
+    def labelled(self, label):
+        listing = subprocess.run([docker_binary(), "ps", "-aq", "--filter", f"label={label}"],
                                  capture_output=True, text=True, check=True).stdout
-        return set(listing.split())
+        return listing.split()
+
+    def remove_labelled(self, label):
+        for container in self.labelled(label):
+            subprocess.run([docker_binary(), "rm", "-f", container], capture_output=True)
 
     def test_git_works_in_linked_worktree(self):
         fixture = LinuxFixture(self, linked=True).finish(linked=True)
