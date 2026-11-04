@@ -38,6 +38,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 MARKER = "ADT_RELEASE_STEP"
 KILL_GRACE_SECONDS = 10.0
+# A release check runs both legs, each under R265's 30 minutes (DD-v3-tests:42, :63).
+RELEASE_CAP_SECONDS = 1800
+STARTED_LOG = "started.jsonl"
 POLL_SECONDS = 0.05
 # SIGKILL passes over a step's leftovers before the runner stops trying (plan r4 L6).
 SWEEP_ROUNDS = 5
@@ -192,11 +195,12 @@ def _excluded(step, exclusions):
 
 
 def _discovered_units(repo):
+    """Every test_*.py under tools/ at any depth (plan r6 change 2), the checks, the battery,
+    and the directory steps' directories."""
     repo = Path(repo)
-    units = []
-    for pattern in ("tools/relay_engine/tests/test_*.py", "tools/adapters/tests/test_*.py",
-                    "tools/check-*.py"):
-        units.extend(_rel(repo, p) for p in sorted(repo.glob(pattern)))
+    units = [_rel(repo, p) for p in sorted(repo.glob("tools/**/test_*.py"))
+             if "__pycache__" not in p.relative_to(repo).parts]
+    units.extend(_rel(repo, p) for p in sorted(repo.glob("tools/check-*.py")))
     if (repo / "tools/mtbattery.py").is_file():
         units.append("tools/mtbattery.py")
     for directory in ("tools/kit_tests", "tools/release_check_tests"):
@@ -209,9 +213,13 @@ def uncovered(repo, steps, exclusions):
     """Discovered units no step or exclusion covers, plus exclusions that match nothing."""
     repo = Path(repo)
     covered = {c for s in steps if not _excluded(s, exclusions) for c in s.covers}
+    # A directory step covers every file inside its directory.
+    directories = tuple(c + "/" for c in covered if (repo / c).is_dir())
     problems = []
     for unit in _discovered_units(repo):
-        if unit not in covered and not any(_matches(unit, e) for e in exclusions):
+        if unit in covered or unit.startswith(directories):
+            continue
+        if not any(_matches(unit, e) for e in exclusions):
             problems.append(f"{unit}: discovered but neither a step nor an exclusion")
     for exclusion in exclusions:
         if not list(repo.glob(exclusion.path)):
@@ -446,9 +454,10 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     running = {}
     sweeps = []
     errors = []
+    started_log = open(leg_out / STARTED_LOG, "a", encoding="utf-8")
     try:
         _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline,
-                  {s.id for s in active if s.summary})
+                  {s.id for s in active if s.summary}, started_log)
     except KeyboardInterrupt:
         STOP.set()
     except Exception as error:  # noqa: BLE001 - any runner failure still stops and writes
@@ -457,6 +466,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     if STOP.is_set():
         results["interrupted"] = True
     _stop_all(running, sweeps, rows, errors)
+    started_log.close()
     for step in pending:
         Path(rows[step.id]["log"]).touch()
     try:
@@ -480,7 +490,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     return LegResult(leg, exit_code, results_path)
 
 
-def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline, summary_ids):
+def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline, summary_ids, started_log):
     """Start and reap steps, and sweep finished steps' leftovers, until all are done,
     the cap passes or the run is stopped."""
     while (pending or running or sweeps) and not STOP.is_set():
@@ -494,6 +504,10 @@ def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline,
                                     stdout=handle, stderr=subprocess.STDOUT, close_fds=True,
                                     start_new_session=True)
             running[step.id] = (proc, marker, time.monotonic(), handle)
+            # Written as the step starts, so a runner killed outright leaves a record of what
+            # to stop (plan r6 change 3; tools/TESTING.md "After a SIGKILL").
+            started_log.write(json.dumps({"id": step.id, "pid": proc.pid, "marker": marker}) + "\n")
+            started_log.flush()
         for step_id, (proc, marker, started, handle) in list(running.items()):
             code = proc.poll()
             if code is None:
@@ -829,11 +843,17 @@ def _run_host(args, repo, environ, exclusions, history):
         print(f"release-check: --out {args.out} is not under $HOME; macOS purges /tmp and "
               "/var/folders, so results there may vanish before they are cited", file=sys.stderr)
         return 2
-    if args.release and exclusions:
-        for exclusion in exclusions:
-            print(f"release-check: --release refuses exclusion {exclusion.path} ({exclusion.reason})",
-                  file=sys.stderr)
-        return 2
+    if args.release:
+        refusals = [f"exclusion {e.path} ({e.reason})" for e in exclusions]
+        if args.leg != "both":
+            refusals.append(f"--leg {args.leg}: a release check runs both legs")
+        if args.cap_seconds > RELEASE_CAP_SECONDS:
+            refusals.append(f"--cap-seconds {args.cap_seconds}: a release leg is capped at "
+                            f"{RELEASE_CAP_SECONDS} s (R265)")
+        for refusal in refusals:
+            print(f"release-check: --release refuses {refusal}", file=sys.stderr)
+        if refusals:
+            return 2
     if os.path.lexists(args.out) and not os.path.isdir(args.out):
         print(f"release-check: --out {args.out} exists and is not a directory", file=sys.stderr)
         return 2
@@ -866,7 +886,7 @@ def _run_host(args, repo, environ, exclusions, history):
     exits = {leg: result.exit for leg, result in legs_run.items()}
     overall = 2 if 2 in exits.values() else 1 if 1 in exits.values() else 0
     summary = {"commit": _commit(repo), "finished": _now(), "exit": overall,
-               "interrupted": STOP.is_set(),
+               "release": args.release, "cap_seconds": args.cap_seconds, "interrupted": STOP.is_set(),
                "legs": {leg: {"exit": result.exit,
                               "results": str(result.results_path) if result.results_path else None}
                         for leg, result in legs_run.items()}}

@@ -15,6 +15,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -213,6 +214,11 @@ DETACH = textwrap.dedent('''
 ''')
 
 
+def kill_group(pgid):
+    with contextlib.suppress(OSError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
 def kill_pidfile(path):
     try:
         os.kill(int(Path(path).read_text()), signal.SIGKILL)
@@ -347,7 +353,8 @@ def start_driver(repo, *argv, env=None):
 def stop_driver(driver):
     if driver.poll() is None:
         driver.kill()
-    driver.communicate()
+    if driver.stdout and not driver.stdout.closed:
+        driver.communicate()
 
 
 IGNORES_SIGTERM = '''
@@ -514,11 +521,22 @@ class StartRefusals(unittest.TestCase):
         self.assertIn("tools/check-old.py", err)
         self.assertFalse((repo.out / "mac" / "results.json").exists())
 
-    def test_release_mode_starts_with_empty_exclusions(self):
+    def test_release_refuses_one_leg(self):
         repo = FixtureRepo(self)
         repo.passing("test_a_ok")
         code, err = repo.run("--release")
-        self.assertEqual(code, 0, err)
+        self.assertEqual(code, 2, err)
+        self.assertIn("--leg mac", err)
+        self.assertFalse(repo.out.exists(), "a refused release run wrote results")
+
+    def test_release_refuses_long_cap(self):
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        code, err = repo.run("--release", "--leg", "both", "--cap-seconds", "1801")
+        self.assertEqual(code, 2, err)
+        self.assertIn("--cap-seconds 1801", err)
+        self.assertNotIn("--leg", err)
+        self.assertFalse(repo.out.exists(), "a refused release run wrote results")
 
     def test_uncovered_module_refuses_to_start(self):
         repo = FixtureRepo(self)
@@ -545,8 +563,16 @@ class StartRefusals(unittest.TestCase):
     def test_out_dir_outside_home_refused(self):
         repo = FixtureRepo(self)
         repo.passing("test_a_ok")
-        outside = ["/tmp/adt-release-check-x", "/private/tmp/adt-release-check-x",
-                   os.path.join(os.path.realpath(tempfile.gettempdir()), "adt-release-check-x")]
+        # A directory left at the old fixed name by an earlier run must not matter.
+        legacy = Path("/tmp/adt-release-check-x")
+        if not legacy.exists():
+            legacy.mkdir()
+            self.addCleanup(shutil.rmtree, legacy, True)
+        name = f"adt-release-check-{uuid.uuid4().hex}"
+        outside = [f"/tmp/{name}", f"/private/tmp/{name}-p",
+                   os.path.join(os.path.realpath(tempfile.gettempdir()), name)]
+        for path in outside:
+            self.addCleanup(shutil.rmtree, path, True)
         self.assertTrue(any(p.startswith("/var/folders") or p.startswith("/private/var/folders")
                             for p in outside) or sys.platform != "darwin")
         for path in outside:
@@ -645,6 +671,44 @@ class Coverage(unittest.TestCase):
         self.assertEqual(code, 0, err)
         step = control.step("test-adapter.sh")
         self.assertEqual((step["outcome"], step["reason"]), ("pass", None))
+
+
+class Discovery(unittest.TestCase):
+
+    def test_nested_and_new_test_dirs_are_discovered(self):
+        repo = FixtureRepo(self)
+        repo.passing("test_a_ok")
+        repo.tool("tools/console_tests/test_x.py", "import unittest\n")
+        repo.tool("tools/relay_engine/tests/sub/test_y.py", "import unittest\n")
+        repo.tool("tools/relay_engine/tests/__pycache__/test_z.py", "")
+        code, err = repo.run()
+        self.assertEqual(code, 2, err)
+        self.assertIn("tools/console_tests/test_x.py", err)
+        self.assertIn("tools/relay_engine/tests/sub/test_y.py", err)
+        self.assertNotIn("__pycache__", err)
+
+
+class StartedLog(unittest.TestCase):
+
+    def test_started_log_written_before_step_ends(self):
+        repo = FixtureRepo(self)
+        log = repo.out / "mac" / "started.jsonl"
+        repo.module("test_a_reads", f'''
+            import json
+            class T(unittest.TestCase):
+                def test_reads(self):
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        rows = [json.loads(line) for line in open({str(log)!r})] if os.path.exists({str(log)!r}) else []
+                        mine = [r for r in rows if r["id"] == "relay_engine.tests.test_a_reads"]
+                        if mine:
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(mine, [{{"id": "relay_engine.tests.test_a_reads", "pid": os.getpid(),
+                                              "marker": os.environ["ADT_RELEASE_STEP"]}}])
+        ''')
+        code, err = repo.run("--workers", "1")
+        self.assertEqual(code, 0, err)
 
 
 class StepsAndResults(unittest.TestCase):
@@ -782,8 +846,8 @@ class LinuxFixture(FixtureRepo):
             self.repo = self.linked_dir
         return self
 
-    def run_legs(self, leg, environ=None, history=()):
-        argv = ["full", "--leg", leg, "--out", str(self.out), "--workers", "2"]
+    def run_legs(self, leg, environ=None, history=(), extra=()):
+        argv = ["full", "--leg", leg, "--out", str(self.out), "--workers", "2", *extra]
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = rc.main(argv, repo=self.repo,
@@ -1089,6 +1153,52 @@ class LinuxLeg(unittest.TestCase):
         step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_empty")
         self.assertEqual((step["outcome"], step["reason"], step["exit_code"]), ("fail", "no-tests", 0))
 
+    def test_summary_records_release_legs_cap(self):
+        fixture = LinuxFixture(self).finish()
+        code, err = fixture.run_legs("mac")
+        self.assertEqual(code, 0, err)
+        summary = json.loads((fixture.out / "release-check.json").read_text())
+        self.assertEqual((summary["release"], summary["cap_seconds"], set(summary["legs"])),
+                         (False, 1800, {"mac"}))
+        # Control for the release refusals: both legs and the full cap start and pass.
+        fixture.out = fixture.out.parent / (fixture.out.name + "-release")
+        self.addCleanup(shutil.rmtree, fixture.out, True)
+        code, err = fixture.run_legs("both", extra=("--release", "--cap-seconds", "1800"))
+        self.assertEqual(code, 0, err)
+        summary = json.loads((fixture.out / "release-check.json").read_text())
+        self.assertEqual((summary["release"], summary["cap_seconds"], set(summary["legs"])),
+                         (True, 1800, {"mac", "linux"}))
+
+    def test_sigkill_cleanup_finds_leftovers(self):
+        fixture = LinuxFixture(self)
+        fixture.module("test_b_slow", self.STARTS.format(name="test_b_slow"))
+        fixture.finish()
+        driver = start_driver(fixture, "full", "--leg", "both", "--workers", "2", "--out", str(fixture.out))
+        self.addCleanup(stop_driver, driver)
+        label = self.run_label(fixture)
+        self.addCleanup(self.remove_labelled, label)
+        started = [fixture.out / leg / "engine-results" / "test_b_slow" for leg in ("mac", "linux")]
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and not all(p.exists() for p in started):
+            time.sleep(0.2)
+        self.assertTrue(all(p.exists() for p in started), "the steps never started")
+        driver.send_signal(signal.SIGKILL)
+        driver.communicate()
+        self.assertFalse((fixture.out / "release-check.json").exists())
+        rows = [json.loads(line) for line in (fixture.out / "mac" / "started.jsonl").read_text().splitlines()]
+        step = next(r for r in rows if r["id"] == "relay_engine.tests.test_b_slow")
+        self.addCleanup(kill_group, step["pid"])
+        # The documented commands, run as written against what the killed run left.
+        block = sigkill_block(TESTING_MD.read_text()).replace("<the run's --out directory>", str(fixture.out))
+        listed = subprocess.run(["bash", "-c", block], capture_output=True, text=True, check=True).stdout.split("\n")
+        self.assertEqual(set(self.labelled(label)) & {line.strip() for line in listed},
+                         set(self.labelled(label)), listed)
+        self.assertTrue(self.labelled(label), "the container was already gone")
+        self.assertIn(f"{step['pid']} {step['marker']}", listed)
+        marked = subprocess.run(["bash", "-c", sigkill_marker_command(TESTING_MD.read_text())
+                                 .replace("<marker>", step["marker"])], capture_output=True, text=True).stdout
+        self.assertIn(str(step["pid"]), marked.split())
+
     def test_container_kill_is_not_green(self):
         fixture = LinuxFixture(self).finish()
         base = fixture.out
@@ -1210,7 +1320,26 @@ def trap_problems(repo, text):
     return problems
 
 
+def sigkill_block(text):
+    """The indented command block under the SIGKILL residual's heading."""
+    section = text.split("### After a SIGKILL", 1)[1].split("\n## ", 1)[0]
+    return "\n".join(line[4:] for line in section.splitlines() if line.startswith("    "))
+
+
+def sigkill_marker_command(text):
+    section = text.split("### After a SIGKILL", 1)[1].split("\n## ", 1)[0]
+    return next(c for c in TICKED.findall(section) if c.startswith("ps -E"))
+
+
 class TestingDoc(unittest.TestCase):
+
+    def test_testing_md_states_sigkill_residual(self):
+        text = TESTING_MD.read_text()
+        section = text.split("### After a SIGKILL", 1)[1].split("\n## ", 1)[0]
+        for needle in ("SIGKILL", "started.jsonl", "container.json", "docker ps -q --filter",
+                       "kill -TERM -- -<pid>", "docker stop"):
+            self.assertIn(needle, section)
+        self.assertNotIn("label=adt.release-check.run=", section)
 
     def test_testing_md_trap_list_resolves(self):
         text = TESTING_MD.read_text()

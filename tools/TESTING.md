@@ -35,7 +35,21 @@ It runs every step on two legs side by side: `mac` on this host and `linux` in a
 Each leg is cut at 30 minutes, and anything unfinished at the cap counts as failed.
 A failure on either leg fails the check, and the runner never turns a failure green.
 The results go to `<out>/release-check.json`, with one `results.json` per leg; `--out` must be under `$HOME`, since macOS purges `/tmp` and `/var/folders`.
-At the release head, add `--release`, which refuses to start while any exclusion in the runner's table remains.
+At the release head, add `--release`, which refuses to start while any exclusion in the runner's table remains, with `--leg` other than `both`, or with `--cap-seconds` above 1800; `release-check.json` records `release`, `cap_seconds` and, as the keys of `legs`, the legs run.
+Every `test_*.py` under `tools/` is a discovered unit, so a new test module or directory refuses the start until a step runs it or the exclusion table names it.
+
+### After a SIGKILL
+
+An interrupt (Ctrl-C, SIGTERM, SIGHUP) stops every step and the container and writes results, but a SIGKILL of the runner itself cannot run that stop path: its running steps and its linux container keep running, and no `release-check.json` or `results.json` is written.
+Two files exist from the start: `linux/container.json` holds the run's container label, and each leg's `started.jsonl` holds one line per started step (`id`, `pid`, `marker`).
+List what the killed run left (set `OUT` first):
+
+    OUT=<the run's --out directory>
+    docker ps -q --filter "label=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["label"])' "$OUT/linux/container.json")"
+    python3 -c 'import json, sys; [print(row["pid"], row["marker"]) for row in map(json.loads, open(sys.argv[1]))]' "$OUT/mac/started.jsonl"
+
+Stop each listed container with `docker stop <id>`.
+For each `<pid> <marker>` line, check the group still runs that step (`ps -o pid,pgid,command -g <pid>`), stop it with `kill -TERM -- -<pid>`, which also reaches its members whose environment macOS hides, then stop by pid anything still carrying the marker, as listed by `ps -E -ww -o pid=,command= -U "$(id -u)" | grep -F "ADT_RELEASE_STEP=<marker>"`.
 
 ## Trap list
 
