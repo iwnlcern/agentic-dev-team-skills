@@ -1358,10 +1358,10 @@ class TestingDoc(unittest.TestCase):
         self.assertTrue(any("`tools/adapters/**`" in line for line in lines))
 
     # Rows measured by the one rule TESTING.md states (direct or through an imported helper,
-    # minus the runner's exclusion table); counts from PL-v3-tests-1 r4 erratum 1.
-    MEASURED_ROWS = {"`tools/relay-lint.py`": 38, "`tools/relay-engine-fixtures/**`": 23,
-                     "`tools/relay-lint-fixtures/**`": 26, "`tools/check-relay-lint-fixtures.py`": 5,
-                     "`tools/relay`": 3, "`tools/measure-plan-shape.py`": 1, "`tools/**`": 4}
+    # minus the runner's exclusion table); reader counts may shrink as modules retire.
+    MEASURED_ROWS = {"`tools/relay-lint.py`", "`tools/relay-engine-fixtures/**`",
+                     "`tools/relay-lint-fixtures/**`", "`tools/check-relay-lint-fixtures.py`",
+                     "`tools/relay`", "`tools/measure-plan-shape.py`", "`tools/**`"}
 
     def row(self, glob):
         lines = [line for line in trap_lines(TESTING_MD.read_text()) if line.split(" → ")[0] == f"- {glob}"]
@@ -1369,10 +1369,9 @@ class TestingDoc(unittest.TestCase):
         return TICKED.findall(lines[0].split(" → ", 1)[1])
 
     def test_trap_rows_follow_the_measured_rule(self):
-        for glob, count in self.MEASURED_ROWS.items():
+        for glob in self.MEASURED_ROWS:
             targets = self.row(glob)
-            self.assertEqual(len(targets), count, (glob, targets))
-            self.assertEqual(len(set(targets)), count, glob)
+            self.assertEqual(len(set(targets)), len(targets), glob)
             excluded = [t for t in targets if any(fnmatch.fnmatchcase(f"tools/relay_engine/tests/{t}.py", e.path)
                                                   or fnmatch.fnmatchcase(f"tools/{t}", e.path)
                                                   for e in rc.EXCLUSIONS)]
@@ -1381,6 +1380,32 @@ class TestingDoc(unittest.TestCase):
         self.assertEqual(set(self.row("`tools/**`")),
                          {"test_version", "test_identity_matrix", "test_mtbattery_guard", "check-generate-plugins.py"})
         self.assertNotIn("capture_order_baseline", TESTING_MD.read_text())
+
+    def test_trap_row_drop_is_not_a_failure(self):
+        text = TESTING_MD.read_text()
+        row = next(line for line in trap_lines(text)
+                   if line.startswith("- `tools/relay-lint.py` → "))
+        dropped = text.replace(row, row.replace(", `test_version`", "", 1), 1)
+        self.assertNotEqual(dropped, text)
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "TESTING.md"
+            document.write_text(dropped)
+            with mock.patch(__name__ + ".TESTING_MD", document):
+                self.test_trap_rows_follow_the_measured_rule()
+                self.test_testing_md_trap_list_resolves()
+
+    def test_trap_row_duplicate_or_excluded_is_a_failure(self):
+        text = TESTING_MD.read_text()
+        row = next(line for line in trap_lines(text)
+                   if line.startswith("- `tools/relay-lint.py` → "))
+        with tempfile.TemporaryDirectory() as directory:
+            document = Path(directory) / "TESTING.md"
+            for target in ("test_version", "mtbattery.py"):
+                with self.subTest(target=target):
+                    document.write_text(text.replace(row, row + f", `{target}`", 1))
+                    with mock.patch(__name__ + ".TESTING_MD", document):
+                        with self.assertRaises(AssertionError):
+                            self.test_trap_rows_follow_the_measured_rule()
 
     def test_descendant_rule_states_the_macos_residual(self):
         text = TESTING_MD.read_text()
