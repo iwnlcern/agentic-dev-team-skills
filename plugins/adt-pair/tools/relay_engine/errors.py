@@ -394,6 +394,36 @@ strings.register_inventory({
 })
 
 
+# v3 submit rules (DD-v3-engine § 5, § 8, E-OP2): one code per rule.
+_SUBMIT_TEXT = {
+    "error-parent-unknown-cause": "line {line}: PARENT {value} names no relay in this project",
+    "error-parent-unknown-remedy": "name a handle or UUID of a relay in this project; the parent-candidates query lists the relays you may name",
+    "error-parent-unknown-explain": "PARENT names a relay of the sender's own project",
+    "error-parent-not-member-cause": "line {line}: PARENT {value} was neither addressed to you (TO or CC) nor written by you",
+    "error-parent-not-member-remedy": "name a relay addressed to you or written by you; if the grant you need is not among them, ask for it again and name the answer",
+    "error-parent-not-member-explain": "a reply joins only a lineage its seat took part in",
+    "error-finding-unknown-cause": "line {line}: {field} names finding {value}, which this project does not have",
+    "error-finding-unknown-remedy": "use the finding handle F<n> shown on the review relay that raised it",
+    "error-finding-unknown-explain": "FIXES and RESOLVE name findings raised in the same project",
+    "error-resolve-not-raiser-cause": "line {line}: finding {value} was raised by another seat, and you do not hold the orchestrator-planner role",
+    "error-resolve-not-raiser-remedy": "ask the seat that raised the finding, or the orchestrator planner, to resolve it",
+    "error-resolve-not-raiser-explain": "only the raiser or an orchestrator planner resolves a finding",
+    "error-resolve-state-cause": "line {line}: {field} {transition} does not apply to finding {value}, whose status is {status}",
+    "error-resolve-state-remedy": "FIXES follows open; fix-accepted and fix-refused follow fixed; withdrawn follows open or fixed",
+    "error-resolve-state-explain": "a finding moves from open to fixed, then to fix-accepted, back to open on fix-refused, or to withdrawn",
+}
+_FINDING_STATUSES = {"open", "fixed", "fix-accepted", "withdrawn"}
+_TRANSITIONS = {"fixes", "fix-accepted", "fix-refused", "withdrawn"}
+strings.register_inventory(_SUBMIT_TEXT, {
+    (key, field): {"line": _is_line, "field": _is_header_key,
+                   "value": _is_header_text,
+                   "status": lambda v: v in _FINDING_STATUSES,
+                   "transition": lambda v: v in _TRANSITIONS}[field]
+    for key, template in _SUBMIT_TEXT.items()
+    for field in strings._placeholders(template)
+})
+
+
 # v3 references (DD-v3-engine § 6): one code per refusal rule.
 _REF_TEXT = {
     "error-ref-spelling-cause": "REF {value} is not a reference spelling: {reason}",
@@ -489,6 +519,11 @@ ERRORS = {
     "E-QUESTION-ADDRESS": _spec("question-address", "integrity"),
     "E-SQLITE-VERSION": _spec("sql-version", "client"),
     "E-SCHEMA-MISMATCH": _spec("schema-mismatch", "integrity"),
+    "E-PARENT-UNKNOWN": _spec("parent-unknown", "integrity"),
+    "E-PARENT-NOT-MEMBER": _spec("parent-not-member", "integrity"),
+    "E-FINDING-UNKNOWN": _spec("finding-unknown", "integrity"),
+    "E-RESOLVE-NOT-RAISER": _spec("resolve-not-raiser", "integrity"),
+    "E-RESOLVE-STATE": _spec("resolve-state", "integrity"),
     "E-REF-SPELLING": _spec("ref-spelling", "integrity"),
     "E-REF-UNRESOLVED": _spec("ref-unresolved", "integrity"),
     "E-REF-AMBIGUOUS": _spec("ref-ambiguous", "integrity"),

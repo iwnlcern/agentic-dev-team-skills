@@ -31,6 +31,16 @@ _FINDING_STATUS = ("open", "fixed", "fix-accepted", "withdrawn")
 _SHA256 = "CHECK (length(%s) = 64 AND %s NOT GLOB '*[^0-9a-f]*')"
 
 
+def _object_id(column):
+    """A Git object id: 40 lowercase hex (SHA-1) or 64 (SHA-256)."""
+    return "(length(%s) IN (40, 64) AND %s NOT GLOB '*[^0-9a-f]*')" % (column, column)
+
+
+def _hex64(column):
+    """A sha256 digest: 64 lowercase hex, as a bare predicate."""
+    return "(length(%s) = 64 AND %s NOT GLOB '*[^0-9a-f]*')" % (column, column)
+
+
 def _sha(column, nullable=False):
     check = _SHA256 % (column, column)
     return check.replace("CHECK (", "CHECK (%s IS NULL OR " % column, 1) if nullable else check
@@ -48,12 +58,12 @@ _TABLES = (
     """CREATE TABLE IF NOT EXISTS git_states (
     id TEXT PRIMARY KEY,
     repository_id TEXT NOT NULL,
-    head_commit TEXT NOT NULL,
+    head_commit TEXT CHECK (head_commit IS NULL OR %s),
     branch TEXT,
-    dirty_paths TEXT NOT NULL,
+    dirty_paths INTEGER NOT NULL CHECK (dirty_paths >= 0),
     porcelain_sha256 TEXT NOT NULL %s,
     measured_at INTEGER NOT NULL
-) STRICT""" % _sha("porcelain_sha256"),
+) STRICT""" % (_object_id("head_commit"), _sha("porcelain_sha256")),
     """CREATE TABLE IF NOT EXISTS relays (
     id TEXT PRIMARY KEY,
     handle INTEGER NOT NULL CHECK (handle >= 1),
@@ -69,6 +79,7 @@ _TABLES = (
     sender_role TEXT,
     created_at INTEGER NOT NULL,
     body_sha256 TEXT NOT NULL %s,
+    meta_sha256 TEXT NOT NULL %s,
     body_bytes INTEGER NOT NULL CHECK (body_bytes >= 0),
     header_bytes INTEGER NOT NULL CHECK (header_bytes >= 0),
     git_state_id TEXT REFERENCES git_states (id),
@@ -78,7 +89,7 @@ _TABLES = (
     CHECK (kind != 'BOOT' OR sender_seat_id = 'system')
 ) STRICT""" % (_in("kind", header.KINDS | {"BOOT"}),
                _in("needs", header.NEEDS), _SHA256 % ("body_sha256", "body_sha256"),
-               _verdict_pairs()),
+               _SHA256 % ("meta_sha256", "meta_sha256"), _verdict_pairs()),
     """CREATE TABLE IF NOT EXISTS bodies (
     relay_id TEXT PRIMARY KEY REFERENCES relays (id),
     body BLOB NOT NULL
@@ -106,7 +117,8 @@ _TABLES = (
     target_path TEXT,
     target_line_start INTEGER,
     target_line_end INTEGER,
-    digest_at_submit TEXT %s,
+    digest_at_submit TEXT CHECK (digest_at_submit IS NULL OR %s
+        OR (target_type = 'git' AND %s)),
     UNIQUE (from_relay_id, kind, ordinal),
     CHECK ((target_type = 'relay' AND target_relay_id IS NOT NULL
             AND target_repository_id IS NULL AND target_path IS NULL)
@@ -115,7 +127,7 @@ _TABLES = (
             AND target_path IS NOT NULL)
         OR (target_type = 'path' AND target_relay_id IS NULL
             AND target_repository_id IS NULL AND target_path IS NOT NULL))
-) STRICT""" % _sha("digest_at_submit", nullable=True),
+) STRICT""" % (_hex64("digest_at_submit"), _object_id("digest_at_submit")),
     """CREATE TABLE IF NOT EXISTS bundles (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,

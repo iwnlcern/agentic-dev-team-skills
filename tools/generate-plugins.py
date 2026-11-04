@@ -47,6 +47,7 @@ assert ENGINE_SET == (
     "relay_engine/schema.py",
     "relay_engine/seats.py",
     "relay_engine/strings.py",
+    "relay_engine/submit.py",
     "relay_engine/supersede.py",
     "relay_engine/version.py",
 )
