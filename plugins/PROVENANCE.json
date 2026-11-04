@@ -19,6 +19,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/LICENSES/obra-superpowers-MIT.txt",
+    "sha256": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400",
+    "source": "LICENSES/obra-superpowers-MIT.txt"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/hooks/hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -38,7 +44,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/domain-planner/SKILL.md",
-    "sha256": "80cee96c45cd1c9fee789bfc8a419898a1608cdb764ff1f09de9061a4181a1ba",
+    "sha256": "749d3d1b3ee8eb624247f79571a268724edbb2615953873d6d4828c96e54c957",
     "source": "skills/domain-planner/SKILL.md"
   },
   {
@@ -86,7 +92,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-planner/SKILL.md",
-    "sha256": "d4c6ae220ec87659682fd61d296c4af0242a9e0581a67ace262fc7edda2fd23c",
+    "sha256": "911218400abc6e911bba3d60aa1bcab6a3c95d90e9f1dca42c444ffb90e0d037",
     "source": "skills/master-planner/SKILL.md"
   },
   {
@@ -140,7 +146,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-planner/SKILL.md",
-    "sha256": "f73ebb9a27bfeedbd306869727823b8967ae575bce4d6e203528affaa6e26126",
+    "sha256": "6c74080e7750d099e580e4e5a9f8debc189b68c8df845d94ef996a5a5e2c8e64",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -230,7 +236,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-planner/SKILL.md",
-    "sha256": "30645323e5d1507a3fe269b74b3486bcd135ee874d673975223d44b19d1d9a14",
+    "sha256": "876276334a7979ac41fce0b260282bf68678cf8b94e9f8482d2874040d6d3911",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -10621,6 +10627,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/vendor/obra/superpowers/brainstorming.md",
+    "sha256": "4f69aba9377773be0fbf27664eb06c3de7e7df5a152934321532ce3039d774f3",
+    "source": "vendor/obra/superpowers/brainstorming.md"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/.claude-plugin/plugin.json",
     "sha256": "651d5b03518ec0668789973f42b288531426cb7f4e090e5c8573ebb0f350349e",
     "source": "tools/generate-plugins.py"
@@ -10636,6 +10648,12 @@
     "path": "adt-orchestrator/LICENSES/mattpocock-skills-MIT.txt",
     "sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
     "source": "LICENSES/mattpocock-skills-MIT.txt"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/LICENSES/obra-superpowers-MIT.txt",
+    "sha256": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400",
+    "source": "LICENSES/obra-superpowers-MIT.txt"
   },
   {
     "kit_version": "2.9.7",
@@ -10658,7 +10676,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-planner/SKILL.md",
-    "sha256": "f73ebb9a27bfeedbd306869727823b8967ae575bce4d6e203528affaa6e26126",
+    "sha256": "6c74080e7750d099e580e4e5a9f8debc189b68c8df845d94ef996a5a5e2c8e64",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -10748,7 +10766,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-planner/SKILL.md",
-    "sha256": "30645323e5d1507a3fe269b74b3486bcd135ee874d673975223d44b19d1d9a14",
+    "sha256": "876276334a7979ac41fce0b260282bf68678cf8b94e9f8482d2874040d6d3911",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -21139,6 +21157,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/vendor/obra/superpowers/brainstorming.md",
+    "sha256": "4f69aba9377773be0fbf27664eb06c3de7e7df5a152934321532ce3039d774f3",
+    "source": "vendor/obra/superpowers/brainstorming.md"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/.claude-plugin/plugin.json",
     "sha256": "f093a441da188ae4cfe47ba8c77af475bea730330fdcc9eefb307922e534f2b9",
     "source": "tools/generate-plugins.py"
@@ -21154,6 +21178,12 @@
     "path": "adt-pair/LICENSES/mattpocock-skills-MIT.txt",
     "sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
     "source": "LICENSES/mattpocock-skills-MIT.txt"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/LICENSES/obra-superpowers-MIT.txt",
+    "sha256": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400",
+    "source": "LICENSES/obra-superpowers-MIT.txt"
   },
   {
     "kit_version": "2.9.7",
@@ -21194,7 +21224,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-planner/SKILL.md",
-    "sha256": "2978a4ea3d8ad6671c747b20f0ca9ab62825d49a3e43dc0c0f6dc2e5577f8b29",
+    "sha256": "9e83b737e11ac246dd8df0df7a23988b9d31cc7f5b0f06099999886ac45a20a5",
     "source": "skills/pair-planner/SKILL.md"
   },
   {
@@ -31582,5 +31612,11 @@
     "path": "adt-pair/vendor/mattpocock/grill-me/SKILL.md",
     "sha256": "74147eb6010a65957efef2b9e0f0b3ff935c1def7fc117697151b1d0f3610556",
     "source": "vendor/mattpocock/grill-me/SKILL.md"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/vendor/obra/superpowers/brainstorming.md",
+    "sha256": "4f69aba9377773be0fbf27664eb06c3de7e7df5a152934321532ce3039d774f3",
+    "source": "vendor/obra/superpowers/brainstorming.md"
   }
 ]

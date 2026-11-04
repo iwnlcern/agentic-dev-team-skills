@@ -168,17 +168,17 @@ implementation into governance seats.
 
 ## Requirements
 
-- **Superpowers** — the skills build on its brainstorming, planning, plan-execution, and review
-  procedures. If it is not installed, the skills tell the agent to stop and report the missing
-  prerequisite.
+- **Superpowers is not needed.** Each role skill states the practices it relies on, and the Planner skills read a trimmed brainstorming reference vendored with the kit.
+  Keeping Superpowers enabled still adds its `using-superpowers` start-of-session text (3,192 bytes in Superpowers 7.0.0) to every session.
 - **Python 3.11 or newer** — required as the first `python3` on `PATH` by the engine entry point `tools/relay`, `tools/relay-lint.py`, and the Python host-adapter entry points in `tools/adapters/`.
   The skills can report that optional linting is unavailable; those Python entry points still require the interpreter.
   Install the generated `tools/` directory under your skills root, or point at it however your host resolves skills.
 
 ## License
 
-Apache-2.0 — see `LICENSE`. The vendored `grill-me` skill under `vendor/mattpocock/grill-me/` is MIT
-© 2026 Matt Pocock; its license is in `LICENSES/`.
+Apache-2.0 — see `LICENSE`.
+The vendored `grill-me` skill under `vendor/mattpocock/grill-me/` is MIT © 2026 Matt Pocock; its license is `LICENSES/mattpocock-skills-MIT.txt`.
+The vendored brainstorming reference `vendor/obra/superpowers/brainstorming.md` is modified from Superpowers 7.0.0 and is MIT © 2025 Jesse Vincent; its license is `LICENSES/obra-superpowers-MIT.txt`.
 
 ## Status
 

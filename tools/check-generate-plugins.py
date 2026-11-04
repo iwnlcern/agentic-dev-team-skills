@@ -357,6 +357,7 @@ def expected_plugin_files(plugin: str) -> set[str]:
     for engine_member in LOCKED_ENGINE_SET:
         expected |= canonical_files(ROOT / "tools" / engine_member, f"tools/{engine_member}")
     expected |= canonical_files(ROOT / "vendor" / "mattpocock", "vendor/mattpocock")
+    expected |= canonical_files(ROOT / "vendor" / "obra", "vendor/obra")
     expected |= canonical_files(ROOT / "LICENSE", "LICENSE")
     expected |= canonical_files(ROOT / "LICENSES", "LICENSES")
     return expected
@@ -827,6 +828,7 @@ def check_adjacency() -> None:
         for required in (
             "tools/relay-lint.py",
             "vendor/mattpocock/grill-me/SKILL.md",
+            "vendor/obra/superpowers/brainstorming.md",
             "LICENSE",
         ):
             expect((plugin_root / required).is_file(), f"{plugin} lacks file {required}")
@@ -919,6 +921,8 @@ def check_cold_install(scratch_base: Path) -> dict[str, Path]:
                 expect((skill_root / "master-tier-boundary.md").is_file(), f"{plugin} cold install lacks {skill}/master-tier-boundary.md")
         expect((scratch / "vendor" / "mattpocock" / "grill-me" / "SKILL.md").is_file(), f"{plugin} cold install lacks vendored grill-me")
         expect((scratch / "LICENSES" / "mattpocock-skills-MIT.txt").is_file(), f"{plugin} cold install lacks vendored MIT license")
+        expect((scratch / "vendor" / "obra" / "superpowers" / "brainstorming.md").is_file(), f"{plugin} cold install lacks vendored brainstorming")
+        expect((scratch / "LICENSES" / "obra-superpowers-MIT.txt").is_file(), f"{plugin} cold install lacks vendored Superpowers MIT license")
         expect((scratch / "LICENSE").is_file(), f"{plugin} cold install lacks kit license")
         linter = scratch / "tools" / "relay-lint.py"
         fixture = scratch / "tools" / "relay-lint-fixtures" / "claude" / "A1-valid-audit.md"

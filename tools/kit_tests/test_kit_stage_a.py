@@ -186,5 +186,62 @@ class TestSuperpowersOut(KitTreeCase):
         self.assertEqual(edited, 9)
 
 
+PLANNER_SKILLS = ("orchestrator-planner", "pair-planner", "master-planner", "domain-planner")
+UPSTREAM_COMMIT = "bb92a77741419a4ab5f06e711a283343f1ada0c3"
+VENDOR_LICENSE = "LICENSES/obra-superpowers-MIT.txt"
+
+
+class TestVendoredBrainstorming(KitTreeCase):
+    """A2: a trimmed, attributed brainstorming reference that Planner skills read by plugin-root path."""
+
+    def test_vendored_brainstorming_marked_modified(self):
+        text = self.canonical_text(VENDORED_BRAINSTORMING)
+        head = "\n".join(text.splitlines()[:12])
+        for needle in ("Superpowers 7.0.0", UPSTREAM_COMMIT, "github.com/obra/superpowers", "modified"):
+            self.assertIn(needle, head)
+        license_text = self.canonical_text(VENDOR_LICENSE)
+        self.assertTrue(license_text.startswith("MIT License"))
+        self.assertIn("Copyright (c) 2025 Jesse Vincent", license_text)
+        lowered = text.lower()
+        for dropped in ("visual companion", "builder", "spike", "docs/superpowers", "writing-plans"):
+            self.assertNotIn(dropped, lowered, f"trimmed copy still contains {dropped!r}")
+
+    def test_vendored_brainstorming_keeps_the_conversation(self):
+        text = self.canonical_text(VENDORED_BRAINSTORMING)
+        for kept in (
+            "Each message ends with one question",
+            "Play back as you go",
+            "Mark anything you're guessing as your guess",
+            "Think wide privately",
+            "Offer recon",
+            "Get them describing",
+            "everyday words",
+            "analogy",
+        ):
+            self.assertIn(kept, text)
+
+    def test_planner_skills_name_an_existing_vendored_path(self):
+        for skill in PLANNER_SKILLS:
+            rel = f"skills/{skill}/SKILL.md"
+            copies = {rel: self.canonical_text(rel)}
+            copies.update({f"plugins/{tier}/{rel}": text for tier, text in self.installed_texts(rel).items()})
+            for where, text in copies.items():
+                self.assertIn(f"`{VENDORED_BRAINSTORMING}`", text, f"{where} does not name the vendored file")
+                self.assertNotIn(f"]({VENDORED_BRAINSTORMING}", text, where)
+                self.assertNotIn("/vendor/obra/", text.replace(f"`{VENDORED_BRAINSTORMING}`", ""), where)
+            for tier in self.installed_texts(rel):
+                self.assertTrue((PLUGINS / tier / VENDORED_BRAINSTORMING).is_file(), f"{tier} lacks the vendored file")
+                self.assertTrue((PLUGINS / tier / VENDOR_LICENSE).is_file(), f"{tier} lacks the vendored licence")
+
+    def test_readme_says_superpowers_not_needed(self):
+        readme = self.canonical_text("README.md")
+        requirements = readme.split("## Requirements", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("Superpowers is not needed", requirements)
+        self.assertIn("3,192 bytes", requirements)
+        license_section = readme.split("## License", 1)[1].split("\n## ", 1)[0]
+        for needle in ("vendor/mattpocock/grill-me/", VENDORED_BRAINSTORMING, "LICENSES/mattpocock-skills-MIT.txt", VENDOR_LICENSE):
+            self.assertIn(needle, license_section)
+
+
 if __name__ == "__main__":
     unittest.main()
