@@ -355,6 +355,48 @@ strings.register_inventory({
 })
 
 
+# v3 references (DD-v3-engine § 6): one code per refusal rule.
+_REF_TEXT = {
+    "error-ref-spelling-cause": "REF {value} is not a reference spelling: {reason}",
+    "error-ref-spelling-remedy": "write #<n>, #<n>@<project>, a lowercase UUID, <repo>@<rev>:<path>[#L<a>[-L<b>]] or file:<absolute or ~/ path>, exactly as it re-renders",
+    "error-ref-spelling-explain": "a reference is accepted only when its parsed parts re-render to the same text",
+    "error-ref-unresolved-cause": "REF {value} does not resolve: {reason}",
+    "error-ref-unresolved-remedy": "commit the file, or correct the repository, revision or path",
+    "error-ref-unresolved-explain": "every reference target is checked when the relay is submitted",
+    "error-ref-ambiguous-cause": "REF {value} is ambiguous: an entry named {literal} also exists at commit {commit}",
+    "error-ref-ambiguous-remedy": "rename the entry whose name ends in a line suffix, or cite another file",
+    "error-ref-ambiguous-explain": "a path ending in #L<n> could name a file or a line range, so both existing is refused",
+    "error-ref-range-cause": "REF {value} cites lines {start} to {end}; the file has {count} lines at commit {commit}",
+    "error-ref-range-remedy": "cite lines inside the file at that revision",
+    "error-ref-range-explain": "a line range is checked against the file at the cited revision",
+    "error-ref-timeout-cause": "REF {value} was not checked: a Git query reached its time limit",
+    "error-ref-timeout-remedy": "retry the submit; if it repeats, the machine is busy or the repository is large for the limit",
+    "error-ref-timeout-explain": "Git queries run under a time limit; reaching it says nothing about the reference",
+    "error-ref-git-environment-cause": "REF {value} was not checked: the engine's environment holds {count} GIT_ variables, among them {name}, which change what Git answers",
+    "error-ref-git-environment-remedy": "start the engine with no GIT_ variables in its environment",
+    "error-ref-git-environment-explain": "references resolve against the repository alone, so a variable that selects or configures Git is refused",
+}
+
+
+def _is_ref_text(value):
+    return strings._is_show_text(value) and len(value) <= 512
+
+
+def _is_commit(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value) is not None
+
+
+strings.register_inventory(_REF_TEXT, {
+    (key, field): {"commit": _is_commit, "start": strings._is_count,
+                   "name": lambda v: (isinstance(v, str) and v.startswith("GIT_")
+                                      and strings._is_show_text(v) and len(v) <= 64),
+                   "end": strings._is_count, "count": strings._is_count,
+                   }.get(field, _is_ref_text)
+    for key, template in _REF_TEXT.items()
+    for field in strings._placeholders(template)
+})
+
+
 def _spec(stem, cls):
     return ErrorSpec("error-%s-cause" % stem,
                      "error-%s-remedy" % stem,
@@ -408,6 +450,12 @@ ERRORS = {
     "E-QUESTION-ADDRESS": _spec("question-address", "integrity"),
     "E-SQLITE-VERSION": _spec("sql-version", "client"),
     "E-SCHEMA-MISMATCH": _spec("schema-mismatch", "integrity"),
+    "E-REF-SPELLING": _spec("ref-spelling", "integrity"),
+    "E-REF-UNRESOLVED": _spec("ref-unresolved", "integrity"),
+    "E-REF-AMBIGUOUS": _spec("ref-ambiguous", "integrity"),
+    "E-REF-RANGE": _spec("ref-range", "integrity"),
+    "E-REF-TIMEOUT": _spec("ref-timeout", "command"),
+    "E-REF-GIT-ENVIRONMENT": _spec("ref-git-environment", "client"),
 }
 
 ERROR_VARIANTS = {
