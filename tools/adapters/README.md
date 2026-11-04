@@ -6,7 +6,8 @@ Adapters are optional host hardening. They do not replace the protocol; they mak
 
 Use this staged replacement for an initial install or every refresh of the shared-root `tools/` tree.
 Set `candidate_tools` to an absolute path to the candidate tree.
-For a Codex-host standalone install, set `skills_root` to `$HOME/.agents/skills`; `~/.codex/skills` remains a working deprecated fallback destination.
+For a Codex-host standalone install, set `skills_root` to `$HOME/.agents/skills`; `~/.codex/skills` still resolves for Codex skill discovery but is deprecated.
+The hooks find the linter only through `RELAY_LINT_SKILLS_ROOT`, as described below.
 
 ```bash
 (
@@ -33,9 +34,10 @@ The candidate is copied to a unique sibling before the active name changes, so t
 When an active tree exists, the printed `.tools.previous.*` path is the recoverable previous tree; restore it by moving the failed active tree aside and renaming that backup to `tools`.
 
 `<skills-root>` means the skills root the installed skill tree was resolved from — each generated plugin tree ships its own `tools/`.
-Both hooks first resolve the engine when `$RELAY_LINT_SKILLS_ROOT/tools/relay` and `$RELAY_LINT_SKILLS_ROOT/tools/relay_engine/` are present.
+Both hooks lint with the engine CLI, `python3 "$RELAY_LINT_SKILLS_ROOT/tools/relay" lint <file>`, when `$RELAY_LINT_SKILLS_ROOT/tools/relay` and `$RELAY_LINT_SKILLS_ROOT/tools/relay_engine/` are present.
 When `RELAY_LINT_SKILLS_ROOT` is unset, that root defaults to `$HOME/.claude/skills`.
-They then resolve `$RELAY_LINT_SKILLS_ROOT/tools/relay-lint.py`, `$HOME/.agents/skills/tools/relay-lint.py`, and `$HOME/.codex/skills/tools/relay-lint.py` (deprecated), in that order.
+There is no other location: when the engine CLI is absent, the hooks report the relay `UNLINTED` and exit 2, and a `relay-lint.py` in any older location is never run.
+A manual install whose shared root is not `$HOME/.claude/skills`, such as a Codex standalone install under `$HOME/.agents/skills`, sets `RELAY_LINT_SKILLS_ROOT` in each hook command.
 They do not probe `relay-lint` on `PATH`.
 The write-time hook honors `RELAY_LINT_MAX_DRIFT_MINUTES` (widened authoring-drift tolerance) and `RELAY_LINT_NO_FRESHNESS=1` (skip the freshness check when editing an existing older relay); both default to the strict posture.
 
@@ -52,12 +54,13 @@ Follow `tools/adapters/plugin-hooks.json` for plugin-route pinning: its linter a
 The hook therefore uses the byte-matched linter and relay engine shipped in the same plugin version instead of wandering to a stale shared root.
 The command-scoped assignment does not modify the user's environment.
 
-Manual installs intentionally retain the resolution ladder documented above.
+Manual installs resolve the linter as documented above, from the configured shared root only.
 A marketplace update does not refresh a separately installed shared-root `tools/` copy, so manual users must repeat the staged replacement after updating.
 
 ### Consent and migration
 
-Codex presents a one-time content-hash trust prompt when a plugin hook or its script content is first encountered or changes.
+Codex presents a content-hash trust prompt when a plugin hook or its script content is first encountered or changes, and a kit update changes it every time.
+Codex re-hashes each plugin bundle when a hook runs, so after every kit update each kit hook fails with "plugin contents changed; hook approval required" until it is approved again with `/hooks` (measured at the 2.9.7 install).
 Declining keeps the hook disabled; lint every relay manually before handoff as documented in `harness-codex.md`.
 Claude Code applies its own plugin-install consent flow.
 
@@ -95,11 +98,12 @@ The snippet invokes each hook as `bash <script>`, so it does not depend on a scr
 
 `route_path` in `tools/adapters/claude-code/relay-lint-posttooluse.sh` decides which Write/Edit/MultiEdit paths are linted, including the `.engine/` draft exemption.
 It also extracts relay targets declared by apply-patch envelopes delivered through the Bash or native patch payload forms.
-It routes a file whose exact basename is `INDEX.md` through relay-lint's `--index` mode; other relay Markdown files use explicit-file lint.
+A file whose exact basename is `INDEX.md` is not a relay: the engine renders it, so the hook routes it out before any lint and exits 0.
+Other relay Markdown files use explicit-file lint.
 
 The Bash event runs the normalizer and guard additively, without suppression or duplicate elimination.
 The guard recognizes literal relay-root writes using redirection, `tee`, `cp`, or `mv`.
-When exactly one existing relay Markdown target can be resolved, the guard lints it with the same linter-location chain as the normalizer.
+When exactly one existing relay Markdown target can be resolved, the guard lints it with the same linter resolution as the normalizer; an `INDEX.md` target exits 0 unlinted.
 Multiple, unresolved, or backgrounded targets receive a generic manual-lint advisory without a filename lint claim.
 
 Coverage is observable when the linter is invoked on the exact relay target or when an explicit noisy `UNLINTED` advisory directs manual lint.
@@ -120,7 +124,7 @@ bash tools/adapters/claude-code/test-adapter.sh
 ```
 
 The test builds a temporary skills root from this candidate's `tools/`.
-It preserves coverage for clean relay, dirty relay, dirty tripwire relay, non-relay path, non-md relay-root file, explicit INDEX mode, missing-linter degradation, and broken-linter attribution.
+It preserves coverage for clean relay, dirty relay, dirty tripwire relay, non-relay path, non-md relay-root file, `INDEX.md` targets left unlinted, missing-linter degradation (a legacy `relay-lint.py` is never used), and broken-linter attribution.
 It also covers literal Bash relay writes, patch-envelope extraction, non-relay writes, heredoc INDEX routing, unresolved move destinations, interpreter residuals, backgrounded writes, write-then-fail delivery, multiple relay targets, exact-basename file routing, additive handler behavior, and the shipped Bash registration under both host events.
 
 ## Adapter family design
@@ -160,10 +164,10 @@ Deployment drift remains on the watch list. A future adapter hardening turn may 
 
 ## Shipped adapter: relay auto-delivery (`relay-monitor.py`)
 
-Files: `tools/adapters/relay-monitor.py`, `tools/adapters/shell_lex.py`, `tools/adapters/plugin-monitors.json` (shipped as `monitors/monitors.json`), the three hooks in `plugin-hooks.json`, `tools/adapters/codex/adt-codex`, `tools/adapters/claude-code/relay-guard-destinations.py`, tests and the scope oracle in `tools/adapters/tests/`.
+Files: `tools/adapters/relay-monitor.py`, `tools/adapters/window.py`, `tools/adapters/hostlogs.py`, `tools/adapters/shell_lex.py`, `tools/adapters/plugin-monitors.json` (shipped as `monitors/monitors.json`), the three hooks in `plugin-hooks.json`, `tools/adapters/codex/adt-codex`, `tools/adapters/claude-code/relay-guard-destinations.py`, tests and the scope oracle in `tools/adapters/tests/`.
 
 Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `status`, `operator`, `replay`.
-State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a lifetime leader lock and a short state lock; progress is a cursor on the index's `file` cell.
+State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a short state lock, and a lifetime window lock `window-<key>.lock` in the same directory (one doorbell per window, below); progress is a cursor on the index's `file` cell.
 The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies only to filings it binds from.
 For those filings, one as the bound seat in the bound root leaves progress where it is; any other moves that root's progress to the filing itself, skipping earlier undelivered relays even after a return filing.
 For filings it does not bind from, binding and progress stay where they were, and the hook prints a rebind line for only some of them; `relay-monitor.py status` shows where the watcher is bound, and the absence of a rebind line does not.
@@ -174,12 +178,12 @@ Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` opt
 The status grammar separates follower readiness from binding observations and install identity:
 
 ```text
-relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> client=<id> daemon=<id> updated=<stamp>[ miss=submit-near-miss][ last-bind=<reason>][ tiers=mixed][ identity=mismatch]
+relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> window=<key> doorbell=<kit>@<sha> client=<id> daemon=<id>[ engine=wedged] updated=<stamp>[ miss=submit-near-miss][ last-bind=<reason>][ identity=mismatch]
 [remedy: <one line>]
 [rebind: <one line>]
 ```
 
-The six readiness words are `not-started` (no leader, live standby or recorded follower exit), `standby-only` (a live or unknown standby without a leader), `starting` (the lock holder and leader record do not yet agree), `waiting-for-binding` (a live leader without initialized binding progress), `armed` (a live leader following initialized progress), and `unavailable` (a recorded delivery fault or follower exit, with exit reason `transport-failed` or `follower-error`).
+The five readiness words are `not-started` (no doorbell holds the window lock and no follower exit is recorded), `starting` (the lock holder and leader record do not yet agree), `waiting-for-binding` (a live leader without initialized binding progress), `armed` (a live leader following initialized progress), and `unavailable` (a recorded delivery fault or follower exit, with exit reason `transport-failed`, `follower-error`, `window-gone` or `terminated`).
 A binding observation changes neither readiness nor delivery eligibility.
 Delivery requires a binding, a usable index and cursor or fallback anchor, an addressed row beyond that position, and an available output path; the Codex drain can deliver without a follower.
 A missing cursor and fallback anchor produce `unavailable: anchor-not-found`; index faults report `index-missing`, `index-malformed`, `index-unreadable` or `root-stalled`.
@@ -218,8 +222,6 @@ A changed binding clears earlier observations inside its transaction; a later ob
 For hosts supplying `tool_use_id`, the last eight session-and-call identities suppress duplicate tier-hook reports inside one note transaction.
 A different call with the same content is a different invocation; without the identifier only consecutive duplicate binds or observations collapse.
 The guarantee applies only when all hooks use this version: the mixed sequence new hook, 2.9.6 hook, 2.9.6 hook advances the generation by three.
-Each follower records its own kit version and fingerprint; differing identities among non-dead leader and standby records produce `tiers=mixed`, with missing identity treated as its own value and unknown liveness counted as present.
-This diagnostic triggers no automatic leader handover.
 Numeric fd duplication and close, including `2>&1`, `>&2` and `2>&-`, are accepted while a background ampersand remains unsupported.
 The relay guard retains its existing limitation for a file operand of `>&`, such as `>& relay.md`; this change does not add destination detection for that form.
 
@@ -262,3 +264,43 @@ Interactive zsh 5.9 without `INTERACTIVE_COMMENTS` instead attempts to run `#` a
 Do not treat an incomplete hint as a runnable rebind command.
 Complete and inferred commands are emitted only for printable ASCII arguments; other text falls back to an escaped incomplete hint.
 Status fields also escape terminal controls and non-ASCII characters.
+
+### One doorbell per window
+
+A window is the agent process the seat runs in.
+On Claude Code it is the nearest ancestor process with a host record `~/.claude/sessions/<pid>.json` whose `pid` and `procStart` match that process; the record is an undocumented Claude Code internal (measured on 2.1.318), so when no record matches, the window is the first non-shell ancestor above the nearest run of shells.
+On Codex the window is `CODEX_THREAD_ID`.
+`ADT_HOST` names the host; otherwise `CODEX_THREAD_ID` selects Codex, because a Codex environment can inherit `CLAUDE_CODE_SESSION_ID`.
+A doorbell that cannot determine its window keys on its session, as before.
+Each doorbell takes the window's lock without waiting; a second doorbell in the same window, such as another tier's plugin monitor, exits 0 with no output and leaves no record, so there are no standbys.
+`window=` in the status line names the window key, and `doorbell=` names the running doorbell's own kit version and the first eight hex digits of its `relay-monitor.py` sha256, taken from the doorbell's record rather than from the process running `status`.
+
+### Doorbell exits
+
+A doorbell exits when its Claude Code window is gone (the window's pid is no longer running with the same start time) or when it receives SIGTERM or SIGHUP.
+Each exit prints exactly one line on stdout, `relay-monitor: stopped: window gone` or `relay-monitor: stopped: terminated`, records the exit in the note, frees the window lock and exits 0.
+An engine outage is not an exit: the doorbell keeps polling.
+
+### Bounded status
+
+`status` and SessionStart check the engine's identity under one shared 1.5 s deadline, so both return within 2 s on a wedged engine; a timed-out check shows `daemon=-` with `engine=wedged`.
+The answer is cached in the note for 60 s per root.
+
+### Host token logs
+
+`python3 tools/adapters/hostlogs.py read --host <claude-code|codex> [--owners <file>] <path>...` prints one JSON object per turn from host logs: token counts and identifiers only, never message content.
+`input` is uncached input on both hosts (Codex `input_tokens` minus `cached_input_tokens`), and `output` includes reasoning on both hosts.
+Claude Code rows are one per `requestId`; `--owners` keeps a forked session's copied requests with the session that first owned them.
+Codex rows are one per `response_id`, keyed by the thread the record carries; `.bak` rollouts are skipped and a rollout without a `token_usage_record` is reported as missing.
+
+### Host facts
+
+These host behaviours were measured on this kit's hosts and govern installs and upgrades.
+
+- Running sessions keep the plugin version they started with: Claude Code keeps the old tree under `.in_use`, so a kit update reaches a seat only when its session restarts.
+- `/reload-plugins` reloads hooks and skills but starts no new plugin monitor, so a reloaded session's doorbell stays on the old version.
+- Restart a root's relay daemon on the new kit only after that root's sessions restart; a daemon ahead of its sessions refuses their filings with `E-VERSION-MISMATCH`.
+- `codex plugin add` replaces the plugin cache, deleting the previous version's tree while running Codex seats still execute from it; back the cache up first and restart or re-arm Codex seats right after.
+- Codex re-approves kit hooks after each update (see Consent and migration).
+- A watch started with Claude Code's Monitor tool, rather than as a plugin monitor, ends when its timeout expires, at most 30 minutes; re-arm it and read the root's `INDEX.md` for relays filed in the gap.
+- One doorbell runs per window, and each doorbell exit prints one `relay-monitor: stopped:` line (above).
