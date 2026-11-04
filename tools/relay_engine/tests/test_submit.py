@@ -20,8 +20,9 @@ SEATS = {
     address: submit.SeatRef("seat-" + address, address, address.partition(".")[2] or address, "t1",
                             PROJECT)
     for address in ("v3-engine.planner", "v3-engine.implementer", "v3-other.planner",
-                    "v3.orchestrator-planner", "operator")
+                    "v3.orchestrator-planner")
 }
+SEATS["operator"] = submit.SeatRef(submit.OPERATOR_SEAT_ID, "operator", "operator", "t1", PROJECT)
 PLANNER = SEATS["v3-engine.planner"]
 IMPL = SEATS["v3-engine.implementer"]
 OTHER = SEATS["v3-other.planner"]

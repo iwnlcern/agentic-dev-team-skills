@@ -12,8 +12,10 @@ from pathlib import Path
 
 from relay_engine import errors
 from relay_engine import refs
+from relay_engine.submit import OPERATOR_SEAT_ID
 
-QUIET_MS = 1_800_000  # DD § 7: 30 minutes, an engine constant
+UNOPENED_MS = 900_000  # amendment 4 A4.4 (operator P9): 15 minutes from admission
+IDLE_MS = 3_600_000  # 60 minutes without activity while holding open must-act work
 TOKEN_SOURCES = frozenset({"host-log", "host-reported"})
 BLOCKING_STATUSES = ("open", "fixed")
 
@@ -64,6 +66,7 @@ class EdgeRow:
 
 @dataclass(frozen=True)
 class Flag:
+    rule: str  # "unopened", or "idle" naming the seat's newest open must-act relay
     relay_id: str
     handle: int
     seat_id: str
@@ -220,18 +223,37 @@ def note_activity(conn, seat_id, at_ms):
     conn.commit()
 
 
-def unopened_flags(conn, project_id, now_ms, quiet_ms=QUIET_MS):
-    """TO addressees asked to do something who have neither opened the relay
-    nor made any engine request for quiet_ms (DD § 7); CC never flags."""
-    cutoff = now_ms - quiet_ms
-    return [Flag(*row) for row in conn.execute(
+def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=IDLE_MS):
+    """P9 liveness flags for the orchestrator (amendment 4 A4.4): a TO addressee
+    of a relay with NEEDS other than none that has not opened it unopened_ms
+    after admission, delivered or not and active or not ("unopened"); and a
+    seat holding open must-act work (act or answer, unanswered) with no
+    activity for idle_ms, counted from the later of its last activity and the
+    admission of its newest open must-act relay ("idle", naming that relay).
+    A seat with an unanswered QUESTION to the operator is never flagged; CC
+    and the operator, who is not a seat, never flag."""
+    exempt = ("NOT EXISTS (SELECT 1 FROM relays q JOIN recipients o ON o.relay_id = q.id"
+              " WHERE q.kind = 'QUESTION' AND q.sender_seat_id = c.seat_id AND o.role = 'to'"
+              " AND o.answered_by IS NULL) AND c.seat_id != ?")
+    flags = [Flag("unopened", *row) for row in conn.execute(
         "SELECT r.id, r.handle, c.seat_id, r.created_at FROM recipients c"
         " JOIN relays r ON r.id = c.relay_id"
-        " LEFT JOIN seat_activity a ON a.seat_id = c.seat_id"
         " WHERE r.project_id = ? AND c.role = 'to' AND r.needs != 'none'"
-        " AND c.opened_at IS NULL AND c.answered_by IS NULL AND r.created_at <= ?"
-        " AND (a.last_request_at IS NULL OR a.last_request_at <= ?)"
-        " ORDER BY r.created_at, c.seat_id", (project_id, cutoff, cutoff))]
+        " AND c.opened_at IS NULL AND c.answered_by IS NULL AND r.created_at <= ? AND "
+        + exempt, (project_id, now_ms - unopened_ms, OPERATOR_SEAT_ID))]
+    newest = {}  # seat -> (created_at, handle, relay id, last activity) of its newest open must-act
+    for relay_id, handle, seat_id, created, active in conn.execute(
+            "SELECT r.id, r.handle, c.seat_id, r.created_at, a.last_request_at FROM recipients c"
+            " JOIN relays r ON r.id = c.relay_id"
+            " LEFT JOIN seat_activity a ON a.seat_id = c.seat_id"
+            " WHERE r.project_id = ? AND c.role = 'to' AND r.needs IN ('act', 'answer')"
+            " AND c.answered_by IS NULL AND " + exempt, (project_id, OPERATOR_SEAT_ID)):
+        newest[seat_id] = max(newest.get(seat_id, (created, handle, relay_id, active)),
+                              (created, handle, relay_id, active))
+    flags += [Flag("idle", relay_id, handle, seat_id, created)
+              for seat_id, (created, handle, relay_id, active) in newest.items()
+              if max(created, active or 0) <= now_ms - idle_ms]
+    return sorted(flags, key=lambda f: (f.created_at, f.seat_id, f.rule))
 
 
 def points_to(conn, relay_id):

@@ -25,6 +25,7 @@ from relay_engine import schema
 
 SYSTEM = "system"  # the reserved sender of engine-written relays
 ORCHESTRATOR_ROLE = "orchestrator-planner"
+OPERATOR_SEAT_ID = "operator"  # J2's machine-wide special: one queue, no team seat
 
 
 @dataclass(frozen=True)

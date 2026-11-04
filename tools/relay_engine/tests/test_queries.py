@@ -10,7 +10,9 @@ from relay_engine import queries
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine.tests.test_refs import Repo, git
-from relay_engine.tests.test_submit import (IMPL, ORCH, OTHER, PLANNER, Store, draft)
+from relay_engine.tests.test_submit import (IMPL, ORCH, OTHER, PLANNER, SEATS, Store, draft)
+
+OPERATOR = SEATS["operator"]
 
 ENVELOPE = {"handle", "kind", "sender", "to", "cc", "subject", "parent", "verdict", "needs",
             "created_at"}
@@ -124,32 +126,92 @@ class TestLineage(Store):
 
 
 class TestFlags(Store):
-    QUIET = 1_800_000
+    """Amendment 4 A4.4 (operator P9): 15 minutes unopened from admission; 60 minutes idle
+    with open must-act work; a seat waiting on its operator QUESTION is never flagged."""
+    MIN = 60_000
 
-    def test_flag_counts_activity(self):
+    def flags(self, now):
+        return [(f.rule, f.handle, f.seat_id)
+                for f in queries.unopened_flags(self.conn, PLANNER.project_id, now)]
+
+    def test_unopened_flag_from_admission(self):
         start = self.clock
-        act = self.submit(draft(to="v3-engine.implementer", cc="v3-other.planner", needs="act"))
+        review = self.submit(draft(to="v3-engine.implementer", cc="v3-other.planner",
+                                   needs="review"))
         self.submit(draft(to="v3-engine.implementer", needs="none"))
-        project = PLANNER.project_id
-        before = queries.unopened_flags(self.conn, project, start + self.QUIET - 1)
-        self.assertEqual(before, [])
-        flags = queries.unopened_flags(self.conn, project, start + self.QUIET)
-        self.assertEqual([(f.handle, f.seat_id) for f in flags], [(act.handle, IMPL.seat_id)])
-        queries.note_activity(self.conn, IMPL.seat_id, start + self.QUIET - 10)
-        self.assertEqual(queries.unopened_flags(self.conn, project, start + self.QUIET), [])
-        later = start + 2 * self.QUIET  # the activity is now older than the window
-        self.assertEqual(len(queries.unopened_flags(self.conn, project, later)), 1)
-        queries.mark_opened(self.conn, act.relay_id, IMPL.seat_id, later)
-        self.assertEqual(queries.unopened_flags(self.conn, project, later + 1), [])
+        self.assertEqual(self.flags(start + 15 * self.MIN - 1), [])
+        self.assertEqual(self.flags(start + 15 * self.MIN),
+                         [("unopened", review.handle, IMPL.seat_id)])  # CC, NEEDS none: never
+        queries.note_activity(self.conn, IMPL.seat_id, start + 15 * self.MIN - 1)  # active seat
+        queries.mark_delivered(self.conn, review.relay_id, IMPL.seat_id, start)  # delivered
+        self.assertEqual(self.flags(start + 15 * self.MIN),
+                         [("unopened", review.handle, IMPL.seat_id)])
+        queries.mark_opened(self.conn, review.relay_id, IMPL.seat_id, start + 16 * self.MIN)
+        self.assertEqual(self.flags(start + 16 * self.MIN), [])
 
-    def test_a_read_is_activity(self):
+    def test_unopened_flag_needs_no_delivery(self):  # a seat whose session is down
+        start = self.clock
+        review = self.submit(draft(to="v3-engine.implementer", needs="review"))
+        self.assertEqual(self.flags(start + 24 * 60 * self.MIN),
+                         [("unopened", review.handle, IMPL.seat_id)])
+
+    def test_idle_flag_from_later_start(self):
+        start = self.clock
+        first = self.submit(draft(to="v3-engine.implementer", needs="act"))
+        self.clock += 1
+        newest = self.submit(draft(to="v3-engine.implementer", needs="answer"))
+        for relay in (first, newest):  # opened, so only the idle rule can fire
+            queries.mark_opened(self.conn, relay.relay_id, IMPL.seat_id, start + 2)
+        queries.note_activity(self.conn, IMPL.seat_id, start + 2)
+        self.assertEqual(self.flags(start + 2 + 60 * self.MIN - 1), [])
+        self.assertEqual(self.flags(start + 2 + 60 * self.MIN),
+                         [("idle", newest.handle, IMPL.seat_id)])  # names the newest
+        queries.note_activity(self.conn, IMPL.seat_id, start + 2 + 59 * self.MIN)  # a request at 59
+        self.assertEqual(self.flags(start + 2 + 60 * self.MIN), [])
+        # a must-act relay admitted to a seat idle for two hours starts the clock at admission
+        self.clock = start + 2 + 59 * self.MIN + 120 * self.MIN
+        late = self.submit(draft(to="v3-engine.implementer", needs="act"))
+        queries.mark_opened(self.conn, late.relay_id, IMPL.seat_id, self.clock)
+        self.assertEqual(self.flags(self.clock + 60 * self.MIN - 1), [])
+        self.assertEqual(self.flags(self.clock + 60 * self.MIN),
+                         [("idle", late.handle, IMPL.seat_id)])
+        # answering all of it ends the idle rule
+        for relay in (first, newest, late):
+            self.submit(draft(parent="#%d" % relay.handle, to="v3-engine.planner"), sender=IMPL)
+        self.assertEqual(self.flags(self.clock + 61 * self.MIN), [])
+
+    def test_review_is_not_must_act(self):
+        start = self.clock
+        review = self.submit(draft(to="v3-engine.implementer", needs="review"))
+        queries.mark_opened(self.conn, review.relay_id, IMPL.seat_id, start)
+        self.assertEqual(self.flags(start + 24 * 60 * self.MIN), [])
+
+    def test_operator_question_exempts_seat(self):
+        start = self.clock
+        relays = [self.submit(draft(to="v3-engine.implementer", needs=needs))
+                  for needs in ("act", "answer")]
+        late = start + 24 * 60 * self.MIN
+        self.submit(draft(to="v3-engine.planner", needs="answer"), sender=IMPL)  # not a QUESTION
+        mine = lambda: [flag for flag in self.flags(late) if flag[2] == IMPL.seat_id]
+        self.assertEqual(len(mine()), 3)  # an unanswered SITREP of its own exempts nothing
+        question = self.submit(draft(kind="QUESTION", to="operator", needs="answer"),
+                               sender=IMPL)
+        self.assertEqual(mine(), [])  # neither rule, for the whole seat
+        self.assertEqual([f for f in self.flags(late) if f[2] == OPERATOR.seat_id], [])  # not a seat
+        self.submit(draft(parent="#%d" % question.handle, to="v3-engine.implementer"),
+                    sender=OPERATOR)  # the operator answers
+        self.assertEqual(sorted(mine()),
+                         sorted([("unopened", relays[0].handle, IMPL.seat_id),
+                                 ("unopened", relays[1].handle, IMPL.seat_id),
+                                 ("idle", relays[1].handle, IMPL.seat_id)]))
+
+    def test_read_is_activity(self):
         start = self.clock
         act = self.submit(draft(to="v3-engine.implementer", needs="act"))
         other = self.submit(draft(to="v3-engine.implementer", needs="none"))
-        queries.read(self.conn, other.relay_id, IMPL.seat_id, start + self.QUIET - 10)
-        self.assertEqual(queries.unopened_flags(self.conn, PLANNER.project_id,
-                                                start + self.QUIET), [])
-        self.assertIsNotNone(act)
+        queries.mark_opened(self.conn, act.relay_id, IMPL.seat_id, start)
+        queries.read(self.conn, other.relay_id, IMPL.seat_id, start + 59 * self.MIN)
+        self.assertEqual(self.flags(start + 60 * self.MIN), [])
 
     def test_activity_keeps_latest(self):
         queries.note_activity(self.conn, IMPL.seat_id, 50)
