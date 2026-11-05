@@ -254,7 +254,7 @@ _HEADER_TEXT = {
     "error-header-empty-cause": "line {line}: {key} has no value",
     "error-header-empty-remedy": "give the field a value, or remove the line",
     "error-header-empty-explain": "a header line always carries a value",
-    "error-header-control-cause": "line {line}, column {column}: {codepoint} is a control or line-separator character",
+    "error-header-control-cause": "line {line}, column {column}: {codepoint} is a control, line-separator or bidirectional-control character",
     "error-header-control-remedy": "remove the character; the header allows tab and no other control character",
     "error-header-control-explain": "a header value is one line of printable text",
     "error-header-title-line-cause": "line {line} is a title line; a v3 draft starts with header lines",
@@ -306,6 +306,7 @@ _HEADER_TEXT = {
     "error-finding-no-check-cause": "line {line}: the finding cites REF line {cited}, and the header has {count} REF lines",
     "error-finding-no-check-remedy": "add a REF line naming the executed check's output and cite its number (1 for the first REF line), or mark the finding advisory",
     "error-finding-no-check-advisory-cause": "line {line}: the finding starts with the number {cited}, read as a REF line, and the header has {count} REF lines",
+    "error-finding-no-check-relay-cause": "line {line}: the finding's check, REF line {cited}, names relay {value}; a blocking finding's check is a local path or a Git-pinned file",
     "error-finding-no-check-advisory-remedy": "cite an existing REF line by its number (1 for the first), or start the summary with a word",
     "error-finding-no-check-explain": "a blocking finding cites the REF line that records its executed check",
 }
@@ -391,6 +392,36 @@ strings.register_inventory({
         lambda v: strings._is_rejected(v) or (strings._is_show_text(v) and len(v) <= 300),
     ("error-root-not-found-cause", "directory"):
         lambda v: strings._is_rejected(v) or strings._is_show_absolute(v),
+})
+
+
+# v3 submit rules (DD-v3-engine § 5, § 8, E-OP2): one code per rule.
+_SUBMIT_TEXT = {
+    "error-parent-unknown-cause": "line {line}: PARENT {value} names no relay in this project",
+    "error-parent-unknown-remedy": "name a handle or UUID of a relay in this project; the parent-candidates query lists the relays you may name",
+    "error-parent-unknown-explain": "PARENT names a relay of the sender's own project",
+    "error-parent-not-member-cause": "line {line}: PARENT {value} was neither addressed to you (TO or CC) nor written by you",
+    "error-parent-not-member-remedy": "name a relay addressed to you or written by you; if the grant you need is not among them, ask for it again and name the answer",
+    "error-parent-not-member-explain": "a reply joins only a lineage its seat took part in",
+    "error-finding-unknown-cause": "line {line}: {field} names finding {value}, which this project does not have",
+    "error-finding-unknown-remedy": "use the finding handle F<n> shown on the review relay that raised it",
+    "error-finding-unknown-explain": "FIXES and RESOLVE name findings raised in the same project",
+    "error-resolve-not-raiser-cause": "line {line}: finding {value} was raised by another seat, and you do not hold the orchestrator-planner role",
+    "error-resolve-not-raiser-remedy": "ask the seat that raised the finding, or the orchestrator planner, to resolve it",
+    "error-resolve-not-raiser-explain": "only the raiser or an orchestrator planner resolves a finding",
+    "error-resolve-state-cause": "line {line}: {field} {transition} does not apply to finding {value}, whose status is {status}",
+    "error-resolve-state-remedy": "FIXES follows open; fix-accepted and fix-refused follow fixed; withdrawn follows open or fixed",
+    "error-resolve-state-explain": "a finding moves from open to fixed, then to fix-accepted, back to open on fix-refused, or to withdrawn",
+}
+_FINDING_STATUSES = {"open", "fixed", "fix-accepted", "withdrawn"}
+_TRANSITIONS = {"fixes", "fix-accepted", "fix-refused", "withdrawn"}
+strings.register_inventory(_SUBMIT_TEXT, {
+    (key, field): {"line": _is_line, "field": _is_header_key,
+                   "value": _is_header_text,
+                   "status": lambda v: v in _FINDING_STATUSES,
+                   "transition": lambda v: v in _TRANSITIONS}[field]
+    for key, template in _SUBMIT_TEXT.items()
+    for field in strings._placeholders(template)
 })
 
 
@@ -489,6 +520,11 @@ ERRORS = {
     "E-QUESTION-ADDRESS": _spec("question-address", "integrity"),
     "E-SQLITE-VERSION": _spec("sql-version", "client"),
     "E-SCHEMA-MISMATCH": _spec("schema-mismatch", "integrity"),
+    "E-PARENT-UNKNOWN": _spec("parent-unknown", "integrity"),
+    "E-PARENT-NOT-MEMBER": _spec("parent-not-member", "integrity"),
+    "E-FINDING-UNKNOWN": _spec("finding-unknown", "integrity"),
+    "E-RESOLVE-NOT-RAISER": _spec("resolve-not-raiser", "integrity"),
+    "E-RESOLVE-STATE": _spec("resolve-state", "integrity"),
     "E-REF-SPELLING": _spec("ref-spelling", "integrity"),
     "E-REF-UNRESOLVED": _spec("ref-unresolved", "integrity"),
     "E-REF-AMBIGUOUS": _spec("ref-ambiguous", "integrity"),
@@ -526,6 +562,9 @@ ERROR_VARIANTS = {
         "error-header-title-line-explain", "integrity"),
     ("E-FINDING-NO-CHECK", "advisory"): ErrorSpec(
         "error-finding-no-check-advisory-cause", "error-finding-no-check-advisory-remedy",
+        "error-finding-no-check-explain", "integrity"),
+    ("E-FINDING-NO-CHECK", "relay"): ErrorSpec(
+        "error-finding-no-check-relay-cause", "error-finding-no-check-remedy",
         "error-finding-no-check-explain", "integrity"),
     ("E-FIELD-FORBIDDEN", "bundle"): ErrorSpec(
         "error-field-forbidden-cause", "error-field-forbidden-bundle-remedy",

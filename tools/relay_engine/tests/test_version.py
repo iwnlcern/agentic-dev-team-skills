@@ -40,6 +40,7 @@ EXPECTED_ROSTER = (
     "relay_engine/ledger.py",
     "relay_engine/migrate.py",
     "relay_engine/paths.py",
+    "relay_engine/queries.py",
     "relay_engine/reconcile.py",
     "relay_engine/refs.py",
     "relay_engine/render.py",
@@ -48,6 +49,7 @@ EXPECTED_ROSTER = (
     "relay_engine/schema.py",
     "relay_engine/seats.py",
     "relay_engine/strings.py",
+    "relay_engine/submit.py",
     "relay_engine/supersede.py",
     "relay_engine/version.py",
 )

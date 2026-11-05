@@ -18,8 +18,8 @@ TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
 
 INDEXES = {
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
-               ("sender_seat_id",)},
-    "recipients": {("seat_id",)},
+               ("sender_seat_id", "kind"), ("project_id", "id")},
+    "recipients": {("seat_id",), ("relay_id",)},
     "edges": {("from_relay_id",), ("target_relay_id",),
               ("target_repository_id", "target_path"), ("target_path",)},
     "findings": {("bundle_id", "status"), ("raised_in",), ("resolved_in",)},
@@ -56,13 +56,13 @@ class Store(unittest.TestCase):
         ).fetchall())
 
     def relay(self, conn, rid, handle, *, kind="SITREP", verdict=None, needs="none",
-              sender="a.planner", created=None, body_sha=SHA, project="p"):
+              sender="a.planner", created=None, body_sha=SHA, project="p", meta_sha=SHA):
         conn.execute(
             "INSERT INTO relays (id, handle, project_id, kind, verdict, needs, subject,"
-            " sender_seat_id, created_at, body_sha256, body_bytes, header_bytes)"
-            " VALUES (?, ?, ?, ?, ?, ?, 's', ?, ?, ?, 0, 10)",
+            " sender_seat_id, created_at, body_sha256, meta_sha256, body_bytes, header_bytes)"
+            " VALUES (?, ?, ?, ?, ?, ?, 's', ?, ?, ?, ?, 0, 10)",
             (rid, handle, project, kind, verdict, needs, sender,
-             handle if created is None else created, body_sha))
+             handle if created is None else created, body_sha, meta_sha))
 
     def refused(self, conn, sql, params=()):
         with self.assertRaises(sqlite3.IntegrityError):
@@ -117,7 +117,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 15)
+        self.assertEqual(len(named), 17)
 
 
 class TestChecks(Store):
@@ -187,7 +187,32 @@ class TestChecks(Store):
                     self.relay(conn, "r-" + bad[:3], 1, body_sha=bad)
         self.refused(conn, "INSERT INTO refusals (code, at, draft_sha256) VALUES ('E-X', 1, 'z')")
         self.refused(conn, "INSERT INTO git_states (id, repository_id, head_commit, dirty_paths,"
-                           " porcelain_sha256, measured_at) VALUES ('g', 'r', 'c', '[]', 'z', 1)")
+                           " porcelain_sha256, measured_at) VALUES ('g', 'r', NULL, 0, 'z', 1)")
+
+    def test_submit_columns(self):  # Task 4 rulings
+        conn = self.connect()
+        for bad in (None, "a" * 63, "A" * 64):
+            with self.subTest(meta=bad):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.relay(conn, "m-%s" % bad, 1, meta_sha=bad)
+        state = ("INSERT INTO git_states (id, repository_id, head_commit, dirty_paths,"
+                 " porcelain_sha256, measured_at) VALUES (?, 'r', ?, ?, ?, 1)")
+        conn.execute(state, ("g1", None, 0, SHA))          # an unborn branch has no head
+        conn.execute(state, ("g2", "c" * 40, 3, SHA))
+        conn.execute(state, ("g3", "c" * 64, 0, SHA))
+        for name, head, dirty in (("g4", "c" * 39, 0), ("g5", "C" * 40, 0), ("g6", "c" * 40, -1),
+                                  ("g7", "c" * 40, "[]")):
+            with self.subTest(state=name):
+                self.refused(conn, state, (name, head, dirty, SHA))
+        self.relay(conn, "r1", 1)
+        edge = ("INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
+                " target_relay_id, target_repository_id, target_commit, target_path,"
+                " digest_at_submit) VALUES (?, 'r1', ?, 'ref', ?, 's', NULL, ?, ?, '/p', ?)")
+        conn.execute(edge, ("e1", 1, "git", "repo", "c" * 40, "b" * 40))   # a Git blob id
+        conn.execute(edge, ("e2", 2, "git", "repo", "c" * 40, "b" * 64))
+        conn.execute(edge, ("e3", 3, "path", None, None, SHA))
+        self.refused(conn, edge, ("e4", 4, "path", None, None, "b" * 40))  # a file: sha256 only
+        self.refused(conn, edge, ("e5", 5, "git", "repo", "c" * 40, "B" * 40))
 
     def test_foreign_keys(self):
         conn = self.connect()
@@ -270,6 +295,27 @@ class TestVersioning(Store):
                 self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")
                 self.assertIn(phrase, caught.exception.cause)
                 self.assertEqual(self.objects(conn), before)
+
+    def test_changed_definitions_refused(self):  # A13
+        changes = (
+            ("CREATE TABLE extra (x INTEGER) STRICT", "an extra table extra"),
+            ("ALTER TABLE bodies ADD COLUMN note TEXT", "a changed table bodies"),
+            ("DROP INDEX findings_bundle_status", "no index findings_bundle_status"),
+            ("DROP TRIGGER relays_handle_fixed", "no trigger relays_handle_fixed"),
+        )
+        for statement, phrase in changes:
+            with self.subTest(statement=statement):
+                conn = self.connect()
+                conn.execute(statement)
+                conn.commit()
+                before = self.objects(conn)
+                with self.assertRaises(errors.EngineError) as caught:
+                    schema.init_v3(conn)
+                self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")
+                self.assertIn(phrase, caught.exception.cause)
+                self.assertEqual(self.objects(conn), before)  # nothing written
+        conn = self.connect()
+        schema.init_v3(conn)  # positive control: an unchanged store opens
 
     def test_init_atomic(self):
         conn = self.connect(init=False)

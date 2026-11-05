@@ -1,7 +1,6 @@
 import contextlib
 import io
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -62,6 +61,11 @@ ALL_CODES = POLICY_CODES | {
     "E-QUESTION-ADDRESS",
     "E-SQLITE-VERSION",
     "E-SCHEMA-MISMATCH",
+    "E-PARENT-UNKNOWN",
+    "E-PARENT-NOT-MEMBER",
+    "E-FINDING-UNKNOWN",
+    "E-RESOLVE-NOT-RAISER",
+    "E-RESOLVE-STATE",
     "E-REF-SPELLING",
     "E-REF-UNRESOLVED",
     "E-REF-AMBIGUOUS",

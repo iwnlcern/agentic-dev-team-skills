@@ -8,6 +8,7 @@ import re
 import unicodedata
 
 from relay_engine import errors
+from relay_engine import refs as reference
 
 
 HEADER_CAP = 8192
@@ -247,6 +248,12 @@ def _unterminated(prefix):
     raise _refuse("E-HEADER-SIZE", variant="unterminated", limit=HEADER_CAP)
 
 
+# bidirectional controls reorder how a value reads (A12); other format
+# characters stay admitted and are escaped wherever refusal text shows them
+_BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+                           "\u2066\u2067\u2068\u2069")
+
+
 def _read_line(number, raw):
     if number == 1 and raw.startswith(b"\xef\xbb\xbf"):
         raise _refuse("E-HEADER-BOM", line=number)
@@ -256,7 +263,7 @@ def _read_line(number, raw):
     for column, char in enumerate(text, start=1):
         code = ord(char)
         if ((code < 32 and char != "\t") or 127 <= code <= 159 or
-                char in "  "):
+                char in "\u2028\u2029" or char in _BIDI_CONTROLS):
             raise _refuse("E-HEADER-CONTROL", line=number, column=column,
                           codepoint="U+%04X" % code)
     if text.startswith("#"):
@@ -272,8 +279,21 @@ def _read_line(number, raw):
     return match.group(1), match.group(2)
 
 
+_LIST_FORM = "<address>, <address> with one ASCII space or none after each comma"
+
+
 def _addresses(number, field, value, validate_address, seen_addresses):
-    items = [item.strip() for item in value.split(",")]
+    """Items split at commas; the only whitespace beside a comma is one ASCII
+    space after it (A11), and nothing is stripped.  Whitespace inside an item
+    is the address grammar's to refuse."""
+    items = value.split(",")
+    for index, item in enumerate(items):
+        if index and item.startswith(" "):
+            item = item[1:]
+        if item[:1].isspace() or item[-1:].isspace():
+            raise _refuse("E-FIELD-SHAPE", line=number, field=field,
+                          value=_display(value), form=_LIST_FORM)
+        items[index] = item
     result = []
     for item in items:
         if not item:
@@ -296,6 +316,33 @@ def _addresses(number, field, value, validate_address, seen_addresses):
         seen_addresses.add(item)
         result.append(item)
     return tuple(result)
+
+
+
+def _mirror_value(what, value, address):
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("%s must be non-empty text without edge whitespace" % what)
+    if any(unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp")
+           for c in value):
+        raise ValueError("%s holds a control or line-break character" % what)
+    if address and ("," in value or any(c.isspace() for c in value)):
+        raise ValueError("%s must be one address without commas or spaces" % what)
+    return value
+
+
+def render_mirror_header(sender, to, cc, parent_mirror_path):
+    """FROM, TO, CC (when any) and IN_REPLY_TO (when a parent exists) lines,
+    in that order and in 2.9.7's spelling, for readers of the mirror tree
+    such as pdc's inbox sweeper; a value that could forge a line is refused."""
+    if isinstance(to, str) or isinstance(cc, str) or not to:
+        raise ValueError("TO must be a non-empty sequence of addresses; CC a sequence")
+    lines = ["FROM: " + _mirror_value("FROM", sender, True),
+             "TO: " + ", ".join(_mirror_value("TO", seat, True) for seat in to)]
+    if cc:
+        lines.append("CC: " + ", ".join(_mirror_value("CC", seat, True) for seat in cc))
+    if parent_mirror_path is not None:
+        lines.append("IN_REPLY_TO: " + _mirror_value("IN_REPLY_TO", parent_mirror_path, False))
+    return lines
 
 
 def _enum(number, field, value, allowed):
@@ -360,7 +407,7 @@ def _validate(values, seen, body, header_bytes, validate_address):
 
     verdict = _verdict(kind, needs, first.get("VERDICT"))
     refs = tuple(value for _, value in lists["REF"])
-    findings = _findings(kind, needs, lists["FINDING"], len(refs))
+    findings = _findings(kind, needs, lists["FINDING"], refs)
     fixes = _fixes(kind, lists["FIXES"])
     resolves = _resolves(lists["RESOLVE"])
     return Draft(kind=kind, to=to, cc=cc, parent=parent, bundle=bundle,
@@ -387,7 +434,8 @@ def _verdict(kind, needs, entry):
     return _enum(entry[0], "VERDICT", entry[1], allowed)
 
 
-def _findings(kind, needs, entries, ref_count):
+def _findings(kind, needs, entries, ref_values):
+    ref_count = len(ref_values)
     form = "<blocking|advisory> [<REF line number>] <summary>, one space between words"
     result = []
     for number, value in entries:
@@ -418,8 +466,21 @@ def _findings(kind, needs, entries, ref_count):
             raise _refuse("E-FINDING-NO-CHECK",
                           variant=None if severity == "blocking" else "advisory",
                           line=number, cited=str(index), count=ref_count)
+        if severity == "blocking" and _names_relay(ref_values[index - 1]):
+            # DD § 8: the check is a local path or a Git-pinned file (PR-3 fold S1)
+            raise _refuse("E-FINDING-NO-CHECK", variant="relay", line=number,
+                          cited=str(index), value=_display(ref_values[index - 1]))
         result.append(FindingSpec(severity, index, summary))
     return tuple(result)
+
+
+def _names_relay(text):
+    """True when the REF spells a relay; a REF that does not parse is its own
+    line's refusal at submit, so it is not judged here."""
+    try:
+        return reference.parse_ref(text).kind == "relay"
+    except errors.EngineError:
+        return False
 
 
 def _fixes(kind, entries):

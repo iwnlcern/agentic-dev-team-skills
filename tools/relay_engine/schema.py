@@ -31,6 +31,16 @@ _FINDING_STATUS = ("open", "fixed", "fix-accepted", "withdrawn")
 _SHA256 = "CHECK (length(%s) = 64 AND %s NOT GLOB '*[^0-9a-f]*')"
 
 
+def _object_id(column):
+    """A Git object id: 40 lowercase hex (SHA-1) or 64 (SHA-256)."""
+    return "(length(%s) IN (40, 64) AND %s NOT GLOB '*[^0-9a-f]*')" % (column, column)
+
+
+def _hex64(column):
+    """A sha256 digest: 64 lowercase hex, as a bare predicate."""
+    return "(length(%s) = 64 AND %s NOT GLOB '*[^0-9a-f]*')" % (column, column)
+
+
 def _sha(column, nullable=False):
     check = _SHA256 % (column, column)
     return check.replace("CHECK (", "CHECK (%s IS NULL OR " % column, 1) if nullable else check
@@ -48,12 +58,12 @@ _TABLES = (
     """CREATE TABLE IF NOT EXISTS git_states (
     id TEXT PRIMARY KEY,
     repository_id TEXT NOT NULL,
-    head_commit TEXT NOT NULL,
+    head_commit TEXT CHECK (head_commit IS NULL OR %s),
     branch TEXT,
-    dirty_paths TEXT NOT NULL,
+    dirty_paths INTEGER NOT NULL CHECK (dirty_paths >= 0),
     porcelain_sha256 TEXT NOT NULL %s,
     measured_at INTEGER NOT NULL
-) STRICT""" % _sha("porcelain_sha256"),
+) STRICT""" % (_object_id("head_commit"), _sha("porcelain_sha256")),
     """CREATE TABLE IF NOT EXISTS relays (
     id TEXT PRIMARY KEY,
     handle INTEGER NOT NULL CHECK (handle >= 1),
@@ -69,6 +79,7 @@ _TABLES = (
     sender_role TEXT,
     created_at INTEGER NOT NULL,
     body_sha256 TEXT NOT NULL %s,
+    meta_sha256 TEXT NOT NULL %s,
     body_bytes INTEGER NOT NULL CHECK (body_bytes >= 0),
     header_bytes INTEGER NOT NULL CHECK (header_bytes >= 0),
     git_state_id TEXT REFERENCES git_states (id),
@@ -78,7 +89,7 @@ _TABLES = (
     CHECK (kind != 'BOOT' OR sender_seat_id = 'system')
 ) STRICT""" % (_in("kind", header.KINDS | {"BOOT"}),
                _in("needs", header.NEEDS), _SHA256 % ("body_sha256", "body_sha256"),
-               _verdict_pairs()),
+               _SHA256 % ("meta_sha256", "meta_sha256"), _verdict_pairs()),
     """CREATE TABLE IF NOT EXISTS bodies (
     relay_id TEXT PRIMARY KEY REFERENCES relays (id),
     body BLOB NOT NULL
@@ -106,7 +117,8 @@ _TABLES = (
     target_path TEXT,
     target_line_start INTEGER,
     target_line_end INTEGER,
-    digest_at_submit TEXT %s,
+    digest_at_submit TEXT CHECK (digest_at_submit IS NULL OR %s
+        OR (target_type = 'git' AND %s)),
     UNIQUE (from_relay_id, kind, ordinal),
     CHECK ((target_type = 'relay' AND target_relay_id IS NOT NULL
             AND target_repository_id IS NULL AND target_path IS NULL)
@@ -115,7 +127,7 @@ _TABLES = (
             AND target_path IS NOT NULL)
         OR (target_type = 'path' AND target_relay_id IS NULL
             AND target_repository_id IS NULL AND target_path IS NOT NULL))
-) STRICT""" % _sha("digest_at_submit", nullable=True),
+) STRICT""" % (_hex64("digest_at_submit"), _object_id("digest_at_submit")),
     """CREATE TABLE IF NOT EXISTS bundles (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -193,9 +205,12 @@ _TABLES = (
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS relays_parent ON relays (parent_id)",
+    "CREATE INDEX IF NOT EXISTS relays_project_id ON relays (project_id, id)",
     "CREATE INDEX IF NOT EXISTS relays_bundle ON relays (bundle_id)",
-    "CREATE INDEX IF NOT EXISTS relays_sender ON relays (sender_seat_id)",
+    "CREATE INDEX IF NOT EXISTS relays_sender_kind ON relays (sender_seat_id, kind)",
     "CREATE INDEX IF NOT EXISTS recipients_seat ON recipients (seat_id)",
+    "CREATE INDEX IF NOT EXISTS recipients_open ON recipients (relay_id)"
+    " WHERE role = 'to' AND answered_by IS NULL",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges (from_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_relay ON edges (target_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_git ON edges (target_repository_id, target_path)",
@@ -270,5 +285,34 @@ def _require_matching(conn, names):
     elif row[1] != ddl_digest():
         found = "v3 schema version %s with other table definitions" % SCHEMA_V3
     else:
-        return
+        difference = _definition_difference(conn)
+        if difference is None:
+            return
+        found = "v3 schema version %s with %s" % (SCHEMA_V3, difference)
     raise errors.error_for("E-SCHEMA-MISMATCH", found=found)
+
+
+def _definitions(conn):
+    return {(kind, name): sql for kind, name, sql in conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+
+
+def _definition_difference(conn):
+    """The first way the file's own definitions differ from the ones this
+    engine builds (A13), or None; the version record alone is not trusted."""
+    expected_conn = sqlite3.connect(":memory:")
+    try:
+        for statement in _TABLES + _INDEXES + _TRIGGERS:
+            expected_conn.execute(statement)
+        expected = _definitions(expected_conn)
+    finally:
+        expected_conn.close()
+    found = _definitions(conn)
+    for (kind, name) in sorted(set(found) - set(expected)):
+        return "an extra %s %s" % (kind, header._display(name, 60))
+    for (kind, name) in sorted(set(expected) - set(found)):
+        return "no %s %s" % (kind, header._display(name, 60))
+    for key in sorted(expected):
+        if found[key] != expected[key]:
+            return "a changed %s %s" % (key[0], header._display(key[1], 60))
+    return None

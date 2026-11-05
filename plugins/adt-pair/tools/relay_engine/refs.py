@@ -7,6 +7,7 @@ runs with replacement objects off, and a process environment holding any
 ``GIT_`` variable is refused, since either would change Git's answer.
 """
 
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import errno
@@ -144,33 +145,55 @@ def _require_clean_environment(text):
                                name=_display(names[0], 60), count=len(names))
 
 
-def resolve_git(checkout, spec):
-    """Resolve a Git reference at its revision; refuse unless it names one file."""
-    if spec.kind != "git":
-        _unresolved(spec.text, "only a Git reference resolves against a checkout")
-    _require_clean_environment(spec.text)
-    checkout = Path(checkout)
-    location = os.path.realpath(checkout)
+@contextlib.contextmanager
+def _git_session(checkout, text):
+    """Every Git read inside runs with a clean environment and replacement
+    objects off (fold R1, R2), and leaves only typed errors naming text."""
+    _require_clean_environment(text)
+    location = os.path.realpath(Path(checkout))
     try:
         info = os.stat(location)
     except OSError as exc:
-        _unresolved(spec.text, "the checkout cannot be read: %s" % (exc.strerror or "error"))
-    # replacement objects off for every read of this resolution, whatever
+        _unresolved(text, "the checkout cannot be read: %s" % (exc.strerror or "error"))
+    # replacement objects off for every read of this session, whatever
     # classification would say (rules.xroot_git adds --no-replace-objects)
     mode = rules._XROOT_MODE.set(
         rules.XrootNamespace(location, info.st_dev, info.st_ino))
     try:
         try:
-            return _resolve(checkout, spec)
+            yield
         except rules.XrootAxisError as exc:
             if exc.axis == "capacity":
-                raise errors.error_for("E-REF-TIMEOUT", value=_display(spec.text)) from None
-            _unresolved(spec.text, exc.detail)
+                raise errors.error_for("E-REF-TIMEOUT", value=_display(text)) from None
+            _unresolved(text, exc.detail)
         except (UnicodeError, ValueError) as exc:
-            _unresolved(spec.text, "Git returned text the engine cannot read (%s)"
+            _unresolved(text, "Git returned text the engine cannot read (%s)"
                         % type(exc).__name__)
     finally:
         rules._XROOT_MODE.reset(mode)
+
+
+def resolve_git(checkout, spec):
+    """Resolve a Git reference at its revision; refuse unless it names one file."""
+    if spec.kind != "git":
+        _unresolved(spec.text, "only a Git reference resolves against a checkout")
+    with _git_session(checkout, spec.text):
+        return _resolve(Path(checkout), spec)
+
+
+def read_blob(checkout, blob_id):
+    """The bytes of a blob, read like a resolution."""
+    with _git_session(checkout, blob_id):
+        return rules.xroot_git(Path(checkout), "cat-file", "blob", blob_id, binary=True)
+
+
+def changed_paths(checkout, commit):
+    """Paths a commit changes against its first parent (all of them for a root)."""
+    with _git_session(checkout, commit):
+        listed = rules.xroot_git(Path(checkout), "diff-tree", "-r", "-z", "--name-only",
+                                 "--no-commit-id", "--root", "-m", "--first-parent",
+                                 "--end-of-options", commit, binary=True)
+    return {name.decode("utf-8", "surrogateescape") for name in listed.split(b"\0") if name}
 
 
 def _entry(repo, tree, path):

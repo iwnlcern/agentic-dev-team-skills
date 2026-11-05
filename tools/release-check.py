@@ -49,6 +49,11 @@ SWEEP_ROUNDS = 5
 PLATFORM_DIRS = ("/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/System/")
 BOTH = frozenset({"mac", "linux"})
 MAC = frozenset({"mac"})
+# The one engine module that runs on the mac leg only: pdc's real inbox sweeper reads the
+# engine's mirror headers against the operator's own checkout, which the linux image never
+# has; a pdc break blocks the release unless the operator approves it by name
+# (DD-v3-tests § 3.6, PR-3 G-E2).  Its skip on a host without pdc fails the step.
+PDC_CONSUMER = "relay_engine.tests.test_pdc_consumer"
 DOCKERFILE = Path(__file__).resolve().parent / "release-check.Dockerfile"
 CONTAINER_OUT = "/out"
 CONTAINER_SCRATCH = "/scratch"
@@ -162,7 +167,8 @@ def step_table(repo):
     steps = []
     for path in sorted((repo / "tools/relay_engine/tests").glob("test_*.py")):
         module = "relay_engine.tests." + path.stem
-        steps.append(Step(module, [python, "-m", "unittest", module], BOTH, (_rel(repo, path),),
+        steps.append(Step(module, [python, "-m", "unittest", module],
+                          MAC if module == PDC_CONSUMER else BOTH, (_rel(repo, path),),
                           summary=True))
     adapter = repo / ADAPTER_SCRIPT
     if adapter.is_file():
