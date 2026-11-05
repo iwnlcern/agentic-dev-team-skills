@@ -1279,6 +1279,22 @@ class RealTree(unittest.TestCase):
     def test_real_tree_is_covered(self):
         self.assertEqual(rc.uncovered(REPO, rc.step_table(REPO), rc.EXCLUSIONS), [])
 
+    def test_pdc_consumer_runs_on_mac_only(self):  # PR-3 G-E2; DD-v3-tests § 3.6
+        module = "relay_engine.tests.test_pdc_consumer"
+        steps = rc.step_table(REPO)
+        by_id = {s.id: s for s in steps}
+        self.assertEqual(by_id[module].legs, rc.MAC)
+        self.assertEqual(by_id[module].covers, ("tools/relay_engine/tests/test_pdc_consumer.py",))
+        self.assertEqual([s.id for s in steps if s.id.startswith("relay_engine.tests.")
+                          and s.legs != rc.BOTH], [module])
+        with tempfile.TemporaryDirectory() as name:
+            linux = json.loads(rc.write_container_plan(name, steps, "linux", rc.EXCLUSIONS)
+                               .read_text())["step_ids"]
+        self.assertNotIn(module, linux)
+        self.assertIn("relay_engine.tests.test_header", linux)
+        self.assertIn(module, [s.id for s in steps if "mac" in s.legs
+                               and not rc._excluded(s, rc.EXCLUSIONS)])
+
 
 TESTING_MD = REPO / "tools" / "TESTING.md"
 TICKED = re.compile(r"`([^`]+)`")

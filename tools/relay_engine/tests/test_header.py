@@ -1,9 +1,5 @@
 """v3 relay header: field registry, the one parser, and its refusal codes (DD-v3-engine § 3, § 5)."""
 
-from pathlib import Path
-import subprocess
-import sys
-import tempfile
 import time
 import unittest
 
@@ -536,11 +532,9 @@ class TestGateAdvisories(Refused):
 
 
 
-PDC_SWEEPER = Path("/Users/jack/Programming/pdc/tools/inbox-sweep.py")
-
-
 class TestMirrorHeader(unittest.TestCase):
-    """Task 8: mirror header lines in today's spelling, read by pdc's inbox sweeper."""
+    """Task 8: mirror header lines in today's spelling; pdc's inbox sweeper reads them in
+    test_pdc_consumer."""
 
     def test_lines_and_order(self):
         self.assertEqual(
@@ -580,30 +574,6 @@ class TestMirrorHeader(unittest.TestCase):
                 with self.assertRaises(errors.EngineError) as caught:
                     header.parse(draft(replace("SUBJECT", "a" + char + "b")))
                 self.assertEqual(caught.exception.code, "E-HEADER-CONTROL")
-
-    def sweep(self, seat, reply_parent):
-        with tempfile.TemporaryDirectory() as name:
-            team = Path(name, "master", "relays", "t")
-            team.mkdir(parents=True)
-            inbound = "IMPL-pair-planner-20261104-010000.md"
-            (team / inbound).write_text("\n".join(header.render_mirror_header(
-                "t.planner", [seat], ["v.orchestrator-planner"], None)) + "\n\nplease act\n")
-            (team / "IMPL-pair-implementer-20261104-010100.md").write_text("\n".join(
-                header.render_mirror_header(seat, ["t.planner"], [],
-                                            "t/" + inbound if reply_parent else None))
-                + "\n\ndone\n")
-            result = subprocess.run(
-                [sys.executable, "-I", str(PDC_SWEEPER), seat, "--all", "--root", name],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, cwd=name)
-        rows = [line.split() for line in result.stdout.splitlines() if inbound in line]
-        return result.returncode, rows
-
-    @unittest.skipUnless(PDC_SWEEPER.is_file(), "pdc checkout absent: %s" % PDC_SWEEPER)
-    def test_pdc_sweeper_consumed(self):
-        code, rows = self.sweep("t.implementer", reply_parent=True)
-        self.assertEqual((code, [row[1] for row in rows]), (0, ["consumed"]))
-        code, rows = self.sweep("t.implementer", reply_parent=False)  # control
-        self.assertEqual((code, [row[1] for row in rows]), (1, ["UNREAD"]))
 
 
 if __name__ == "__main__":
