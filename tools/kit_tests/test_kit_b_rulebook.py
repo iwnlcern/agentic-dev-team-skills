@@ -193,3 +193,34 @@ class TestRulebook(KitTreeCase):
         rows = read_census()
         for line in (68, 70, 150, 152, 749, 908):
             self.assertTrue(all(row['disposition'] != 'deleted' for row in rows if int(row['line']) == line), line)
+
+    def test_delivery_names_connect(self):
+        files = [*(ROOT / 'skills').rglob('*.md'), *(ROOT / 'shared').rglob('*.md')]
+        for path in files:
+            text = path.read_text()
+            for old in ('relay-monitor.py bind', 'relay-monitor.py status'):
+                self.assertNotIn(old, text, str(path.relative_to(ROOT)))
+        for rel in ('shared/protocol.md', 'shared/harness-codex.md', 'skills/pair-planner/SKILL.md', 'skills/pair-implementer/SKILL.md'):
+            self.assertIn('relay connect', self.canonical_text(rel), rel)
+
+    def test_no_linter_script_named(self):
+        paths = [ROOT / 'README.md', *(ROOT / 'skills').rglob('*'), *(ROOT / 'shared').rglob('*')]
+        for path in paths:
+            if not path.is_file():
+                continue
+            with self.subTest(path=path.relative_to(ROOT)):
+                text = path.read_text(errors='replace')
+                for old in ('relay-lint.py', 'relay-lint-fixtures', 'check-relay-lint-fixtures.py', '--index'):
+                    self.assertNotIn(old, text)
+        unreleased = self.canonical_text('CHANGELOG.md').split('## [Unreleased]\n', 1)[1].split('\n## [', 1)[0]
+        for old in ('relay-lint.py', 'relay-lint-fixtures', 'check-relay-lint-fixtures.py', '--index'):
+            self.assertNotIn(old, unreleased)
+
+    def test_testing_pointer(self):
+        text = self.canonical_text('skills/pair-implementer/SKILL.md')
+        practice = ROOT / 'tools/TESTING.md'
+        self.assertTrue(practice.is_file())
+        self.assertIn('tools/TESTING.md', text)
+        everyday = practice.read_text().split('\n## Everyday\n', 1)[1].split('\n## ', 1)[0]
+        copied = set(text.splitlines()) & {line for line in everyday.splitlines() if line.strip()}
+        self.assertEqual(copied, set())

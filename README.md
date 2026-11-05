@@ -59,11 +59,8 @@ Every generated role skill carries its adjacent `protocol.md` and tier-specific 
 repository's canonical `skills/` and `shared/` directories are the semantic sources for the
 generator.
 
-Plus **`tools/`** — `relay-lint`, a small linter that structurally checks relay artifacts (shape,
-enums, addressing, lineage, merge-token grammar; it is truth-agnostic — it checks structure, not
-whether claims are true), a Claude Code auto-lint adapter, and a fixture matrix that is the linter's
-own correctness gate (`python3 tools/check-relay-lint-fixtures.py`, plus
-`python3 tools/check-timestamp-drift.py` for clock-dependent checks).
+Plus **`tools/`** — the relay engine and `relay lint`, which checks relay structure rather than claim truth, the generator and host adapters.
+See [tools/TESTING.md](tools/TESTING.md) for the checks and their fixture matrices.
 
 Current version: v2.9.7 — four-tier vocabulary, three nested plugins, canonical-source generator.
 
@@ -157,20 +154,17 @@ A typical run:
 3. Work moves phase by phase — AUDIT → DESIGN (optionally `design-grill`) → DESIGN-REVIEW → PLAN → plan review →
    dispatch → implementation → adversarial review → merge gate — with each handoff a lint-clean
    relay file.
-4. Lint relays before handing them off:
+4. Lint the draft before handing it off, then submit it separately:
 
    ```sh
-   python3 tools/relay-lint.py path/to/relay.md            # one relay, incl. authoring-drift check
-   python3 tools/relay-lint.py --relay-root .relays/<run>  # a whole run, with lineage cross-checks
-   python3 tools/relay-lint.py --index .relays/<run>/INDEX.md  # index: real times, non-decreasing, not ahead of the clock
+   tools/relay lint path/to/draft.md --root .relays/<run>
+   tools/relay submit path/to/draft.md --key <seat-key> --root .relays/<run>
    ```
 
-   Linting one relay also checks that its filename timestamp is a real time within ±2 min of the
-   clock, so a stamp nobody read off a clock fails before the handoff. Add `--no-freshness` when
-   re-verifying an older relay, `--max-drift-minutes N` to loosen the tolerance, and `--index-audit`
-   to see history grandfathered by a `monotonic-from` marker. `--index` deliberately applies no
-   drift window: it is an ordering check, so a quiet index passes while a row stamped ahead of the
-   clock fails.
+   Read the receipt and use its filed path; a clean structural check does not prove the claims.
+   For the v3 delivery contract (DD-v3-adapter § 4.1–4.2), connect with `relay connect --key <seat-key> --root .relays/<run>`.
+   Only `TO` rings, at most 20 on connect; `relay connect --list` shows the remaining count.
+   Keep the terminal handoff pointer for seats using the fallback.
 
 Running more than one pair at once is what the orchestrator roles are for: `orchestrator-planner`
 decomposes and routes work across pair-tier teams, and `orchestrator-reviewer` adversarially checks
@@ -182,7 +176,7 @@ implementation into governance seats.
 
 - **Superpowers is not needed.** Each role skill states the practices it relies on, and the Planner skills read a trimmed brainstorming reference vendored with the kit.
   Keeping Superpowers enabled still adds its `using-superpowers` start-of-session text (3,192 bytes in Superpowers 7.0.0) to every session.
-- **Python 3.11 or newer** — required as the first `python3` on `PATH` by the engine entry point `tools/relay`, `tools/relay-lint.py`, and the Python host-adapter entry points in `tools/adapters/`.
+- **Python 3.11 or newer** — required as the first `python3` on `PATH` by the engine entry point `tools/relay` and the Python host-adapter entry points in `tools/adapters/`.
   The skills can report that optional linting is unavailable; those Python entry points still require the interpreter.
   Install the generated `tools/` directory under your skills root, or point at it however your host resolves skills.
 

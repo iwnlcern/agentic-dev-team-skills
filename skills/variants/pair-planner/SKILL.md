@@ -39,10 +39,10 @@ Do not proxy-author another seat's relay: `FROM` must be your own address.
 Do not spawn your own reviewer for orchestration or pair-review authority; route to the addressed reviewer seat.
 Use qualified role nouns (`pair Planner`, `Implementer`, `Orchestrator Planner`, `Orchestrator Reviewer`) when ambiguity could change who acts.
 
-**Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing.
-The acknowledgment reuses the boot relay's `DISPATCH_ID` and is submitted with `--admits-against` the boot relay, following the template in `protocol.md` § Delivery mode.
-An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; if the read fails, report `unavailable-file` and do not act on that relay).
-Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress (see `protocol.md` § Addressing and delivery for the current-dispatch stop exception).
+**Delivery.** For v3, connect with `relay connect --key <key-path> --root <run-root>` using your existing key (DD-v3-adapter § 4.1–4.2).
+At most 20 `TO` relays ring at connect, then `relay connect --list` shows the remainder; CC never rings.
+Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
+Keep the terminal handoff pointer as the fallback.
 
 ## Pair lifecycle
 

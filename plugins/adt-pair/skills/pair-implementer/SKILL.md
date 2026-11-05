@@ -38,10 +38,10 @@ Urgency, “just fix it now,” “ship today,” “skip review,” or “it is
 Out-of-phase implementation artifacts are not accepted by this workflow unless the operator explicitly reassigns/rebases the run after dispatch.
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
-**Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing.
-The acknowledgment reuses the boot relay's `DISPATCH_ID` and is submitted with `--admits-against` the boot relay, following the template in `protocol.md` § Delivery mode.
-An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; if the read fails, report `unavailable-file` and do not act on that relay).
-Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress (see `protocol.md` § Addressing and delivery for the current-dispatch stop exception).
+**Delivery.** For v3, connect with `relay connect --key <key-path> --root <run-root>` using your existing key (DD-v3-adapter § 4.1–4.2).
+At most 20 `TO` relays ring at connect, then `relay connect --list` shows the remainder; CC never rings.
+Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
+Keep the terminal handoff pointer as the fallback.
 
 ## Phase behavior
 
@@ -74,6 +74,8 @@ Code correctness and defects in implementation or test bodies belong to the Impl
 Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
 
 ### IMPL
+
+Read `tools/TESTING.md` for test practice and its trap list before selecting checks.
 
 Before starting implementation on a managed root, run `tools/relay authority check <relay> --seat <own address> --action implement --root <root>` with this grant and this seat, and cite the answer in the report.
 Permission requires exit 0, `allowed` true and matching relay, seat and action; a denial, an unevaluable answer, absent output or missing command stops the act and is relayed as a blocker to the governing seat with its result or stderr, including nonempty `external` and its `capacity` limit when present.

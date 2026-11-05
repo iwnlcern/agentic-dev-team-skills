@@ -76,4 +76,4 @@ Use all available teams. Disjoint surfaces can run in parallel. Shared files, mi
 
 ## Relay transport
 
-Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. Armed seats receive the arrival automatically (protocol Delivery mode); the pointer block is printed regardless as the fallback. If a receiver cannot access the path, relay or attach the file contents.
+Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. For v3 delivery, connect with `relay connect --key <key-path> --root <run-root>` (DD-v3-adapter § 4.1–4.2); the pointer block remains the fallback. If a receiver cannot access the path, relay or attach the file contents.
