@@ -1262,19 +1262,17 @@ def check_validator_diagnostics(value: object, label: str) -> None:
         for item in value:
             check_validator_diagnostics(item, label)
     elif isinstance(value, dict):
+        expect(not str(value.get("code", "")).startswith("ICON_"),
+               f"{label}: refused icon diagnostic {value}")
         if "severity" in value:
-            severity = value["severity"]
-            expect(severity in ("info", "note", "warning"), f"{label}: refused diagnostic {value}")
-            if severity == "warning":
-                expect(value.get("code") == "ICON_MISSING", f"{label}: refused warning {value}")
+            expect(value["severity"] in ("info", "note"),
+                   f"{label}: refused diagnostic {value}")
         for key, item in value.items():
             if key in ("error", "errors", "failure"):
                 expect(not item, f"{label}: {key}: {item}")
             elif key == "warnings":
-                expect(isinstance(item, list), f"{label}: malformed warnings: {item}")
-                for warning in item:
-                    expect(isinstance(warning, dict) and warning.get("code") == "ICON_MISSING",
-                           f"{label}: refused warning {warning}")
+                expect(isinstance(item, list) and not item,
+                       f"{label}: refused warnings: {item}")
             check_validator_diagnostics(item, label)
 
 
@@ -1310,11 +1308,14 @@ def check_validator_controls() -> None:
     other = {"code": "OTHER_WARNING", "severity": "warning", "message": "Different warning"}
     error = {"code": "ICON_MISSING", "severity": "error", "message": "An error"}
     cases = (
-        ("only allowed code", [icon], 0, True),
+        ("icon warning", [icon], 0, False),
+        ("icon note", [{"code": "ICON_NOTE", "severity": "note"}], 0, False),
+        ("icon info", [{"code": "ICON_INFO", "severity": "info"}], 0, False),
         ("different warning", [other], 0, False),
         ("mixed warnings", [icon, other], 0, False),
         ("error with allowed code", [error], 0, False),
         ("nonzero exit", [icon], 1, False),
+        ("nonzero clean report", [], 1, False),
         ("clean report", [], 0, True),
     )
     with tempfile.TemporaryDirectory(prefix="validator-controls-") as temporary:

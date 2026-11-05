@@ -398,35 +398,6 @@ class TestIcon(KitTreeCase):
         self.assertEqual(len(stream), position + 4)
         self.assertGreater(blocks, 1)
 
-    def test_icon_clears_validator(self):
-        selected = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-        self.assertTrue(selected, "Claude Code validator not found; set CLAUDE_BIN")
-        claude = shutil.which(str(selected))
-        self.assertTrue(claude, f"Claude Code validator is not executable: {selected}")
-        version = subprocess.run([claude, "--version"], capture_output=True, text=True, check=True).stdout.strip()
-        print(f"validator: {claude} {version}")
-        for tier in TIERS:
-            result = subprocess.run(
-                [claude, "plugin", "validate", "--json", str(PLUGINS / tier)],
-                cwd=ROOT, capture_output=True, text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            findings = []
-
-            def walk(value):
-                if isinstance(value, dict):
-                    if "code" in value or "severity" in value:
-                        findings.append(value)
-                    for item in value.values():
-                        walk(item)
-                elif isinstance(value, list):
-                    for item in value:
-                        walk(item)
-
-            walk(json.loads(result.stdout))
-            icon_codes = [f.get("code") for f in findings if str(f.get("code", "")).startswith("ICON_")]
-            self.assertEqual(icon_codes, [], tier)
-            self.assertEqual([f for f in findings if f.get("severity") == "error"], [], tier)
 
 
 class TestUpgradeDocs(KitTreeCase):

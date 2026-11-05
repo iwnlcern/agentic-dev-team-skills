@@ -38,11 +38,30 @@ class TestReviewRules(KitTreeCase):
     def shared_copies(self, name):
         return {f"shared/{name}": self.canonical_text(f"shared/{name}"), **self.installed_shared_copies(name)}
 
+    def test_advisory_template_has_no_brackets(self):
+        for where, text in self.shared_copies("review-panels.md").items():
+            with self.subTest(where=where):
+                header = _section(text, "## Reviewer output").split("In the review body:", 1)[0]
+                finding_lines = [line for line in text.splitlines() if line.startswith("FINDING:")]
+                self.assertTrue(finding_lines)
+                self.assertFalse(any("[" in line or "]" in line for line in finding_lines))
+                self.assertIn("FINDING: advisory <summary>", header.splitlines())
+                self.assertIn("FINDING: advisory <check-REF-index> <summary>", header.splitlines())
+
+    def test_reviewer_names_three_duties(self):
+        rel = "skills/orchestrator-reviewer/SKILL.md"
+        copies = {rel: self.canonical_text(rel), **self.installed_texts(rel)}
+        expected = "Your addressed duties are verification requests at a pair's completion claim, gate reviews and reconcile requests; each is addressed `TO` your reviewer seat."
+        for where, text in copies.items():
+            with self.subTest(where=where):
+                self.assertIn(expected, _section(text, "## Verification requests").splitlines())
+
     def test_blocking_finding_needs_check(self):
         wanted = {
             "review-panels.md": [
                 "FINDING: blocking <check-REF-index> <summary>",
-                "FINDING: advisory [<check-REF-index>] <summary>",
+                "FINDING: advisory <summary>",
+                "FINDING: advisory <check-REF-index> <summary>",
                 "Put `FINDING` lines in the relay's header block; `<check-REF-index>` is the 1-based position of a `REF` line in that header.",
                 "A blocking finding's `REF` names the executed check's output.",
                 "A finding from reading alone is `advisory`.",
@@ -80,7 +99,7 @@ class TestReviewRules(KitTreeCase):
                 with self.subTest(path=path):
                     text = path.read_text(encoding="utf-8")
                     body = lines(_section(text, "## Verification requests"))
-                    for line in ("Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.", "Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.", AUTHORITY, RELEASE, "The release runner's planned subcommands are `consumers`, `frank`, `docs` and `all` (DD-v3-tests § 3.2); each must exist at the release head.", "Cite each command's output file.", "`CC` is visibility only; it is not a verification request or a reply obligation."):
+                    for line in (("Your addressed duties are verification requests at a pair's completion claim, gate reviews and reconcile requests; each is addressed `TO` your reviewer seat." if role == "orchestrator-reviewer" else "Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim."), "Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.", AUTHORITY, RELEASE, "The release runner's planned subcommands are `consumers`, `frank`, `docs` and `all` (DD-v3-tests § 3.2); each must exist at the release head.", "Cite each command's output file.", "`CC` is visibility only; it is not a verification request or a reply obligation."):
                         self.assertIn(line, body)
                     for gone in REMOVED:
                         self.assertNotIn(gone, text)

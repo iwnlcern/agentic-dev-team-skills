@@ -20,7 +20,7 @@ Before any substantive output, apply `protocol.md`. In read-only/report-only pha
 
 ## Verification requests
 
-Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.
+Your addressed duties are verification requests at a pair's completion claim, gate reviews and reconcile requests; each is addressed `TO` your reviewer seat.
 Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.
 The claim kinds are the authority pair's (DD-v3-authority A-OP2); until its table is published, verify every claim by the rule above.
 At release only, for the kit repository's own release, run `python3 tools/release-check.py full --out <dir under $HOME>`.

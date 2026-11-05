@@ -152,7 +152,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-reviewer/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -200,7 +200,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-planner/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -218,7 +218,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "24f25146437da3c33983e9955494e47868a06a7621f265fd5e3971dd1d88b76a",
+    "sha256": "9dc87a12dfc54af0192d35525287c8c2c6cfa8d03a87e32f1a56b38505f3fa6f",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -236,7 +236,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-reviewer/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -290,7 +290,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-planner/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -10874,7 +10874,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-planner/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -10892,7 +10892,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "24f25146437da3c33983e9955494e47868a06a7621f265fd5e3971dd1d88b76a",
+    "sha256": "9dc87a12dfc54af0192d35525287c8c2c6cfa8d03a87e32f1a56b38505f3fa6f",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -10910,7 +10910,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -10964,7 +10964,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-planner/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
@@ -21554,7 +21554,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-planner/review-panels.md",
-    "sha256": "32fd39cfc33a2aa2ded188360fa34ab47c7cea4495d4c774fb14c7ead8abd269",
+    "sha256": "6936ec7c0d763df7238779f373446912ff09a0434ff068040070106e8527eab1",
     "source": "shared/review-panels.md"
   },
   {
