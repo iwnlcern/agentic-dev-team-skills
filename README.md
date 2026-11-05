@@ -157,7 +157,7 @@ A typical run:
 4. Lint the draft before handing it off, then submit it separately:
 
    ```sh
-   tools/relay lint path/to/draft.md --root .relays/<run>
+   tools/relay lint /absolute/path/to/draft.md
    tools/relay submit path/to/draft.md --key <seat-key> --root .relays/<run>
    ```
 

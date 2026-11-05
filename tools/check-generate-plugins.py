@@ -1312,6 +1312,7 @@ def check_validator_controls() -> None:
         ("icon note", [{"code": "ICON_NOTE", "severity": "note"}], 0, False),
         ("icon info", [{"code": "ICON_INFO", "severity": "info"}], 0, False),
         ("different warning", [other], 0, False),
+        ("warnings container without severity", [{"warnings": [{"message": "Warning without severity"}]}], 0, False),
         ("mixed warnings", [icon, other], 0, False),
         ("error with allowed code", [error], 0, False),
         ("nonzero exit", [icon], 1, False),

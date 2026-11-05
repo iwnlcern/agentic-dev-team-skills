@@ -3,10 +3,17 @@
 import ast
 from collections import Counter
 import csv
+from datetime import datetime
 import io
+import json
 from pathlib import Path
 import re
+import runpy
+import shlex
 import subprocess
+import sys
+import tempfile
+from unittest.mock import patch
 
 from test_kit_stage_a import KitTreeCase, ROOT
 
@@ -102,6 +109,7 @@ class TestRulebook(KitTreeCase):
             self.assertEqual(rows[entry], 1, entry)
 
     def test_census_deleted_names_function(self):
+        # Structural coverage only: symbol existence does not prove the duty is enforced.
         rows = read_census()
         self.assertTrue(any(row['disposition'] == 'deleted' for row in rows))
         parsed = {}
@@ -273,3 +281,78 @@ class TestRulebook(KitTreeCase):
         rows = {int(row['line']): row for row in read_census() if int(row['line']) in (56, 861, 862)}
         for number in (56, 861, 862):
             self.assertNotEqual(rows[number]['disposition'], 'deleted', number)
+
+    def test_documented_native_lint_commands_execute(self):
+        sources = ('README.md', 'shared/harness-codex.md', 'skills/sprint-doc-setup/SKILL.md')
+        fixture = """## Inert offline lint control
+
+ROLE: Pair Planner
+PHASE: SITREP
+AUTHORITY: report-only
+DISPATCH_ID: kit-offline-lint-probe
+RUN_ID: fixture
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no — inert syntax fixture, never filed
+FROM: fixture.planner
+TO: fixture.planner
+SUBJECT: Inert syntax fixture only
+ACTIONS_GIT_REF: none — syntax fixture with no repository action
+FINAL_GIT_STATUS_SHORT: empty in isolated syntax fixture
+
+Inert legacy offline syntax fixture; never submitted or used as a grant.
+"""
+        with tempfile.TemporaryDirectory(prefix='kit-lint-docs-') as temporary:
+            draft = Path(temporary) / f"SITREP-pair-planner-{datetime.now():%Y%m%d-%H%M%S}.md"
+            draft.write_text(fixture)
+            substitutions = {'<draft>': str(draft), '<absolute-draft-path>': str(draft),
+                             'path/to/draft.md': str(draft), '/absolute/path/to/draft.md': str(draft),
+                             '<run-root>': temporary, '.relays/<run>': temporary}
+            for source in sources:
+                with self.subTest(source=source):
+                    commands = re.findall(r'(?:<skills-root>/)?(?:tools/)?relay lint [^`\n]+', self.canonical_text(source))
+                    self.assertEqual(len(commands), 1, (source, commands))
+                    tokens = shlex.split(commands[0])
+                    self.assertIn(tokens[0], ('relay', 'tools/relay', '<skills-root>/tools/relay'))
+                    argv = [sys.executable, str(ROOT / 'tools/relay'), *[substitutions.get(token, token) for token in tokens[1:]]]
+                    result = subprocess.run(argv, cwd=temporary, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, (commands[0], result.stdout, result.stderr))
+                    self.assertEqual(json.loads(result.stdout), {str(draft): {'errors': [], 'warnings': []}})
+                    control = subprocess.run([*argv, '--root', temporary], cwd=temporary, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(control.returncode, 2, control.stdout + control.stderr)
+                    self.assertIn('unrecognized arguments: --root', control.stderr)
+
+    def test_allocation_census_names_surviving_duty(self):
+        row, = [row for row in read_census() if int(row['line']) == 722]
+        self.assertEqual(row['disposition'], 'rewritten')
+        duty = 'PLAN, PLAN-REVIEW, and IMPL each use their own unique handoff id at the parent edge; a reissued PLAN or PLAN-REVIEW increments its numeric suffix (`-2`, `-3`, …) without asking the orchestrator; the merge grant/claim pair shares its merge-handoff id; non-authority-chain status relays carry the cycle id, never a handoff id.'
+        self.assertEqual(row['target'], 'skills/sprint-doc-setup/SKILL.md:164 ' + duty)
+        naming = self.canonical_text('skills/sprint-doc-setup/SKILL.md').split('## Naming conventions\n', 1)[1].split('\n## ', 1)[0]
+        self.assertIn(duty, naming)
+
+    def test_warning_container_control_is_decisive(self):
+        path = ROOT / 'tools/check-generate-plugins.py'
+        with patch.object(sys, 'path', [str(ROOT / 'tools'), *sys.path]):
+            module = runpy.run_path(str(path))
+        controls = module['check_validator_controls']
+        controls()  # Unchanged real external validator controls must pass first.
+        node, = [node for node in ast.parse(path.read_text()).body
+                 if isinstance(node, ast.FunctionDef) and node.name == 'check_validator_diagnostics']
+        replaced = []
+
+        class OmitWarningContainer(ast.NodeTransformer):
+            def visit_If(self, node):
+                node = self.generic_visit(node)
+                if ast.unparse(node.test) == "key == 'warnings'":
+                    node.body = [ast.Pass()]
+                    replaced.append(True)
+                return node
+
+        node = OmitWarningContainer().visit(node)
+        self.assertEqual(len(replaced), 1)
+        namespace = dict(controls.__globals__)
+        tree = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
+        exec(compile(tree, str(path), 'exec'), namespace)
+        with patch.dict(controls.__globals__, {'check_validator_diagnostics': namespace['check_validator_diagnostics']}):
+            with self.assertRaisesRegex(AssertionError, 'warnings container without severity'):
+                controls()

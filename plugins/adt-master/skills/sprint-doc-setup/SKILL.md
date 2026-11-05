@@ -71,7 +71,7 @@ Create the INDEX and append the first boot row in one step; do not leave a newly
 The canonical marker value is a POSIX-separator path relative to the directory containing the INDEX (`.` and `..` permitted). A tracked absolute marker is a reviewer-detected conformance violation; untracked machine-local indexes may use absolute values. An existing index opts in by appending its first and only marker at end-of-file. A second recognized marker is a duplicate refusal, never an update mechanism. An index without a marker receives no resolution semantics or resolution check — there is no repo-root default or implied base.
 
 `INDEX.md` is append-oriented.
-Lint drafts with `relay lint <draft> --root <run-root>` before submission; `_cmd_lint` in `tools/relay_engine/cli.py` selects the check.
+Lint drafts with `relay lint <absolute-draft-path>` before submission; `_cmd_lint` in `tools/relay_engine/cli.py` selects the check.
 For legacy INDEX rules, consult `lint_relay_index` in `tools/relay_engine/rules.py`; never hand-edit a daemon projection.
 It uses exactly this schema:
 
