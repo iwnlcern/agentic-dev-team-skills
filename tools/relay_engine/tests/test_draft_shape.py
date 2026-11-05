@@ -1,5 +1,7 @@
 """Behavioral contract for draft admission shapes and their diagnostic locations."""
+import hashlib
 import itertools
+import json
 import random
 import re
 import unittest
@@ -45,7 +47,7 @@ def verdict_keys(lengths):
 
 
 def diagnostic_texts():
-    """Shared input population for the standalone/engine differential."""
+    """Frozen diagnostic inputs, including valid and quoted controls."""
     yield draft()
     for ch in CHARS:
         yield draft(body='text' + ch + 'tail')
@@ -785,6 +787,11 @@ class TestClosedRule(unittest.TestCase):
                     self.assertEqual((shape.kind, shape.key, shape.column), ('late-control', 'SUPERSEDES', 14))
 
     def test_key_map_table(self):
+        # Independent full-content oracle captured from base 2b4f83e.
+        canonical = json.dumps(E.SHAPE_KEY_MAP, ensure_ascii=True, sort_keys=True,
+                               separators=(',', ':')).encode('ascii')
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(),
+                         'd8efb93b2f50513357213a64689b33672eb481d4c4d35a70139e78e0c96e71cc')
         self.assertEqual(len(E.SHAPE_KEY_MAP), 1914)
         for chars, want in (('：∶', ':'), ('＿﹍', '_'), ('ЕΕ', 'E'), ('Ｓ𝐒Ⓢ', 'S'), ('0','O'), ('1I|','l'), ('m','rn')):
             for char in chars:
@@ -794,6 +801,10 @@ class TestClosedRule(unittest.TestCase):
         self.assertTrue(all(re.fullmatch('[A-Za-z0-9:_]+', value) for value in E.SHAPE_KEY_MAP.values()))
 
     def test_entity_table(self):
+        canonical = json.dumps(E.SHAPE_ENTITY_MAP, ensure_ascii=True, sort_keys=True,
+                               separators=(',', ':')).encode('ascii')
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(),
+                         '3abe4872e0059176c279f9e38ea1b84fe3f91e2674d6d8b4ac64d1abed33bfca')
         self.assertEqual(len(E.SHAPE_ENTITY_MAP), 349)
         for name, value in (('colon', ':'), ('ZeroWidthSpace', '\u200b'), ('shy', '\xad')):
             self.assertEqual(E.SHAPE_ENTITY_MAP[name], value)

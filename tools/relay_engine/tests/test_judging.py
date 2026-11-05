@@ -9,7 +9,7 @@ from relay_engine import judging, rules
 from relay_engine.envelope import Envelope
 
 TOOLS = Path(__file__).resolve().parents[2]
-POPULATION = TOOLS / 'relay-engine-fixtures/lint-population'  # the linter's fixtures at cbc8f07
+POPULATION = TOOLS / 'relay-engine-fixtures/lint-population'  # copied at 2b4f83e, less the documented omissions
 
 
 def body(phase='PLAN', sender='p.planner', target='p.implementer', ident='candidate', extra='', content=''):

@@ -29,8 +29,8 @@ LATER_CASES = ('merge-token/MT10-field-grant-to-planner', 'merge-token/MT11-toke
 
 
 def snapshot(destination):
-    """The order population: tools/relay-engine-fixtures as at BASE, from Git,
-    with the copied lint population beside it."""
+    """The order population: base fixtures from Git plus the working-tree copy,
+    including any untracked inputs there, less the explicitly named later cases."""
     archive = subprocess.check_output(['git', 'archive', BASE, 'tools/relay-engine-fixtures'], cwd=REPO)
     with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
         stream.extractall(destination, filter='data')

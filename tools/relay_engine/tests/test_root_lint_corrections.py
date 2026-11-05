@@ -132,3 +132,22 @@ class TestRootLintCorrections(unittest.TestCase):
 
     def test_missing_artifact_fails_in_every_spelling(self):
         self.check_spellings(missing=True)
+
+    def test_relative_lock_target_may_exist_only_in_cwd(self):
+        working = Path(self.temp.name) / 'analysis-cwd'
+        target = working / 'notes/neutral.md'
+        target.parent.mkdir(parents=True)
+        relative = 'notes/neutral.md'
+        self.assertFalse((self.root / relative).exists())
+        self.assertFalse((self.root.parent.parent / relative).exists())
+        for key in ('PLAN_LOCK_ID', 'DESIGN_LOCK_ID'):
+            with self.subTest(key=key):
+                self.path.write_text(draft(extra=key + ': ' + relative + '\n'))
+                target.write_text('Independent lock target.\n')
+                with cwd(working):
+                    present = rules.lint_relay_root(self.root)
+                    self.assertEqual([e for e in present.errors if 'references missing file' in e], [])
+                    target.unlink()
+                    absent = rules.lint_relay_root(self.root)
+                self.assertEqual([e for e in absent.errors if 'references missing file' in e],
+                                 [self.path.name + ': ' + key + ' references missing file ' + relative])

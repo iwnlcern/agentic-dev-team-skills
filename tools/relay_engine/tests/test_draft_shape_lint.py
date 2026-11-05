@@ -1,11 +1,14 @@
 """Public lint surfaces agree on draft-shape refusals and quote controls."""
 import copy
+import hashlib
+import itertools
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from relay_engine import envelope, rules
-from relay_engine.tests.test_draft_shape import draft
+from relay_engine.tests.test_draft_shape import diagnostic_texts, draft
 
 
 POPULATION = 'tools/relay-engine-fixtures/lint-population'
@@ -48,6 +51,18 @@ class TestDraftShapeLint(unittest.TestCase):
         path = path or self.path
         path.write_bytes(text.encode('utf-8'))
         return path
+
+    def test_wrapper_messages_match_frozen_diagnostic_population(self):
+        fixture = (Path(__file__).resolve().parents[2] / 'relay-engine-fixtures'
+                   / 'draft-shape/wrapper-messages-2b4f83e.json')
+        expected = json.loads(fixture.read_text())['cases']
+        for index, (text, row) in enumerate(itertools.zip_longest(diagnostic_texts(), expected)):
+            with self.subTest(case=index):
+                self.assertIsNotNone(text)
+                self.assertIsNotNone(row)
+                self.assertEqual(hashlib.sha256(text.encode('utf-8')).hexdigest(),
+                                 row['input_sha256'])
+                self.assertEqual(rules.draft_shape_errors(text), row['errors'])
 
     def test_lint_file_reports_each_kind_in_both_linters(self):
         for text in (draft(body='a\u2028b'), draft(body='SUPERSEDES: x'),
