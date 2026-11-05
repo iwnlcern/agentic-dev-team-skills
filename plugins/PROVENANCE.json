@@ -308,7 +308,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "cec7f39b5a96a2ae1a6c02a0e66a27b298bff9b5cb7ffeefe89aa1c8c19a003f",
+    "sha256": "43358635fbe01dc0e9ec49b7e248424f429df879b268466c47482f93dfdb624f",
     "source": "tools/adapters/README.md"
   },
   {
@@ -10994,7 +10994,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "cec7f39b5a96a2ae1a6c02a0e66a27b298bff9b5cb7ffeefe89aa1c8c19a003f",
+    "sha256": "43358635fbe01dc0e9ec49b7e248424f429df879b268466c47482f93dfdb624f",
     "source": "tools/adapters/README.md"
   },
   {
@@ -21596,7 +21596,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "cec7f39b5a96a2ae1a6c02a0e66a27b298bff9b5cb7ffeefe89aa1c8c19a003f",
+    "sha256": "43358635fbe01dc0e9ec49b7e248424f429df879b268466c47482f93dfdb624f",
     "source": "tools/adapters/README.md"
   },
   {

@@ -281,7 +281,9 @@ A doorbell exits when its Claude Code window is gone (the window's process has e
 Each exit prints exactly one line on stdout, `relay-monitor: stopped: window gone` or `relay-monitor: stopped: terminated`, records the exit in the note, frees the window lock and exits 0.
 A stopping doorbell writes no further arrival, and an arrival it wrote after the stop request is offered again by the next doorbell, so a stop loses no arrival and can repeat one.
 The window's exit is reported by the kernel (kqueue on macOS, a pidfd on Linux), so an idle doorbell starts no process to check it; the window's start time is read once, from the kernel, when the doorbell starts.
-A stop that arrives in the first few tens of milliseconds, before Python has started running the doorbell's code, ends the process without the `stopped:` line.
+Python's own startup and the compilation of the whole doorbell script come before its stop handlers are installed.
+A SIGTERM in that interval takes its default action: no `stopped:` line, raw return code -15 (shell status 143), and no runtime state, because no note, lock or leader exists yet.
+The interval grows with machine load.
 An engine outage is not an exit: the doorbell keeps polling.
 
 ### Bounded status
