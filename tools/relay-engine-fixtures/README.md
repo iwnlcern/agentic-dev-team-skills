@@ -6,6 +6,11 @@ Imported/adopted rows are suppressed without ever having been fully linted; file
 The `judging/base-order-cbc8f07.json` capture preserves unsorted diagnostics from the base commit and its frozen fixture population.
 It is independent of the regenerated parity golden.
 
+The `lint-population/` tree is the shipped v2 linter's fixture tree as at `origin/v3` `2b4f83e`, copied byte for byte when the engine's tests stopped reading the linter's own tree (plan Task 13).
+It omits that tree's README and the `lockpath/LP2-new-form/` case, the three files that name the linter.
+`test_judging`, `test_judging_agreement` and `test_human_gate` read it whole.
+The order check in `test_finding_tags` and `test_history_audit` reads it without the two `merge-token` cases added after `cbc8f07`, so its population is that commit's tree less the same three files.
+
 The `judging/aligned/` fixtures compare every Finding field against the sweep for aligned admission order, including gate-review approval, no-reply, and a SITREP admitted after an unheard grant.
 The `judging/future-sensitive/` fixtures hold the six named temporal cases and explicit admission and sweep expectations.
 The lock-lifecycle and commission-surface cases require late ingestion of older-stamped evidence, so the required order-divergent precedence classifies those two as order-divergent despite their storage directory.

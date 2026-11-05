@@ -1,0 +1,18 @@
+ROLE: Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: amb3-dispatch
+PARENT_DISPATCH_ID: amb3
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no
+FROM: qi.planner
+TO: qi.implementer
+DELEGATED_DISPATCH_AUTHORITY: yes
+SCOPE_DIFF:
+- src/fix.ts -> in
+SCOPE_DIFF_RESULT: all-in
+
+DISPATCH IMPL
+
+FINAL_GIT_STATUS_SHORT: none — fixture only

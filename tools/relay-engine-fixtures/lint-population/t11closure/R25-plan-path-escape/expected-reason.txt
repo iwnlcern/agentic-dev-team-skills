@@ -1,0 +1,1 @@
+t11-closure: plan lock path escapes the plan root

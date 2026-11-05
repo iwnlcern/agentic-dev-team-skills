@@ -380,6 +380,57 @@ class TestPanelFold(Refused):
         self.assertEqual(self.resolve("bivpak@main:a:b").line_count, 1)
 
 
+
+# Plan Task 13 (DD-v3-tests § 3.4, erratum 1): the engine's tests off the shipped linter.
+TASK13_MODULES = ("test_judging", "test_judging_agreement", "test_routed_notice",
+                  "test_draft_shape_lint", "test_draft_shape", "test_root_lint_corrections",
+                  "test_finding_tags", "test_history_audit", "test_human_gate", "test_refs")
+# spelled in parts so that this module, one of the ten, names none of them
+LINTER_NAMES = ("relay-" + "lint.py", "relay-" + "lint-fixtures", "_stand" + "alone")
+
+
+class TestLinterSeam(unittest.TestCase):
+    def test_no_linter_loader(self):
+        tests = Path(__file__).resolve().parent
+        for name in TASK13_MODULES:
+            text = (tests / (name + ".py")).read_text(encoding="utf-8")
+            for word in LINTER_NAMES:
+                with self.subTest(module=name, word=word):
+                    self.assertNotIn(word, text)
+        # an executed import of each, in a copy of tools/ with the linter and its
+        # fixtures absent (v3-a4-order-ruling-4), not only a text scan
+        tools = tests.parents[1]
+        hidden = {LINTER_NAMES[0], LINTER_NAMES[1], "relay-engine-fixtures", "__pycache__"}
+        with tempfile.TemporaryDirectory() as name:
+            copy = Path(name, "tools")
+            __import__("shutil").copytree(tools, copy,
+                                          ignore=lambda folder, names: hidden & set(names))
+            self.assertFalse((copy / LINTER_NAMES[0]).exists())
+            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            env.update(PYTHONPATH=str(copy), PYTHONDONTWRITEBYTECODE="1")
+            run = subprocess.run(
+                [__import__("sys").executable, "-c",
+                 "import importlib, sys\n"
+                 "for name in sys.argv[1:]:\n"
+                 "    module = importlib.import_module('relay_engine.tests.' + name)\n"
+                 "    assert module.__file__.startswith(%r), module.__file__\n" % str(copy),
+                 *TASK13_MODULES],
+                cwd=name, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=120)
+            self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_seam_expired_deadline_spawns_no_git(self):
+        import time
+        with tempfile.TemporaryDirectory() as name, mock.patch.object(
+                rules, "_xroot_start_git", side_effect=AssertionError("Git was spawned")) as start:
+            for axis in ("design", "plan", "artifact"):
+                with self.subTest(axis=axis):
+                    with self.assertRaises(rules.XrootAxisError) as caught:
+                        rules.xroot_git(Path(name), "cat-file", "-e", "HEAD", axis=axis,
+                                        deadline=time.monotonic() - 1)
+                    self.assertIn("timed out", str(caught.exception))
+            start.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -1,0 +1,16 @@
+ROLE: Master Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: cm127-grant
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: yes
+FROM: Alpha.Master-Planner
+TO: beta.pair-planner
+PARENT_DISPATCH_ID: cm127-approval
+DELEGATED_DISPATCH_AUTHORITY: yes
+COMMISSION_ID: cm127
+COMMISSION_SCOPE: scope-cm127
+COMMISSION_TO: beta.pair-planner
+CHARTER_DOC_ID: CH-cm127
+FINAL_GIT_STATUS_SHORT: none — generated lifecycle fixture

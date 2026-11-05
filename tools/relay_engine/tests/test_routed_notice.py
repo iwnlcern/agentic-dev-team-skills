@@ -1,11 +1,10 @@
 """One atomic and explicitly linked notice for each unknown-address submission."""
-import importlib.util
 from pathlib import Path
 import subprocess
 import time
 from unittest import mock
 
-from relay_engine import daemon, judging, ledger as store, reconcile, roster, rules, seats
+from relay_engine import daemon, ledger as store, reconcile, roster, rules, seats
 from relay_engine.envelope import parse_draft
 from relay_engine.tests.test_judging import body
 from relay_engine.tests.test_roster import RosterFixture
@@ -98,14 +97,10 @@ class TestRoutedNotice(RosterFixture):
 
     def test_notice_envelope_lints_clean_in_both_linters(self):
         result=self.submit_raw(self.unknown());path=Path(self.root.path,result['routed_notice'])
-        standalone=Path(__file__).parents[2]/'relay-lint.py'
         self.assertEqual(rules.lint_file(path,freshness=False).errors,[])
-        check=subprocess.run(['python3',str(standalone),str(path),'--no-freshness'],capture_output=True,text=True)
-        self.assertEqual(check.returncode,0,check.stdout+check.stderr)
 
     def test_unknown_addresses_are_listed_in_a_fence(self):
         from relay_engine import envelope
-        from relay_engine.tests.test_parity import _standalone
         shown = '𝐒𝐔𝐏𝐄𝐑𝐒𝐄𝐃𝐄𝐒： x'
         raw = body('SITREP').replace(b'CC: r.orchestrator-reviewer', ('CC: `a, '+shown+', b`').encode())
         self.assertIsNone(envelope.draft_shape(raw.decode()))
@@ -116,8 +111,7 @@ class TestRoutedNotice(RosterFixture):
         notice = path.read_text()
         self.assertTrue(notice.endswith('Unknown addresses:\n\n~~~\n`a\nb`\n'+shown+'\n~~~\n'))
         self.assertIsNone(envelope.draft_shape(notice))
-        for module in (rules, _standalone()):
-            self.assertEqual(module.lint_file(path, freshness=False).errors, [])
+        self.assertEqual(rules.lint_file(path, freshness=False).errors, [])
 
     def test_notice_fence_outruns_any_tilde_run(self):
         for number, (addresses, fence) in enumerate(((['a~~~~b','x~y'],'~~~~~'), (['left','right'],'~~~'))):
@@ -130,13 +124,11 @@ class TestRoutedNotice(RosterFixture):
     def test_no_address_list_shapes_the_notice(self):
         import random
         from relay_engine import envelope
-        from relay_engine.tests.test_parity import _standalone
         # Retained notice_fence_probe parts, with exactly its seed and normalization.
         parts = ['supersedes', 'SUPERSEDES', '𝐒𝐔𝐏𝐄𝐑𝐒𝐄𝐃𝐄𝐒', ':', '：', '&colon;', '`', '``', '```',
                  '~', '~~~', '~~~~~~', '<b', '>', '](', ')', '][', ']', '![', '<!--', '-->', '- ', '1. ',
                  '> ', '<pre>', ' ', 'x', 'a.b', '\u200b', '\\', '*', '_', '#', '&#83;', '𝐒𝐄', '𝐃𝐄𝐒:']
         rng = random.Random(5)
-        hand = _standalone()
         raw = body('SITREP')
         ctx = store.AdmissionContext(self.ledger, 1, '20261031-010000',
                                      'r/SITREP-pair-planner-20261031-010000.md', parse_draft(raw.decode()), raw, None)
@@ -159,7 +151,6 @@ class TestRoutedNotice(RosterFixture):
                 text = captured.pop()
                 current = text.split('Unknown addresses:', 1)[0]+'Unknown addresses: '+', '.join(addresses)+'\n'
                 controls += envelope.draft_shape(current) is not None
-                for module in (envelope, hand):
-                    with self.subTest(case=number, copy=module.__name__):
-                        self.assertIsNone(module.draft_shape(text))
+                with self.subTest(case=number):
+                    self.assertIsNone(envelope.draft_shape(text))
         self.assertGreater(controls, 0)
