@@ -34,6 +34,24 @@ At most 20 `TO` relays ring at connect, then `relay connect --list` shows the re
 Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
 Keep the terminal handoff pointer as the fallback.
 
+## Delegated scope check
+
+Before issuing a delegated `DISPATCH IMPL`, produce a mechanical scope diff — list, do not judge:
+
+```text
+SCOPE_DIFF:
+- <each file/dir the locked plan touches> -> <in | OUT vs the dispatch's in-scope list>
+SCOPE_DIFF_RESULT: <all-in | deviation-present>
+```
+
+Any file or directory not covered by the dispatch's in-scope list is a deviation.
+
+There is no `minor`, `single-line`, `integration hook`, `boundary-contract-supporting`, or `needed-for-acceptance` exception, and an Implementer plan-review approve does not convert an out-of-scope file into an in-scope one.
+
+Whether an out-of-scope edit is necessary is the orchestrator's (or the operator's in a standalone run) call, not the pair's.
+
+If `SCOPE_DIFF_RESULT` is `deviation-present`, do not issue the token; relay the plan plus the justification to the orchestrator (or the operator when no orchestrator seat exists) and wait.
+
 ## Pair lifecycle
 
 1. **Intake and tier selection** — choose the lightest safe ceremony tier; record any downgrade; escalate on hard triggers.
@@ -51,7 +69,7 @@ The plan relay (file-first) must carry: locked design, scope, acceptance criteri
 8. **Plan review fold** — receive Implementer/human plan-review findings.
 Fold blockers and must-haves, quickly verify the fold, and reissue until approved.
 After approve, a correction that leaves bound items unchanged is an erratum with a delta review of the erratum alone, per the Plan contract section of `protocol.md`; a change to a bound item is a reissue.
-9. **Implementation dispatch** — implementation starts only after the exact literal token `DISPATCH IMPL` is issued in a relay file under the active run's RELAY_ROOT to exactly one Implementer-role `TO` addressee by the operator/orchestrator — or by you, the pair Planner, when an orchestrator PLAN dispatch, a master-planner commissioning PLAN under the `DD-v29-master-authority-20260809` commissioning gate, or — in a standalone run — an operator PLAN dispatch has explicitly delegated conditional dispatch authority AND the Implementer's plan review returned approve AND the mechanical `SCOPE_DIFF` from `protocol.md` returns `all-in` with no hard trigger AND the `PARENT_DISPATCH_ID` chain points to that approving PLAN-REVIEW, whose parent is your pair-Planner PLAN addressed to the Implementer. A token outside the active RELAY_ROOT is inert regardless of addressing. Any deviation re-engages the orchestrator (or the operator when no orchestrator seat exists) instead of dispatching. Do not implement by default. After dispatch, the Implementer executes the plan task by task — stand by for inline questions and blocker relays, but do not direct implementation; your next active step is the PR/implementation report.
+9. **Implementation dispatch** — implementation starts only after the exact literal token `DISPATCH IMPL` is issued in a relay file under the active run's RELAY_ROOT to exactly one Implementer-role `TO` addressee by the operator/orchestrator — or by you, the pair Planner, when an orchestrator PLAN dispatch, a master-planner commissioning PLAN under the `DD-v29-master-authority-20260809` commissioning gate, or — in a standalone run — an operator PLAN dispatch has explicitly delegated conditional dispatch authority AND the Implementer's plan review returned approve AND the mechanical `SCOPE_DIFF` in § Delegated scope check returns `all-in` with no hard trigger AND the `PARENT_DISPATCH_ID` chain points to that approving PLAN-REVIEW, whose parent is your pair-Planner PLAN addressed to the Implementer. A token outside the active RELAY_ROOT is inert regardless of addressing. Any deviation re-engages the orchestrator (or the operator when no orchestrator seat exists) instead of dispatching. Do not implement by default. After dispatch, the Implementer executes the plan task by task — stand by for inline questions and blocker relays, but do not direct implementation; your next active step is the PR/implementation report.
    When authoring the grant, see `protocol.md` § Authority check before acting.
 See `protocol.md` § Authority check before acting for continuations.
 10. **Adversarial review** — after PR creation, use `review-panels.md`. Use `reviewer-spawn-prompts.md` when the host supports agent teams/subagents.

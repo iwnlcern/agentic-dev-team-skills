@@ -124,11 +124,6 @@ class TestRulebook(KitTreeCase):
         text = self.canonical_text('shared/protocol.md')
         for row in read_census():
             number = int(row['line'])
-            if number == 56:
-                # Explicit v3-kit-impl-b1 hold: retain the base sentence until
-                # the operator answer is relayed; do not test its future rewrite.
-                self.assertIn(row['sentence'], text)
-                continue
             if row['disposition'] not in ('moved', 'rewritten', 'kept'):
                 continue
             with self.subTest(line=number, disposition=row['disposition']):
@@ -224,3 +219,57 @@ class TestRulebook(KitTreeCase):
         everyday = practice.read_text().split('\n## Everyday\n', 1)[1].split('\n## ', 1)[0]
         copied = set(text.splitlines()) & {line for line in everyday.splitlines() if line.strip()}
         self.assertEqual(copied, set())
+
+    def test_delegated_scope_judgment_is_preserved(self):
+        planner = self.canonical_text('skills/pair-planner/SKILL.md')
+        for row in read_census():
+            if int(row['line']) in (360, 362, 368):
+                self.assertIn(row['disposition'], ('moved', 'rewritten'))
+                self.assertIn(row['sentence'], planner)
+        self.assertNotIn('mechanical `SCOPE_DIFF` from `protocol.md`', planner)
+
+    def test_authoring_conventions_exceed_the_checker(self):
+        text = self.canonical_text('shared/protocol.md')
+        self.assertIn('Keep every grant fence-free, including field-form grants; never repeat any header field with a different body value, including noncritical fields.', text.splitlines())
+        for row in read_census():
+            if int(row['line']) in (527, 528, 529):
+                self.assertEqual(row['disposition'], 'rewritten')
+
+    def test_semantic_census_destinations(self):
+        for row in read_census():
+            with self.subTest(line=row['line']):
+                if int(row['line']) in (690, 719, 720, 985):
+                    self.assertIn(row['disposition'], ('moved', 'rewritten'))
+                if int(row['line']) == 781 and row['sentence'].startswith('Index rows'):
+                    self.assertEqual(row['target'], '`lint_relay_index` in `tools/relay_engine/rules.py`')
+        implementer = self.canonical_text('skills/pair-implementer/SKILL.md')
+        for row in read_census():
+            if int(row['line']) in (719, 720):
+                self.assertIn(row['sentence'], implementer)
+        text = self.canonical_text('shared/protocol.md')
+        self.assertIn('A handoff names scope/exclusions, owner/surface, evidence or audit instructions, criteria/reject gates, applicable locks, boundary contract or not applicable, branch/base/target for implementation or merge, deliverable, evidence level and operator decisions or none.', text.splitlines())
+        self.assertIn('Reconcile free-prose merge claims; a clean structural check does not establish their truth.', text.splitlines())
+
+    def test_resume_prerequisites_are_concrete(self):
+        implementer = self.canonical_text('skills/pair-implementer/SKILL.md')
+        self.assertIn('## Resume checks', implementer.splitlines())
+        for row in read_census():
+            if int(row['line']) in (177, 449, 450, 451):
+                self.assertIn(row['sentence'], implementer)
+                self.assertIn(row['disposition'], ('moved', 'rewritten'))
+        self.assertIn('skills/pair-implementer/SKILL.md', self.canonical_text('shared/protocol.md'))
+
+    def test_cc_is_visibility_only(self):
+        protocol = self.canonical_text('shared/protocol.md')
+        reviewer = self.canonical_text('skills/orchestrator-reviewer/SKILL.md')
+        self.assertIn('Ordinary CC is context and visibility: it grants no action authority, requires no reply or acknowledgment, and does not by itself interrupt addressed work.', protocol.splitlines())
+        self.assertIn('A seat whose role gives it a standing duty toward copied relays still acts on that duty and files under it, not as a reply the copy asked for.', protocol.splitlines())
+        self.assertIn('Evidence itself can establish a stop condition of the current dispatch; confirm it before applying that stop.', protocol.splitlines())
+        self.assertIn('Independently examine copied orchestrator rulings and authority-bearing relays on your own cadence for decomposition, routing, sequencing, stale state, scope or boundary, and verification risks; file supported findings under your standing reviewer role without waiting for a Planner-selected addressed request.', reviewer.splitlines())
+        self.assertNotIn('Use those copies as context for an addressed verification request; visibility alone does not assign review work.', reviewer)
+        self.assertIn('This is not a standing approval gate; do not require the Orchestrator Planner to wait for your approval before routing a relay unless the operator explicitly creates such a gate or the run has adopted reviewer checkpoints, in which case the merge grant waits for your addressed reply.', reviewer.splitlines())
+        self.assertIn("Your addressed duties are verification requests at a pair's completion claim, gate reviews and reconcile requests; each is addressed `TO` your reviewer seat.", reviewer.splitlines())
+        self.assertIn('Your standing review role supplies independent oversight authority; a copy supplies visibility, never implementation or downstream direction authority.', reviewer.splitlines())
+        rows = {int(row['line']): row for row in read_census() if int(row['line']) in (56, 861, 862)}
+        for number in (56, 861, 862):
+            self.assertNotEqual(rows[number]['disposition'], 'deleted', number)

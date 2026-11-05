@@ -41,7 +41,8 @@ Do not replace a missing relay with a review panel; require the relay to be writ
 You are booted at orchestrator `init`; follow the protocol's same-run reviewer CC convention for orchestrator-planner authority-bearing relays in the broad SET.
 The missing-visibility finding is decided by `orchestrator_review_gate_errors` in `tools/relay_engine/rules.py`; its absence does not establish that the CC convention was met.
 CC grants context, not action authority and not a reply obligation.
-Use those copies as context for an addressed verification request; visibility alone does not assign review work.
+Independently examine copied orchestrator rulings and authority-bearing relays on your own cadence for decomposition, routing, sequencing, stale state, scope or boundary, and verification risks; file supported findings under your standing reviewer role without waiting for a Planner-selected addressed request.
+Your standing review role supplies independent oversight authority; a copy supplies visibility, never implementation or downstream direction authority.
 This is not a standing approval gate; do not require the Orchestrator Planner to wait for your approval before routing a relay unless the operator explicitly creates such a gate or the run has adopted reviewer checkpoints, in which case the merge grant waits for your addressed reply.
 
 For the two addressed checkpoints, see [Addressed checkpoint duties](#addressed-checkpoint-duties); their reply obligations are distinct from `CC` visibility.

@@ -1,13 +1,13 @@
 # Agentic Dev Team Protocol
 
-Use this rulebook for agent judgment; the engine decides relay grammar and admission.
+Use this rulebook for judgment; the engine decides relay grammar and admission.
 Role scope: Master Planner (`master-planner`), Master Reviewer (`master-reviewer`), Domain Planner (`domain-planner`), Domain Reviewer (`domain-reviewer`), Pair Planner (`pair-planner`), Pair Implementer (`pair-implementer`) and legacy Planner (`planner`).
 
 ## Scope note
 
 This protocol defines workflow scope only.
-It does not ask any agent to bypass platform, tool, repository, safety, or operator restrictions.
-If an instruction conflicts with a higher-priority policy or tool boundary, pause and report the conflict.
+Follow platform, tool, repository, safety and operator restrictions.
+Pause and report higher-priority policy or tool conflicts.
 
 ## Host adaptation
 
@@ -40,37 +40,38 @@ Plan-shape and revision warnings prompt contract review; they prove no defect.
 ## Working documents and evidence
 
 File substantive handoffs; keep the design conversation inline and file its resulting lock.
+A handoff names scope/exclusions, owner/surface, evidence or audit instructions, criteria/reject gates, applicable locks, boundary contract or not applicable, branch/base/target for implementation or merge, deliverable, evidence level and operator decisions or none.
 Revise the one working copy of a design or plan in place; do not create a new `-rN` file for each revision.
 Review snapshots and the lock mark belong to DD-v3-engine § 17.
-Point to files and lines instead of copying long passages.
+Point to files and lines instead of copying passages.
 Keep and reread evidence on disk.
 Do not edit or delete filed relays or daemon projections.
 Ask operator questions plainly, with the decision and consequences.
 Use a `KIND: QUESTION` relay to `operator` for operator decisions and `NEEDS: answer` for seat-to-seat questions (DD-v3-engine § 3).
 Keep your own author identity; never proxy-author another seat's authority.
+Keep every grant fence-free, including field-form grants; never repeat any header field with a different body value, including noncritical fields.
 A digest acknowledgment is legitimate only in its matching approval or direct-override lineage; a register entry alone is not approval.
 After filing, print your FROM and 3–6 summary lines, then terminal RELAY/TO/CC blocks in filing order, with nothing after them.
 Use the filed header addressees verbatim; omit absent CC; if the receiver cannot access the file, relay or attach its contents.
 Use the real authoring clock; never invent a timestamp.
-Panels report to their owner; they do not replace addressed reviewers.
+Panels report to owners; they do not replace addressed reviewers.
 
 ## Authority check before acting
 
 Check the filed grant before implementation, changed-evidence resume or merge; findings grant nothing.
 Run `tools/relay authority check <relay> --seat <own address> --action implement|merge --root <root>`; `_check` in `tools/relay_engine/authority.py` decides permission.
-Act only on an allowed answer matching the relay, seat and action, with exit 0.
+Require exit 0 and an allowed answer matching relay, seat and action.
 Every nonzero exit stops the act; a denial, a result that could not be evaluated, no result at all, and a client without this command are relayed as blockers to the governing seat.
 Quote the result and nonempty external limits, or stderr and exit status if no result.
 Do not retry into a pass or fall back to reading the relay by eye.
 A command failure never turns a managed root into a hand-authored root.
-Retain the command, its output or stderr code, and exit status for every check actually run.
-A later allowed answer does not prove permission at an earlier act.
-If an artifact, amendment, governing relay or cycle state changes, check again before resuming; unknown counts as changed.
-Keep earlier checks as evidence and cite the latest check preceding the reported act.
+Retain every check's command, output or stderr/code and exit status; cite the latest before the act.
+A later allowance proves no earlier permission.
+Before treating a resume as unchanged, apply `skills/pair-implementer/SKILL.md` § Resume checks; unknown needs a new authority check.
+Retain every check's command, output or stderr/code and exit status; cite the latest before the act.
 On a managed root, the sender must file a chat go-ahead before action.
-On a hand-authored root, report why the check is unavailable; never invent success.
-Implementation permission and green tests do not grant merge permission.
-Do not self-authorize a merge or treat a review verdict as a merge grant.
+On hand-authored roots, explain unavailable checks; never invent success.
+Green tests and review verdicts are not merge grants; never self-authorize.
 
 ## Work in progress
 
@@ -82,12 +83,12 @@ The seat asks its governing seat which comes first only when such a relay says, 
 Here the governing seat is the seat whose addressed relay authorized the work in progress, or the operator when that seat is the operator or when there is none.
 Before taking up another relay at a checkpoint, the seat records where the interrupted work stands and its next step somewhere that outlasts the conversation, such as a file it keeps for that work.
 Once that relay is handled, the seat returns to the interrupted work unless that relay halted or replaced it.
-A `CC` arrival is context only: it grants no authority and asks for no reply, so nothing is owed or filed in response to it.
+Ordinary CC is context and visibility: it grants no action authority, requires no reply or acknowledgment, and does not by itself interrupt addressed work.
 A seat whose role gives it a standing duty toward copied relays still acts on that duty and files under it, not as a reply the copy asked for.
 
 ## Addressing and delivery
 
-A CC'd relay can still be evidence: confirm from the evidence itself that a stop condition of your own current dispatch has been met, then apply that stop under that dispatch, as you would for any other evidence.
+Evidence itself can establish a stop condition of the current dispatch; confirm it before applying that stop.
 Only an addressed grant authorizes action; visibility and notifications do not.
 For apparently misrouted work, ask its sender rather than acting.
 Copy only seats whose next decision depends on the relay.
@@ -108,8 +109,8 @@ E4 — deployed/live proof: deployed SHA verified plus real target/tenant/enviro
 
 Choose evidence level by the strongest acceptance claim, not incidental commands.
 A shell search of committed source is E1; executing the described behavior can supply E2 or E3.
-Return an evidence-level disagreement rather than silently changing the target.
-Do not say fixed, done, safe or verified without the evidence level.
+Return evidence-level disagreements; do not silently change the target.
+Label fixed, done, safe and verified claims with an evidence level.
 Passing tests are E2; merge is not deploy and deploy is not live verification.
 
 ## 4-bucket audit verdict definitions
@@ -121,11 +122,11 @@ Name PRIMARY_BUCKET and fill all four buckets:
 - product-overlapped: another owner or feature covers enough to narrow or reroute.
 - recommended-next: implement, promote, reroute, defer, reject or ask the operator.
 
-Do not contradict the recommendation; promoting existing code cannot be reported as no existing path.
+Keep the verdict consistent with its recommendation; promotion implies an existing path.
 
 ## Hard escalation triggers
 
-Escalate sensitive authorization or data, destructive changes, money or trust-critical state, downstream automation, async workers, shared contracts, materialized user controls, runtime-role mismatch, broad or ambiguous scope, residual risk or skipped live verification.
+Apply the heavier workflow or ask the operator when any ceremony-scan category is yes or unknown.
 An index monotonic-from marker is also a hard escalation trigger.
 Never self-insert a marker; the operator must ratify a stabilized historical inversion, never a live race, bad stamp, missing or duplicate rows.
 
@@ -140,7 +141,7 @@ Check implemented, flagged, dead, alternate, tested and overlapping paths.
 For existing paths, recommend promotion, wiring, tests, rerouting or closure.
 Map every addressed audit finding once to an owned target, reasoned rejection, overlap owner or verified closure.
 Name checked evidence or none with a reason; unmapped findings defeat reconciliation.
-Keep the obligation ledger readable by other seats.
+Keep the ledger readable by other seats.
 
 ## Boundary contract fields
 
@@ -187,17 +188,17 @@ Reversibility needs captured application state or executable restoration; vague 
 Write SITREPs only for news the engine cannot know.
 Name artifact, claims/evidence, actions with Git/disk refs, remaining work, blockers, scope risk and next action.
 Check incoming claims against repo, PR, runtime or deployment.
-Do not report known engine state merely to restate it.
+Do not restate known engine state.
 For read-only reports, report fresh final Git status literally, or why unavailable.
 Do not say no actions when the status or evidence shows edits.
 
 ## Fold scope
 
-Before any fold edit, list every file to be touched and mark each in or out against the findings scope.
+List every file and mark it in or out against findings before any fold edit.
 Any out row stops the fold: relay the deviation and wait before editing.
-Scope precedes action even when an edit would ultimately prove in scope.
-Put the scope and its result above the action references in the fold report.
-Check row truth against locked scope and findings; valid structure proves no truth.
+An earlier edit violates scope even if the path is in scope.
+Put scope and result above action refs in the fold report.
+Check paths against locked scope and findings; valid rows prove no truth.
 
 ## Merge and live verification
 
@@ -208,11 +209,12 @@ Do not grant on reviewer silence; re-address the request or route the missing re
 An operator answer covers current conditions, head, base and plan; changes need another answer.
 Record chat authorization in the operator's own words; do not infer approval.
 The quote records the decision; the acting seat still needs its filed grant.
+Reconcile free-prose merge claims; a clean structural check does not establish their truth.
 Preserve failed or partial evidence and named exceptions; an accepted break does not become a green check.
 
 ## Tool pointers
 
 Run `relay lint` on a draft before filing; `_cmd_lint` in `tools/relay_engine/cli.py` chooses the check, whose structural success does not establish claim truth.
-Read `tools/TESTING.md` for the everyday checks instead of copying its command list into role instructions.
+Read `tools/TESTING.md` for everyday checks; do not copy its commands into role instructions.
 For relay field grammar use `parse` in `tools/relay_engine/header.py`; do not reproduce the field table in working instructions.
 For filing paths use `_rendered_path` in `tools/relay_engine/ledger.py`; do not invent a receipt or rewrite a filed path.

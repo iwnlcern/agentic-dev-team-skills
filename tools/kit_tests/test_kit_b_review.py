@@ -104,7 +104,7 @@ class TestReviewRules(KitTreeCase):
                     for gone in REMOVED:
                         self.assertNotIn(gone, text)
                     if role == "orchestrator-reviewer":
-                        self.assertIn("Use those copies as context for an addressed verification request; visibility alone does not assign review work.", lines(_section(text, "## Orchestrator-review visibility gate")))
+                        self.assertIn("Independently examine copied orchestrator rulings and authority-bearing relays on your own cadence for decomposition, routing, sequencing, stale state, scope or boundary, and verification risks; file supported findings under your standing reviewer role without waiting for a Planner-selected addressed request.", lines(_section(text, "## Orchestrator-review visibility gate")))
         # Check every installed adjacent pointer, including spawn prompts.
         paths = list(PLUGINS.glob("*/skills/*/reviewer-spawn-prompts.md"))
         paths += [PLUGINS / tier / "skills" / role / "SKILL.md" for role, tiers in REVIEWERS.items() for tier in tiers]

@@ -43,6 +43,22 @@ At most 20 `TO` relays ring at connect, then `relay connect --list` shows the re
 Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
 Keep the terminal handoff pointer as the fallback.
 
+## Action-report lineage
+
+For an IMPL action report, `PARENT_DISPATCH_ID` is the `DISPATCH_ID` of the addressed dispatch that authorized the reported work, never that dispatch's own `PARENT_DISPATCH_ID`.
+`IN_REPLY_TO` may locate the dispatch file but does not substitute for this parent edge.
+This report-parent rule is independent of the report's own `DISPATCH_ID` allocation below.
+
+## Resume checks
+
+An approved erratum does not re-open `DISPATCH IMPL` when implementation is already dispatched; the Implementer resumes under the standing dispatch after reading the approved erratum.
+A resume is unchanged only when the seat establishes all three conditions:
+- Every plan and design artifact the last answer rested on, the base and every approved amendment, hashes as it did at that check.
+- Since that check no relay was filed by the pair's Planner, the operator or an orchestrator seat, and this seat filed no review; this test is by author, not by the presence of lock headers.
+- The grant's cycle and, for a pair-Planner grant, the cycle of each relay in its pair lineage are open, established from the root's record rather than inferred from authors or the absence of particular relay kinds.
+Anything the seat cannot establish is unknown, and unknown asks again.
+With all three established, an unchanged resume needs no new check.
+
 ## Phase behavior
 
 ### AUDIT
