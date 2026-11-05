@@ -109,7 +109,13 @@ class TestWrongSentences(KitTreeCase):
         protocol.update(self.installed_shared_copies("protocol.md"))
         self.assertGreater(len(protocol), 1)
         for where, text in protocol.items():
-            self.assertIn("`_role_slug`", text, f"{where}: filename role sentence does not name _role_slug")
+            # B1 census row 744 retires this shipped sentence; the deciding
+            # filename function remains checked below and by the census test.
+            self.assertNotIn("`_role_slug`", text, where)
+        from test_kit_b_rulebook import read_census
+        rows = [row for row in read_census() if row["line"] == "744"]
+        self.assertEqual([(row["disposition"], row["target"]) for row in rows],
+                         [("deleted", "`_role_slug` in `tools/relay_engine/ledger.py`")])
 
         release = _section(self.canonical_text("CHANGELOG.md"), "## [2.9.5] — 2026-09-23")
         hook_lines = [line for line in release.splitlines() if line.startswith("- **Codex arming and Stop drain hooks**")]
@@ -121,7 +127,11 @@ class TestWrongSentences(KitTreeCase):
         cited = set()
         for rel in ("skills/sprint-doc-setup/SKILL.md", "shared/protocol.md"):
             cited |= set(CITED.findall(self.canonical_text(rel)))
-        self.assertIn(("_role_slug", "tools/relay_engine/ledger.py"), cited)
+        from test_kit_b_rulebook import read_census
+        retired = next(row for row in read_census() if row["line"] == "744")
+        self.assertEqual(retired["disposition"], "deleted")
+        self.assertEqual(retired["target"], "`_role_slug` in `tools/relay_engine/ledger.py`")
+        cited.update(CITED.findall(retired["target"]))
         self.assertGreaterEqual(len(cited), 5)
         for name, rel in sorted(cited):
             self.assertRegex(

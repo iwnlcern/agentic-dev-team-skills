@@ -104,6 +104,7 @@ class TestRulebook(KitTreeCase):
     def test_census_deleted_names_function(self):
         rows = read_census()
         self.assertTrue(any(row['disposition'] == 'deleted' for row in rows))
+        parsed = {}
         for row in rows:
             self.assertIn(row['disposition'], {'deleted', 'pointer', 'moved', 'rewritten', 'kept'})
             if row['disposition'] != 'deleted':
@@ -114,5 +115,81 @@ class TestRulebook(KitTreeCase):
                 match = re.fullmatch(r'`([A-Za-z_]\w*)` in `(tools/[^`]+\.py)`', row['target'])
                 self.assertIsNotNone(match, row['target'])
                 path = ROOT / match[2]
-                definitions = {n.name for n in ast.walk(ast.parse(path.read_text())) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+                if path not in parsed:
+                    parsed[path] = {n.name for n in ast.walk(ast.parse(path.read_text())) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+                definitions = parsed[path]
                 self.assertIn(match[1], definitions, row['target'])
+
+    def test_census_moved_present(self):
+        text = self.canonical_text('shared/protocol.md')
+        for row in read_census():
+            number = int(row['line'])
+            if number == 56:
+                # Explicit v3-kit-impl-b1 hold: retain the base sentence until
+                # the operator answer is relayed; do not test its future rewrite.
+                self.assertIn(row['sentence'], text)
+                continue
+            if row['disposition'] not in ('moved', 'rewritten', 'kept'):
+                continue
+            with self.subTest(line=number, disposition=row['disposition']):
+                match = re.fullmatch(r'([^:]+):(\d+)(?: (.*))?', row['target'])
+                self.assertIsNotNone(match, row['target'])
+                path = ROOT / match[1]
+                target_line = int(match[2])
+                window = '\n'.join(path.read_text().splitlines()[max(0, target_line - 4):target_line + 3])
+                expected = match[3] if row['disposition'] == 'rewritten' else row['sentence']
+                if row['disposition'] == 'kept':
+                    self.assertIn(expected, path.read_text())
+                else:
+                    self.assertIn(expected, window, row['target'])
+
+    def test_rulebook_size(self):
+        self.assertLess(len((ROOT / 'shared/protocol.md').read_bytes()), 15000)
+
+    def test_rulebook_mechanics_headings_absent(self):
+        headings = {line.lstrip('#').strip() for line in self.canonical_text('shared/protocol.md').splitlines() if line.startswith('#')}
+        forbidden = {'Literal dispatch token', 'Literal merge token', 'Relay transport', 'Delivery mode', 'Relay lint', 'Canonical relay-header schema', 'Artifact identity, location, and integrity', 'Action-claim git-ref rule', 'Hand-off pointer', 'Handoff completeness validator', 'ROLE/FROM discipline', 'SITREP — boot acknowledgment', 'Design-review lineage gate', 'Orchestrator-review visibility gate'}
+        self.assertEqual(headings & forbidden, set())
+
+    def test_engine_sentences_point_at_functions(self):
+        text = self.canonical_text('shared/protocol.md')
+        command = re.compile(r'`(?:tools/)?relay [a-z]')
+        citation = re.compile(r'`([A-Za-z_]\w*)` in `(tools/[^`]+\.py)`')
+        found = 0
+        for line in text.splitlines():
+            if not command.search(line):
+                continue
+            found += 1
+            matches = citation.findall(line)
+            self.assertTrue(matches or re.search(r'DD-v3-[a-z-]+ § \d+', line), line)
+            for name, rel in matches:
+                definitions = {n.name for n in ast.walk(ast.parse((ROOT / rel).read_text())) if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+                self.assertIn(name, definitions, line)
+        self.assertGreaterEqual(found, 3)
+
+    def test_one_working_copy_rule(self):
+        text = self.canonical_text('shared/protocol.md')
+        self.assertIn('Revise the one working copy of a design or plan in place; do not create a new `-rN` file for each revision.', text.splitlines())
+        self.assertIn('Review snapshots and the lock mark belong to DD-v3-engine § 17.', text.splitlines())
+
+    def test_stage_a_pins_follow_census(self):
+        rows = [row for row in read_census() if int(row['line']) == 744]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['disposition'], 'deleted')
+        self.assertEqual(rows[0]['target'], '`_role_slug` in `tools/relay_engine/ledger.py`')
+        self.assertNotIn('`_role_slug`', self.canonical_text('shared/protocol.md'))
+
+    def test_agent_judgments_survive_mechanics_removal(self):
+        text = self.canonical_text('shared/protocol.md')
+        required = (
+            'A digest acknowledgment is legitimate only in its matching approval or direct-override lineage; a register entry alone is not approval.',
+            'Set `HUMAN_GATE_REQUIRED` anew for the requested transition: yes only for a fresh operator decision, with its ask; otherwise no with a reason.',
+            'After filing, print your FROM and 3–6 summary lines, then terminal RELAY/TO/CC blocks in filing order, with nothing after them.',
+            'Route user-visible behavior and broad scope expansion to the operator.',
+            'Use the real authoring clock; never invent a timestamp.',
+        )
+        for sentence in required:
+            self.assertIn(sentence, text.splitlines())
+        rows = read_census()
+        for line in (68, 70, 150, 152, 749, 908):
+            self.assertTrue(all(row['disposition'] != 'deleted' for row in rows if int(row['line']) == line), line)

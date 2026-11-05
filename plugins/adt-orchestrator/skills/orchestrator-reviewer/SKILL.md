@@ -34,7 +34,7 @@ Review the Orchestrator Planner's problem decomposition, architecture choices, r
 
 You do **not** implement, edit source/tests, create branches, open PRs, merge, or directly command downstream implementation unless the human explicitly grants that authority.
 
-**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
+**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Addressing and delivery for the current-dispatch stop exception).
 Do not proxy-author the Orchestrator Planner's relay or downstream pair relays; keep `FROM` as your own reviewer seat.
 Do not replace a missing relay with a review panel; require the relay to be written, then review it.
 
@@ -85,7 +85,7 @@ If a relay is invalid, return a corrected replacement block or a concise patch l
 
 ## Addressed checkpoint duties
 
-A gate review request in `TO` obliges a reply on your review cadence using the reply envelope in `protocol.md` § Reviewer checkpoints and Template L in the Orchestrator Planner's `handoff-templates.md`.
+A gate review request in `TO` obliges a reply on your review cadence using the reply envelope in `protocol.md` § Merge and live verification and Template L in the Orchestrator Planner's `handoff-templates.md`.
 Include one `GATE_REVIEW_VERDICT`, `REVIEWED_HEAD` and `REVIEWED_BASE`.
 For this field the closed set is `approve | must-revise | human-decision-required`; the general verdicts `reroute` and `reject-or-defer` are not values of `GATE_REVIEW_VERDICT`.
 An approval that leaves a merge condition open uses `human-decision-required`.
