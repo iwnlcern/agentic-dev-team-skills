@@ -1,5 +1,7 @@
 # tools/adapters/tests/test_relay_monitor.py
+import ast
 import base64
+import copy
 import contextlib
 import errno
 import importlib.util
@@ -1767,6 +1769,75 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
         proc.wait(timeout=timeout)
         return proc.returncode, proc.stdout.read().splitlines(), proc.stderr.read()
 
+    def startup_process(self, hold):
+        ready = self.base / "handlers-ready"
+        seam = self.seam(os.getpid())
+        key = "cc-%d-%d" % (os.getpid(), self.rm.window.lstart_epoch(seam["ADT_WINDOW_START"]))
+        lock = self.rm.WindowLock(key)._path
+        started = time.monotonic()
+        proc = self.spawn(extra_env=dict(seam, ADT_TEST_HANDLERS_READY=str(ready), **{hold: "2.0"}))
+        self.wait_startup_state(proc, ready.exists, "handlers-ready file", missing_at=lock.exists)
+        return proc, lock, started
+
+    def wait_startup_state(self, proc, predicate, state, missing_at=lambda: False):
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            if predicate():
+                return
+            if proc.poll() is not None:
+                self.fail(f"startup state not observed: {state}; child exited {proc.returncode}")
+            if missing_at():
+                self.fail(f"startup state not observed: {state}; child reached window lock first")
+            time.sleep(0.005)  # bounded observation, never a delay choosing the signal phase
+        self.fail(f"startup state not observed: {state}")
+
+    def signal_startup(self, proc, started, phase):
+        proc.send_signal(signal.SIGTERM)
+        signalled = time.monotonic()
+        print(f"A2_PHASE {phase} spawn={started:.9f} signal={signalled:.9f} hold=2.0", file=sys.stderr)
+        self.assertLess(signalled, started + 2.0,
+                        f"startup phase missed: {phase}; spawn={started}, signal={signalled}, hold=2.0")
+        rc, lines, err = self.finish(proc)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([line for line in lines if line.startswith(b"relay-monitor: stopped:")],
+                         [b"relay-monitor: stopped: terminated"])
+        self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+
+    def early_handlers_layout(self, tree):
+        guard_test = ast.parse('__name__ == "__main__" and _sys.argv[1:2] == ["follow"]').body[0].value
+        guards = [node for node in tree.body if isinstance(node, ast.If)
+                  and ast.dump(node.test) == ast.dump(guard_test)]
+        self.assertEqual(len(guards), 1, "one main/follow early-handler guard required")
+        guard = guards[0]
+        loops = [node for node in guard.body if isinstance(node, ast.For)
+                 and isinstance(node.iter, ast.Tuple)
+                 and {ast.unparse(item) for item in node.iter.elts}
+                 == {"_signal.SIGTERM", "_signal.SIGHUP", "_signal.SIGINT"}]
+        self.assertEqual(len(loops), 1, "all three early stop signals must be registered")
+        loop = loops[0]
+        self.assertTrue(any(isinstance(node, ast.Call) and ast.unparse(node.func) == "_signal.signal"
+                            and node.args and ast.unparse(node.args[0]) == ast.unparse(loop.target)
+                            for node in ast.walk(loop)), "early loop must register its signals")
+        ready = [node for node in guard.body if isinstance(node, ast.If)
+                 and any(isinstance(part, ast.Constant) and part.value == "ADT_TEST_HANDLERS_READY"
+                         for part in ast.walk(node.test))]
+        self.assertEqual(len(ready), 1, "readiness publication must be in main/follow guard")
+        publication = ready[0]
+        self.assertTrue(any(isinstance(node, ast.Call) and ast.unparse(node.func) == "_os.open"
+                            for node in ast.walk(publication)), "readiness must publish its file")
+        first, last = guard.body.index(loop), guard.body.index(publication)
+        self.assertLess(first, last, "readiness must follow early signal registration")
+        self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom))
+                             for statement in guard.body[first + 1:last]
+                             for node in ast.walk(statement)), "no intervening import before readiness")
+        delays = [node for node in tree.body if isinstance(node, ast.If)
+                  and any(isinstance(part, ast.Constant) and part.value == "ADT_TEST_IMPORT_DELAY"
+                          for part in ast.walk(node.test))]
+        self.assertEqual(len(delays), 1, "existing import-delay boundary required")
+        self.assertLess(tree.body.index(guard), tree.body.index(delays[0]),
+                        "readiness must precede the import hold")
+        return guard, loop, publication
+
     def assert_window_free(self):
         key = self.rm.NoteStore("psess").load()["window"]
         lock = self.rm.WindowLock(key)
@@ -1937,31 +2008,32 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
         self.assertIsNone(self.rm.NoteStore("psess").load()["leader"])
 
     def test_sigterm_during_startup_prints_one_line(self):
-        # fold F7: handlers exist before the leader record; a stop in the first 100 ms leaves no leader
-        for delay in (0.1, 0.2):
-            with self.subTest(delay=delay):
-                write_index(self.index, row(1, to="b.implementer"))
-                proc = self.spawn(extra_env=self.seam(os.getpid()))
-                time.sleep(delay)
-                proc.send_signal(signal.SIGTERM)
-                rc, lines, err = self.finish(proc)
-                self.assertEqual(rc, 0, err)
-                self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
-                                 [b"relay-monitor: stopped: terminated"])
-                self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+        # Missing early handlers must not be masked by the later runtime handlers.
+        write_index(self.index, row(1, to="b.implementer"))
+        proc, lock, started = self.startup_process("ADT_TEST_IMPORT_DELAY")
+        self.assertFalse(lock.exists(), "primary startup stop reached the window lock")
+        self.signal_startup(proc, started, "primary-import-hold")
 
     def test_sigterm_inside_the_startup_gap_stops_cleanly(self):
         # fold 2 G1: a stop after the lock is taken and before the first stamp freed the lock, and the
         # stamp then wrote through a closed descriptor (TypeError, rc 1, no stopped: line)
         write_index(self.index, row(1, to="b.implementer"))
-        proc = self.spawn(extra_env=dict(self.seam(os.getpid()), ADT_TEST_STARTUP_DELAY="1.0"))
-        time.sleep(0.5)
-        proc.send_signal(signal.SIGTERM)
-        rc, lines, err = self.finish(proc)
-        self.assertEqual(rc, 0, err)
-        self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
-                         [b"relay-monitor: stopped: terminated"])
-        self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+        proc, lock, started = self.startup_process("ADT_TEST_STARTUP_DELAY")
+
+        def held_empty_lock():
+            if not lock.exists():
+                return False
+            import fcntl
+            with lock.open("rb") as stream:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return not stream.read()
+                fcntl.flock(stream, fcntl.LOCK_UN)
+            return False
+
+        self.wait_startup_state(proc, held_empty_lock, "held, unstamped window lock")
+        self.signal_startup(proc, started, "held-empty-lock")
         self.assertIsNone(self.rm.WindowLock(self.rm.NoteStore("psess").load().get("window")
                                              or "cc-%d-%d" % (os.getpid(), self.rm.window.lstart_epoch(utc_lstart(os.getpid())))).holder())
 
@@ -1969,14 +2041,49 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
         # fold 2 G4: the stop handlers are installed before the module's imports, so a stop while they load
         # still ends with one stopped: line and exit 0, not -15
         write_index(self.index, row(1, to="b.implementer"))
-        proc = self.spawn(extra_env=dict(self.seam(os.getpid()), ADT_TEST_IMPORT_DELAY="1.0"))
-        time.sleep(0.5)
+        proc, lock, started = self.startup_process("ADT_TEST_IMPORT_DELAY")
+        self.assertFalse(lock.exists(), "pre-import stop reached runtime state")
+        self.signal_startup(proc, started, "before-imports-finish")
+
+    def test_handlers_ready_seam_is_inert_unless_set(self):
+        ready = self.base / "handlers-ready"
+        write_index(self.index, row(1, to="b.implementer"))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("ADT_TEST_HANDLERS_READY", None)
+            proc = self.spawn(extra_env=self.seam(os.getpid()))
+        self.wait_note(lambda note: self.bound(note) and note.get("phase") == "following")
         proc.send_signal(signal.SIGTERM)
         rc, lines, err = self.finish(proc)
-        self.assertEqual(rc, 0, err)
-        self.assertEqual([l for l in lines if l.startswith(b"relay-monitor: stopped:")],
-                         [b"relay-monitor: stopped: terminated"])
+        self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: terminated"]), err)
+        self.assertFalse(ready.exists(), "unset readiness instrumentation wrote a file")
         self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+        ready.write_text("existing marker")
+        proc = self.spawn(extra_env=dict(self.seam(os.getpid()), ADT_TEST_HANDLERS_READY=str(ready)))
+        try:
+            rc, _, err = self.finish(proc, timeout=5)
+        except subprocess.TimeoutExpired:
+            self.fail("existing readiness marker was ignored instead of reporting FileExistsError")
+        self.assertNotEqual(rc, 0)
+        self.assertIn(b"FileExistsError", err)
+        self.assertEqual(ready.read_text(), "existing marker")
+
+    def test_handlers_ready_follows_early_handler_registration(self):
+        self.early_handlers_layout(ast.parse(SCRIPT.read_text()))
+
+    def test_handlers_ready_order_check_rejects_bad_variants(self):
+        source = ast.parse(SCRIPT.read_text())
+        self.early_handlers_layout(source)  # a broken candidate cannot validate its own negative fixtures
+        for name in ("missing-registrations", "publication-first"):
+            with self.subTest(variant=name):
+                variant = copy.deepcopy(source)
+                guard, loop, ready = self.early_handlers_layout(variant)
+                guard.body.remove(loop if name == "missing-registrations" else ready)
+                if name == "publication-first":
+                    guard.body.insert(0, ready)
+                # Round-trip to independently establish that rejection is not a syntax failure.
+                parsed = ast.parse(ast.unparse(variant))
+                with self.assertRaisesRegex(AssertionError, "early stop signals|readiness must follow"):
+                    self.early_handlers_layout(parsed)
 
     def test_stamp_after_release_writes_nothing(self):
         lock = self.rm.WindowLock("w-gap")

@@ -18,6 +18,12 @@ _EARLY_STOP: list[int] = []
 if __name__ == "__main__" and _sys.argv[1:2] == ["follow"]:
     for _signum in (_signal.SIGTERM, _signal.SIGHUP, _signal.SIGINT):
         _signal.signal(_signum, lambda signum, _frame: _EARLY_STOP.append(signum))
+    if _os.environ.get("ADT_TEST_HANDLERS_READY"):
+        # Test-only: publish readiness after all early stop handlers are installed.
+        _ready_fd = _os.open(
+            _os.environ["ADT_TEST_HANDLERS_READY"], _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600
+        )
+        _os.close(_ready_fd)
 
 if __name__ == "__main__" and _os.environ.get("ADT_TEST_IMPORT_DELAY"):
     _time.sleep(float(_os.environ["ADT_TEST_IMPORT_DELAY"]))  # test-only: stands in for slow imports (G4)
