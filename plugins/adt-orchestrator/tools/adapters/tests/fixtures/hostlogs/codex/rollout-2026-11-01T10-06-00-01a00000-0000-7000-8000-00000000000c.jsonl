@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-01T10:06:00Z","type":"session_meta","payload":{"id":"01a00000-0000-7000-8000-00000000000c","cwd":"/w","cli_version":"0.166.0","source":"cli","base_instructions":{"text":"SENTINEL-CONTENT-7f3a"}}}
+{"timestamp":"2026-11-01T10:06:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SENTINEL-CONTENT-7f3a"}]}}

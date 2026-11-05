@@ -12,7 +12,9 @@ cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 skills_root="$tmp/skills"
 mkdir -p "$skills_root/tools"
-cp "$TOOLS_DIR/relay-lint.py" "$skills_root/tools/relay-lint.py"
+# The hooks lint through tools/relay only (v3-design-amend-9): the fixture skills root carries the engine CLI.
+cp "$TOOLS_DIR/relay" "$skills_root/tools/relay"
+cp -R "$TOOLS_DIR/relay_engine" "$skills_root/tools/relay_engine"
 mkdir -p "$tmp/work/.relays/run1" "$tmp/work/.relays/run2" "$tmp/work/src"
 # Explicit-file lint is the authoring path: stamped, fresh filenames are the contract; tests author like agents author.
 stamp="$(date +%Y%m%d-%H%M%S)"
@@ -259,20 +261,24 @@ assert_guard_destinations "b3-background-relay-write" 'cmd > relay.md &' '/revie
 PATH_NORMAL="$PATH"
 spy_skills="$tmp/spy-skills"
 spy_log="$tmp/spy-invocations"
-mkdir -p "$spy_skills/tools"
-cat > "$spy_skills/tools/relay-lint.py" <<'PY'
+mkdir -p "$spy_skills/tools/relay_engine"
+cat > "$spy_skills/tools/relay" <<'PY'
 import os
 import sys
 
+args = sys.argv[1:]
+if args[:1] == ["lint"]:
+    args = args[1:]  # the hooks call `relay lint <file>`; the log keeps the linted operands
 with open(os.environ["SPY_LOG"], "a", encoding="utf-8") as stream:
-    stream.write("|".join((os.environ["SPY_HANDLER"], *sys.argv[1:])) + "\n")
+    stream.write("|".join((os.environ["SPY_HANDLER"], *args)) + "\n")
 message = os.environ.get("SPY_STDERR", "")
 if message:
     print(message, file=sys.stderr)
 raise SystemExit(int(os.environ.get("SPY_RC", "0")))
 PY
 
-# v1-v5 name the visible-root recognition boundary. Each shape is exercised
+# v1-v5 name the visible-root recognition boundary (v3 stage A: an INDEX.md inside a relay root, v2 and v5,
+# is routed out before any lint and exits 0 silently). Each shape is exercised
 # through both adapter entry points so their routing cannot drift apart.
 visible_relay="$tmp/work/master/relays/run1/v1-$stamp.md"
 visible_index_root="$tmp/work/master/relays/INDEX.md"
@@ -288,13 +294,13 @@ printf 'x\n' > "$visible_relay"
 assert_guard_case "v1-bash-visible-relay-root" "printf x > $visible_relay" false PostToolUse 2 "FAILS lint" || fail=1
 
 : > "$visible_index_root"
-assert_case "v2-write-visible-index-direct-root" "$visible_index_root" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+assert_case "v2-write-visible-index-direct-root" "$visible_index_root" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 : > "$visible_index_root"
-assert_guard_case "v2-bash-visible-index-direct-root" "printf x > $visible_index_root" false PostToolUse 2 "no index rows found" || fail=1
+assert_guard_case "v2-bash-visible-index-direct-root" "printf x > $visible_index_root" false PostToolUse 0 "" || fail=1
 : > "$visible_index_nested"
-assert_case "v2-write-visible-index-nested" "$visible_index_nested" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+assert_case "v2-write-visible-index-nested" "$visible_index_nested" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 : > "$visible_index_nested"
-assert_guard_case "v2-bash-visible-index-nested" "printf x > $visible_index_nested" false PostToolUse 2 "no index rows found" || fail=1
+assert_guard_case "v2-bash-visible-index-nested" "printf x > $visible_index_nested" false PostToolUse 0 "" || fail=1
 
 assert_case "v3-write-relays-near-miss" "$near_miss" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_guard_case "v3-bash-relays-near-miss" "printf x > $near_miss" false PostToolUse 0 "" || fail=1
@@ -305,9 +311,9 @@ printf 'x\n' > "$hidden_relay"
 assert_guard_case "v4-bash-hidden-relay-root" "printf x > $hidden_relay" false PostToolUse 2 "FAILS lint" || fail=1
 
 : > "$hidden_index"
-assert_case "v5-write-hidden-index" "$hidden_index" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+assert_case "v5-write-hidden-index" "$hidden_index" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 : > "$hidden_index"
-assert_guard_case "v5-bash-hidden-index" "printf x > $hidden_index" false PostToolUse 2 "no index rows found" || fail=1
+assert_guard_case "v5-bash-hidden-index" "printf x > $hidden_index" false PostToolUse 0 "" || fail=1
 
 assert_case "a-clean-relay" "$clean_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 assert_case "b-dirty-fd1" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
@@ -322,20 +328,21 @@ engine_skills="$tmp/engine-skills"
 mkdir -p "$engine_skills/tools"
 cp "$TOOLS_DIR/relay" "$engine_skills/tools/relay"
 cp -R "$TOOLS_DIR/relay_engine" "$engine_skills/tools/relay_engine"
-cp "$TOOLS_DIR/relay-lint.py" "$engine_skills/tools/relay-lint.py"
 engine_clean="$tmp/work/.relays/run1/engine-clean-$stamp.md"
 engine_dirty="$tmp/work/.relays/run1/engine-dirty-$stamp.md"
 cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$engine_clean"
 cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$engine_dirty"
 assert_case_engine_json "engine-preferred-dirty" "$engine_dirty" "$engine_skills" "$tmp/home" "$PATH_NORMAL" 2 || fail=1
 assert_case "engine-preferred-clean" "$engine_clean" "$engine_skills" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
-assert_case "engine-absent-fallback" "$fd1_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "FAILS lint" || fail=1
+# engine-absent-fallback retired (v3 stage A): with no engine CLI the hooks report UNLINTED (no-legacy-linter-fallback).
 engine_draft="$tmp/work/.relays/x/.engine/drafts/seat/DIRTY.md"
 mkdir -p "$(dirname "$engine_draft")"
 cp "$TOOLS_DIR/relay-lint-fixtures/fold/FD1-fold-edit-no-foldscope.md" "$engine_draft"
 assert_case "engine-drafts-exempt" "$engine_draft" "$engine_skills" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 
-assert_case "c3-empty-index-md" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "no index rows found" || fail=1
+# c3, i1-i3 (v3 stage A, v3-design-amend-9): the engine renders INDEX.md and the hooks never lint it, so an
+# empty, valid, out-of-order or malformed INDEX passes silently; INDEX content is the engine's, not the hook's.
+assert_case "c3-empty-index-md" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 printf '%s\n' \
   '| time | phase | role | dispatch | parent | from | to | cc | status | file |' \
   '|---|---|---|---|---|---|---|---|---|---|' \
@@ -343,14 +350,14 @@ printf '%s\n' \
   > "$index_relay"
 assert_case "i1-valid-index-md" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 printf '%s\n' '| 20260601-110000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | AUDIT-planner-20260601-110000.md |' >> "$index_relay"
-assert_case "i2-decreasing-index-row" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "precedes the previous row" || fail=1
+assert_case "i2-decreasing-index-row" "$index_relay" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 printf '%s\n' \
   '| time | phase | role | dispatch | parent | from | to | cc | status | file |' \
   '|---|---|---|---|---|---|---|---|---|---|' \
   '| 20260601-120000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | AUDIT-planner-20260601-120000.md |' \
   '| 20260601-130000 | AUDIT | Planner | d-e5 | — | pair-1.planner | orchestrator | — | returned | raw | split |' \
   > "$raw_split_index"
-assert_case "i3-raw-split-index-row" "$raw_split_index" "$skills_root" "$tmp/home" "$PATH_NORMAL" 2 "header declares" || fail=1
+assert_case "i3-raw-split-index-row" "$raw_split_index" "$skills_root" "$tmp/home" "$PATH_NORMAL" 0 "" || fail=1
 mkdir -p "$tmp/bin" "$tmp/empty-skills" "$tmp/empty-home"
 ln -s "$(command -v python3)" "$tmp/bin/python3"
 if PATH="$tmp/bin" command -v relay-lint >/dev/null 2>&1; then
@@ -362,8 +369,8 @@ fi
 
 # Broken linter should be attributed to linter execution, not relay lint failure.
 broken_skills="$tmp/broken-skills"
-mkdir -p "$broken_skills/tools"
-printf 'definitely not python\n' > "$broken_skills/tools/relay-lint.py"
+mkdir -p "$broken_skills/tools/relay_engine"
+printf 'definitely not python\n' > "$broken_skills/tools/relay"
 assert_case "e-broken-linter" "$clean_relay" "$broken_skills" "$tmp/home" "$PATH_NORMAL" 2 "linter execution failed" || fail=1
 
 g1_relay="$tmp/work/.relays/run1/g1-$stamp.md"
@@ -380,7 +387,7 @@ printf '%s\n' \
   '|---|---|---|---|---|---|---|---|---|---|' \
   '| 20260601-130000 | AUDIT | Planner | d-g3 | — | pair-1.planner | orchestrator | — | returned | raw | split |' \
   > "$g3_index"
-assert_guard_case "g3-index-heredoc-routes-index-mode" "cat <<'EOF' > $g3_index" false PostToolUse 2 "header declares" || fail=1
+assert_guard_case "g3-index-heredoc-is-not-linted" "cat <<'EOF' > $g3_index" false PostToolUse 0 "" || fail=1
 
 printf 'x\n' > "$tmp/work/a.md"
 assert_guard_case "g4-mv-to-relay-directory-is-generic" "mv $tmp/work/a.md $tmp/work/.relays/run1/" false PostToolUse 2 "could not be linted" || fail=1
@@ -550,7 +557,38 @@ command="*** Begin Patch
 *** Update File: .relays/run1/INDEX.md
 *** End Patch"
 payload="$(payload_for_command "$command" apply_patch "$tmp/work")"
-assert_payload_handler "p6-index-target-uses-index-mode" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|--index|$p_index" || fail=1
+assert_payload_handler "p6-index-target-is-not-linted" normalizer "$HOOK" "$payload" 0 "" 0 0 "" || fail=1
+# p6 (v3 stage A, v3-design-amend-9): an INDEX.md is not a relay; neither hook invokes a linter for it.
+payload="$(payload_for_file "$p_index")"
+assert_payload_handler "p6-index-write-is-not-linted" normalizer "$HOOK" "$payload" 0 "" 0 0 "" || fail=1
+printf 'x\n' > "$p_index"
+: > "$spy_log"
+python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"PostToolUse","tool_input":{"command":sys.argv[1],"run_in_background":False}}))' "printf x > $p_index" \
+  | SPY_LOG="$spy_log" SPY_HANDLER=guard SPY_RC=0 RELAY_LINT_SKILLS_ROOT="$spy_skills" HOME="$tmp/home" PATH="$PATH_NORMAL" \
+    "$BASH_BIN" "$BASH_GUARD" 2>"$tmp/stderr"
+rc=$?
+if [ "$rc" -ne 0 ] || [ -s "$spy_log" ] || [ -s "$tmp/stderr" ]; then
+  echo "FAIL p6-index-bash-write-is-not-linted: expected exit 0, no linter call, silent; got $rc" >&2; cat "$spy_log" "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS p6-index-bash-write-is-not-linted"
+fi
+# no-legacy-linter-fallback (v3-design-amend-9): relay-lint.py in any old location is not a linter any more.
+legacy_skills="$tmp/legacy-skills"
+legacy_home="$tmp/legacy-home"
+mkdir -p "$legacy_skills/tools" "$legacy_home/.agents/skills/tools" "$legacy_home/.codex/skills/tools"
+for legacy in "$legacy_skills/tools" "$legacy_home/.agents/skills/tools" "$legacy_home/.codex/skills/tools"; do
+  cp "$TOOLS_DIR/relay-lint.py" "$legacy/relay-lint.py"
+done
+legacy_relay="$tmp/work/.relays/run1/legacy-$stamp.md"
+cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$legacy_relay"
+assert_case "no-legacy-linter-fallback-write" "$legacy_relay" "$legacy_skills" "$legacy_home" "$PATH_NORMAL" 2 "UNLINTED" || fail=1
+run_bash_guard "printf x >> $legacy_relay" false PostToolUse "$legacy_skills" "$legacy_home" "$PATH_NORMAL"
+rc=$?
+if [ "$rc" -ne 2 ] || ! grep -Fq "UNLINTED" "$tmp/stderr"; then
+  echo "FAIL no-legacy-linter-fallback-bash: expected UNLINTED exit 2, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
+else
+  echo "PASS no-legacy-linter-fallback-bash"
+fi
 
 command="*** Begin Patch
 *** Update File: .relays/run1/$(basename "$p_clean")
@@ -677,19 +715,11 @@ else
   fail=1
 fi
 
-# f0-f4 pin the complete four-step resolution order:
-# engine-capable configured root -> standalone configured root -> ~/.agents/skills
-# -> deprecated ~/.codex/skills. PATH is deliberately never a resolver.
+# f0 and f4 pin the resolution: the engine CLI in the configured root is the only linter (v3 stage A,
+# v3-design-amend-9; the relay-lint.py ladder that f1-f3 pinned is gone, see no-legacy-linter-fallback).
+# PATH is deliberately never a resolver.
 # f0: a live configured root beats a conflicting .agents linter.
-# f1: .agents beats the deprecated root when the configured root is absent.
-# f2: the deprecated root still resolves alone.
-# f3: the deprecated root beats a conflicting PATH linter.
 # f4: no filesystem resolver emits UNLINTED even when PATH carries a decoy.
-fallback_home="$tmp/home-fallback"
-mkdir -p "$fallback_home/.agents/skills/tools" "$fallback_home/.codex/skills/tools"
-cp "$TOOLS_DIR/relay-lint.py" "$fallback_home/.agents/skills/tools/relay-lint.py"
-printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("DECOY-CODEX-LINTER", file=sys.stderr)' 'sys.exit(1)' \
-  > "$fallback_home/.codex/skills/tools/relay-lint.py"
 absent_root="$tmp/no-such-skills-root"
 fallback_relay="$tmp/work/.relays/run1/fallback-$stamp.md"
 cp "$TOOLS_DIR/relay-lint-fixtures/content/E5-clean-tree.md" "$fallback_relay"
@@ -699,7 +729,7 @@ mkdir -p "$confroot_home/.agents/skills/tools"
 printf '%s\n' '#!/usr/bin/env python3' 'import sys' 'print("DECOY-AGENTS-LINTER", file=sys.stderr)' 'sys.exit(1)' \
   > "$confroot_home/.agents/skills/tools/relay-lint.py"
 
-# PATH is decoy-armed for f0-f3: an ambient relay-lint on the host must never
+# PATH is decoy-armed for f0: an ambient relay-lint on the host must never
 # be reachable as a silent lower fallthrough, or precedence passes stop being
 # exclusive to the claimed winner (R8).
 decoy_bin="$tmp/decoy-bin"
@@ -715,38 +745,6 @@ if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
   echo "FAIL f0-bash-confroot-beats-agents: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
 else
   echo "PASS f0-bash-confroot-beats-agents"
-fi
-
-assert_case "f1-write-agents-beats-deprecated" "$fallback_relay" "$absent_root" "$fallback_home" "$PATH_WITH_DECOY" 0 "" || fail=1
-run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$fallback_home" "$PATH_WITH_DECOY"
-rc=$?
-if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
-  echo "FAIL f1-bash-agents-beats-deprecated: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
-else
-  echo "PASS f1-bash-agents-beats-deprecated"
-fi
-
-rm "$fallback_home/.agents/skills/tools/relay-lint.py"
-assert_case "f2-write-deprecated-still-resolves" "$fallback_relay" "$absent_root" "$fallback_home" "$PATH_WITH_DECOY" 2 "DECOY-CODEX-LINTER" || fail=1
-run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$fallback_home" "$PATH_WITH_DECOY"
-rc=$?
-if [ "$rc" -ne 2 ] || ! grep -Fq "DECOY-CODEX-LINTER" "$tmp/stderr"; then
-  echo "FAIL f2-bash-deprecated-still-resolves: expected exit 2 with decoy marker, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
-else
-  echo "PASS f2-bash-deprecated-still-resolves"
-fi
-
-pathbeat_home="$tmp/home-pathbeat"
-mkdir -p "$pathbeat_home/.codex/skills/tools"
-cp "$TOOLS_DIR/relay-lint.py" "$pathbeat_home/.codex/skills/tools/relay-lint.py"
-
-assert_case "f3-write-deprecated-beats-path" "$fallback_relay" "$absent_root" "$pathbeat_home" "$PATH_WITH_DECOY" 0 "" || fail=1
-run_bash_guard "printf x >> $fallback_relay" false PostToolUse "$absent_root" "$pathbeat_home" "$PATH_WITH_DECOY"
-rc=$?
-if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
-  echo "FAIL f3-bash-deprecated-beats-path: expected silent exit 0, got $rc" >&2; cat "$tmp/stderr" >&2; fail=1
-else
-  echo "PASS f3-bash-deprecated-beats-path"
 fi
 
 empty_home="$tmp/home-empty"
@@ -884,7 +882,7 @@ assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/
 assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine_dirty" "$e3_plugin_new" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 B || fail=1
 assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.7" "$e3_plugin_new_fingerprint" || fail=1
 
-if ! (cd "$ROOT" && python3 -m unittest tools.adapters.tests.test_relay_monitor tools.adapters.tests.test_shell_lex tools.adapters.tests.test_scope_proof 2>"$tmp/unittest.err"); then
+if ! (cd "$ROOT" && python3 -m unittest tools.adapters.tests.test_relay_monitor tools.adapters.tests.test_shell_lex tools.adapters.tests.test_scope_proof tools.adapters.tests.test_window tools.adapters.tests.test_hostlogs 2>"$tmp/unittest.err"); then
   echo "FAIL relay-monitor unittest" >&2; cat "$tmp/unittest.err" >&2; fail=1
 else
   echo "PASS relay-monitor unittest"

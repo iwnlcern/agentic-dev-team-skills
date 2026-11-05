@@ -26,6 +26,8 @@ target=""
 case "$target" in
   */.engine/*) exit 0 ;;
 esac
+# An INDEX.md is not a relay; the engine renders it, so it is never linted (v3-design-amend-9).
+[ "$(basename "${target:-x}")" = "INDEX.md" ] && exit 0
 if [ "$bg" = "true" ]; then
   echo "relay-guard: a backgrounded Bash command appears to write into a relay root; the hook cannot lint a target that may not be complete — lint manually before handoff" >&2
   exit 2
@@ -35,28 +37,13 @@ if [ -z "$target" ] || [ ! -f "$target" ]; then
   exit 2
 fi
 
-case "$(basename "$target")" in
-  INDEX.md) mode="--index" ;;
-  *) mode="file" ;;
-esac
 skills_root="${RELAY_LINT_SKILLS_ROOT:-$HOME/.claude/skills}"
 rc=0
 run_lint() {
-  if [ "$mode" = "--index" ]; then
-    out="$("$@" --index "$target" 2>&1)" || rc=$?
-  else
-    out="$("$@" "$target" 2>&1)" || rc=$?
-  fi
+  out="$("$@" "$target" 2>&1)" || rc=$?
 }
 if [ -f "$skills_root/tools/relay" ] && [ -d "$skills_root/tools/relay_engine" ]; then
   run_lint python3 "$skills_root/tools/relay" lint
-elif [ -f "$skills_root/tools/relay-lint.py" ]; then
-  run_lint python3 "$skills_root/tools/relay-lint.py"
-elif [ -f "$HOME/.agents/skills/tools/relay-lint.py" ]; then
-  run_lint python3 "$HOME/.agents/skills/tools/relay-lint.py"
-elif [ -f "$HOME/.codex/skills/tools/relay-lint.py" ]; then
-  # deprecated Codex root, retained for back-compat
-  run_lint python3 "$HOME/.codex/skills/tools/relay-lint.py"
 else
   echo "relay-guard: linter not found at any installed location; relay $target UNLINTED" >&2
   exit 2

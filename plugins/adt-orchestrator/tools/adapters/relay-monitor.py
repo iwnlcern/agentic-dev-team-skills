@@ -7,6 +7,21 @@ Reads the run's rendered INDEX.md; never touches the engine record.
 
 from __future__ import annotations
 
+import os as _os
+import signal as _signal
+import sys as _sys
+import time as _time
+
+# A doorbell's stop handlers go in before anything else loads (fold 2 G4): a stop while the imports run is
+# remembered here and acted on by `follow`, so it still ends with one `stopped:` line and exit 0.
+_EARLY_STOP: list[int] = []
+if __name__ == "__main__" and _sys.argv[1:2] == ["follow"]:
+    for _signum in (_signal.SIGTERM, _signal.SIGHUP, _signal.SIGINT):
+        _signal.signal(_signum, lambda signum, _frame: _EARLY_STOP.append(signum))
+
+if __name__ == "__main__" and _os.environ.get("ADT_TEST_IMPORT_DELAY"):
+    _time.sleep(float(_os.environ["ADT_TEST_IMPORT_DELAY"]))  # test-only: stands in for slow imports (G4)
+
 import argparse
 import base64
 import contextlib
@@ -15,10 +30,10 @@ import errno
 import fcntl
 import json
 import os
-import platform
 import re
 import select
 import shlex
+import signal
 import subprocess
 import stat
 import sys
@@ -30,9 +45,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
+_ADAPTERS_DIR = str(Path(__file__).resolve().parent)
+if _ADAPTERS_DIR not in sys.path:
+    sys.path.insert(0, _ADAPTERS_DIR)
+import window  # noqa: E402  (tools/adapters/window.py, shipped beside this file)
+
 ROOT_BUDGET = 1.0
+# fold 2 G2: measured under 12 busy-loop processes, a healthy engine's cold identity check took at most
+# 0.214 s, and the worst combined case (wedged engine, hung `ps`, busy note) must stay at or under 1.6 s
+IDENTITY_BUDGET = 1.0  # both engine identity calls together; status/SessionStart fit 2 s (DD A6)
+STATUS_BUDGET = 1.3  # every read status and SessionStart make, engine calls included (fold F3)
+PS_BUDGET = 0.25  # one process start-time read on the status path, used only where the kernel will not say (F3, G3)
+WRITE_BUDGET = 0.1  # a note write on the status path; a busy note is skipped, never waited on (G2)
+IDENTITY_TTL = 60.0
 INDEX_MAX_BYTES = 16 * 1024 * 1024
-FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error"})
+FOLLOWER_EXIT = frozenset({"transport-failed", "follower-error", "window-gone", "terminated"})
 INDEX_UNAVAILABLE = frozenset({"index-missing", "index-malformed", "index-unreadable", "root-stalled"})
 SIGNATURE_STALLED = object()
 NOTE_VERSION = 1
@@ -50,6 +77,11 @@ TEST_CRASH_BEFORE_OUTPUT = os.environ.get("ADT_TEST_CRASH_BEFORE_OUTPUT") == "1"
 TEST_CRASH_AFTER_OUTPUT = os.environ.get("ADT_TEST_CRASH_AFTER_OUTPUT") == "1"
 TEST_SINK_ACCEPT = int(os.environ.get("ADT_TEST_SINK_ACCEPT") or 0)
 TEST_PAUSE_BEFORE_CLEANUP = os.environ.get("ADT_TEST_PAUSE_BEFORE_CLEANUP") or None
+TEST_STARTUP_DELAY = float(os.environ.get("ADT_TEST_STARTUP_DELAY") or 0)  # test-only: widen the startup gap (G1)
+# test-only: hold after this process's first written row until a stop arrives or this many seconds pass, so a
+# test's stop lands mid-backlog on any machine load (G-A1 linux leg)
+TEST_PAUSE_AFTER_FIRST_ROW = float(os.environ.get("ADT_TEST_PAUSE_AFTER_FIRST_ROW") or 0)
+_PAUSED: list[bool] = []
 CLAUDE_PAYLOAD_FIELDS = (
     "prompt_id",
     "effort",
@@ -110,7 +142,7 @@ def default_note() -> dict:
         "handled_calls": [],
         "binding_gen": 0,
         "leader": None,
-        "standbys": [],
+        "window": None,
         "phase": "not-started",
         "reason": None,
         "reason_detail": None,
@@ -242,32 +274,49 @@ class NoteStore:
             return None
 
 
-def process_start_time(pid: int) -> str | None:
+def process_start_time(pid: int, timeout: float = 5.0) -> str | None:
+    """The process's start time from the kernel, `ps` only where the kernel will not say (fold 2 G3)."""
+    return window.process_start(pid, timeout)
+
+
+def own_identity(plugin_root: str | None) -> dict:
+    """This file's own code: the kit version of the tree it ships in and the first 8 hex of its sha256.
+
+    The kit comes from the plugin manifest under `plugin_root`, else from the tree this file sits in
+    (manifest, then `tools/relay_engine/version.py`), so an empty plugin root still names a kit (V-c).
+    """
+    import hashlib
+
+    here = Path(__file__).resolve()
     try:
-        if platform.system() == "Linux":
-            with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
-                return handle.read().rsplit(")", 1)[1].split()[19]
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-        return out or None
-    except (OSError, subprocess.SubprocessError, IndexError):
-        return None
+        sha = hashlib.sha256(here.read_bytes()).hexdigest()[:8]
+    except OSError:
+        sha = "unknown"
+    kit = None
+    for base in ([Path(plugin_root)] if plugin_root else []) + [here.parents[2]]:
+        for manifest in (base / ".claude-plugin" / "plugin.json", base / ".codex-plugin" / "plugin.json"):
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                kit = json.loads(manifest.read_text(encoding="utf-8")).get("version") or None
+            if kit:
+                return {"kit": kit, "sha": sha}
+        with contextlib.suppress(OSError):
+            found = re.search(r'^KIT_VERSION = "([^"]+)"', (base / "tools" / "relay_engine" / "version.py").read_text(encoding="utf-8"), re.M)
+            if found:
+                return {"kit": found.group(1), "sha": sha}
+    return {"kit": kit, "sha": sha}
 
 
-def leader_record() -> dict:
-    version, rc = run_relay(None, "version")
+def leader_record(plugin_root: str | None = None, start_time: str | None = None) -> dict:
+    version, rc = run_relay(None, "version", timeout=IDENTITY_BUDGET)  # a wedged engine never stalls startup (F7)
     identity = None
     if rc == 0 and isinstance(version, dict) and version.get("kit") and version.get("fingerprint"):
         identity = {"kit": version["kit"], "fp": version["fingerprint"]}
     return {
         "pid": os.getpid(),
-        "start_time": process_start_time(os.getpid()),
+        "start_time": start_time or process_start_time(os.getpid()),
         "instance": str(uuid.uuid4()),
         "identity": identity,
+        "doorbell": own_identity(plugin_root),
     }
 
 
@@ -288,7 +337,7 @@ def process_probe(pid: int) -> str:
     return PROC_ALIVE
 
 
-def process_liveness(record: dict | None) -> str:
+def process_liveness(record: dict | None, timeout: float = 5.0) -> str:
     if not isinstance(record, dict):
         return PROC_DEAD
     pid = record.get("pid")
@@ -298,48 +347,144 @@ def process_liveness(record: dict | None) -> str:
     if probe == PROC_DEAD:
         return PROC_DEAD
     recorded = record.get("start_time")
-    observed = process_start_time(pid)
+    observed = process_start_time(pid, timeout)
     if recorded is not None and observed is not None:
         return PROC_ALIVE if recorded == observed else PROC_DEAD
     return probe
 
 
-class LeaderLock:
-    def __init__(self, session: str):
-        if not valid_session_id(session):
-            raise ValueError("invalid-session-id")
-        self._path = note_dir() / f"{session}.leader"
+WINDOW_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,200}")
+
+
+def valid_window_key(key) -> bool:
+    return isinstance(key, str) and WINDOW_KEY.fullmatch(key) is not None and ".." not in key
+
+
+class WindowLock:
+    """The window's lifetime lock: the doorbell that holds it is the window's only doorbell (DD § 4.2).
+
+    Acquisition is non-blocking only; a copy that cannot take it exits, so no second doorbell waits.
+    """
+
+    def __init__(self, window_key: str):
+        if not valid_window_key(window_key):
+            raise ValueError("invalid-window-key")
+        self._path = note_dir() / f"window-{window_key}.lock"
         self._fd = None
 
-    def acquire(self, blocking: bool) -> bool:
+    def acquire(self) -> bool:
         fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(fd)
             return False
         self._fd = fd
         return True
 
-    def stamp(self, instance: str) -> None:
-        os.ftruncate(self._fd, 0)
-        os.lseek(self._fd, 0, os.SEEK_SET)
-        os.write(self._fd, instance.encode("utf-8"))
-        os.fsync(self._fd)
-
-    def holder_instance(self) -> str | None:
+    def stamp(self, instance: str | None, pid: int | None = None, start_time: str | None = None) -> bool:
+        """Write the holder's stamp; False, writing nothing, once the lock is released (a stop handler can
+        release it at any bytecode, so the descriptor is taken once and a closed one is not an error; G1)."""
+        fd = self._fd
+        if fd is None:
+            return False
         try:
-            return self._path.read_text(encoding="utf-8").strip() or None
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, json.dumps({"instance": instance, "pid": pid, "start_time": start_time}).encode("utf-8"))
+            os.fsync(fd)
+        except OSError:
+            return False
+        return self._fd is not None
+
+    def holder(self) -> dict | None:
+        """The stamp the holder wrote, read without taking the lock (fold F2); a released lock reads None."""
+        try:
+            text = self._path.read_text(encoding="utf-8").strip()
         except OSError:
             return None
+        if not text:
+            return None
+        try:
+            stamp = json.loads(text)
+        except ValueError:
+            return {"instance": text, "pid": None, "start_time": None}
+        if not isinstance(stamp, dict) or not isinstance(stamp.get("instance"), (str, type(None))):
+            return None
+        return stamp  # instance None: taken, leader record not yet made
+
+    def holder_instance(self) -> str | None:
+        stamp = self.holder()
+        return stamp["instance"] if stamp else None
 
     def release(self) -> None:
-        if self._fd is not None:
+        """Idempotent; also called from the stop-signal handler, so the descriptor is taken first."""
+        fd, self._fd = self._fd, None
+        if fd is not None:
             with contextlib.suppress(OSError):
-                os.ftruncate(self._fd, 0)
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-            os.close(self._fd)
-            self._fd = None
+                os.ftruncate(fd, 0)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+_STOP_SIGNAL: list[int] = []
+_STOP_RELEASE: list["WindowLock"] = []
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)  # SIGINT stops as SIGTERM does (fold F7)
+
+
+def _request_stop(signum, _frame) -> None:
+    """Free the window at once, so a doorbell started right after the stop takes it (final review I1).
+
+    The loop acts on the stop at its next check; until then nothing more is delivered, because
+    `deliver_once` checks the stop under the state lock before each row and after each write (fold F1),
+    and a successor's leader record fences the old instance's frames.
+    """
+    _STOP_SIGNAL.append(signum)
+    for lock in _STOP_RELEASE:
+        lock.release()
+
+
+def record_own_exit(note: dict, *, reason: str, instance: str) -> None:
+    """Record a stop exit unless a successor already took the window and wrote its own leader record."""
+    holder = (note.get("leader") or {}).get("instance")
+    if holder in (None, instance):
+        record_exit(note, reason=reason, detail=None, instance=instance)
+
+
+def stop_line(fd: int, reason: str) -> None:
+    """The doorbell's one exit line on its stdout (the host shows it in the conversation)."""
+    with contextlib.suppress(OSError):
+        os.write(fd, f"relay-monitor: stopped: {reason}\n".encode("ascii"))
+
+
+def session_window_key(session: str) -> str:
+    """The key used when a window cannot be determined: one doorbell per session, as on 2.9.7."""
+    return "sess-" + session
+
+
+def follow_window(host: str, session: str, environ=None) -> window.Window | None:
+    """The window this doorbell process runs in (DD § 4.1).
+
+    Test seam (test-only): `ADT_WINDOW_PID` and `ADT_WINDOW_START` (a UTC `ps` lstart) together name
+    the Claude Code window directly; neither is read unless both are set.
+    """
+    environ = os.environ if environ is None else environ
+    if host == "codex":
+        thread = environ.get("CODEX_THREAD_ID") or session
+        return window.Window("codex", "cx-" + thread, None, None, thread, "thread")
+    seam_pid, seam_start = environ.get("ADT_WINDOW_PID"), environ.get("ADT_WINDOW_START")
+    if seam_pid and seam_start:
+        try:
+            return window._claude_window(int(seam_pid), seam_start, "test-seam")
+        except ValueError:
+            return None
+    claude_env = {k: v for k, v in environ.items() if k != "CODEX_THREAD_ID"}
+    claude_env["ADT_HOST"] = "claude-code"
+    try:
+        return window.window_identity(claude_env, os.getpid())
+    except Exception:
+        return None
 
 
 class FdSink:
@@ -1003,7 +1148,11 @@ def deliver_once(
     pacer: Pacer | None = None,
     encode=None,
     start_cursor: dict | None = None,
+    stop=None,
 ) -> DeliverResult:
+    """Deliver addressed rows after the cursor; `stop`, when given, is checked under the state lock before each
+    row and after each write, so a stopping doorbell writes nothing more and never advances progress past a row
+    written after the stop request (fold v3-adapter-a-review-1 F1)."""
     result = DeliverResult()
     if binding is None:
         return result
@@ -1120,6 +1269,9 @@ def deliver_once(
             result.aborted = "lock-timeout"
             return result
         try:
+            if stop is not None and stop():
+                result.aborted = "stopped"
+                return result
             note = store.load()
             frame = note.get("frame")
             if (
@@ -1188,6 +1340,14 @@ def deliver_once(
                     return result
                 if TEST_CRASH_AFTER_FLUSH or TEST_CRASH_AFTER_OUTPUT:
                     os._exit(9)
+                if TEST_PAUSE_AFTER_FIRST_ROW and not _PAUSED:
+                    _PAUSED.append(True)
+                    held = time.monotonic() + TEST_PAUSE_AFTER_FIRST_ROW
+                    while time.monotonic() < held and not _STOP_SIGNAL:
+                        time.sleep(0.01)
+                if stop is not None and stop():
+                    result.aborted = "stopped"  # the host may have stopped reading: the successor offers it again
+                    return result
                 ring = note["printed"].setdefault(root_key, [])
                 ring.append(row_.cells["file"])
                 del ring[:-RING_SIZE]
@@ -1270,32 +1430,60 @@ def follow(args) -> int:
     if not valid_session_id(session):
         print("relay-monitor: invalid-session-id", file=sys.stderr)
         return 2
+    _STOP_SIGNAL[:] = _EARLY_STOP  # stops that arrived while the module loaded (G4)
+    _STOP_RELEASE.clear()
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in STOP_SIGNALS:  # before the lock and the leader record (fold F7)
+            previous[signum] = signal.signal(signum, _request_stop)
+    try:
+        return _follow(args, session)
+    finally:
+        _STOP_RELEASE.clear()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _stopped_at_startup(leader: "WindowLock | None") -> int:
+    if leader is not None:
+        leader.release()
+    stop_line(sys.stdout.fileno(), "terminated")
+    return 0
+
+
+def _follow(args, session: str) -> int:
     host = decide_host(args, None, os.environ)
-    store, leader, me = NoteStore(session), LeaderLock(session), leader_record()
-    if not leader.acquire(blocking=False):
-        store.update(
-            lambda n: n["standbys"].append(me)
-        )  # standbys register themselves only; `phase` is leader-owned (plan-19)
-        leader.acquire(blocking=True)
-        store.update(
-            lambda n: n.update(
-                {
-                    "standbys": [
-                        s for s in n["standbys"] if s.get("instance") != me["instance"]
-                    ]
-                }
-            )
-        )
-    leader.stamp(me["instance"])
+    win = follow_window(host, session)
+    window_key = win.key if win is not None else session_window_key(session)
+    store, leader = NoteStore(session), WindowLock(window_key)
+    if _STOP_SIGNAL:
+        return _stopped_at_startup(None)
+    if not leader.acquire():
+        return 0  # another doorbell holds this window: an extra tier copy or a re-arm exits silently
+    _STOP_RELEASE[:] = [leader]
+    if TEST_STARTUP_DELAY:
+        time.sleep(TEST_STARTUP_DELAY)
+    started = process_start_time(os.getpid())
+    if _STOP_SIGNAL or not leader.stamp(None, os.getpid(), started):  # status reads `starting` from here (F2)
+        return _stopped_at_startup(leader)  # a stop before or during the stamp (fold 2 G1)
+    me = leader_record(getattr(args, "plugin_root", None), started)
+    if _STOP_SIGNAL or not leader.stamp(me["instance"], me["pid"], me["start_time"]):
+        return _stopped_at_startup(leader)  # stopped before any leader record was written
+    watch = (
+        window.ExitWatch(win.pid, win.proc_start_utc)
+        if win is not None and win.host == "claude-code" and win.pid is not None
+        else None
+    )  # window liveness without a process per poll (fold F6)
     store.update(
-        lambda n: n.update(
+        lambda n: (n.pop("standbys", None), n.update(
             {
                 "leader": me,
+                "window": window_key,
                 "host": host if host in ("claude-code", "codex") else n.get("host"),
                 "phase": "waiting-for-binding",
                 "frame": None,
             }
-        )
+        ))
     )  # a new leader's stream starts at byte zero
     with store.state_lock():
         sweep_owner_files(store)  # eventual cleanup of unreferenced owner files (P5-R1)
@@ -1306,11 +1494,21 @@ def follow(args) -> int:
     backoff_until = 0.0
     try:
         while True:
+            stop = "terminated" if _STOP_SIGNAL else "window gone" if watch is not None and watch.gone() else None
+            if stop:
+                store.update(
+                    lambda n: record_own_exit(n, reason=stop.replace(" ", "-"), instance=me["instance"]),
+                    timeout=2.0,
+                )
+                leader.release()
+                stop_line(sys.stdout.fileno(), stop)
+                return 0
             with root_budget():
                 note = store.load()
                 binding = resolve_binding(note, os.environ, args)
                 if binding is None:
-                    store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
+                    if note.get("phase") != "waiting-for-binding":
+                        store.update(lambda n: n.update({"phase": "waiting-for-binding"}))
                     time.sleep(POLL_NOTE)
                     continue
                 if binding.source == "env":
@@ -1389,6 +1587,8 @@ def follow(args) -> int:
                 if time.monotonic() < backoff_until:
                     time.sleep(min(POLL_INDEX, backoff_until - time.monotonic()))
                     continue
+                if _STOP_SIGNAL:
+                    continue  # a stopping doorbell delivers nothing; the loop top records the exit
                 last_sig, last_note, backoff_until, pending = sig, nsig, 0.0, False
                 snap = read_index(Path(binding.root) / "INDEX.md")
                 last_error = snap.error
@@ -1400,6 +1600,7 @@ def follow(args) -> int:
                     end=time.monotonic() + FOLLOW_OUTPUT_DEADLINE,
                     leader_instance=me["instance"],
                     pacer=pacer,
+                    stop=lambda: bool(_STOP_SIGNAL),
                 )
                 with store.state_lock():
                     recovered = store.load()
@@ -1447,6 +1648,9 @@ def follow(args) -> int:
         finally:
             leader.release()
         raise
+    finally:
+        if watch is not None:
+            watch.close()
 
 
 MODES["follow"] = follow
@@ -2227,6 +2431,8 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
             text=True,
             timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        return {"code": "E-WEDGED", "detail": f"no answer within {timeout:.1f}s"}, 124
     except (OSError, subprocess.SubprocessError) as exc:
         return {"code": "E-EXEC", "detail": str(exc)}, 1
     text = proc.stdout.strip() or proc.stderr.strip()
@@ -2236,8 +2442,11 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
         return {"raw": proc.stderr.strip() or text}, proc.returncode
 
 
-def check_identity(plugin_root: str | None, root: str | None):
-    client, rc = run_relay(plugin_root, "version")
+def check_identity(plugin_root: str | None, root: str | None, budget: float = IDENTITY_BUDGET):
+    end = time.monotonic() + budget  # one deadline across both engine calls (DD A6, item 8)
+    client, rc = run_relay(plugin_root, "version", timeout=max(0.05, end - time.monotonic()))
+    if isinstance(client, dict) and client.get("code") == "E-WEDGED":
+        return "wedged", {"kit": None, "fp": None}, None
     client = client if isinstance(client, dict) else {}
     client_id = (
         {"kit": client.get("kit"), "fp": client.get("fingerprint")}
@@ -2251,7 +2460,9 @@ def check_identity(plugin_root: str | None, root: str | None):
         return "unchecked", client_id, None
     if not engine.value:
         return "hand-root", client_id, None
-    status_doc, rc = run_relay(plugin_root, "status", "--root", root)
+    if end - time.monotonic() <= 0.05:
+        return "wedged", client_id, None
+    status_doc, rc = run_relay(plugin_root, "status", "--root", root, timeout=end - time.monotonic())
     status_doc = status_doc if isinstance(status_doc, dict) else {}
     if rc != 0:
         raw = status_doc.get("raw") or ""
@@ -2276,29 +2487,30 @@ def check_identity(plugin_root: str | None, root: str | None):
     return ("ok" if daemon == client_id else "version-mismatch"), client_id, daemon
 
 
-def readiness(store: NoteStore, _between=None):
-    probe = LeaderLock(store.session)
-    held = not probe.acquire(blocking=False)
-    if not held:
-        probe.release()
+def readiness(store: NoteStore, _between=None, *, ps_timeout: float = 5.0):
+    """The doorbell's state, read without taking any lock (fold F2, F3).
+
+    The window lock is never taken here: a probe holding it, even briefly, makes a doorbell that starts in
+    that moment exit as a second copy.  The holder is read from the stamp it wrote into the lock file (its
+    instance, pid and start time; a release empties it), and the note is read whole without the state lock
+    because every write replaces it atomically.
+    """
+    key = store.load().get("window")
+    stamp = WindowLock(key if valid_window_key(key) else session_window_key(store.session)).holder()
     if _between is not None:
         _between()
-    holder = probe.holder_instance() if held else None
-    with store.state_lock():
-        note = store.load()
+    note = store.load()
+    leader = note.get("leader") or {}
+    process = stamp if stamp is not None and stamp.get("pid") is not None else (
+        leader if stamp is not None and leader.get("instance") == stamp["instance"] else None
+    )  # a stamp without its pid (written before this fold) names the leader record's process
+    held = process is not None and process_liveness(process, ps_timeout) != PROC_DEAD
     if not held:
         return (
-            "standby-only"
-            if any(process_liveness(s) != PROC_DEAD for s in note.get("standbys", []))
-            else "unavailable" if note.get("leader") is None and note.get("exit") else "not-started"
+            "unavailable" if note.get("leader") is None and note.get("exit") else "not-started"
         ), note
     leader = note.get("leader")
-    if (
-        not leader
-        or not holder
-        or leader.get("instance") != holder
-        or process_liveness(leader) == PROC_DEAD
-    ):
+    if not leader or leader.get("instance") != stamp["instance"]:
         return "starting", note
     if note.get("phase") == "unavailable":
         return "unavailable", note
@@ -2309,16 +2521,6 @@ def readiness(store: NoteStore, _between=None):
     ):
         return "armed", note
     return "waiting-for-binding", note
-
-
-def tiers_mixed(note: dict) -> bool:
-    identities = set()
-    for record in [note.get("leader"), *note.get("standbys", [])]:
-        if record is None or process_liveness(record) == PROC_DEAD:
-            continue
-        identity = record.get("identity")
-        identities.add((identity.get("kit"), identity.get("fp")) if isinstance(identity, dict) else None)
-    return len(identities) > 1
 
 
 def printable_text(text: str) -> str:
@@ -2357,16 +2559,37 @@ def rebind_line(note: dict, session: str) -> str | None:
     return "".join(parts) + suffix
 
 
-def status_line(store: NoteStore, plugin_root: str | None) -> str:
-    state, note = readiness(store)
+def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None = None) -> str:
+    """One status line within `end` (default STATUS_BUDGET from now): reads that run out print `-` (fold F3)."""
+    end = time.monotonic() + STATUS_BUDGET if end is None else end
+    state, note = readiness(store, ps_timeout=min(PS_BUDGET, _remaining(end)))
     ident, client_id, daemon = "unchecked", {}, None
     if note.get("root"):
-        ident, client_id, daemon = check_identity(plugin_root, note.get("root"))
-        store.update(
-            lambda n: n.update(
-                {"client_identity": client_id, "daemon_identity": daemon}
+        cache, now = note.get("identity_cache") or {}, time.time()
+        if (
+            cache.get("root") == note["root"]
+            and cache.get("plugin_root") == plugin_root
+            and cache.get("ident") != "wedged"
+            and 0 <= now - float(cache.get("at") or 0) < IDENTITY_TTL
+        ):
+            ident, client_id, daemon = cache.get("ident"), cache.get("client") or {}, cache.get("daemon")
+        else:
+            budget = min(IDENTITY_BUDGET, _remaining(end))
+            ident, client_id, daemon = (
+                check_identity(plugin_root, note.get("root"), budget) if budget > 0.05 else ("wedged", {}, None)
             )
-        )
+            # keyed by root and plugin root; a wedged answer is never reused (M3)
+            cache = None if ident == "wedged" else {
+                "root": note["root"], "plugin_root": plugin_root, "at": now, "ident": ident,
+                "client": client_id, "daemon": daemon,
+            }
+        with contextlib.suppress(LockTimeout):
+            store.update(
+                lambda n: n.update(
+                    {"client_identity": client_id, "daemon_identity": daemon, "identity_cache": cache}
+                ),
+                timeout=min(WRITE_BUDGET, _remaining(end)),
+            )
     reason = shown_exit_reason(note) if state == "unavailable" and note.get("leader") is None and note.get("exit") else note.get("reason")
     suffix = f": {reason}" if state == "unavailable" and reason else ""
     binding = note.get("binding_source") or "none"
@@ -2381,7 +2604,10 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         "hand-root": "hand-root",
         "daemon-down": "down",
         "unchecked": "-",
+        "wedged": "-",
     }.get(ident, fp(daemon))
+    own = (note.get("leader") or {}).get("doorbell") or {}
+    doorbell_txt = f"{own.get('kit') or '-'}@{own.get('sha') or '-'}" if own else "-"
     record = note.get("bind_observation") or {}
     observed = record.get("reason")
     miss = "submit-near-miss" if observed == "submit-near-miss" else note.get("submit_miss")
@@ -2390,12 +2616,12 @@ def status_line(store: NoteStore, plugin_root: str | None) -> str:
         f"relay-monitor: {state}{suffix} "
         f"seat={note.get('seat') or '-'} "
         f"root={note.get('root') or '-'} cursor={cur} "
-        f"binding={binding} client={fp(client_id)} "
+        f"binding={binding} window={note.get('window') or '-'} doorbell={doorbell_txt} client={fp(client_id)} "
         f"daemon={daemon_txt} "
+        f"{'engine=wedged ' if ident == 'wedged' else ''}"
         f"updated={note.get('updated') or '-'}"
         f"{' miss=' + miss if miss else ''}"
         f"{' last-bind=' + last_bind if last_bind else ''}"
-        f"{' tiers=mixed' if tiers_mixed(note) else ''}"
         f"{' identity=mismatch' if ident == 'version-mismatch' else ''}"
     )
     raw = (daemon or {}).get("raw") or ""
@@ -2414,10 +2640,10 @@ def status(args) -> int:
         if not valid_session_id(session):
             print("relay-monitor: invalid-session-id", file=sys.stderr)
             return 2
-        store = NoteStore(session)
-        with store.state_lock():
-            sweep_owner_files(store)  # eventual cleanup; never the referenced file
-        print(status_line(store, args.plugin_root))
+        store, end = NoteStore(session), time.monotonic() + STATUS_BUDGET
+        with contextlib.suppress(LockTimeout), store.state_lock(timeout=0.05):
+            sweep_owner_files(store)  # eventual cleanup; never the referenced file; skipped while busy (F3)
+        print(status_line(store, args.plugin_root, end=end))
         return 0
 
 
@@ -2496,7 +2722,7 @@ def session_start(args) -> int:
                     }
                 }
             )
-        store = NoteStore(session)
+        store, end = NoteStore(session), time.monotonic() + STATUS_BUDGET
         host = decide_host(args, payload, os.environ)
         plugin_root = (
             args.plugin_root
@@ -2504,23 +2730,26 @@ def session_start(args) -> int:
             or os.environ.get("PLUGIN_ROOT")
             or str(Path(__file__).resolve().parents[2])
         )
-        lines = [status_line(store, plugin_root)]
+        lines = [status_line(store, plugin_root, end=end)]
+
+        def note_update(fn):  # a busy note is not waited on (fold F3, G2)
+            with contextlib.suppress(LockTimeout):
+                store.update(fn, timeout=min(WRITE_BUDGET, _remaining(end)))
+
         if host in ("host-ambiguous", "host-unknown"):
-            store.update(lambda n: set_reason(n, host))
+            note_update(lambda n: set_reason(n, host))
         elif host == "codex":
             override = (
                 os.environ.get("ADT_CODEX_FORK") == "0"
             )  # the only stock signal the kit honours (erratum-1 A)
-            store.update(
-                lambda n: n.update({"host": "codex", "codex_fork_override": override})
-            )
+            note_update(lambda n: n.update({"host": "codex", "codex_fork_override": override}))
             lines.append(
                 FALLBACK_OVERRIDE_TEXT
                 if override
                 else arming_text(plugin_root, session, source_label(payload.get("source")))
             )
         else:
-            store.update(lambda n: n.update({"host": "claude-code"}))
+            note_update(lambda n: n.update({"host": "claude-code"}))
         return emit_json(
             {
                 "hookSpecificOutput": {
