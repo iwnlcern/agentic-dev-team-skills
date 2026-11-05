@@ -142,6 +142,16 @@ class TestGuardrail(unittest.TestCase):
             self.effect(command, "operator-endpoint")
         self.assertIsNone(self.command("relay show answer"))
 
+    def test_final_engine_command_spellings(self):
+        for command in ("adt engine stop", "tools/adt engine stop",
+                        "/opt/bin/adt engine stop", 'env FOO=1 bash -c "adt engine stop"'):
+            with self.subTest(command=command):
+                self.assertEqual(self.command(command), g.Match("operator-only"))
+        for command in ("adt engine restart", "tools/adt engine restart",
+                        "adt show engine stop", "echo adt engine stop"):
+            with self.subTest(command=command):
+                self.assertIsNone(self.command(command))
+
     def test_command_spellings(self):
         plain = self.command(f"gh pr merge 12 --match-head-commit {HEAD}")
         for command in (f"gh  pr   merge 12 --match-head-commit {HEAD}",
@@ -378,6 +388,9 @@ class TestGuardrail(unittest.TestCase):
         self.assertEqual(table["effects"]["pr-merge"]["slip_kind"], "merge")
         self.assertEqual(set(table["flags"]["values"]), {"pinned", "auto", "admin", "unparsed", "compound"})
         self.assertEqual(table["flags"]["unresolved_target"], "refuse-or-resolve")
+        self.assertEqual(table["operator_commands"],
+                         {"stop": [["adt", "engine", "stop"]],
+                          "restart": [["adt", "engine", "restart"]]})
         for spelling in table["operator_commands"]["stop"]:
             self.effect(" ".join(spelling), "operator-only")
         for spelling in table["operator_commands"]["restart"]:

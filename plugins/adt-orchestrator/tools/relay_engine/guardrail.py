@@ -26,7 +26,7 @@ _SHAPES = {
                       "content reader naming an ancestor directory",
                       "command naming refused path"),
     "operator-endpoint": ("relay answer", "relay prompt-record"),
-    "operator-only": ("relay engine off", "relay team open"),
+    "operator-only": ("adt engine stop", "relay engine off", "relay team open"),
 }
 _SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -73,9 +73,9 @@ def table() -> dict:
         "refused_paths": ["frank operator key", "Jev key", "prompt-hook key", "other seat keys"],
         "flags": {"values": ["pinned", "auto", "admin", "unparsed", "compound"],
                   "unresolved_target": "refuse-or-resolve"},
-        # Platform owns the eventual stop/restart spellings; these are provisional.
-        "operator_commands": {"stop": [["relay", "engine", "off"]],
-                              "restart": [["relay", "engine", "restart"]]},
+        # Platform's final names retain distinct stop and restart-request semantics.
+        "operator_commands": {"stop": [["adt", "engine", "stop"]],
+                              "restart": [["adt", "engine", "restart"]]},
         "effects": {
             effect: {"command_shapes": list(_SHAPES[effect]),
                      "slip_kind": {"commit": "implement", "pr-merge": "merge"}.get(effect)}
@@ -401,8 +401,11 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
         _, args = _leading_options(args, {"--root": "root", "--key": "key"})
         if args[:1] in (["answer"], ["prompt-record"]) or args[:2] in (["authority", "prompt-record"], ["operator", "answer"], ["prompt", "record"]):
             return Match("operator-endpoint")
-        if ["relay", *args[:2]] in table()["operator_commands"]["stop"] or args[:2] in (["team", "open"], ["team", "open-next"]):
+        if args[:2] in (["engine", "off"], ["team", "open"], ["team", "open-next"]):
             return Match("operator-only")
+    if any([program, *args[:len(row) - 1]] == row
+           for row in table()["operator_commands"]["stop"]):
+        return Match("operator-only")
     return _unparsed(" ".join(words), paths) if program not in (
         "git", "gh", "relay", "relay.py", "echo", "printf", "cat") else None
 
