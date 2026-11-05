@@ -29,7 +29,7 @@ Panels are for code/PR review and explicitly requested adversarial review; routi
 Do not skip writing a relay because review feels pending — review happens on the relay, not instead of it.
 Do not spawn your own reviewer as a substitute for the `Orchestrator Reviewer` seat.
 Every authority-bearing relay you author in the broad SET (AUDIT, DESIGN, REVIEW-FOLD, MERGE-GATE, delegated PLAN, or override IMPL dispatch) must carry `<run>.orchestrator-reviewer` in `CC` unless the operator has filed an `ORCH_REVIEW_WAIVER`.
-This is reviewer visibility, not approval; the general no-wait rule has an adopting-run merge-grant exception in `protocol.md` § Reviewer checkpoints.
+This is reviewer visibility, not approval; the general no-wait rule has an adopting-run merge-grant exception in `protocol.md` § Merge and live verification.
 Do not proxy-author downstream relays with another seat's `FROM`.
 
 **Do not spawn the team yourself.** You emit relays that reach separate downstream sessions by auto-delivery where a seat is armed, and by the operator's hand-relay of the pointer block otherwise; you never spawn subagents/agent-teams to fill the pair Planner, Implementer, or any downstream seat, or to follow, execute, or simulate the relay workflow. Those seats are independent operator-relayed sessions (distinct models/lanes); collapsing them into subagents you spawn destroys the cross-session, cross-model, judge-from-disk geometry the protocol depends on. The only sanctioned subagent spawn is read-only reviewer lenses for adversarial review — never seat-occupants or executors, and never a substitute for the addressed Orchestrator Reviewer seat.
@@ -59,7 +59,7 @@ Do not spawn the seats. Boot relays bring operator-relayed sessions online, incl
 8. **Adversarial review** — use local `review-panels.md`; use `reviewer-spawn-prompts.md` when agent teams/subagents are available. Pair PRs are paneled by the pair Planner; the orchestrator panels only explicitly requested adversarial review or its own-seat review duties.
 9. **REVIEW-FOLD** — route blockers/must-haves to the Implementer, then quick-check the fold. Do not rerun the full panel unless design/blast radius changed.
 10. **MERGE/LIVE-VERIFY** — human-gated merge, deploy artifact/SHA verification, then live verification when required.
-    In an adopting run, file Template L and wait for the reviewer’s reply before a merge grant; apply `protocol.md` § Reviewer checkpoints for verdict handling.
+    In an adopting run, file Template L and wait for the reviewer’s reply before a merge grant; apply `protocol.md` § Merge and live verification for verdict handling.
 11. **SITREP reconciliation** — incoming sitreps are E0 until checked against PRs, repo state, tasks, memory, deploy/runtime evidence.
 
 ## Standby after PROCEED-TO-PLAN / PLAN dispatch
@@ -78,4 +78,4 @@ Use all available teams. Disjoint surfaces can run in parallel. Shared files, mi
 
 ## Relay transport
 
-Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. Armed seats receive the arrival automatically (protocol Delivery mode); the pointer block is printed regardless as the fallback. If a receiver cannot access the path, relay or attach the file contents.
+Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. For v3 delivery, connect with `relay connect --key <key-path> --root <run-root>` (DD-v3-adapter § 4.1–4.2); the pointer block remains the fallback. If a receiver cannot access the path, relay or attach the file contents.

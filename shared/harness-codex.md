@@ -20,32 +20,36 @@ Claude Code is this kit's default harness and has no such file.
 - Sandboxed wrapper tooling on this host can mask byte diffs; prefer `/usr/bin/git`, `cmp`, `sha256sum`, or direct file reads for evidence-grade comparison.
 - Detached HEAD in a managed Codex sandbox means branch/push/PR are unavailable; commit the work and report, so the operator can finish through the host's own controls.
 
-## relay-lint
+## Relay lint
 
 The procedure in `protocol.md` § Authority check before acting is the same on Codex and does not depend on hooks.
 
 - Plugin-route installs ship the relay-write adapter through `hooks/hooks.json`; Codex asks to approve the hook when it or its script bytes are first encountered and again whenever they change, which includes every kit update.
-- Manual installs and users who decline that prompt run the linter before every handoff: `python3 <skills-root>/tools/relay-lint.py <relay>`, where `<skills-root>` is the directory the skills were installed into.
+- Manual installs and users who decline that prompt run the linter before every handoff: `<skills-root>/tools/relay lint <absolute-draft-path>`, where `<skills-root>` is the directory the skills were installed into.
 
 ## Instructions files
 
 - `AGENTS.md` is this host's default project-instructions file, concatenated root-downward with closer files refining earlier ones; `CLAUDE.md` is not read unless configured via `project_doc_fallback_filenames`.
 
-## Relay auto-delivery
+## Relay delivery
 
-- The supported host for auto-delivery is the kit's Codex fork (`iwnlcern/codex`, DD-v295-b3): the `monitor` tool carries `relay-monitor.py follow` for the seat.
-  The kit never probes for the fork: the SessionStart hook supplies the arming context when it resolves the host as Codex.
-  At `startup` that is the boot wording, and the boot turn arms only if `monitor` is in its advertised tool surface, otherwise reporting `unavailable: monitor-tool` with the pointer fallback.
-  For every SessionStart source other than `startup`, including an unrecognised source, it is the non-boot wording: no acknowledgment, a watch started only if this session has none running, and the work in progress continues in the same turn.
-  Set `ADT_CODEX_FORK=0` in a seat's environment to suppress the arming context on a seat you know is stock.
-- Install per the fork's recipe in DD-v295-b3 6.11 (the npm vendor slot); `codex features list` and the recorded sha256 are install evidence for the operator and never gate arming.
-- The fork forwards at most 4 KiB of text per record; a row over that size is unsupported for monitor delivery and is recovered through `relay-monitor.py replay`, which reads the index directly.
-- Start a seat through the shipped launcher `tools/adapters/codex/adt-codex`, which exports `ADT_HOST=codex` and execs the binary; it is the explicit host marker the hooks read, and it must not be exported globally on a machine that also runs Claude seats.
-- The plugin's `hooks/hooks.json` adds three hooks: SessionStart (`session-start`, which prints the delivery state and, on the fork, the arming instruction), PostToolUse `Bash` (`bind`, whose receipt-to-binding rules are defined by `bind_from_receipt` in `tools/adapters/relay-monitor.py`), and Stop (`drain`, which continues the turn with one pending arrival).
-- New or changed hooks are skipped until trusted: run `/hooks` once per seat after installing or upgrading and trust the three relay-monitor entries; plugin hooks are not auto-trusted.
-- On this host hook processes receive `session_id` on stdin, not in the environment; the arming instruction therefore passes `--session <id>` explicitly.
-- The fork forwards the watcher's stderr in a tagged block of the same notification.
-  Follow diagnostics and error handling in `follow` in `tools/adapters/relay-monitor.py`; unexpected failures can also reach stderr.
-  Persistent diagnostics live in the note under `${TMPDIR:-/tmp}/adt-relay-monitor/`.
-- Stock Codex is fallback-only: the seat's acknowledgment says `fallback: pointer`, relays reach it by the operator's pointer block, and `codex queue --thread <id> --message <text>` is the documented manual alternative.
-- A shell call that fails after a successful `relay submit`, or a submit with redirected stdout, is not bound by hook on any host; rebind with `python3 <plugin-root>/tools/adapters/relay-monitor.py bind --manual --session <id> --root <run-root> --anchor <file-cell>`.
+The v3 connection contract is DD-v3-adapter § 4.1–4.2; these steps describe that contract for the v3 release.
+
+- Connect using `relay connect --key <key-path> --root <run-root>` with your existing seat key; do not register or replace a resumed seat.
+- A window with no connection says `not connected — ask for your seat name and key` and rings for nothing.
+- Connecting another window as the same seat moves delivery; the old window reports `relay: replaced by another window`.
+  Changing seats in an already connected window requires `--switch`; the previous seat keeps its engine delivery position.
+- Delivery rings only for `TO`, oldest first: at most 20 on connect, then a remaining count with `relay connect --list`.
+  CC supplies visibility and never rings.
+- On Codex the window identity is `CODEX_THREAD_ID`.
+  `startup`, `clear` and `fork` require connect in the new thread; `resume` and `compact` continue while the doorbell holds the window's lifetime lock.
+- The Codex fork's `monitor` tool runs the doorbell.
+  SessionStart supplies a start-the-monitor instruction whenever no doorbell holds that lock; check existing watches before starting another.
+  Stock Codex uses the operator's handoff pointer fallback.
+- The SessionStart hook disconnects a fresh conversation; it never connects a seat.
+  The Stop drain checks undelivered `TO` rows using per-row claims; it does not watch between turns.
+  Receipt parsing and the PostToolUse binding hook are removed by this contract; filing a relay does not connect or switch a seat.
+- New or changed hooks require trust again: run `/hooks` after installing or upgrading and approve the shipped entries.
+  On Codex, hook processes receive `session_id` on stdin; a monitor instruction supplies its session explicitly.
+- Keep the terminal handoff pointer after every filing, including when delivery is unavailable.
+  Follow the status and recovery instructions printed by the connected command; unexpected doorbell exit is reported to the operator for a window restart.

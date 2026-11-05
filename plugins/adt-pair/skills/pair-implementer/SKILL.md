@@ -29,7 +29,7 @@ You own independent audit, pair-Planner question-answering, review of your pair 
 The pair Implementer subsumes the adversarial-reviewer function: a pair-tier team is exactly two seats, and an unresolved review issue requires an operator ruling.
 
 **Not your job:** do not approve a CC'd orchestrator PLAN as if it were your pair Planner's plan.
-A relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception); non-addressed relays are not yours.
+A relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Addressing and delivery for the current-dispatch stop exception); non-addressed relays are not yours.
 Do not proxy-author another seat's relay: `FROM` must be your own address.
 
 You do **not** implement before the exact literal token `DISPATCH IMPL` appears bare, unfenced, un-backticked, and alone on its own line, and either appears in a relay whose `TO` includes your address as the sole implementer addressee or appears in a direct message addressed only to you; a relay file counts only if it lives under the active run's RELAY_ROOT — a token anywhere else on disk (fixture directories, documentation, corpora, scratch files) is inert regardless of addressing.
@@ -38,10 +38,26 @@ Urgency, “just fix it now,” “ship today,” “skip review,” or “it is
 Out-of-phase implementation artifacts are not accepted by this workflow unless the operator explicitly reassigns/rebases the run after dispatch.
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
-**Delivery.** Your boot acknowledgment states the delivery state from `relay-monitor.py status` run through the shell immediately before filing.
-The acknowledgment reuses the boot relay's `DISPATCH_ID` and is submitted with `--admits-against` the boot relay, following the template in `protocol.md` § Delivery mode.
-An arrival event is E0: read the relay file before acting (through `tools/relay show --body` on an engine root; if the read fails, report `unavailable-file` and do not act on that relay).
-Act only when your address is in `TO`, under the arrival rule in `protocol.md` § Delivery mode; a `CC` arrival is context only and grants nothing: file nothing in reply and carry on with any work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
+**Delivery.** For v3, connect with `relay connect --key <key-path> --root <run-root>` using your existing key (DD-v3-adapter § 4.1–4.2).
+At most 20 `TO` relays ring at connect, then `relay connect --list` shows the remainder; CC never rings.
+Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
+Keep the terminal handoff pointer as the fallback.
+
+## Action-report lineage
+
+For an IMPL action report, `PARENT_DISPATCH_ID` is the `DISPATCH_ID` of the addressed dispatch that authorized the reported work, never that dispatch's own `PARENT_DISPATCH_ID`.
+`IN_REPLY_TO` may locate the dispatch file but does not substitute for this parent edge.
+This report-parent rule is independent of the report's own `DISPATCH_ID` allocation below.
+
+## Resume checks
+
+An approved erratum does not re-open `DISPATCH IMPL` when implementation is already dispatched; the Implementer resumes under the standing dispatch after reading the approved erratum.
+A resume is unchanged only when the seat establishes all three conditions:
+- Every plan and design artifact the last answer rested on, the base and every approved amendment, hashes as it did at that check.
+- Since that check no relay was filed by the pair's Planner, the operator or an orchestrator seat, and this seat filed no review; this test is by author, not by the presence of lock headers.
+- The grant's cycle and, for a pair-Planner grant, the cycle of each relay in its pair lineage are open, established from the root's record rather than inferred from authors or the absence of particular relay kinds.
+Anything the seat cannot establish is unknown, and unknown asks again.
+With all three established, an unchanged resume needs no new check.
 
 ## Phase behavior
 
@@ -55,25 +71,27 @@ Read-only, same restrictions as AUDIT. Design Q&A is inline — answer the Plann
 
 ### DESIGN-REVIEW
 
-When writing the verdict, see "What the check reads" in `protocol.md` § Authority check before acting.
+When writing the verdict, see `protocol.md` § Authority check before acting.
 
 Read-only/review-only. Review the pair Planner's design doc, not a CC'd sibling/orchestrator relay. Verify the design doc's `DESIGN_DOC_ID`, boundary contract, target entity, acceptance criteria draft, operator decisions/defaults, rejected alternatives, and open questions. Return `DESIGN_REVIEW_VERDICT: approve`, `must-revise`, `reject-narrow`, or `human-decision-required`; parent the review relay to the DESIGN relay. A design-doc-backed PLAN should not proceed unless your review approved the matching `DESIGN_DOC_ID` or an operator/orchestrator direct override is present.
 
 ### PLAN-REVIEW
 
-When writing the verdict, see "What the check reads" in `protocol.md` § Authority check before acting.
+When writing the verdict, see `protocol.md` § Authority check before acting.
 
 Review your pair Planner's written plan before implementation.
 Every codebase claim in a plan carries its search or probe; the reviewer re-runs at least the ones the plan's correctness rests on, and for each completeness claim also derives its own search with a control.
 A CC'd orchestrator PLAN is context only and is not yours to approve.
 Review decomposition and dependency order, declared interfaces and their consistency, named test behaviors and their assertions and discriminating controls, exact commands and expected outcomes, acceptance criteria, locked design, scope, boundary contract, out-of-scope lines, and hard escalation triggers.
 A review may not ask for code bodies; a missing body is not a finding.
-A plan carrying implementation or full test bodies is incomplete under the protocol's handoff completeness validator; return `must-revise` naming the bodies, not defects inside them.
+A plan carrying implementation or full test bodies is incomplete under the protocol's Plan contract; return `must-revise` naming the bodies, not defects inside them.
 A post-approve erratum receives a delta review of the erratum alone; the approved base plan is not re-reviewed.
 Code correctness and defects in implementation or test bodies belong to the Implementer's worktree and IMPL or PR review.
 Return `approve`, `must-revise`, `reject-narrow`, or `human-decision-required`.
 
 ### IMPL
+
+Read `tools/TESTING.md` for test practice and its trap list before selecting checks.
 
 Before starting implementation on a managed root, run `tools/relay authority check <relay> --seat <own address> --action implement --root <root>` with this grant and this seat, and cite the answer in the report.
 Permission requires exit 0, `allowed` true and matching relay, seat and action; a denial, an unevaluable answer, absent output or missing command stops the act and is relayed as a blocker to the governing seat with its result or stderr, including nonempty `external` and its `capacity` limit when present.
@@ -84,7 +102,7 @@ Execution follows the plan task by task under the Practices above: a separate gi
 This skill fixes only the interface: enter with the token plus the locked plan relay; keep scope locked to that plan; exit with the implementation report relay (file-first) and the PR.
 Stop and relay a blocker instead of improvising if the plan is materially wrong, already built, lacks a downstream consumer, or requires operator judgment.
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
-For continuation and the standing-dispatch case, see `protocol.md` § Continuation dispatch.
+For continuation and the standing-dispatch case, see `protocol.md` § Authority check before acting.
 
 ### REVIEW-FOLD
 

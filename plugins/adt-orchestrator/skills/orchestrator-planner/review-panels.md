@@ -49,11 +49,11 @@ In the relay's header block:
 
 ```text
 FINDING: blocking <check-REF-index> <summary>
-FINDING: advisory [<check-REF-index>] <summary>
+FINDING: advisory <summary>
+FINDING: advisory <check-REF-index> <summary>
 ```
 
 Put `FINDING` lines in the relay's header block; `<check-REF-index>` is the 1-based position of a `REF` line in that header.
-Square brackets mark the optional advisory index; omit them in an actual line.
 The finding syntax is decided by `_findings` in `tools/relay_engine/header.py`; the status set is `_FINDING_STATUS` in `tools/relay_engine/schema.py`.
 
 In the review body:

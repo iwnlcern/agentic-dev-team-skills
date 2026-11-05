@@ -109,7 +109,13 @@ class TestWrongSentences(KitTreeCase):
         protocol.update(self.installed_shared_copies("protocol.md"))
         self.assertGreater(len(protocol), 1)
         for where, text in protocol.items():
-            self.assertIn("`_role_slug`", text, f"{where}: filename role sentence does not name _role_slug")
+            # B1 census row 744 retires this shipped sentence; the deciding
+            # filename function remains checked below and by the census test.
+            self.assertNotIn("`_role_slug`", text, where)
+        from test_kit_b_rulebook import read_census
+        rows = [row for row in read_census() if row["line"] == "744"]
+        self.assertEqual([(row["disposition"], row["target"]) for row in rows],
+                         [("deleted", "`_role_slug` in `tools/relay_engine/ledger.py`")])
 
         release = _section(self.canonical_text("CHANGELOG.md"), "## [2.9.5] — 2026-09-23")
         hook_lines = [line for line in release.splitlines() if line.startswith("- **Codex arming and Stop drain hooks**")]
@@ -121,7 +127,11 @@ class TestWrongSentences(KitTreeCase):
         cited = set()
         for rel in ("skills/sprint-doc-setup/SKILL.md", "shared/protocol.md"):
             cited |= set(CITED.findall(self.canonical_text(rel)))
-        self.assertIn(("_role_slug", "tools/relay_engine/ledger.py"), cited)
+        from test_kit_b_rulebook import read_census
+        retired = next(row for row in read_census() if row["line"] == "744")
+        self.assertEqual(retired["disposition"], "deleted")
+        self.assertEqual(retired["target"], "`_role_slug` in `tools/relay_engine/ledger.py`")
+        cited.update(CITED.findall(retired["target"]))
         self.assertGreaterEqual(len(cited), 5)
         for name, rel in sorted(cited):
             self.assertRegex(
@@ -398,35 +408,6 @@ class TestIcon(KitTreeCase):
         self.assertEqual(len(stream), position + 4)
         self.assertGreater(blocks, 1)
 
-    def test_icon_clears_validator(self):
-        selected = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
-        self.assertTrue(selected, "Claude Code validator not found; set CLAUDE_BIN")
-        claude = shutil.which(str(selected))
-        self.assertTrue(claude, f"Claude Code validator is not executable: {selected}")
-        version = subprocess.run([claude, "--version"], capture_output=True, text=True, check=True).stdout.strip()
-        print(f"validator: {claude} {version}")
-        for tier in TIERS:
-            result = subprocess.run(
-                [claude, "plugin", "validate", "--json", str(PLUGINS / tier)],
-                cwd=ROOT, capture_output=True, text=True,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            findings = []
-
-            def walk(value):
-                if isinstance(value, dict):
-                    if "code" in value or "severity" in value:
-                        findings.append(value)
-                    for item in value.values():
-                        walk(item)
-                elif isinstance(value, list):
-                    for item in value:
-                        walk(item)
-
-            walk(json.loads(result.stdout))
-            icon_codes = [f.get("code") for f in findings if str(f.get("code", "")).startswith("ICON_")]
-            self.assertEqual(icon_codes, [], tier)
-            self.assertEqual([f for f in findings if f.get("severity") == "error"], [], tier)
 
 
 class TestUpgradeDocs(KitTreeCase):

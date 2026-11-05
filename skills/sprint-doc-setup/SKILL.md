@@ -69,7 +69,8 @@ Create the INDEX and append the first boot row in one step; do not leave a newly
 The canonical marker value is a POSIX-separator path relative to the directory containing the INDEX (`.` and `..` permitted). A tracked absolute marker is a reviewer-detected conformance violation; untracked machine-local indexes may use absolute values. An existing index opts in by appending its first and only marker at end-of-file. A second recognized marker is a duplicate refusal, never an update mechanism. An index without a marker receives no resolution semantics or resolution check — there is no repo-root default or implied base.
 
 `INDEX.md` is append-oriented.
-`main` in `tools/relay-lint.py` decides explicit-file, index, and root-sweep routing; request `--index` explicitly when checking an individual INDEX.
+Lint drafts with `relay lint <absolute-draft-path>` before submission; `_cmd_lint` in `tools/relay_engine/cli.py` selects the check.
+For legacy INDEX rules, consult `lint_relay_index` in `tools/relay_engine/rules.py`; never hand-edit a daemon projection.
 It uses exactly this schema:
 
 ```text
@@ -77,7 +78,8 @@ It uses exactly this schema:
 ```
 
 `index_rows` in `tools/relay_engine/render.py` determines daemon-rendered `role` cells; absent values are exactly `—`.
-The `status` cell is one kebab-case token with no spaces, parentheses, or sentences. Statuses use the three-way canonical / legacy-synonym / free partition and the full disposition table in the adjacent `protocol.md`: for the seven reserved meanings, new rows use `sent`, `dispatched`, `review-requested`, `approve`, `must-revise`, `returned`, or `complete`; a meaning outside those seven uses a free-tail token, while a legacy synonym is never emitted in a new row.
+The `status` cell is one kebab-case token with no spaces, parentheses, or sentences.
+For legacy hand-authored indexes, `lint_relay_index` in `tools/relay_engine/rules.py` decides the canonical / legacy-synonym / free partition: for the seven reserved meanings, new rows use `sent`, `dispatched`, `review-requested`, `approve`, `must-revise`, `returned`, or `complete`; a meaning outside those seven uses a free-tail token, while a legacy synonym is never emitted in a new row.
 
 A `file` cell is either a path resolving under the declared root or the explicit literal `none — <short reason>`, which the resolution check skips by rule. The reason-bearing form is not an absence; bare `—` is not valid in the `file` cell.
 
@@ -87,7 +89,8 @@ Do not assume `.relays/` is shared across worktrees or sessions. If a receiver c
 
 For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree.
 Operator quickstart: open one session per seat and load its role skill; boot the standalone Planner and Implementer sessions directly, or for an orchestrator-team run boot the Orchestrator Planner and trigger `init`.
-Armed seats receive each filed relay automatically (protocol Delivery mode); carry the returned hand-off pointer to any seat whose acknowledgment said `waiting-for-binding`, `unavailable`, or `fallback`, and treat `CC` as context only.
+For the v3 delivery contract, connect with `relay connect --key <key-path> --root <run-root>` (DD-v3-adapter § 4.1–4.2).
+Only `TO` rings; carry the handoff pointer to seats using the fallback.
 Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise.
 The artifacts are never optional; who writes them depends on the root's mode.
 In an engine-managed root (a daemon has cut over and serves it), seats file through `.engine/drafts/` + `relay submit` and only the daemon writes `INDEX.md`.
@@ -164,7 +167,9 @@ New artifact stems use `designs/DD-<cycle>-<YYYYMMDD>.md` and `plans/PL-<cycle>-
   The gated design-doc PLAN's parent edge names the approving DESIGN-REVIEW.
 - Boot dispatch ids render as `<run>-boot-<owner>-<role>` with `<owner>` byte-equal to the address's owner segment; run-prefix stutter (`s1-boot-s1-core-planner`) is accepted. Spell the owner segment exactly once, the same way as in the address.
 - Addresses: dotted lowercase owner-role form, e.g. `qi-a.planner`, `qi-a.implementer`, `site-qi.orchestrator-planner`.
-- Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC. Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence. `relay-lint` fails an impossible or drifted stamp, and `relay-lint --index` fails an index whose `time` column decreases or disagrees with the filename it points at.
+- Timestamps: `YYYYMMDD-HHMMSS` in local sprint time unless the operator specifies UTC.
+  Read the real clock at authoring time — never infer a stamp from a neighbouring relay or a tidy cadence.
+  Use `relay lint` on the draft before filing; do not edit a daemon-assigned stamp or INDEX row.
 
 ## Lifecycle mapping
 

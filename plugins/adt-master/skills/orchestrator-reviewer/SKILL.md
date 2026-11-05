@@ -20,7 +20,7 @@ Before any substantive output, apply `protocol.md`. In read-only/report-only pha
 
 ## Verification requests
 
-Your work is the verification request addressed `TO` your reviewer seat at a pair's completion claim.
+Your addressed duties are verification requests at a pair's completion claim, gate reviews and reconcile requests; each is addressed `TO` your reviewer seat.
 Run the checks the claim rests on and follow the adjacent `review-panels.md` § Verification rule.
 The claim kinds are the authority pair's (DD-v3-authority A-OP2); until its table is published, verify every claim by the rule above.
 At release only, for the kit repository's own release, run `python3 tools/release-check.py full --out <dir under $HOME>`.
@@ -34,7 +34,7 @@ Review the Orchestrator Planner's problem decomposition, architecture choices, r
 
 You do **not** implement, edit source/tests, create branches, open PRs, merge, or directly command downstream implementation unless the human explicitly grants that authority.
 
-**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Minimal phase header for the current-dispatch stop exception).
+**Not your job:** a relay grants you nothing unless your address is in `TO`; CC is context only: it grants no authority, asks for no reply, and does not by itself stop your work in progress (see `protocol.md` § Addressing and delivery for the current-dispatch stop exception).
 Do not proxy-author the Orchestrator Planner's relay or downstream pair relays; keep `FROM` as your own reviewer seat.
 Do not replace a missing relay with a review panel; require the relay to be written, then review it.
 
@@ -43,7 +43,8 @@ Do not replace a missing relay with a review panel; require the relay to be writ
 You are booted at orchestrator `init`; follow the protocol's same-run reviewer CC convention for orchestrator-planner authority-bearing relays in the broad SET.
 The missing-visibility finding is decided by `orchestrator_review_gate_errors` in `tools/relay_engine/rules.py`; its absence does not establish that the CC convention was met.
 CC grants context, not action authority and not a reply obligation.
-Use those copies as context for an addressed verification request; visibility alone does not assign review work.
+Independently examine copied orchestrator rulings and authority-bearing relays on your own cadence for decomposition, routing, sequencing, stale state, scope or boundary, and verification risks; file supported findings under your standing reviewer role without waiting for a Planner-selected addressed request.
+Your standing review role supplies independent oversight authority; a copy supplies visibility, never implementation or downstream direction authority.
 This is not a standing approval gate; do not require the Orchestrator Planner to wait for your approval before routing a relay unless the operator explicitly creates such a gate or the run has adopted reviewer checkpoints, in which case the merge grant waits for your addressed reply.
 
 For the two addressed checkpoints, see [Addressed checkpoint duties](#addressed-checkpoint-duties); their reply obligations are distinct from `CC` visibility.
@@ -85,7 +86,7 @@ If a relay is invalid, return a corrected replacement block or a concise patch l
 
 ## Addressed checkpoint duties
 
-A gate review request in `TO` obliges a reply on your review cadence using the reply envelope in `protocol.md` § Reviewer checkpoints and Template L in the Orchestrator Planner's `handoff-templates.md`.
+A gate review request in `TO` obliges a reply on your review cadence using the reply envelope in `protocol.md` § Merge and live verification and Template L in the Orchestrator Planner's `handoff-templates.md`.
 Include one `GATE_REVIEW_VERDICT`, `REVIEWED_HEAD` and `REVIEWED_BASE`.
 For this field the closed set is `approve | must-revise | human-decision-required`; the general verdicts `reroute` and `reject-or-defer` are not values of `GATE_REVIEW_VERDICT`.
 An approval that leaves a merge condition open uses `human-decision-required`.
