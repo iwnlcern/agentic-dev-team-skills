@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from relay_engine import rules
 from relay_engine.tests.test_draft_shape import draft
-from relay_engine.tests.test_parity import _standalone
 from relay_engine.tests.test_rules_index import INDEX_TEXT
 
 
@@ -29,10 +28,6 @@ def verdict(result):
 
 
 class TestRootLintCorrections(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.hand = _standalone()
-
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -61,7 +56,7 @@ class TestRootLintCorrections(unittest.TestCase):
     def test_hand_root_walk_skips_engine_drafts(self):
         self.consumer()
         self.hidden_copy()
-        for module in (self.hand, rules):
+        for module in (rules,):
             result = module.lint_relay_root(self.root)
             self.assertFalse(any('held by 2 relays' in e for e in result.errors))
             self.assertFalse(any('.engine/drafts/' in e for e in result.errors + result.warnings))
@@ -70,7 +65,7 @@ class TestRootLintCorrections(unittest.TestCase):
         self.consumer()
         second = self.root / 'SITREP-pair-planner-20261026-010001.md'
         second.write_bytes(self.path.read_bytes())
-        for module in (self.hand, rules):
+        for module in (rules,):
             self.assertTrue(any('held by 2 relays' in e for e in module.lint_relay_root(self.root).errors))
 
     def test_engine_root_mode_is_unchanged(self):
@@ -123,7 +118,7 @@ class TestRootLintCorrections(unittest.TestCase):
         self.path.write_text(draft(extra='PLAN_ARTIFACT: PL-check\nPLAN_SHA256: '
                                    + hashlib.sha256(raw).hexdigest() + '\n'))
         cases = self.spellings()
-        for module in (self.hand, rules):
+        for module in (rules,):
             expected = verdict(module.lint_relay_root(self.root))
             self.assertEqual(any('no artifact resolves' in e for e in expected[0]), missing)
             for working_dir, spelling in cases:
@@ -137,3 +132,22 @@ class TestRootLintCorrections(unittest.TestCase):
 
     def test_missing_artifact_fails_in_every_spelling(self):
         self.check_spellings(missing=True)
+
+    def test_relative_lock_target_may_exist_only_in_cwd(self):
+        working = Path(self.temp.name) / 'analysis-cwd'
+        target = working / 'notes/neutral.md'
+        target.parent.mkdir(parents=True)
+        relative = 'notes/neutral.md'
+        self.assertFalse((self.root / relative).exists())
+        self.assertFalse((self.root.parent.parent / relative).exists())
+        for key in ('PLAN_LOCK_ID', 'DESIGN_LOCK_ID'):
+            with self.subTest(key=key):
+                self.path.write_text(draft(extra=key + ': ' + relative + '\n'))
+                target.write_text('Independent lock target.\n')
+                with cwd(working):
+                    present = rules.lint_relay_root(self.root)
+                    self.assertEqual([e for e in present.errors if 'references missing file' in e], [])
+                    target.unlink()
+                    absent = rules.lint_relay_root(self.root)
+                self.assertEqual([e for e in absent.errors if 'references missing file' in e],
+                                 [self.path.name + ': ' + key + ' references missing file ' + relative])

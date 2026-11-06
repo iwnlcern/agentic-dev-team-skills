@@ -88,7 +88,7 @@ def defect_observations():
     from unittest import mock
     manifest=json.loads((ROOT/'defect-corpus.json').read_text())
     for relative in manifest['roots']:
-        root=ROOT.parents[1]/'relay-lint-fixtures'/relative
+        root=ROOT.parent/'lint-population'/relative
         files=sorted((p for p in root.rglob('*.md') if p.name!='INDEX.md' and p.is_file()),key=lambda p:rules.relay_order_key(p,root))
         texts={p:rules.read(p) for p in files}
         full=rules.lint_relay_root(root)
@@ -122,7 +122,7 @@ class TestDefectCorpusAgreement(unittest.TestCase):
         manifest=ROOT/'defect-corpus.json'
         self.assertTrue(manifest.exists(), 'the aligned corpus must contain real defects')
         manifest=json.loads(manifest.read_text())
-        base=ROOT.parents[1]/'relay-lint-fixtures'
+        base=ROOT.parent/'lint-population'
         self.assertEqual(manifest['roots'],sorted(str(p.relative_to(base)) for family in manifest['families'] for p in (base/family).iterdir() if p.is_dir()))
         exceptions=manifest['exceptions'];seen=set();counts=Counter();families=Counter()
         for key,partition,actual,expected,after in defect_observations():

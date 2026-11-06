@@ -4,7 +4,7 @@ import unittest
 from relay_engine import rules
 
 
-FIXTURES = Path(__file__).parents[2] / "relay-lint-fixtures" / "humangate"
+FIXTURES = Path(__file__).parents[2] / "relay-engine-fixtures" / "lint-population" / "humangate"
 WARNING = (
     "HUMAN_GATE_REQUIRED: yes carries no annotation naming its ask; "
     "annotate as 'yes — <the decision>'"

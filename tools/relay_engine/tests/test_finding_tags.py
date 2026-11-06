@@ -2,20 +2,57 @@
 from relay_engine.tests.test_judgment_store import base_module
 import ast
 from collections import Counter
-from dataclasses import replace
 import inspect
+import io
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from relay_engine import rules
-from relay_engine.tests.capture_order_baseline import collect, snapshot
 from relay_engine.tests.test_draft_shape_lint import expected_shape_sweep
 
 REPO = Path(__file__).resolve().parents[3]
 BASELINE = REPO / 'tools/relay-engine-fixtures/judging/base-order-cbc8f07.json'
+BASE = 'cbc8f071cd593af4c48994ec30b0775b3c919ad6'
+# The linter's fixture tree, copied for these tests (DD-v3-tests § 3.4, plan Task 13):
+# its files at HEAD 2b4f83e less README.md and lockpath/LP2-new-form, which name it.
+POPULATION = 'tools/relay-engine-fixtures/lint-population'
+# Cases added after cbc8f07: they pin merge-claim errors that cbc8f07's rules do not
+# emit, so the order check, which compares the current rules with those, leaves them
+# out (ruling v3-engine-pr9-ruling-2); test_judging_agreement reads them.
+LATER_CASES = ('merge-token/MT10-field-grant-to-planner', 'merge-token/MT11-token-beside-denial')
+
+
+def snapshot(destination):
+    """The order population: base fixtures from Git plus the working-tree copy,
+    including any untracked inputs there, less the explicitly named later cases."""
+    archive = subprocess.check_output(['git', 'archive', BASE, 'tools/relay-engine-fixtures'], cwd=REPO)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
+        stream.extractall(destination, filter='data')
+    shutil.copytree(REPO / POPULATION, Path(destination) / POPULATION)
+    for case in LATER_CASES:
+        shutil.rmtree(Path(destination) / POPULATION / case)
+
+
+def root_list(root):
+    paths = [POPULATION]
+    for parent in ('tools/relay-engine-fixtures/corpora', 'tools/relay-engine-fixtures/record-root'):
+        paths.extend(str(p.relative_to(root)) for p in sorted((root / parent).iterdir()) if p.is_dir())
+    return paths
+
+
+def collect(module, root, paths):
+    results = {}
+    for name in paths:
+        result = module.lint_relay_root(root / name)
+        results[name] = {key: [msg.replace(str(root), '<fixture-root>') for msg in getattr(result, key)]
+                         for key in ('errors', 'warnings')}
+    return results
 FAMILIES = frozenset(('file.lint', 'lineage.lock-lifecycle', 'lineage.receiving-seat',
                      'lineage.commission', 'lineage.cross-root-design', 'lineage.design-review',
                      'lineage.dispatch', 'lineage.impl-report-parent', 'lineage.merge-claim',
@@ -63,6 +100,15 @@ class TestFindingTags(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp.cleanup()
 
+    def test_later_cases_stay_out_of_the_order_population(self):
+        # the control for LATER_CASES: on them the two rule sets disagree
+        base = base_module('rules')
+        for case in LATER_CASES:
+            with self.subTest(case=case):
+                self.assertFalse((self.root / POPULATION / case).exists())
+                root = REPO / POPULATION / case
+                self.assertNotEqual(rules.lint_relay_root(root).errors, base.lint_relay_root(root).errors)
+
     def test_family_ids_are_exactly_the_declared_set(self):
         self.assertEqual(getattr(rules, 'FAMILY_IDS', None), FAMILIES)
 
@@ -97,7 +143,7 @@ class TestFindingTags(unittest.TestCase):
 
     def test_helper_returning_bare_string_is_detected(self):
         self.assertTrue(hasattr(rules.LintResult, 'add_finding'))
-        root = self.root / 'tools/relay-lint-fixtures/mastertier/MT37-pair-route-control'
+        root = self.root / POPULATION / 'mastertier/MT37-pair-route-control'
         with patch.object(rules, 'h27_receiving_seat_errors', return_value=['untagged branch']):
             with self.assertRaises(TypeError):
                 rules.lint_relay_root(root)
@@ -107,7 +153,7 @@ class TestFindingTags(unittest.TestCase):
         self.assertTrue(hasattr(rules, 'Finding'))
         finding = rules.Finding('lineage.receiving-seat', 'error', '', (), {}, 'broken metadata')
         with patch.object(rules, 'h27_receiving_seat_errors', return_value=[finding]):
-            result = rules.lint_relay_root(self.root / 'tools/relay-lint-fixtures/mastertier/MT37-pair-route-control')
+            result = rules.lint_relay_root(self.root / POPULATION / 'mastertier/MT37-pair-route-control')
         with self.assertRaises(AssertionError):
             for finding in result.findings:
                 self.assertTrue(finding.subject)
@@ -133,7 +179,7 @@ class TestFindingTags(unittest.TestCase):
         self.assertEqual(sorted(values), sorted(swapped))
 
     def test_finding_subject_is_the_relay_the_helper_judged(self):
-        root = self.root / 'tools/relay-lint-fixtures/mastertier/MT45-reviewer-design-origin'
+        root = self.root / POPULATION / 'mastertier/MT45-reviewer-design-origin'
         result = rules.lint_relay_root(root)
         self.assertTrue(hasattr(result, 'findings'))
         lifecycle = [f for f in result.findings if f.id == 'lineage.lock-lifecycle']
