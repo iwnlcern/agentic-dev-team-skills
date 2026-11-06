@@ -1757,6 +1757,16 @@ class BoundedStatusTests(TmpEnv):
 class DoorbellExitTests(FollowProcessMixin, TmpEnv):
     """The doorbell's own exits in stage A: window gone, terminated; nothing else (DD § 4.2, A5; plan Task 3)."""
 
+    def setUp(self):
+        source_only = {
+            "test_handlers_ready_follows_early_handler_registration",
+            "test_handlers_ready_order_check_rejects_bad_variants",
+            "test_startup_lock_ready_follows_acquisition_and_release_handoff",
+            "test_source_order_checks_do_not_load_monitor",
+        }
+        if self._testMethodName not in source_only:
+            super().setUp()
+
     def seam(self, pid, start=None):
         return {"ADT_WINDOW_PID": str(pid), "ADT_WINDOW_START": start or utc_lstart(pid)}
 
@@ -1771,11 +1781,17 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
 
     def startup_process(self, hold):
         ready = self.base / "handlers-ready"
+        lock_ready = self.base / "startup-lock-ready"
+        self.assertFalse(ready.exists(), "early readiness marker must be fresh")
+        self.assertFalse(lock_ready.exists(), "acquired-lock readiness marker must be fresh")
         seam = self.seam(os.getpid())
         key = "cc-%d-%d" % (os.getpid(), self.rm.window.lstart_epoch(seam["ADT_WINDOW_START"]))
         lock = self.rm.WindowLock(key)._path
         started = time.monotonic()
-        proc = self.spawn(extra_env=dict(seam, ADT_TEST_HANDLERS_READY=str(ready), **{hold: "2.0"}))
+        extra = dict(seam, ADT_TEST_HANDLERS_READY=str(ready), **{hold: "2.0"})
+        if hold == "ADT_TEST_STARTUP_DELAY":
+            extra["ADT_TEST_STARTUP_LOCK_READY"] = str(lock_ready)
+        proc = self.spawn(extra_env=extra)
         self.wait_startup_state(proc, ready.exists, "handlers-ready file", missing_at=lock.exists)
         return proc, lock, started
 
@@ -2019,23 +2035,45 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
         # stamp then wrote through a closed descriptor (TypeError, rc 1, no stopped: line)
         write_index(self.index, row(1, to="b.implementer"))
         proc, lock, started = self.startup_process("ADT_TEST_STARTUP_DELAY")
+        lock_ready = self.base / "startup-lock-ready"
 
         def held_empty_lock():
-            if not lock.exists():
-                return False
-            import fcntl
-            with lock.open("rb") as stream:
-                try:
-                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return not stream.read()
-                fcntl.flock(stream, fcntl.LOCK_UN)
-            return False
+            return lock_ready.exists() and lock.exists() and not lock.read_bytes()
 
         self.wait_startup_state(proc, held_empty_lock, "held, unstamped window lock")
+        self.assertIsNone(proc.poll(), "acquired-lock marker outlived the startup child")
         self.signal_startup(proc, started, "held-empty-lock")
-        self.assertIsNone(self.rm.WindowLock(self.rm.NoteStore("psess").load().get("window")
-                                             or "cc-%d-%d" % (os.getpid(), self.rm.window.lstart_epoch(utc_lstart(os.getpid())))).holder())
+        import fcntl
+        with lock.open("rb") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                self.assertEqual(stream.read(), b"", "completed startup child left a stamp")
+            finally:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+    def test_startup_gap_probes_release_only_after_completion(self):
+        import fcntl
+        captured, probes = {}, []
+        startup, real_flock = self.startup_process, fcntl.flock
+
+        def capture_startup(hold):
+            proc, lock, started = startup(hold)
+            captured.update(proc=proc, lock=lock)
+            return proc, lock, started
+
+        def track_probe(fd, operation):
+            if captured and operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+                fileno = fd.fileno() if hasattr(fd, "fileno") else fd
+                observed, expected = os.fstat(fileno), captured["lock"].stat()
+                if (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino):
+                    self.assertIsNotNone(captured["proc"].poll(), "gap release probe ran before child completion")
+                    probes.append(fd)
+            return real_flock(fd, operation)
+
+        with mock.patch.object(self, "startup_process", capture_startup), \
+             mock.patch.object(fcntl, "flock", track_probe):
+            self.test_sigterm_inside_the_startup_gap_stops_cleanly()
+        self.assertEqual(len(probes), 1, "gap success must probe release on its exact lock after completion")
 
     def test_sigterm_before_the_imports_finish_stops_cleanly(self):
         # fold 2 G4: the stop handlers are installed before the module's imports, so a stop while they load
@@ -2084,6 +2122,200 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
                 parsed = ast.parse(ast.unparse(variant))
                 with self.assertRaisesRegex(AssertionError, "early stop signals|readiness must follow"):
                     self.early_handlers_layout(parsed)
+
+    def test_startup_lock_ready_seam_is_inert_unless_set(self):
+        ready = self.base / "startup-lock-ready"
+        write_index(self.index, row(1, to="b.implementer"))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("ADT_TEST_STARTUP_LOCK_READY", None)
+            proc = self.spawn(extra_env=self.seam(os.getpid()))
+        self.wait_note(lambda note: self.bound(note) and note.get("phase") == "following")
+        proc.send_signal(signal.SIGTERM)
+        rc, lines, err = self.finish(proc)
+        self.assertEqual((rc, lines[-1:]), (0, [b"relay-monitor: stopped: terminated"]), err)
+        self.assertFalse(ready.exists(), "unset acquired-lock instrumentation wrote a marker")
+
+        # Each failure gets fresh runtime storage, so earlier notes/stamps cannot satisfy cleanup.
+        for case in ("existing", "missing-parent"):
+            with self.subTest(case=case):
+                runtime = self.base / case
+                runtime.mkdir()
+                marker = runtime / ("ready" if case == "existing" else "missing/ready")
+                if case == "existing":
+                    marker.write_text("existing marker")
+                proc = self.spawn(extra_env=dict(self.seam(os.getpid()), TMPDIR=str(runtime),
+                                                ADT_TEST_STARTUP_LOCK_READY=str(marker)))
+                try:
+                    rc, _, err = self.finish(proc, timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"{case} startup-lock marker creation was ignored")
+                self.assertNotEqual(rc, 0, "startup-lock marker creation failure was hidden")
+                self.assertIn(b"Traceback", err)
+                self.assertIn(b"FileExistsError" if case == "existing" else b"FileNotFoundError", err)
+                self.assertEqual(marker.read_text() if case == "existing" else marker.exists(),
+                                 "existing marker" if case == "existing" else False)
+                with mock.patch.dict(os.environ, {"TMPDIR": str(runtime)}):
+                    self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
+                locks = list(runtime.rglob("window-*.lock"))
+                self.assertEqual(len(locks), 1, "failure did not reach acquired/pre-stamp point")
+                import fcntl
+                with locks[0].open("rb") as stream:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        self.assertEqual(stream.read(), b"", "failed marker allowed a first stamp")
+                    finally:
+                        fcntl.flock(stream, fcntl.LOCK_UN)
+
+    def startup_lock_layout(self, tree):
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_follow"]
+        self.assertEqual(len(functions), 1, "one follow implementation required")
+        body = functions[0].body
+        acquisition = [node for node in body if isinstance(node, ast.If)
+                       and ast.unparse(node.test) == "not leader.acquire()"]
+        handoff = [node for node in body if isinstance(node, ast.Assign)
+                   and ast.unparse(node) == "_STOP_RELEASE[:] = [leader]"]
+        marker = [node for node in body if isinstance(node, ast.If)
+                  and any(isinstance(part, ast.Constant) and part.value == "ADT_TEST_STARTUP_LOCK_READY"
+                          for part in ast.walk(node.test))]
+        hold = [node for node in body if isinstance(node, ast.If) and ast.unparse(node.test) == "TEST_STARTUP_DELAY"]
+        stamps = [node for node in body if any(isinstance(part, ast.Call)
+                  and ast.unparse(part.func) == "leader.stamp" for part in ast.walk(node))]
+        self.assertEqual(len(acquisition), 1, "successful acquisition guard required")
+        self.assertTrue(any(isinstance(node, ast.Return) for node in acquisition[0].body),
+                        "failed acquisition must return before publication")
+        self.assertEqual(len(handoff), 1, "release handoff required")
+        self.assertEqual(len(marker), 1, "one child-owned startup-lock readiness publication required")
+        self.assertEqual(len(hold), 1, "existing startup hold required")
+        self.assertTrue(stamps, "first stamp required")
+        self.assertLess(body.index(acquisition[0]), body.index(marker[0]), "readiness must follow successful acquire")
+        self.assertLess(body.index(handoff[0]), body.index(marker[0]), "readiness must follow release handoff")
+        self.assertLess(body.index(marker[0]), body.index(hold[0]), "readiness must precede startup hold")
+        self.assertLess(body.index(marker[0]), body.index(stamps[0]), "readiness must precede first stamp")
+        calls = [node for node in ast.walk(marker[0]) if isinstance(node, ast.Call)]
+        self.assertTrue(any(ast.unparse(node.func) == "os.open" and len(node.args) == 3
+                            and ast.unparse(node.args[1]) == "os.O_CREAT | os.O_EXCL | os.O_WRONLY"
+                            and isinstance(node.args[2], ast.Constant) and node.args[2].value == 0o600
+                            for node in calls), "startup-lock marker must be exclusive0600")
+        self.assertTrue(any(ast.unparse(node.func) == "os.close" for node in calls),
+                        "startup-lock publication must close its marker descriptor")
+        return functions[0], acquisition[0], handoff[0], marker[0]
+
+    def test_startup_lock_ready_follows_acquisition_and_release_handoff(self):
+        source = ast.parse(SCRIPT.read_text())
+        self.startup_lock_layout(source)
+        for target in ("acquisition", "handoff"):
+            with self.subTest(before=target):
+                variant = copy.deepcopy(source)
+                follow, acquire, handoff, marker = self.startup_lock_layout(variant)
+                follow.body.remove(marker)
+                follow.body.insert(follow.body.index(acquire if target == "acquisition" else handoff), marker)
+                parsed = ast.parse(ast.unparse(variant))
+                with self.assertRaisesRegex(AssertionError, "readiness must follow"):
+                    self.startup_lock_layout(parsed)
+
+    def test_source_order_checks_do_not_load_monitor(self):
+        names = ("test_handlers_ready_follows_early_handler_registration",
+                 "test_handlers_ready_order_check_rejects_bad_variants",
+                 "test_startup_lock_ready_follows_acquisition_and_release_handoff")
+        suite = unittest.TestSuite(type(self)(name) for name in names)
+        output = io.StringIO()
+        refusal = AssertionError("source-only isolation: monitor load/exec forbidden")
+        loader_type = importlib.machinery.SourceFileLoader
+        real_execute = loader_type.exec_module
+        execute = mock.Mock(side_effect=refusal)
+
+        def guarded_execute(loader, module):
+            if pathlib.Path(loader.path).resolve() == SCRIPT.resolve():
+                return execute(loader, module)
+            return real_execute(loader, module)
+
+        with mock.patch(__name__ + ".load_script", side_effect=refusal) as load, \
+             mock.patch.object(loader_type, "exec_module", guarded_execute):
+            # Calibrate the installed guard without executing monitor code, then count only
+            # execution attempts from the actual source-order methods and their setup.
+            with self.assertRaisesRegex(AssertionError, "monitor load/exec forbidden"):
+                loader_type("refused_monitor", str(SCRIPT)).exec_module(types.ModuleType("refused_monitor"))
+            execute.assert_called_once()
+            execute.reset_mock()
+            result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
+        self.assertEqual((load.call_count, execute.call_count), (0, 0),
+                         "source-only isolation guard caught monitor execution:\n" + output.getvalue())
+        self.assertFalse(result.errors, "source-only isolation guard caught setup/import execution:\n" + output.getvalue())
+        self.assertTrue(result.wasSuccessful(), "source-only AST assertions failed:\n" + output.getvalue())
+        self.assertEqual((result.testsRun, len(result.skipped), load.call_count, execute.call_count), (3, 0, 0, 0))
+        print("A2_SOURCE_ONLY monitor load/exec refused; three actual source-order methods completed", file=sys.stderr)
+
+    def test_startup_lock_observation_does_not_compete_for_lock(self):
+        # Execute the actual nested parent observer, with actual WindowLock acquisition paused
+        # after open. A legacy observer is held at its flock until the worker attempts acquire.
+        import fcntl
+        tree = ast.parse(pathlib.Path(__file__).read_text())
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoorbellExitTests")
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "test_sigterm_inside_the_startup_gap_stops_cleanly")
+        observers = [node for node in method.body if isinstance(node, ast.FunctionDef) and node.name == "held_empty_lock"]
+        self.assertEqual(len(observers), 1, "actual parent observer required for interference control")
+        leader = self.rm.WindowLock("observer-interleaving")
+        marker = self.base / "worker-acquired"
+        scope = {"lock": leader._path, "lock_ready": marker}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[copy.deepcopy(observers[0])], type_ignores=[])),
+                     "actual-parent-observer", "exec"), scope)
+        observer = scope["held_empty_lock"]
+        opened, allow_acquire, attempted, release = (threading.Event() for _ in range(4))
+        result = {}
+        real_open, real_flock = os.open, fcntl.flock
+        parent = threading.current_thread()
+
+        def gated_open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if threading.current_thread() is not parent and pathlib.Path(path) == leader._path:
+                opened.set()
+                if not allow_acquire.wait(2):
+                    os.close(fd)
+                    raise RuntimeError("observer control acquire gate timed out")
+            return fd
+
+        def observed_flock(fd, operation):
+            value = real_flock(fd, operation)
+            if threading.current_thread() is parent and operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+                allow_acquire.set()
+                if not attempted.wait(2):
+                    real_flock(fd, fcntl.LOCK_UN)
+                    raise RuntimeError("observer control worker did not attempt acquisition")
+            return value
+
+        def worker():
+            try:
+                result["acquired"] = leader.acquire()
+                if result["acquired"]:
+                    fd = real_open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    os.close(fd)
+                attempted.set()
+                if result["acquired"] and not release.wait(2):
+                    raise RuntimeError("observer control release gate timed out")
+            except BaseException as error:
+                result["error"] = repr(error)
+                attempted.set()
+            finally:
+                leader.release()
+
+        thread = threading.Thread(target=worker)
+        with mock.patch.object(self.rm, "os", types.SimpleNamespace(**{**vars(os), "open": gated_open})), \
+             mock.patch.object(fcntl, "flock", observed_flock):
+            thread.start()
+            try:
+                self.assertTrue(opened.wait(2), "worker did not open the lock")
+                self.assertFalse(observer(), "observer accepted unpublished readiness")
+                allow_acquire.set()
+                self.assertTrue(attempted.wait(2), "worker did not attempt acquisition")
+                self.assertNotIn("error", result)
+                self.assertIs(result.get("acquired"), True, "parent observer interfered with actual acquisition")
+                self.assertTrue(observer(), "observer missed child-owned acquired readiness")
+            finally:
+                allow_acquire.set()
+                release.set()
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive(), "owned observer-control worker leaked")
 
     def test_stamp_after_release_writes_nothing(self):
         lock = self.rm.WindowLock("w-gap")

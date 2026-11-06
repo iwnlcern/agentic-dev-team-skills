@@ -1467,6 +1467,12 @@ def _follow(args, session: str) -> int:
     if not leader.acquire():
         return 0  # another doorbell holds this window: an extra tier copy or a re-arm exits silently
     _STOP_RELEASE[:] = [leader]
+    if os.environ.get("ADT_TEST_STARTUP_LOCK_READY"):
+        # Test-only: this child acquired the lock and installed its stop-release handoff.
+        ready_fd = os.open(
+            os.environ["ADT_TEST_STARTUP_LOCK_READY"], os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+        )
+        os.close(ready_fd)
     if TEST_STARTUP_DELAY:
         time.sleep(TEST_STARTUP_DELAY)
     started = process_start_time(os.getpid())
