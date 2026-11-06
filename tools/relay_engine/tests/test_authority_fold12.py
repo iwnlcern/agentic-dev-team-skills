@@ -2,7 +2,7 @@
 from unittest import mock
 from relay_engine import authority, rules
 from relay_engine.tests import test_authority_fold10 as foreign_fixture
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 
 class TestAuthorityFold12(TestAuthorityFold5):
     git = foreign_fixture.TestAuthorityFold10.git

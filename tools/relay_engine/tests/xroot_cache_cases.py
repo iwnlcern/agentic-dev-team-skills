@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import hashlib
 import time
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 from relay_engine.tests.xroot_b9_cases import DESIGN, REVIEW, O, R, _object_tree
 from relay_engine.tests import xroot_narrow_corpus as corpus
 import xrootfixgen as xf

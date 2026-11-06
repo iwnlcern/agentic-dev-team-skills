@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from relay_engine import authority, rules
-from relay_engine.tests import test_authority_fold5 as fixtures
+from relay_engine.tests import authority_legacy_fixtures as fixtures
 from relay_engine.tests import test_authority_fold10 as fold10
 from relay_engine.tests import xroot_cache_cases as cc
 from relay_engine.tests import xroot_narrow_corpus as corpus

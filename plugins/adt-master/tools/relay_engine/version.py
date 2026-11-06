@@ -18,6 +18,7 @@ ROSTER = (
     "relay_engine/daemon.py",
     "relay_engine/envelope.py",
     "relay_engine/errors.py",
+    "relay_engine/guardrail.py",
     "relay_engine/header.py",
     "relay_engine/jcs.py",
     "relay_engine/judging.py",

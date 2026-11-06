@@ -433,7 +433,7 @@ class TestXrootDeadline(unittest.TestCase):
         self.assertEqual('Git object query timed out at the 5 s bound during classification; '+tail, entry['detail'])
 
     def test_capacity_detail_names_root_and_commit(self):
-        from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+        from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
         repo = self.case.repository
         tree = xf._git(repo, 'rev-parse', self.case.commit+':relays')
         raw = xf._git(repo, 'cat-file', 'tree', tree, text=False)

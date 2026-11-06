@@ -9,7 +9,7 @@ from unittest import mock
 from relay_engine import rules
 from relay_engine.tests.xroot_test_stops import alarm_guard
 from relay_engine.tests import xroot_b9_cases as cases
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 import xrootfixgen as xf
 
 

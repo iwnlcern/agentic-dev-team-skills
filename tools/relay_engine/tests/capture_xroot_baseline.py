@@ -77,7 +77,7 @@ def main():
     if args.lift_budget:
         rules._XROOT_BUDGET = LiftedBudget(rules._XROOT_BUDGET)
     from relay_engine.tests.xroot_b9_cases import materialize, deadline_fault
-    from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+    from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
     import xrootfixgen as xf
     cases = materialize(args.cases_root, only=args.only)
     result = dict(source_commit=BASE, source_sha256=hashes,

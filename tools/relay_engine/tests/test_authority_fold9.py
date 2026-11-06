@@ -3,7 +3,7 @@ from contextlib import contextmanager
 
 from relay_engine.tests import test_authority as base_fixture
 from relay_engine.tests import test_authority_fold7 as header_fixture
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 
 
 class TestAuthorityFold9(TestAuthorityFold5):
