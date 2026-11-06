@@ -1,0 +1,15 @@
+ROLE: Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: x-plan
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no
+FROM: v29-x.planner
+TO: v29-x.implementer
+PLAN_SHA256: d3fb5268a8f2427f1edd7b2b3e492994f194fcc24db2caafba46f13dd6d652e5
+PLAN_ARTIFACT: fixture-plan-draft
+
+Fixture draft.
+
+FINAL_GIT_STATUS_SHORT: none — fixture only

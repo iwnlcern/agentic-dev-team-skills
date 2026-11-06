@@ -1,0 +1,14 @@
+ROLE: Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: g1-casefold-plan
+CEREMONY_TIER: medium
+EVIDENCE_TARGET: E2
+HUMAN_GATE_REQUIRED: no
+FROM: Pair-1.planner
+TO: Pair-1.implementer
+CC: orchestrator
+DELEGATED_DISPATCH_AUTHORITY: yes
+FINAL_GIT_STATUS_SHORT: none — clean tree
+
+Plan grants delegated dispatch when scope is all-in.

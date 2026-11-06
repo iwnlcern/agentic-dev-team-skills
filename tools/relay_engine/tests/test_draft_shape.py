@@ -1,5 +1,7 @@
 """Behavioral contract for draft admission shapes and their diagnostic locations."""
+import hashlib
 import itertools
+import json
 import random
 import re
 import unittest
@@ -45,7 +47,7 @@ def verdict_keys(lengths):
 
 
 def diagnostic_texts():
-    """Shared input population for the standalone/engine differential."""
+    """Frozen diagnostic inputs, including valid and quoted controls."""
     yield draft()
     for ch in CHARS:
         yield draft(body='text' + ch + 'tail')
@@ -483,35 +485,23 @@ class TestDraftShape(unittest.TestCase):
         self.assertEqual(error.remedy, "the line is built from the registration's inputs and the root's stored commissioning record; re-register with a dispatch reference on one line that shows no cycle or supersession key with a colon, or ask the operator to re-commission the root with a commissioning path on one line that shows none")
 
     def test_late_verdict_keys_of_any_length_render(self):
-        import tempfile
-        from pathlib import Path
-        from relay_engine.tests.test_parity import _standalone
-        hand = _standalone()
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'MERGE-GATE-pair-planner-20261026-010000.md'
-            for key in verdict_keys((64, 65, 4096)):
-                with self.subTest(key=key):
-                    text = draft('MERGE-GATE', body='DISPATCH MERGE\n\n' + key + ': no\n')
-                    shape = E.draft_shape(text)
-                    self.assertEqual((shape.kind, shape.key), ('late-verdict', key))
-                    error = E.shape_error(shape)
-                    self.assertEqual((error.code, error.cause_key),
-                                     ('E-DRAFT-SHAPE', 'error-draft-shape-late-verdict-cause'))
-                    self.assertIn(key, error.cause)
-                    expected = error.cause + '; ' + error.remedy
-                    self.assertEqual(rules.draft_shape_errors(text), [expected])
-                    path.write_text(text)
-                    messages = [e for e in hand.lint_file(path).errors
-                                if "outside this grant's header block" in e]
-                    self.assertEqual(messages, [expected])
+        for key in verdict_keys((64, 65, 4096)):
+            with self.subTest(key=key):
+                text = draft('MERGE-GATE', body='DISPATCH MERGE\n\n' + key + ': no\n')
+                shape = E.draft_shape(text)
+                self.assertEqual((shape.kind, shape.key), ('late-verdict', key))
+                error = E.shape_error(shape)
+                self.assertEqual((error.code, error.cause_key),
+                                 ('E-DRAFT-SHAPE', 'error-draft-shape-late-verdict-cause'))
+                self.assertIn(key, error.cause)
+                expected = error.cause + '; ' + error.remedy
+                self.assertEqual(rules.draft_shape_errors(text), [expected])
 
     def test_long_verdict_keys_are_refused_by_every_consumer(self):
         import tempfile
         from pathlib import Path
         from relay_engine import daemon, errors
         from relay_engine.tests import test_admission_judging as admission
-        from relay_engine.tests.test_parity import _standalone
-        hand = _standalone()
         fixture = admission.TestAdmissionJudging()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
@@ -532,7 +522,7 @@ class TestDraftShape(unittest.TestCase):
                 path.write_bytes(raw)
                 for consumer in ('file', 'root'):
                     with self.subTest(key=key, consumer=consumer):
-                        expected = hand.draft_shape_errors(raw.decode())[0]
+                        expected = rules.draft_shape_errors(raw.decode())[0]
                         result = (rules.lint_file(path) if consumer == 'file'
                                   else rules.lint_relay_root(root, engine_root=False))
                         messages = [e for e in result.errors if "outside this grant's header block" in e]
@@ -580,7 +570,6 @@ class TestDraftShape(unittest.TestCase):
                     self.assertEqual(shape.kind, 'late-verdict' if key=='VERDICT' else 'late-control')
 
     def test_set_aside_table(self):
-        from relay_engine.tests.test_parity import _standalone
         ranges = ((9,9),(32,32),(0xa0,0xa0),(0x1680,0x1680),(0x2000,0x200a),
                   (0x202f,0x202f),(0x205f,0x205f),(0x3000,0x3000),
                   (0xad,0xad),(0x34f,0x34f),(0x61c,0x61c),(0x115f,0x1160),
@@ -590,7 +579,6 @@ class TestDraftShape(unittest.TestCase):
                   (0x1d173,0x1d17a),(0xe0000,0xe0fff))
         expected = frozenset(chr(c) for a,b in ranges for c in range(a,b+1))
         self.assertEqual(E.SHAPE_SET_ASIDE, expected)
-        self.assertEqual(_standalone().SHAPE_SET_ASIDE, expected)
 
     def test_one_pass_equals_the_repeated_scan(self):
         from unittest import mock
@@ -737,8 +725,7 @@ R8_SHOWN_CASES = [
 class TestClosedRule(unittest.TestCase):
     def test_the_scan_refuses_shown_keys(self):
         # Missing scanning, wrong source positions, and incorrect exemptions fail.
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             for name, text, expected in R8_SHOWN_CASES:
                 with self.subTest(copy=module.__name__, case=name):
                     shape = module.draft_shape(text)
@@ -746,20 +733,17 @@ class TestClosedRule(unittest.TestCase):
                     self.assertEqual(actual, expected)
 
     def test_set_aside_class_matches_its_table(self):
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             pattern = re.compile(module._SHAPE_W)
             actual = frozenset(chr(c) for c in range(0x110000) if pattern.fullmatch(chr(c)))
             self.assertEqual(actual, module.SHAPE_SET_ASIDE)
 
     def test_set_aside_class_is_built_from_ranges(self):
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             self.assertLess(len(module._SHAPE_W), 512)
 
     def test_invisible_characters_before_the_colon_are_removed(self):
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             self.assertIsNone(module.draft_shape(draft(
                 'MERGE-GATE', body='DISPATCH MERGE\n\n```\nVERDICT: x\n```')))
             for char, marker, verdict in itertools.product(
@@ -785,8 +769,7 @@ class TestClosedRule(unittest.TestCase):
                 self.assertIsNone(module.draft_shape(draft(body='```\n' + body + '\n```')))
 
     def test_review_fold_rule_pins(self):
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             for name, text, expected in review_fold_cases():
                 with self.subTest(copy=module.__name__, case=name):
                     shape = module.draft_shape(text)
@@ -795,8 +778,7 @@ class TestClosedRule(unittest.TestCase):
                     self.assertEqual(actual, expected)
 
     def test_answers_do_not_depend_on_the_interpreters_unicode(self):
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             for c in (0x16130, 0x1e4f0, 0x11f50, 0x0661, 0x1d7ce, 0x1fbf1, 0x10d30, 0x1e5f1, 0x16d70):
                 with self.subTest(copy=module.__name__, cp=c):
                     self.assertIsNone(module.draft_shape(draft(body=chr(c)+'. x\n```\nSUPERSEDES: y\n```')))
@@ -805,8 +787,11 @@ class TestClosedRule(unittest.TestCase):
                     self.assertEqual((shape.kind, shape.key, shape.column), ('late-control', 'SUPERSEDES', 14))
 
     def test_key_map_table(self):
-        from relay_engine.tests.test_parity import _standalone
-        self.assertEqual(E.SHAPE_KEY_MAP, _standalone().SHAPE_KEY_MAP)
+        # Independent full-content oracle captured from base 2b4f83e.
+        canonical = json.dumps(E.SHAPE_KEY_MAP, ensure_ascii=True, sort_keys=True,
+                               separators=(',', ':')).encode('ascii')
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(),
+                         'd8efb93b2f50513357213a64689b33672eb481d4c4d35a70139e78e0c96e71cc')
         self.assertEqual(len(E.SHAPE_KEY_MAP), 1914)
         for chars, want in (('：∶', ':'), ('＿﹍', '_'), ('ЕΕ', 'E'), ('Ｓ𝐒Ⓢ', 'S'), ('0','O'), ('1I|','l'), ('m','rn')):
             for char in chars:
@@ -816,8 +801,10 @@ class TestClosedRule(unittest.TestCase):
         self.assertTrue(all(re.fullmatch('[A-Za-z0-9:_]+', value) for value in E.SHAPE_KEY_MAP.values()))
 
     def test_entity_table(self):
-        from relay_engine.tests.test_parity import _standalone
-        self.assertEqual(E.SHAPE_ENTITY_MAP, _standalone().SHAPE_ENTITY_MAP)
+        canonical = json.dumps(E.SHAPE_ENTITY_MAP, ensure_ascii=True, sort_keys=True,
+                               separators=(',', ':')).encode('ascii')
+        self.assertEqual(hashlib.sha256(canonical).hexdigest(),
+                         '3abe4872e0059176c279f9e38ea1b84fe3f91e2674d6d8b4ac64d1abed33bfca')
         self.assertEqual(len(E.SHAPE_ENTITY_MAP), 349)
         for name, value in (('colon', ':'), ('ZeroWidthSpace', '\u200b'), ('shy', '\xad')):
             self.assertEqual(E.SHAPE_ENTITY_MAP[name], value)
@@ -825,7 +812,6 @@ class TestClosedRule(unittest.TestCase):
             self.assertNotIn(name, E.SHAPE_ENTITY_MAP)
 
     def test_removal_table(self):
-        from relay_engine.tests.test_parity import _standalone
         cf = ((0xad,0xad),(0x600,0x605),(0x61c,0x61c),(0x6dd,0x6dd),(0x70f,0x70f),
               (0x890,0x891),(0x8e2,0x8e2),(0x180e,0x180e),(0x200b,0x200f),(0x202a,0x202e),
               (0x2060,0x2064),(0x2066,0x206f),(0xfeff,0xfeff),(0xfff9,0xfffb),
@@ -837,15 +823,14 @@ class TestClosedRule(unittest.TestCase):
                 (0xffa0,0xffa0),(0xfff0,0xfff8),(0x1bca0,0x1bca3),(0x1d173,0x1d17a),(0xe0000,0xe0fff))
         expected = frozenset(chr(c) for a,b in cf+dicp+((0,8),(10,31),(127,159),(0x2800,0x2800)) for c in range(a,b+1))
         self.assertEqual(len(expected), 4271)
-        for module in (E, _standalone()):
+        for module in (E,):
             self.assertEqual(module.SHAPE_REMOVAL, expected)
             self.assertNotIn('\t', module.SHAPE_REMOVAL)
 
     def test_scan_is_linear(self):
         from unittest.mock import patch
-        from relay_engine.tests.test_parity import _standalone
         families = closed_linear_families()
-        for module in (E, _standalone()):
+        for module in (E,):
             for number, make in enumerate(families):
                 baseline = None
                 for n in (4000, 16000, 2000000):
@@ -865,8 +850,7 @@ class TestClosedRule(unittest.TestCase):
 
 
     def test_stop_lines_end_fence_quoting(self):
-        from relay_engine.tests.test_parity import _standalone
-        for module in (E, _standalone()):
+        for module in (E,):
             for stop in ('- note','* note','+ note','2) step','> quote','-','<!-- c -->','- - -','</div>','<?x>','<div>'):
                 text = draft(body=stop+'\n  ```\nSUPERSEDES: x\n  ```')
                 with self.subTest(copy=module.__name__, stop=stop):
@@ -895,11 +879,10 @@ class TestClosedRule(unittest.TestCase):
             self.assertEqual((shape.kind,shape.key,shape.line),('late-verdict','VERDICT',17))
 
     def test_fences_carried_across_the_block_quote_nothing(self):
-        from relay_engine.tests.test_parity import _standalone
         names = {'list item touching','unclosed opener before','html block before',
                  'grant token inside a carried fence','tilde opener before the block',
                  'closed fence before, fence after','supplementary digit','arabic-indic digit'}
-        for module in (E, _standalone()):
+        for module in (E,):
             for name,text,want in R8_SHOWN_CASES:
                 if name in names:
                     with self.subTest(copy=module.__name__,case=name):

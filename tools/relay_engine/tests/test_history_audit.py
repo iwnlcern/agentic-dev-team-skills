@@ -11,7 +11,7 @@ import unittest
 from relay_engine import client, daemon, rules, strings
 from relay_engine.ledger import open_ledger, record_judgment
 from relay_engine.rules import Finding
-from relay_engine.tests.capture_order_baseline import collect, snapshot
+from relay_engine.tests.test_finding_tags import collect, snapshot
 from relay_engine.tests.test_judging import body
 from relay_engine.tests.test_lint_context import ContextDaemonCase, DID, _entry
 

@@ -9,6 +9,7 @@ from relay_engine import judging, rules
 from relay_engine.envelope import Envelope
 
 TOOLS = Path(__file__).resolve().parents[2]
+POPULATION = TOOLS / 'relay-engine-fixtures/lint-population'  # copied at 2b4f83e, less the documented omissions
 
 
 def body(phase='PLAN', sender='p.planner', target='p.implementer', ident='candidate', extra='', content=''):
@@ -130,14 +131,14 @@ class TestJudging(unittest.TestCase):
         self.check_fixture('CM188-later-approval-inert', 'lineage.commission', '03-grant.md', 'CM77-valid-chain')
 
     def check_fixture(self, case, family, candidate, control):
-        root = TOOLS / 'relay-lint-fixtures/mastertier' / case
+        root = POPULATION / 'mastertier' / case
         files = sorted(root.glob('*.md'))
         chosen = root / candidate
         older = [(p.name, p.read_bytes()) for p in files if p.name < candidate]
         findings = self.family(chosen.read_bytes(), family, older)
         self.assertTrue(findings)
         self.assertTrue(all(f.subject == self.subject for f in findings))
-        root = TOOLS / 'relay-lint-fixtures/mastertier' / control
+        root = POPULATION / 'mastertier' / control
         files = sorted(root.glob('*.md'))
         self.assertEqual(self.family(files[-1].read_bytes(), family, [(p.name, p.read_bytes()) for p in files[:-1]]), [])
 
@@ -145,7 +146,7 @@ class TestJudging(unittest.TestCase):
         for name in ('CM77-valid-chain', 'CM216-malformed-latest-charter',
                      'CM211-review-same-position'):
             with self.subTest(name=name):
-                root = TOOLS / 'relay-lint-fixtures/mastertier' / name
+                root = POPULATION / 'mastertier' / name
                 files = sorted(root.rglob('*.md'), key=lambda p: rules.relay_order_key(p, root))
                 phases = [(p, rules.relay_order_key(p, root), rules.header_fields(p.read_text()).get('PHASE', ''),
                            rules.header_fields(p.read_text()), p.read_text()) for p in files]
@@ -160,7 +161,7 @@ class TestJudging(unittest.TestCase):
                     self.assertEqual(actual, [])
                 else:
                     self.assertTrue(actual)
-        root = TOOLS / 'relay-lint-fixtures/mastertier/CM216-malformed-latest-charter'
+        root = POPULATION / 'mastertier/CM216-malformed-latest-charter'
         files = sorted(root.glob('*.md'))
         raw = files[-1].read_bytes()
         findings = self.family(raw, 'lineage.commission', [(p.name, p.read_bytes()) for p in files[:-1]])

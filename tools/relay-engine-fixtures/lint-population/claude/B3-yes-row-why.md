@@ -1,0 +1,17 @@
+ROLE: Planner
+PHASE: PLAN
+AUTHORITY: plan-only
+DISPATCH_ID: d-x
+CEREMONY_TIER: tiny
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+CEREMONY_DOWNGRADE: proposed skipped review because tiny.
+ESCALATION_SCAN:
+- authz/tenant/RLS/permissions/secrets: no — none
+- migration/backfill/destructive-write/canonical-data-repair: yes — destructive backfill
+ESCALATION_SCAN_RESULT: trigger-present
+WHY_DOWNGRADE_IS_SAFE:
+- it is tiny
+ACTIONS_GIT_REF: no edits claimed; final git status --short = empty
+FINAL_GIT_STATUS_SHORT:
+none — clean tree

@@ -1,0 +1,17 @@
+ROLE: Planner
+PHASE: IMPL
+AUTHORITY: implementation
+DISPATCH_ID: fte2-impl
+PARENT_DISPATCH_ID: fte2-review
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+DELEGATED_DISPATCH_AUTHORITY: yes
+FROM: qi.planner
+TO: qi.implementer
+
+DISPATCH IMPL
+
+ACTIONS_GIT_REF: none — dispatch relay only
+FINAL_GIT_STATUS_SHORT:
+ M src/wip.ts

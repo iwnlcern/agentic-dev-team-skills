@@ -3,7 +3,7 @@ from unittest import mock
 
 from relay_engine import authority, errors, rules
 from relay_engine.tests import test_authority as authority_fixture
-from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
 from relay_engine.tests import test_authority_fold7 as header_fixture
 from relay_engine.tests.test_judging import body
 
@@ -30,7 +30,7 @@ class TestAuthorityFold8(TestAuthorityFold5):
             raw = body(*a, **k)
             old = next(line for line in raw.split(b'\n') if line.startswith(b'SUBJECT:'))
             return raw.replace(old, b'NOTE: compare\x0b\nSUBJECT: compare <tag> values', 1)
-        with mock.patch('relay_engine.tests.test_authority_fold5.body', side_effect=changed_subject):
+        with mock.patch('relay_engine.tests.authority_legacy_fixtures.body', side_effect=changed_subject):
             # The literal SUBJECT row is refused before authority: VT hides a required field.
             with self.assertRaises(errors.EngineError) as caught:
                 self.add(sender='operator')
@@ -62,7 +62,7 @@ class TestAuthorityFold8(TestAuthorityFold5):
                     def with_control(*a, **k):
                         raw = body(*a, **k)
                         return raw + b'\nprose \x0c tail\n' if a[0] == phase else raw
-                    with mock.patch('relay_engine.tests.test_authority_fold5.body', side_effect=with_control):
+                    with mock.patch('relay_engine.tests.authority_legacy_fixtures.body', side_effect=with_control):
                         fixture.base(design=True)
                     self.assertEqual(fixture.check()['reasons'], ['authority.lineage-incomplete'])
                 finally:

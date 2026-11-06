@@ -3,8 +3,21 @@
 The `record-root/` members exercise engine-root record-scoped lint behavior.
 Imported/adopted rows are suppressed without ever having been fully linted; filed history is not relitigated.
 
-The `judging/base-order-cbc8f07.json` capture preserves unsorted diagnostics from the base commit and its frozen fixture population.
+The `judging/base-order-cbc8f07.json` capture preserves unsorted diagnostics from the frozen base source against the moved fixture population, in the capture host's traversal order.
 It is independent of the regenerated parity golden.
+After the omitted inputs' diagnostics are removed, the re-capture reorders 253 remaining positions: 63 errors and 190 warnings.
+The remaining diagnostic multisets are unchanged; the original capture also does not reproduce its exact traversal order on this host.
+This host-dependent ordering change is separate from the eight README errors and one LP2 warning removed with their inputs, and from the three downstream insertion-offset changes.
+The capture command, source/population pins, before/after digests and independent order comparison are retained in the Task 13 review evidence.
+
+The `lint-population/` tree is the shipped v2 linter's fixture tree as at `origin/v3` `2b4f83e`, copied byte for byte when the engine's tests stopped reading the linter's own tree (plan Task 13).
+It omits that tree's README and the `lockpath/LP2-new-form/` case, the three files that name the linter.
+`test_judging` and `test_judging_agreement` read the copied population; `test_human_gate` reads its `humangate/` cases.
+The order check in `test_finding_tags` and `test_history_audit` reads it without the two `merge-token` cases added after `cbc8f07`, so its population is that commit's tree less the same three files.
+
+The `draft-shape/wrapper-messages-2b4f83e.json` fixture freezes all 1,005 diagnostic-input hashes and independent expected wrapper messages from the pinned base diagnostic oracle.
+It records the producing source commit and digest, plus canonical key/entity table digests; runtime tests do not load that producer.
+The canonical table form is ASCII JSON with sorted keys and compact separators, covering every key and value.
 
 The `judging/aligned/` fixtures compare every Finding field against the sweep for aligned admission order, including gate-review approval, no-reply, and a SITREP admitted after an unheard grant.
 The `judging/future-sensitive/` fixtures hold the six named temporal cases and explicit admission and sweep expectations.

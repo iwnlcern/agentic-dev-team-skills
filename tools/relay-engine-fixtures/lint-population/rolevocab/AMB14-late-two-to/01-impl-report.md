@@ -1,0 +1,13 @@
+ROLE: Implementer
+PHASE: IMPL
+AUTHORITY: implementation
+DISPATCH_ID: amb14-report
+PARENT_DISPATCH_ID: amb14
+CEREMONY_TIER: small
+EVIDENCE_TARGET: E1
+HUMAN_GATE_REQUIRED: no
+FROM: qi.implementer
+TO: qi.planner
+ACTIONS_GIT_REF: commit abc1234 — edited src/fix.ts
+
+Implementation report.

@@ -510,7 +510,7 @@ class TestXrootReader(unittest.TestCase):
         from contextlib import ExitStack
         from relay_engine.tests.xroot_b9_cases import materialize, deadline_fault, R
         from relay_engine.tests.capture_xroot_baseline import INJECTED_TIMEOUTS
-        from relay_engine.tests.test_authority_fold5 import TestAuthorityFold5
+        from relay_engine.tests.authority_legacy_fixtures import TestAuthorityFold5
         cases = materialize(self.repo/'injected', only=INJECTED_TIMEOUTS)
         original_reader = rules.XrootBatchReader
         original_verify = rules.xroot_verify

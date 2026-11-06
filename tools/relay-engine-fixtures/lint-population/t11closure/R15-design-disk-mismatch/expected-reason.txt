@@ -1,0 +1,1 @@
+t11-closure: design file digest mismatch: recomputed sha256 does not equal the design pin
