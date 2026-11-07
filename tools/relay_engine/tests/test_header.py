@@ -3,6 +3,7 @@
 import time
 import unittest
 
+from relay_engine import addresses
 from relay_engine import errors
 from relay_engine import header
 
@@ -237,7 +238,7 @@ class TestReviewFocus(Refused):
 
         def recording(value):
             seen.append(value)
-            header.syntactic_address(value)
+            addresses.parse_address(value)
 
         for value in ("a.planner, , b.planner", "a.planner,", ", a.planner"):
             with self.subTest(value=value):

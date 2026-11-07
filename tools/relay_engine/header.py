@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import re
 import unicodedata
 
+from relay_engine import addresses
 from relay_engine import errors
 from relay_engine import refs as reference
 
@@ -91,16 +92,8 @@ FIELDS = (
 )
 _SPECS = {spec.name: spec for spec in FIELDS}
 
-ROLE_WORDS = frozenset({
-    "planner", "implementer", "reviewer", "orchestrator-planner",
-    "orchestrator-reviewer", "master-planner", "master-reviewer",
-    "domain-planner", "domain-reviewer"})
-_ALIASES = {"pair-planner": "planner", "pair-implementer": "implementer"}
-
 _LINE = re.compile(r"([A-Z][A-Z_]*): (\S(?:.*\S)?)", re.DOTALL)
 _EMPTY = re.compile(r"[A-Z][A-Z_]*:[ \t]*")
-_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
-_TEAM = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _BUNDLE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
 _HANDLE = re.compile(r"#[1-9][0-9]{0,17}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -138,18 +131,9 @@ def _refuse(code, variant=None, **params):
     return errors.error_for(code, variant=variant, **params)
 
 
-def syntactic_address(value):
-    """Interim address check (platform joint lock J2); Task 6 replaces it."""
-    reason, canonical = _address_problem(value)
-    if reason is None:
-        return
-    if canonical is not None:
-        raise AddressRefused(reason, canonical)
-    raise AddressRefused(reason)
-
-
 class AddressRefused(Exception):
-    """Raised by an address validator; parse turns it into E-ADDRESS."""
+    """Raised by a Directory when an address names no seat; parse and submit turn it
+    into E-ADDRESS.  Grammar refusals are platform's addresses.AddressRefused."""
 
     def __init__(self, reason, canonical=None):
         super().__init__(reason)
@@ -157,34 +141,34 @@ class AddressRefused(Exception):
         self.canonical = canonical
 
 
-def _address_problem(value):
-    if value == "operator":
-        return None, None
-    if any(char.isspace() for char in value):
-        return "whitespace inside an address", None
-    if value != value.lower():
-        return "uppercase letters", None
-    seat, at, project = value.partition("@")
-    if at:
-        if not project or "@" in project:
-            return "empty or repeated @", None
-        if seat == "operator":
-            return "operator takes no @project", None
-        if _NAME.fullmatch(project) is None:
-            return "project name outside [a-z0-9][a-z0-9-]{0,31}", None
-    team, dot, role = seat.partition(".")
-    if not dot:
-        return "not an address: no .<role> part and not operator", None
-    if _TEAM.fullmatch(team) is None:
-        return "team name outside [a-z0-9][a-z0-9-]{0,63}", None
-    if role in _ALIASES:
-        return "unknown role word", _ALIASES[role]
-    if role not in ROLE_WORDS:
-        return "unknown role word", None
-    return None, None
+# J2's reason words for platform's refusal reasons; mapping a Reason onto E-ADDRESS is
+# the engine's job (DD-v3-platform J1, J2).
+_REASON_TEXT = {
+    addresses.Reason.NOT_AN_ADDRESS: "not an address: no .<role> part and not operator",
+    addresses.Reason.AT_EMPTY_OR_REPEATED: "empty or repeated @",
+    addresses.Reason.UPPERCASE: "uppercase",
+    addresses.Reason.BAD_CHARACTER: "a character outside the grammar",
+    addresses.Reason.UNKNOWN_ROLE: "unknown role word",
+    addresses.Reason.NAME_TOO_LONG: "name too long",
+    addresses.Reason.WHITESPACE_IN_TOKEN: "whitespace inside a token",
+    addresses.Reason.OPERATOR_QUALIFIED: "operator qualified with @",
+}
 
 
-def parse(data, validate_address=syntactic_address):
+def address_refused(refused):
+    """The AddressRefused for a platform grammar refusal: J2's reason words, and the
+    canonical role word when the token is a retired alias."""
+    return AddressRefused(_REASON_TEXT[refused.reason], refused.canonical)
+
+
+def _check_address(validate_address, item):
+    try:
+        validate_address(item)
+    except addresses.AddressRefused as refused:
+        raise address_refused(refused) from None
+
+
+def parse(data, validate_address=addresses.parse_address):
     """Parse one v3 draft; refuse with one typed code per rule, never skip."""
     if not isinstance(data, bytes):
         raise TypeError("draft bytes required")
@@ -300,7 +284,7 @@ def _addresses(number, field, value, validate_address, seen_addresses):
             raise _refuse("E-ADDRESS", line=number, field=field,
                           value=_display(value), reason="empty list item")
         try:
-            validate_address(item)
+            _check_address(validate_address, item)
         except AddressRefused as refused:
             if refused.canonical is not None:
                 raise _refuse("E-ADDRESS", variant="alias", line=number,

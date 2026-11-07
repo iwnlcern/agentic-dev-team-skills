@@ -20,6 +20,8 @@ POLICY_CODES = {
 }
 
 ALL_CODES = POLICY_CODES | {
+    "E-SUBMISSION-KEY-REUSED",
+    "E-ADMISSION-HOOK",
     "no-top-seat",
     "E-HEADER",
     "E-DRAFT-SHAPE",
@@ -452,6 +454,50 @@ class TestExplainCLI(unittest.TestCase):
             "Hand-relay this escalation to the eligible starter: master-planner if a master tier exists (never the orchestrator session), else orchestrator-planner, else the operator. This escalation is the sole exception to daemon admission.",
         )
 
+
+class TestAdmissionErrors(unittest.TestCase):
+    """Breaks: unregistered replay refusal or changed legacy error envelope."""
+
+    def test_replay_error_catalog(self):
+        self.assertIn("E-SUBMISSION-KEY-REUSED", errors.ERRORS,
+                      "reused admission keys require their registered refusal")
+        error = errors.error_for("E-SUBMISSION-KEY-REUSED")
+        self.assertEqual(error.code, "E-SUBMISSION-KEY-REUSED")
+        self.assertEqual(error.cls, "integrity")
+        self.assertEqual(set(error.as_dict()), {"code", "cause", "remedy", "cls"})
+        self.assertEqual(error.cause,
+                         "this sender party already used the submission key for different draft bytes")
+        self.assertEqual(error.remedy,
+                         "retry the original bytes with this key, or use a new key for a new submission")
+        self.assertEqual(errors.explain_for(error.code)[0],
+                         "a sender party and submission key identify one exact full input and its original admission receipt")
+        spec = errors.ERRORS[error.code]
+        self.assertTrue(strings.INVENTORY[spec.explain_key])
+        self.assertNotIn(error.code, errors.POLICY_CODES)
+
+
+
+    def test_hook_error_catalog(self):
+        self.assertIn("E-ADMISSION-HOOK", errors.ERRORS,
+                      "hook faults need the registered integrity refusal and ended variant")
+        error = errors.error_for("E-ADMISSION-HOOK", hook="fixture.module.hook", kind="RuntimeError")
+        self.assertEqual(error.cls, "integrity")
+        self.assertEqual(error.cause, "the admission hook fixture.module.hook failed with RuntimeError; nothing from this draft was stored")
+        self.assertEqual(error.remedy, "report it to the orchestrator; the draft can be submitted again once the hook is fixed")
+        self.assertEqual(errors.explain_for(error.code)[0], "admission and the hook's records commit together, so a failed hook refuses the whole draft rather than storing a relay without them")
+        ended = errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction", hook="fixture.module.hook")
+        self.assertEqual(ended.cause, "the admission hook fixture.module.hook ended the transaction; nothing from this draft was stored")
+        self.assertEqual(set(error.as_dict()), {"code", "cause", "remedy", "cls"})
+        self.assertNotIn(error.code, errors.POLICY_CODES)
+        self.assertEqual({spec.cls for spec in errors.ERRORS.values()},
+                         {"policy", "integrity", "client", "registration", "command", "wire"})
+        for params in ({"hook": "x\nPRIVATE", "kind": "RuntimeError"},
+                       {"hook": "x.hook", "kind": "RuntimeError:PRIVATE"},
+                       {"hook": "", "kind": "RuntimeError"},
+                       {"hook": "x.hook", "kind": ""}):
+            with self.subTest(params=params):
+                with self.assertRaises(ValueError):
+                    errors.error_for("E-ADMISSION-HOOK", **params)
 
 if __name__ == "__main__":
     unittest.main()

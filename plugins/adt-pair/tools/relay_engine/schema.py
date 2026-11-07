@@ -54,10 +54,109 @@ def _verdict_pairs():
         for kind, values in sorted(header.VERDICTS.items()))
     return "CHECK (verdict IS NULL OR %s)" % pairs
 
-_TABLES = (
+def _arc(prefix, specials):
+    """An exclusive arc: a seat by foreign key, or one of the specials this
+    column may hold, never both and never neither (planner Q1)."""
+    seat, special = prefix + "seat_id", prefix + "special"
+    return ("%s TEXT REFERENCES seats (id),\n    %s TEXT %s\n"
+            "        CHECK ((%s IS NULL) <> (%s IS NULL))"
+            % (seat, special, _in(special, specials, nullable=True), seat, special))
+
+
+SPECIALS = frozenset({"operator", "system"})  # J2: never team seats
+HOSTS = frozenset({"claude-code", "codex", "frank", "other"})  # J3 seat_sessions.host
+_LEVELS = frozenset({"master", "domain", "orchestrator", "pair"})
+_SEAT_STATES = frozenset({"vacant", "occupied", "stood-down"})
+
+# Platform's identity tables: J3 with amendment J-A1 (DD-v3-platform § Joint lock,
+# frozen copy sha256 6e202276…); platform owns their semantics, the engine their DDL.
+_PLATFORM_TABLES = (
+    """CREATE TABLE IF NOT EXISTS projects (
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    top_seat_id TEXT REFERENCES seats (id)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS repositories (
+    id TEXT NOT NULL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    name TEXT NOT NULL,
+    UNIQUE (project_id, name)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS repository_checkouts (
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    path TEXT NOT NULL PRIMARY KEY,
+    last_seen_at INTEGER NOT NULL
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS team_instances (
+    id TEXT NOT NULL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    name TEXT NOT NULL,
+    level TEXT NOT NULL %s,
+    parent_instance_id TEXT,
+    opened_at INTEGER NOT NULL,
+    opened_by TEXT NOT NULL,
+    closed_at INTEGER,
+    UNIQUE (id, project_id),
+    FOREIGN KEY (parent_instance_id, project_id) REFERENCES team_instances (id, project_id)
+) STRICT""" % _in("level", _LEVELS),
+    """CREATE TABLE IF NOT EXISTS seats (
+    id TEXT NOT NULL PRIMARY KEY,
+    team_instance_id TEXT NOT NULL REFERENCES team_instances (id),
+    role TEXT NOT NULL,
+    state TEXT NOT NULL %s,
+    UNIQUE (team_instance_id, role)
+) STRICT""" % _in("state", _SEAT_STATES),
+    """CREATE TABLE IF NOT EXISTS seat_occupants (
+    id TEXT NOT NULL PRIMARY KEY,
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    key_id TEXT NOT NULL UNIQUE,
+    key_verifier TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    UNIQUE (id, seat_id)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS seat_sessions (
+    id TEXT NOT NULL PRIMARY KEY,
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    occupant_id TEXT NOT NULL,
+    host TEXT NOT NULL %s,
+    host_session_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    signed_in_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    UNIQUE (seat_id, generation),
+    FOREIGN KEY (occupant_id, seat_id) REFERENCES seat_occupants (id, seat_id)
+) STRICT""" % _in("host", HOSTS),
+)
+
+TABLE_OWNERS: dict[str, str] = {
+    "projects": "platform",
+    "repositories": "platform",
+    "repository_checkouts": "platform",
+    "team_instances": "platform",
+    "seats": "platform",
+    "seat_occupants": "platform",
+    "seat_sessions": "platform",
+    "git_states": "engine",
+    "relays": "engine",
+    "bodies": "engine",
+    "recipients": "engine",
+    "edges": "engine",
+    "bundles": "engine",
+    "findings": "engine",
+    "finding_events": "engine",
+    "refusals": "engine",
+    "seat_activity": "engine",
+    "token_counts": "engine",
+    "schema_version": "engine",
+}
+
+_TABLES = _PLATFORM_TABLES + (
     """CREATE TABLE IF NOT EXISTS git_states (
     id TEXT PRIMARY KEY,
-    repository_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
     head_commit TEXT CHECK (head_commit IS NULL OR %s),
     branch TEXT,
     dirty_paths INTEGER NOT NULL CHECK (dirty_paths >= 0),
@@ -67,15 +166,15 @@ _TABLES = (
     """CREATE TABLE IF NOT EXISTS relays (
     id TEXT PRIMARY KEY,
     handle INTEGER NOT NULL CHECK (handle >= 1),
-    project_id TEXT NOT NULL,
-    team_instance_id TEXT,
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    team_instance_id TEXT REFERENCES team_instances (id),
     bundle_id TEXT REFERENCES bundles (id),
     kind TEXT NOT NULL %s,
     verdict TEXT,
     needs TEXT NOT NULL %s,
     subject TEXT NOT NULL,
     parent_id TEXT REFERENCES relays (id),
-    sender_seat_id TEXT NOT NULL,
+    %s,
     sender_role TEXT,
     created_at INTEGER NOT NULL,
     body_sha256 TEXT NOT NULL %s,
@@ -83,26 +182,32 @@ _TABLES = (
     body_bytes INTEGER NOT NULL CHECK (body_bytes >= 0),
     header_bytes INTEGER NOT NULL CHECK (header_bytes >= 0),
     git_state_id TEXT REFERENCES git_states (id),
+    submission_key TEXT CHECK (submission_key IS NULL OR length(submission_key) > 0),
+    draft_sha256 TEXT %s,
+    CHECK ((submission_key IS NULL) = (draft_sha256 IS NULL)),
     UNIQUE (project_id, handle),
     UNIQUE (project_id, created_at),
     %s,
-    CHECK (kind != 'BOOT' OR sender_seat_id = 'system')
+    CHECK (kind != 'BOOT' OR sender_special IS 'system')
 ) STRICT""" % (_in("kind", header.KINDS | {"BOOT"}),
-               _in("needs", header.NEEDS), _SHA256 % ("body_sha256", "body_sha256"),
-               _SHA256 % ("meta_sha256", "meta_sha256"), _verdict_pairs()),
+               _in("needs", header.NEEDS), _arc("sender_", SPECIALS),
+               _SHA256 % ("body_sha256", "body_sha256"),
+               _SHA256 % ("meta_sha256", "meta_sha256"),
+               _sha("draft_sha256", nullable=True), _verdict_pairs()),
     """CREATE TABLE IF NOT EXISTS bodies (
     relay_id TEXT PRIMARY KEY REFERENCES relays (id),
     body BLOB NOT NULL
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS recipients (
     relay_id TEXT NOT NULL REFERENCES relays (id),
-    seat_id TEXT NOT NULL,
+    %s,
     role TEXT NOT NULL CHECK (role IN ('to', 'cc')),
     delivered_at INTEGER,
     opened_at INTEGER,
     answered_by TEXT REFERENCES relays (id),
-    PRIMARY KEY (relay_id, seat_id)
-) STRICT""",
+    UNIQUE (relay_id, seat_id),
+    UNIQUE (relay_id, special)
+) STRICT""" % _arc("", {"operator"}),
     """CREATE TABLE IF NOT EXISTS edges (
     id TEXT PRIMARY KEY,
     from_relay_id TEXT NOT NULL REFERENCES relays (id),
@@ -111,7 +216,8 @@ _TABLES = (
     target_type TEXT NOT NULL CHECK (target_type IN ('relay', 'git', 'path')),
     spelling TEXT NOT NULL,
     target_relay_id TEXT REFERENCES relays (id),
-    target_repository_id TEXT,
+    target_repository_name TEXT,
+    target_repository_id TEXT REFERENCES repositories (id),
     target_rev TEXT,
     target_commit TEXT,
     target_path TEXT,
@@ -120,6 +226,7 @@ _TABLES = (
     digest_at_submit TEXT CHECK (digest_at_submit IS NULL OR %s
         OR (target_type = 'git' AND %s)),
     UNIQUE (from_relay_id, kind, ordinal),
+    CHECK ((target_repository_name IS NULL) = (target_repository_id IS NULL)),
     CHECK ((target_type = 'relay' AND target_relay_id IS NOT NULL
             AND target_repository_id IS NULL AND target_path IS NULL)
         OR (target_type = 'git' AND target_relay_id IS NULL
@@ -130,20 +237,20 @@ _TABLES = (
 ) STRICT""" % (_hex64("digest_at_submit"), _object_id("digest_at_submit")),
     """CREATE TABLE IF NOT EXISTS bundles (
     id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    team_instance_id TEXT,
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    team_instance_id TEXT REFERENCES team_instances (id),
     name TEXT NOT NULL,
-    opened_by TEXT NOT NULL,
+    %s,
     closed_at INTEGER,
     UNIQUE (project_id, name)
-) STRICT""",
+) STRICT""" % _arc("opened_by_", SPECIALS),
     """CREATE TABLE IF NOT EXISTS findings (
     id TEXT PRIMARY KEY,
     handle INTEGER NOT NULL CHECK (handle >= 1),
-    project_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects (id),
     bundle_id TEXT REFERENCES bundles (id),
     raised_in TEXT NOT NULL REFERENCES relays (id),
-    raiser_seat_id TEXT NOT NULL,
+    raiser_seat_id TEXT NOT NULL REFERENCES seats (id),
     severity TEXT NOT NULL %s,
     check_edge_id TEXT REFERENCES edges (id),
     summary TEXT NOT NULL CHECK (length(summary) <= 200),
@@ -167,27 +274,20 @@ _TABLES = (
                _in("from_status", _FINDING_STATUS), _in("to_status", _FINDING_STATUS)),
     """CREATE TABLE IF NOT EXISTS refusals (
     id INTEGER PRIMARY KEY,
-    project_id TEXT,
-    seat_id TEXT,
+    project_id TEXT REFERENCES projects (id),
+    %s,
     code TEXT NOT NULL,
     line INTEGER,
     at INTEGER NOT NULL,
     draft_sha256 TEXT NOT NULL %s
-) STRICT""" % _sha("draft_sha256"),
+) STRICT""" % (_arc("", SPECIALS), _sha("draft_sha256")),
     """CREATE TABLE IF NOT EXISTS seat_activity (
-    seat_id TEXT PRIMARY KEY,
+    seat_id TEXT NOT NULL PRIMARY KEY REFERENCES seats (id),
     last_request_at INTEGER NOT NULL
-) STRICT""",
-    """CREATE TABLE IF NOT EXISTS seat_sessions (
-    session_id TEXT PRIMARY KEY,
-    host TEXT NOT NULL,
-    seat_id TEXT NOT NULL,
-    start_at INTEGER NOT NULL,
-    end_at INTEGER
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS token_counts (
     id INTEGER PRIMARY KEY,
-    seat_id TEXT NOT NULL,
+    seat_id TEXT NOT NULL REFERENCES seats (id),
     bundle_id TEXT REFERENCES bundles (id),
     source TEXT NOT NULL CHECK (source IN ('host-log', 'host-reported')),
     input INTEGER NOT NULL CHECK (input >= 0),
@@ -204,6 +304,9 @@ _TABLES = (
 )
 
 _INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS relays_submission_party ON relays"
+    " (coalesce(sender_seat_id, sender_special), submission_key)"
+    " WHERE submission_key IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS relays_parent ON relays (parent_id)",
     "CREATE INDEX IF NOT EXISTS relays_project_id ON relays (project_id, id)",
     "CREATE INDEX IF NOT EXISTS relays_bundle ON relays (bundle_id)",
@@ -222,6 +325,13 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS refusals_project ON refusals (project_id, code)",
     "CREATE INDEX IF NOT EXISTS seat_sessions_seat ON seat_sessions (seat_id)",
     "CREATE INDEX IF NOT EXISTS token_counts_bundle ON token_counts (bundle_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS team_instances_open_name ON team_instances"
+    " (project_id, name) WHERE closed_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS seat_occupants_open ON seat_occupants (seat_id)"
+    " WHERE ended_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS seat_sessions_open ON seat_sessions (seat_id)"
+    " WHERE ended_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS repositories_project ON repositories (project_id)",
 )
 
 

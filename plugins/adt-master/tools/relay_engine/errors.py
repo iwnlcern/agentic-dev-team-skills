@@ -238,7 +238,6 @@ strings.register_inventory(
 )
 
 
-
 # v3 header refusals (DD-v3-engine § 3, § 5, § 10): one code per rule; the
 # cause names the line and the refused text, the remedy needs no incident value.
 _HEADER_TEXT = {
@@ -397,6 +396,9 @@ strings.register_inventory({
 
 # v3 submit rules (DD-v3-engine § 5, § 8, E-OP2): one code per rule.
 _SUBMIT_TEXT = {
+    "error-submission-key-reused-cause": "this sender party already used the submission key for different draft bytes",
+    "error-submission-key-reused-remedy": "retry the original bytes with this key, or use a new key for a new submission",
+    "error-submission-key-reused-explain": "a sender party and submission key identify one exact full input and its original admission receipt",
     "error-parent-unknown-cause": "line {line}: PARENT {value} names no relay in this project",
     "error-parent-unknown-remedy": "name a handle or UUID of a relay in this project; the parent-candidates query lists the relays you may name",
     "error-parent-unknown-explain": "PARENT names a relay of the sender's own project",
@@ -421,6 +423,32 @@ strings.register_inventory(_SUBMIT_TEXT, {
                    "status": lambda v: v in _FINDING_STATUSES,
                    "transition": lambda v: v in _TRANSITIONS}[field]
     for key, template in _SUBMIT_TEXT.items()
+    for field in strings._placeholders(template)
+})
+
+
+# Admission-hook values are type identities only, never exception messages.
+def _is_hook_name(value):
+    return (isinstance(value, str) and 0 < len(value) <= 256 and
+            re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|<locals>|<lambda>))*",
+                value) is not None)
+
+
+def _is_hook_kind(value):
+    return (isinstance(value, str) and 0 < len(value) <= 128 and
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) is not None)
+
+
+_HOOK_TEXT = {
+    "error-admission-hook-cause": "the admission hook {hook} failed with {kind}; nothing from this draft was stored",
+    "error-admission-hook-ended-transaction-cause": "the admission hook {hook} ended the transaction; nothing from this draft was stored",
+    "error-admission-hook-remedy": "report it to the orchestrator; the draft can be submitted again once the hook is fixed",
+    "error-admission-hook-explain": "admission and the hook's records commit together, so a failed hook refuses the whole draft rather than storing a relay without them",
+}
+strings.register_inventory(_HOOK_TEXT, {
+    (key, field): {"hook": _is_hook_name, "kind": _is_hook_kind}[field]
+    for key, template in _HOOK_TEXT.items()
     for field in strings._placeholders(template)
 })
 
@@ -474,6 +502,8 @@ def _spec(stem, cls):
 
 
 ERRORS = {
+    "E-ADMISSION-HOOK": _spec("admission-hook", "integrity"),
+    "E-SUBMISSION-KEY-REUSED": _spec("submission-key-reused", "integrity"),
     "E-DRAFT-SHAPE": _spec("draft-shape", "integrity"),
     "no-top-seat": _spec("no-top-seat", "command"),
     "E-KEY-MISMATCH": _spec("key-mismatch", "policy"),
@@ -538,6 +568,9 @@ ERRORS = {
 }
 
 ERROR_VARIANTS = {
+    ("E-ADMISSION-HOOK", "ended-transaction"): ErrorSpec(
+        "error-admission-hook-ended-transaction-cause", "error-admission-hook-remedy",
+        "error-admission-hook-explain", "integrity"),
     ("E-NO-ROOT", "unstarted"): _spec("no-root-unstarted", "client"),
     ("E-PATH-ESCAPE", "relay-not-found"): _spec("relay-not-found", "policy"),
     ("E-DRAFT-SHAPE", "separator"): _spec("draft-shape-separator", "integrity"),
