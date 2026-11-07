@@ -2,7 +2,10 @@
 
 import json
 import os
+import shlex
 import unittest
+from contextlib import ExitStack
+from unittest import mock
 
 from relay_engine import guardrail as g
 
@@ -151,6 +154,141 @@ class TestGuardrail(unittest.TestCase):
                         "adt show engine stop", "echo adt engine stop"):
             with self.subTest(command=command):
                 self.assertIsNone(self.command(command))
+
+    def test_configure_shape_opaque_and_malformed(self):
+        for tail in ("", " --jev-key-fd", " --jev-key-fd 3", " --jev-key-fd3",
+                     " --jev-key-fd 0", " --jev-key-fd not-a-number",
+                     " --jev-key-fd 3 --jev-key-fd 4", " --unknown option",
+                     " --jev-key-fd 3 --store-root /fake/existing-store"):
+            with self.subTest(tail=tail):
+                self.assertEqual(self.command("adt engine configure" + tail), g.Match("operator-only"))
+
+    def test_configure_normalization(self):
+        command = "adt engine configure --jev-key-fd 3"
+        commands = ["tools/" + command, "/opt/bin/" + command,
+                    "'adt' 'engine' 'configure' --jev-key-fd 3",
+                    "FOO=1 " + command, "env -u FOO BAR=1 " + command]
+        for wrapper in ("command", "builtin", "exec", "nohup", "time -p", "nice -n 5",
+                        "timeout 10", "stdbuf -oL", "sudo -u fake", "xargs -n 1"):
+            commands.append(wrapper + " " + command)
+        for shell in ("bash", "sh", "zsh", "dash", "ksh"):
+            commands.append(shell + " -c " + shlex.quote(command))
+        commands += ["env " * 10 + command, "env -S " + shlex.quote(command),
+                     "echo " + shlex.quote(command) + " | sh",
+                     "printf '%s' " + shlex.quote(command) + " | bash",
+                     "echo $(" + command + ")", "true && " + command,
+                     f"gh pr merge 12 --match-head-commit {HEAD}; " + command]
+        commands += ['rg "$(' + command + ')" docs/',
+                     'grep -F "`' + command + '`" README.md']
+        for value in commands:
+            with self.subTest(command=value):
+                self.assertEqual(self.command(value), g.Match("operator-only"))
+        for field in ("command", "cmd"):
+            self.assertEqual(g.classify_tool("Bash", {field: command}, REFUSED), g.Match("operator-only"))
+
+    def test_configure_named_fallback_closed(self):
+        command = "adt engine configure --jev-key-fd 3"
+        nested = command
+        for _ in range(12):
+            nested = "bash -c " + shlex.quote(nested)
+        for value in (command + " '", "adt 'engine' configure '3",
+                      "mystery " + command, "mystery /opt/bin/" + command,
+                      "env " * 11 + command, nested,
+                      "gh pr merge '12; " + command,
+                      "rg -n 'adt engine configure",
+                      "env " * 11 + "rg -n 'adt engine configure' docs/",
+                      "mystery rg -n 'adt engine configure' docs/",
+                      "rg --pre 'adt engine configure' -e value docs/",
+                      "rg --pre='adt engine configure' value docs/",
+                      "rg --pre helper -e 'adt engine configure' docs/",
+                      "rg --hostname-bin 'adt engine configure' value docs/"):
+            with self.subTest(command=value):
+                self.assertEqual(self.command(value), g.Match("operator-only", flags=frozenset({"unparsed"})))
+
+    def test_configure_data_restart_positive(self):
+        for value in ("echo 'adt engine configure --jev-key-fd 3'",
+                      "printf '%s' 'adt engine configure'", "echo ready # adt engine configure",
+                      "cat <<'EOF'\nIt's a runbook: adt engine configure --jev-key-fd 3\nEOF\n",
+                      "echo '$(adt engine configure)'", "cat <&3", "echo ready 3>/fake/output",
+                      "adt engine restart", "tools/adt engine restart", "adt engine status",
+                      "adt show engine configure", "adt engine configure-extra",
+                      "mystery not-adt engine configure", "mystery adt engine configure-extra"):
+            with self.subTest(command=value):
+                self.assertIsNone(self.command(value))
+        searches = ("rg -n 'adt engine configure' docs/",
+                    "grep -F 'adt engine configure' README.md",
+                    "rg -e 'adt engine configure' docs/",
+                    "grep -e 'adt engine configure' README.md",
+                    "rg -nFe'adt engine configure' docs/",
+                    "grep --regexp='adt engine configure' README.md",
+                    "rg -n -- 'adt engine configure' docs/",
+                    "rg -e --pre 'adt engine configure'",
+                    "rg '$(adt engine configure)' docs/",
+                    "grep -F '`adt engine configure`' README.md")
+        for value in searches:
+            for prefix in ("", "/opt/bin/", "env FOO=1 ", "command ", "sudo -u fake "):
+                with self.subTest(command=prefix + value):
+                    self.assertIsNone(self.command(prefix + value))
+        self.assertIsNone(self.command("env " * 10 + searches[0]))
+
+    def test_configure_list_boundary(self):
+        for payload in ({"command": ["adt", "engine", "configure", "--jev-key-fd", "3"]},
+                        {"cmd": ["adt engine configure"]}, {"examples": ["adt engine configure"]}):
+            with self.subTest(payload=payload):
+                self.assertIsNone(g.classify_tool("Bash", payload, REFUSED))
+        for payload in ({"examples": ["adt engine configure", REFUSED[1]]},
+                        {"command": ["adt", "engine", "configure", REFUSED[1]]}):
+            self.assertEqual(g.classify_tool("Bash", payload, REFUSED), g.Match("key-file-read", path=REFUSED[1]))
+
+    def test_configure_precedence_and_purity(self):
+        self.assertEqual(self.command("adt engine configure " + REFUSED[1]),
+                         g.Match("key-file-read", path=REFUSED[1]))
+        for value in ("rg -n 'adt engine configure' " + REFUSED[1],
+                      "grep -F 'adt engine configure' " + REFUSED[1]):
+            self.assertEqual(self.command(value), g.Match("key-file-read", path=REFUSED[1]))
+        for value, effect in (("rg -e 'git push' docs/", "protected-push"),
+                              ("grep -F 'gh pr merge 12' README.md", "pr-merge"),
+                              ("rg -n 'adt engine configure; gh pr merge 12' docs/", "pr-merge"),
+                              ("grep -F 'adt engine configure git push' README.md", "protected-push")):
+            self.assertEqual(self.command(value), g.Match(effect, flags=frozenset({"unparsed"})))
+
+        class NoEnvironment(dict):
+            def forbidden(self, *args, **kwargs):
+                raise AssertionError("classifier read environment")
+            __getitem__ = __contains__ = __iter__ = __len__ = get = copy = forbidden
+
+        commands = ("adt engine configure --jev-key-fd 3",
+                    "env FOO=1 /opt/bin/adt engine configure --store-root /fake/store",
+                    "adt engine configure '", "rg -n 'adt engine configure' docs/")
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(os, "environ", NoEnvironment()))
+            for target in ("builtins.open", "io.open", "os.open", "os.fdopen", "os.read",
+                           "os.write", "os.close", "os.stat", "os.lstat", "os.fstat", "os.getenv"):
+                stack.enter_context(mock.patch(target, side_effect=AssertionError("classifier performed I/O")))
+            matches = [g.classify_tool("Bash", {"command": value}, REFUSED,
+                                       home="/fake/home", cwd="/fake/cwd") for value in commands]
+        self.assertEqual(matches, [g.Match("operator-only"), g.Match("operator-only"),
+                                  g.Match("operator-only", flags=frozenset({"unparsed"})), None])
+
+    def test_configure_actor_separation(self):
+        for actor in ("operator", "seat", "top-seat", "service"):
+            payload = {"command": "adt engine configure --jev-key-fd 3", "actor": actor,
+                       "operator": True, "credential_kind": actor}
+            with self.subTest(actor=actor):
+                self.assertEqual(g.classify_tool("Bash", payload, REFUSED), g.Match("operator-only"))
+
+    def test_configure_table_and_regression(self):
+        table = g.table()
+        self.assertEqual(table["operator_commands"].get("configure"), [["adt", "engine", "configure"]])
+        self.assertIn("adt engine configure", table["effects"]["operator-only"]["command_shapes"])
+        self.assertIsNone(table["effects"]["operator-only"]["slip_kind"])
+        table["operator_commands"]["configure"][0][0] = "changed"
+        table["effects"]["operator-only"]["command_shapes"].clear()
+        fresh = g.table()
+        self.assertEqual(fresh["operator_commands"]["configure"], [["adt", "engine", "configure"]])
+        self.assertIn("adt engine configure", fresh["effects"]["operator-only"]["command_shapes"])
+        self.assertEqual(self.command("adt engine stop"), g.Match("operator-only"))
+        self.assertIsNone(self.command("adt engine restart"))
 
     def test_command_spellings(self):
         plain = self.command(f"gh pr merge 12 --match-head-commit {HEAD}")
@@ -390,7 +528,8 @@ class TestGuardrail(unittest.TestCase):
         self.assertEqual(table["flags"]["unresolved_target"], "refuse-or-resolve")
         self.assertEqual(table["operator_commands"],
                          {"stop": [["adt", "engine", "stop"]],
-                          "restart": [["adt", "engine", "restart"]]})
+                          "restart": [["adt", "engine", "restart"]],
+                          "configure": [["adt", "engine", "configure"]]})
         for spelling in table["operator_commands"]["stop"]:
             self.effect(" ".join(spelling), "operator-only")
         for spelling in table["operator_commands"]["restart"]:
