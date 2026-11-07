@@ -26,10 +26,11 @@ _SHAPES = {
                       "content reader naming an ancestor directory",
                       "command naming refused path"),
     "operator-endpoint": ("relay answer", "relay prompt-record"),
-    "operator-only": ("adt engine stop", "relay engine off", "relay team open"),
+    "operator-only": ("adt engine stop", "adt engine configure", "relay engine off", "relay team open"),
 }
 _SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_CONFIGURE = re.compile(r"(?<![\w.-])adt['\"]*\s+['\"]*engine['\"]*\s+['\"]*configure(?![\w./-])")
 _MUTATIONS = re.compile(r"\b(?:mergePullRequest|updateRef|updateRefs|mergeBranch|"
                         r"createCommitOnBranch|deleteRef|enqueuePullRequest|enablePullRequestAutoMerge)\s*\(")
 
@@ -75,7 +76,8 @@ def table() -> dict:
                   "unresolved_target": "refuse-or-resolve"},
         # Platform's final names retain distinct stop and restart-request semantics.
         "operator_commands": {"stop": [["adt", "engine", "stop"]],
-                              "restart": [["adt", "engine", "restart"]]},
+                              "restart": [["adt", "engine", "restart"]],
+                              "configure": [["adt", "engine", "configure"]]},
         "effects": {
             effect: {"command_shapes": list(_SHAPES[effect]),
                      "slip_kind": {"commit": "implement", "pr-merge": "merge"}.get(effect)}
@@ -222,7 +224,9 @@ def _unparsed(text: str, paths: Sequence[str]) -> Match | None:
     path = _refused(text, paths)
     if path:
         return Match("key-file-read", path=path, flags=frozenset({"unparsed"}))
-    if re.search(r"\bgh\b.*\bpr\b.*\bmerge\b", text, re.S):
+    if _CONFIGURE.search(text):
+        effect = "operator-only"
+    elif re.search(r"\bgh\b.*\bpr\b.*\bmerge\b", text, re.S):
         effect = "pr-merge"
     elif re.search(r"\bgh\s+(?:repo\s+sync|(?:extension\s+exec\s+)?stack\s+merge)\b", text):
         effect = "api-ref-write"
@@ -404,9 +408,16 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
         if args[:2] in (["engine", "off"], ["team", "open"], ["team", "open-next"]):
             return Match("operator-only")
     if any([program, *args[:len(row) - 1]] == row
-           for row in table()["operator_commands"]["stop"]):
+           for name in ("stop", "configure") for row in table()["operator_commands"][name]):
         return Match("operator-only")
-    return _unparsed(" ".join(words), paths) if program not in (
+    fallback = " ".join(words)
+    if program in ("rg", "grep"):
+        options, positional = _arguments(args, {"-e": "pattern", "--regexp": "pattern"})
+        if set(options) <= {"-n", "-F", "pattern"} and ("pattern" in options or positional):
+            # Only these known data arguments suppress configure; other named
+            # effects and unknown/command-bearing options retain their fallback.
+            fallback = _CONFIGURE.sub("__adt_pattern_data__", fallback)
+    return _unparsed(fallback, paths) if program not in (
         "git", "gh", "relay", "relay.py", "echo", "printf", "cat") else None
 
 
