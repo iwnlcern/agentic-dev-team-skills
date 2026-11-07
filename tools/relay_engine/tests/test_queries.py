@@ -15,8 +15,10 @@ from relay_engine import queries
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
+from relay_engine.tests import test_submit as submit_tests
 from relay_engine.tests.test_refs import Repo, git
-from relay_engine.tests.test_submit import (FOREIGN, IMPL, ORCH, OTHER, PLANNER, SEATS, Store,
+from unittest import mock
+from relay_engine.tests.test_submit import (FOREIGN, IMPL, ORCH, OTHER, PLANNER, SEATS, Store, GitStore,
                                             draft, vm_steps)
 
 OPERATOR = SEATS["operator"]
@@ -562,7 +564,7 @@ class TestFlags(Store):
                          [(50,)])
 
 
-class TestFindings(Store):
+class TestFindings(GitStore):
     def review_with(self, findings, refs_=(), parent=None, to="v3-engine.implementer",
                     sender=PLANNER):
         request = self.submit(draft(kind="REVIEW", needs="review", to=sender.address,
@@ -656,7 +658,7 @@ class TestFindings(Store):
         self.assertEqual(queries.refusal_counts(self.conn, "elsewhere"), {})
 
 
-class TestEdges(Store):
+class TestEdges(GitStore):
     def test_points_to_and_from(self):
         repo = Repo({"a.py": "1\n2\n3\n4\n"})
         self.addCleanup(repo.close)
@@ -977,6 +979,27 @@ class TestRecords(Store):
                 selected.set()
                 worker.join(3)
                 first.close()
+
+
+class TestGitIsolation(unittest.TestCase):
+    def test_store_tests_ignore_ambient_git_names(self):
+        # Breaks: a Store consumer reaches Git through an unisolated fixture.
+        from relay_engine.tests import test_queries
+
+        loader = unittest.TestLoader()
+        selected = []
+        for module in (test_queries, submit_tests):
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if cls.__module__ == module.__name__ and issubclass(cls, Store):
+                    selected.extend(cls(name) for name in loader.getTestCaseNames(cls))
+        self.assertTrue(selected)
+        for case in selected:
+            with self.subTest(test=case.id()), mock.patch.dict(os.environ, {"GIT_PAGER": "cat"}):
+                result = unittest.TestResult()
+                case.run(result)
+                traces = "\n".join(text for _, text in result.errors + result.failures)
+                self.assertFalse(result.errors + result.failures, traces)
+                self.assertFalse(result.skipped, result.skipped)
 
 
 class TestQueryCost(unittest.TestCase):

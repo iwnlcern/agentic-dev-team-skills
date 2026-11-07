@@ -151,6 +151,12 @@ class Store(unittest.TestCase):
             self.conn.row_factory = None
 
 
+class GitStore(Store):
+    def setUp(self):
+        super().setUp()
+        clean_git_environment(self)
+
+
 class TestAdmit(Store):
     def test_admit_writes_all_tables(self):
         clean_git_environment(self)
@@ -1494,6 +1500,31 @@ class TestAdmissionHook(Store):
 class TestAdmissionHookAtomicity(Store):
     """Breaks: post-rollback durability, partial internal filing and unsafe hook errors."""
 
+    def test_submit_without_autocommit_attribute_admits(self):
+        # Breaks: admission reads the 3.12-only attribute on a 3.11 connection.
+        class WithoutAutocommit(sqlite3.Connection):
+            @property
+            def autocommit(self):
+                raise AttributeError("autocommit is unavailable")
+
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "legacy.db"
+            conn = sqlite3.connect(path, factory=WithoutAutocommit)
+            try:
+                conn.execute("PRAGMA foreign_keys=ON")
+                schema.init_v3(conn)
+                platform_rows(conn)
+                receipt = submit.submit(conn, self.ctx(), draft())
+            finally:
+                conn.close()
+            fresh = sqlite3.connect(path)
+            try:
+                self.assertEqual(fresh.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+                self.assertEqual(fresh.execute("SELECT id FROM relays").fetchone(),
+                                 (receipt.relay_id,))
+            finally:
+                fresh.close()
+
     def file_store(self, path, *, mode="legacy", conflict_rollback=False):
         conn = sqlite3.connect(path)
         self.addCleanup(conn.close)
@@ -1530,7 +1561,9 @@ class TestAdmissionHookAtomicity(Store):
     def test_hook_rows_never_outlive_rolled_back_admission(self):
         # A cached VM must not write after SQLite rolls back the admission.
         observed, expected = [], []
-        modes = ("legacy", "isolation-none", "autocommit-true")
+        modes = ("legacy", "isolation-none")
+        if hasattr(sqlite3.Connection, "autocommit"):
+            modes += ("autocommit-true",)
         attacks = ("fresh-cte", "cached-cte", "table-rollback", "plain")
         cte = "WITH value(id,relay_id) AS (VALUES (?,?)) INSERT INTO fixture_owned SELECT * FROM value"
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
@@ -1580,19 +1613,22 @@ class TestAdmissionHookAtomicity(Store):
                     observed.append((mode, attack, refusal, state))
                     expected.append((mode, attack, "E-ADMISSION-HOOK", want))
                     self.assert_file_free(conn)
-            path = Path(name) / "unsupported.db"
-            conn = self.file_store(path, mode="autocommit-false")
-            before, statements = self.file_state(path), []
-            conn.set_trace_callback(statements.append)
-            outcome = None
-            try:
-                submit.submit(conn, self.ctx(), draft())
-            except (ValueError, sqlite3.OperationalError) as error:
-                outcome = type(error).__name__
-            finally:
-                conn.set_trace_callback(None)
-            observed.append(("autocommit-false", outcome, statements, self.file_state(path)))
-            expected.append(("autocommit-false", "ValueError", [], before))
+            if hasattr(sqlite3.Connection, "autocommit"):
+                path = Path(name) / "unsupported.db"
+                conn = self.file_store(path, mode="autocommit-false")
+                before, statements = self.file_state(path), []
+                conn.set_trace_callback(statements.append)
+                outcome = None
+                try:
+                    submit.submit(conn, self.ctx(), draft())
+                except (ValueError, sqlite3.OperationalError) as error:
+                    outcome = type(error).__name__
+                finally:
+                    conn.set_trace_callback(None)
+                observed.append(("autocommit-false", outcome, statements, self.file_state(path)))
+                expected.append(("autocommit-false", "ValueError", [], before))
+            else:
+                self.assertFalse(hasattr(self.conn, "autocommit"))
         self.assertEqual(observed, expected,
                          "hook writes must not survive a rolled-back admission in any supported mode")
 

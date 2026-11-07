@@ -200,7 +200,7 @@ def _at(line, error):
 
 def submit(conn, ctx, data):
     """Admit one draft, or record one refusal and raise it."""
-    if conn.autocommit is False:
+    if getattr(conn, "autocommit", None) is False:
         raise ValueError("submit requires legacy transaction control or autocommit True")
     if conn in _HOOK_FRAMES:
         raise sqlite3.DatabaseError("nested admission is not allowed during a hook")
