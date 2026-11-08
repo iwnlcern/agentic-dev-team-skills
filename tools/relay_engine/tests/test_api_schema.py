@@ -7,6 +7,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -225,6 +227,218 @@ assert not forbidden.intersection(sys.modules),sorted(forbidden.intersection(sys
         result = subprocess.run([sys.executable, '-I', '-c', control, str(TOOLS)], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('sqlite3', result.stderr)
+
+
+TOOL_VERSIONS = {'rustc': 'rustc 1.99.1 (58cf8f9c3 2026-10-13)', 'node': 'v26.13.0', 'tsc': '7.0.2'}
+
+
+def toolchain():
+    root = Path(os.environ.get('ADT_TOOLCHAINS', Path.home() / '.local/share/adt-toolchains'))
+    return {'rustc': [str(root / 'rust-1.99.1/bin/rustc')],
+            'node': [str(root / 'node-v26.13.0/bin/node')],
+            'tsc': [str(root / 'node-v26.13.0/bin/node'),
+                    str(root / 'typescript-7.0.2/node_modules/typescript/bin/tsc')]}
+
+
+def exact_version(tool, banner):
+    if tool == 'tsc':
+        match = re.fullmatch(r'Version (\d+\.\d+\.\d+)', banner.strip())
+        return bool(match and match[1] == TOOL_VERSIONS[tool])
+    return banner.strip() == TOOL_VERSIONS[tool]
+
+
+class TestToolchain(unittest.TestCase):
+    def test_pinned_toolchain_present(self):
+        for name, command in toolchain().items():
+            with self.subTest(tool=name):
+                try:
+                    result = subprocess.run(command + ['--version'], capture_output=True, text=True, timeout=30)
+                except OSError as error:
+                    self.fail(name + ': ' + type(error).__name__)
+                self.assertEqual(result.returncode, 0, name + ': ' + result.stderr)
+                self.assertTrue(exact_version(name, result.stdout), name + ': ' + result.stdout)
+
+    def test_version_comparison_is_exact(self):
+        good = [TOOL_VERSIONS['rustc'], TOOL_VERSIONS['node'], 'Version 7.0.2']
+        bad = ['rustc 1.99.10 (58cf8f9c3 2026-10-13)', 'v26.13.01', 'Version 7.0.20']
+        for name, yes, no in zip(('rustc', 'node', 'tsc'), good, bad):
+            self.assertTrue(exact_version(name, yes))
+            self.assertFalse(exact_version(name, no))
+            self.assertFalse(exact_version(name, 'unparseable'))
+
+
+def consumer_scenarios():
+    from relay_engine import api_protocol as p, api_schema, api_wire as w
+    compiled = load_generator().build_registry()
+    artifact = api_schema.export_schema(compiled, '3.0')
+    runtime = p.RuntimeContext('consumer-store', 'isolated', 'consumer-runtime', '3.0.0',
+                               'a' * 64, True, {'3.0': artifact})
+    args = {'supported': {'min': '3.0', 'max': '3.0'},
+            'required_build_id': runtime.build_id, 'required_schema_digest': artifact.digest}
+    connected = p.dispatch_discovery(p.initial_connection_state(), w.ApiRequest('1', 'protocol.connect', args), runtime, compiled)
+    schema = p.dispatch_discovery(connected.state, w.ApiRequest('2', 'protocol.schema', {}), runtime, compiled)
+    cases = []
+    def frame(value):
+        raw = jcs.jcs_encode(value)
+        return (len(raw).to_bytes(4, 'big') + raw).hex()
+    def add(scenario, expected):
+        cases.append((scenario, expected))
+    for op, request_id, body in [('protocol.connect', '1', args), ('protocol.schema', '2', {})]:
+        expected = {'request_id': request_id, 'op': op, 'args': body}
+        encoded = frame(expected)
+        parsed = w.decode_api_frame(bytes.fromhex(encoded)[4:], compiled)
+        self_expected = w.ApiRequest(request_id, op, body)
+        assert parsed == self_expected
+        add({'action': 'encode', 'operation': op, 'id': request_id, 'value': body}, {'hex': encoded})
+    connect_frame = frame(connected.response)
+    def decode(response, operation='protocol.schema', outstanding='2', context=connect_frame, valid=True):
+        case = {'action': 'decode', 'operation': operation, 'id': outstanding,
+                'frame': frame(response), 'connect': context}
+        if not valid:
+            expected = {'unavailable': True}
+        elif 'error' in response:
+            expected = {'error': response['error']}
+        elif operation == 'protocol.schema':
+            expected = {'result': {k: response['result'][k] for k in ('protocol', 'schema_digest', 'schema_byte_count')}}
+        else:
+            expected = {'result': response['result']}
+        add(case, expected)
+    decode(connected.response, 'protocol.connect', '1', '')
+    decode(schema.response)
+    for arm in compiled.arms:
+        cause = compiled.types[arm.cause_type.name].shape
+        kind_ref = next(f.type_ref for f in cause.fields if f.name == 'kind')
+        kind = compiled.types[kind_ref.name].shape.values[0]
+        code, api_class, remedy = arm.code, arm.wire_class, arm.remedy
+        payload = {}
+        if kind == 'protocol_window':
+            payload = {'requested': {'min': '2.0', 'max': '2.9'}, 'supported': {'min': '3.0', 'max': '3.0'}}
+        elif kind == 'pin_mismatch':
+            payload = {'field': 'build_id', 'required': 'f' * 64, 'actual': 'a' * 64}
+        error = p.api_error(compiled, kind, **payload)
+        assert (error['code'], error['class'], error['remedy']) == (code, api_class, remedy)
+        decode({'request_id': '2', 'error': error})
+        wrong = json.loads(json.dumps(error));wrong['remedy'] = 'unknown_remedy'
+        decode({'request_id': '2', 'error': wrong}, valid=False)
+    for field, bad in [('schema_byte_count', str(artifact.byte_count + 1)), ('schema_digest', '0' * 64)]:
+        wrong = json.loads(json.dumps(schema.response));wrong['result'][field] = bad
+        decode(wrong, valid=False)
+    for field, bad in [('protocol', '2.0'), ('schema_digest', '0' * 64)]:
+        wrong = json.loads(json.dumps(connected.response));wrong['result'][field] = bad
+        decode(schema.response, context=frame(wrong), valid=False)
+    decode(schema.response, context='', valid=False)
+    decode(schema.response, outstanding='3', valid=False)
+    error = p.api_error(compiled, 'handshake_required')
+    for field, bad in [('class', 'version'), ('remedy', 'resend_valid_request')]:
+        wrong = dict(error, **{field: bad});decode({'request_id': '2', 'error': wrong}, valid=False)
+    wrong = json.loads(json.dumps(error));wrong['cause']['kind'] = 'unknown_kind'
+    decode({'request_id': '2', 'error': wrong}, valid=False)
+    values = [('UInt64', x) for x in ('0', '18446744073709551615', '18446744073709551616', '01', '-1', '1\n')]
+    values += [('RequestId', x) for x in ('1', '0', '18446744073709551615', '18446744073709551616', '01', '+1', '1e3')]
+    values += [('OpaqueId', x) for x in ('x', 'é' * 128, 'é' * 129, '😀' * 64, '😀' * 64 + 'a', '', 'a\x00b')]
+    values += [('ProtocolWindow', x) for x in ({'min': '3.0', 'max': '3.1'}, {'min': '3.1', 'max': '3.0'}, {'min': '2.0', 'max': '3.0'})]
+    values += [('CanonicalSchemaBase64', x) for x in ('e30=', 'e31=', 'e30', 'e30=\n', '-w==')]
+    for name, value in values:
+        expected = not isinstance(r.validate_type(compiled, d.TypeRef(name), value), r.ValidationFailure)
+        add({'action': 'validate', 'type': name, 'value': value}, {'valid': expected})
+    for raw in ['{"x":"a","\\u0078":"b"}', '{"x":1}', '{"x":1.0}', '{"x":true}', '"\\ud800"', '"\\ud83d\\ude00"', '{} {}', '\ufeff{}']:
+        try:
+            w.strict_json_loads(raw.encode());valid = True
+        except w.StrictJsonError:
+            valid = False
+        add({'action': 'parse', 'text': raw}, {'valid': valid})
+    known = json.loads(artifact.canonical_bytes)
+    add({'action': 'schema', 'schema': json.dumps(known)}, {'valid': True})
+    duplicate = json.loads(json.dumps(known));duplicate['x-adt']['rules'][-1] = duplicate['x-adt']['rules'][0]
+    add({'action': 'schema', 'schema': json.dumps(duplicate)}, {'valid': False})
+    known['x-adt']['rules'].append({'kind': 'future_required_kind'})
+    add({'action': 'schema', 'schema': json.dumps(known)}, {'valid': False})
+    return cases
+
+
+class TestGeneratedConsumers(unittest.TestCase):
+    def test_manifest_matches_artifacts(self):
+        from relay_engine import api_schema
+        root = TOOLS / 'relay_engine/generated/api'
+        artifact = api_schema.export_schema(load_generator().build_registry(), '3.0')
+        manifest = json.loads((root / 'manifest.json').read_bytes())
+        self.assertEqual(manifest['schema_digest'], artifact.digest)
+        self.assertEqual(manifest['schema_byte_count'], str(artifact.byte_count))
+        self.assertEqual(manifest['protocol'], '3.0')
+        self.assertEqual(manifest['operations'], ['protocol.connect', 'protocol.schema'])
+        self.assertEqual(set(manifest['bindings']), {'api_3_0.rs', 'api_3_0.ts'})
+        for name, digest in manifest['bindings'].items():
+            self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)
+
+    def run_consumer(self, language, only_schema=False, cases=None):
+        cases = consumer_scenarios() if cases is None else cases
+        if only_schema:
+            cases = [case for case in cases if case[0]['action'] == 'schema']
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp);scenario_file = folder / 'scenarios.jsonl'
+            scenario_file.write_bytes(b'\n'.join(jcs.jcs_encode(s) for s, _ in cases) + b'\n')
+            consumer = TOOLS / 'relay_engine/tests/api_consumers' / ('consumer.' + language)
+            tools = toolchain()
+            if language == 'rs':
+                binary = folder / 'consumer'
+                command = tools['rustc'] + ['--edition', '2021', '-D', 'warnings', str(consumer), '-o', str(binary)]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                command = [str(binary), str(scenario_file)]
+            else:
+                command = tools['tsc'] + ['--strict', '--noEmit', '--target', 'es2022', '--module', 'nodenext', '--allowImportingTsExtensions', str(consumer)]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                command = tools['node'] + [str(consumer), str(scenario_file)]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = result.stdout.splitlines();expected = [jcs.jcs_encode(value).decode() for _, value in cases]
+            self.assertEqual(lines, expected)
+            if not only_schema and any(s['action'] == 'encode' for s, _ in cases):
+                for action, field in [('encode', 'hex'), ('decode', 'result')]:
+                    index = next(i for i, (s, e) in enumerate(cases) if s['action'] == action and field in e)
+                    changed = expected.copy();wrong = json.loads(expected[index])
+                    if action == 'encode':
+                        raw = bytes.fromhex(wrong['hex']); body = json.loads(raw[4:]);body['op'] = 'protocol.changed'
+                        raw = jcs.jcs_encode(body);wrong['hex'] = (len(raw).to_bytes(4, 'big') + raw).hex()
+                    else:
+                        wrong['result']['schema_digest'] = '0' * 64
+                    changed[index] = jcs.jcs_encode(wrong).decode()
+                    with self.assertRaises(AssertionError):
+                        self.assertEqual(lines, changed)
+                changed = expected.copy();index = next(i for i, (s, _) in enumerate(cases) if s.get('id') == '2' and s['action'] == 'decode')
+                wrong = json.loads(expected[index]);wrong['request_id'] = '3'
+                changed[index] = jcs.jcs_encode(wrong).decode()
+                with self.assertRaises(AssertionError):
+                    self.assertEqual(lines, changed)
+
+    def test_generated_base64_size_contract(self):
+        compiled = load_generator().build_registry()
+        values = ['A' * 8388608,
+                  base64.b64encode(b'\x00' * 8388608).decode(),
+                  base64.b64encode(b'\x00' * 8388609).decode(),
+                  'A' * 8388606 + 'B=']
+        cases = []
+        for value in values:
+            valid = not isinstance(r.validate_type(compiled, d.TypeRef('CanonicalSchemaBase64'), value), r.ValidationFailure)
+            cases.append(({'action': 'validate', 'type': 'CanonicalSchemaBase64', 'value': value}, {'valid': valid}))
+        self.assertEqual([expected['valid'] for _, expected in cases], [True, True, False, False])
+        self.run_consumer('ts', cases=cases)
+        self.run_consumer('rs', cases=cases)
+
+    def test_rust_parser_large_valid_string(self):
+        cases = [({'action': 'parse', 'text': json.dumps('x' * 1048576)}, {'valid': True})]
+        self.run_consumer('rs', cases=cases)
+
+    def test_rust_consumer_compiles_and_agrees(self):
+        self.run_consumer('rs')
+
+    def test_typescript_consumer_typechecks_and_agrees(self):
+        self.run_consumer('ts')
+
+    def test_bindings_refuse_unknown_rule_kind(self):
+        self.run_consumer('rs', only_schema=True)
+        self.run_consumer('ts', only_schema=True)
 
 
 if __name__ == '__main__':
