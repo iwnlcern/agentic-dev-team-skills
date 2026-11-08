@@ -17,7 +17,7 @@ from relay_engine.tests import test_submit
 from relay_engine.tests.test_submit import Store as SubmitStore
 
 
-TABLES = {"reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
+TABLES = {"slips", "slip_events", "branch_bindings", "reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
@@ -875,8 +875,9 @@ class TestTableOwners(Store):
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
-        self.assertEqual(len(actual), 38)
-        authority = {"reviewer_assignments", "verification_requests", "waivers"}
+        self.assertEqual(len(actual), 41)
+        authority = {"reviewer_assignments", "verification_requests", "waivers",
+                     "slips", "slip_events", "branch_bindings"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "authority"}, authority)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)

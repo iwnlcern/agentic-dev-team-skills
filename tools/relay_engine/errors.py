@@ -620,12 +620,29 @@ _SETTINGS_TEXT = {
 strings.register_inventory(_SETTINGS_TEXT, {})
 
 
+_AUTHORITY_TEXT = {
+    'error-authority-query-cause': 'this effect has no usable approval',
+    'error-authority-query-remedy': 'ask the named decider to review the current approval',
+    'error-authority-query-explain': 'the act answer names the reason and who can unblock it',
+}
+strings.register_inventory(_AUTHORITY_TEXT, {})
+
 ERRORS = {
     "E-SETTING-OPERATOR-ONLY": _spec("setting-operator-only", "policy"),
     "E-JEV-ACT-NEEDS-RECORD": _spec("jev-act-needs-record", "policy"),
     "E-DELIVERY-INTERVAL-MARGIN": _spec("delivery-interval-margin", "policy"),
     "E-SETTING-UNKNOWN": _spec("setting-unknown", "command"),
     "E-SETTING-VALUE": _spec("setting-value", "command"),
+    "E-AUTHORITY-SLIP-MISSING": _spec("authority-query", "command"),
+    "E-AUTHORITY-SLIP-INVALID": _spec("authority-query", "command"),
+    "E-AUTHORITY-LINEAGE-INCOMPLETE": _spec("authority-query", "command"),
+    "E-AUTHORITY-NOT-ISSUER": _spec("authority-query", "command"),
+    "E-AUTHORITY-PLAN-CHANGED": _spec("authority-query", "command"),
+    "E-AUTHORITY-DESIGN-CHANGED": _spec("authority-query", "command"),
+    "E-AUTHORITY-VERIFICATION-PENDING": _spec("authority-query", "command"),
+    "E-AUTHORITY-VERIFICATION-OBJECTED": _spec("authority-query", "command"),
+    "E-AUTHORITY-CHECK-UNAVAILABLE": _spec("authority-query", "command"),
+
     "E-SNAPSHOT-STALE": _spec("snapshot-stale", "integrity"),
     "E-SNAPSHOT-NOT-TO": _spec("snapshot-not-to", "integrity"),
     "E-SNAPSHOT-NO-REF": _spec("snapshot-no-ref", "integrity"),

@@ -57,6 +57,23 @@ INVENTORY = {
     "engine-root-outside-the-record": "outside-the-record: {cause}: {path}",
 }
 
+INVENTORY.update({
+    "authority-missing": "no implement slip exists for this seat",
+    "authority-state": "the slip is {state}",
+    "authority-repository": "the slip covers another repository: {repository}",
+    "authority-seat": "the branch belongs to another seat: {seat}",
+    "authority-binding": "the branch has no usable slip for its bound bundle",
+    "authority-context": "the commit needs a repository and branch",
+    "authority-lineage": "relay {relay} is missing a permitted issuer or approved plan or design lock",
+    "authority-lineage-long": "relay {relay}: the relay chain is longer than the 256 relays checked",
+    "authority-artifact": "the working copy changed or cannot be read: {artifact}; re-request review of the current copy, then issue a fresh go",
+    "authority-verification": "the {kind} verification is {state}",
+    "authority-no-merge": "merge slips are not issued by this build",
+    "authority-guardrail": "the guardrail rules are the decider for this effect; this check cannot answer it",
+    "authority-fault": "the permission check could not answer; report the fault to the operator",
+    "authority-not-issuer": "only the issuer, the project's orchestrator or the operator can revoke this slip",
+})
+
 _VALIDATORS = {}
 _FACTORY_CALLED = False
 LIST_BUDGET = 4096
@@ -69,6 +86,16 @@ _CODE_VALUES = {
     "E-SETTING-UNKNOWN", "E-SETTING-VALUE",
     "E-ADMISSION-HOOK", "E-SUBMISSION-KEY-REUSED", "E-SENDER-NOT-CURRENT",
     "E-ADMISSION-COMMIT", "E-ADMISSION-UNKNOWN", "E-STORE-BUSY",
+    "E-AUTHORITY-SLIP-MISSING",
+    "E-AUTHORITY-SLIP-INVALID",
+    "E-AUTHORITY-LINEAGE-INCOMPLETE",
+    "E-AUTHORITY-NOT-ISSUER",
+    "E-AUTHORITY-PLAN-CHANGED",
+    "E-AUTHORITY-DESIGN-CHANGED",
+    "E-AUTHORITY-VERIFICATION-PENDING",
+    "E-AUTHORITY-VERIFICATION-OBJECTED",
+    "E-AUTHORITY-CHECK-UNAVAILABLE",
+
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE", "E-DRAFT-SHAPE",
     "E-REPLAY-MISMATCH", "E-STORAGE", "E-DAEMON-DOWN", "E-NO-ROOT",
@@ -287,6 +314,12 @@ def register_inventory(entries, validators):
 def _placeholders(template):
     return tuple(field for _, field, _, _ in _string.Formatter().parse(template)
                  if field is not None)
+
+
+for _key in tuple(INVENTORY):
+    if _key.startswith('authority-'):
+        for _field in _placeholders(INVENTORY[_key]):
+            _VALIDATORS[(_key, _field)] = _is_show_text
 
 
 def render(key, /, **params):

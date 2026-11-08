@@ -213,6 +213,48 @@ _AUTHORITY_TABLES = (
 TABLE_OWNERS.update({name: 'authority' for name in
                     ('reviewer_assignments', 'verification_requests', 'waivers')})
 
+_AUTHORITY_TABLES += (
+    """CREATE TABLE IF NOT EXISTS slips (
+    id TEXT NOT NULL PRIMARY KEY,
+    handle INTEGER NOT NULL CHECK (handle >= 1),
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    kind TEXT NOT NULL CHECK (kind IN ('implement', 'merge')),
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    %s,
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    issued_in TEXT NOT NULL UNIQUE REFERENCES relays (id),
+    binds TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('live', 'revoked', 'consumed', 'ended')),
+    issued_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    end_reason TEXT CHECK (end_reason IN ('revoked', 'bundle-closed', 'merged', 'pr-closed')),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    UNIQUE (project_id, handle),
+    UNIQUE (seat_id, kind, repository_id, issued_at, handle),
+    CHECK ((state = 'live') = (ended_at IS NULL)),
+    CHECK ((ended_at IS NULL) = (end_reason IS NULL))
+) STRICT""" % _arc('issuer_', {'operator'}),
+    """CREATE TABLE IF NOT EXISTS slip_events (
+    slip_id TEXT NOT NULL REFERENCES slips (id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    event TEXT NOT NULL CHECK (event IN ('issue', 'revoke')),
+    at INTEGER NOT NULL,
+    %s,
+    detail TEXT NOT NULL,
+    UNIQUE (slip_id, revision)
+) STRICT""" % _arc('by_', {'operator'}),
+    """CREATE TABLE IF NOT EXISTS branch_bindings (
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    branch TEXT NOT NULL,
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    bound_at INTEGER NOT NULL,
+    UNIQUE (repository_id, branch)
+) STRICT""",
+)
+TABLE_OWNERS.update({name: 'authority' for name in ('slips', 'slip_events', 'branch_bindings')})
+
 _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
     """CREATE TABLE IF NOT EXISTS imported_relays (
     relay_id TEXT NOT NULL REFERENCES relays(id),
