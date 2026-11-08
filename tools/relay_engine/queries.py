@@ -13,6 +13,8 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import secrets
+import stat
 import sqlite3
 import tempfile
 from typing import Callable
@@ -666,23 +668,24 @@ def snapshot_diff(conn, a_handle, b_handle, store, directory=None, *, project_id
 
 
 def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None, project_id):
-    """Write a snapshot's exact bytes; overwrite replaces the directory entry."""
+    """Publish exact bytes through a private file beside the output.
+
+    Creating a copy needs same-directory hard links; a filesystem that refuses
+    them raises its OSError after staging cleanup. Overwrite uses os.replace
+    and keeps an existing regular file's permission bits, else the umask mode.
+    """
     snapshot = _snapshot(conn, handle, project_id)
     data = _snapshot_bytes(conn, snapshot, store, directory)
-    if overwrite:
-        # mkstemp uses O_EXCL: even a final symlink is never followed.
-        fd, target = tempfile.mkstemp(prefix=".snapshot-", dir=Path(out).parent)
-    else:
-        target = out
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for attempt in range(100):
+        target = Path(out).parent / (".snapshot-" + secrets.token_hex(8))
         try:
-            fd = os.open(out, flags, 0o644)
+            fd = os.open(target, flags, 0o644)
         except FileExistsError:
-            shown = os.fspath(out)
-            raise errors.error_for(
-                "E-OUTPUT-EXISTS",
-                path=shown if strings._is_show_text(shown) and len(shown) <= 300
-                else errors._rejected_identity(shown)) from None
+            if attempt == 99:
+                raise
+        else:
+            break
     try:
         with io.FileIO(fd, mode="wb", closefd=True) as stream:
             view = memoryview(data)
@@ -691,12 +694,28 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
                 if written <= 0:
                     raise OSError("snapshot write made no progress")
                 view = view[written:]
+            if overwrite:
+                try:
+                    mode = os.lstat(out).st_mode
+                except FileNotFoundError:
+                    pass
+                else:
+                    if stat.S_ISREG(mode):
+                        os.fchmod(stream.fileno(), stat.S_IMODE(mode))
             os.fsync(stream.fileno())
         if overwrite:
             os.replace(target, out)
-    except BaseException:
+        else:
+            try:
+                os.link(target, out)
+            except FileExistsError:
+                shown = os.fspath(out)
+                raise errors.error_for(
+                    "E-OUTPUT-EXISTS",
+                    path=shown if strings._is_show_text(shown) and len(shown) <= 300
+                    else errors._rejected_identity(shown)) from None
+    finally:
         try:
             os.unlink(target)
         except OSError:
             pass
-        raise

@@ -1257,29 +1257,39 @@ class TestSnapshotCopies(submit_tests.Snapshots):
                 out.symlink_to(target)
             else:
                 os.link(other, out)
-            pid = os.fork()
-            if pid == 0:
+            if kind == "fifo":
+                reader = os.open(out, os.O_RDONLY | os.O_NONBLOCK)
                 try:
-                    queries.write_snapshot(self.conn, 1, out, self.store, True,
-                        project_id=submit_tests.PROJECT)
-                except BaseException:
-                    os._exit(1)
-                os._exit(0)
-            status = None
-            deadline = time.monotonic() + 2
-            try:
-                while time.monotonic() < deadline:
-                    done, value = os.waitpid(pid, os.WNOHANG)
-                    if done:
-                        status = value
-                        break
-                    time.sleep(0.01)
-            finally:
-                if status is None:
-                    os.kill(pid, 9)
-                    os.waitpid(pid, 0)
-            self.assertIsNotNone(status, "overwrite blocked on " + kind)
-            self.assertEqual(os.waitstatus_to_exitcode(status), 0, kind)
+                    result = snapshot_outcome(lambda: queries.write_snapshot(
+                        self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
+                    self.assertEqual(result[0], "ok", result)
+                    self.assertEqual(os.read(reader, 100), b"")
+                finally:
+                    os.close(reader)
+            else:
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        queries.write_snapshot(self.conn, 1, out, self.store, True,
+                            project_id=submit_tests.PROJECT)
+                    except BaseException:
+                        os._exit(1)
+                    os._exit(0)
+                status = None
+                deadline = time.monotonic() + 2
+                try:
+                    while time.monotonic() < deadline:
+                        done, value = os.waitpid(pid, os.WNOHANG)
+                        if done:
+                            status = value
+                            break
+                        time.sleep(0.01)
+                finally:
+                    if status is None:
+                        os.kill(pid, 9)
+                        os.waitpid(pid, 0)
+                self.assertIsNotNone(status, "overwrite blocked on " + kind)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 0, kind)
             self.assertFalse(out.is_symlink())
             self.assertTrue(out.is_file())
             self.assertEqual(out.read_bytes(), b"one\n")
@@ -1313,6 +1323,7 @@ class TestSnapshotCopies(submit_tests.Snapshots):
     def test_create_write_failure_removes_partial(self):
         self.snapshots_pair()
         out = self.folder / "partial"
+        before = set(self.folder.iterdir())
         marker = OSError("fixture partial write")
         real_write = os.write
 
@@ -1324,11 +1335,66 @@ class TestSnapshotCopies(submit_tests.Snapshots):
                 project_id=submit_tests.PROJECT))
         self.assertIs(result[1], marker, result)
         self.assertFalse(out.exists())
+        self.assertEqual(set(self.folder.iterdir()), before)
         out.write_bytes(b"not ours")
         result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
             project_id=submit_tests.PROJECT))
         self.assertEqual(result[0], "E-OUTPUT-EXISTS", result)
         self.assertEqual(out.read_bytes(), b"not ours")
+
+    def test_create_spares_concurrent_overwrite(self):
+        self.snapshots_pair()
+        for operation in ("write", "fsync"):
+            out = self.folder / ("race-" + operation)
+            before = set(self.folder.iterdir())
+            marker = OSError("fixture interleaved write")
+            real_operation = getattr(os, operation)
+            triggered = False
+
+            def interleave(*args):
+                nonlocal triggered
+                if not triggered:
+                    triggered = True
+                    queries.write_snapshot(self.conn, 2, out, self.store, True,
+                        project_id=submit_tests.PROJECT)
+                    if operation == "write":
+                        raise marker
+                return real_operation(*args)
+
+            with mock.patch.object(queries.os, operation, side_effect=interleave):
+                result = snapshot_outcome(lambda: queries.write_snapshot(
+                    self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+            if operation == "write":
+                self.assertIs(result[1], marker, result)
+            else:
+                self.assertEqual(result[0], "E-OUTPUT-EXISTS", result)
+            self.assertTrue(out.exists(), result)
+            self.assertEqual(out.read_bytes(), b"two\n")
+            self.assertEqual(set(self.folder.iterdir()), before | {out})
+
+    def test_copy_modes(self):
+        self.snapshots_pair()
+        previous = os.umask(0o022)
+        try:
+            out = self.folder / "modes"
+            queries.write_snapshot(self.conn, 1, out, self.store,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o644)
+            out.chmod(0o640)
+            queries.write_snapshot(self.conn, 2, out, self.store, True,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o640)
+            target = self.folder / "mode-target"
+            target.write_bytes(b"keep")
+            target.chmod(0o600)
+            link = self.folder / "mode-link"
+            link.symlink_to(target)
+            queries.write_snapshot(self.conn, 1, link, self.store, True,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(link.stat().st_mode & 0o7777, 0o644)
+            self.assertEqual(target.stat().st_mode & 0o7777, 0o600)
+        finally:
+            os.umask(previous)
 
     def test_copy_project_scoped(self):
         ref = self.snapshots_pair()
