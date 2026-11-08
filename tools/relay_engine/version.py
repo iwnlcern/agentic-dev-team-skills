@@ -24,6 +24,7 @@ ROSTER = (
     "relay_engine/daemon.py",
     "relay_engine/envelope.py",
     "relay_engine/errors.py",
+    "relay_engine/generated/api/schema-3.0.json",
     "relay_engine/guardrail.py",
     "relay_engine/header.py",
     "relay_engine/jcs.py",

@@ -60,12 +60,8 @@ def help_population(parser):
 
 def ruled_manifest():
     entries = []
-    relay = SOURCE_ROOT / "tools/relay"
-    entries.append((relay, "relay"))
-    for source in sorted((SOURCE_ROOT / "tools/relay_engine").glob("*.py")):
-        entries.append((source, "relay_engine/" + source.name))
-    readme = SOURCE_ROOT / "tools/relay_engine/README.md"
-    entries.append((readme, "relay_engine/README.md"))
+    for member in ROSTER:
+        entries.append((SOURCE_ROOT / "tools" / member, member))
     standalone = SOURCE_ROOT / "tools/relay-lint.py"
     entries.append((standalone, "tools/relay-lint.py"))
 

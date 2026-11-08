@@ -10711,6 +10711,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/generated/api/schema-3.0.json",
+    "sha256": "bdae726a381a828c3f452a6c9b1fb79e0f95645470160b2becceb5699afdad6e",
+    "source": "tools/relay_engine/generated/api/schema-3.0.json"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/guardrail.py",
     "sha256": "25466bc9cacea0b906ce6faa8580de20636684c4a0714117fdb8a79c54e6dce2",
     "source": "tools/relay_engine/guardrail.py"
@@ -10826,7 +10832,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "ff118452d2c1828f6c6c7dbcc7e88865263a73daebf0e938c09c2859da4eb102",
+    "sha256": "c9e5c3ccbfc4bd2be7b12710354a69bae0afa59ba9739b06cf6441de24d2069e",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21445,6 +21451,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/generated/api/schema-3.0.json",
+    "sha256": "bdae726a381a828c3f452a6c9b1fb79e0f95645470160b2becceb5699afdad6e",
+    "source": "tools/relay_engine/generated/api/schema-3.0.json"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/guardrail.py",
     "sha256": "25466bc9cacea0b906ce6faa8580de20636684c4a0714117fdb8a79c54e6dce2",
     "source": "tools/relay_engine/guardrail.py"
@@ -21560,7 +21572,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "ff118452d2c1828f6c6c7dbcc7e88865263a73daebf0e938c09c2859da4eb102",
+    "sha256": "c9e5c3ccbfc4bd2be7b12710354a69bae0afa59ba9739b06cf6441de24d2069e",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32095,6 +32107,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/generated/api/schema-3.0.json",
+    "sha256": "bdae726a381a828c3f452a6c9b1fb79e0f95645470160b2becceb5699afdad6e",
+    "source": "tools/relay_engine/generated/api/schema-3.0.json"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/guardrail.py",
     "sha256": "25466bc9cacea0b906ce6faa8580de20636684c4a0714117fdb8a79c54e6dce2",
     "source": "tools/relay_engine/guardrail.py"
@@ -32210,7 +32228,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "ff118452d2c1828f6c6c7dbcc7e88865263a73daebf0e938c09c2859da4eb102",
+    "sha256": "c9e5c3ccbfc4bd2be7b12710354a69bae0afa59ba9739b06cf6441de24d2069e",
     "source": "tools/relay_engine/version.py"
   },
   {

@@ -1,9 +1,19 @@
 """Canonical discovery artifact and generated-consumer conformance controls."""
 import base64
+import ast
+import contextlib
 from dataclasses import replace
 import hashlib
+import importlib.util
+import io
 import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from relay_engine import api_definitions as d, api_registry as r, errors, jcs
 
@@ -141,6 +151,80 @@ class TestExport(unittest.TestCase):
                     self.export(replace(self.registry, types=types))
                 self.assertEqual(caught.exception.reason, 'unrepresentable_profile')
         self.assertIsInstance(self.export().canonical_bytes, bytes)
+
+
+TOOLS = Path(__file__).resolve().parents[2]
+
+
+def load_generator():
+    spec = importlib.util.spec_from_file_location('discovery_generator', TOOLS / 'generate-api.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestGenerator(unittest.TestCase):
+    def test_committed_schema_equals_export(self):
+        from relay_engine import api_protocol, api_schema
+        generator = load_generator()
+        compiled = generator.build_registry()
+        self.assertEqual(dict(compiled.handlers), api_protocol.discovery_handlers())
+        expected = api_schema.export_schema(compiled, '3.0').canonical_bytes
+        with patch('builtins.open', side_effect=AssertionError('generator opened a file')):
+            generated = generator.generate(TOOLS)
+        key = 'tools/relay_engine/generated/api/schema-3.0.json'
+        self.assertEqual(generated[key], expected)
+        self.assertEqual((TOOLS.parent / key).read_bytes(), expected)
+        self.assertFalse(expected.endswith(b'\n'))
+
+    def test_check_mode_detects_drift(self):
+        generator = load_generator()
+        with tempfile.TemporaryDirectory() as temp:
+            tools = Path(temp) / 'tools'
+            destination = tools / 'relay_engine/generated/api'
+            shutil.copytree(TOOLS / 'relay_engine/generated/api', destination)
+            with patch.object(generator, 'TOOLS_DIR', tools), contextlib.redirect_stdout(io.StringIO()) as output:
+                before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in destination.iterdir()}
+                self.assertEqual(generator.main(['--check']), 0)
+                self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in destination.iterdir()}, before)
+                file = destination / 'schema-3.0.json'
+                original = file.read_bytes()
+                file.write_bytes(b'!' + original[1:])
+                changed = file.read_bytes()
+                self.assertEqual(generator.main(['--check']), 1)
+                self.assertIn('tools/relay_engine/generated/api/schema-3.0.json', output.getvalue())
+                self.assertEqual(file.read_bytes(), changed)
+                self.assertEqual(generator.main(['--write']), 0)
+                self.assertEqual(file.read_bytes(), original)
+                self.assertEqual(generator.main(['--check']), 0)
+
+    def test_generator_import_surface(self):
+        path = TOOLS / 'generate-api.py'
+        tree = ast.parse(path.read_text())
+        forbidden = {'daemon', 'cli', 'client', 'ledger', 'socket', 'sqlite3', 'submit', 'schema', 'queries'}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = {part for alias in node.names for part in alias.name.split('.')}
+            elif isinstance(node, ast.ImportFrom):
+                names = set((node.module or '').split('.')) | {alias.name for alias in node.names}
+            else:
+                continue
+            self.assertFalse(names & forbidden)
+        probe = '''import importlib.util,sys
+from pathlib import Path
+tools=Path(sys.argv[1]);sys.path.insert(0,str(tools))
+spec=importlib.util.spec_from_file_location("producer",tools/"generate-api.py")
+producer=importlib.util.module_from_spec(spec);spec.loader.exec_module(producer)
+assert producer.generate(tools)
+forbidden={"sqlite3","_sqlite3","socket"}|{"relay_engine."+x for x in ("daemon","cli","client","ledger","submit","schema","queries")}
+assert not forbidden.intersection(sys.modules),sorted(forbidden.intersection(sys.modules))
+'''
+        result = subprocess.run([sys.executable, '-I', '-c', probe, str(TOOLS)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        control = probe.replace('assert not forbidden.intersection', 'import sqlite3\nassert not forbidden.intersection')
+        result = subprocess.run([sys.executable, '-I', '-c', control, str(TOOLS)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('sqlite3', result.stderr)
 
 
 if __name__ == '__main__':
