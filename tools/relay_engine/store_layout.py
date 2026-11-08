@@ -1,5 +1,6 @@
 """Store paths and guarded per-project opening (DD-v3-store slice 1)."""
 from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 import sqlite3
 import sys
@@ -204,3 +205,44 @@ def add_key_route(catalogue_conn, key_id: str, project_id: str, now_ms: int) -> 
     """Insert an immutable locator before the caller provisions the occupant."""
     catalogue_conn.execute('INSERT INTO key_routes VALUES (?, ?, ?)',
                            (_canonical_id(key_id), _canonical_id(project_id), now_ms)).close()
+
+
+def declared_order(catalogue: bool, project_ids: Iterable[str]) -> tuple[str, ...]:
+    """One acquisition order for every job, including overlapping declared sets."""
+    projects = tuple(_canonical_id(project_id) for project_id in project_ids)
+    if len(set(projects)) != len(projects):
+        raise ValueError('duplicate declared project')
+    return (('catalogue',) if catalogue else ()) + tuple(sorted(projects))
+
+
+def rollback_declared(conns: Mapping[str, sqlite3.Connection]) -> None:
+    """Release every transaction, including one whose BEGIN failed."""
+    for conn in conns.values():
+        if conn.in_transaction:
+            _pragma(conn, 'ROLLBACK')
+
+
+def begin_declared(conns: Mapping[str, sqlite3.Connection], *,
+                   except_written: str | None = None) -> None:
+    """Acquire F-2 locks; the caller commits only its one written file.
+
+    Every connection must have all cursors closed and no transaction open
+    before this call (DD section 5 F-2). Live cursors are not detected: after
+    another connection commits to their file, they can cause BEGIN IMMEDIATE
+    to fail at once with SQLITE_BUSY_SNAPSHOT, without the busy timeout.
+    Skip except_written only when an Engine helper will own its BEGIN.
+    On failure roll back every connection in the declared set.
+    """
+    try:
+        order = declared_order('catalogue' in conns,
+                               (name for name in conns if name != 'catalogue'))
+        if except_written is not None and except_written not in conns:
+            raise ValueError('written file is outside the declared set')
+        if any(conn.in_transaction for conn in conns.values()):
+            raise ValueError('declared connection already has a transaction')
+        for name in order:
+            if name != except_written:
+                _pragma(conns[name], 'BEGIN IMMEDIATE')
+    except BaseException:
+        rollback_declared(conns)
+        raise
