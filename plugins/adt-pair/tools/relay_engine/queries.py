@@ -16,7 +16,6 @@ from pathlib import Path
 import secrets
 import stat
 import sqlite3
-import tempfile
 from typing import Callable
 
 from relay_engine import errors
@@ -701,7 +700,7 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
                     pass
                 else:
                     if stat.S_ISREG(mode):
-                        os.fchmod(stream.fileno(), stat.S_IMODE(mode))
+                        os.fchmod(stream.fileno(), stat.S_IMODE(mode) & 0o777)
             os.fsync(stream.fileno())
         if overwrite:
             os.replace(target, out)

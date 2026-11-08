@@ -1393,6 +1393,12 @@ class TestSnapshotCopies(submit_tests.Snapshots):
                 project_id=submit_tests.PROJECT)
             self.assertEqual(link.stat().st_mode & 0o7777, 0o644)
             self.assertEqual(target.stat().st_mode & 0o7777, 0o600)
+            out.chmod(0o4750)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o4750,
+                "special-mode fixture precondition")
+            queries.write_snapshot(self.conn, 1, out, self.store, True,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o750)
         finally:
             os.umask(previous)
 
