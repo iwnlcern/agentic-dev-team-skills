@@ -20,12 +20,12 @@ POLICY_CODES = {
 }
 
 ALL_CODES = POLICY_CODES | {
-    'E-SNAPSHOT-STALE',
-    'E-SNAPSHOT-NOT-TO',
-    'E-SNAPSHOT-NO-REF',
-    'E-SNAPSHOT-NO-BYTES',
-    'E-SNAPSHOT-NOT-TEXT',
-    'E-OUTPUT-EXISTS',
+    "E-SNAPSHOT-STALE",
+    "E-SNAPSHOT-NOT-TO",
+    "E-SNAPSHOT-NO-REF",
+    "E-SNAPSHOT-NO-BYTES",
+    "E-SNAPSHOT-NOT-TEXT",
+    "E-OUTPUT-EXISTS",
 
     "E-SUBMISSION-KEY-REUSED",
     "E-ADMISSION-HOOK",
@@ -90,7 +90,12 @@ ALL_CODES = POLICY_CODES | {
 
 class TestErrorRegistry(unittest.TestCase):
     def test_snapshot_codes_catalogued(self):
-        cases = {'E-SNAPSHOT-STALE': 'integrity', 'E-SNAPSHOT-NOT-TO': 'integrity', 'E-SNAPSHOT-NO-REF': 'integrity', 'E-SNAPSHOT-NO-BYTES': 'command', 'E-SNAPSHOT-NOT-TEXT': 'command', 'E-OUTPUT-EXISTS': 'command'}
+        cases = {"E-SNAPSHOT-STALE": 'integrity',
+                 "E-SNAPSHOT-NOT-TO": 'integrity',
+                 "E-SNAPSHOT-NO-REF": 'integrity',
+                 "E-SNAPSHOT-NO-BYTES": 'command',
+                 "E-SNAPSHOT-NOT-TEXT": 'command',
+                 "E-OUTPUT-EXISTS": 'command'}
         for code, kind in cases.items():
             with self.subTest(code=code):
                 self.assertIn(code, errors.ERRORS)

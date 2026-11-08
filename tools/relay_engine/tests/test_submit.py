@@ -2017,6 +2017,7 @@ class TestAdmissionKeyBoundary(Store):
         self.assertEqual(refused, [True, True, True, True],
                          "SubmitContext must refuse unstorable and over-256-byte keys")
 
+
 def snapshot_outcome(action):
     try:
         return ("ok", action())
@@ -2028,7 +2029,7 @@ class FakeStore:
     """An in-memory evidence store that counts what it was asked to keep."""
 
     def __init__(self):
-        self.objects, self.puts = {}, 0
+        self.objects, self.puts = ({}, 0)
 
     def put(self, data):
         self.puts += 1
@@ -2044,11 +2045,13 @@ class FakeStore:
 
 MIB = 1 << 20
 
-class Snapshots(Store):
-    def counts(self):
-        return dict(super().counts(), snapshots=self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0])
 
+class Snapshots(Store):
     """DD § 17: what each review saw, and which copy an approve locked."""
+
+    def counts(self):
+        return dict(super().counts(), snapshots=self.conn.execute(
+            "SELECT count(*) FROM snapshots").fetchone()[0])
 
     def setUp(self):
         super().setUp()
@@ -2059,7 +2062,7 @@ class Snapshots(Store):
 
     def ctx(self, *args, **kwargs):
         ctx = super().ctx(*args, **kwargs)
-        return replace(ctx, store=self.store) if hasattr(ctx, "store") else ctx
+        return replace(ctx, store=self.store)
 
     def artifact(self, name, data):
         path = self.folder / name
@@ -2068,10 +2071,7 @@ class Snapshots(Store):
 
     def request(self, *refs_, kind="DESIGN", cc=None):
         result = self.submit(draft(kind=kind, needs="review", to="v3-engine.implementer", cc=cc,
-                                   refs=refs_))
-        self.assertIn("snapshots", {name for name, in self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'")},
-            "review requests must persist their snapshot rows")
+            refs=refs_))
         return result
 
     def approve(self, request, *refs_, verdict="approve", sender=IMPL):
@@ -2079,119 +2079,127 @@ class Snapshots(Store):
 
     def reply(self, request, *refs_, verdict="approve"):
         return draft(kind="DESIGN-REVIEW", verdict=verdict, parent="#%d" % request.handle,
-                     to="v3-engine.planner", refs=refs_)
+            to="v3-engine.planner", refs=refs_)
 
     def rows(self):
-        return self.conn.execute(
-            "SELECT handle, relay_id, artifact, content_sha256, bytes_len, has_bytes, locked_by"
-            " FROM snapshots ORDER BY handle").fetchall()
+        return self.conn.execute("SELECT handle, relay_id, artifact, content_sha256, bytes_len, "
+            "has_bytes, locked_by FROM snapshots ORDER BY handle").fetchall()
 
 
 class TestSnapshots(Snapshots):
     def test_snapshot_on_review_request(self):
-        ref = self.artifact('design.md', b'# design\nline\n')
-        first = self.request(ref, kind='PLAN')
-        sha = hashlib.sha256(b'# design\nline\n').hexdigest()
+        ref = self.artifact("design.md", b"# design\nline\n")
+        first = self.request(ref, kind="PLAN")
+        sha = hashlib.sha256(b"# design\nline\n").hexdigest()
         self.assertEqual(self.rows(), [(1, first.relay_id, ref[5:], sha, 14, 1, None)])
-        self.assertEqual(self.store.get(sha), b'# design\nline\n')
-        self.request(ref, kind='DESIGN')
+        self.assertEqual(self.store.get(sha), b"# design\nline\n")
+        self.request(ref, kind="DESIGN")
         self.assertEqual(len(self.rows()), 2)
         self.assertEqual(self.store.puts, 1)
-        for kind, needs in [('SITREP','none'), ('DESIGN','act'), ('AUDIT','review')]:
+        for kind, needs in [("SITREP", "none"), ("DESIGN", "act"), ("AUDIT", "review")]:
             self.submit(draft(kind=kind, needs=needs, refs=(ref,)))
             self.assertEqual(len(self.rows()), 2)
 
     def test_lock_marks_latest_approved(self):
-        ref = self.artifact('d.md', b'v1\n')
-        request = self.request(ref, cc='v3-other.planner')
-        self.refused('E-SNAPSHOT-NOT-TO', self.reply(request, ref), sender=OTHER)
-        self.refused('E-SNAPSHOT-NO-REF', self.reply(request), sender=IMPL)
-        Path(ref[5:]).write_bytes(b'v2\n')
-        self.refused('E-SNAPSHOT-STALE', self.reply(request, ref), sender=IMPL)
-        Path(ref[5:]).write_bytes(b'v1\n')
+        ref = self.artifact("d.md", b"v1\n")
+        request = self.request(ref, cc="v3-other.planner")
+        self.refused("E-SNAPSHOT-NOT-TO", self.reply(request, ref), sender=OTHER)
+        self.refused("E-SNAPSHOT-NO-REF", self.reply(request), sender=IMPL)
+        Path(ref[5:]).write_bytes(b"v2\n")
+        self.refused("E-SNAPSHOT-STALE", self.reply(request, ref), sender=IMPL)
+        Path(ref[5:]).write_bytes(b"v1\n")
         reply = self.approve(request, ref)
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.rows()[0][6], reply.relay_id)
-        self.assertEqual(self.conn.execute('SELECT locked_at FROM snapshots').fetchone(), (reply.created_at_ms,))
+        self.assertEqual(self.conn.execute("SELECT locked_at FROM snapshots").fetchone(), (
+            reply.created_at_ms,))
         self.approve(request, ref)
         self.assertEqual(self.rows()[0][6], reply.relay_id)
 
     def test_lock_per_artifact(self):
-        a = self.artifact('a.md', b'a\n'); b = self.artifact('b.md', b'b\n')
-        request = self.request(a,b)
-        reply = self.approve(request,a)
-        self.assertEqual([r[6] for r in self.rows()], [reply.relay_id,None])
-        second = self.request(a,b)
-        Path(b[5:]).write_bytes(b'changed')
-        self.refused('E-SNAPSHOT-STALE', self.reply(second,a,b), sender=IMPL)
-        self.assertEqual([r[6] for r in self.rows()], [reply.relay_id,None,None,None])
+        a = self.artifact("a.md", b"a\n")
+        b = self.artifact("b.md", b"b\n")
+        request = self.request(a, b)
+        reply = self.approve(request, a)
+        self.assertEqual([r[6] for r in self.rows()], [reply.relay_id, None])
+        second = self.request(a, b)
+        Path(b[5:]).write_bytes(b"changed")
+        self.refused("E-SNAPSHOT-STALE", self.reply(second, a, b), sender=IMPL)
+        self.assertEqual([r[6] for r in self.rows()], [reply.relay_id, None, None, None])
 
     def test_hook_sees_own_lock(self):
         from relay_engine import queries
-        ref = self.artifact('a.md', b'a\n')
+        ref = self.artifact("a.md", b"a\n")
         request = self.request(ref)
         seen = []
+
         def hook(conn, admitted, data, ctx):
-            row = queries.locked_snapshot(conn, ref[5:], project_id=PROJECT)
-            seen.append(row)
-            self.assertIsNotNone(row)
-            self.assertEqual(row.locked_by, admitted.relay_id)
-        try:
-            reply = submit.submit(self.conn, replace(self.ctx(IMPL), after_admit=hook), self.reply(request,ref))
-            outcome = reply.relay_id
-        except errors.EngineError as exc:
-            outcome = exc.code
-        self.assertNotEqual(outcome, 'E-ADMISSION-HOOK')
-        self.assertEqual(seen[0].locked_by, outcome)
+            seen.append(queries.locked_snapshot(conn, ref[5:], project_id=PROJECT))
+        result = snapshot_outcome(lambda: submit.submit(self.conn, replace(self.ctx(IMPL),
+            after_admit=hook), self.reply(request, ref)))
+        self.assertEqual(result[0], "ok", result)
+        self.assertIsNotNone(seen[0])
+        self.assertEqual(seen[0].locked_by, result[1].relay_id)
         second = self.request(ref)
-        before = self.conn.execute('SELECT * FROM snapshots').fetchall()
+        before = self.conn.execute("SELECT * FROM snapshots").fetchall()
+
         def failing(conn, admitted, data, ctx):
-            hook(conn,admitted,data,ctx)
-            raise RuntimeError('fixture')
-        with self.assertRaises(errors.EngineError) as caught:
-            submit.submit(self.conn, replace(self.ctx(IMPL), after_admit=failing), self.reply(second,ref))
-        self.assertEqual(caught.exception.code,'E-ADMISSION-HOOK')
-        self.assertEqual(self.conn.execute('SELECT * FROM snapshots').fetchall(), before)
-        self.assertIsNone(self.conn.execute('SELECT id FROM relays WHERE id=?',(seen[-1].locked_by,)).fetchone())
+            hook(conn, admitted, data, ctx)
+            raise RuntimeError("fixture")
+        result = snapshot_outcome(lambda: submit.submit(self.conn, replace(self.ctx(IMPL),
+            after_admit=failing), self.reply(second, ref)))
+        self.assertEqual(result[0], "E-ADMISSION-HOOK", result)
+        self.assertIn("RuntimeError", result[1].cause)
+        self.assertIsNotNone(seen[-1])
+        self.assertEqual(self.conn.execute("SELECT * FROM snapshots").fetchall(), before)
+        self.assertIsNone(self.conn.execute("SELECT id FROM relays WHERE id=?", (seen[-1].locked_by,
+            )).fetchone())
 
     def test_replayed_approve_locks_nothing(self):
-        ref=self.artifact('a.md',b'a'); request=self.request(ref); calls=[]
-        ctx=replace(self.ctx(IMPL),after_admit=lambda *a:calls.append(1))
-        data=self.reply(request,ref); reply=submit.submit(self.conn,ctx,data)
-        self.assertEqual(len(self.rows()),1)
-        self.assertEqual(self.rows()[0][6],reply.relay_id)
-        before=self.conn.execute('SELECT * FROM snapshots').fetchall()
-        self.assertEqual(submit.submit(self.conn,ctx,data),reply)
-        self.assertEqual(self.conn.execute('SELECT * FROM snapshots').fetchall(),before)
-        self.assertEqual(calls,[1])
+        ref = self.artifact("a.md", b"a")
+        request = self.request(ref)
+        calls = []
+        ctx = replace(self.ctx(IMPL), after_admit=lambda *a: calls.append(1))
+        data = self.reply(request, ref)
+        reply = submit.submit(self.conn, ctx, data)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0][6], reply.relay_id)
+        before = self.conn.execute("SELECT * FROM snapshots").fetchall()
+        self.assertEqual(submit.submit(self.conn, ctx, data), reply)
+        self.assertEqual(self.conn.execute("SELECT * FROM snapshots").fetchall(), before)
+        self.assertEqual(calls, [1])
 
     def test_snapshot_without_store_is_digest_only(self):
-        ref=self.artifact('a.md',b'a'); stored=self.request(ref); self.approve(stored,ref)
-        self.store=None
-        bare=self.request(ref); self.approve(bare,ref)
-        self.assertEqual(len(self.rows()),2)
-        self.assertEqual([r[3] for r in self.rows()],[hashlib.sha256(b'a').hexdigest()]*2)
-        self.assertEqual([r[5] for r in self.rows()],[1,0])
-        self.assertTrue(all(r[6] for r in self.rows()))
+        ref = self.artifact("a.md", b"a")
+        stored = self.request(ref)
+        self.approve(stored, ref)
+        self.store = None
+        bare = self.request(ref)
+        self.approve(bare, ref)
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual([r[3] for r in self.rows()], [hashlib.sha256(b"a").hexdigest()] * 2)
+        self.assertEqual([r[5] for r in self.rows()], [1, 0])
+        self.assertTrue(all((r[6] for r in self.rows())))
 
     def test_large_file_snapshot_digest_only(self):
-        big=b'x'*(MIB+1); ref=self.artifact('big',big)
+        big = b"x" * (MIB + 1)
+        ref = self.artifact("big", big)
         self.request(ref)
-        self.assertEqual(len(self.rows()),1)
-        self.assertEqual(self.rows()[0][3:6],(hashlib.sha256(big).hexdigest(),len(big),0))
-        self.assertEqual(self.store.puts,0)
-        self.request(self.artifact('exact',b'y'*MIB))
-        self.assertEqual(self.rows()[1][5],1)
-        self.assertEqual(self.store.puts,1)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0][3:6], (hashlib.sha256(big).hexdigest(), len(big), 0))
+        self.assertEqual(self.store.puts, 0)
+        self.request(self.artifact("exact", b"y" * MIB))
+        self.assertEqual(self.rows()[1][5], 1)
+        self.assertEqual(self.store.puts, 1)
 
     def test_non_approve_replies_lock_nothing(self):
         ref = self.artifact("non-approve", b"same")
         request = self.request(ref)
-        for data in (self.reply(request, ref, verdict="must-revise"),
-                     draft(parent="#" + str(request.handle), refs=(ref,))):
+        for data in (self.reply(request, ref, verdict="must-revise"), draft(parent="#" + str(
+            request.handle), refs=(ref,))):
             result = snapshot_outcome(lambda: self.submit(data, sender=IMPL))
             self.assertEqual(result[0], "ok", result)
-            self.assertTrue(all(row[6] is None for row in self.rows()))
+            self.assertTrue(all((row[6] is None for row in self.rows())))
 
     def test_store_dedupe_by_store(self):
         from relay_engine import queries
@@ -2203,8 +2211,8 @@ class TestSnapshots(Snapshots):
         self.request(ref)
         self.assertEqual(first_store.puts, 1)
         out = self.folder / "dedupe-copy"
-        result = snapshot_outcome(lambda: queries.write_snapshot(
-            self.conn, 2, out, first_store, project_id=PROJECT))
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 2, out, first_store,
+            project_id=PROJECT))
         self.assertEqual(result[0], "ok", result)
         self.assertEqual(out.read_bytes(), b"same")
         self.request(ref)
@@ -2214,8 +2222,8 @@ class TestSnapshots(Snapshots):
         self.request(ref)
         self.request(ref)
         self.assertEqual(second_store.puts, 1)
-        result = snapshot_outcome(lambda: queries.write_snapshot(
-            self.conn, 4, out, second_store, True, project_id=PROJECT))
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 4, out, second_store, True,
+            project_id=PROJECT))
         self.assertEqual(result[0], "ok", result)
         self.assertEqual(out.read_bytes(), b"same")
 
@@ -2223,6 +2231,7 @@ class TestSnapshots(Snapshots):
         ref = self.artifact("keep", b"bytes")
         keeps = []
         original = refs.read_file
+
         def read(path, keep):
             keeps.append(keep)
             return original(path, keep)
@@ -2233,40 +2242,45 @@ class TestSnapshots(Snapshots):
             self.assertEqual(result[0], "ok", result)
         self.assertEqual(keeps, [0, submit.SNAPSHOT_BYTES_MAX])
 
+
 class GitSnapshots(Snapshots, GitStore):
     def repository(self):
-        repo=Repo({'d.md':'one\n'});self.addCleanup(repo.close)
-        self.directory.checkouts['bivpak']=repo.path
+        repo = Repo({"d.md": "one\n"})
+        self.addCleanup(repo.close)
+        self.directory.checkouts["bivpak"] = repo.path
         return repo
+
 
 class TestGitSnapshots(GitSnapshots):
     def test_git_snapshot_identity(self):
-        repo=self.repository()
+        repo = self.repository()
         try:
-            request=self.request('bivpak@main:d.md')
+            request = self.request("bivpak@main:d.md")
         except Exception as exc:
-            request=exc
-        self.assertIsInstance(request,submit.Admitted)
-        self.assertEqual(self.rows(),[(1,request.relay_id,'repo-1:d.md',hashlib.sha256(b'one\n').hexdigest(),4,0,None)])
-        blob=git(repo.path,'rev-parse','main:d.md')
-        self.assertNotEqual(self.rows()[0][3],blob)
-        self.assertEqual(self.store.puts,0)
+            request = exc
+        self.assertIsInstance(request, submit.Admitted)
+        self.assertEqual(self.rows(), [(1, request.relay_id, "repo-1:d.md", hashlib.sha256(
+            b"one\n").hexdigest(), 4, 0, None)])
+        blob = git(repo.path, "rev-parse", "main:d.md")
+        self.assertNotEqual(self.rows()[0][3], blob)
+        self.assertEqual(self.store.puts, 0)
 
     def test_git_lock_and_changed_blob(self):
-        repo=self.repository(); request=self.request('bivpak@main:d.md')
-        commit=git(repo.path,'rev-parse','HEAD')
-        repo.commit_files({'d.md':'two\n'})
-        self.refused('E-SNAPSHOT-STALE', self.reply(request,'bivpak@main:d.md'),sender=IMPL)
-        reply=self.approve(request,'bivpak@'+commit+':d.md')
-        self.assertEqual(len(self.rows()),1)
-        self.assertEqual(self.rows()[0][6],reply.relay_id)
+        repo = self.repository()
+        request = self.request("bivpak@main:d.md")
+        commit = git(repo.path, "rev-parse", "HEAD")
+        repo.commit_files({"d.md": "two\n"})
+        self.refused("E-SNAPSHOT-STALE", self.reply(request, "bivpak@main:d.md"), sender=IMPL)
+        reply = self.approve(request, "bivpak@" + commit + ":d.md")
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0][6], reply.relay_id)
 
     def test_lock_matches_each_snapshot(self):
         repo = self.repository()
         one = git(repo.path, "rev-parse", "HEAD")
         repo.commit_files({"d.md": "two\n"})
         two = git(repo.path, "rev-parse", "HEAD")
-        a, b = "bivpak@" + one + ":d.md", "bivpak@" + two + ":d.md"
+        a, b = ("bivpak@" + one + ":d.md", "bivpak@" + two + ":d.md")
         result = snapshot_outcome(lambda: self.request(a, b))
         self.assertEqual(result[0], "ok", result)
         request = result[1]
@@ -2284,236 +2298,233 @@ class TestGitSnapshots(GitSnapshots):
         self.assertEqual(result[0], "ok", result)
         self.refused("E-SNAPSHOT-STALE", self.reply(result[1], "bivpak@main:d.md"), sender=IMPL)
 
+BODY_READS = ("SELECT body FROM bodies", "SELECT count(*) FROM bodies",
+    "SELECT EXISTS(SELECT 1 FROM bodies)", "SELECT 1 FROM bodies",
+    "SELECT r.id FROM relays r JOIN bodies b ON b.relay_id=r.id")
 
-BODY_READS = (
-    'SELECT body FROM bodies',
-    'SELECT count(*) FROM bodies',
-    'SELECT EXISTS(SELECT 1 FROM bodies)',
-    'SELECT 1 FROM bodies',
-    'SELECT r.id FROM relays r JOIN bodies b ON b.relay_id=r.id',
-)
 
 class TestHookReadDenials(Store):
     def context(self, hook, denied=None):
-        ctx=replace(self.ctx(),after_admit=hook)
-        if denied is not None and hasattr(ctx,'after_admit_reads_denied'):
-            ctx=replace(ctx,after_admit_reads_denied=denied)
+        ctx = replace(self.ctx(), after_admit=hook)
+        if denied is not None:
+            ctx = replace(ctx, after_admit_reads_denied=denied)
         return ctx
-
-    def outcome(self, ctx):
-        try:
-            return submit.submit(self.conn,ctx,draft())
-        except errors.EngineError as exc:
-            return exc.code
 
     def test_hook_body_read_denied(self):
         for sql in BODY_READS:
             with self.subTest(sql=sql):
-                before=self.counts()
-                result=self.outcome(self.context(lambda c,*_:c.execute(sql).fetchall(),frozenset({'bodies'})))
-                self.assertEqual(result,'E-ADMISSION-HOOK')
-                after=self.counts()
-                self.assertEqual(after.pop('refusals'),before.pop('refusals')+1)
-                self.assertEqual(after,before)
+                before = self.counts()
+                result = snapshot_outcome(lambda: submit.submit(self.conn, self.context(lambda c,
+                    *_: c.execute(sql).fetchall(), frozenset({"bodies"})), draft()))[0]
+                self.assertEqual(result, "E-ADMISSION-HOOK")
+                after = self.counts()
+                self.assertEqual(after.pop("refusals"), before.pop("refusals") + 1)
+                self.assertEqual(after, before)
 
     def test_hook_reads_allowed_tables(self):
-        seen=[]
-        def hook(c,a,d,x):
-            for table in ('relays','edges','findings','snapshots'):
-                seen.append(c.execute('SELECT count(*) FROM '+table).fetchone()[0])
-        self.assertIsInstance(self.outcome(self.context(hook,frozenset({'bodies'}))),submit.Admitted)
-        self.assertEqual(seen,[1,0,0,0])
+        seen = []
+
+        def hook(c, a, d, x):
+            for table in ("relays", "edges", "findings", "snapshots"):
+                seen.append(c.execute("SELECT count(*) FROM " + table).fetchone()[0])
+        self.assertIsInstance(snapshot_outcome(lambda: submit.submit(self.conn, self.context(hook,
+            frozenset({"bodies"})), draft()))[1], submit.Admitted)
+        self.assertEqual(seen, [1, 0, 0, 0])
 
     def test_hook_read_denied_default(self):
-        ctx=self.context(lambda c,*_:c.execute('SELECT count(*) FROM bodies').fetchone())
-        self.assertEqual(self.outcome(ctx),'E-ADMISSION-HOOK')
+        ctx = self.context(lambda c, *_: c.execute("SELECT count(*) FROM bodies").fetchone())
+        self.assertEqual(snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft()))[0],
+            "E-ADMISSION-HOOK")
 
     def test_hook_read_denied_validation(self):
-        self.assertIn('after_admit_reads_denied',submit.SubmitContext.__dataclass_fields__)
-        for value in (set(),['bodies'],'bodies',frozenset({'unknown'}),frozenset({1})):
+        self.assertIn("after_admit_reads_denied", submit.SubmitContext.__dataclass_fields__)
+        for value in (set(), ["bodies"], "bodies", frozenset({"unknown"}), frozenset({1})):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                replace(self.ctx(),after_admit_reads_denied=value)
+                replace(self.ctx(), after_admit_reads_denied=value)
         for table in schema.TABLE_OWNERS:
-            self.assertEqual(replace(self.ctx(),after_admit_reads_denied=frozenset({table})).after_admit_reads_denied,frozenset({table}))
+            self.assertEqual(replace(self.ctx(), after_admit_reads_denied=frozenset({
+                table})).after_admit_reads_denied, frozenset({table}))
 
     def test_system_filing_under_body_denial(self):
-        seen=[]
-        def hook(c,a,d,x):
-            seen.append(submit.file_system_relay(c,x,draft(bundle='system')))
+        seen = []
+
+        def hook(c, a, d, x):
+            seen.append(submit.file_system_relay(c, x, draft(bundle="system")))
             try:
-                c.execute('SELECT 1 FROM bodies').fetchall()
-                seen.append('body allowed')
+                c.execute("SELECT 1 FROM bodies").fetchall()
+                seen.append("body allowed")
             except sqlite3.DatabaseError:
-                seen.append('body denied')
-        result=self.outcome(self.context(hook,frozenset({'bodies'})))
-        self.assertIsInstance(result,submit.Admitted)
-        self.assertEqual(len(seen),2)
-        self.assertIsInstance(seen[0],submit.Admitted)
-        self.assertEqual(seen[1],'body denied')
-        self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(2,))
+                seen.append("body denied")
+        result = snapshot_outcome(lambda: submit.submit(self.conn, self.context(hook, frozenset({
+            "bodies"})), draft()))[1]
+        self.assertIsInstance(result, submit.Admitted)
+        self.assertEqual(len(seen), 2)
+        self.assertIsInstance(seen[0], submit.Admitted)
+        self.assertEqual(seen[1], "body denied")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM relays").fetchone(), (2,))
 
 
 class TestReadGuard(Store):
     def setUp(self):
         super().setUp()
-        self.conn.execute('CREATE TABLE fixture_guard (value TEXT)')
+        self.conn.execute("CREATE TABLE fixture_guard (value TEXT)")
         self.conn.commit()
-        patch=mock.patch.dict(schema.TABLE_OWNERS,{'fixture_guard':'test-only'})
-        patch.start();self.addCleanup(patch.stop)
-
-    def outcome(self, action):
-        try:
-            return ('ok',action())
-        except Exception as exc:
-            return (type(exc).__name__,exc)
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_guard": "test-only"})
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def body_denied(self):
         for sql in BODY_READS:
-            result=self.outcome(lambda:self.conn.execute(sql).fetchall())
-            self.assertNotEqual(result[0],'ok',sql)
-            self.assertIsInstance(result[1],sqlite3.DatabaseError)
+            result = snapshot_outcome(lambda: self.conn.execute(sql).fetchall())
+            self.assertNotEqual(result[0], "ok", sql)
+            self.assertIsInstance(result[1], sqlite3.DatabaseError)
 
     def test_read_guard_denies_bodies(self):
         self.submit(draft())
         with submit.read_guard(self.conn):
             self.body_denied()
-            for table in ('relays','edges','snapshots'):
-                self.conn.execute('SELECT count(*) FROM '+table).fetchone()
+            for table in ("relays", "edges", "snapshots"):
+                self.conn.execute("SELECT count(*) FROM " + table).fetchone()
             self.conn.execute("INSERT INTO fixture_guard VALUES ('owned')")
-        self.assertEqual(self.conn.execute('SELECT * FROM fixture_guard').fetchall(),[('owned',)])
+        self.assertEqual(self.conn.execute("SELECT * FROM fixture_guard").fetchall(), [("owned",)])
 
     def test_read_guard_restores(self):
         self.submit(draft())
         with submit.read_guard(self.conn):
             self.body_denied()
-        normal=self.outcome(lambda:self.conn.execute('SELECT body FROM bodies').fetchall())
-        self.assertEqual(normal,('ok',[(b'body\n',)]))
-        marker=RuntimeError('fixture marker')
-        caught=None
+        normal = snapshot_outcome(lambda: self.conn.execute("SELECT body FROM bodies").fetchall())
+        self.assertEqual(normal, ("ok", [(b"body\n",)]))
+        marker = RuntimeError("fixture marker")
+        caught = None
         try:
             with submit.read_guard(self.conn):
                 raise marker
         except RuntimeError as exc:
-            caught=exc
-        self.assertIs(caught,marker)
+            caught = exc
+        self.assertIs(caught, marker)
         self.assertIsNone(caught.__cause__)
         self.assertIsNone(caught.__context__)
-        result=self.outcome(lambda:self.conn.execute('SELECT count(*) FROM bodies').fetchone())
-        self.assertEqual(result,('ok',(1,)))
-        self.assertEqual(submit._READ_GUARDS,{})
+        result = snapshot_outcome(lambda: self.conn.execute("SELECT count(*) FROM bodies").fetchone())
+        self.assertEqual(result, ("ok", (1,)))
+        self.assertEqual(submit._READ_GUARDS, {})
 
     def test_read_guard_cached_statement(self):
         self.submit(draft())
-        sql='SELECT body FROM bodies'
-        self.assertEqual(self.conn.execute(sql).fetchall(),[(b'body\n',)])
+        sql = "SELECT body FROM bodies"
+        self.assertEqual(self.conn.execute(sql).fetchall(), [(b"body\n",)])
         with submit.read_guard(self.conn):
-            result=self.outcome(lambda:self.conn.execute(sql).fetchall())
-            self.assertNotEqual(result[0],'ok')
-            self.assertIsInstance(result[1],sqlite3.DatabaseError)
+            result = snapshot_outcome(lambda: self.conn.execute(sql).fetchall())
+            self.assertNotEqual(result[0], "ok")
+            self.assertIsInstance(result[1], sqlite3.DatabaseError)
 
     def test_read_guard_nested(self):
         self.submit(draft())
         with submit.read_guard(self.conn):
-            with submit.read_guard(self.conn,frozenset()):
+            with submit.read_guard(self.conn, frozenset()):
                 self.body_denied()
-            with submit.read_guard(self.conn,frozenset({'relays'})):
+            with submit.read_guard(self.conn, frozenset({"relays"})):
                 self.body_denied()
-                result=self.outcome(lambda:self.conn.execute('SELECT 1 FROM relays').fetchall())
-                self.assertNotEqual(result[0],'ok')
-                self.assertIsInstance(result[1],sqlite3.DatabaseError)
-            self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(1,))
+                result = snapshot_outcome(lambda: self.conn.execute("SELECT 1 FROM relays").fetchall())
+                self.assertNotEqual(result[0], "ok")
+                self.assertIsInstance(result[1], sqlite3.DatabaseError)
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM relays").fetchone(), (1,))
             self.body_denied()
-        self.assertEqual(submit._READ_GUARDS,{})
+        self.assertEqual(submit._READ_GUARDS, {})
 
     def test_read_guard_inside_hook(self):
-        observed=[]
-        def hook(c,a,d,x):
-            with submit.read_guard(c,frozenset({'bodies'})):
+        observed = []
+
+        def hook(c, a, d, x):
+            with submit.read_guard(c, frozenset({"bodies"})):
                 c.execute("INSERT INTO fixture_guard VALUES ('owned')")
-                c.execute('SELECT count(*) FROM snapshots').fetchone()
+                c.execute("SELECT count(*) FROM snapshots").fetchone()
                 try:
                     c.execute("DELETE FROM relays WHERE id='no-such-relay'")
-                    observed.append('write allowed')
+                    observed.append("write allowed")
                 except sqlite3.DatabaseError:
-                    observed.append('write denied')
-        ctx=replace(self.ctx(),after_admit=hook,after_admit_writes=frozenset({'fixture_guard'}))
-        result=self.outcome(lambda:submit.submit(self.conn,ctx,draft()))
-        self.assertEqual(result[0],'ok',result)
-        self.assertEqual(observed,['write denied'])
-        self.assertEqual(self.conn.execute('SELECT * FROM fixture_guard').fetchall(),[('owned',)])
-        def too_much(c,a,d,x):
+                    observed.append("write denied")
+        ctx = replace(self.ctx(), after_admit=hook, after_admit_writes=frozenset({"fixture_guard"}))
+        result = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(observed, ["write denied"])
+        self.assertEqual(self.conn.execute("SELECT * FROM fixture_guard").fetchall(), [("owned",)])
+
+        def too_much(c, a, d, x):
             try:
-                with submit.read_guard(c,frozenset({'bodies','relays'})):
+                with submit.read_guard(c, frozenset({"bodies", "relays"})):
                     pass
             except RuntimeError as exc:
                 observed.append(str(exc))
                 raise
-        ctx=replace(self.ctx(),after_admit=too_much)
-        result=self.outcome(lambda:submit.submit(self.conn,ctx,draft()))
-        self.assertNotEqual(result[0],'ok')
-        self.assertIsInstance(result[1],errors.EngineError)
-        self.assertEqual(result[1].code,'E-ADMISSION-HOOK')
-        self.assertIn('RuntimeError',result[1].cause)
-        self.assertEqual(observed[-1],"a read guard inside a hook cannot deny more than the hook's own read denials")
-        self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(1,))
-
+        ctx = replace(self.ctx(), after_admit=too_much)
+        result = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertNotEqual(result[0], "ok")
+        self.assertIsInstance(result[1], errors.EngineError)
+        self.assertEqual(result[1].code, "E-ADMISSION-HOOK")
+        self.assertIn("RuntimeError", result[1].cause)
+        self.assertEqual(observed[-1],
+            "a read guard inside a hook cannot deny more than the hook's own read denials")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM relays").fetchone(), (1,))
         observed.clear()
+
         def own_subset(c, a, d, x):
             with submit.read_guard(c, frozenset({"edges"})):
                 observed.append(c.execute("SELECT count(*) FROM snapshots").fetchone())
-        ctx = replace(self.ctx(), after_admit=own_subset,
-                      after_admit_reads_denied=frozenset({"bodies", "edges"}))
-        result = self.outcome(lambda: submit.submit(self.conn, ctx, draft()))
+        ctx = replace(self.ctx(), after_admit=own_subset, after_admit_reads_denied=frozenset({"bodies",
+            "edges"}))
+        result = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft()))
         self.assertEqual(result[0], "ok", result)
         self.assertEqual(observed, [(0,)])
+
         def foreign_superset(c, a, d, x):
             with submit.read_guard(c, frozenset({"relays"})):
                 pass
-        ctx = replace(self.ctx(), after_admit=foreign_superset,
-                      after_admit_reads_denied=frozenset({"bodies", "edges"}))
-        result = self.outcome(lambda: submit.submit(self.conn, ctx, draft()))
-        self.assertEqual(result[0], "EngineError", result)
+        ctx = replace(self.ctx(), after_admit=foreign_superset, after_admit_reads_denied=frozenset({
+            "bodies", "edges"}))
+        result = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertEqual(result[0], "E-ADMISSION-HOOK", result)
         self.assertEqual(result[1].code, "E-ADMISSION-HOOK")
         self.assertIn("RuntimeError", result[1].cause)
 
     def test_submit_refused_inside_read_guard(self):
-        before=self.counts()
+        before = self.counts()
         with submit.read_guard(self.conn):
-            result=self.outcome(lambda:self.submit(draft()))
-            self.assertNotEqual(result[0],'ok')
-            self.assertIsInstance(result[1],sqlite3.DatabaseError)
-            self.assertEqual(str(result[1]),'admission is not allowed during a read guard')
+            result = snapshot_outcome(lambda: self.submit(draft()))
+            self.assertNotEqual(result[0], "ok")
+            self.assertIsInstance(result[1], sqlite3.DatabaseError)
+            self.assertEqual(str(result[1]), "admission is not allowed during a read guard")
             self.body_denied()
-        self.assertEqual(self.counts(),before)
-        self.assertEqual(submit._READ_GUARDS,{})
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(submit._READ_GUARDS, {})
 
     def test_read_guard_closed_connection(self):
-        for raises in (False,True):
-            conn=sqlite3.connect(':memory:')
+        for raises in (False, True):
+            conn = sqlite3.connect(":memory:")
             self.addCleanup(conn.close)
-            marker=RuntimeError('fixture close')
+            marker = RuntimeError("fixture close")
+
             def block():
                 with submit.read_guard(conn):
                     conn.close()
                     if raises:
                         raise marker
-            result=self.outcome(block)
+            result = snapshot_outcome(block)
             if raises:
-                self.assertEqual(result[0],'RuntimeError')
-                self.assertIs(result[1],marker)
+                self.assertEqual(result[0], "RuntimeError")
+                self.assertIs(result[1], marker)
                 self.assertIsNone(result[1].__context__)
                 self.assertIsNone(result[1].__cause__)
             else:
-                self.assertEqual(result,('ok',None))
-            self.assertEqual(submit._READ_GUARDS,{})
+                self.assertEqual(result, ("ok", None))
+            self.assertEqual(submit._READ_GUARDS, {})
 
     def test_read_guard_validation(self):
-        guard=submit.read_guard
-        for denied in (set(),['bodies'],'bodies',frozenset({'unknown'}),frozenset({1})):
+        guard = submit.read_guard
+        for denied in (set(), ["bodies"], "bodies", frozenset({"unknown"}), frozenset({1})):
             with self.subTest(denied=denied), self.assertRaises(ValueError):
-                with guard(self.conn,denied):
+                with guard(self.conn, denied):
                     pass
-        self.assertEqual(submit._READ_GUARDS,{})
+        self.assertEqual(submit._READ_GUARDS, {})
 
 if __name__ == "__main__":
     unittest.main()

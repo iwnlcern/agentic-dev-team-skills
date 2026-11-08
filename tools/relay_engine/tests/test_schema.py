@@ -1,6 +1,7 @@
 """v3 tables: STRICT, versioned, atomic, checked against the header registry (DD-v3-engine § 4, § 8, § 9)."""
 
 from dataclasses import replace
+import hashlib
 import os
 import re
 import sqlite3
@@ -11,6 +12,8 @@ from unittest import mock
 from relay_engine import errors
 from relay_engine import header
 from relay_engine import schema
+from relay_engine import refs
+from relay_engine.tests import test_submit
 from relay_engine.tests.test_submit import Store as SubmitStore
 
 
@@ -684,39 +687,37 @@ class TestTableOwners(Store):
 
 class TestSnapshotSchema(Store):
     def test_snapshots_ddl_refuses_bf2deda_store(self):
-        self.assertIn('snapshots', schema.TABLE_OWNERS)
-        tables = tuple(t for t in schema._TABLES if 'CREATE TABLE IF NOT EXISTS snapshots ' not in t)
-        indexes = tuple(t for t in schema._INDEXES if ' ON snapshots ' not in t)
+        self.assertIn("snapshots", schema.TABLE_OWNERS)
+        tables = tuple((t for t in schema._TABLES if "CREATE TABLE IF NOT EXISTS snapshots " not in t))
+        indexes = tuple((t for t in schema._INDEXES if " ON snapshots " not in t))
         conn = self.connect(init=False)
-        with mock.patch.object(schema, '_TABLES', tables), mock.patch.object(schema, '_INDEXES', indexes):
+        with mock.patch.object(schema, "_TABLES", tables), mock.patch.object(schema, "_INDEXES",
+            indexes):
             schema.init_v3(conn)
         before = self.objects(conn)
-        digest = conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone()
+        digest = conn.execute("SELECT ddl_sha256 FROM schema_version").fetchone()
         with self.assertRaises(errors.EngineError) as caught:
             schema.init_v3(conn)
-        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")
         self.assertEqual(self.objects(conn), before)
-        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(), digest)
+        self.assertEqual(conn.execute("SELECT ddl_sha256 FROM schema_version").fetchone(), digest)
         fresh = self.connect()
         objects = self.objects(fresh)
         schema.init_v3(fresh)
         self.assertEqual(self.objects(fresh), objects)
 
     def test_read_file_keeps_small(self):
-        from relay_engine import refs
-        import hashlib
         with tempfile.TemporaryDirectory() as d:
-            p = os.path.join(d, 'artifact')
-            with open(p, 'wb') as f:
-                f.write(b'abc\x00def')
-            digest = hashlib.sha256(b'abc\x00def').hexdigest()
+            p = os.path.join(d, "artifact")
+            with open(p, "wb") as f:
+                f.write(b"abc\x00def")
+            digest = hashlib.sha256(b"abc\x00def").hexdigest()
             for keep in (7, 8):
-                self.assertEqual(refs.read_file(p, keep), (digest, 7, b'abc\x00def'))
+                self.assertEqual(refs.read_file(p, keep), (digest, 7, b"abc\x00def"))
             self.assertEqual(refs.read_file(p, 6), (digest, 7, None))
             self.assertEqual(refs.file_digest(p), digest)
 
     def test_snapshot_bytes_check(self):
-        from relay_engine.tests import test_submit
         fixture = test_submit.Snapshots()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -728,7 +729,7 @@ class TestSnapshotSchema(Store):
         fixture.conn.commit()
         row[names.index("has_bytes")] = 1
         row[names.index("bytes_len")] = 1048577
-        sql = "INSERT INTO snapshots VALUES (" + ",".join("?" for _ in row) + ")"
+        sql = "INSERT INTO snapshots VALUES (" + ",".join(("?" for _ in row)) + ")"
         caught = None
         try:
             fixture.conn.execute(sql, row)
@@ -743,9 +744,8 @@ class TestSnapshotSchema(Store):
         except Exception as exc:
             caught = exc
         self.assertIsNone(caught)
-        self.assertEqual(fixture.conn.execute("SELECT bytes_len, has_bytes FROM snapshots").fetchall(),
-                         [(1048576, 1)])
-
+        self.assertEqual(fixture.conn.execute("SELECT bytes_len, has_bytes FROM snapshots").fetchall(), [
+            (1048576, 1)])
 
 if __name__ == "__main__":
     unittest.main()

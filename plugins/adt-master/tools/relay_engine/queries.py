@@ -1,8 +1,3 @@
-from relay_engine import strings
-import os
-import io
-import hashlib
-import tempfile
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11; plan Task 5).
 
 Every check after submit is a query: reads and read state, the bounded
@@ -14,14 +9,19 @@ schema's indexes; no query reads every body.
 
 from dataclasses import dataclass
 import difflib
+import hashlib
+import io
+import os
 from pathlib import Path
 import sqlite3
+import tempfile
 from typing import Callable
 
 from relay_engine import errors
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
+from relay_engine import strings
 from relay_engine.submit import OPERATOR_SEAT_ID, new_uuid7, party_sql
 
 UNOPENED_MS = 900_000  # amendment 4 A4.4 (operator P9): 15 minutes from admission
@@ -110,8 +110,6 @@ class SnapshotRow:
     has_bytes: bool
     locked_by: str | None
     locked_at: int | None
-
-
 
 
 @dataclass(frozen=True)
@@ -584,6 +582,7 @@ def refusal_counts(conn, project_id):
 
 _SNAPSHOT_COLUMNS = ("handle, relay_id, edge_id, artifact, content_sha256, bytes_len, has_bytes,"
                      " locked_by, locked_at")
+_SNAPSHOT_JOIN_COLUMNS = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
 
 
 def _snapshot_row(row):
@@ -592,24 +591,20 @@ def _snapshot_row(row):
 
 def locked_snapshot(conn, artifact, *, project_id):
     """Latest approval lock of the exact artifact in this project."""
-    columns = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
     row = conn.execute(
-        "SELECT " + columns + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+        "SELECT " + _SNAPSHOT_JOIN_COLUMNS + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
         " WHERE s.artifact = ? AND r.project_id = ? AND s.locked_by IS NOT NULL"
         " ORDER BY s.locked_at DESC, s.handle DESC LIMIT 1", (artifact, project_id)).fetchone()
     return None if row is None else _snapshot_row(row)
 
 
 def _snapshot(conn, handle, project_id):
-    columns = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
     row = conn.execute(
-        "SELECT " + columns + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+        "SELECT " + _SNAPSHOT_JOIN_COLUMNS + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
         " WHERE s.handle = ? AND r.project_id = ?", (handle, project_id)).fetchone()
     if row is None:
         raise KeyError(handle)
     return _snapshot_row(row)
-
-
 
 
 def _snapshot_bytes(conn, snapshot, store, directory):
