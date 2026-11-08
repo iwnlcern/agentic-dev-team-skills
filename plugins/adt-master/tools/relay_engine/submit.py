@@ -114,6 +114,14 @@ class EvidenceStore(Protocol):
         """Return host-observed, seat-supplied, or None for an absent record."""
 
 
+def _validate_read_denials(denied):
+    if not isinstance(denied, frozenset):
+        raise ValueError("read denials are a frozenset of declared table names")
+    if any(not isinstance(table, str) or table not in schema.TABLE_OWNERS
+           for table in denied):
+        raise ValueError("read denials name only declared tables")
+
+
 @dataclass(frozen=True)
 class SubmitContext:
     sender: SeatRef
@@ -124,9 +132,11 @@ class SubmitContext:
     after_admit: Callable[[sqlite3.Connection, "Admitted", header.Draft, "SubmitContext"], None] | None = None
     after_admit_writes: frozenset[str] = frozenset()
     store: EvidenceStore | None = None
+    after_admit_reads_denied: frozenset[str] = frozenset({"bodies"})
 
     def __post_init__(self):
         _check_git_state(self.git_state)
+        _validate_read_denials(self.after_admit_reads_denied)
         if (not isinstance(self.submission_key, str) or not self.submission_key
                 or "\x00" in self.submission_key):
             raise ValueError("submission_key is a non-empty UTF-8 string without NUL")
@@ -262,6 +272,8 @@ def _run_hook(conn, ctx, admitted, draft):
              sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
     writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
     def authorize(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_READ and table in ctx.after_admit_reads_denied:
+            return sqlite3.SQLITE_DENY
         if action in reads:
             return sqlite3.SQLITE_OK
         if action in writes and database == "main" and table in ctx.after_admit_writes:

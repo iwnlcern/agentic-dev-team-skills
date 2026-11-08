@@ -1729,7 +1729,9 @@ class TestAdmissionHookAtomicity(Store):
                 snapshots.append((before, after))
                 filed.append(submit.file_system_relay(
                     c, x, draft(bundle="valid-system", subject="valid-system")))
-            submit.submit(conn, replace(self.ctx(), after_admit=hook), draft())
+            # This atomicity fixture deliberately counts every table, including bodies.
+            submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                                        after_admit_reads_denied=frozenset()), draft())
             self.assertEqual(len(filed), 1)
             reader = sqlite3.connect(path)
             try:
@@ -2197,6 +2199,74 @@ class TestGitSnapshots(GitSnapshots):
         reply=self.approve(request,'bivpak@'+commit+':d.md')
         self.assertEqual(len(self.rows()),1)
         self.assertEqual(self.rows()[0][6],reply.relay_id)
+
+
+BODY_READS = (
+    'SELECT body FROM bodies',
+    'SELECT count(*) FROM bodies',
+    'SELECT EXISTS(SELECT 1 FROM bodies)',
+    'SELECT 1 FROM bodies',
+    'SELECT r.id FROM relays r JOIN bodies b ON b.relay_id=r.id',
+)
+
+class TestHookReadDenials(Store):
+    def context(self, hook, denied=None):
+        ctx=replace(self.ctx(),after_admit=hook)
+        if denied is not None and hasattr(ctx,'after_admit_reads_denied'):
+            ctx=replace(ctx,after_admit_reads_denied=denied)
+        return ctx
+
+    def outcome(self, ctx):
+        try:
+            return submit.submit(self.conn,ctx,draft())
+        except errors.EngineError as exc:
+            return exc.code
+
+    def test_hook_body_read_denied(self):
+        for sql in BODY_READS:
+            with self.subTest(sql=sql):
+                before=self.counts()
+                result=self.outcome(self.context(lambda c,*_:c.execute(sql).fetchall(),frozenset({'bodies'})))
+                self.assertEqual(result,'E-ADMISSION-HOOK')
+                after=self.counts()
+                self.assertEqual(after.pop('refusals'),before.pop('refusals')+1)
+                self.assertEqual(after,before)
+
+    def test_hook_reads_allowed_tables(self):
+        seen=[]
+        def hook(c,a,d,x):
+            for table in ('relays','edges','findings','snapshots'):
+                seen.append(c.execute('SELECT count(*) FROM '+table).fetchone()[0])
+        self.assertIsInstance(self.outcome(self.context(hook,frozenset({'bodies'}))),submit.Admitted)
+        self.assertEqual(seen,[1,0,0,0])
+
+    def test_hook_read_denied_default(self):
+        ctx=self.context(lambda c,*_:c.execute('SELECT count(*) FROM bodies').fetchone())
+        self.assertEqual(self.outcome(ctx),'E-ADMISSION-HOOK')
+
+    def test_hook_read_denied_validation(self):
+        self.assertIn('after_admit_reads_denied',submit.SubmitContext.__dataclass_fields__)
+        for value in (set(),['bodies'],'bodies',frozenset({'unknown'}),frozenset({1})):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(self.ctx(),after_admit_reads_denied=value)
+        for table in schema.TABLE_OWNERS:
+            self.assertEqual(replace(self.ctx(),after_admit_reads_denied=frozenset({table})).after_admit_reads_denied,frozenset({table}))
+
+    def test_system_filing_under_body_denial(self):
+        seen=[]
+        def hook(c,a,d,x):
+            seen.append(submit.file_system_relay(c,x,draft(bundle='system')))
+            try:
+                c.execute('SELECT 1 FROM bodies').fetchall()
+                seen.append('body allowed')
+            except sqlite3.DatabaseError:
+                seen.append('body denied')
+        result=self.outcome(self.context(hook,frozenset({'bodies'})))
+        self.assertIsInstance(result,submit.Admitted)
+        self.assertEqual(len(seen),2)
+        self.assertIsInstance(seen[0],submit.Admitted)
+        self.assertEqual(seen[1],'body denied')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(2,))
 
 if __name__ == "__main__":
     unittest.main()
