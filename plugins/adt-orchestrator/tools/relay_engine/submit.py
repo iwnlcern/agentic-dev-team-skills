@@ -10,6 +10,7 @@ A refused submit writes exactly one ``refusals`` row and nothing else; an
 engine fault writes nothing.  No rule reads the body.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import hashlib
 import os
@@ -227,6 +228,8 @@ def _at(line, error):
 
 def submit(conn, ctx, data):
     """Admit one draft, or record one refusal and raise it."""
+    if conn in _READ_GUARDS:
+        raise sqlite3.DatabaseError("admission is not allowed during a read guard")
     if getattr(conn, "autocommit", None) is False:
         raise ValueError("submit requires legacy transaction control or autocommit True")
     if conn in _HOOK_FRAMES:
@@ -247,6 +250,7 @@ def submit(conn, ctx, data):
 # This SQL write boundary trusts Python code in the process, including calls to
 # set_authorizer, set_progress_handler and blobopen.
 _HOOK_FRAMES = {}
+_READ_GUARDS = {}
 
 
 def _hook_name(hook):
@@ -885,3 +889,40 @@ class TableDirectory:
             " WHERE r.project_id = ? AND r.name = ? ORDER BY c.last_seen_at DESC LIMIT 1",
             (self.project_id, repo)).fetchone()
         return None if row is None else Path(row[0])
+
+
+@contextmanager
+def read_guard(conn, denied=frozenset({"bodies"})):
+    """Deny named table reads for this block, retaining an outer guard or hook."""
+    _validate_read_denials(denied)
+    frame = _HOOK_FRAMES.get(conn)
+    if frame is not None:
+        if not denied <= frame[0].after_admit_reads_denied:
+            raise RuntimeError("a read guard inside a hook cannot deny more than the hook's own read denials")
+        yield
+        return
+    previous = _READ_GUARDS.get(conn)
+    if previous is not None and denied <= previous[0]:
+        yield
+        return
+    active = denied if previous is None else previous[0] | denied
+    def authorize(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_READ and table in active:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    _READ_GUARDS[conn] = (active, authorize)
+    try:
+        conn.set_authorizer(authorize)
+        yield
+    finally:
+        _READ_GUARDS.pop(conn, None)
+        if previous is not None:
+            _READ_GUARDS[conn] = previous
+        failure = None
+        try:
+            conn.set_authorizer(None if previous is None else previous[1])
+        except sqlite3.ProgrammingError as error:
+            if _transaction_state(conn) != "closed":
+                failure = error
+        if failure is not None:
+            raise failure

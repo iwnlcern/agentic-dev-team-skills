@@ -2185,7 +2185,12 @@ class GitSnapshots(Snapshots, GitStore):
 
 class TestGitSnapshots(GitSnapshots):
     def test_git_snapshot_identity(self):
-        repo=self.repository(); request=self.request('bivpak@main:d.md')
+        repo=self.repository()
+        try:
+            request=self.request('bivpak@main:d.md')
+        except Exception as exc:
+            request=exc
+        self.assertIsInstance(request,submit.Admitted)
         self.assertEqual(self.rows(),[(1,request.relay_id,'repo-1:d.md',hashlib.sha256(b'one\n').hexdigest(),4,0,None)])
         blob=git(repo.path,'rev-parse','main:d.md')
         self.assertNotEqual(self.rows()[0][3],blob)
@@ -2267,6 +2272,150 @@ class TestHookReadDenials(Store):
         self.assertIsInstance(seen[0],submit.Admitted)
         self.assertEqual(seen[1],'body denied')
         self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(2,))
+
+
+class TestReadGuard(Store):
+    def setUp(self):
+        super().setUp()
+        self.conn.execute('CREATE TABLE fixture_guard (value TEXT)')
+        self.conn.commit()
+        patch=mock.patch.dict(schema.TABLE_OWNERS,{'fixture_guard':'test-only'})
+        patch.start();self.addCleanup(patch.stop)
+
+    def outcome(self, action):
+        try:
+            return ('ok',action())
+        except Exception as exc:
+            return (type(exc).__name__,exc)
+
+    def body_denied(self):
+        for sql in BODY_READS:
+            result=self.outcome(lambda:self.conn.execute(sql).fetchall())
+            self.assertNotEqual(result[0],'ok',sql)
+            self.assertIsInstance(result[1],sqlite3.DatabaseError)
+
+    def test_read_guard_denies_bodies(self):
+        self.submit(draft())
+        with submit.read_guard(self.conn):
+            self.body_denied()
+            for table in ('relays','edges','snapshots'):
+                self.conn.execute('SELECT count(*) FROM '+table).fetchone()
+            self.conn.execute("INSERT INTO fixture_guard VALUES ('owned')")
+        self.assertEqual(self.conn.execute('SELECT * FROM fixture_guard').fetchall(),[('owned',)])
+
+    def test_read_guard_restores(self):
+        self.submit(draft())
+        with submit.read_guard(self.conn):
+            self.body_denied()
+        normal=self.outcome(lambda:self.conn.execute('SELECT body FROM bodies').fetchall())
+        self.assertEqual(normal,('ok',[(b'body\n',)]))
+        marker=RuntimeError('fixture marker')
+        caught=None
+        try:
+            with submit.read_guard(self.conn):
+                raise marker
+        except RuntimeError as exc:
+            caught=exc
+        self.assertIs(caught,marker)
+        self.assertIsNone(caught.__cause__)
+        self.assertIsNone(caught.__context__)
+        result=self.outcome(lambda:self.conn.execute('SELECT count(*) FROM bodies').fetchone())
+        self.assertEqual(result,('ok',(1,)))
+        self.assertEqual(submit._READ_GUARDS,{})
+
+    def test_read_guard_cached_statement(self):
+        self.submit(draft())
+        sql='SELECT body FROM bodies'
+        self.assertEqual(self.conn.execute(sql).fetchall(),[(b'body\n',)])
+        with submit.read_guard(self.conn):
+            result=self.outcome(lambda:self.conn.execute(sql).fetchall())
+            self.assertNotEqual(result[0],'ok')
+            self.assertIsInstance(result[1],sqlite3.DatabaseError)
+
+    def test_read_guard_nested(self):
+        self.submit(draft())
+        with submit.read_guard(self.conn):
+            with submit.read_guard(self.conn,frozenset()):
+                self.body_denied()
+            with submit.read_guard(self.conn,frozenset({'relays'})):
+                self.body_denied()
+                result=self.outcome(lambda:self.conn.execute('SELECT 1 FROM relays').fetchall())
+                self.assertNotEqual(result[0],'ok')
+                self.assertIsInstance(result[1],sqlite3.DatabaseError)
+            self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(1,))
+            self.body_denied()
+        self.assertEqual(submit._READ_GUARDS,{})
+
+    def test_read_guard_inside_hook(self):
+        observed=[]
+        def hook(c,a,d,x):
+            with submit.read_guard(c,frozenset({'bodies'})):
+                c.execute("INSERT INTO fixture_guard VALUES ('owned')")
+                c.execute('SELECT count(*) FROM snapshots').fetchone()
+                try:
+                    c.execute("DELETE FROM relays WHERE id='no-such-relay'")
+                    observed.append('write allowed')
+                except sqlite3.DatabaseError:
+                    observed.append('write denied')
+        ctx=replace(self.ctx(),after_admit=hook,after_admit_writes=frozenset({'fixture_guard'}))
+        result=self.outcome(lambda:submit.submit(self.conn,ctx,draft()))
+        self.assertEqual(result[0],'ok',result)
+        self.assertEqual(observed,['write denied'])
+        self.assertEqual(self.conn.execute('SELECT * FROM fixture_guard').fetchall(),[('owned',)])
+        def too_much(c,a,d,x):
+            try:
+                with submit.read_guard(c,frozenset({'bodies','relays'})):
+                    pass
+            except RuntimeError as exc:
+                observed.append(str(exc))
+                raise
+        ctx=replace(self.ctx(),after_admit=too_much)
+        result=self.outcome(lambda:submit.submit(self.conn,ctx,draft()))
+        self.assertNotEqual(result[0],'ok')
+        self.assertIsInstance(result[1],errors.EngineError)
+        self.assertEqual(result[1].code,'E-ADMISSION-HOOK')
+        self.assertIn('RuntimeError',result[1].cause)
+        self.assertEqual(observed[-1],"a read guard inside a hook cannot deny more than the hook's own read denials")
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(1,))
+
+    def test_submit_refused_inside_read_guard(self):
+        before=self.counts()
+        with submit.read_guard(self.conn):
+            result=self.outcome(lambda:self.submit(draft()))
+            self.assertNotEqual(result[0],'ok')
+            self.assertIsInstance(result[1],sqlite3.DatabaseError)
+            self.assertEqual(str(result[1]),'admission is not allowed during a read guard')
+            self.body_denied()
+        self.assertEqual(self.counts(),before)
+        self.assertEqual(submit._READ_GUARDS,{})
+
+    def test_read_guard_closed_connection(self):
+        for raises in (False,True):
+            conn=sqlite3.connect(':memory:')
+            self.addCleanup(conn.close)
+            marker=RuntimeError('fixture close')
+            def block():
+                with submit.read_guard(conn):
+                    conn.close()
+                    if raises:
+                        raise marker
+            result=self.outcome(block)
+            if raises:
+                self.assertEqual(result[0],'RuntimeError')
+                self.assertIs(result[1],marker)
+                self.assertIsNone(result[1].__context__)
+                self.assertIsNone(result[1].__cause__)
+            else:
+                self.assertEqual(result,('ok',None))
+            self.assertEqual(submit._READ_GUARDS,{})
+
+    def test_read_guard_validation(self):
+        guard=submit.read_guard
+        for denied in (set(),['bodies'],'bodies',frozenset({'unknown'}),frozenset({1})):
+            with self.subTest(denied=denied), self.assertRaises(ValueError):
+                with guard(self.conn,denied):
+                    pass
+        self.assertEqual(submit._READ_GUARDS,{})
 
 if __name__ == "__main__":
     unittest.main()
