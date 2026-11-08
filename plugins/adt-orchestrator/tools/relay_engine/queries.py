@@ -485,6 +485,51 @@ def record_token_counts(conn, seat_id, bundle_id, source, counts, *, at_ms):
     conn.commit()
 
 
+def record_session_step(conn, session_id: str, host: str, seat_id: str, start_ms: int) -> str:
+    """Record a session inside the caller's open transaction, without ending it.
+
+    The closing UPDATE takes the write lock before reading the occupant, even
+    in a deferred transaction. A refusal rolls back only this step's writes.
+    """
+    if host not in schema.HOSTS:
+        raise ValueError("unknown host %r" % (host,))
+    if not conn.in_transaction:
+        raise ValueError("session step needs an open transaction")
+    conn.execute("SAVEPOINT engine_record_session")
+    try:
+        conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE seat_id = ? AND ended_at IS NULL",
+                     (start_ms, seat_id))
+        occupant = conn.execute("SELECT id FROM seat_occupants WHERE seat_id = ? AND ended_at IS NULL",
+                                (seat_id,)).fetchone()
+        if occupant is None:
+            raise ValueError("seat %s has no open occupant" % seat_id)
+        generation = conn.execute("SELECT coalesce(max(generation), 0) + 1 FROM seat_sessions"
+                                  " WHERE seat_id = ?", (seat_id,)).fetchone()[0]
+        internal_id = new_uuid7(start_ms)
+        conn.execute(
+            "INSERT INTO seat_sessions (id, seat_id, occupant_id, host, host_session_id,"
+            " generation, signed_in_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (internal_id, seat_id, occupant[0], host, session_id, generation, start_ms,
+             start_ms))
+        conn.execute("RELEASE engine_record_session")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK TO engine_record_session")
+            conn.execute("RELEASE engine_record_session")
+        raise
+    return internal_id
+
+
+def end_session_step(conn, session_id: str, end_ms: int) -> None:
+    """End an internal session in the caller's open transaction; never commit it."""
+    if not conn.in_transaction:
+        raise ValueError("session step needs an open transaction")
+    cursor = conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE id = ?"
+                          " AND ended_at IS NULL", (end_ms, session_id))
+    if cursor.rowcount != 1:
+        raise ValueError("no open session %s" % session_id)
+
+
 def record_session(conn, session_id, host, seat_id, start_ms):
     """A sign-in (J3 with J-A1): session_id is the host's session id; the
     session takes the seat's open occupant and the next generation of the
@@ -495,20 +540,7 @@ def record_session(conn, session_id, host, seat_id, start_ms):
         raise ValueError("session helper needs a clean connection")
     conn.execute("BEGIN IMMEDIATE")
     try:
-        occupant = conn.execute("SELECT id FROM seat_occupants WHERE seat_id = ? AND ended_at IS NULL",
-                                (seat_id,)).fetchone()
-        if occupant is None:
-            raise ValueError("seat %s has no open occupant" % seat_id)
-        generation = conn.execute("SELECT coalesce(max(generation), 0) + 1 FROM seat_sessions"
-                                  " WHERE seat_id = ?", (seat_id,)).fetchone()[0]
-        conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE seat_id = ? AND ended_at IS NULL",
-                     (start_ms, seat_id))
-        internal_id = new_uuid7(start_ms)
-        conn.execute(
-            "INSERT INTO seat_sessions (id, seat_id, occupant_id, host, host_session_id,"
-            " generation, signed_in_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (internal_id, seat_id, occupant[0], host, session_id, generation, start_ms,
-             start_ms))
+        internal_id = record_session_step(conn, session_id, host, seat_id, start_ms)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
@@ -523,10 +555,7 @@ def end_session(conn, session_id, end_ms):
         raise ValueError("session helper needs a clean connection")
     conn.execute("BEGIN IMMEDIATE")
     try:
-        cursor = conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE id = ?"
-                              " AND ended_at IS NULL", (end_ms, session_id))
-        if cursor.rowcount != 1:
-            raise ValueError("no open session %s" % session_id)
+        end_session_step(conn, session_id, end_ms)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:

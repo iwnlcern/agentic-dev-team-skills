@@ -982,6 +982,181 @@ class TestRecords(Store):
                 first.close()
 
 
+class TestSessionSteps(Store):
+    SESSION = ("SELECT host_session_id, host, seat_id, occupant_id, generation, signed_in_at,"
+               " last_seen_at, ended_at FROM seat_sessions ORDER BY generation")
+
+    def test_session_steps_need_a_transaction(self):
+        """M1/M2: a clean connection must not acquire a step-owned transaction."""
+        current = queries.record_session(self.conn, "old", "codex", IMPL.seat_id, 10)
+        before = self.conn.execute("SELECT * FROM seat_sessions").fetchall()
+        for operation in (lambda: queries.record_session_step(
+                self.conn, "new", "codex", IMPL.seat_id, 20),
+                lambda: queries.end_session_step(self.conn, current, 30)):
+            with self.assertRaisesRegex(ValueError, "session step needs an open transaction"):
+                operation()
+            self.assertFalse(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT * FROM seat_sessions").fetchall(), before)
+
+    def test_session_step_joins_caller_transaction(self):
+        """M3: a record step must preserve caller writes and the caller's commit choice."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 321 WHERE seat_id = ?",
+                          (PLANNER.seat_id,))
+        first = queries.record_session_step(self.conn, "first", "codex", IMPL.seat_id, 10)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertIsInstance(first, str)
+        self.assertEqual(self.conn.execute(self.SESSION).fetchall(),
+                         [("first", "codex", IMPL.seat_id, "o-" + IMPL.seat_id,
+                           1, 10, 10, None)])
+        self.assertEqual(self.conn.execute("SELECT id FROM seat_sessions").fetchone(), (first,))
+        self.conn.commit()
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                           (PLANNER.seat_id,)).fetchone(), (321,))
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 456 WHERE seat_id = ?",
+                          (PLANNER.seat_id,))
+        second = queries.record_session_step(self.conn, "rolled-back", "frank", IMPL.seat_id, 20)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertNotEqual(first, second)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute(self.SESSION).fetchall(),
+                         [("first", "codex", IMPL.seat_id, "o-" + IMPL.seat_id,
+                           1, 10, 10, None)])
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                           (PLANNER.seat_id,)).fetchone(), (321,))
+        self.conn.execute("BEGIN IMMEDIATE")
+        second = queries.record_session_step(self.conn, "second", "frank", IMPL.seat_id, 30)
+        third = queries.record_session_step(self.conn, "third", "other", IMPL.seat_id, 40)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(len({first, second, third}), 3)
+        self.conn.commit()
+        self.assertEqual(self.conn.execute(self.SESSION).fetchall(), [
+            ("first", "codex", IMPL.seat_id, "o-" + IMPL.seat_id, 1, 10, 10, 30),
+            ("second", "frank", IMPL.seat_id, "o-" + IMPL.seat_id, 2, 30, 30, 40),
+            ("third", "other", IMPL.seat_id, "o-" + IMPL.seat_id, 3, 40, 40, None)])
+
+    def test_end_session_step_joins_caller_transaction(self):
+        """M4: ending a session is provisional until its caller commits."""
+        current = queries.record_session(self.conn, "host", "codex", IMPL.seat_id, 10)
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.assertIsNone(queries.end_session_step(self.conn, current, 20))
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT ended_at FROM seat_sessions").fetchone(), (20,))
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute("SELECT ended_at FROM seat_sessions").fetchone(), (None,))
+        self.conn.execute("BEGIN IMMEDIATE")
+        queries.end_session_step(self.conn, current, 30)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.commit()
+        self.assertEqual(self.conn.execute("SELECT ended_at FROM seat_sessions").fetchone(), (30,))
+
+    def test_session_step_refusal_keeps_caller_writes(self):
+        """M5/M6: refused record/end writes cannot survive a caller's later commit."""
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+        peer = queries.record_session(self.conn, "peer", "frank", PLANNER.seat_id, 11)
+        self.conn.execute("UPDATE seat_occupants SET ended_at = 12 WHERE seat_id = ?",
+                          (IMPL.seat_id,))
+        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 321 WHERE seat_id = ?",
+                          (PLANNER.seat_id,))
+        # Capturing the real result makes a missing refusal an assertion, not an ERROR.
+        for operation, message in (
+                (lambda: queries.record_session_step(self.conn, "bad-host", "vim",
+                                                       IMPL.seat_id, 20), "unknown host"),
+                (lambda: queries.record_session_step(self.conn, "no-occupant", "codex",
+                                                       IMPL.seat_id, 20), "has no open occupant"),
+                (lambda: queries.end_session_step(self.conn, "absent", 20), "no open session")):
+            with self.assertRaisesRegex(ValueError, message):
+                operation()
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                               (PLANNER.seat_id,)).fetchone(), (321,))
+            self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
+                                               " ORDER BY signed_in_at").fetchall(),
+                             [(previous, None), (peer, None)])
+        queries.end_session_step(self.conn, peer, 21)
+        with self.assertRaisesRegex(ValueError, "no open session"):
+            queries.end_session_step(self.conn, peer, 22)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.commit()
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
+                                           " ORDER BY signed_in_at").fetchall(),
+                         [(previous, None), (peer, 21)])
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                           (PLANNER.seat_id,)).fetchone(), (321,))
+
+    def test_session_step_serializes_in_deferred_transaction(self):
+        """M7: the occupant read must follow the write lock, even in plain BEGIN."""
+        step = queries.record_session_step
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sessions.db")
+            signing_in = sqlite3.connect(path)
+            replacing = sqlite3.connect(path, timeout=0.02)
+            try:
+                self.conn.backup(signing_in)
+                signing_in.execute("PRAGMA foreign_keys = ON")
+                replacing.execute("PRAGMA foreign_keys = ON")
+                self.assertEqual(signing_in.execute("PRAGMA journal_mode = WAL").fetchone(), ("wal",))
+                attempts = []
+
+                def replace(occupant, at):
+                    replacing.execute("BEGIN IMMEDIATE")
+                    replacing.execute("UPDATE seat_occupants SET ended_at = ?"
+                                      " WHERE seat_id = ? AND ended_at IS NULL", (at, IMPL.seat_id))
+                    replacing.execute("INSERT INTO seat_occupants"
+                                      " (id, seat_id, key_id, key_verifier, issued_at)"
+                                      " VALUES (?, ?, ?, 'v', ?)",
+                                      (occupant, IMPL.seat_id, 'k-' + occupant, at + 1))
+                    replacing.commit()
+
+                def after_selection(cursor, row):
+                    if not attempts and [col[0] for col in cursor.description] == ["id"]:
+                        try:
+                            replace("o-replacement", 25)
+                        except sqlite3.OperationalError as error:
+                            attempts.append(error.sqlite_errorcode)
+                            replacing.rollback()
+                        else:
+                            attempts.append("replacement committed")
+                    return row
+
+                signing_in.execute("BEGIN")
+                signing_in.row_factory = after_selection
+                try:
+                    outcome = step(signing_in, "first", "codex", IMPL.seat_id, 10)
+                except BaseException as error:
+                    outcome = error
+                signing_in.row_factory = None
+                self.assertIsInstance(outcome, str, repr(outcome))
+                self.assertTrue(signing_in.in_transaction)
+                self.assertEqual(attempts, [sqlite3.SQLITE_BUSY])
+                self.assertEqual(signing_in.execute(
+                    "SELECT occupant_id, generation, ended_at FROM seat_sessions").fetchall(),
+                    [("o-" + IMPL.seat_id, 1, None)])
+                signing_in.commit()
+                replace("o-replacement", 25)  # Positive control: the writer works after commit.
+                signing_in.execute("BEGIN")
+                signing_in.execute("SELECT id FROM seat_occupants").fetchall()
+                replace("o-newer", 35)
+                before = signing_in.execute("SELECT * FROM seat_sessions").fetchall()
+                try:
+                    outcome = step(signing_in, "stale", "codex", IMPL.seat_id, 40)
+                except BaseException as error:
+                    outcome = error
+                self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
+                self.assertEqual(outcome.sqlite_errorcode, 517)
+                self.assertTrue(signing_in.in_transaction)
+                self.assertEqual(signing_in.execute("SELECT * FROM seat_sessions").fetchall(), before)
+                signing_in.rollback()
+                self.assertEqual(replacing.execute(
+                    "SELECT host_session_id FROM seat_sessions").fetchall(), [("first",)])
+            finally:
+                signing_in.close()
+                replacing.close()
+
+
 class TestGitIsolation(unittest.TestCase):
     def test_store_tests_ignore_ambient_git_names(self):
         # Breaks: a Store consumer reaches Git through an unisolated fixture.
