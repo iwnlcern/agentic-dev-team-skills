@@ -1,3 +1,7 @@
+from relay_engine import strings
+import os
+import io
+import hashlib
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11; plan Task 5).
 
 Every check after submit is a query: reads and read state, the bounded
@@ -592,3 +596,83 @@ def locked_snapshot(conn, artifact, *, project_id):
         " WHERE s.artifact = ? AND r.project_id = ? AND s.locked_by IS NOT NULL"
         " ORDER BY s.locked_at DESC, s.handle DESC LIMIT 1", (artifact, project_id)).fetchone()
     return None if row is None else _snapshot_row(row)
+
+
+def _snapshot(conn, handle):
+    row = conn.execute("SELECT " + _SNAPSHOT_COLUMNS + " FROM snapshots WHERE handle = ?",
+                       (handle,)).fetchone()
+    if row is None:
+        raise KeyError(handle)
+    return _snapshot_row(row)
+
+
+
+
+def _snapshot_bytes(conn, snapshot, store, directory):
+    if snapshot.has_bytes:
+        return store.get(snapshot.content_sha256)
+    edge = conn.execute("SELECT target_type, target_repository_name, digest_at_submit FROM edges"
+                        " WHERE id = ?", (snapshot.edge_id,)).fetchone()
+    if edge[0] != "git":
+        reason = ("the file was over 1 MiB when the request was submitted"
+                  if snapshot.bytes_len > (1 << 20) else
+                  "no evidence store was configured when the request was submitted")
+    elif directory is None:
+        reason = "a Git snapshot is read from its repository, which was not given"
+    else:
+        checkout = directory.checkout(edge[1])
+        if checkout is None:
+            reason = "a Git snapshot's repository is not known to this project"
+        else:
+            try:
+                data = refs.read_blob(checkout, edge[2])
+            except errors.EngineError as error:
+                if error.code != "E-REF-UNRESOLVED":
+                    raise
+                reason = "the blob cannot be read from its checkout"
+            else:
+                if hashlib.sha256(data).hexdigest() != snapshot.content_sha256:
+                    raise ValueError("blob %s no longer matches snapshot %d" %
+                                     (edge[2], snapshot.handle))
+                return data
+    raise errors.error_for("E-SNAPSHOT-NO-BYTES", handle=snapshot.handle, reason=reason)
+
+
+def snapshot_diff(conn, a_handle, b_handle, store, directory=None):
+    """The unified line difference between two snapshots of one artifact."""
+    first, second = _snapshot(conn, a_handle), _snapshot(conn, b_handle)
+    if first.artifact != second.artifact:
+        raise ValueError("snapshots %d and %d are of different artifacts" % (a_handle, b_handle))
+    texts = []
+    for snapshot in (first, second):
+        data = _snapshot_bytes(conn, snapshot, store, directory)
+        try:
+            texts.append(data.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise errors.error_for("E-SNAPSHOT-NOT-TEXT", handle=snapshot.handle) from None
+    return "".join(difflib.unified_diff(
+        texts[0].splitlines(keepends=True), texts[1].splitlines(keepends=True),
+        fromfile="snapshot %d" % a_handle, tofile="snapshot %d" % b_handle))
+
+
+def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None):
+    """Write a snapshot's exact bytes to out; an existing file is replaced
+    only when overwrite is true, and a final symlink is never followed."""
+    snapshot = _snapshot(conn, handle)
+    data = _snapshot_bytes(conn, snapshot, store, directory)
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+             | (os.O_TRUNC if overwrite else os.O_EXCL))
+    try:
+        fd = os.open(out, flags, 0o644)
+    except FileExistsError:
+        shown = os.fspath(out)
+        raise errors.error_for(
+            "E-OUTPUT-EXISTS",
+            path=shown if strings._is_show_text(shown) and len(shown) <= 300
+            else errors._rejected_identity(shown)) from None
+    with io.FileIO(fd, mode="wb", closefd=True) as stream:
+        view = memoryview(data)
+        while view:
+            view = view[stream.write(view):]
+
+

@@ -1,5 +1,7 @@
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11, § 15 item 6; plan Task 5)."""
 
+import difflib
+from pathlib import Path
 import hashlib
 import inspect
 import json
@@ -1104,6 +1106,99 @@ class TestLockedSnapshots(submit_tests.Snapshots):
         self.assertEqual(self.locked(ref,'q').locked_by,reply.relay_id)
         p=self.request(ref);r=self.approve(p,ref)
         self.assertEqual(self.locked(ref).locked_by,r.relay_id)
+
+
+class TestSnapshotCopies(submit_tests.Snapshots):
+    def snapshots_pair(self, first=b'one\n', second=b'two\n'):
+        ref=self.artifact('d',first);self.request(ref)
+        self.artifact('d',second);self.request(ref)
+        return ref
+
+    def outcome(self, action):
+        try:
+            return ('ok',action())
+        except Exception as exc:
+            return (getattr(exc,'code',type(exc).__name__),exc)
+
+    def test_second_snapshot_and_diff(self):
+        self.snapshots_pair()
+        self.assertEqual(queries.snapshot_diff(self.conn,1,2,self.store), ''.join(difflib.unified_diff(['one\n'],['two\n'],fromfile='snapshot 1',tofile='snapshot 2')))
+        self.request(self.artifact('d',b'\xff'))
+        result=self.outcome(lambda:queries.snapshot_diff(self.conn,1,3,self.store))
+        self.assertEqual(result[0],'E-SNAPSHOT-NOT-TEXT')
+
+    def test_clean_copy_exact(self):
+        self.snapshots_pair(first=b'bytes\x00\xff')
+        out=self.folder/'copy'
+        queries.write_snapshot(self.conn,1,out,self.store)
+        self.assertEqual(out.read_bytes(),b'bytes\x00\xff')
+        result=self.outcome(lambda:queries.write_snapshot(self.conn,2,out,self.store))
+        self.assertEqual(result[0],'E-OUTPUT-EXISTS')
+        self.assertEqual(out.read_bytes(),b'bytes\x00\xff')
+        queries.write_snapshot(self.conn,2,out,self.store,True)
+        self.assertEqual(out.read_bytes(),b'two\n')
+        link=self.folder/'link';link.symlink_to(out)
+        for overwrite in (False,True):
+            result=self.outcome(lambda:queries.write_snapshot(self.conn,1,link,self.store,overwrite))
+            self.assertNotEqual(result[0],'ok')
+            self.assertEqual(out.read_bytes(),b'two\n')
+            self.assertTrue(link.is_symlink())
+
+    def test_large_copy_no_bytes(self):
+        self.request(self.artifact('d',b'x'*(submit_tests.MIB+1)))
+        for action in (lambda:queries.write_snapshot(self.conn,1,self.folder/'copy',self.store),lambda:queries.snapshot_diff(self.conn,1,1,self.store)):
+            result=self.outcome(action)
+            self.assertEqual(result[0],'E-SNAPSHOT-NO-BYTES')
+            self.assertIn('the file was over 1 MiB when the request was submitted',result[1].cause)
+
+    def test_no_store_copy_no_bytes(self):
+        self.store=None;self.request(self.artifact('d',b'one'))
+        for action in (lambda:queries.write_snapshot(self.conn,1,self.folder/'copy',None),lambda:queries.snapshot_diff(self.conn,1,1,None)):
+            result=self.outcome(action)
+            self.assertEqual(result[0],'E-SNAPSHOT-NO-BYTES')
+            self.assertIn('no evidence store was configured when the request was submitted',result[1].cause)
+
+    def test_unknown_handle(self):
+        # Let an absent production name be the explicit C1 AttributeError.
+        write=queries.write_snapshot;diff=queries.snapshot_diff
+        for action in (lambda:write(self.conn,99,self.folder/'copy',self.store),lambda:diff(self.conn,99,100,self.store)):
+            self.assertEqual(self.outcome(action)[0],'KeyError')
+
+class TestGitSnapshotCopies(submit_tests.GitSnapshots):
+    def outcome(self, action):
+        try:
+            return ('ok',action())
+        except Exception as exc:
+            return (getattr(exc,'code',type(exc).__name__),exc)
+
+    def test_git_snapshot_copy_and_diff(self):
+        repo=self.repository();self.request('bivpak@main:d.md')
+        repo.commit_files({'d.md':'two\n'});self.request('bivpak@main:d.md')
+        other=Repo({'unrelated':'none'});self.addCleanup(other.close)
+        self.conn.executemany('INSERT INTO repository_checkouts (repository_id,path,last_seen_at) VALUES (?,?,1)',[('repo-1',str(repo.path)),('repo-q',str(other.path))]);self.conn.commit()
+        directory=submit.TableDirectory(self.conn,submit_tests.PROJECT)
+        out=self.folder/'git-copy'
+        copied=self.outcome(lambda:queries.write_snapshot(self.conn,1,out,self.store,directory=directory))
+        self.assertEqual(copied[0],'ok',copied)
+        self.assertEqual(out.read_bytes(),b'one\n')
+        diff=self.outcome(lambda:queries.snapshot_diff(self.conn,1,2,self.store,directory))
+        self.assertEqual(diff,('ok',''.join(difflib.unified_diff(['one\n'],['two\n'],fromfile='snapshot 1',tofile='snapshot 2'))))
+        with mock.patch.object(refs,'read_blob',return_value=b'wrong'):
+            mismatch=self.outcome(lambda:queries.write_snapshot(self.conn,1,self.folder/'bad',self.store,directory=directory))
+        self.assertEqual(mismatch[0],'ValueError')
+        self.assertIn('snapshot 1',str(mismatch[1]))
+
+    def test_git_snapshot_needs_directory(self):
+        repo=self.repository();self.request('bivpak@main:d.md')
+        other=Repo({'unrelated':'none'});self.addCleanup(other.close)
+        cases=[(None,'which was not given'),(submit_tests.FakeDirectory({'repo-1':repo.path}),'not known to this project'),(submit_tests.FakeDirectory({'bivpak':other.path}),'the blob cannot be read from')]
+        for directory,reason in cases:
+            for action in (lambda:queries.write_snapshot(self.conn,1,self.folder/'copy',self.store,directory=directory),lambda:queries.snapshot_diff(self.conn,1,1,self.store,directory)):
+                result=self.outcome(action)
+                self.assertEqual(result[0],'E-SNAPSHOT-NO-BYTES',result)
+                self.assertIn(reason,result[1].cause)
+                self.assertIsNone(result[1].__cause__)
+                self.assertIsNone(result[1].__context__)
 
 if __name__ == "__main__":
     unittest.main()
