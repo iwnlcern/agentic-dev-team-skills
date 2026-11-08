@@ -214,7 +214,9 @@ def submit(conn, ctx, data):
         raise
 
 
-# Engine owns this connection's authorizer and progress-handler slots during the hook.
+# Engine owns this connection's authorizer and progress-handler slots for its whole life.
+# A hook can change connection attributes, including isolation_level and autocommit,
+# whose changes outlive the submit.
 # This SQL write boundary trusts Python code in the process, including calls to
 # set_authorizer, set_progress_handler and blobopen.
 _HOOK_FRAMES = {}
@@ -229,12 +231,11 @@ def _hook_name(hook):
     return name if errors._is_hook_name(name) else "relay_engine.submit.unknown_hook"
 
 
-def _transaction_ended(conn):
+def _transaction_state(conn):
     try:
-        return not conn.in_transaction
+        return "active" if conn.in_transaction else "ended"
     except sqlite3.ProgrammingError:
-        raise sqlite3.ProgrammingError(
-            "the admission hook closed the store connection") from None
+        return "closed"
 
 
 def _run_hook(conn, ctx, admitted, draft):
@@ -255,19 +256,31 @@ def _run_hook(conn, ctx, admitted, draft):
         conn.set_authorizer(authorize)
         # Prepared VMs are not re-authorized; stop them after any conflict rollback.
         conn.set_progress_handler(lambda: 0 if conn.in_transaction else 1, 1)
+        failure = None
         try:
             ctx.after_admit(conn, admitted, draft, ctx)
-        except errors.EngineError:
-            raise
+        except errors.EngineError as exc:
+            failure = exc
         except Exception as exc:
-            if _transaction_ended(conn):
-                raise errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
-                                       hook=name) from None
-            kind = type(exc).__name__
-            if not errors._is_hook_kind(kind):
-                kind = "Exception"
-            raise errors.error_for("E-ADMISSION-HOOK", hook=name, kind=kind) from None
-        if _transaction_ended(conn):
+            state = _transaction_state(conn)
+            if state == "closed":
+                failure = sqlite3.ProgrammingError(
+                    "the admission hook closed the store connection")
+            elif state == "ended":
+                failure = errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
+                                           hook=name)
+            else:
+                kind = type(exc).__name__
+                if not errors._is_hook_kind(kind):
+                    kind = "Exception"
+                failure = errors.error_for("E-ADMISSION-HOOK", hook=name, kind=kind)
+        if failure is not None:
+            raise failure
+        state = _transaction_state(conn)
+        if state == "closed":
+            raise sqlite3.ProgrammingError(
+                "the admission hook closed the store connection")
+        if state == "ended":
             raise errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
                                    hook=name) from None
     finally:
@@ -405,8 +418,13 @@ def _admit(conn, ctx, data, now, *, _system=False):
             _run_hook(conn, ctx, Admitted(relay_id, handle, created), draft)
             conn.execute("COMMIT")
     except BaseException:
-        if not _system and conn.in_transaction:
-            conn.execute("ROLLBACK")
+        if not _system:
+            try:
+                active = conn.in_transaction
+            except sqlite3.ProgrammingError:
+                active = False
+            if active:
+                conn.execute("ROLLBACK")
         raise
     return Admitted(relay_id, handle, created)
 

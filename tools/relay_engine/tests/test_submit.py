@@ -1324,6 +1324,9 @@ class TestAdmissionHook(Store):
             c.execute("BEGIN")
         def rollback(c, ctx):
             c.rollback()
+        def savepoint(c, ctx):
+            c.execute("SAVEPOINT warmed")
+            c.execute("RELEASE warmed")
         operations = [
             ("COMMIT", lambda c, x: c.execute("COMMIT")),
             ("COMMIT; BEGIN", lambda c, x: c.executescript("COMMIT; BEGIN")),
@@ -1331,19 +1334,23 @@ class TestAdmissionHook(Store):
             ("ROLLBACK;BEGIN", lambda c, x: c.executescript("ROLLBACK; BEGIN")),
             ("lowercase", lambda c, x: c.executescript("commit; begin")),
             ("conn.rollback", rollback),
-            ("SAVEPOINT/RELEASE", lambda c, x: c.executescript("SAVEPOINT warmed; RELEASE warmed")),
+            ("SAVEPOINT/RELEASE", savepoint),
             ("ATTACH", lambda c, x: c.execute("ATTACH ':memory:' AS warmed")),
             ("DETACH", lambda c, x: c.execute("DETACH warmed")),
             ("PRAGMA", lambda c, x: c.execute("PRAGMA user_version")),
             ("DDL", lambda c, x: c.execute("CREATE TABLE fixture_ddl (n INTEGER)")),
             ("nested", lambda c, x: submit.submit(c, x, draft(subject="nested"))),
         ]
-        for label, operation in operations:
+        for number, (label, operation) in enumerate(operations):
             with self.subTest(escape=label):
                 def hook(conn, admitted, parsed, ctx):
-                    conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("escape", admitted.relay_id))
+                    conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("escape-%d" % number, admitted.relay_id))
                     operation(conn, ctx)
-                self.reject_hook(hook)
+                try:
+                    outcome = self.reject_hook(hook)
+                except BaseException as error:
+                    outcome = error
+                self.assertIsInstance(outcome, errors.EngineError)
 
     def test_hook_write_set_trigger_cascade(self):
         self.require_hook()
@@ -1475,17 +1482,22 @@ class TestAdmissionHook(Store):
         self.canaries()
         self.conn.execute("INSERT INTO fixture_owned VALUES ('duplicate',NULL)")
         self.conn.commit()
+        states = []
         def hook(c, a, d, x):
             # SQLite itself rolls the transaction back on this conflict.
-            # No authorizer replacement or pretend commit bypass is involved.
             try:
                 c.execute("INSERT OR ROLLBACK INTO fixture_owned VALUES ('duplicate',?)", (a.relay_id,))
-            except sqlite3.IntegrityError:
+            except sqlite3.DatabaseError:
                 pass
-            self.assertFalse(c.in_transaction)
-        error = self.reject_hook(hook)
-        self.assertEqual(error.cause_key, "error-admission-hook-ended-transaction-cause")
-        self.assertNotIn("kind", error.params)
+            states.append(c.in_transaction)
+        try:
+            outcome = self.reject_hook(hook)
+        except BaseException as error:
+            outcome = error
+        self.assertEqual(states, [False])
+        self.assertIsInstance(outcome, errors.EngineError)
+        self.assertEqual(outcome.cause_key, "error-admission-hook-ended-transaction-cause")
+        self.assertNotIn("kind", outcome.params)
 
     def test_hook_default_preserves_existing(self):
         self.require_hook()
@@ -1593,7 +1605,7 @@ class TestAdmissionHookAtomicity(Store):
                                "INSERT OR ROLLBACK INTO fixture_owned VALUES ('duplicate',NULL)")
                         try:
                             c.execute(sql)
-                        except sqlite3.IntegrityError:
+                        except sqlite3.DatabaseError:
                             pass
                         try:
                             c.execute("INSERT INTO fixture_owned VALUES (?,?)"
@@ -1605,8 +1617,8 @@ class TestAdmissionHookAtomicity(Store):
                     refusal = None
                     try:
                         submit.submit(conn, ctx, draft())
-                    except errors.EngineError as error:
-                        refusal = error.code
+                    except BaseException as error:
+                        refusal = error.code if isinstance(error, errors.EngineError) else type(error).__name__
                     state = self.file_state(path)
                     want = dict(before)
                     want["refusals"] += 1
@@ -1743,24 +1755,33 @@ class TestAdmissionHookAtomicity(Store):
                     if closing:
                         c.close()
                     raise RuntimeError(private_message)
-                error = None
+                outcome = None
                 try:
-                    submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                    outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
                                   after_admit_writes=frozenset({"fixture_owned"})), draft())
-                except (sqlite3.ProgrammingError, errors.EngineError) as caught:
-                    error = caught
+                except BaseException as caught:
+                    outcome = caught
                 want = dict(before)
                 if closing:
-                    self.assertIsInstance(error, sqlite3.ProgrammingError)
+                    self.assertIsInstance(outcome, sqlite3.ProgrammingError)
+                    self.assertEqual(str(outcome), "the admission hook closed the store connection")
                 else:
-                    self.assertIsInstance(error, errors.EngineError)
-                    self.assertEqual(error.code, "E-ADMISSION-HOOK")
-                    self.assertEqual(error.params["kind"], "RuntimeError")
+                    self.assertIsInstance(outcome, errors.EngineError)
+                    self.assertEqual(outcome.code, "E-ADMISSION-HOOK")
+                    self.assertEqual(outcome.params["kind"], "RuntimeError")
                     want["refusals"] += 1
                     self.assert_file_free(conn)
                 self.assertEqual(self.file_state(path), want)
                 self.assertNotIn(conn, submit._HOOK_FRAMES)
-                disclosed.append(private_message in "".join(traceback.format_exception(error)))
+                pending, seen = [outcome], set()
+                while pending:
+                    error = pending.pop()
+                    if error is None or id(error) in seen:
+                        continue
+                    seen.add(id(error))
+                    self.assertNotIn(private_message, str(error))
+                    pending.extend((error.__cause__, error.__context__))
+                disclosed.append(private_message in "".join(traceback.format_exception(outcome)))
         self.assertEqual(disclosed, [False, False],
                          "closed and open hook failures must not disclose the private payload")
 
@@ -1773,12 +1794,94 @@ class TestAdmissionHookAtomicity(Store):
             def hook(c, a, d, x):
                 c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("closed", a.relay_id))
                 c.close()
-            with self.assertRaises(sqlite3.ProgrammingError):
-                submit.submit(conn, replace(self.ctx(), after_admit=hook,
+            outcome = None
+            try:
+                outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
                               after_admit_writes=frozenset({"fixture_owned"})), draft())
+            except BaseException as caught:
+                outcome = caught
+            self.assertIsInstance(outcome, sqlite3.ProgrammingError)
+            self.assertEqual(str(outcome), "the admission hook closed the store connection")
+            self.assertIsNone(outcome.__cause__)
+            self.assertIsNone(outcome.__context__)
             self.assertEqual(self.file_state(path), before)
             self.assertNotIn(conn, submit._HOOK_FRAMES,
                              "closing a hook connection must not leak its ownership frame")
+
+    def test_hook_closing_connection_interrupt_propagates(self):
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            path = Path(name) / "closed-interrupt.db"
+            conn = self.file_store(path)
+            before = self.file_state(path)
+            interrupt = KeyboardInterrupt("closed-hook-interrupt")
+            def hook(c, a, d, x):
+                c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("interrupt", a.relay_id))
+                c.close()
+                raise interrupt
+            outcome = None
+            try:
+                outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                              after_admit_writes=frozenset({"fixture_owned"})), draft())
+            except BaseException as caught:
+                outcome = caught
+            self.assertIs(outcome, interrupt)
+            self.assertEqual(self.file_state(path), before)
+            self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+    def test_hook_writes_outside_main_refused(self):
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            for database in ("fixture_attached", "temp"):
+                with self.subTest(database=database):
+                    path = Path(name) / (database + ".db")
+                    conn = self.file_store(path)
+                    conn.execute("ATTACH ':memory:' AS fixture_attached")
+                    conn.execute("CREATE TABLE fixture_attached.fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT)")
+                    conn.execute("CREATE TEMP TABLE fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT)")
+                    before = self.file_state(path)
+                    def hook(c, a, d, x):
+                        c.execute("INSERT INTO " + database + ".fixture_owned VALUES (?,?)",
+                                  ("outside", a.relay_id))
+                    outcome = None
+                    try:
+                        outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                                      after_admit_writes=frozenset({"fixture_owned"})), draft())
+                    except BaseException as caught:
+                        outcome = caught
+                    self.assertIsInstance(outcome, errors.EngineError)
+                    self.assertEqual(outcome.code, "E-ADMISSION-HOOK")
+                    want = dict(before)
+                    want["refusals"] += 1
+                    self.assertEqual(self.file_state(path), want)
+                    for target in ("fixture_attached", "temp"):
+                        self.assertEqual(conn.execute("SELECT * FROM " + target + ".fixture_owned").fetchall(), [])
+                    self.assert_file_free(conn)
+
+    def test_system_filing_with_foreign_context_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            conn = self.file_store(Path(name) / "foreign-context.db")
+            foreign_ctx = self.ctx(sender=FOREIGN, git_state=None)
+            attempts = []
+            def hook(c, a, d, x):
+                try:
+                    attempts.append(submit.file_system_relay(
+                        c, foreign_ctx, draft(to=FOREIGN.address, bundle="foreign-system")))
+                except BaseException as caught:
+                    attempts.append(caught)
+            outcome = None
+            try:
+                outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook), draft())
+            except BaseException as caught:
+                outcome = caught
+            self.assertIsInstance(outcome, submit.Admitted)
+            self.assertEqual(len(attempts), 1)
+            self.assertIsInstance(attempts[0], RuntimeError)
+            self.assertEqual(str(attempts[0]),
+                             "system filing requires this connection's active admission hook")
+            self.assertEqual(conn.execute("SELECT project_id, count(*) FROM relays GROUP BY project_id").fetchall(),
+                             [("p", 1)])
+            self.assert_file_free(conn)
 
 
 class TestAdmissionKeyBoundary(Store):
