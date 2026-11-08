@@ -1,13 +1,17 @@
 """Machine catalogue identity, classification and pre-release refusal."""
 from pathlib import Path
+import hashlib
+import inspect
+import os
 import sqlite3
+import stat
 import sys
 import tempfile
 import unittest
 from unittest import mock
 from uuid import UUID
 
-from relay_engine import catalogue, errors, store_layout
+from relay_engine import catalogue, errors, store_layout, submit
 
 
 P = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -63,10 +67,16 @@ class TestCatalogue(unittest.TestCase):
                 self.assertEqual(rows[0][1], 'isolated')
                 self.assertEqual(self.identity(self.opened(root, **kwargs)), rows)
             resolver.assert_not_called()
-        # Control: comparing with a default path does resolve the default.
-        with mock.patch.object(store_layout, 'production_root', return_value=self.root) as resolver:
-            self.assertEqual(self.root, store_layout.production_root())
-            resolver.assert_called_once_with()
+        # Control: run a classifying variant of the opener itself.
+        source = inspect.getsource(store_layout.open_catalogue)
+        self.assertIn("kind or 'isolated'", source)
+        source = source.replace("kind or 'isolated'",
+                                "kind or ('production' if root == production_root() else 'isolated')")
+        with mock.patch.object(store_layout, 'production_root', side_effect=AssertionError('resolved')):
+            namespace = dict(vars(store_layout))
+            exec(compile(source, '<classifying-opener>', 'exec'), namespace)
+            with self.assertRaisesRegex(AssertionError, 'resolved'):
+                namespace['open_catalogue'](Path(self.tmp.name) / 'classifying')
 
     def test_default_never_creates_production(self):
         with mock.patch.object(store_layout, 'production_root', return_value=self.root) as resolver:
@@ -86,7 +96,8 @@ class TestCatalogue(unittest.TestCase):
 
     def test_init_refuses_other_digest(self):
         for mutation in ["UPDATE schema_version SET ddl_sha256 = 'old'",
-                         'CREATE TABLE extra(value TEXT) STRICT']:
+                         'CREATE TABLE extra(value TEXT) STRICT',
+                         'ALTER TABLE project_routes ADD COLUMN extra TEXT']:
             with self.subTest(mutation=mutation):
                 root = Path(self.tmp.name) / str(len(mutation))
                 conn = self.opened(root)
@@ -98,6 +109,133 @@ class TestCatalogue(unittest.TestCase):
                     self.opened(root)
                 self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
                 self.assertEqual(self.snapshot(conn), before)
+
+    def test_missing_catalogue_with_projects_refuses(self):
+        # M12: a lost catalogue must not silently become a new empty store.
+        for fixture in ['absent', 'empty', 'no-tables']:
+            with self.subTest(fixture=fixture):
+                root = Path(self.tmp.name) / fixture
+                ledger = store_layout.open_ledger(root, P, create=True)
+                ledger.close()
+                path = root / 'machine.sqlite3'
+                if fixture == 'empty':
+                    path.touch()
+                elif fixture == 'no-tables':
+                    conn = sqlite3.connect(path)
+                    conn.execute('PRAGMA user_version=1').close()
+                    conn.close()
+                before = (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+                entries = sorted(p.relative_to(root).as_posix() for p in root.rglob('*'))
+                with self.assertRaises(store_layout.LayoutFault) as caught:
+                    self.opened(root)
+                self.assertEqual(caught.exception.cause, 'missing-catalogue')
+                after = (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+                self.assertEqual(after, before)
+                self.assertEqual(sorted(p.relative_to(root).as_posix() for p in root.rglob('*')), entries)
+        # An empty projects directory still permits a genuinely new store.
+        root = Path(self.tmp.name) / 'empty-projects'
+        (root / 'projects').mkdir(parents=True)
+        self.assertEqual(self.identity(self.opened(root))[0][1], 'isolated')
+
+    def test_creation_is_one_transaction(self):
+        # M13: a commit between schema and identity strands a half-created store.
+        with mock.patch.object(submit, 'new_uuid7', side_effect=RuntimeError('before identity')):
+            with self.assertRaisesRegex(RuntimeError, 'before identity'):
+                self.opened(kind='production')
+        probe = sqlite3.connect(self.root / 'machine.sqlite3')
+        try:
+            self.assertEqual(probe.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall(), [])
+        finally:
+            probe.close()
+        trace = []
+        connect = sqlite3.connect
+
+        def traced(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            conn.set_trace_callback(trace.append)
+            return conn
+
+        with mock.patch.object(sqlite3, 'connect', side_effect=traced):
+            conn = self.opened(kind='production')
+        self.assertEqual(self.identity(conn)[0][1], 'production')
+        self.assertEqual([sql for sql in trace if sql in ('BEGIN IMMEDIATE', 'COMMIT')],
+                         ['BEGIN IMMEDIATE', 'COMMIT'])
+
+    def test_tables_without_identity_refuse(self):
+        for kwargs in [{}, {'kind': 'production'}]:
+            with self.subTest(kwargs=kwargs):
+                root = Path(self.tmp.name) / str(len(kwargs))
+                conn = self.opened(root)
+                conn.execute('DELETE FROM catalogue_identity').close()
+                conn.execute('COMMIT').close()
+                conn.close()
+                path = root / 'machine.sqlite3'
+                before = (path.read_bytes(), path.stat().st_mtime_ns,
+                          sorted(p.name for p in root.iterdir()))
+                with self.assertRaises(store_layout.LayoutFault) as caught:
+                    self.opened(root, **kwargs)
+                self.assertEqual(caught.exception.cause, 'no-identity')
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns,
+                                  sorted(p.name for p in root.iterdir())), before)
+
+    def test_pragmas_precede_first_write(self):
+        # The first durable schema/identity write must already have full sync.
+        connect = sqlite3.connect
+        trace = []
+
+        def traced(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            conn.set_trace_callback(trace.append)
+            return conn
+
+        with mock.patch.object(sqlite3, 'connect', side_effect=traced):
+            self.opened()
+        first_create = next(i for i, sql in enumerate(trace) if sql.startswith('CREATE '))
+        for pragma in ['PRAGMA journal_mode=WAL', 'PRAGMA synchronous=FULL']:
+            self.assertLess(trace.index(pragma), first_create)
+
+    def test_sqlite_prefix_is_literal(self):
+        # M14: '_' as a wildcard hides all four added object types.
+        for statement in ['CREATE TABLE sqliteXextra (value TEXT)',
+                          'CREATE INDEX sqlite1 ON project_routes (created_at)',
+                          'CREATE VIEW sqlitev AS SELECT * FROM project_routes',
+                          'CREATE TRIGGER sqlitet AFTER INSERT ON project_routes BEGIN SELECT 1; END']:
+            with self.subTest(statement=statement):
+                root = Path(self.tmp.name) / statement.split()[1]
+                conn = self.opened(root)
+                conn.execute(statement).close()
+                with self.assertRaises(errors.EngineError) as caught:
+                    self.opened(root)
+                self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+
+    def test_ddl_is_pinned(self):
+        # Pin the actual stored definitions independently of catalogue._TABLES.
+        conn = self.opened()
+        definitions = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
+        self.assertEqual(digest, 'd81174ed62148caa30f62315bb498f1724629cc1225d31a98786c4375d199ee2')
+
+    def test_constraints_hold(self):
+        conn = self.opened()
+        statements = [
+            ("INSERT INTO project_routes VALUES (?, 'invalid', 'other', 1)", (P,)),
+            ("INSERT INTO catalogue_identity VALUES (2, 'other', 'isolated', 1)", ()),
+            ("INSERT INTO key_routes VALUES (?, ?, 1)", (Q, P)),
+        ]
+        for sql, parameters in statements:
+            with self.subTest(sql=sql):
+                conn.execute('BEGIN IMMEDIATE').close()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(sql, parameters).close()
+                conn.execute('ROLLBACK').close()
+
+    def test_created_root_is_0700(self):
+        previous = os.umask(0)
+        try:
+            self.opened()
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o700)
 
     def test_owner_map_covers_every_table(self):
         conn = self.opened()

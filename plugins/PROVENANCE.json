@@ -10670,7 +10670,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/catalogue.py",
-    "sha256": "37edeb8afefd7777de2056c9a91e3e01f09a1c5dfe8f351d69b58805529b7a0f",
+    "sha256": "29e77cbcf8b9249d34f4d1499b38b4185bf4aac003f2d0f33ba8b3827b00ab58",
     "source": "tools/relay_engine/catalogue.py"
   },
   {
@@ -10838,7 +10838,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/store_layout.py",
-    "sha256": "7785738f372b133d522fe846a37b9e5fcd8333d688650a735babed655dc165c9",
+    "sha256": "d11b347eed540b2add9487aec1a41ad4069c7e44a418477dec974c4b53b930f7",
     "source": "tools/relay_engine/store_layout.py"
   },
   {
@@ -21440,7 +21440,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/catalogue.py",
-    "sha256": "37edeb8afefd7777de2056c9a91e3e01f09a1c5dfe8f351d69b58805529b7a0f",
+    "sha256": "29e77cbcf8b9249d34f4d1499b38b4185bf4aac003f2d0f33ba8b3827b00ab58",
     "source": "tools/relay_engine/catalogue.py"
   },
   {
@@ -21608,7 +21608,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/store_layout.py",
-    "sha256": "7785738f372b133d522fe846a37b9e5fcd8333d688650a735babed655dc165c9",
+    "sha256": "d11b347eed540b2add9487aec1a41ad4069c7e44a418477dec974c4b53b930f7",
     "source": "tools/relay_engine/store_layout.py"
   },
   {
@@ -32126,7 +32126,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/catalogue.py",
-    "sha256": "37edeb8afefd7777de2056c9a91e3e01f09a1c5dfe8f351d69b58805529b7a0f",
+    "sha256": "29e77cbcf8b9249d34f4d1499b38b4185bf4aac003f2d0f33ba8b3827b00ab58",
     "source": "tools/relay_engine/catalogue.py"
   },
   {
@@ -32294,7 +32294,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/store_layout.py",
-    "sha256": "7785738f372b133d522fe846a37b9e5fcd8333d688650a735babed655dc165c9",
+    "sha256": "d11b347eed540b2add9487aec1a41ad4069c7e44a418477dec974c4b53b930f7",
     "source": "tools/relay_engine/store_layout.py"
   },
   {

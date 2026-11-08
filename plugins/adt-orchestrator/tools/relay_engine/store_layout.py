@@ -7,7 +7,7 @@ import sys
 import time
 from uuid import UUID
 
-from relay_engine import submit
+from relay_engine import schema, submit
 
 
 class LayoutFault(Exception):
@@ -100,18 +100,20 @@ def open_ledger(root, project_id: str, *, create: bool = False):
     if create:
         for directory in [Path(root), Path(root) / 'projects', path.parent]:
             directory.mkdir(mode=0o700, exist_ok=True)
+        conn = submit.open_store(path)
     else:
+        if not path.exists():
+            raise LayoutFault('missing')
         try:
-            probe = sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True)
+            conn = sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True)
         except sqlite3.OperationalError:
             if not path.exists():
                 raise LayoutFault('missing') from None
             raise
-        probe.close()
-    conn = submit.open_store(path)
     try:
-        _configure(conn)
-        rows = conn.execute('SELECT id FROM projects LIMIT 2')
+        if _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'") is None:
+            raise LayoutFault('no-project-row')
+        rows = conn.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')
         try:
             projects = rows.fetchall()
         finally:
@@ -120,6 +122,10 @@ def open_ledger(root, project_id: str, *, create: bool = False):
             raise LayoutFault('wrong-project')
         if not projects and not create:
             raise LayoutFault('no-project-row')
+        if not create:
+            _pragma(conn, 'PRAGMA foreign_keys=ON')
+            schema.init_v3(conn)
+        _configure(conn)
     except BaseException:
         conn.close()
         raise
@@ -133,23 +139,38 @@ def open_catalogue(root, *, kind: str | None = None):
     if kind not in (None, 'production', 'isolated'):
         raise ValueError('unknown catalogue kind')
     root = Path(root)
+    path = root / 'machine.sqlite3'
+    projects = root / 'projects'
+    has_projects = projects.exists() and any(projects.iterdir())
+    if has_projects and (not path.exists() or path.stat().st_size == 0):
+        raise LayoutFault('missing-catalogue')
     root.mkdir(mode=0o700, exist_ok=True)
-    conn = sqlite3.connect(root / 'machine.sqlite3')
+    conn = sqlite3.connect(path)
     try:
-        _pragma(conn, 'PRAGMA foreign_keys=ON')
-        catalogue.init_catalogue(conn)
-        _pragma(conn, 'BEGIN IMMEDIATE')
-        identity = _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1')
-        if identity is None:
-            now_ms = time.time_ns() // 1_000_000
-            conn.execute('INSERT INTO catalogue_identity VALUES (1, ?, ?, ?)',
-                         (submit.new_uuid7(now_ms), kind or 'isolated', now_ms)).close()
-            _pragma(conn, 'COMMIT')
-        else:
-            _pragma(conn, 'ROLLBACK')
+        if has_projects and _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1") is None:
+            raise LayoutFault('missing-catalogue')
+        if catalogue._definitions(conn):
+            catalogue._require_matching(conn)
+            identity = _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1')
+            if identity is None:
+                raise LayoutFault('no-identity')
             if kind is not None and identity != (kind,):
                 raise LayoutFault('wrong-kind')
         _configure(conn)
+        _pragma(conn, 'PRAGMA foreign_keys=ON')
+        _pragma(conn, 'BEGIN IMMEDIATE')
+        creating = not catalogue._definitions(conn)
+        catalogue.init_catalogue(conn)
+        identity = _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1')
+        if identity is None:
+            if not creating:
+                raise LayoutFault('no-identity')
+            now_ms = time.time_ns() // 1_000_000
+            conn.execute('INSERT INTO catalogue_identity VALUES (1, ?, ?, ?)',
+                         (submit.new_uuid7(now_ms), kind or 'isolated', now_ms)).close()
+        elif kind is not None and identity != (kind,):
+            raise LayoutFault('wrong-kind')
+        _pragma(conn, 'COMMIT')
     except BaseException:
         if conn.in_transaction:
             _pragma(conn, 'ROLLBACK')
@@ -197,8 +218,13 @@ def reserve_project(catalogue_conn, project_id: str, name: str, now_ms: int) -> 
 
 def activate_project(catalogue_conn, project_id: str) -> None:
     """Creation step 3, after the ledger step has committed."""
-    catalogue_conn.execute("UPDATE project_routes SET state='active' WHERE project_id=?",
-                           (_canonical_id(project_id),)).close()
+    project_id = _canonical_id(project_id)
+    row = _row(catalogue_conn, 'SELECT state FROM project_routes WHERE project_id=?', (project_id,))
+    if row is None:
+        raise RouteUnavailable('not-found')
+    if row != ('active',):
+        catalogue_conn.execute("UPDATE project_routes SET state='active' WHERE project_id=?",
+                               (project_id,)).close()
 
 
 def add_key_route(catalogue_conn, key_id: str, project_id: str, now_ms: int) -> None:
@@ -238,6 +264,8 @@ def begin_declared(conns: Mapping[str, sqlite3.Connection], *,
                                (name for name in conns if name != 'catalogue'))
         if except_written is not None and except_written not in conns:
             raise ValueError('written file is outside the declared set')
+        if except_written is not None and except_written != order[-1]:
+            raise ValueError('written file must be last in the declared order')
         if any(conn.in_transaction for conn in conns.values()):
             raise ValueError('declared connection already has a transaction')
         for name in order:

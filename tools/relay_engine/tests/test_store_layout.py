@@ -1,5 +1,6 @@
 """Per-project paths and opening: catches ambient-home, creation and WAL regressions."""
 import os
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -93,6 +94,19 @@ class TestStoreLayout(unittest.TestCase):
         self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone(), ('wal',))
         self.assertEqual(conn.execute('PRAGMA synchronous').fetchone(), (2,))
         self.assertEqual(conn.execute('PRAGMA foreign_keys').fetchone(), (1,))
+        connect = sqlite3.connect
+        trace = []
+
+        def defaults_to_off(*args, **kwargs):
+            opened = connect(*args, **kwargs)
+            opened.execute('PRAGMA synchronous=OFF').close()
+            opened.set_trace_callback(trace.append)
+            return opened
+
+        with mock.patch.object(sqlite3, 'connect', side_effect=defaults_to_off):
+            configured = self.opened()
+        self.assertEqual(configured.execute('PRAGMA synchronous').fetchone(), (2,))
+        self.assertIn('PRAGMA synchronous=FULL', trace)
 
         class Answer:
             def fetchone(self):
@@ -120,6 +134,118 @@ class TestStoreLayout(unittest.TestCase):
         control.execute('BEGIN IMMEDIATE')
         self.assertEqual(control.execute('PRAGMA journal_mode=WAL').fetchone(), ('delete',))
         control.execute('ROLLBACK')
+
+    def test_refusal_writes_nothing(self):
+        # M16: configuring before validation changes a refused ledger to WAL.
+        for fixture in ['empty', 'no-projects-table', 'wrong-project']:
+            with self.subTest(fixture=fixture):
+                root = Path(self.tmp.name) / fixture
+                path = store_layout.ledger_path(root, P)
+                path.parent.mkdir(parents=True)
+                if fixture == 'wrong-project':
+                    conn = submit.open_store(path)
+                    self.project(conn, Q)
+                    conn.close()
+                elif fixture == 'no-projects-table':
+                    conn = sqlite3.connect(path)
+                    conn.execute('CREATE TABLE unrelated (id TEXT)').close()
+                    conn.close()
+                else:
+                    path.touch()
+                before = (hashlib.sha256(path.read_bytes()).hexdigest(),
+                          path.stat().st_mtime_ns, sorted(p.name for p in path.parent.iterdir()))
+                with self.assertRaises((store_layout.LayoutFault, errors.EngineError)) as caught:
+                    store_layout.open_ledger(root, P).close()
+                self.assertIsInstance(caught.exception, store_layout.LayoutFault)
+                self.assertEqual(caught.exception.cause,
+                                 'wrong-project' if fixture == 'wrong-project' else 'no-project-row')
+                self.assertEqual((hashlib.sha256(path.read_bytes()).hexdigest(),
+                                  path.stat().st_mtime_ns,
+                                  sorted(p.name for p in path.parent.iterdir())), before)
+                conn = sqlite3.connect(path)
+                try:
+                    self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone(), ('delete',))
+                finally:
+                    conn.close()
+
+    def test_missing_after_check_is_not_recreated(self):
+        # A removal after exists() must never reach a creating connection.
+        conn = self.opened()
+        self.project(conn)
+        conn.close()
+        path = store_layout.ledger_path(self.root, P)
+        exists = Path.exists
+
+        def remove_after_check(candidate):
+            result = exists(candidate)
+            if candidate == path and result:
+                candidate.unlink()
+            return result
+
+        with mock.patch.object(Path, 'exists', remove_after_check):
+            with self.assertRaises(store_layout.LayoutFault) as caught:
+                store_layout.open_ledger(self.root, P).close()
+        self.assertEqual(caught.exception.cause, 'missing')
+        self.assertFalse(path.exists())
+
+    def test_wrong_project_refused_with_create(self):
+        conn = self.opened()
+        self.project(conn, Q)
+        with self.assertRaises(store_layout.LayoutFault) as caught:
+            self.opened(create=True)
+        self.assertEqual(caught.exception.cause, 'wrong-project')
+
+    def test_project_check_reads_the_table(self):
+        # A stale covering index must not let a different table row through.
+        conn = self.opened()
+        self.project(conn)
+        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').close()
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='projects'").fetchone()[0]
+        size = conn.execute('PRAGMA page_size').fetchone()[0]
+        conn.close()
+        path = store_layout.ledger_path(self.root, P)
+        data = path.read_bytes()
+        offset = (page - 1) * size
+        table = data[offset:offset + size]
+        self.assertEqual(table.count(P.encode()), 1)
+        path.write_bytes(data[:offset] + table.replace(P.encode(), Q.encode()) + data[offset + size:])
+        control = sqlite3.connect(path)
+        try:
+            self.assertEqual(control.execute('SELECT id FROM projects LIMIT 2').fetchall(), [(P,)])
+            self.assertEqual(control.execute('SELECT id FROM projects NOT INDEXED').fetchall(), [(Q,)])
+        finally:
+            control.close()
+        with self.assertRaises(store_layout.LayoutFault) as caught:
+            store_layout.open_ledger(self.root, P).close()
+        self.assertEqual(caught.exception.cause, 'wrong-project')
+
+    def test_open_ledger_never_reads_catalogue(self):
+        # F-4: a corrupt or exclusively locked catalogue cannot block bound work.
+        conn = self.opened()
+        self.project(conn)
+        conn.close()
+        catalogue_path = self.root / 'machine.sqlite3'
+        catalogue_path.write_bytes(b'not a database')
+
+        def write_bound():
+            started = time.monotonic()
+            bound = store_layout.open_ledger(self.root, P)
+            try:
+                bound.execute('UPDATE projects SET created_at=created_at+1').close()
+                bound.execute('COMMIT').close()
+            finally:
+                bound.close()
+            self.assertLess(time.monotonic() - started, 1)
+
+        write_bound()
+        catalogue_path.unlink()
+        catalogue = sqlite3.connect(catalogue_path)
+        try:
+            catalogue.execute('CREATE TABLE locked (id INTEGER)').close()
+            catalogue.execute('BEGIN EXCLUSIVE').close()
+            write_bound()
+        finally:
+            catalogue.close()
 
     def test_open_darwin_full_syncs(self):
         conn = self.opened()
@@ -178,8 +304,59 @@ class TestStoreLayout(unittest.TestCase):
         store_layout.reserve_project(conn, project, name, 1)
         if active:
             store_layout.activate_project(conn, project)
-        self.assertTrue(conn.in_transaction)
         conn.execute('COMMIT').close()
+
+    def test_creation_steps_leave_commit_to_caller(self):
+        conn = self.catalogue()
+        conn.execute('BEGIN IMMEDIATE').close()
+        store_layout.reserve_project(conn, P, 'example', 1)
+        conn.execute('ROLLBACK').close()
+        self.assertEqual(conn.execute('SELECT * FROM project_routes').fetchall(), [])
+        self.reserve(conn, active=False)
+        conn.execute('BEGIN IMMEDIATE').close()
+        store_layout.activate_project(conn, P)
+        conn.execute('ROLLBACK').close()
+        self.assertEqual(conn.execute('SELECT state FROM project_routes').fetchall(), [('creating',)])
+        conn.execute('BEGIN IMMEDIATE').close()
+        store_layout.add_key_route(conn, K, P, 2)
+        conn.execute('ROLLBACK').close()
+        self.assertEqual(conn.execute('SELECT * FROM key_routes').fetchall(), [])
+
+    def test_activate_touches_only_its_project(self):
+        # M11: a missing WHERE would activate Q as well.
+        conn = self.catalogue()
+        self.reserve(conn, active=False)
+        self.reserve(conn, project=Q, name='other', active=False)
+        conn.execute('BEGIN IMMEDIATE').close()
+        store_layout.activate_project(conn, P)
+        conn.execute('COMMIT').close()
+        self.assertEqual(conn.execute('SELECT project_id,state FROM project_routes ORDER BY project_id').fetchall(),
+                         [(P, 'active'), (Q, 'creating')])
+        before = conn.total_changes
+        store_layout.activate_project(conn, P)
+        if conn.in_transaction:
+            conn.execute('COMMIT').close()
+        self.assertEqual(conn.total_changes, before)
+
+    def test_activate_unknown_refuses(self):
+        conn = self.catalogue()
+        self.reserve(conn)
+        before = '\n'.join(conn.iterdump())
+        with self.assertRaises(store_layout.RouteUnavailable) as caught:
+            store_layout.activate_project(conn, Q)
+        self.assertEqual(caught.exception.cause, 'not-found')
+        self.assertEqual('\n'.join(conn.iterdump()), before)
+
+    def test_route_selectors_refuse_noncanonical_ids(self):
+        conn = self.catalogue()
+        self.reserve(conn)
+        for invalid in [P.upper(), P[:-1]]:
+            for call in [lambda: store_layout.route(conn, project_id=invalid),
+                         lambda: store_layout.route_key(conn, invalid),
+                         lambda: store_layout.add_key_route(conn, invalid, P, 1),
+                         lambda: store_layout.add_key_route(conn, K, invalid, 1)]:
+                with self.assertRaises(ValueError):
+                    call()
 
     def test_route_by_id_and_name(self):
         conn = self.catalogue()
@@ -314,7 +491,6 @@ class TestStoreLayout(unittest.TestCase):
         for key in [K, Q]:
             conn.execute('BEGIN IMMEDIATE').close()
             store_layout.add_key_route(conn, key, P, 2)
-            self.assertTrue(conn.in_transaction)
             conn.execute('COMMIT').close()
         reopened = self.catalogue()
         for key in [K, Q]:
@@ -524,11 +700,31 @@ class TestDeclaredLocks(unittest.TestCase):
         store_layout.begin_declared(conns)
         self.assertEqual(trace, ['catalogue', P, Q])
         store_layout.rollback_declared(conns)
+        self.assertFalse(any(conn.in_transaction for conn in conns.values()))
         trace.clear()
-        store_layout.begin_declared(conns, except_written=P)
-        self.assertEqual(trace, ['catalogue', Q])
-        self.assertFalse(conns[P].in_transaction)
+        store_layout.begin_declared(conns, except_written=Q)
+        self.assertEqual(trace, ['catalogue', P])
+        self.assertFalse(conns[Q].in_transaction)
         store_layout.rollback_declared(conns)
+        self.assertFalse(any(conn.in_transaction for conn in conns.values()))
+
+    def test_except_written_must_be_last(self):
+        # M15: deferring P's lock until after Q breaks the global order.
+        conns = self.connections((Q, P, 'catalogue'))
+        with self.assertRaises(ValueError):
+            store_layout.begin_declared(conns, except_written=P)
+        self.assertFalse(any(conn.in_transaction for conn in conns.values()))
+        store_layout.begin_declared(conns, except_written=Q)
+        self.assertTrue(conns['catalogue'].in_transaction)
+        self.assertTrue(conns[P].in_transaction)
+        self.assertFalse(conns[Q].in_transaction)
+        store_layout.rollback_declared(conns)
+
+    def test_except_written_outside_set_refuses(self):
+        conns = self.connections()
+        with self.assertRaises(ValueError):
+            store_layout.begin_declared(conns, except_written=Q)
+        self.assertFalse(any(conn.in_transaction for conn in conns.values()))
 
     def test_mixed_order_control_deadlocks_only_when_mixed(self):
         # This handshake belongs only to the mixed-order negative case.

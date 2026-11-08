@@ -52,7 +52,7 @@ def _rows(conn, sql):
 
 def _definitions(conn):
     return _rows(conn, "SELECT type, name, sql FROM sqlite_master "
-                 "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+                 "WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name")
 
 
 def _require_matching(conn):
@@ -71,20 +71,12 @@ def _require_matching(conn):
 
 
 def init_catalogue(conn) -> None:
-    """Build an empty catalogue or verify its exact schema without writing."""
+    """Build or verify the schema inside the caller's write transaction."""
     schema.require_sqlite()
-    conn.execute('BEGIN IMMEDIATE').close()
-    try:
-        if _definitions(conn):
-            _require_matching(conn)
-            conn.execute('ROLLBACK').close()
-            return
-        for statement in _TABLES:
-            conn.execute(statement).close()
-        conn.execute('INSERT INTO schema_version VALUES (1, ?, ?)',
-                     ('1', ddl_digest())).close()
-        conn.execute('COMMIT').close()
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute('ROLLBACK').close()
-        raise
+    if _definitions(conn):
+        _require_matching(conn)
+        return
+    for statement in _TABLES:
+        conn.execute(statement).close()
+    conn.execute('INSERT INTO schema_version VALUES (1, ?, ?)',
+                 ('1', ddl_digest())).close()
