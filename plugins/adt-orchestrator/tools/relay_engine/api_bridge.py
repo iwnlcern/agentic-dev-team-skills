@@ -5,7 +5,7 @@ import ipaddress
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from relay_engine import api_definitions as d, api_protocol as p, api_registry as r, api_wire as w, errors, jcs
+from relay_engine import api_definitions as d, api_protocol as p, api_registry as r, api_wire as w, jcs
 
 
 class BackendConnection(Protocol):
@@ -102,11 +102,8 @@ def _checked_connect(response, args):
     if 'error' in response:
         return None
     result = response['result']
-    window = args['supported']
-    versions = [v for v in p.IMPLEMENTED_PROTOCOLS
-                if tuple(map(int, window['min'].split('.'))) <= tuple(map(int, v.split('.')))
-                <= tuple(map(int, window['max'].split('.')))]
-    if not versions or result['protocol'] != versions[-1]:
+    protocol = p.negotiate_protocol(args['supported'])
+    if protocol is None or result['protocol'] != protocol:
         raise ValueError('invalid_backend_response')
     for field in ('build_id', 'schema_digest'):
         pin = args.get('required_' + field)
@@ -116,7 +113,7 @@ def _checked_connect(response, args):
 
 
 def map_discovery_get(request: BridgeRequest, bridge_context: BridgeContext) -> CoreDiscoveryExchange:
-    registry = r.compile_registry(d.discovery_definitions(), p.discovery_handlers(), (errors.api_error_catalog(),))
+    registry = p.discovery_registry()
     request_id = {'/api/connect': '1', '/api/schema': '2'}.get(request.path)
 
     def answer(response):

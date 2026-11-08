@@ -2,6 +2,7 @@
 from dataclasses import replace
 import json
 import unittest
+from unittest.mock import patch
 
 from relay_engine import api_protocol as p, api_registry as r, api_wire as w, jcs
 from relay_engine.tests.test_api_protocol import make_registry, make_runtime
@@ -77,6 +78,40 @@ class TestBridge(unittest.TestCase):
         self.assertEqual(len(self.backends[0].requests), 1)
         self.assertEqual(w.decode_api_frame(self.backends[0].requests[0][4:], self.registry),
             w.ApiRequest('1', 'protocol.connect', {'supported': {'min': '3.0', 'max': '3.0'}}))
+
+    def test_connect_refuses_backend_pin_mismatches(self):
+        for field in ('build_id', 'schema_digest'):
+            with self.subTest(field=field):
+                # The pin equals the real runtime: dispatch succeeds, then the
+                # hostile backend changes exactly one otherwise valid field.
+                pin = self.runtime.build_id if field == 'build_id' else self.runtime.schemas['3.0'].digest
+                def override(_request, response):
+                    return dict(response, result=dict(response['result'], **{field: 'f' * 64}))
+                self.override = override
+                result, envelope = self.exchange(self.req(query='min_protocol=3.0&max_protocol=3.0&required_' + field + '=' + pin))
+                self.assertEqual(result.status, 503)
+                self.assertEqual(envelope, {'request_id': '1', 'error': p.api_error(self.registry, 'runtime_not_ready')})
+                self.assertEqual(self.backends[-1].closed, 1)
+
+    def test_connect_refuses_backend_nonhighest_common_protocol(self):
+        baseline = p.dispatch_discovery(p.initial_connection_state(),
+            w.ApiRequest('1', 'protocol.connect', {'supported': {'min': '3.0', 'max': '3.0'}}),
+            self.runtime, self.registry).response
+        self.override = lambda _request, _response: baseline
+        with patch.object(p, 'IMPLEMENTED_PROTOCOLS', ('3.0', '3.1')):
+            result, envelope = self.exchange(self.req(query='min_protocol=3.0&max_protocol=3.1'))
+        self.assertEqual(result.status, 503)
+        self.assertEqual(envelope, {'request_id': '1', 'error': p.api_error(self.registry, 'runtime_not_ready')})
+        self.assertEqual(self.backends[-1].closed, 1)
+
+    def test_bridge_uses_shared_registry_and_negotiation(self):
+        with patch.object(p, 'discovery_registry', wraps=p.discovery_registry) as factory, \
+             patch.object(p, 'negotiate_protocol', wraps=p.negotiate_protocol) as negotiate:
+            self.assertEqual(self.exchange()[0].status, 200)
+            self.assertEqual(self.exchange()[0].status, 200)
+        self.assertEqual(factory.call_count, 2)
+        # Both dispatcher and bridge use the same function on each GET.
+        self.assertEqual(negotiate.call_count, 4)
 
     def test_schema_mapping(self):
         result, envelope = self.exchange(self.req('/api/schema'))

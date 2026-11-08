@@ -263,26 +263,31 @@ class TestCompile(unittest.TestCase):
 
     def test_compile_refuses_rule_scope_errors(self):
         from dataclasses import replace
-        rules = [d.Utf8MaxBytes(d.TypeRef('Digest'), 256),
-                 d.CanonicalUInt64(d.TypeRef('Digest')),
-                 d.CanonicalBase64(d.TypeRef('Digest')),
-                 d.SortedUnique(d.TypeRef('Digest')),
-                 d.ProtocolWindowV1(d.TypeRef('Digest')),
-                 d.SchemaPayloadV1(d.TypeRef('Digest')),
-                 d.NegotiatedSchemaV1(d.TypeRef('Digest'))]
+        # Graph-only node: catalogue interning must not mask rule validation.
+        ref = d.TypeRef('RuleScopeProbe')
+        rules = [d.Utf8MaxBytes(ref, 256), d.CanonicalUInt64(ref),
+                 d.CanonicalBase64(ref), d.SortedUnique(ref),
+                 d.ProtocolWindowV1(ref), d.SchemaPayloadV1(ref),
+                 d.NegotiatedSchemaV1(ref)]
         for rule in rules:
-            types = tuple(replace(t, rules=(rule,)) if t.name == 'Digest' else t
-                          for t in self.graph.types)
+            graph = replace(self.graph, types=self.graph.types +
+                            (d.TypeDef(ref.name, d.String('.*'), (rule,)),))
             with self.subTest(rule=rule.kind):
-                with self.assertRaises(self.r.RegistryCompileError):
-                    self.compile(graph=replace(self.graph, types=types))
-        types = tuple(replace(t, rules=(d.ProtocolWindowV1(d.TypeRef('ProtocolWindow'), min_field='unknown'),))
-                      if t.name == 'ProtocolWindow' else t for t in self.graph.types)
-        with self.assertRaises(self.r.RegistryCompileError):
-            self.compile(graph=replace(self.graph, types=types))
-        wrong = replace(self.graph.operations[1], rules=(d.NegotiatedSchemaV1(d.TypeRef('Digest')),))
-        with self.assertRaises(self.r.RegistryCompileError):
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(graph=graph)
+                self.assertEqual(caught.exception.reason, 'invalid_rule')
+        wrong = replace(self.graph.operations[1], rules=(d.NegotiatedSchemaV1(ref),))
+        with self.assertRaises(self.r.RegistryCompileError) as caught:
             self.compile(graph=replace(self.graph, operations=(self.graph.operations[0], wrong)))
+        self.assertEqual(caught.exception.reason, 'invalid_rule')
+
+    def test_synthetic_error_name_collisions_are_refused(self):
+        from dataclasses import replace
+        graph = replace(self.graph, types=self.graph.types +
+                        (d.TypeDef('ApiErrorIncompatiblePinMismatch', d.Record(())),))
+        with self.assertRaises(self.r.RegistryCompileError) as caught:
+            self.compile(graph=graph)
+        self.assertEqual(caught.exception.reason, 'invalid_error')
 
     def test_capabilities_are_exactly_two(self):
         registry = self.compile()

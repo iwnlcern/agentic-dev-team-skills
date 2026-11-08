@@ -179,6 +179,83 @@ class TestGenerator(unittest.TestCase):
         self.assertEqual((TOOLS.parent / key).read_bytes(), expected)
         self.assertFalse(expected.endswith(b'\n'))
 
+    def test_binding_names_stay_stable_when_literals_and_catalog_grow(self):
+        from relay_engine import api_schema
+        generator = load_generator()
+        original = generator.build_registry()
+        catalogue = errors.api_error_catalog()
+        variant = catalogue.variants[0]
+        cause = next(t for t in catalogue.types if t.name == variant.cause_ref.name)
+        kind = d.TypeDef('EarlierKind', d.LiteralSet(('aaa_earlier',)))
+        leaf = d.TypeDef('EarlierCause', d.Record((d.FieldDef('kind', d.TypeRef(kind.name)),)))
+        updated = replace(catalogue, types=tuple(replace(t, shape=replace(cause.shape,
+            arms=cause.shape.arms + (d.TypeRef(leaf.name),))) if t == cause else t for t in catalogue.types) + (kind, leaf),
+            variants=(replace(variant, branches=variant.branches +
+                      (d.ErrorBranchDef('aaa_earlier', variant.branches[0].remedy),)),) + catalogue.variants[1:])
+        with patch.object(errors, 'api_error_catalog', return_value=updated):
+            grown = r.compile_registry(d.discovery_definitions(), original.handlers, (updated,))
+        old_names = {ref.name for ref in original.types['ApiError'].shape.arms}
+        self.assertTrue(old_names <= {ref.name for ref in grown.types['ApiError'].shape.arms})
+        self.assertIn('ApiErrorIncompatiblePinMismatch', old_names)
+        for compiled in (original, grown):
+            artifact = api_schema.export_schema(compiled, '3.0')
+            for emit in (generator.emit_rust, generator.emit_typescript):
+                source = emit(compiled, artifact).decode()
+                self.assertIn('ApiErrorIncompatiblePinMismatch', source)
+                self.assertNotIn('__ApiError0', source)
+        types = dict(original.types)
+        node = types['SchemaEncoding']
+        types[node.name] = replace(node, shape=d.LiteralSet(('aaa_earlier', 'base64')))
+        before = generator._rust_types(original)
+        after = generator._rust_types(replace(original, types=types))
+        for source in (before, after):
+            self.assertIn('Self::Base64=>text("base64")', source)
+            self.assertIn('IncompatiblePinMismatch(ApiErrorIncompatiblePinMismatch)', source)
+
+    def test_binding_name_collisions_are_refused(self):
+        from relay_engine import api_schema
+        generator = load_generator()
+        compiled = generator.build_registry()
+        types = dict(compiled.types, Collision=d.TypeDef('Collision', d.LiteralSet(('a-b', 'a_b'))))
+        compiled = replace(compiled, types=types)
+        artifact = api_schema.export_schema(compiled, '3.0')
+        for emit in (generator.emit_rust, generator.emit_typescript):
+            with self.subTest(language=emit.__name__):
+                with self.assertRaisesRegex(ValueError, '^binding_name_collision$'):
+                    emit(compiled, artifact)
+
+    def test_runtime_placeholders_do_not_rewrite_graph_literals(self):
+        from relay_engine import api_schema
+        generator = load_generator()
+        compiled = generator.build_registry()
+        types = dict(compiled.types, Marker=d.TypeDef('Marker', d.LiteralSet(('@MAX_API_FRAME@',))))
+        compiled = replace(compiled, types=types)
+        artifact = api_schema.export_schema(compiled, '3.0')
+        for emit in (generator.emit_rust, generator.emit_typescript):
+            self.assertIn(b'"@MAX_API_FRAME@"', emit(compiled, artifact))
+
+    def test_generated_runtime_bounds_follow_python_constants(self):
+        from relay_engine import api_schema, api_wire
+        generator = load_generator()
+        compiled = generator.build_registry()
+        artifact = api_schema.export_schema(compiled, '3.0')
+        cases = [(api_wire, 'MAX_API_FRAME', 101, ('rs', 'ts')),
+                 (d, 'MAX_SCHEMA_BYTES', 123, ('rs', 'ts')),
+                 (d, 'MAX_SCHEMA_BASE64_CHARS', 164, ('rs', 'ts')),
+                 (d, 'MAX_JSON_DEPTH', 7, ('rs', 'ts')),
+                 (d, 'MAX_SAFE_JSON_INTEGER', 127, ('rs',)),
+                 (d, 'MAX_UINT64', 999, ('ts',))]
+        for owner, name, value, languages in cases:
+            for language in languages:
+                with self.subTest(constant=name, language=language):
+                    emit = generator.emit_rust if language == 'rs' else generator.emit_typescript
+                    original = emit(compiled, artifact)
+                    with patch.object(owner, name, value):
+                        self.assertNotEqual(emit(compiled, artifact), original)
+        with patch.object(api_wire, 'MAX_API_FRAME', 1):
+            with self.assertRaisesRegex(api_schema.SchemaExportError, 'schema_reply_too_large'):
+                api_schema.export_schema(compiled, '3.0')
+
     def test_check_mode_detects_drift(self):
         generator = load_generator()
         with tempfile.TemporaryDirectory() as temp:
@@ -353,6 +430,16 @@ def consumer_scenarios():
     add({'action': 'schema', 'schema': json.dumps(duplicate)}, {'valid': False})
     known['x-adt']['rules'].append({'kind': 'future_required_kind'})
     add({'action': 'schema', 'schema': json.dumps(known)}, {'valid': False})
+    # All payload and context checks pass; only the decode-path rule guard can refuse.
+    altered = jcs.jcs_encode(known)
+    digest = hashlib.sha256(altered).hexdigest()
+    altered_connect = json.loads(json.dumps(connected.response))
+    altered_connect['result']['schema_digest'] = digest
+    altered_schema = json.loads(json.dumps(schema.response))
+    altered_schema['result'].update(schema_digest=digest, schema_byte_count=str(len(altered)),
+                                   schema_bytes_base64=base64.b64encode(altered).decode())
+    decode(altered_schema, context=frame(altered_connect), valid=False)
+    cases[-1][0]['control'] = 'unknown_rule_decode'
     return cases
 
 
@@ -370,14 +457,20 @@ class TestGeneratedConsumers(unittest.TestCase):
         for name, digest in manifest['bindings'].items():
             self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)
 
-    def run_consumer(self, language, only_schema=False, cases=None):
+    def run_consumer(self, language, only_schema=False, cases=None, binding=None, controls=True):
         cases = consumer_scenarios() if cases is None else cases
         if only_schema:
-            cases = [case for case in cases if case[0]['action'] == 'schema']
+            cases = [case for case in cases if case[0]['action'] == 'schema' or case[0].get('control') == 'unknown_rule_decode']
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp);scenario_file = folder / 'scenarios.jsonl'
             scenario_file.write_bytes(b'\n'.join(jcs.jcs_encode(s) for s, _ in cases) + b'\n')
             consumer = TOOLS / 'relay_engine/tests/api_consumers' / ('consumer.' + language)
+            if binding is not None:
+                generated = folder / ('api_3_0.' + language)
+                generated.write_bytes(binding)
+                copied = folder / ('consumer.' + language)
+                copied.write_text(consumer.read_text().replace('../../generated/api/api_3_0.' + language, str(generated)))
+                consumer = copied
             tools = toolchain()
             if language == 'rs':
                 binary = folder / 'consumer'
@@ -394,7 +487,7 @@ class TestGeneratedConsumers(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             lines = result.stdout.splitlines();expected = [jcs.jcs_encode(value).decode() for _, value in cases]
             self.assertEqual(lines, expected)
-            if not only_schema and any(s['action'] == 'encode' for s, _ in cases):
+            if controls and not only_schema and any(s['action'] == 'encode' for s, _ in cases):
                 for action, field in [('encode', 'hex'), ('decode', 'result')]:
                     index = next(i for i, (s, e) in enumerate(cases) if s['action'] == action and field in e)
                     changed = expected.copy();wrong = json.loads(expected[index])
@@ -411,6 +504,33 @@ class TestGeneratedConsumers(unittest.TestCase):
                 changed[index] = jcs.jcs_encode(wrong).decode()
                 with self.assertRaises(AssertionError):
                     self.assertEqual(lines, changed)
+
+    def test_third_operation_round_trips_in_both_bindings(self):
+        from relay_engine import api_protocol as p, api_schema
+        generator = load_generator()
+        graph = d.discovery_definitions()
+        op = replace(graph.operations[1], name='test.echo',
+                     request_ref=d.TypeRef('EchoArgs'), result_ref=d.TypeRef('EchoResult'), rules=())
+        graph = replace(graph, types=graph.types + (
+            d.TypeDef('EchoArgs', d.Record((d.FieldDef('message', d.TypeRef('OpaqueId')),))),
+            d.TypeDef('EchoResult', d.Record((d.FieldDef('reply', d.TypeRef('Digest')),)))),
+            operations=graph.operations + (op,))
+        compiled = r.compile_registry(graph, dict(p.discovery_handlers(), **{'test.echo': lambda args: None}),
+                                      (errors.api_error_catalog(),))
+        artifact = api_schema.export_schema(compiled, '3.0')
+        def frame(value):
+            raw = jcs.jcs_encode(value)
+            return (len(raw).to_bytes(4, 'big') + raw).hex()
+        error = p.api_error(compiled, 'unknown_operation')
+        cases = [({'action': 'encode', 'operation': op.name, 'id': '3', 'value': {'message': 'hello'}},
+                  {'hex': frame({'request_id': '3', 'op': op.name, 'args': {'message': 'hello'}})}),
+                 ({'action': 'decode', 'operation': op.name, 'id': '3', 'connect': '',
+                   'frame': frame({'request_id': '3', 'result': {'reply': 'b' * 64}})}, {'result': {'reply': 'b' * 64}}),
+                 ({'action': 'decode', 'operation': op.name, 'id': '3', 'connect': '',
+                   'frame': frame({'request_id': '3', 'error': error})}, {'error': error})]
+        for language, emit in [('rs', generator.emit_rust), ('ts', generator.emit_typescript)]:
+            with self.subTest(language=language):
+                self.run_consumer(language, cases=cases, binding=emit(compiled, artifact), controls=False)
 
     def test_generated_base64_size_contract(self):
         compiled = load_generator().build_registry()

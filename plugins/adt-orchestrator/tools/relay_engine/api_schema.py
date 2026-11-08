@@ -3,7 +3,7 @@ import base64
 from dataclasses import asdict, dataclass
 import hashlib
 
-from relay_engine import api_definitions as d, jcs
+from relay_engine import api_definitions as d, api_wire, jcs
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +38,7 @@ def _shape(shape):
     if isinstance(shape, d.LiteralSet):
         return {'type': 'string', 'enum': list(shape.values)}
     if isinstance(shape, d.String):
-        # ECMAScript $ can match before a final LF. The lookahead enforces a real end.
+        # The explicit end lookahead preserves full-match semantics across regex engines.
         result = {'type': 'string', 'pattern': '^(?:' + shape.pattern + ')$(?![\\s\\S])',
                   'minLength': shape.min_length}
         if shape.max_length is not None:
@@ -64,7 +64,7 @@ def _profile(value):
     if value is None or type(value) is bool:
         return
     if type(value) is int:
-        if not -(2 ** 53 - 1) <= value <= 2 ** 53 - 1:
+        if not -d.MAX_SAFE_JSON_INTEGER <= value <= d.MAX_SAFE_JSON_INTEGER:
             raise SchemaExportError('unrepresentable_profile')
         return
     if type(value) is str:
@@ -140,9 +140,9 @@ def export_schema(registry, protocol: str) -> SchemaArtifact:
     if len(raw) > d.MAX_SCHEMA_BYTES:
         raise SchemaExportError('schema_too_large')
     digest = hashlib.sha256(raw).hexdigest()
-    reply = {'request_id': '18446744073709551615', 'result': {
+    reply = {'request_id': str(d.MAX_UINT64), 'result': {
         'protocol': protocol, 'schema_digest': digest, 'schema_encoding': 'base64',
         'schema_byte_count': str(len(raw)), 'schema_bytes_base64': base64.b64encode(raw).decode('ascii')}}
-    if len(jcs.jcs_encode(reply)) > 16777216:
+    if len(jcs.jcs_encode(reply)) > api_wire.MAX_API_FRAME:
         raise SchemaExportError('schema_reply_too_large')
     return SchemaArtifact(protocol, raw, digest, len(raw))

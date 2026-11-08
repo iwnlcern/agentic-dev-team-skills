@@ -258,8 +258,14 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
         for kind, remedy in sorted(branch_map.items()):
             arms.append(ErrorArm(code, variant.api_class, leaves[kind], remedy))
     error_refs = []
-    for i, arm in enumerate(arms):
-        prefix = '__ApiError' + str(i)
+    for arm in arms:
+        leaf = types[arm.cause_type.name].shape
+        kind_ref = next(f.type_ref for f in leaf.fields if f.name == 'kind')
+        kind = types[kind_ref.name].shape.values[0]
+        prefix = 'ApiError' + ''.join(part.title() for part in
+                                     (arm.code.removeprefix('E_API_') + '_' + kind).split('_'))
+        if any(prefix + suffix in types for suffix in ('', 'Code', 'Class', 'Remedy')):
+            raise RegistryCompileError('invalid_error')
         members = []
         for field, value in (('code', arm.code), ('class', arm.wire_class), ('remedy', arm.remedy)):
             name = prefix + field.title()
@@ -292,7 +298,7 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
 
 
 def _validate(registry, ref, value, path, decoded, depth=0):
-    if depth > 64 or ref.name not in registry.types:
+    if depth > d.MAX_JSON_DEPTH or ref.name not in registry.types:
         return ValidationFailure('depth_or_ref', path)
     node = registry.types[ref.name]
     shape = node.shape
@@ -346,7 +352,8 @@ def _validate(registry, ref, value, path, decoded, depth=0):
             if len(value.encode('utf-8')) > rule.limit:
                 return ValidationFailure(rule.kind, path)
         elif isinstance(rule, d.CanonicalUInt64):
-            if len(value) > 20 or (len(value) == 20 and value > '18446744073709551615'):
+            maximum = str(d.MAX_UINT64)
+            if len(value) > len(maximum) or (len(value) == len(maximum) and value > maximum):
                 return ValidationFailure(rule.kind, path)
         elif isinstance(rule, d.CanonicalBase64):
             if value not in decoded:

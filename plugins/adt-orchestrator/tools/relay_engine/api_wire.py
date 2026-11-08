@@ -62,7 +62,7 @@ def strict_json_loads(data: bytes) -> object:
     except RecursionError:
         raise StrictJsonError('syntax') from None
     def scalars(item, depth=0):
-        if depth > 64:
+        if depth > d.MAX_JSON_DEPTH:
             raise StrictJsonError('syntax')
         if type(item) is str:
             if any(0xD800 <= ord(char) <= 0xDFFF for char in item):

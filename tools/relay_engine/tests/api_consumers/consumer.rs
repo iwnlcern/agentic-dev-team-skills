@@ -14,7 +14,7 @@ fn run(v:&Value)->Result<Value,()>{
    let connect=string(v,"connect")?;let observation=if connect.is_empty(){DecodedResponse::Unavailable}else{api::decode_response(&unhex(connect)?,"protocol.connect","1",None)};
    let context=match &observation {DecodedResponse::Connect(_,ctx)=>Some(ctx),_=>None};
    let response=api::decode_response(&unhex(string(v,"frame")?)?,string(v,"operation")?,string(v,"id")?,context);
-   Ok(match response {DecodedResponse::Unavailable=>object(vec![("unavailable",Value::Bool(true))]),DecodedResponse::Error(error)=>object(vec![("error",error.to_value())]),DecodedResponse::Connect(result,_)=>object(vec![("result",result.to_value())]),DecodedResponse::Schema(result)=>{let all=result.to_value();object(vec![("result",object(vec![("protocol",all.get("protocol")?.clone()),("schema_digest",all.get("schema_digest")?.clone()),("schema_byte_count",all.get("schema_byte_count")?.clone())]))])}})
+   Ok(match response {DecodedResponse::Unavailable=>object(vec![("unavailable",Value::Bool(true))]),DecodedResponse::Error(error)=>object(vec![("error",error.to_value())]),DecodedResponse::Connect(result,_)=>object(vec![("result",result.to_value())]),other=>{let all=other.result_value().ok_or(())?;if string(v,"operation")?!="protocol.schema"{return Ok(object(vec![("result",all)]));}object(vec![("result",object(vec![("protocol",all.get("protocol")?.clone()),("schema_digest",all.get("schema_digest")?.clone()),("schema_byte_count",all.get("schema_byte_count")?.clone())]))])}})
   },_=>Err(())
  }
 }

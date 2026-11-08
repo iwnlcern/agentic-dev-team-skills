@@ -38,6 +38,22 @@ class TestProtocol(unittest.TestCase):
                                          req or request(), runtime or self.runtime,
                                          registry or self.registry)
 
+    def test_shared_negotiation_and_cached_discovery_registry(self):
+        window = {'min': '3.0', 'max': '3.10'}
+        self.assertEqual(self.p.negotiate_protocol(window, ('3.2', '3.10', '3.1')), '3.10')
+        self.assertIsNone(self.p.negotiate_protocol(window, ('4.0',)))
+        self.p.discovery_registry.cache_clear()
+        try:
+            with patch.object(r, 'compile_registry', wraps=r.compile_registry) as compile_registry:
+                first = self.p.discovery_registry()
+                self.assertIs(self.p.discovery_registry(), first)
+                self.assertEqual(compile_registry.call_count, 1)
+                result = self.p.dispatch_discovery(self.p.initial_connection_state(), request(), self.runtime)
+                self.assertEqual(result.response['result']['protocol'], '3.0')
+                self.assertEqual(compile_registry.call_count, 1)
+        finally:
+            self.p.discovery_registry.cache_clear()
+
     def assert_refusal(self, result, kind, close, request_id, remedy=None):
         self.assertEqual(result.response['request_id'], request_id)
         self.assertEqual(result.response['error']['cause']['kind'], kind)

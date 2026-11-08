@@ -2,9 +2,10 @@
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import cache
 from types import MappingProxyType
 
-from relay_engine import api_definitions as d, api_registry as r, api_schema, api_wire as w, strings
+from relay_engine import api_definitions as d, api_registry as r, api_schema, api_wire as w, errors, strings
 
 IMPLEMENTED_PROTOCOLS = ('3.0',)
 
@@ -80,12 +81,27 @@ def discovery_handlers() -> dict:
     return {'protocol.connect': _connect, 'protocol.schema': _schema}
 
 
+@cache
+def discovery_registry() -> r.FrozenApiRegistry:
+    """Compile the immutable core graph once for all discovery consumers."""
+    return r.compile_registry(d.discovery_definitions(), discovery_handlers(), (errors.api_error_catalog(),))
+
+
+def negotiate_protocol(window, implemented=None) -> str | None:
+    """Return the highest numeric common protocol, independent of input order."""
+    candidates = IMPLEMENTED_PROTOCOLS if implemented is None else implemented
+    return max((version for version in candidates
+                if _version(window['min']) <= _version(version) <= _version(window['max'])),
+               key=_version, default=None)
+
+
 def _version(value):
     return tuple(int(part) for part in value.split('.'))
 
 
 def dispatch_discovery(state: ConnectionState, request: w.ApiRequest | w.ProtocolRefusal,
-                       runtime: RuntimeContext, registry) -> ResponseAndConnectionState:
+                       runtime: RuntimeContext, registry=None) -> ResponseAndConnectionState:
+    registry = discovery_registry() if registry is None else registry
     if state.phase == 'closed':
         return ResponseAndConnectionState(None, state, True)
 
@@ -118,13 +134,11 @@ def dispatch_discovery(state: ConnectionState, request: w.ApiRequest | w.Protoco
 
     if request.op == 'protocol.connect':
         window = request.args['supported']
-        candidates = [version for version in IMPLEMENTED_PROTOCOLS
-                      if _version(window['min']) <= _version(version) <= _version(window['max'])]
-        if not candidates:
+        protocol = negotiate_protocol(window)
+        if protocol is None:
             return refuse('protocol_window', request.request_id, True, current,
                           requested=window, supported={'min': IMPLEMENTED_PROTOCOLS[0],
                                                        'max': IMPLEMENTED_PROTOCOLS[-1]})
-        protocol = max(candidates, key=_version)
         artifact = runtime.schemas.get(protocol)
         if artifact is None or artifact.protocol != protocol:
             return refuse('schema_unavailable', request.request_id, True, current)

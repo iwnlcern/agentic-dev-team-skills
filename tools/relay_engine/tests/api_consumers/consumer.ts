@@ -16,7 +16,7 @@ async function run(value: Json): Promise<unknown> {
         const result = await decodeResponse(unhex(str(v['frame'])), str(v['operation']), str(v['id']), context);
         if (result.kind === 'unavailable') return { unavailable: true };
         if (result.kind === 'error') return { error: result.error };
-        if (result.kind === 'connect') return { result: result.result };
+        if (result.kind !== 'schema') return { result: result.result };
         return { result: { protocol: result.result.protocol, schema_digest: result.result.schema_digest, schema_byte_count: result.result.schema_byte_count } };
     }
     throw Error('action');
