@@ -158,6 +158,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/schema.py",
     "relay_engine/seats.py",
     "relay_engine/slips.py",
+    "relay_engine/store_layout.py",
     "relay_engine/strings.py",
     "relay_engine/submit.py",
     "relay_engine/supersede.py",
