@@ -1402,6 +1402,77 @@ class TestSnapshotCopies(submit_tests.Snapshots):
         finally:
             os.umask(previous)
 
+        previous = os.umask(0o000)
+        try:
+            out = self.folder / "mode-without-umask"
+            queries.write_snapshot(self.conn, 1, out, self.store,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o644)
+        finally:
+            os.umask(previous)
+
+    def test_overwrite_stage_private_from_creation(self):
+        # Breaks: opening a private replacement's stage wider, or widening before writing.
+        self.snapshots_pair()
+        real_open, real_write = os.open, os.write
+        opened, written = [], []
+
+        def opening(path, flags, mode=0o777, **kwargs):
+            fd = real_open(path, flags, mode, **kwargs)
+            opened.append((mode, os.fstat(fd).st_mode & 0o7777))
+            return fd
+
+        def writing(fd, data):
+            written.append(os.fstat(fd).st_mode & 0o7777)
+            return real_write(fd, data)
+
+        previous = os.umask(0o022)
+        try:
+            for final_mode in (0o600, 0o640):
+                out = self.folder / ("private-%o" % final_mode)
+                out.write_bytes(b"old")
+                out.chmod(final_mode)
+                opened.clear()
+                written.clear()
+                with mock.patch.object(queries.os, "open", side_effect=opening), \
+                        mock.patch.object(queries.os, "write", side_effect=writing):
+                    result = snapshot_outcome(lambda: queries.write_snapshot(
+                        self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
+                self.assertEqual(opened, [(0o600, 0o600)])
+                self.assertEqual(result[0], "ok", result)
+                self.assertTrue(written)
+                self.assertEqual(written, [0o600] * len(written))
+                self.assertEqual(out.stat().st_mode & 0o7777, final_mode)
+                self.assertEqual(out.read_bytes(), b"one\n")
+            opened.clear()
+            written.clear()
+            out = self.folder / "public-create"
+            with mock.patch.object(queries.os, "open", side_effect=opening), \
+                    mock.patch.object(queries.os, "write", side_effect=writing):
+                result = snapshot_outcome(lambda: queries.write_snapshot(
+                    self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+            self.assertEqual(result[0], "ok", result)
+            self.assertEqual(opened, [(0o644, 0o644)])
+            self.assertTrue(written)
+            self.assertEqual(written, [0o644] * len(written))
+            self.assertEqual(out.read_bytes(), b"one\n")
+        finally:
+            os.umask(previous)
+
+    def test_create_link_error_propagates(self):
+        # Breaks: translating a non-EEXIST link failure or leaving staged bytes behind.
+        import errno
+        self.snapshots_pair()
+        out = self.folder / "link-refused"
+        before = set(self.folder.iterdir())
+        marker = PermissionError(errno.EPERM, "fixture link refusal")
+        with mock.patch.object(queries.os, "link", side_effect=marker):
+            result = snapshot_outcome(lambda: queries.write_snapshot(
+                self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+        self.assertIs(result[1], marker, result)
+        self.assertFalse(out.exists())
+        self.assertEqual(set(self.folder.iterdir()), before)
+
     def test_copy_project_scoped(self):
         ref = self.snapshots_pair()
         request = submit.submit(self.conn, self.ctx(FOREIGN, git_state=None), draft(kind="PLAN",

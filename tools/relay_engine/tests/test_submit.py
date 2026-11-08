@@ -2195,11 +2195,42 @@ class TestSnapshots(Snapshots):
     def test_non_approve_replies_lock_nothing(self):
         ref = self.artifact("non-approve", b"same")
         request = self.request(ref)
+        self.assertEqual(len(self.rows()), 1)
         for data in (self.reply(request, ref, verdict="must-revise"), draft(parent="#" + str(
             request.handle), refs=(ref,))):
             result = snapshot_outcome(lambda: self.submit(data, sender=IMPL))
             self.assertEqual(result[0], "ok", result)
             self.assertTrue(all((row[6] is None for row in self.rows())))
+
+    def test_approve_with_unsnapshotted_ref_locks(self):
+        # Breaks: refusing an extra cited artifact that has no request snapshot.
+        a = self.artifact("snapshotted", b"a")
+        other = self.artifact("not-snapshotted", b"other")
+        request = self.request(a)
+        result = snapshot_outcome(lambda: self.approve(request, a, other))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0][6], result[1].relay_id)
+
+    def test_not_to_precedes_no_ref(self):
+        # Breaks: testing missing references before the approver's TO membership.
+        ref = self.artifact("not-to", b"same")
+        request = self.request(ref, cc=OTHER.address)
+        self.refused("E-SNAPSHOT-NOT-TO", self.reply(request), sender=OTHER)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIsNone(self.rows()[0][6])
+
+    def test_store_wrong_key_refuses(self):
+        # Breaks: accepting a store key different from the captured bytes' SHA256.
+        ref = self.artifact("wrong-key", b"same")
+        before = self.counts()
+        refusals = self.conn.execute("SELECT * FROM refusals").fetchall()
+        with mock.patch.object(self.store, "put", return_value="0" * 64):
+            result = snapshot_outcome(lambda: self.request(ref))
+        self.assertEqual(result[0], "ValueError", result)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(self.conn.execute("SELECT * FROM refusals").fetchall(), refusals)
+        self.assertFalse(self.conn.in_transaction)
 
     def test_store_dedupe_by_store(self):
         from relay_engine import queries
@@ -2252,6 +2283,18 @@ class GitSnapshots(Snapshots, GitStore):
 
 
 class TestGitSnapshots(GitSnapshots):
+    def test_stale_second_citation_refuses(self):
+        # Breaks: comparing only the first citation of each snapshotted artifact.
+        repo = self.repository()
+        one = git(repo.path, "rev-parse", "HEAD")
+        original = "bivpak@" + one + ":d.md"
+        request = self.request(original)
+        repo.commit_files({"d.md": "two\n"})
+        self.refused("E-SNAPSHOT-STALE", self.reply(request, original,
+            "bivpak@main:d.md"), sender=IMPL)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIsNone(self.rows()[0][6])
+
     def test_git_snapshot_identity(self):
         repo = self.repository()
         try:

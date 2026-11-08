@@ -675,11 +675,21 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
     """
     snapshot = _snapshot(conn, handle, project_id)
     data = _snapshot_bytes(conn, snapshot, store, directory)
+    mode = None
+    if overwrite:
+        try:
+            observed = os.lstat(out).st_mode
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISREG(observed):
+                mode = observed
+    open_mode = 0o600 if mode is not None else 0o644
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     for attempt in range(100):
         target = Path(out).parent / (".snapshot-" + secrets.token_hex(8))
         try:
-            fd = os.open(target, flags, 0o644)
+            fd = os.open(target, flags, open_mode)
         except FileExistsError:
             if attempt == 99:
                 raise
@@ -693,14 +703,8 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
                 if written <= 0:
                     raise OSError("snapshot write made no progress")
                 view = view[written:]
-            if overwrite:
-                try:
-                    mode = os.lstat(out).st_mode
-                except FileNotFoundError:
-                    pass
-                else:
-                    if stat.S_ISREG(mode):
-                        os.fchmod(stream.fileno(), stat.S_IMODE(mode) & 0o777)
+            if mode is not None:
+                os.fchmod(stream.fileno(), stat.S_IMODE(mode) & 0o777)
             os.fsync(stream.fileno())
         if overwrite:
             os.replace(target, out)

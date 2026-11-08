@@ -353,6 +353,8 @@ class TestGate(unittest.TestCase):
             ("submit", good),
             ("queries", good.replace("os.write(stream.fileno(), view)",
                                      "os.fdopen(stream.fileno())")),
+            ("queries", good.replace("stream.fileno()", "other.fileno()")),
+            ("queries", good.replace("stream.fileno()", "stream.flush()")),
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "queries.py")
