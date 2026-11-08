@@ -200,3 +200,191 @@ class TestErrorCatalog(unittest.TestCase):
             'cause': 'unknown op unrecognized-input (sha256:0123456789ab, length 7)',
             'remedy': 'use an op from the daemon op table', 'cls': 'wire',
         })
+
+
+class TestCompile(unittest.TestCase):
+    def setUp(self):
+        from relay_engine import errors
+        import relay_engine.api_registry as registry
+        self.r = registry
+        self.graph = d.discovery_definitions()
+        self.catalog = errors.api_error_catalog()
+        self.handlers = {'protocol.connect': lambda args: None, 'protocol.schema': lambda args: None}
+
+    def compile(self, graph=None, catalog=None, handlers=None):
+        return self.r.compile_registry(graph or self.graph,
+                                       self.handlers if handlers is None else handlers,
+                                       (catalog or self.catalog,))
+
+    def test_compile_refuses_graph_defects(self):
+        from dataclasses import replace
+        cases = [
+            (replace(self.graph, types=self.graph.types + (self.graph.types[0],)), self.catalog, self.handlers),
+            (replace(self.graph, types=self.graph.types + (d.TypeDef('Dangling', d.Nullable(d.TypeRef('Missing'))),)), self.catalog, self.handlers),
+            (self.graph, self.catalog, {}),
+            (self.graph, replace(self.catalog, variants=self.catalog.variants[:-1]), self.handlers),
+            (self.graph, replace(self.catalog, variants=self.catalog.variants + (replace(self.catalog.variants[0], code='E_API_EXTRA'),)), self.handlers),
+        ]
+        reasons = []
+        for graph, catalog, handlers in cases:
+            with self.assertRaises(self.r.RegistryCompileError) as caught:
+                self.compile(graph, catalog, handlers)
+            reasons.append(caught.exception.reason)
+        self.assertEqual(len(set(reasons)), len(cases))
+        self.assertEqual(self.compile().capabilities(), ('protocol.connect', 'protocol.schema'))
+
+    def test_compile_refuses_malformed_descriptors_with_closed_reason(self):
+        from dataclasses import replace
+        for shape, rules in ((d.Record((object(),)), ()), (d.String('.*'), (object(),))):
+            graph = replace(self.graph, types=self.graph.types + (d.TypeDef('Malformed', shape, rules),))
+            with self.subTest(shape=type(shape).__name__):
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(graph)
+                self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
+        self.assertEqual(len(self.compile().error_arms()), 13)
+
+    def test_compile_refuses_branch_defects(self):
+        from dataclasses import replace
+        v = self.catalog.variants[0]
+        variants = [replace(v, branches=v.branches[:-1]),
+                    replace(v, branches=v.branches + (v.branches[0],)),
+                    replace(v, branches=(d.ErrorBranchDef('unknown_kind', v.branches[0].remedy),) + v.branches[1:]),
+                    replace(v, branches=(replace(v.branches[0], remedy='unknown_remedy'),) + v.branches[1:]),
+                    replace(v, api_class='wire')]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                with self.assertRaises(self.r.RegistryCompileError):
+                    self.compile(catalog=replace(self.catalog, variants=(variant,) + self.catalog.variants[1:]))
+        for bad_shape in [d.String('.*'), d.Record((d.FieldDef('kind', d.TypeRef('Digest')),))]:
+            types = tuple(replace(t, shape=bad_shape) if t.name == v.cause_ref.name else t
+                          for t in self.catalog.types)
+            with self.assertRaises(self.r.RegistryCompileError):
+                self.compile(catalog=replace(self.catalog, types=types))
+
+    def test_compile_refuses_rule_scope_errors(self):
+        from dataclasses import replace
+        rules = [d.Utf8MaxBytes(d.TypeRef('Digest'), 256),
+                 d.CanonicalUInt64(d.TypeRef('Digest')),
+                 d.CanonicalBase64(d.TypeRef('Digest')),
+                 d.SortedUnique(d.TypeRef('Digest')),
+                 d.ProtocolWindowV1(d.TypeRef('Digest')),
+                 d.SchemaPayloadV1(d.TypeRef('Digest')),
+                 d.NegotiatedSchemaV1(d.TypeRef('Digest'))]
+        for rule in rules:
+            types = tuple(replace(t, rules=(rule,)) if t.name == 'Digest' else t
+                          for t in self.graph.types)
+            with self.subTest(rule=rule.kind):
+                with self.assertRaises(self.r.RegistryCompileError):
+                    self.compile(graph=replace(self.graph, types=types))
+        types = tuple(replace(t, rules=(d.ProtocolWindowV1(d.TypeRef('ProtocolWindow'), min_field='unknown'),))
+                      if t.name == 'ProtocolWindow' else t for t in self.graph.types)
+        with self.assertRaises(self.r.RegistryCompileError):
+            self.compile(graph=replace(self.graph, types=types))
+        wrong = replace(self.graph.operations[1], rules=(d.NegotiatedSchemaV1(d.TypeRef('Digest')),))
+        with self.assertRaises(self.r.RegistryCompileError):
+            self.compile(graph=replace(self.graph, operations=(self.graph.operations[0], wrong)))
+
+    def test_capabilities_are_exactly_two(self):
+        registry = self.compile()
+        self.assertEqual(registry.capabilities(), ('protocol.connect', 'protocol.schema'))
+        self.assertIsNone(registry.operation('queue.submit'))
+        self.assertEqual(registry.operation('protocol.schema').result_ref, d.TypeRef('SchemaResult'))
+        with self.assertRaises(TypeError):
+            registry.types['Other'] = d.TypeDef('Other', d.Record(()))
+
+    def test_error_arms_are_complete_records(self):
+        registry = self.compile()
+        self.assertEqual(len(registry.error_arms()), 13)
+        for arm in registry.error_arms():
+            leaf = registry.types[arm.cause_type.name].shape
+            kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]
+            if kind == 'unknown_operation':
+                self.assertEqual(arm.remedy, 'refresh_schema')
+            if kind == 'pin_mismatch':
+                self.assertEqual(arm.remedy, 'select_matching_candidate')
+
+    def test_shared_core_nodes_are_interned_and_conflicts_refuse(self):
+        from dataclasses import replace
+        self.compile()  # Catalog carries the same producer's transitive core nodes.
+        changed = tuple(replace(t, shape=d.String('.*')) if t.name == 'Digest' else t
+                        for t in self.catalog.types)
+        with self.assertRaises(self.r.RegistryCompileError):
+            self.compile(catalog=replace(self.catalog, types=changed))
+
+
+class TestValidate(unittest.TestCase):
+    def setUp(self):
+        from relay_engine import errors
+        import relay_engine.api_registry as registry
+        self.r = registry
+        self.registry = registry.compile_registry(d.discovery_definitions(),
+            {'protocol.connect': lambda args: None, 'protocol.schema': lambda args: None},
+            (errors.api_error_catalog(),))
+
+    def check(self, name, value, accepted=True):
+        result = self.r.validate_type(self.registry, d.TypeRef(name), value)
+        self.assertEqual(isinstance(result, self.r.ValidationFailure), not accepted,
+                         (name, result))
+        return result
+
+    def test_validate_refuses_recursively(self):
+        valid = {'supported': {'min': '3.0', 'max': '3.0'}}
+        self.check('ConnectArgs', valid)
+        for bad in [dict(valid, unexpected='x'), dict(valid, required_build_id=None),
+                    {'supported': {'min': '3.0', 'max': '3.0', 'extra': 1}},
+                    {'supported': []}]:
+            self.check('ConnectArgs', bad, False)
+        self.check('UInt64', 7, False)
+        self.check('OpaqueId', '\ud800', False)
+        self.check('ApiError', {'code': 'E_API_PROTOCOL', 'class': 'wire',
+                               'cause': {'kind': 'unknown_operation'},
+                               'remedy': 'refresh_schema'})
+        self.check('ApiError', {'code': 'E_API_PROTOCOL', 'class': 'wire',
+                               'cause': {'kind': 'unknown_operation'},
+                               'remedy': 'resend_valid_request'}, False)
+
+    def test_uint64_boundaries(self):
+        for value in ['0', '1', '18446744073709551615']:
+            self.check('UInt64', value)
+        for value in ['18446744073709551616', '01', '+1', '1e3', '-1', '', True]:
+            self.check('UInt64', value, False)
+        self.check('RequestId', '18446744073709551615')
+        self.check('RequestId', '0', False)
+
+    def test_opaque_id_counts_utf8_bytes(self):
+        self.check('OpaqueId', '\U0001f600' * 64)
+        self.check('OpaqueId', '\U0001f600' * 64 + 'a', False)
+        self.check('OpaqueId', '', False)
+        self.check('OpaqueId', 'a\0b', False)
+
+    def test_protocol_window_relation(self):
+        for lo, hi in [('3.0', '3.0'), ('2.0', '2.9'), ('3.9', '3.10')]:
+            self.check('ProtocolWindow', {'min': lo, 'max': hi})
+        for lo, hi in [('3.1', '3.0'), ('2.0', '3.0')]:
+            result = self.check('ProtocolWindow', {'min': lo, 'max': hi}, False)
+            self.assertEqual(result.rule, 'protocol_window_v1')
+        for value in ['03.0', '3.00', '65536.0', '3.0.0']:
+            self.check('ProtocolVersion', value, False)
+        self.check('ProtocolVersion', '65535.65535')
+
+    def schema_reply(self):
+        return {'protocol': '3.0', 'schema_digest': '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+                'schema_encoding': 'base64', 'schema_byte_count': '2', 'schema_bytes_base64': 'e30='}
+
+    def test_schema_payload_relation(self):
+        good = self.schema_reply()
+        self.check('SchemaResult', good)
+        for bad in [dict(good, schema_byte_count='1'), dict(good, schema_digest='0' * 64),
+                    dict(good, schema_bytes_base64='e31=')]:
+            self.check('SchemaResult', bad, False)
+
+    def test_negotiated_schema_requires_context(self):
+        good = self.schema_reply()
+        ctx = self.r.DiscoveryValidationContext('schema_reply', '3.0', good['schema_digest'])
+        for context in [None, self.r.DiscoveryValidationContext('wrong', '3.0', good['schema_digest']),
+                        self.r.DiscoveryValidationContext('schema_reply', '3.1', good['schema_digest']),
+                        self.r.DiscoveryValidationContext('schema_reply', '3.0', '0' * 64)]:
+            result = self.r.validate_operation_result(self.registry, 'protocol.schema', good, context)
+            self.assertIsInstance(result, self.r.ValidationFailure)
+        result = self.r.validate_operation_result(self.registry, 'protocol.schema', good, ctx)
+        self.assertIsInstance(result, self.r.ValidatedResult)
