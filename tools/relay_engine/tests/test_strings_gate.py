@@ -147,11 +147,22 @@ def gate_violations(paths):
                         node.args[0].attr == "_input" and
                         isinstance(node.args[0].value, ast.Name) and
                         node.args[0].value.id == "self")
+                    snapshot_file_write = (
+                        module == "queries" and
+                        fn == "write_snapshot" and
+                        node.func.attr == "write" and node.args and
+                        isinstance(node.args[0], ast.Call) and
+                        isinstance(node.args[0].func, ast.Attribute) and
+                        node.args[0].func.attr == "fileno" and
+                        isinstance(node.args[0].func.value, ast.Name) and
+                        node.args[0].func.value.id == "stream" and
+                        not node.args[0].args and not node.args[0].keywords)
                     if (isinstance(base, ast.Name) and
                             base.id in os_aliases and
                             node.func.attr in {"write", "fdopen"} and
                             not (module == "daemon" and
-                                 fn == "_log_diagnostic") and not git_pipe_write):
+                                 fn == "_log_diagnostic") and not git_pipe_write and
+                            not snapshot_file_write):
                         violations.append((module, node.lineno,
                                            "raw os sink"))
                     if (isinstance(base, ast.Name) and
@@ -329,6 +340,32 @@ class TestGate(unittest.TestCase):
                 with self.subTest(expected=expected, source=source):
                     path.write_text(source)
                     self.assertEqual([v[2] for v in gate_violations([str(path)])], [expected])
+
+    def test_snapshot_write_allowance_is_site_bound(self):
+        good = (
+            "import os\n"
+            "def write_snapshot(stream, view):\n"
+            "    os.write(stream.fileno(), view)\n")
+        controls = (
+            ("queries", good.replace("stream.fileno()", "1")),
+            ("queries", good.replace("stream.fileno()", "fd")),
+            ("queries", good.replace("def write_snapshot(", "def write_other(")),
+            ("submit", good),
+            ("queries", good.replace("os.write(stream.fileno(), view)",
+                                     "os.fdopen(stream.fileno())")),
+            ("queries", good.replace("stream.fileno()", "other.fileno()")),
+            ("queries", good.replace("stream.fileno()", "stream.flush()")),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "queries.py")
+            path.write_text(good)
+            self.assertEqual(gate_violations([str(path)]), [])
+            for module, source in controls:
+                with self.subTest(module=module, source=source):
+                    path = Path(directory, module + ".py")
+                    path.write_text(source)
+                    self.assertEqual([v[2] for v in gate_violations([str(path)])],
+                                     ["raw os sink"])
 
     def test_function_reflection_is_detected(self):
         self.check_bad("from relay_engine import strings\nx = strings.emit.__closure__\n",

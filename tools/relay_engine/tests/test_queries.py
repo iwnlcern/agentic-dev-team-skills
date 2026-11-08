@@ -1,5 +1,6 @@
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11, § 15 item 6; plan Task 5)."""
 
+import difflib
 import hashlib
 import inspect
 import json
@@ -1075,6 +1076,495 @@ class TestQueryCost(unittest.TestCase):
         self.assertEqual(record[50000]["lineage"]["rows"], 256)
         self.assertEqual(record[50000]["flags"]["rows"], 301)  # 300 unopened, 1 idle (newest)
 
+
+def snapshot_outcome(action):
+    try:
+        return ("ok", action())
+    except Exception as exc:
+        return (getattr(exc, "code", type(exc).__name__), exc)
+
+
+class TestLockedSnapshots(submit_tests.Snapshots):
+    def locked(self, ref, project="p"):
+        return queries.locked_snapshot(self.conn, ref[5:], project_id=project)
+
+    def test_locked_snapshot(self):
+        ref = self.artifact("a", b"x")
+        self.assertIsNone(self.locked(ref))
+        first = self.request(ref)
+        self.assertIsNone(self.locked(ref))
+        self.approve(first, ref)
+        second = self.request(ref)
+        reply = self.approve(second, ref)
+        self.request(ref)
+        row = self.locked(ref)
+        self.assertIsNotNone(row)
+        self.assertEqual((row.relay_id, row.locked_by), (second.relay_id, reply.relay_id))
+        self.assertTrue(row.has_bytes)
+
+    def test_locked_snapshot_latest_lock_wins(self):
+        ref = self.artifact("a", b"x")
+        a = self.request(ref)
+        self.artifact("a", b"y")
+        b = self.request(ref)
+        self.approve(b, ref)
+        self.artifact("a", b"x")
+        reply = self.approve(a, ref)
+        row = self.locked(ref)
+        self.assertIsNotNone(row)
+        self.assertEqual((row.relay_id, row.locked_by), (a.relay_id, reply.relay_id))
+
+    def test_locked_snapshot_project_scoped(self):
+        ref = self.artifact("a", b"x")
+        request = submit.submit(self.conn, self.ctx(FOREIGN, git_state=None), draft(kind="PLAN",
+            needs="review", to=FOREIGN.address, refs=(ref,)))
+        reply = submit.submit(self.conn, self.ctx(FOREIGN, git_state=None), draft(kind="PLAN-REVIEW",
+            verdict="approve", parent="#" + str(request.handle), to=FOREIGN.address, refs=(ref,)))
+        self.assertIsNone(self.locked(ref))
+        self.assertEqual(self.locked(ref, "q").locked_by, reply.relay_id)
+        p = self.request(ref)
+        r = self.approve(p, ref)
+        self.assertEqual(self.locked(ref).locked_by, r.relay_id)
+
+
+class TestSnapshotCopies(submit_tests.Snapshots):
+    def snapshots_pair(self, first=b"one\n", second=b"two\n"):
+        ref = self.artifact("d", first)
+        self.request(ref)
+        self.artifact("d", second)
+        self.request(ref)
+        return ref
+
+    def test_second_snapshot_and_diff(self):
+        self.snapshots_pair()
+        self.assertEqual(queries.snapshot_diff(self.conn, 1, 2, self.store,
+            project_id=submit_tests.PROJECT), "".join(difflib.unified_diff(["one\n"], ["two\n"],
+            fromfile="snapshot 1", tofile="snapshot 2")))
+        self.request(self.artifact("d", b"\xff"))
+        result = snapshot_outcome(lambda: queries.snapshot_diff(self.conn, 1, 3, self.store,
+            project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "E-SNAPSHOT-NOT-TEXT")
+        self.request(self.artifact("other", b"other"))
+        result = snapshot_outcome(lambda: queries.snapshot_diff(self.conn, 1, 4, self.store,
+            project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "ValueError", result)
+
+    def test_clean_copy_exact(self):
+        self.snapshots_pair(first=b"bytes\x00\xff")
+        out = self.folder / "copy"
+        queries.write_snapshot(self.conn, 1, out, self.store, project_id=submit_tests.PROJECT)
+        self.assertEqual(out.read_bytes(), b"bytes\x00\xff")
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 2, out, self.store,
+            project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "E-OUTPUT-EXISTS")
+        self.assertEqual(out.read_bytes(), b"bytes\x00\xff")
+        queries.write_snapshot(self.conn, 2, out, self.store, True, project_id=submit_tests.PROJECT)
+        self.assertEqual(out.read_bytes(), b"two\n")
+        link = self.folder / "link"
+        link.symlink_to(out)
+        for overwrite in (False, True):
+            result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, link, self.store,
+                overwrite, project_id=submit_tests.PROJECT))
+            if overwrite:
+                self.assertEqual(result[0], "ok", result)
+                self.assertFalse(link.is_symlink())
+                self.assertEqual(link.read_bytes(), b"bytes\x00\xff")
+            else:
+                self.assertEqual(result[0], "E-OUTPUT-EXISTS", result)
+                self.assertTrue(link.is_symlink())
+            self.assertEqual(out.read_bytes(), b"two\n")
+
+    def test_large_copy_no_bytes(self):
+        self.request(self.artifact("d", b"x" * (submit_tests.MIB + 1)))
+        for action in (lambda: queries.write_snapshot(self.conn, 1, self.folder / "copy", self.store,
+            project_id=submit_tests.PROJECT), lambda: queries.snapshot_diff(self.conn, 1, 1, self.store,
+            project_id=submit_tests.PROJECT)):
+            result = snapshot_outcome(action)
+            self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES")
+            self.assertIn("the file was over 1 MiB when the request was submitted", result[1].cause)
+
+    def test_no_store_copy_no_bytes(self):
+        self.store = None
+        self.request(self.artifact("d", b"one"))
+        for action in (lambda: queries.write_snapshot(self.conn, 1, self.folder / "copy", None,
+            project_id=submit_tests.PROJECT), lambda: queries.snapshot_diff(self.conn, 1, 1, None,
+            project_id=submit_tests.PROJECT)):
+            result = snapshot_outcome(action)
+            self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES")
+            self.assertIn("no evidence store was configured when the request was submitted", result[
+                1].cause)
+        self.request(self.artifact("exact", b"x" * submit_tests.MIB))
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 2,
+            self.folder / "exact-copy", None, project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES", result)
+        self.assertIn("no evidence store was configured", result[1].cause)
+
+    def test_unknown_handle(self):
+        write = queries.write_snapshot
+        diff = queries.snapshot_diff
+        for action in (lambda: write(self.conn, 99, self.folder / "copy", self.store,
+            project_id=submit_tests.PROJECT), lambda: diff(self.conn, 99, 100, self.store,
+            project_id=submit_tests.PROJECT)):
+            self.assertEqual(snapshot_outcome(action)[0], "KeyError")
+
+    def test_store_bytes_typed(self):
+        self.snapshots_pair()
+        out = self.folder / "typed-copy"
+        actions = (lambda store: queries.write_snapshot(self.conn, 1, out, store, True,
+            project_id=submit_tests.PROJECT), lambda store: queries.snapshot_diff(self.conn, 1, 2, store,
+            project_id=submit_tests.PROJECT))
+        cases = [(None, "no evidence store was given to read its bytes"), (submit_tests.FakeStore(),
+            "the evidence store does not hold its bytes")]
+        for store, reason in cases:
+            for action in actions:
+                result = snapshot_outcome(lambda: action(store))
+                self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES", result)
+                self.assertIn(reason, result[1].cause)
+                self.assertIsNone(result[1].__cause__)
+                self.assertIsNone(result[1].__context__)
+                self.assertFalse(out.exists())
+        marker = OSError("fixture store unavailable")
+        with mock.patch.object(self.store, "get", side_effect=marker):
+            for existing in (False, True):
+                if existing:
+                    out.write_bytes(b"unchanged")
+                for action in actions:
+                    result = snapshot_outcome(lambda: action(self.store))
+                    self.assertIs(result[1], marker, result)
+                    if existing:
+                        self.assertEqual(out.read_bytes(), b"unchanged")
+                    else:
+                        self.assertFalse(out.exists())
+        out.unlink()
+        with mock.patch.object(self.store, "get", return_value=b"wrong"):
+            for action in actions:
+                result = snapshot_outcome(lambda: action(self.store))
+                self.assertEqual(result[0], "ValueError", result)
+                self.assertIn("snapshot 1", str(result[1]))
+                self.assertFalse(out.exists())
+
+    def test_overwrite_replaces_entry(self):
+        self.snapshots_pair()
+        target = self.folder / "target"
+        target.write_bytes(b"keep target")
+        other = self.folder / "other-link"
+        other.write_bytes(b"keep hard link")
+        for kind in ("fifo", "symlink", "hardlink"):
+            out = self.folder / kind
+            if kind == "fifo":
+                os.mkfifo(out)
+            elif kind == "symlink":
+                out.symlink_to(target)
+            else:
+                os.link(other, out)
+            if kind == "fifo":
+                reader = os.open(out, os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    result = snapshot_outcome(lambda: queries.write_snapshot(
+                        self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
+                    self.assertEqual(result[0], "ok", result)
+                    self.assertEqual(os.read(reader, 100), b"")
+                finally:
+                    os.close(reader)
+            else:
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        queries.write_snapshot(self.conn, 1, out, self.store, True,
+                            project_id=submit_tests.PROJECT)
+                    except BaseException:
+                        os._exit(1)
+                    os._exit(0)
+                status = None
+                deadline = time.monotonic() + 2
+                try:
+                    while time.monotonic() < deadline:
+                        done, value = os.waitpid(pid, os.WNOHANG)
+                        if done:
+                            status = value
+                            break
+                        time.sleep(0.01)
+                finally:
+                    if status is None:
+                        os.kill(pid, 9)
+                        os.waitpid(pid, 0)
+                self.assertIsNotNone(status, "overwrite blocked on " + kind)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 0, kind)
+            self.assertFalse(out.is_symlink())
+            self.assertTrue(out.is_file())
+            self.assertEqual(out.read_bytes(), b"one\n")
+            self.assertEqual(target.read_bytes(), b"keep target")
+            self.assertEqual(other.read_bytes(), b"keep hard link")
+        directory = self.folder / "directory"
+        directory.mkdir()
+        before = set(self.folder.iterdir())
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, directory, self.store,
+            True, project_id=submit_tests.PROJECT))
+        self.assertIsInstance(result[1], OSError, result)
+        self.assertTrue(directory.is_dir())
+        self.assertEqual(list(directory.iterdir()), [])
+        self.assertEqual(set(self.folder.iterdir()), before)
+
+    def test_overwrite_write_failure_keeps_entry(self):
+        self.snapshots_pair()
+        out = self.folder / "old-entry"
+        out.write_bytes(b"old bytes")
+        before = set(self.folder.iterdir())
+        for operation in ("write", "fsync"):
+            marker = OSError("fixture " + operation)
+            with mock.patch.object(queries.os, operation, side_effect=marker):
+                result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+                    True, project_id=submit_tests.PROJECT))
+            self.assertIs(result[1], marker, result)
+            self.assertTrue(out.is_file())
+            self.assertEqual(out.read_bytes(), b"old bytes")
+            self.assertEqual(set(self.folder.iterdir()), before)
+
+    def test_create_write_failure_removes_partial(self):
+        self.snapshots_pair()
+        out = self.folder / "partial"
+        before = set(self.folder.iterdir())
+        marker = OSError("fixture partial write")
+        real_write = os.write
+
+        def partial(fd, data):
+            real_write(fd, data[:1])
+            raise marker
+        with mock.patch.object(queries.os, "write", side_effect=partial):
+            result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+                project_id=submit_tests.PROJECT))
+        self.assertIs(result[1], marker, result)
+        self.assertFalse(out.exists())
+        self.assertEqual(set(self.folder.iterdir()), before)
+        out.write_bytes(b"not ours")
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+            project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "E-OUTPUT-EXISTS", result)
+        self.assertEqual(out.read_bytes(), b"not ours")
+
+    def test_create_spares_concurrent_overwrite(self):
+        self.snapshots_pair()
+        for operation in ("write", "fsync"):
+            out = self.folder / ("race-" + operation)
+            before = set(self.folder.iterdir())
+            marker = OSError("fixture interleaved write")
+            real_operation = getattr(os, operation)
+            triggered = False
+
+            def interleave(*args):
+                nonlocal triggered
+                if not triggered:
+                    triggered = True
+                    queries.write_snapshot(self.conn, 2, out, self.store, True,
+                        project_id=submit_tests.PROJECT)
+                    if operation == "write":
+                        raise marker
+                return real_operation(*args)
+
+            with mock.patch.object(queries.os, operation, side_effect=interleave):
+                result = snapshot_outcome(lambda: queries.write_snapshot(
+                    self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+            if operation == "write":
+                self.assertIs(result[1], marker, result)
+            else:
+                self.assertEqual(result[0], "E-OUTPUT-EXISTS", result)
+            self.assertTrue(out.exists(), result)
+            self.assertEqual(out.read_bytes(), b"two\n")
+            self.assertEqual(set(self.folder.iterdir()), before | {out})
+
+    def test_copy_modes(self):
+        self.snapshots_pair()
+        previous = os.umask(0o022)
+        try:
+            out = self.folder / "modes"
+            queries.write_snapshot(self.conn, 1, out, self.store,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o644)
+            out.chmod(0o640)
+            queries.write_snapshot(self.conn, 2, out, self.store, True,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o640)
+            target = self.folder / "mode-target"
+            target.write_bytes(b"keep")
+            target.chmod(0o600)
+            link = self.folder / "mode-link"
+            link.symlink_to(target)
+            queries.write_snapshot(self.conn, 1, link, self.store, True,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(link.stat().st_mode & 0o7777, 0o644)
+            self.assertEqual(target.stat().st_mode & 0o7777, 0o600)
+            out.chmod(0o4750)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o4750,
+                "special-mode fixture precondition")
+            queries.write_snapshot(self.conn, 1, out, self.store, True,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o750)
+        finally:
+            os.umask(previous)
+
+        previous = os.umask(0o000)
+        try:
+            out = self.folder / "mode-without-umask"
+            queries.write_snapshot(self.conn, 1, out, self.store,
+                project_id=submit_tests.PROJECT)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o644)
+        finally:
+            os.umask(previous)
+
+    def test_overwrite_stage_private_from_creation(self):
+        # Breaks: opening a private replacement's stage wider, or widening before writing.
+        self.snapshots_pair()
+        real_open, real_write = os.open, os.write
+        opened, written = [], []
+
+        def opening(path, flags, mode=0o777, **kwargs):
+            fd = real_open(path, flags, mode, **kwargs)
+            opened.append((mode, os.fstat(fd).st_mode & 0o7777))
+            return fd
+
+        def writing(fd, data):
+            written.append(os.fstat(fd).st_mode & 0o7777)
+            return real_write(fd, data)
+
+        previous = os.umask(0o022)
+        try:
+            for final_mode in (0o600, 0o640):
+                out = self.folder / ("private-%o" % final_mode)
+                out.write_bytes(b"old")
+                out.chmod(final_mode)
+                opened.clear()
+                written.clear()
+                with mock.patch.object(queries.os, "open", side_effect=opening), \
+                        mock.patch.object(queries.os, "write", side_effect=writing):
+                    result = snapshot_outcome(lambda: queries.write_snapshot(
+                        self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
+                self.assertEqual(opened, [(0o600, 0o600)])
+                self.assertEqual(result[0], "ok", result)
+                self.assertTrue(written)
+                self.assertEqual(written, [0o600] * len(written))
+                self.assertEqual(out.stat().st_mode & 0o7777, final_mode)
+                self.assertEqual(out.read_bytes(), b"one\n")
+            opened.clear()
+            written.clear()
+            out = self.folder / "public-create"
+            with mock.patch.object(queries.os, "open", side_effect=opening), \
+                    mock.patch.object(queries.os, "write", side_effect=writing):
+                result = snapshot_outcome(lambda: queries.write_snapshot(
+                    self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+            self.assertEqual(result[0], "ok", result)
+            self.assertEqual(opened, [(0o644, 0o644)])
+            self.assertTrue(written)
+            self.assertEqual(written, [0o644] * len(written))
+            self.assertEqual(out.read_bytes(), b"one\n")
+        finally:
+            os.umask(previous)
+
+    def test_create_link_error_propagates(self):
+        # Breaks: translating a non-EEXIST link failure or leaving staged bytes behind.
+        import errno
+        self.snapshots_pair()
+        out = self.folder / "link-refused"
+        before = set(self.folder.iterdir())
+        marker = PermissionError(errno.EPERM, "fixture link refusal")
+        with mock.patch.object(queries.os, "link", side_effect=marker):
+            result = snapshot_outcome(lambda: queries.write_snapshot(
+                self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+        self.assertIs(result[1], marker, result)
+        self.assertFalse(out.exists())
+        self.assertEqual(set(self.folder.iterdir()), before)
+
+    def test_copy_project_scoped(self):
+        ref = self.snapshots_pair()
+        request = submit.submit(self.conn, self.ctx(FOREIGN, git_state=None), draft(kind="PLAN",
+            needs="review", to=FOREIGN.address, refs=(ref,)))
+        foreign = self.conn.execute("SELECT handle FROM snapshots WHERE relay_id = ?", (request.relay_id,
+            )).fetchone()[0]
+        out = self.folder / "scoped-copy"
+        actions = [lambda: queries.write_snapshot(self.conn, foreign, out, self.store, project_id="p")]
+        for a, b in ((1, foreign), (foreign, 1)):
+            actions.append(lambda a=a, b=b: queries.snapshot_diff(self.conn, a, b, self.store,
+                project_id="p"))
+        for action in actions:
+            result = snapshot_outcome(action)
+            self.assertEqual(result[0], "KeyError", result)
+            self.assertFalse(out.exists())
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, foreign, out, self.store,
+            project_id="q"))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(out.read_bytes(), b"two\n")
+        result = snapshot_outcome(lambda: queries.snapshot_diff(self.conn, foreign, foreign, self.store,
+            project_id="q"))
+        self.assertEqual(result, ("ok", ""))
+        result = snapshot_outcome(lambda: queries.snapshot_diff(self.conn, 1, 2, self.store,
+            project_id="p"))
+        self.assertEqual(result[0], "ok", result)
+        for action in (lambda: queries.write_snapshot(self.conn, 999, out, self.store, project_id="p"),
+            lambda: queries.snapshot_diff(self.conn, 1, 999, self.store, project_id="p")):
+            self.assertEqual(snapshot_outcome(action)[0], "KeyError")
+
+
+class TestGitSnapshotCopies(submit_tests.GitSnapshots):
+    def test_git_snapshot_copy_and_diff(self):
+        repo = self.repository()
+        self.request("bivpak@main:d.md")
+        repo.commit_files({"d.md": "two\n"})
+        self.request("bivpak@main:d.md")
+        other = Repo({"unrelated": "none"})
+        self.addCleanup(other.close)
+        self.conn.executemany(
+            "INSERT INTO repository_checkouts (repository_id,path,last_seen_at) VALUES (?,?,1)", [(
+            "repo-1", str(repo.path)), ("repo-q", str(other.path))])
+        self.conn.commit()
+        directory = submit.TableDirectory(self.conn, submit_tests.PROJECT)
+        out = self.folder / "git-copy"
+        copied = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+            directory=directory, project_id=submit_tests.PROJECT))
+        self.assertEqual(copied[0], "ok", copied)
+        self.assertEqual(out.read_bytes(), b"one\n")
+        diff = snapshot_outcome(lambda: queries.snapshot_diff(self.conn, 1, 2, self.store, directory,
+            project_id=submit_tests.PROJECT))
+        self.assertEqual(diff, ("ok", "".join(difflib.unified_diff(["one\n"], ["two\n"],
+            fromfile="snapshot 1", tofile="snapshot 2"))))
+        with mock.patch.object(refs, "read_blob", return_value=b"wrong"):
+            mismatch = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, self.folder / "bad",
+                self.store, directory=directory, project_id=submit_tests.PROJECT))
+        self.assertEqual(mismatch[0], "ValueError")
+        self.assertIn("snapshot 1", str(mismatch[1]))
+
+    def test_git_snapshot_needs_directory(self):
+        repo = self.repository()
+        self.request("bivpak@main:d.md")
+        other = Repo({"unrelated": "none"})
+        self.addCleanup(other.close)
+        cases = [(None, "which was not given"), (submit_tests.FakeDirectory({"repo-1": repo.path}),
+            "not known to this project"), (submit_tests.FakeDirectory({"bivpak": other.path}),
+            "the blob cannot be read from")]
+        for directory, reason in cases:
+            for action in (lambda: queries.write_snapshot(self.conn, 1, self.folder / "copy", self.store,
+                directory=directory, project_id=submit_tests.PROJECT), lambda: queries.snapshot_diff(
+                self.conn, 1, 1, self.store, directory, project_id=submit_tests.PROJECT)):
+                result = snapshot_outcome(action)
+                self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES", result)
+                self.assertIn(reason, result[1].cause)
+                self.assertIsNone(result[1].__cause__)
+                self.assertIsNone(result[1].__context__)
+
+    def test_git_read_errors_propagate(self):
+        self.repository()
+        self.request("bivpak@main:d.md")
+        directory = self.directory
+        out = self.folder / "failed-git-copy"
+        for marker in (submit_tests.errors.error_for("E-REF-TIMEOUT", value="bivpak@main:d.md"),
+            submit_tests.errors.error_for("E-REF-GIT-ENVIRONMENT", value="bivpak@main:d.md", count=1,
+            name="GIT_DIR")):
+            with mock.patch.object(refs, "read_blob", side_effect=marker):
+                actions = (lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+                    directory=directory, project_id="p"), lambda: queries.snapshot_diff(self.conn, 1, 1,
+                    self.store, directory, project_id="p"))
+                for action in actions:
+                    result = snapshot_outcome(action)
+                    self.assertIs(result[1], marker, result)
+                    self.assertFalse(out.exists())
 
 if __name__ == "__main__":
     unittest.main()

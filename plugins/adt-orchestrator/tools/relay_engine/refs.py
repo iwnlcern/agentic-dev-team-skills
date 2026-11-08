@@ -264,6 +264,12 @@ def file_digest(path):
     """sha256 of a local file's bytes.  The path is absolute (the caller expands
     ~/), the final component is never a symlink, and only a regular file is
     read; the open never waits on a FIFO."""
+    return read_file(path, 0)[0]
+
+
+def read_file(path, keep):
+    """(sha256, length, bytes) of a local file in one read, read like
+    file_digest; bytes is None when the file is longer than keep."""
     path = Path(path)
     if not path.is_absolute():
         _unresolved(str(path), "the path is not absolute; expand ~/ before digesting")
@@ -279,12 +285,15 @@ def file_digest(path):
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             _unresolved(str(path), "not a regular file")
         fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
-        digest = hashlib.sha256()
+        digest, length, kept = hashlib.sha256(), 0, bytearray()
         while True:
             chunk = os.read(fd, 1 << 16)
             if not chunk:
                 break
             digest.update(chunk)
+            length += len(chunk)
+            if length <= keep:
+                kept += chunk
     finally:
         os.close(fd)
-    return digest.hexdigest()
+    return digest.hexdigest(), length, bytes(kept) if length <= keep else None

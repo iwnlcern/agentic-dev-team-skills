@@ -10,6 +10,7 @@ A refused submit writes exactly one ``refusals`` row and nothing else; an
 engine fault writes nothing.  No rule reads the body.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import hashlib
 import os
@@ -26,6 +27,9 @@ from relay_engine import header
 from relay_engine import jcs
 from relay_engine import refs
 from relay_engine import schema
+
+SNAPSHOT_KINDS = frozenset({"DESIGN", "PLAN"})
+SNAPSHOT_BYTES_MAX = 1 << 20
 
 SYSTEM = "system"  # the reserved sender of engine-written relays
 ORCHESTRATOR_ROLE = "orchestrator-planner"
@@ -98,6 +102,27 @@ def _check_git_state(state):
         raise ValueError("git_state.branch is a non-empty string or None")
 
 
+class EvidenceStore(Protocol):
+    """Platform's content-addressed evidence store (DD § 17, amendment5)."""
+
+    def put(self, data: bytes) -> str:
+        """Keep bytes under their sha256 and return that key."""
+
+    def get(self, sha256: str) -> bytes:
+        """Return the bytes retained under sha256."""
+
+    def captured_by(self, sha256: str) -> str | None:
+        """Return host-observed, seat-supplied, or None for an absent record."""
+
+
+def _validate_read_denials(denied):
+    if not isinstance(denied, frozenset):
+        raise ValueError("read denials are a frozenset of declared table names")
+    if any(not isinstance(table, str) or table not in schema.TABLE_OWNERS
+           for table in denied):
+        raise ValueError("read denials name only declared tables")
+
+
 @dataclass(frozen=True)
 class SubmitContext:
     sender: SeatRef
@@ -107,9 +132,12 @@ class SubmitContext:
     submission_key: str
     after_admit: Callable[[sqlite3.Connection, "Admitted", header.Draft, "SubmitContext"], None] | None = None
     after_admit_writes: frozenset[str] = frozenset()
+    store: EvidenceStore | None = None
+    after_admit_reads_denied: frozenset[str] = frozenset({"bodies"})
 
     def __post_init__(self):
         _check_git_state(self.git_state)
+        _validate_read_denials(self.after_admit_reads_denied)
         if (not isinstance(self.submission_key, str) or not self.submission_key
                 or "\x00" in self.submission_key):
             raise ValueError("submission_key is a non-empty UTF-8 string without NUL")
@@ -200,6 +228,8 @@ def _at(line, error):
 
 def submit(conn, ctx, data):
     """Admit one draft, or record one refusal and raise it."""
+    if conn in _READ_GUARDS:
+        raise sqlite3.DatabaseError("admission is not allowed during a read guard")
     if getattr(conn, "autocommit", None) is False:
         raise ValueError("submit requires legacy transaction control or autocommit True")
     if conn in _HOOK_FRAMES:
@@ -219,7 +249,10 @@ def submit(conn, ctx, data):
 # whose changes outlive the submit.
 # This SQL write boundary trusts Python code in the process, including calls to
 # set_authorizer, set_progress_handler and blobopen.
+# Read denials cover cooperating code, not prepared statements already being stepped;
+# schema objects created inside the hook can outlive its read boundary.
 _HOOK_FRAMES = {}
+_READ_GUARDS = {}
 
 
 def _hook_name(hook):
@@ -245,6 +278,8 @@ def _run_hook(conn, ctx, admitted, draft):
              sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
     writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
     def authorize(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_READ and table in ctx.after_admit_reads_denied:
+            return sqlite3.SQLITE_DENY
         if action in reads:
             return sqlite3.SQLITE_OK
         if action in writes and database == "main" and table in ctx.after_admit_writes:
@@ -369,6 +404,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
     parent = _parent(conn, sender, draft, lines)
     targets = _references(conn, ctx, draft, lines)
     transitions = _transitions(draft, lines)
+    snapshot_plan = _snapshot_plan(draft, lines, targets)
     if not _system:
         conn.execute("BEGIN IMMEDIATE")
     try:
@@ -379,6 +415,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
             conn.execute("ROLLBACK")
             return replay
         _check_findings(conn, sender, transitions)
+        locks = _lock_plan(conn, sender, draft, lines, parent, targets)
         handle, created, relay_id = _identity(conn, sender.project_id, now)
         bundle_id = (parent[1] if parent is not None
                      else _bundle(conn, sender, draft.bundle, created))
@@ -407,6 +444,10 @@ def _admit(conn, ctx, data, now, *, _system=False):
                 " target_relay_id) VALUES (?, ?, 1, 'parent', 'relay', ?, ?)",
                 (new_uuid7(created), relay_id, draft.parent, parent[0]))
         edge_ids = _write_references(conn, relay_id, created, targets)
+        _write_snapshots(conn, ctx.store, relay_id, created, edge_ids, snapshot_plan)
+        conn.executemany("UPDATE snapshots SET locked_by = ?, locked_at = ?"
+                         " WHERE handle = ? AND locked_by IS NULL",
+                         [(relay_id, created, h) for h in locks])
         _write_findings(conn, sender, draft, relay_id, bundle_id, edge_ids, created)
         _write_transitions(conn, sender, transitions, relay_id, created)
         if parent is not None:
@@ -528,13 +569,15 @@ def _references(conn, ctx, draft, lines):
     for index, text in enumerate(draft.refs):
         line = lines.of("REF", index)
         try:
-            targets.append((text, _resolve(conn, ctx, refs.parse_ref(text))))
+            targets.append((text, _resolve(
+                conn, ctx, refs.parse_ref(text),
+                keep=SNAPSHOT_BYTES_MAX if draft.kind in SNAPSHOT_KINDS and draft.needs == "review" else 0)))
         except errors.EngineError as error:
             raise _at(line, error)
     return targets
 
 
-def _resolve(conn, ctx, spec):
+def _resolve(conn, ctx, spec, *, keep=0):
     if spec.kind == "relay":
         handle, _, project = spec.relay.partition("@")
         row = _find_relay(conn, project or ctx.sender.project_id, handle)
@@ -554,8 +597,9 @@ def _resolve(conn, ctx, spec):
                     "E-REF-UNRESOLVED", value=header._display(spec.text),
                     reason="this user has no home directory in the password database") from None
             path = os.path.join(home, path[2:])
+        digest, length, kept = refs.read_file(Path(path), keep)
         return {"target_type": "path", "target_path": path,
-                "digest_at_submit": refs.file_digest(Path(path))}
+                "digest_at_submit": digest, "_length": length, "_bytes": kept}
     known = conn.execute("SELECT id FROM repositories WHERE project_id = ? AND name = ?",
                          (ctx.sender.project_id, spec.repo)).fetchone()
     checkout = None if known is None else ctx.directory.checkout(spec.repo)
@@ -568,7 +612,7 @@ def _resolve(conn, ctx, spec):
             "target_repository_id": known[0], "target_rev": spec.rev,
             "target_commit": resolved.commit, "target_path": spec.path,
             "target_line_start": spec.line_start, "target_line_end": spec.line_end,
-            "digest_at_submit": resolved.blob_sha}
+            "digest_at_submit": resolved.blob_sha, "_checkout": checkout}
 
 
 _EDGE_COLUMNS = ("target_type", "target_relay_id", "target_repository_name",
@@ -589,6 +633,91 @@ def _write_references(conn, relay_id, created, targets):
              *[target.get(column) for column in _EDGE_COLUMNS]))
         edge_ids.append(edge_id)
     return edge_ids
+
+
+def _artifact(target):
+    """The artifact a file or Git target names, as snapshots key it."""
+    if target["target_type"] == "path":
+        return target["target_path"]
+    if target["target_type"] == "git":
+        return "%s:%s" % (target["target_repository_id"], target["target_path"])
+    return None
+
+
+def _snapshot_plan(draft, lines, targets):
+    """(ref index, artifact, sha256, length, bytes or None) for each file or
+    Git target of a review request (DD § 17)."""
+    if draft.kind not in SNAPSHOT_KINDS or draft.needs != "review":
+        return []
+    plan = []
+    for index, (_, target) in enumerate(targets):
+        artifact = _artifact(target)
+        if artifact is None:
+            continue
+        if target["target_type"] == "path":
+            plan.append((index, artifact, target["digest_at_submit"], target["_length"],
+                         target["_bytes"]))
+            continue
+        try:
+            blob = refs.read_blob(target["_checkout"], target["digest_at_submit"])
+        except errors.EngineError as error:
+            raise _at(lines.of("REF", index), error)
+        plan.append((index, artifact, hashlib.sha256(blob).hexdigest(), len(blob), None))
+    return plan
+
+
+def _lock_plan(conn, sender, draft, lines, parent, targets):
+    """Handles of the request's snapshots an approve locks; an approve from a
+    non-TO seat, naming none of them, or naming a changed one is refused."""
+    if draft.verdict != "approve" or parent is None:
+        return []
+    snapshots = conn.execute(
+        "SELECT s.handle, s.artifact, e.digest_at_submit FROM snapshots s"
+        " JOIN edges e ON e.id = s.edge_id WHERE s.relay_id = ? ORDER BY s.handle",
+        (parent[0],)).fetchall()
+    if not snapshots:
+        return []
+    request = conn.execute("SELECT handle FROM relays WHERE id = ?", (parent[0],)).fetchone()[0]
+    line = lines.of("VERDICT")
+    if conn.execute("SELECT 1 FROM recipients WHERE relay_id = ? AND coalesce(seat_id, special) = ? AND role = 'to'",
+                    (parent[0], sender.seat_id)).fetchone() is None:
+        raise errors.error_for("E-SNAPSHOT-NOT-TO", line=line, handle=request)
+    named = {}
+    for index, (_, target) in enumerate(targets):
+        artifact = _artifact(target)
+        if artifact is not None:
+            named.setdefault(artifact, []).append((index, target["digest_at_submit"]))
+    referenced = [row for row in snapshots if row[1] in named]
+    if not referenced:
+        raise errors.error_for("E-SNAPSHOT-NO-REF", line=line, handle=request)
+    for artifact, citations in named.items():
+        digests = {digest for _, name, digest in referenced if name == artifact}
+        if not digests:
+            continue
+        for index, now in citations:
+            if now not in digests:
+                raise errors.error_for("E-SNAPSHOT-STALE", line=lines.of("REF", index),
+                                       value=header._display(artifact), handle=request)
+    return [handle for handle, artifact, digest in referenced
+            if any(now == digest for _, now in named[artifact])]
+
+
+def _write_snapshots(conn, store, relay_id, created, edge_ids, plan):
+    """Snapshot rows, and their bytes in the evidence store once per digest."""
+    last = conn.execute("SELECT coalesce(max(handle), 0) FROM snapshots").fetchone()[0]
+    for handle, (index, artifact, sha, length, data) in enumerate(plan, start=last + 1):
+        if store is None:
+            data = None
+        if data is not None and store.captured_by(sha) is None:
+            key = store.put(data)
+            if key != sha:
+                raise ValueError("the evidence store keyed the bytes as %r, not their sha256"
+                                 % (key,))
+        conn.execute(
+            "INSERT INTO snapshots (id, handle, relay_id, edge_id, artifact, content_sha256,"
+            " bytes_len, has_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_uuid7(created), handle, relay_id, edge_ids[index], artifact, sha, length,
+             int(data is not None)))
 
 
 def _identity(conn, project_id, now):
@@ -766,3 +895,45 @@ class TableDirectory:
             " WHERE r.project_id = ? AND r.name = ? ORDER BY c.last_seen_at DESC LIMIT 1",
             (self.project_id, repo)).fetchone()
         return None if row is None else Path(row[0])
+
+
+@contextmanager
+def read_guard(conn, denied=frozenset({"bodies"})):
+    """Deny cooperating code's table reads, retaining an outer guard or hook.
+
+    This is not a sandbox: statements prepared before the guard keep their
+    authorization while stepped, blobopen and other in-process Python can
+    read any table, and schema objects created inside a guard outlive it.
+    """
+    _validate_read_denials(denied)
+    frame = _HOOK_FRAMES.get(conn)
+    if frame is not None:
+        if not denied <= frame[0].after_admit_reads_denied:
+            raise RuntimeError("a read guard inside a hook cannot deny more than the hook's own read denials")
+        yield
+        return
+    previous = _READ_GUARDS.get(conn)
+    if previous is not None and denied <= previous[0]:
+        yield
+        return
+    active = denied if previous is None else previous[0] | denied
+    def authorize(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_READ and table in active:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    _READ_GUARDS[conn] = (active, authorize)
+    try:
+        conn.set_authorizer(authorize)
+        yield
+    finally:
+        _READ_GUARDS.pop(conn, None)
+        if previous is not None:
+            _READ_GUARDS[conn] = previous
+        failure = None
+        try:
+            conn.set_authorizer(None if previous is None else previous[1])
+        except sqlite3.ProgrammingError as error:
+            if _transaction_state(conn) != "closed":
+                failure = error
+        if failure is not None:
+            raise failure

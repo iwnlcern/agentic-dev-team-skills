@@ -9,13 +9,20 @@ schema's indexes; no query reads every body.
 
 from dataclasses import dataclass
 import difflib
+import hashlib
+import io
+import os
 from pathlib import Path
+import secrets
+import stat
 import sqlite3
 from typing import Callable
 
 from relay_engine import errors
 from relay_engine import refs
 from relay_engine import schema
+from relay_engine import submit
+from relay_engine import strings
 from relay_engine.submit import OPERATOR_SEAT_ID, new_uuid7, party_sql
 
 UNOPENED_MS = 900_000  # amendment 4 A4.4 (operator P9): 15 minutes from admission
@@ -91,6 +98,19 @@ class BundleMetrics:
     bytes_by_kind: dict
     rounds: int
     cited_check_share: float | None
+
+
+@dataclass(frozen=True)
+class SnapshotRow:
+    handle: int
+    relay_id: str
+    edge_id: str
+    artifact: str
+    content_sha256: str
+    bytes_len: int
+    has_bytes: bool
+    locked_by: str | None
+    locked_at: int | None
 
 
 @dataclass(frozen=True)
@@ -559,3 +579,146 @@ def loop_flags(conn, bundle_id, checkout):
 def refusal_counts(conn, project_id):
     return dict(conn.execute("SELECT code, count(*) FROM refusals WHERE project_id = ?"
                              " GROUP BY code ORDER BY code", (project_id,)).fetchall())
+
+
+_SNAPSHOT_COLUMNS = ("handle, relay_id, edge_id, artifact, content_sha256, bytes_len, has_bytes,"
+                     " locked_by, locked_at")
+_SNAPSHOT_JOIN_COLUMNS = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
+
+
+def _snapshot_row(row):
+    return SnapshotRow(*row[:6], bool(row[6]), *row[7:])
+
+
+def locked_snapshot(conn, artifact, *, project_id):
+    """Latest approval lock of the exact artifact in this project."""
+    row = conn.execute(
+        "SELECT " + _SNAPSHOT_JOIN_COLUMNS + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+        " WHERE s.artifact = ? AND r.project_id = ? AND s.locked_by IS NOT NULL"
+        " ORDER BY s.locked_at DESC, s.handle DESC LIMIT 1", (artifact, project_id)).fetchone()
+    return None if row is None else _snapshot_row(row)
+
+
+def _snapshot(conn, handle, project_id):
+    row = conn.execute(
+        "SELECT " + _SNAPSHOT_JOIN_COLUMNS + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+        " WHERE s.handle = ? AND r.project_id = ?", (handle, project_id)).fetchone()
+    if row is None:
+        raise KeyError(handle)
+    return _snapshot_row(row)
+
+
+def _snapshot_bytes(conn, snapshot, store, directory):
+    if snapshot.has_bytes:
+        if store is None:
+            reason = "no evidence store was given to read its bytes"
+        else:
+            try:
+                data = store.get(snapshot.content_sha256)
+            except KeyError:
+                reason = "the evidence store does not hold its bytes"
+            else:
+                if hashlib.sha256(data).hexdigest() != snapshot.content_sha256:
+                    raise ValueError("stored bytes no longer match snapshot %d" % snapshot.handle)
+                return data
+        raise errors.error_for("E-SNAPSHOT-NO-BYTES", handle=snapshot.handle, reason=reason)
+    edge = conn.execute("SELECT target_type, target_repository_name, digest_at_submit FROM edges"
+                        " WHERE id = ?", (snapshot.edge_id,)).fetchone()
+    if edge[0] != "git":
+        reason = ("the file was over 1 MiB when the request was submitted"
+                  if snapshot.bytes_len > submit.SNAPSHOT_BYTES_MAX else
+                  "no evidence store was configured when the request was submitted")
+    elif directory is None:
+        reason = "a Git snapshot is read from its repository, which was not given"
+    else:
+        checkout = directory.checkout(edge[1])
+        if checkout is None:
+            reason = "a Git snapshot's repository is not known to this project"
+        else:
+            try:
+                data = refs.read_blob(checkout, edge[2])
+            except errors.EngineError as error:
+                if error.code != "E-REF-UNRESOLVED":
+                    raise
+                reason = "the blob cannot be read from its checkout"
+            else:
+                if hashlib.sha256(data).hexdigest() != snapshot.content_sha256:
+                    raise ValueError("blob %s no longer matches snapshot %d" %
+                                     (edge[2], snapshot.handle))
+                return data
+    raise errors.error_for("E-SNAPSHOT-NO-BYTES", handle=snapshot.handle, reason=reason)
+
+
+def snapshot_diff(conn, a_handle, b_handle, store, directory=None, *, project_id):
+    """The unified line difference between two snapshots of one artifact."""
+    first, second = _snapshot(conn, a_handle, project_id), _snapshot(conn, b_handle, project_id)
+    if first.artifact != second.artifact:
+        raise ValueError("snapshots %d and %d are of different artifacts" % (a_handle, b_handle))
+    texts = []
+    for snapshot in (first, second):
+        data = _snapshot_bytes(conn, snapshot, store, directory)
+        try:
+            texts.append(data.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise errors.error_for("E-SNAPSHOT-NOT-TEXT", handle=snapshot.handle) from None
+    return "".join(difflib.unified_diff(
+        texts[0].splitlines(keepends=True), texts[1].splitlines(keepends=True),
+        fromfile="snapshot %d" % a_handle, tofile="snapshot %d" % b_handle))
+
+
+def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None, project_id):
+    """Publish exact bytes through a private file beside the output.
+
+    Creating a copy needs same-directory hard links; a filesystem that refuses
+    them raises its OSError after staging cleanup. Overwrite uses os.replace
+    and keeps an existing regular file's permission bits, else the umask mode.
+    """
+    snapshot = _snapshot(conn, handle, project_id)
+    data = _snapshot_bytes(conn, snapshot, store, directory)
+    mode = None
+    if overwrite:
+        try:
+            observed = os.lstat(out).st_mode
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISREG(observed):
+                mode = observed
+    open_mode = 0o600 if mode is not None else 0o644
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for attempt in range(100):
+        target = Path(out).parent / (".snapshot-" + secrets.token_hex(8))
+        try:
+            fd = os.open(target, flags, open_mode)
+        except FileExistsError:
+            if attempt == 99:
+                raise
+        else:
+            break
+    try:
+        with io.FileIO(fd, mode="wb", closefd=True) as stream:
+            view = memoryview(data)
+            while view:
+                written = os.write(stream.fileno(), view)
+                if written <= 0:
+                    raise OSError("snapshot write made no progress")
+                view = view[written:]
+            if mode is not None:
+                os.fchmod(stream.fileno(), stat.S_IMODE(mode) & 0o777)
+            os.fsync(stream.fileno())
+        if overwrite:
+            os.replace(target, out)
+        else:
+            try:
+                os.link(target, out)
+            except FileExistsError:
+                shown = os.fspath(out)
+                raise errors.error_for(
+                    "E-OUTPUT-EXISTS",
+                    path=shown if strings._is_show_text(shown) and len(shown) <= 300
+                    else errors._rejected_identity(shown)) from None
+    finally:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass

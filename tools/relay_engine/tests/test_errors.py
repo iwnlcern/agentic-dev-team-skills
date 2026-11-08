@@ -20,6 +20,13 @@ POLICY_CODES = {
 }
 
 ALL_CODES = POLICY_CODES | {
+    "E-SNAPSHOT-STALE",
+    "E-SNAPSHOT-NOT-TO",
+    "E-SNAPSHOT-NO-REF",
+    "E-SNAPSHOT-NO-BYTES",
+    "E-SNAPSHOT-NOT-TEXT",
+    "E-OUTPUT-EXISTS",
+
     "E-SUBMISSION-KEY-REUSED",
     "E-ADMISSION-HOOK",
     "no-top-seat",
@@ -82,6 +89,21 @@ ALL_CODES = POLICY_CODES | {
 
 
 class TestErrorRegistry(unittest.TestCase):
+    def test_snapshot_codes_catalogued(self):
+        cases = {"E-SNAPSHOT-STALE": 'integrity',
+                 "E-SNAPSHOT-NOT-TO": 'integrity',
+                 "E-SNAPSHOT-NO-REF": 'integrity',
+                 "E-SNAPSHOT-NO-BYTES": 'command',
+                 "E-SNAPSHOT-NOT-TEXT": 'command',
+                 "E-OUTPUT-EXISTS": 'command'}
+        for code, kind in cases.items():
+            with self.subTest(code=code):
+                self.assertIn(code, errors.ERRORS)
+                spec = errors.ERRORS[code]
+                self.assertEqual(spec.cls, kind)
+                self.assertTrue(strings.INVENTORY[spec.cause_key])
+                self.assertTrue(strings.INVENTORY[spec.remedy_key])
+
     def test_complete_registry_and_exact_policy_partition(self):
         self.assertEqual(set(errors.ERRORS), ALL_CODES)
         self.assertEqual(errors.POLICY_CODES, POLICY_CODES)

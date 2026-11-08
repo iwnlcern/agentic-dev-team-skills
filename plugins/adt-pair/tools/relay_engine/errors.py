@@ -453,6 +453,45 @@ strings.register_inventory(_HOOK_TEXT, {
 })
 
 
+# v3 review snapshots (DD-v3-engine § 17): one code per rule.
+_SNAPSHOT_TEXT = {
+    "error-snapshot-stale-cause": "line {line}: {value} changed after review request #{handle} snapshotted it",
+    "error-snapshot-stale-remedy": "request review of the current copy, then approve that request",
+    "error-snapshot-stale-explain": "an approve locks the copy the review request saw, so the artifact must be unchanged when the approve is submitted",
+    "error-snapshot-not-to-cause": "line {line}: only a TO addressee of review request #{handle} may approve it",
+    "error-snapshot-not-to-remedy": "ask a TO addressee of the request to approve it, or reply with another verdict",
+    "error-snapshot-not-to-explain": "an approve that locks a snapshot comes from a seat the request asked for review",
+    "error-snapshot-no-ref-cause": "line {line}: this approve of review request #{handle} references none of the artifacts the request snapshotted",
+    "error-snapshot-no-ref-remedy": "add a REF line for each artifact you approve, naming the file or Git path the request named",
+    "error-snapshot-no-ref-explain": "an approve names the artifacts it locks",
+    "error-snapshot-no-bytes-cause": "snapshot {handle} holds no bytes: {reason}",
+    "error-snapshot-no-bytes-remedy": "read the artifact at the recorded digest from where it lives, such as Git at the cited commit",
+    "error-snapshot-no-bytes-explain": "a file over 1 MiB is recorded by digest only, and a Git snapshot is read from Git",
+    "error-snapshot-not-text-cause": "snapshot {handle} is not UTF-8 text",
+    "error-snapshot-not-text-remedy": "write clean copies of both snapshots and compare them with a tool that reads bytes",
+    "error-snapshot-not-text-explain": "a line difference is computed only between UTF-8 texts",
+    "error-output-exists-cause": "{path} already exists",
+    "error-output-exists-remedy": "name a path that does not exist, or ask for the file to be overwritten",
+    "error-output-exists-explain": "a clean copy never replaces a file unless asked",
+}
+_NO_BYTES_REASONS = {"the file was over 1 MiB when the request was submitted",
+                     "a Git snapshot is read from its repository, which was not given",
+                     "a Git snapshot's repository is not known to this project",
+                     "no evidence store was configured when the request was submitted",
+                     "the blob cannot be read from its checkout",
+                     "no evidence store was given to read its bytes",
+                     "the evidence store does not hold its bytes"}
+strings.register_inventory(_SNAPSHOT_TEXT, {
+    (key, field): {"line": _is_line, "value": _is_header_text,
+                   "handle": lambda v: strings._is_count(v) and v >= 1,
+                   "reason": lambda v: v in _NO_BYTES_REASONS,
+                   "path": lambda v: strings._is_rejected(v) or (
+                       strings._is_show_text(v) and len(v) <= 300)}[field]
+    for key, template in _SNAPSHOT_TEXT.items()
+    for field in strings._placeholders(template)
+})
+
+
 # v3 references (DD-v3-engine § 6): one code per refusal rule.
 _REF_TEXT = {
     "error-ref-spelling-cause": "REF {value} is not a reference spelling: {reason}",
@@ -502,6 +541,12 @@ def _spec(stem, cls):
 
 
 ERRORS = {
+    "E-SNAPSHOT-STALE": _spec("snapshot-stale", "integrity"),
+    "E-SNAPSHOT-NOT-TO": _spec("snapshot-not-to", "integrity"),
+    "E-SNAPSHOT-NO-REF": _spec("snapshot-no-ref", "integrity"),
+    "E-SNAPSHOT-NO-BYTES": _spec("snapshot-no-bytes", "command"),
+    "E-SNAPSHOT-NOT-TEXT": _spec("snapshot-not-text", "command"),
+    "E-OUTPUT-EXISTS": _spec("output-exists", "command"),
     "E-ADMISSION-HOOK": _spec("admission-hook", "integrity"),
     "E-SUBMISSION-KEY-REUSED": _spec("submission-key-reused", "integrity"),
     "E-DRAFT-SHAPE": _spec("draft-shape", "integrity"),
