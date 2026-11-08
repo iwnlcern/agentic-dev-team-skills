@@ -16,10 +16,11 @@ from relay_engine.tests.test_submit import Store as SubmitStore
 
 TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
-          "seat_sessions", "token_counts", "schema_version", "projects", "repositories",
+          "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants"}
 
 INDEXES = {
+    "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
                ("sender_seat_id", "kind"), ("project_id", "id")},
     "recipients": {("seat_id",), ("relay_id",)},
@@ -139,10 +140,42 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 22)
+        self.assertEqual(len(named), 25)
 
 
 class TestChecks(Store):
+    def test_snapshots_table_shape(self):
+        conn = self.connect()
+        self.assertIn("snapshots", {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")})
+        self.assertEqual({r[1] for r in conn.execute("PRAGMA table_info(snapshots)")}, {"id", "handle", "relay_id", "edge_id", "artifact", "content_sha256", "bytes_len", "has_bytes", "locked_by", "locked_at"})
+        self.assertEqual(conn.execute("SELECT strict FROM pragma_table_list WHERE name='snapshots'").fetchone(), (1,))
+        self.relay(conn, "r1", 1)
+        self.relay(conn, "r2", 2)
+        conn.execute("INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
+                     " target_path, digest_at_submit) VALUES ('e1', 'r1', 1, 'ref', 'path', 's',"
+                     " '/p', ?)", (SHA,))
+        conn.execute("INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
+                     " target_path, digest_at_submit) VALUES ('e2', 'r1', 2, 'ref', 'path', 's',"
+                     " '/q', ?)", (SHA,))
+        row = ("INSERT INTO snapshots (id, handle, relay_id, edge_id, artifact, content_sha256,"
+               " bytes_len, has_bytes, locked_by, locked_at) VALUES (?, ?, 'r1', ?, '/p', ?, ?, ?,"
+               " ?, ?)")
+        conn.execute(row, ("s1", 1, "e1", SHA, 3, 1, None, None))
+        conn.execute("UPDATE snapshots SET locked_by = 'r2', locked_at = 5 WHERE id = 's1'")
+        for name, values in (("handle taken", ("s2", 1, "e2", SHA, 3, 1, None, None)),
+                             ("edge taken", ("s2", 2, "e1", SHA, 3, 1, None, None)),
+                             ("handle zero", ("s2", 0, "e2", SHA, 3, 1, None, None)),
+                             ("bad digest", ("s2", 2, "e2", "b" * 40, 3, 1, None, None)),
+                             ("negative length", ("s2", 2, "e2", SHA, -1, 1, None, None)),
+                             ("has_bytes 2", ("s2", 2, "e2", SHA, 3, 2, None, None)),
+                             ("lock without time", ("s2", 2, "e2", SHA, 3, 1, "r2", None)),
+                             ("time without lock", ("s2", 2, "e2", SHA, 3, 1, None, 5)),
+                             ("unknown lock relay", ("s2", 2, "e2", SHA, 3, 1, "nope", 5))):
+            with self.subTest(name):
+                self.refused(conn, row, values)
+        conn.execute(row, ("s2", 2, "e2", SHA, 3, 0, "r2", 5))  # positive control
+
+
     def test_enum_checks_equal_the_registry(self):
         conn = self.connect()
         cases = (
@@ -635,7 +668,7 @@ class TestTableOwners(Store):
         self.assertEqual(set(schema.TABLE_OWNERS), actual)
         platform = {"projects", "repositories", "repository_checkouts", "team_instances",
                     "seats", "seat_occupants", "seat_sessions"}
-        self.assertEqual(len(actual), 19)
+        self.assertEqual(len(actual), 20)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform)
         fixture = SubmitStore()
@@ -647,6 +680,41 @@ class TestTableOwners(Store):
                         replace(fixture.ctx(), after_admit_writes=frozenset({table}))
         finally:
             fixture.doCleanups()
+
+
+class TestSnapshotSchema(Store):
+    def test_snapshots_ddl_refuses_bf2deda_store(self):
+        self.assertIn('snapshots', schema.TABLE_OWNERS)
+        tables = tuple(t for t in schema._TABLES if 'CREATE TABLE IF NOT EXISTS snapshots ' not in t)
+        indexes = tuple(t for t in schema._INDEXES if ' ON snapshots ' not in t)
+        conn = self.connect(init=False)
+        with mock.patch.object(schema, '_TABLES', tables), mock.patch.object(schema, '_INDEXES', indexes):
+            schema.init_v3(conn)
+        before = self.objects(conn)
+        digest = conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.objects(conn), before)
+        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(), digest)
+        fresh = self.connect()
+        objects = self.objects(fresh)
+        schema.init_v3(fresh)
+        self.assertEqual(self.objects(fresh), objects)
+
+    def test_read_file_keeps_small(self):
+        from relay_engine import refs
+        import hashlib
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'artifact')
+            with open(p, 'wb') as f:
+                f.write(b'abc\x00def')
+            digest = hashlib.sha256(b'abc\x00def').hexdigest()
+            for keep in (7, 8):
+                self.assertEqual(refs.read_file(p, keep), (digest, 7, b'abc\x00def'))
+            self.assertEqual(refs.read_file(p, 6), (digest, 7, None))
+            self.assertEqual(refs.file_digest(p), digest)
+
 
 if __name__ == "__main__":
     unittest.main()

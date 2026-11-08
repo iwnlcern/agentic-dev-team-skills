@@ -151,6 +151,7 @@ TABLE_OWNERS: dict[str, str] = {
     "seat_activity": "engine",
     "token_counts": "engine",
     "schema_version": "engine",
+    "snapshots": "engine",
 }
 
 _TABLES = _PLATFORM_TABLES + (
@@ -296,6 +297,19 @@ _TABLES = _PLATFORM_TABLES + (
     cache_write INTEGER NOT NULL CHECK (cache_write >= 0),
     copied_at INTEGER NOT NULL
 ) STRICT""",
+    """CREATE TABLE IF NOT EXISTS snapshots (
+    id TEXT PRIMARY KEY,
+    handle INTEGER NOT NULL UNIQUE CHECK (handle >= 1),
+    relay_id TEXT NOT NULL REFERENCES relays (id),
+    edge_id TEXT NOT NULL UNIQUE REFERENCES edges (id),
+    artifact TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL %s,
+    bytes_len INTEGER NOT NULL CHECK (bytes_len >= 0),
+    has_bytes INTEGER NOT NULL CHECK (has_bytes IN (0, 1)),
+    locked_by TEXT REFERENCES relays (id),
+    locked_at INTEGER,
+    CHECK ((locked_by IS NULL) = (locked_at IS NULL))
+) STRICT""" % _sha("content_sha256"),
     """CREATE TABLE IF NOT EXISTS schema_version (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     version TEXT NOT NULL,
@@ -332,6 +346,9 @@ _INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS seat_sessions_open ON seat_sessions (seat_id)"
     " WHERE ended_at IS NULL",
     "CREATE INDEX IF NOT EXISTS repositories_project ON repositories (project_id)",
+    "CREATE INDEX IF NOT EXISTS snapshots_relay ON snapshots (relay_id)",
+    "CREATE INDEX IF NOT EXISTS snapshots_artifact ON snapshots (artifact, handle)",
+    "CREATE INDEX IF NOT EXISTS snapshots_content ON snapshots (content_sha256)",
 )
 
 
