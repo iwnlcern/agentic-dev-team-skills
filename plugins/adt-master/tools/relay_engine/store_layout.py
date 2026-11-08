@@ -2,6 +2,7 @@
 from pathlib import Path
 import sqlite3
 import sys
+import time
 from uuid import UUID
 
 from relay_engine import submit
@@ -102,6 +103,38 @@ def open_ledger(root, project_id: str, *, create: bool = False):
         if not projects and not create:
             raise LayoutFault('no-project-row')
     except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def open_catalogue(root, *, kind: str | None = None):
+    """Open a bound catalogue; only an explicit declaration creates production."""
+    from relay_engine import catalogue
+
+    if kind not in (None, 'production', 'isolated'):
+        raise ValueError('unknown catalogue kind')
+    root = Path(root)
+    root.mkdir(mode=0o700, exist_ok=True)
+    conn = sqlite3.connect(root / 'catalogue.sqlite3')
+    try:
+        _pragma(conn, 'PRAGMA foreign_keys=ON')
+        catalogue.init_catalogue(conn)
+        _pragma(conn, 'BEGIN IMMEDIATE')
+        identity = _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1')
+        if identity is None:
+            now_ms = time.time_ns() // 1_000_000
+            conn.execute('INSERT INTO catalogue_identity VALUES (1, ?, ?, ?)',
+                         (submit.new_uuid7(now_ms), kind or 'isolated', now_ms)).close()
+            _pragma(conn, 'COMMIT')
+        else:
+            _pragma(conn, 'ROLLBACK')
+            if kind is not None and identity != (kind,):
+                raise LayoutFault('wrong-kind')
+        _configure(conn)
+    except BaseException:
+        if conn.in_transaction:
+            _pragma(conn, 'ROLLBACK')
         conn.close()
         raise
     return conn
