@@ -1,8 +1,13 @@
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11, § 15 item 6; plan Task 5)."""
 
+import hashlib
+import inspect
 import json
+from dataclasses import FrozenInstanceError, asdict
 import os
 import sqlite3
+import tempfile
+import threading
 import time
 import unittest
 
@@ -10,9 +15,11 @@ from relay_engine import queries
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
+from relay_engine.tests import test_submit as submit_tests
 from relay_engine.tests.test_refs import Repo, git
-from relay_engine.tests.test_submit import (IMPL, ORCH, OTHER, PLANNER, SEATS, Store, draft,
-                                            vm_steps)
+from unittest import mock
+from relay_engine.tests.test_submit import (FOREIGN, IMPL, ORCH, OTHER, PLANNER, SEATS, Store, GitStore,
+                                            draft, vm_steps)
 
 OPERATOR = SEATS["operator"]
 
@@ -20,7 +27,22 @@ ENVELOPE = {"handle", "kind", "sender", "to", "cc", "subject", "parent", "verdic
             "created_at"}
 
 
+def retain_query_evidence(name, states):
+    """Retain these focused controls' actual row snapshots when a receipt root is supplied."""
+    root = os.environ.get("RELAY_ENGINE_RESULTS_ROOT")
+    if root:
+        with open(os.path.join(root, name + ".json"), "w") as stream:
+            json.dump(states, stream, indent=2)
+            stream.write("\n")
+
+
 class TestReads(Store):
+    def actor_state(self):
+        return {"activity": self.conn.execute(
+                    "SELECT * FROM seat_activity ORDER BY seat_id").fetchall(),
+                "recipients": self.conn.execute(
+                    "SELECT * FROM recipients ORDER BY rowid").fetchall()}
+
     def test_default_read_envelope(self):
         root = self.submit(draft(to="v3-engine.implementer"))
         child = self.submit(draft(to="v3-engine.implementer, v3-other.planner",
@@ -62,6 +84,291 @@ class TestReads(Store):
         queries.read(self.conn, admitted.relay_id, OTHER.seat_id, 5)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM recipients WHERE opened_at"
                                            " IS NOT NULL").fetchone()[0], 0)
+
+    def test_read_refuses_unrelated_project(self):
+        """PR3 R7, carried to Task6: a foreign non-recipient gets no relay or side effects."""
+        admitted = self.submit(draft(to="v3-engine.implementer", body="local-only body\n"))
+        before_activity = self.conn.execute("SELECT * FROM seat_activity ORDER BY seat_id").fetchall()
+        before_recipients = self.conn.execute("SELECT * FROM recipients ORDER BY rowid").fetchall()
+        for meta in (False, True):
+            with self.subTest(meta=meta):
+                with self.assertRaises(ValueError):
+                    queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 77, meta=meta)
+                self.assertEqual(self.conn.execute(
+                    "SELECT * FROM seat_activity ORDER BY seat_id").fetchall(), before_activity)
+                self.assertEqual(self.conn.execute(
+                    "SELECT * FROM recipients ORDER BY rowid").fetchall(), before_recipients)
+
+    def test_foreign_release_callback_is_read_only(self):
+        """Blanket denial and caught write/transaction-control bypasses both fail."""
+        admitted = self.submit(draft(to=FOREIGN.address, body="released body\n"))
+        self.assertIn("foreign_release", inspect.signature(queries.read).parameters,
+                      "mixed read must accept the current-release predicate")
+        # Prepare transaction statements before the callback's permission frame.
+        for statement in ("COMMIT", "ROLLBACK"):
+            self.conn.execute("BEGIN")
+            self.conn.execute(statement)
+
+        snapshots = []
+        for statement in ("UPDATE recipients SET opened_at = 999", "COMMIT", "ROLLBACK",
+                          "DELETE FROM recipients", "SAVEPOINT blocked", "RELEASE blocked",
+                          "PRAGMA user_version", "ATTACH DATABASE ':memory:' AS blocked",
+                          "CREATE TABLE blocked(id)"):
+            with self.subTest(denied=statement):
+                activity = self.conn.execute("SELECT * FROM seat_activity ORDER BY seat_id"
+                                             ).fetchall()
+                recipients = self.conn.execute("SELECT * FROM recipients ORDER BY rowid"
+                                               ).fetchall()
+                denied = []
+
+                def caught_denial(conn, target):
+                    try:
+                        conn.execute(statement)
+                    except sqlite3.DatabaseError:
+                        denied.append(statement)
+                    return True  # Catching the error must not authorize the read.
+
+                with self.assertRaises(ValueError):
+                    queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 77,
+                                 meta=True, foreign_release=caught_denial)
+                self.assertEqual(denied, [statement])
+                self.assertFalse(self.conn.in_transaction)
+                self.assertEqual(self.conn.execute("SELECT * FROM seat_activity ORDER BY seat_id"
+                                                   ).fetchall(), activity)
+                self.assertEqual(self.conn.execute("SELECT * FROM recipients ORDER BY rowid"
+                                                   ).fetchall(), recipients)
+                snapshots.append({"statement": statement, "denied": denied,
+                                  "activity_before": activity,
+                                  "activity_after": self.conn.execute(
+                                      "SELECT * FROM seat_activity ORDER BY seat_id").fetchall(),
+                                  "recipients_before": recipients,
+                                  "recipients_after": self.conn.execute(
+                                      "SELECT * FROM recipients ORDER BY rowid").fetchall(),
+                                  "in_transaction_after": self.conn.in_transaction})
+                # An actual write proves authorizer cleanup, not merely SELECT permission.
+                queries.note_activity(self.conn, IMPL.seat_id, 99)
+                self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity"
+                                                   " WHERE seat_id = ?", (IMPL.seat_id,)
+                                                   ).fetchone(), (99,))
+
+        observed = []
+
+        def released(conn, target):
+            observed.append((target.relay_id, target.body_sha256, target.source_project_id,
+                             target.destination_project_id, target.recipient_seat_id,
+                             target.recipient_role, conn.in_transaction))
+            row = conn.execute("SELECT project_id FROM relays WHERE id = ?",
+                               (target.relay_id,)).fetchone()
+            return row == ("p",)
+
+        result = queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 100,
+                              foreign_release=released)
+        self.assertEqual(result.body, b"released body\n")
+        self.assertEqual(observed, [(admitted.relay_id,
+                                    hashlib.sha256(b"released body\n").hexdigest(),
+                                    "p", "q", FOREIGN.seat_id, "to", True)])
+        self.assertEqual(self.conn.execute("SELECT delivered_at, opened_at, answered_by"
+                                           " FROM recipients WHERE relay_id = ?",
+                                           (admitted.relay_id,)).fetchone(), (None, 100, None))
+        self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity"
+                                           " WHERE seat_id = ?", (FOREIGN.seat_id,)
+                                           ).fetchone(), (100,))
+        self.assertFalse(self.conn.in_transaction)
+        retain_query_evidence("callback-read-only", {
+            "refusals": snapshots, "target": observed,
+            "released_recipients": self.conn.execute(
+                "SELECT * FROM recipients ORDER BY rowid").fetchall(),
+            "released_activity": self.conn.execute(
+                "SELECT * FROM seat_activity ORDER BY seat_id").fetchall()})
+
+    def test_foreign_recipient_release_bound_and_atomic(self):
+        """A recipient/history is not a grant; exact current TO/CC release is usable."""
+        snapshots = []
+        for role in ("to", "cc"):
+            admitted = self.submit(draft(
+                to=FOREIGN.address if role == "to" else IMPL.address,
+                cc=FOREIGN.address if role == "cc" else None, body="bound body\n"))
+            expected = {"relay_id": admitted.relay_id,
+                        "body_sha256": hashlib.sha256(b"bound body\n").hexdigest(),
+                        "source_project_id": "p", "destination_project_id": "q",
+                        "recipient_seat_id": FOREIGN.seat_id, "recipient_role": role}
+            cases = [(status, {}, False) for status in
+                     ("held", "denied", "revoked", "unknown", "unavailable", "ineligible")]
+            cases += [("wrong-" + field, {field: value}, True) for field, value in (
+                ("relay_id", "another-relay"), ("body_sha256", "0" * 64),
+                ("destination_project_id", "p"), ("source_project_id", "q"),
+                ("recipient_seat_id", IMPL.seat_id),
+                ("recipient_role", "cc" if role == "to" else "to"))]
+            cases.append(("wrong-direction", {"source_project_id": "q",
+                                              "destination_project_id": "p"}, True))
+            for meta in (False, True):
+                for status, mismatch, allowed in cases:
+                    with self.subTest(role=role, meta=meta, release=status):
+                        before = self.actor_state()
+                        seen = []
+                        targets = []
+
+                        def release(conn, target):
+                            self.assertIs(conn, self.conn)
+                            self.assertTrue(conn.in_transaction)
+                            seen.append(asdict(target))
+                            targets.append(target)
+                            # Controlled owner seam only, not a release-storage implementation.
+                            return allowed and asdict(target) == dict(expected, **mismatch)
+
+                        with self.assertRaises(ValueError):
+                            queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 70,
+                                         meta=meta, foreign_release=release)
+                        self.assertEqual(seen, [expected])
+                        self.assertEqual(len(targets), 1)
+                        # Keep this assertion outside callback Exception -> ValueError translation.
+                        with self.assertRaises(FrozenInstanceError):
+                            targets[0].body_sha256 = "0" * 64
+                        self.assertEqual(self.actor_state(), before)
+                        self.assertFalse(self.conn.in_transaction)
+                        snapshots.append({"role": role, "meta": meta, "case": status,
+                                          "before": before, "after": self.actor_state()})
+                before_absent = self.actor_state()
+                with self.assertRaises(ValueError):
+                    queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 71, meta=meta)
+                self.assertEqual(self.actor_state(), before_absent)
+                self.assertFalse(self.conn.in_transaction)
+
+            # Fail after the activity write: all helper effects must roll back together.
+            self.conn.execute("CREATE TEMP TRIGGER reject_open BEFORE UPDATE OF opened_at"
+                              " ON recipients WHEN NEW.opened_at = 72"
+                              " BEGIN SELECT RAISE(ABORT, 'fixture open fault'); END")
+            before = self.actor_state()
+            with self.assertRaises(sqlite3.IntegrityError):
+                queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 72,
+                             foreign_release=lambda conn, target: True)
+            self.assertEqual(self.actor_state(), before)
+            self.assertFalse(self.conn.in_transaction)
+            self.conn.execute("DROP TRIGGER reject_open")
+            result = queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 80, meta=True,
+                                  foreign_release=lambda conn, target: asdict(target) == expected)
+            self.assertEqual(result.body, b"bound body\n")
+            self.assertEqual(self.conn.execute("SELECT delivered_at, opened_at, answered_by"
+                                               " FROM recipients WHERE relay_id = ?"
+                                               " AND seat_id = ?",
+                                               (admitted.relay_id, FOREIGN.seat_id)).fetchone(),
+                             (None, 80, None))
+            # Even prior delivery/opening cannot stand in for a current release.
+            self.conn.execute("UPDATE recipients SET delivered_at = 81 WHERE relay_id = ?"
+                              " AND seat_id = ?", (admitted.relay_id, FOREIGN.seat_id))
+            self.conn.commit()
+            before = self.actor_state()
+            with self.assertRaises(ValueError):
+                queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 90,
+                             foreign_release=lambda conn, target: False)
+            self.assertEqual(self.actor_state(), before)
+
+        authored = self.submit(draft(to=IMPL.address, body="foreign author only\n"))
+        # A stored cross-project author alone does not confer recipient eligibility.
+        self.conn.execute("UPDATE relays SET sender_seat_id = ?, team_instance_id = ?"
+                          " WHERE id = ?", (FOREIGN.seat_id, FOREIGN.team_instance_id,
+                                             authored.relay_id))
+        self.conn.commit()
+        before = self.actor_state()
+        calls = []
+        for meta in (False, True):
+            with self.assertRaises(ValueError):
+                queries.read(self.conn, authored.relay_id, FOREIGN.seat_id, 95, meta=meta,
+                             foreign_release=lambda conn, target: calls.append(target) or True)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.actor_state(), before)
+        retain_query_evidence("foreign-release-matrix", snapshots)
+
+    def test_dirty_caller_transaction_is_preserved(self):
+        """Refusal must neither commit nor roll back caller work nor invoke release."""
+        admitted = self.submit(draft(to=FOREIGN.address))
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 321 WHERE seat_id = ?",
+                          (FOREIGN.seat_id,))
+        before = self.actor_state()
+        calls = []
+        for meta in (False, True):
+            with self.assertRaises(ValueError):
+                queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 10, meta=meta,
+                             foreign_release=lambda conn, target: calls.append(target) or True)
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants"
+                                               " WHERE seat_id = ?", (FOREIGN.seat_id,)
+                                               ).fetchone(), (321,))
+            self.assertEqual(self.actor_state(), before)
+        self.assertEqual(calls, [])
+        self.conn.rollback()  # The caller alone disposes of its pending transaction.
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants"
+                                           " WHERE seat_id = ?", (FOREIGN.seat_id,)
+                                           ).fetchone(), (1,))
+        self.assertEqual(queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 11,
+                                     foreign_release=lambda conn, target: True).body, b"body\n")
+
+    def test_callback_refusal_cleans_connection(self):
+        """Strict booleans and callback faults leave no effects or poisoned connection."""
+        admitted = self.submit(draft(to=FOREIGN.address))
+        interrupt = KeyboardInterrupt("fixture interrupt")
+        snapshots = []
+        for outcome in (False, None, 0, 1, "true", [], RuntimeError("private detail"), interrupt):
+            for meta in (False, True):
+                with self.subTest(outcome=repr(outcome), meta=meta):
+                    before = self.actor_state()
+
+                    def release(conn, target):
+                        conn.execute("SELECT id FROM relays WHERE id = ?", (target.relay_id,))
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                        return outcome
+
+                    with self.assertRaises(KeyboardInterrupt if outcome is interrupt
+                                           else ValueError) as caught:
+                        queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 20,
+                                     meta=meta, foreign_release=release)
+                    if outcome is interrupt:
+                        self.assertIs(caught.exception, interrupt)
+                    else:
+                        self.assertNotIn("private detail", str(caught.exception))
+                    self.assertFalse(self.conn.in_transaction)
+                    self.assertEqual(self.actor_state(), before)
+                    snapshots.append({"outcome": repr(outcome), "meta": meta,
+                                      "before": before, "after": self.actor_state()})
+                    queries.note_activity(self.conn, IMPL.seat_id, 21)
+        self.assertEqual(queries.read(self.conn, admitted.relay_id, FOREIGN.seat_id, 22,
+                                     foreign_release=lambda conn, target: True).body, b"body\n")
+        retain_query_evidence("callback-cleanup-matrix", snapshots)
+
+    def test_operator_read_has_no_activity(self):
+        """Real operator access remains; system and missing seats get no bypass."""
+        admitted = self.submit(draft(to="operator", cc=IMPL.address))
+        self.assertEqual(queries.read(self.conn, admitted.relay_id, OPERATOR.seat_id, 30,
+                                     meta=True).body, b"body\n")
+        self.assertEqual(self.conn.execute("SELECT opened_at FROM recipients"
+                                           " WHERE relay_id = ? AND special = 'operator'",
+                                           (admitted.relay_id,)).fetchone(), (30,))
+        self.assertEqual(self.conn.execute("SELECT * FROM seat_activity WHERE seat_id = ?",
+                                           (OPERATOR.seat_id,)).fetchall(), [])
+        before = self.actor_state()
+        for seat in ("system", "missing-seat"):
+            with self.assertRaises(ValueError):
+                queries.read(self.conn, admitted.relay_id, seat, 31)
+            self.assertEqual(self.actor_state(), before)
+        with self.assertRaises(KeyError):
+            queries.read(self.conn, "missing-relay", IMPL.seat_id, 32)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_stateful_cc_read_only_opens(self):
+        """Local CC reads first-open their own row without delivery/answer or TO effects."""
+        admitted = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        result = queries.read(self.conn, admitted.relay_id, OTHER.seat_id, 40, meta=True)
+        self.assertEqual(result.body, b"body\n")
+        self.assertEqual(self.conn.execute("SELECT seat_id, role, delivered_at, opened_at,"
+                                           " answered_by FROM recipients WHERE relay_id = ?"
+                                           " ORDER BY role", (admitted.relay_id,)).fetchall(),
+                         [(OTHER.seat_id, "cc", None, 40, None),
+                          (IMPL.seat_id, "to", None, None, None)])
+        queries.read(self.conn, admitted.relay_id, OTHER.seat_id, 50)
+        self.assertEqual(self.conn.execute("SELECT opened_at FROM recipients WHERE relay_id = ?"
+                                           " AND seat_id = ?", (admitted.relay_id, OTHER.seat_id)
+                                           ).fetchone(), (40,))
 
     def test_marks(self):
         admitted = self.submit(draft(to="v3-engine.implementer", cc="v3-other.planner"))
@@ -112,7 +419,7 @@ class TestLineage(Store):
                 self.refused("E-PARENT-NOT-MEMBER", data, sender=IMPL)
 
     def test_candidates_by_project(self):  # PR-3 fold R4 (planner ruling)
-        q_impl = submit.SeatRef("seat-q-impl", "v3-engine.implementer", "implementer", "t9", "q")
+        q_impl = FOREIGN  # project q's seat
         self.submit(draft(to="v3-engine.implementer"))
         mine = self.submit(draft(kind="QUESTION", to="operator", needs="answer"), sender=IMPL)
         theirs = self.submit(draft(kind="QUESTION", to="operator", needs="answer"), sender=q_impl)
@@ -257,7 +564,7 @@ class TestFlags(Store):
                          [(50,)])
 
 
-class TestFindings(Store):
+class TestFindings(GitStore):
     def review_with(self, findings, refs_=(), parent=None, to="v3-engine.implementer",
                     sender=PLANNER):
         request = self.submit(draft(kind="REVIEW", needs="review", to=sender.address,
@@ -351,7 +658,7 @@ class TestFindings(Store):
         self.assertEqual(queries.refusal_counts(self.conn, "elsewhere"), {})
 
 
-class TestEdges(Store):
+class TestEdges(GitStore):
     def test_points_to_and_from(self):
         repo = Repo({"a.py": "1\n2\n3\n4\n"})
         self.addCleanup(repo.close)
@@ -371,6 +678,12 @@ class TestEdges(Store):
         self.assertEqual(len(line3), 2)
         with self.assertRaises(ValueError):
             queries.pointed_from(self.conn, refs.parse_ref("#1"))
+        # a repository rename keeps its edges, matched by J3's id within the project
+        self.conn.execute("UPDATE repositories SET name = 'bivpak2' WHERE id = 'repo-1'")
+        renamed = refs.parse_ref("bivpak2@main:a.py#L3")
+        self.assertEqual(len(queries.pointed_from(self.conn, renamed, project_id=PLANNER.project_id)),
+                         2)
+        self.assertEqual(queries.pointed_from(self.conn, renamed, project_id="q"), [])
 
     def test_changed_paths(self):
         repo = Repo({"a.py": "a\n", "d/b.py": "b\n"})
@@ -424,6 +737,32 @@ class TestEdges(Store):
 
 
 class TestRecords(Store):
+    def test_session_dirty_transaction_is_preserved(self):
+        """Neither session helper may dispose of a caller-owned transaction."""
+        current = queries.record_session(self.conn, "host", "codex", IMPL.seat_id, 10)
+        before = self.conn.execute("SELECT * FROM seat_sessions ORDER BY id").fetchall()
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 321 WHERE seat_id = ?",
+                          (IMPL.seat_id,))
+        for operation in (lambda: queries.record_session(self.conn, "next", "codex",
+                                                        IMPL.seat_id, 20),
+                          lambda: queries.end_session(self.conn, current, 20)):
+            with self.assertRaises(ValueError):
+                operation()
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants"
+                                               " WHERE seat_id = ?", (IMPL.seat_id,)
+                                               ).fetchone(), (321,))
+            self.assertEqual(self.conn.execute("SELECT * FROM seat_sessions ORDER BY id"
+                                               ).fetchall(), before)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                           (IMPL.seat_id,)).fetchone(), (1,))
+        queries.end_session(self.conn, current, 30)
+        next_id = queries.record_session(self.conn, "next", "codex", IMPL.seat_id, 40)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
+                                           " ORDER BY signed_in_at").fetchall(),
+                         [(current, 30), (next_id, None)])
+
     def test_token_sources(self):
         bundle = self.relay(self.submit(draft()).relay_id)["bundle_id"]
         counts = queries.TokenCounts(input=10, output=5, cache_read=2, cache_write=1)
@@ -442,17 +781,225 @@ class TestRecords(Store):
     def counts_of(self, table):
         return self.conn.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
 
-    def test_session_rows(self):
-        queries.record_session(self.conn, "s1", "claude-code", IMPL.seat_id, 100)
-        queries.end_session(self.conn, "s1", 200)
-        self.assertEqual(self.conn.execute("SELECT session_id, host, seat_id, start_at, end_at"
-                                           " FROM seat_sessions").fetchall(),
-                         [("s1", "claude-code", IMPL.seat_id, 100, 200)])
-        for session in ("s1", "absent"):
+    SESSION = ("SELECT host_session_id, host, seat_id, occupant_id, generation, signed_in_at,"
+               " last_seen_at, ended_at FROM seat_sessions ORDER BY generation")
+
+    def test_session_rows(self):  # Task 6: platform's seat_sessions (J3 with J-A1)
+        session_id = queries.record_session(self.conn, "s1", "claude-code", IMPL.seat_id, 100)
+        queries.end_session(self.conn, session_id, 200)
+        self.assertEqual(self.conn.execute(self.SESSION).fetchall(),
+                         [("s1", "claude-code", IMPL.seat_id, "o-" + IMPL.seat_id, 1, 100, 100,
+                           200)])
+        for session in (session_id, "absent"):
             with self.subTest(session=session):
                 with self.assertRaises(ValueError):
                     queries.end_session(self.conn, session, 300)
-        self.assertEqual(self.conn.execute("SELECT end_at FROM seat_sessions").fetchone(), (200,))
+        self.assertEqual(self.conn.execute("SELECT ended_at FROM seat_sessions").fetchone(),
+                         (200,))
+
+    def test_shared_host_session_end_targets_internal_id(self):
+        """A host-text selector or absent internal-id return cannot end just seat A."""
+        first = queries.record_session(self.conn, "shared", "codex", IMPL.seat_id, 10)
+        second = queries.record_session(self.conn, "shared", "frank", PLANNER.seat_id, 20)
+        self.assertIsInstance(first, str)
+        self.assertIsInstance(second, str)
+        self.assertNotEqual(first, second)
+        before = self.conn.execute("SELECT id, host_session_id, ended_at FROM seat_sessions"
+                                   " ORDER BY signed_in_at").fetchall()
+        self.assertEqual(before, [(first, "shared", None), (second, "shared", None)])
+        with self.assertRaises(ValueError):
+            queries.end_session(self.conn, "shared", 25)
+        self.assertEqual(self.conn.execute("SELECT id, host_session_id, ended_at"
+                                           " FROM seat_sessions ORDER BY signed_in_at").fetchall(),
+                         before)
+        queries.end_session(self.conn, first, 30)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
+                                           " ORDER BY signed_in_at").fetchall(),
+                         [(first, 30), (second, None)])
+        queries.end_session(self.conn, second, 40)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
+                                           " ORDER BY signed_in_at").fetchall(),
+                         [(first, 30), (second, 40)])
+        retain_query_evidence("shared-host-internal-id", {
+            "before": before, "after": self.conn.execute(
+                "SELECT id, host_session_id, ended_at FROM seat_sessions"
+                " ORDER BY signed_in_at").fetchall()})
+
+    def test_stale_session_id_cannot_end_replacement(self):
+        """A stale internal id cannot end the current generation or another seat."""
+        old = queries.record_session(self.conn, "reused", "codex", IMPL.seat_id, 10)
+        current = queries.record_session(self.conn, "reused", "codex", IMPL.seat_id, 20)
+        peer = queries.record_session(self.conn, "reused", "other", PLANNER.seat_id, 30)
+        self.assertIsInstance(current, str)
+        before = self.conn.execute("SELECT id, generation, ended_at FROM seat_sessions"
+                                   " ORDER BY signed_in_at").fetchall()
+        self.assertEqual(before, [(old, 1, 20), (current, 2, None), (peer, 1, None)])
+        for stale in (old, "missing", "reused"):
+            with self.subTest(stale=stale):
+                with self.assertRaises(ValueError):
+                    queries.end_session(self.conn, stale, 40)
+                self.assertEqual(self.conn.execute("SELECT id, generation, ended_at"
+                                                   " FROM seat_sessions ORDER BY signed_in_at"
+                                                   ).fetchall(), before)
+        queries.end_session(self.conn, current, 50)
+        self.assertEqual(self.conn.execute("SELECT id, generation, ended_at FROM seat_sessions"
+                                           " ORDER BY signed_in_at").fetchall(),
+                         [(old, 1, 20), (current, 2, 50), (peer, 1, None)])
+        retain_query_evidence("stale-internal-id", {
+            "before": before, "after": self.conn.execute(
+                "SELECT id, generation, ended_at FROM seat_sessions"
+                " ORDER BY signed_in_at").fetchall()})
+
+    def test_sign_in_generations(self):  # J-T10: 1, 2, 3, each closing the previous
+        for generation, at in ((1, 10), (2, 20), (3, 30)):
+            queries.record_session(self.conn, "h%d" % generation, "codex", IMPL.seat_id, at)
+        self.assertEqual([row[4:] for row in self.conn.execute(self.SESSION)],
+                         [(1, 10, 10, 20), (2, 20, 20, 30), (3, 30, 30, None)])
+        queries.record_session(self.conn, "other", "frank", PLANNER.seat_id, 40)  # per seat
+        self.assertEqual(self.conn.execute("SELECT generation FROM seat_sessions WHERE seat_id = ?",
+                                           (PLANNER.seat_id,)).fetchall(), [(1,)])
+        self.conn.execute("UPDATE seat_occupants SET ended_at = 50 WHERE seat_id = ?",
+                          (IMPL.seat_id,))
+        self.conn.execute("INSERT INTO seat_occupants (id, seat_id, key_id, key_verifier,"
+                          " issued_at) VALUES ('o-new', ?, 'k-new', 'v', 51)", (IMPL.seat_id,))
+        self.conn.commit()
+        queries.record_session(self.conn, "h4", "codex", IMPL.seat_id, 60)  # across occupants
+        self.assertEqual(self.conn.execute(
+            "SELECT occupant_id, generation FROM seat_sessions WHERE host_session_id = 'h4'"
+        ).fetchone(), ("o-new", 4))
+
+    def test_sign_in_refusals(self):
+        for host, seat in (("vim", IMPL.seat_id), ("codex", "seat-nobody")):
+            with self.subTest(host=host, seat=seat):
+                with self.assertRaises(ValueError):
+                    queries.record_session(self.conn, "h", host, seat, 1)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM seat_sessions").fetchone(), (0,))
+
+    def test_sign_in_serializes_occupant_replacement(self):
+        """C1: a replacement cannot commit between selecting and binding the occupant."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sessions.db")
+            signing_in = sqlite3.connect(path)
+            replacing = sqlite3.connect(path, timeout=0.02)
+            try:
+                self.conn.backup(signing_in)
+                signing_in.execute("PRAGMA foreign_keys = ON")
+                replacing.execute("PRAGMA foreign_keys = ON")
+                self.assertEqual(signing_in.execute("PRAGMA journal_mode = WAL").fetchone(),
+                                 ("wal",))
+                attempts = []
+
+                def replace():
+                    replacing.execute("BEGIN IMMEDIATE")
+                    replacing.execute("UPDATE seat_occupants SET ended_at = 25"
+                                      " WHERE seat_id = ? AND ended_at IS NULL", (IMPL.seat_id,))
+                    replacing.execute("INSERT INTO seat_occupants"
+                                      " (id, seat_id, key_id, key_verifier, issued_at)"
+                                      " VALUES ('o-replacement', ?, 'k-replacement', 'v', 26)",
+                                      (IMPL.seat_id,))
+                    replacing.commit()
+
+                def after_selection(cursor, row):
+                    # SQLite's row factory returns the real selected row after fetching it.
+                    # WAL lets the other writer commit here unless sign-in owns its lock.
+                    if not attempts and [col[0] for col in cursor.description] == ["id"]:
+                        try:
+                            replace()
+                        except sqlite3.OperationalError as error:
+                            attempts.append(error.sqlite_errorcode)
+                            replacing.rollback()
+                        else:
+                            attempts.append("replacement committed")
+                    return row
+
+                signing_in.row_factory = after_selection
+                queries.record_session(signing_in, "first-host", "codex", IMPL.seat_id, 10)
+                signing_in.row_factory = None
+                self.assertEqual(signing_in.execute(
+                    "SELECT s.occupant_id, o.ended_at, s.generation, s.ended_at"
+                    " FROM seat_sessions s JOIN seat_occupants o ON o.id = s.occupant_id"
+                ).fetchall(), [("o-" + IMPL.seat_id, None, 1, None)])
+                self.assertEqual(attempts, [sqlite3.SQLITE_BUSY])
+                replace()  # positive control: replacement succeeds after sign-in commits
+                queries.record_session(signing_in, "second-host", "codex", IMPL.seat_id, 40)
+                self.assertEqual(signing_in.execute(
+                    "SELECT occupant_id, generation, ended_at FROM seat_sessions"
+                    " ORDER BY generation").fetchall(),
+                    [("o-" + IMPL.seat_id, 1, 40), ("o-replacement", 2, None)])
+            finally:
+                signing_in.close()
+                replacing.close()
+
+    def test_overlapping_sign_ins_keep_generations(self):
+        """J-A1 J-T10: two overlapping sign-ins both succeed and leave one open session."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "sessions.db")
+            first = sqlite3.connect(path)
+            self.conn.backup(first)
+            first.execute("PRAGMA foreign_keys = ON")
+            selected = threading.Event()
+            attempted = threading.Event()
+            failures = []
+
+            def second_sign_in():
+                conn = sqlite3.connect(path, timeout=2)
+                try:
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    if not selected.wait(2):
+                        raise AssertionError("first sign-in never selected its occupant")
+                    conn.set_trace_callback(lambda sql: attempted.set()
+                                            if sql == "BEGIN IMMEDIATE" else None)
+                    queries.record_session(conn, "second-host", "codex", IMPL.seat_id, 20)
+                except BaseException as error:
+                    failures.append(error)
+                finally:
+                    conn.close()
+
+            def after_selection(cursor, row):
+                if [col[0] for col in cursor.description] == ["id"]:
+                    selected.set()
+                    if not attempted.wait(2):
+                        raise AssertionError("second sign-in never attempted its transaction")
+                return row
+
+            worker = threading.Thread(target=second_sign_in)
+            first.row_factory = after_selection
+            worker.start()
+            try:
+                queries.record_session(first, "first-host", "codex", IMPL.seat_id, 10)
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(failures, [])
+                first.row_factory = None
+                self.assertEqual(first.execute(
+                    "SELECT host_session_id, generation, ended_at FROM seat_sessions"
+                    " ORDER BY generation").fetchall(),
+                    [("first-host", 1, 20), ("second-host", 2, None)])
+            finally:
+                selected.set()
+                worker.join(3)
+                first.close()
+
+
+class TestGitIsolation(unittest.TestCase):
+    def test_store_tests_ignore_ambient_git_names(self):
+        # Breaks: a Store consumer reaches Git through an unisolated fixture.
+        from relay_engine.tests import test_queries
+
+        loader = unittest.TestLoader()
+        selected = []
+        for module in (test_queries, submit_tests):
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if cls.__module__ == module.__name__ and issubclass(cls, Store):
+                    selected.extend(cls(name) for name in loader.getTestCaseNames(cls))
+        self.assertTrue(selected)
+        for case in selected:
+            with self.subTest(test=case.id()), mock.patch.dict(os.environ, {"GIT_PAGER": "cat"}):
+                result = unittest.TestResult()
+                case.run(result)
+                traces = "\n".join(text for _, text in result.errors + result.failures)
+                self.assertFalse(result.errors + result.failures, traces)
+                self.assertFalse(result.skipped, result.skipped)
 
 
 class TestQueryCost(unittest.TestCase):
@@ -465,8 +1012,17 @@ class TestQueryCost(unittest.TestCase):
         self.addCleanup(conn.close)
         conn.execute("PRAGMA foreign_keys = ON")
         schema.init_v3(conn)
-        conn.execute("INSERT INTO bundles (id, project_id, name, opened_by) VALUES"
-                     " ('b', 'p', 'b', 's')")
+        conn.executescript("""
+            INSERT INTO projects (id, name, created_at) VALUES ('p', 'p', 1);
+            INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)
+                VALUES ('t', 'p', 't', 'pair', 1, 'operator');
+            INSERT INTO seats (id, team_instance_id, role, state) VALUES ('s', 't', 'planner',
+                'occupied');
+            INSERT INTO seats (id, team_instance_id, role, state) VALUES ('s2', 't',
+                'implementer', 'occupied');
+            INSERT INTO bundles (id, project_id, name, opened_by_seat_id) VALUES ('b', 'p', 'b',
+                's');
+        """)
         sha = "a" * 64
         rows = []
         for n in range(1, count + 1):  # the last 300 relays form one chain and are open work

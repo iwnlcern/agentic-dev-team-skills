@@ -10,7 +10,7 @@ A refused submit writes exactly one ``refusals`` row and nothing else; an
 engine fault writes nothing.  No rule reads the body.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import os
 from pathlib import Path
@@ -20,6 +20,7 @@ import secrets
 import sqlite3
 from typing import Callable, Protocol
 
+from relay_engine import addresses
 from relay_engine import errors
 from relay_engine import header
 from relay_engine import jcs
@@ -29,6 +30,16 @@ from relay_engine import schema
 SYSTEM = "system"  # the reserved sender of engine-written relays
 ORCHESTRATOR_ROLE = "orchestrator-planner"
 OPERATOR_SEAT_ID = "operator"  # J2's machine-wide special: one queue, no team seat
+
+
+def party_columns(party):
+    """(seat id, special) for one party: a seat id, or a special name (planner Q1's arcs)."""
+    return (None, party) if party in schema.SPECIALS else (party, None)
+
+
+def party_sql(prefix=""):
+    """The SQL that reads an arc back as one party string."""
+    return "coalesce(%sseat_id, %sspecial)" % (prefix, prefix)
 
 
 @dataclass(frozen=True)
@@ -93,9 +104,29 @@ class SubmitContext:
     git_state: GitState | None
     now_ms: Callable[[], int]
     directory: Directory
+    submission_key: str
+    after_admit: Callable[[sqlite3.Connection, "Admitted", header.Draft, "SubmitContext"], None] | None = None
+    after_admit_writes: frozenset[str] = frozenset()
 
     def __post_init__(self):
         _check_git_state(self.git_state)
+        if (not isinstance(self.submission_key, str) or not self.submission_key
+                or "\x00" in self.submission_key):
+            raise ValueError("submission_key is a non-empty UTF-8 string without NUL")
+        try:
+            key_bytes = self.submission_key.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("submission_key must be UTF-8 encodable") from None
+        if len(key_bytes) > 256:
+            raise ValueError("submission_key is at most 256 UTF-8 bytes")
+        if self.after_admit is not None and not callable(self.after_admit):
+            raise ValueError("after_admit is callable or None")
+        if not isinstance(self.after_admit_writes, frozenset):
+            raise ValueError("after_admit_writes is a frozenset of owned table names")
+        for table in self.after_admit_writes:
+            if (not isinstance(table, str) or table not in schema.TABLE_OWNERS
+                    or schema.TABLE_OWNERS[table] in {"engine", "platform"}):
+                raise ValueError("after_admit_writes names only declared hook-owned tables")
 
 
 @dataclass(frozen=True)
@@ -169,6 +200,10 @@ def _at(line, error):
 
 def submit(conn, ctx, data):
     """Admit one draft, or record one refusal and raise it."""
+    if getattr(conn, "autocommit", None) is False:
+        raise ValueError("submit requires legacy transaction control or autocommit True")
+    if conn in _HOOK_FRAMES:
+        raise sqlite3.DatabaseError("nested admission is not allowed during a hook")
     if conn.execute("PRAGMA foreign_keys").fetchone() != (1,):
         raise ValueError("the store connection has foreign keys off; open it with open_store")
     now = ctx.now_ms()
@@ -179,14 +214,126 @@ def submit(conn, ctx, data):
         raise
 
 
+# Engine owns this connection's authorizer and progress-handler slots for its whole life.
+# A hook can change connection attributes, including isolation_level and autocommit,
+# whose changes outlive the submit.
+# This SQL write boundary trusts Python code in the process, including calls to
+# set_authorizer, set_progress_handler and blobopen.
+_HOOK_FRAMES = {}
+
+
+def _hook_name(hook):
+    module = getattr(hook, "__module__", type(hook).__module__)
+    qualname = getattr(hook, "__qualname__", type(hook).__qualname__)
+    if not isinstance(module, str) or not isinstance(qualname, str):
+        return "relay_engine.submit.unknown_hook"
+    name = module + "." + qualname
+    return name if errors._is_hook_name(name) else "relay_engine.submit.unknown_hook"
+
+
+def _transaction_state(conn):
+    try:
+        return "active" if conn.in_transaction else "ended"
+    except sqlite3.ProgrammingError:
+        return "closed"
+
+
+def _run_hook(conn, ctx, admitted, draft):
+    if ctx.after_admit is None:
+        return
+    reads = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT,
+             sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+    writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
+    def authorize(action, table, column, database, trigger):
+        if action in reads:
+            return sqlite3.SQLITE_OK
+        if action in writes and database == "main" and table in ctx.after_admit_writes:
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+    name = _hook_name(ctx.after_admit)
+    _HOOK_FRAMES[conn] = (ctx, authorize)
+    try:
+        conn.set_authorizer(authorize)
+        # Prepared VMs are not re-authorized; stop them after any conflict rollback.
+        conn.set_progress_handler(lambda: 0 if conn.in_transaction else 1, 1)
+        failure = None
+        try:
+            ctx.after_admit(conn, admitted, draft, ctx)
+        except errors.EngineError as exc:
+            if _transaction_state(conn) == "closed":
+                failure = sqlite3.ProgrammingError(
+                    "the admission hook closed the store connection")
+            else:
+                failure = exc
+        except Exception as exc:
+            state = _transaction_state(conn)
+            if state == "closed":
+                failure = sqlite3.ProgrammingError(
+                    "the admission hook closed the store connection")
+            elif state == "ended":
+                failure = errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
+                                           hook=name)
+            else:
+                kind = type(exc).__name__
+                if not errors._is_hook_kind(kind):
+                    kind = "Exception"
+                failure = errors.error_for("E-ADMISSION-HOOK", hook=name, kind=kind)
+        if failure is not None:
+            raise failure
+        state = _transaction_state(conn)
+        if state == "closed":
+            raise sqlite3.ProgrammingError(
+                "the admission hook closed the store connection")
+        if state == "ended":
+            raise errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
+                                   hook=name) from None
+    finally:
+        _HOOK_FRAMES.pop(conn, None)
+        try:
+            conn.set_progress_handler(None, 0)
+        except sqlite3.Error:
+            pass
+        try:
+            conn.set_authorizer(None)
+        except sqlite3.Error:
+            pass
+
+
+def file_system_relay(conn, ctx, data):
+    """Engine filing inside this connection's active hook; owns no transaction."""
+    frame = _HOOK_FRAMES.get(conn)
+    if frame is None or frame[0] is not ctx or not conn.in_transaction:
+        raise RuntimeError("system filing requires this connection's active admission hook")
+    system = SeatRef(SYSTEM, SYSTEM, SYSTEM, ctx.sender.team_instance_id,
+                     ctx.sender.project_id)
+    internal = replace(ctx, sender=system, after_admit=None,
+                       after_admit_writes=frozenset())
+    # Each real authorizer transition expires cached prepared statements.
+    # A boolean privilege flag would let cached engine INSERTs escape later.
+    conn.set_authorizer(None)
+    try:
+        conn.execute("SAVEPOINT engine_system_filing")
+        try:
+            admitted = _admit(conn, internal, data, ctx.now_ms(), _system=True)
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK TO engine_system_filing")
+                conn.execute("RELEASE engine_system_filing")
+            raise
+        conn.execute("RELEASE engine_system_filing")
+        return admitted
+    finally:
+        conn.set_authorizer(frame[1])
+
+
 def _record_refusal(conn, ctx, data, now, error):
     line = error.params.get("line", getattr(error, "refusal_line", None))
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute(
-            "INSERT INTO refusals (project_id, seat_id, code, line, at, draft_sha256)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (ctx.sender.project_id, ctx.sender.seat_id, error.code,
+            "INSERT INTO refusals (project_id, seat_id, special, code, line, at, draft_sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ctx.sender.project_id, *party_columns(ctx.sender.seat_id), error.code,
              line if isinstance(line, int) else None, now,
              hashlib.sha256(data).hexdigest()))
         conn.execute("COMMIT")
@@ -196,7 +343,23 @@ def _record_refusal(conn, ctx, data, now, error):
         raise
 
 
-def _admit(conn, ctx, data, now):
+def _replay(conn, ctx, data):
+    """The persisted receipt belongs to one party and the exact input bytes."""
+    row = conn.execute(
+        "SELECT id, handle, created_at, draft_sha256 FROM relays"
+        " WHERE coalesce(sender_seat_id, sender_special) = ? AND submission_key = ?",
+        (ctx.sender.seat_id, ctx.submission_key)).fetchone()
+    if row is None:
+        return None
+    if row[3] != hashlib.sha256(data).hexdigest():
+        raise errors.error_for("E-SUBMISSION-KEY-REUSED")
+    return Admitted(row[0], row[1], row[2])
+
+
+def _admit(conn, ctx, data, now, *, _system=False):
+    replay = None if _system else _replay(conn, ctx, data)
+    if replay is not None:
+        return replay
     draft = header.parse(data)
     lines = _Lines(data, draft.header_bytes)
     sender = ctx.sender
@@ -206,8 +369,15 @@ def _admit(conn, ctx, data, now):
     parent = _parent(conn, sender, draft, lines)
     targets = _references(conn, ctx, draft, lines)
     transitions = _transitions(draft, lines)
-    conn.execute("BEGIN IMMEDIATE")
+    if not _system:
+        conn.execute("BEGIN IMMEDIATE")
     try:
+        # Reference resolution preceded the lock; another writer may have
+        # committed this party/key while we were resolving that input.
+        replay = None if _system else _replay(conn, ctx, data)
+        if replay is not None:
+            conn.execute("ROLLBACK")
+            return replay
         _check_findings(conn, sender, transitions)
         handle, created, relay_id = _identity(conn, sender.project_id, now)
         bundle_id = (parent[1] if parent is not None
@@ -215,20 +385,22 @@ def _admit(conn, ctx, data, now):
         git_state_id = _write_git_state(conn, ctx.git_state, created)
         conn.execute(
             "INSERT INTO relays (id, handle, project_id, team_instance_id, bundle_id, kind,"
-            " verdict, needs, subject, parent_id, sender_seat_id, sender_role, created_at,"
-            " body_sha256, meta_sha256, body_bytes, header_bytes, git_state_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " verdict, needs, subject, parent_id, sender_seat_id, sender_special, sender_role,"
+            " created_at, body_sha256, meta_sha256, body_bytes, header_bytes, git_state_id,"
+            " submission_key, draft_sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (relay_id, handle, sender.project_id, sender.team_instance_id, bundle_id,
              draft.kind, draft.verdict, draft.needs, draft.subject,
-             None if parent is None else parent[0], sender.seat_id, sender.role, created,
-             hashlib.sha256(draft.body).hexdigest(),
+             None if parent is None else parent[0], *party_columns(sender.seat_id),
+             sender.role, created, hashlib.sha256(draft.body).hexdigest(),
              meta_digest(draft, None if parent is None else parent[0], targets), len(draft.body),
-             draft.header_bytes, git_state_id))
+             draft.header_bytes, git_state_id, None if _system else ctx.submission_key,
+             None if _system else hashlib.sha256(data).hexdigest()))
         conn.execute("INSERT INTO bodies (relay_id, body) VALUES (?, ?)",
                      (relay_id, draft.body))
         conn.executemany(
-            "INSERT INTO recipients (relay_id, seat_id, role) VALUES (?, ?, ?)",
-            [(relay_id, seat_id, role) for seat_id, role in recipients])
+            "INSERT INTO recipients (relay_id, seat_id, special, role) VALUES (?, ?, ?, ?)",
+            [(relay_id, *party_columns(seat_id), role) for seat_id, role in recipients])
         if parent is not None:
             conn.execute(
                 "INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
@@ -239,15 +411,24 @@ def _admit(conn, ctx, data, now):
         _write_transitions(conn, sender, transitions, relay_id, created)
         if parent is not None:
             _write_answered_by(conn, parent[0], sender.seat_id, relay_id)
-        # an admission is the sender's activity (PR-3 fold R6), committed with it
-        conn.execute("INSERT INTO seat_activity (seat_id, last_request_at) VALUES (?, ?)"
-                     " ON CONFLICT (seat_id) DO UPDATE SET last_request_at ="
-                     " max(last_request_at, excluded.last_request_at)",
-                     (sender.seat_id, created))
-        conn.execute("COMMIT")
+        # an admission is the sender's activity (PR-3 fold R6), committed with it;
+        # a special (operator, system) is not a seat and records none, as in note_activity
+        if sender.seat_id not in schema.SPECIALS:
+            conn.execute("INSERT INTO seat_activity (seat_id, last_request_at) VALUES (?, ?)"
+                         " ON CONFLICT (seat_id) DO UPDATE SET last_request_at ="
+                         " max(last_request_at, excluded.last_request_at)",
+                         (sender.seat_id, created))
+        if not _system:
+            _run_hook(conn, ctx, Admitted(relay_id, handle, created), draft)
+            conn.execute("COMMIT")
     except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
+        if not _system:
+            try:
+                active = conn.in_transaction
+            except sqlite3.ProgrammingError:
+                active = False
+            if active:
+                conn.execute("ROLLBACK")
         raise
     return Admitted(relay_id, handle, created)
 
@@ -280,8 +461,8 @@ def meta_digest(draft, parent_id=None, targets=()):
 
 def _recipients(ctx, draft, lines):
     result, seats = [], set()
-    for field, role, addresses in (("TO", "to", draft.to), ("CC", "cc", draft.cc)):
-        for address in addresses:
+    for field, role, named in (("TO", "to", draft.to), ("CC", "cc", draft.cc)):
+        for address in named:
             try:
                 seat = ctx.directory.resolve(address, ctx.sender)
             except header.AddressRefused as refused:
@@ -318,8 +499,8 @@ def _parent(conn, sender, draft, lines):
         raise errors.error_for("E-PARENT-UNKNOWN", line=line,
                                value=header._display(draft.parent))
     member = conn.execute(
-        "SELECT 1 FROM relays WHERE id = ? AND sender_seat_id = ?"
-        " UNION ALL SELECT 1 FROM recipients WHERE relay_id = ? AND seat_id = ?",
+        "SELECT 1 FROM relays WHERE id = ? AND " + party_sql("sender_") + " = ?"
+        " UNION ALL SELECT 1 FROM recipients WHERE relay_id = ? AND " + party_sql() + " = ?",
         (row[0], sender.seat_id, row[0], sender.seat_id)).fetchone()
     if member is None:
         raise errors.error_for("E-PARENT-NOT-MEMBER", line=line,
@@ -334,9 +515,10 @@ def _bundle(conn, sender, name, created):
     if row is not None:
         return row[0]
     bundle_id = new_uuid7(created)
-    conn.execute("INSERT INTO bundles (id, project_id, team_instance_id, name, opened_by)"
-                 " VALUES (?, ?, ?, ?, ?)",
-                 (bundle_id, sender.project_id, sender.team_instance_id, name, sender.seat_id))
+    conn.execute("INSERT INTO bundles (id, project_id, team_instance_id, name, opened_by_seat_id,"
+                 " opened_by_special) VALUES (?, ?, ?, ?, ?, ?)",
+                 (bundle_id, sender.project_id, sender.team_instance_id, name,
+                  *party_columns(sender.seat_id)))
     return bundle_id
 
 
@@ -374,19 +556,23 @@ def _resolve(conn, ctx, spec):
             path = os.path.join(home, path[2:])
         return {"target_type": "path", "target_path": path,
                 "digest_at_submit": refs.file_digest(Path(path))}
-    checkout = ctx.directory.checkout(spec.repo)
+    known = conn.execute("SELECT id FROM repositories WHERE project_id = ? AND name = ?",
+                         (ctx.sender.project_id, spec.repo)).fetchone()
+    checkout = None if known is None else ctx.directory.checkout(spec.repo)
     if checkout is None:
         raise errors.error_for("E-REF-UNRESOLVED", value=header._display(spec.text),
                                reason="repository %s is not known to this project"
                                % header._display(spec.repo, 40))
     resolved = refs.resolve_git(checkout, spec)
-    return {"target_type": "git", "target_repository_id": spec.repo, "target_rev": spec.rev,
+    return {"target_type": "git", "target_repository_name": spec.repo,
+            "target_repository_id": known[0], "target_rev": spec.rev,
             "target_commit": resolved.commit, "target_path": spec.path,
             "target_line_start": spec.line_start, "target_line_end": spec.line_end,
             "digest_at_submit": resolved.blob_sha}
 
 
-_EDGE_COLUMNS = ("target_type", "target_relay_id", "target_repository_id", "target_rev",
+_EDGE_COLUMNS = ("target_type", "target_relay_id", "target_repository_name",
+                 "target_repository_id", "target_rev",
                  "target_commit", "target_path", "target_line_start", "target_line_end",
                  "digest_at_submit")
 
@@ -532,5 +718,51 @@ def _event(conn, finding_id, relay_id, transition, from_status, to_status, commi
 
 def _write_answered_by(conn, parent_id, seat_id, relay_id):
     """The first child a recipient files answers the parent for that seat."""
-    conn.execute("UPDATE recipients SET answered_by = ? WHERE relay_id = ? AND seat_id = ?"
-                 " AND answered_by IS NULL", (relay_id, parent_id, seat_id))
+    conn.execute("UPDATE recipients SET answered_by = ? WHERE relay_id = ? AND " + party_sql()
+                 + " = ? AND answered_by IS NULL", (relay_id, parent_id, seat_id))
+
+
+class TableDirectory:
+    """A Directory over platform's tables (J2, J3): <team>.<role> in the sender's
+    project or <team>.<role>@<project> names the seat of that role in the open
+    team instance of that name; operator names the special."""
+
+    def __init__(self, conn, project_id):
+        self.conn, self.project_id = conn, project_id
+
+    def resolve(self, address, sender):
+        try:  # the grammar and the parts are platform's validator's alone (J1, J2, J-T1)
+            parsed = addresses.parse_address(address)
+        except addresses.AddressRefused as refused:
+            raise header.address_refused(refused) from None
+        if parsed.special is not None:
+            return SeatRef(OPERATOR_SEAT_ID, address, parsed.special, None, sender.project_id)
+        team, role, project_name = parsed.team, parsed.role, parsed.project
+        if project_name:
+            row = self.conn.execute("SELECT id FROM projects WHERE name = ?",
+                                    (project_name,)).fetchone()
+            if row is None:
+                raise header.AddressRefused("no project is named %s" % project_name)
+            project_id = row[0]
+        else:
+            project_id = sender.project_id
+        instance = self.conn.execute(
+            "SELECT id FROM team_instances WHERE project_id = ? AND name = ? AND closed_at IS NULL",
+            (project_id, team)).fetchone()
+        if instance is None:
+            raise header.AddressRefused("no open team %s in that project" % team)
+        row = self.conn.execute("SELECT id, state FROM seats WHERE team_instance_id = ? AND role = ?",
+                                (instance[0], role)).fetchone()
+        if row is None:
+            raise header.AddressRefused("no seat %s in team %s" % (role, team))
+        if row[1] == "stood-down":
+            raise header.AddressRefused("the seat %s.%s is stood down" % (team, role))
+        return SeatRef(row[0], address, role, instance[0], project_id)
+
+    def checkout(self, repo):
+        """The most recently seen checkout of this project's repository named repo."""
+        row = self.conn.execute(
+            "SELECT c.path FROM repositories r JOIN repository_checkouts c ON c.repository_id = r.id"
+            " WHERE r.project_id = ? AND r.name = ? ORDER BY c.last_seen_at DESC LIMIT 1",
+            (self.project_id, repo)).fetchone()
+        return None if row is None else Path(row[0])

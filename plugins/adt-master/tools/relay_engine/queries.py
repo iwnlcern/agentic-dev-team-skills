@@ -10,10 +10,13 @@ schema's indexes; no query reads every body.
 from dataclasses import dataclass
 import difflib
 from pathlib import Path
+import sqlite3
+from typing import Callable
 
 from relay_engine import errors
 from relay_engine import refs
-from relay_engine.submit import OPERATOR_SEAT_ID
+from relay_engine import schema
+from relay_engine.submit import OPERATOR_SEAT_ID, new_uuid7, party_sql
 
 UNOPENED_MS = 900_000  # amendment 4 A4.4 (operator P9): 15 minutes from admission
 IDLE_MS = 3_600_000  # 60 minutes without activity while holding open must-act work
@@ -56,6 +59,7 @@ class EdgeRow:
     target_type: str
     spelling: str
     target_relay_id: str | None
+    target_repository_name: str | None
     target_repository_id: str | None
     target_rev: str | None
     target_commit: str | None
@@ -97,12 +101,31 @@ class ReadResult:
     unopened: list
 
 
-_RELAY_COLUMNS = ("id, handle, kind, sender_seat_id, parent_id, bundle_id, created_at, verdict,"
-                  " needs, subject")
+@dataclass(frozen=True)
+class ForeignReadTarget:
+    relay_id: str
+    body_sha256: str
+    source_project_id: str
+    destination_project_id: str
+    recipient_seat_id: str
+    recipient_role: str
+
+
+ForeignReleaseCheck = Callable[[sqlite3.Connection, ForeignReadTarget], bool] | None
+
+
+_RELAY_FIELDS = ("id", "handle", "kind", None, "parent_id", "bundle_id", "created_at", "verdict",
+                 "needs", "subject")  # None: the sender, read from its arc
+
+
+def _relay_columns(alias):
+    return ", ".join(party_sql(alias + "sender_") if name is None else alias + name
+                     for name in _RELAY_FIELDS)
+
 _FINDING_COLUMNS = ("id, handle, severity, status, summary, raised_in, raiser_seat_id,"
                     " fixed_commit")
 _EDGE_COLUMNS = ("id, from_relay_id, kind, ordinal, target_type, spelling, target_relay_id,"
-                 " target_repository_id, target_rev, target_commit, target_path,"
+                 " target_repository_name, target_repository_id, target_rev, target_commit, target_path,"
                  " target_line_start, target_line_end, digest_at_submit")
 
 # one row per step up parent_id, from the relay itself, at most ? rows
@@ -111,26 +134,60 @@ _LINEAGE_SQL = (
     " SELECT id, 1 FROM relays WHERE id = ?"
     " UNION ALL SELECT r.parent_id, w.depth + 1 FROM walk w JOIN relays r ON r.id = w.id"
     " WHERE r.parent_id IS NOT NULL AND w.depth < ?)"
-    " SELECT " + ", ".join("r." + c.strip() for c in _RELAY_COLUMNS.split(",")) +
+    " SELECT " + _relay_columns("r.") +
     " FROM walk w JOIN relays r ON r.id = w.id ORDER BY w.depth")
 _BLOCKING_SQL = (
     "SELECT " + _FINDING_COLUMNS + " FROM findings WHERE bundle_id = ? AND severity = 'blocking'"
     " AND status IN ('open', 'fixed') ORDER BY handle")
 
 
-def read(conn, relay_id, seat_id, at_ms, meta=False):
+def read(conn, relay_id, seat_id, at_ms, meta=False, *, foreign_release: ForeignReleaseCheck=None):
     """The body and DD § 7's minimal envelope; meta adds digests, edges, read
-    state and git state.  A recipient's first read sets its opened_at."""
+    state and git state.  Eligibility and a recipient's first-open commit together.
+
+    Platform authenticates the actor before calling in its serialized writer job;
+    foreign_release is trusted owner code reading current evidence, not client proof.
+    """
+    if conn.in_transaction:
+        raise ValueError("read helper needs a clean connection")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        result = _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release)
+        conn.execute("COMMIT")
+        return result
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
     row = conn.execute(
-        "SELECT r.handle, r.kind, r.sender_seat_id, r.subject, p.handle, r.verdict, r.needs,"
-        " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id"
+        "SELECT r.handle, r.kind, " + party_sql("r.sender_") + ", r.subject, p.handle, r.verdict, r.needs,"
+        " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id, r.project_id, r.id"
         " FROM relays r JOIN bodies b ON b.relay_id = r.id"
         " LEFT JOIN relays p ON p.id = r.parent_id WHERE r.id = ?", (relay_id,)).fetchone()
     if row is None:
         raise KeyError(relay_id)
-    note_activity(conn, seat_id, at_ms)
-    mark_opened(conn, relay_id, seat_id, at_ms)
-    seats = conn.execute("SELECT seat_id, role FROM recipients WHERE relay_id = ? ORDER BY rowid",
+    if seat_id != OPERATOR_SEAT_ID:
+        reader = conn.execute("SELECT s.id, t.project_id FROM seats s JOIN team_instances t"
+                              " ON t.id = s.team_instance_id WHERE s.id = ?",
+                              (seat_id,)).fetchone()
+        if reader is None:
+            raise ValueError("read needs a project seat or the operator")
+        if reader[1] != row[12]:
+            recipient = conn.execute("SELECT seat_id, role FROM recipients"
+                                     " WHERE relay_id = ? AND seat_id = ?",
+                                     (relay_id, reader[0])).fetchone()
+            if recipient is None or foreign_release is None:
+                raise ValueError("foreign read is not released")
+            target = ForeignReadTarget(row[13], row[9], row[12], reader[1],
+                                       recipient[0], recipient[1])
+            _check_foreign_release(conn, target, foreign_release)
+    _note_activity(conn, seat_id, at_ms)
+    _mark_opened(conn, relay_id, seat_id, at_ms)
+    seats = conn.execute("SELECT " + party_sql() + ", role FROM recipients WHERE relay_id = ?"
+                         " ORDER BY rowid",
                          (relay_id,)).fetchall()
     envelope = {
         "handle": row[0], "kind": row[1], "sender": row[2],
@@ -150,12 +207,38 @@ def read(conn, relay_id, seat_id, at_ms, meta=False):
                 {"seat": seat, "role": role, "delivered_at": delivered, "opened_at": opened,
                  "answered_by": answered}
                 for seat, role, delivered, opened, answered in conn.execute(
-                    "SELECT seat_id, role, delivered_at, opened_at, answered_by FROM recipients"
+                    "SELECT " + party_sql() + ", role, delivered_at, opened_at, answered_by"
+                    " FROM recipients"
                     " WHERE relay_id = ? ORDER BY rowid", (relay_id,))],
             "git_state": _git_state(conn, row[11]),
         }
-    conn.commit()
     return ReadResult(bytes(row[8]), envelope, extra, unopened)
+
+
+def _check_foreign_release(conn, target, foreign_release):
+    """Use the Engine-owned authorizer slot only for trusted read-only owner code."""
+    allowed = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION,
+               sqlite3.SQLITE_RECURSIVE}
+    denied = False
+
+    def authorize(action, arg1, arg2, database, trigger):
+        nonlocal denied
+        if action in allowed:
+            return sqlite3.SQLITE_OK
+        denied = True
+        return sqlite3.SQLITE_DENY
+
+    # Entry/exit reset also invalidates permissions on previously prepared statements.
+    conn.set_authorizer(authorize)
+    try:
+        try:
+            released = foreign_release(conn, target)
+        except Exception:
+            raise ValueError("foreign read is not released") from None
+        if denied or not conn.in_transaction or released is not True:
+            raise ValueError("foreign read is not released")
+    finally:
+        conn.set_authorizer(None)
 
 
 def _git_state(conn, state_id):
@@ -178,8 +261,8 @@ def parent_candidates(conn, seat_id, bundle_id=None, kind=None, *, project_id=No
     if seat_id == OPERATOR_SEAT_ID and project_id is None:
         raise ValueError("the operator's candidates need a project_id: handles repeat across"
                          " projects")
-    sql = ("SELECT handle FROM relays WHERE (sender_seat_id = ? OR id IN"
-           " (SELECT relay_id FROM recipients WHERE seat_id = ?))")
+    sql = ("SELECT handle FROM relays WHERE (" + party_sql("sender_") + " = ? OR id IN"
+           " (SELECT relay_id FROM recipients WHERE " + party_sql() + " = ?))")
     params = [seat_id, seat_id]
     if project_id is not None:
         sql += " AND project_id = ?"
@@ -206,29 +289,42 @@ def unopened_in_lineage(conn, relay_id, seat_id):
     marks = ",".join("?" * len(walk))
     rows = dict(conn.execute(
         "SELECT r.id, r.handle FROM relays r JOIN recipients c ON c.relay_id = r.id"
-        " WHERE c.seat_id = ? AND c.opened_at IS NULL AND r.id IN (%s)" % marks,
+        " WHERE " + party_sql("c.") + " = ? AND c.opened_at IS NULL AND r.id IN (%s)" % marks,
         [seat_id, *walk]).fetchall())
     return [rows[rid] for rid in reversed(walk) if rid in rows]
 
 
 def mark_delivered(conn, relay_id, seat_id, at_ms):
     """The delivery path's mark; a CC row is never delivered (DD § 4)."""
-    conn.execute("UPDATE recipients SET delivered_at = ? WHERE relay_id = ? AND seat_id = ?"
-                 " AND role = 'to' AND delivered_at IS NULL", (at_ms, relay_id, seat_id))
+    conn.execute("UPDATE recipients SET delivered_at = ? WHERE relay_id = ? AND " + party_sql()
+                 + " = ? AND role = 'to' AND delivered_at IS NULL", (at_ms, relay_id, seat_id))
     conn.commit()
 
 
 def mark_opened(conn, relay_id, seat_id, at_ms):
-    conn.execute("UPDATE recipients SET opened_at = ? WHERE relay_id = ? AND seat_id = ?"
-                 " AND opened_at IS NULL", (at_ms, relay_id, seat_id))
+    _mark_opened(conn, relay_id, seat_id, at_ms)
     conn.commit()
+
+
+def _mark_opened(conn, relay_id, seat_id, at_ms):
+    conn.execute("UPDATE recipients SET opened_at = ? WHERE relay_id = ? AND " + party_sql()
+                 + " = ? AND opened_at IS NULL", (at_ms, relay_id, seat_id))
 
 
 def note_activity(conn, seat_id, at_ms):
+    """A seat's latest engine request; a special (the operator) is not a seat and records none."""
+    if seat_id in schema.SPECIALS:
+        return
+    _note_activity(conn, seat_id, at_ms)
+    conn.commit()
+
+
+def _note_activity(conn, seat_id, at_ms):
+    if seat_id in schema.SPECIALS:
+        return
     conn.execute("INSERT INTO seat_activity (seat_id, last_request_at) VALUES (?, ?)"
                  " ON CONFLICT (seat_id) DO UPDATE SET last_request_at ="
                  " max(last_request_at, excluded.last_request_at)", (seat_id, at_ms))
-    conn.commit()
 
 
 def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=IDLE_MS):
@@ -239,27 +335,28 @@ def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=ID
     activity for idle_ms, counted from the later of its last activity and the
     admission of its newest open must-act relay ("idle", naming that relay).
     A seat with an unanswered QUESTION to the operator is never flagged; CC
-    and the operator, who is not a seat, never flag."""
+    and the specials, which are not seats, never flag."""
     # Both rules start from the open TO rows (recipients_open, a partial index),
     # so their cost follows open work, not the project's history (PR-3 R2);
     # CROSS JOIN keeps that join order.  A QUESTION exempts its own project (R12).
     exempt = ("NOT EXISTS (SELECT 1 FROM relays q JOIN recipients o ON o.relay_id = q.id"
               " WHERE q.sender_seat_id = c.seat_id AND q.kind = 'QUESTION'"
               " AND q.project_id = r.project_id AND o.role = 'to'"
-              " AND o.answered_by IS NULL) AND c.seat_id != ?")
+              " AND o.answered_by IS NULL) AND c.special IS NULL")
     flags = [Flag("unopened", *row) for row in conn.execute(
-        "SELECT r.id, r.handle, c.seat_id, r.created_at FROM recipients c"
+        "SELECT r.id, r.handle, " + party_sql("c.") + ", r.created_at FROM recipients c"
         " CROSS JOIN relays r ON r.id = c.relay_id"
         " WHERE r.project_id = ? AND c.role = 'to' AND r.needs != 'none'"
         " AND c.opened_at IS NULL AND c.answered_by IS NULL AND r.created_at <= ? AND "
-        + exempt, (project_id, now_ms - unopened_ms, OPERATOR_SEAT_ID))]
+        + exempt, (project_id, now_ms - unopened_ms))]
     newest = {}  # seat -> (created_at, handle, relay id, last activity) of its newest open must-act
     for relay_id, handle, seat_id, created, active in conn.execute(
-            "SELECT r.id, r.handle, c.seat_id, r.created_at, a.last_request_at FROM recipients c"
+            "SELECT r.id, r.handle, " + party_sql("c.") + ", r.created_at, a.last_request_at"
+            " FROM recipients c"
             " CROSS JOIN relays r ON r.id = c.relay_id"
             " LEFT JOIN seat_activity a ON a.seat_id = c.seat_id"
             " WHERE r.project_id = ? AND c.role = 'to' AND r.needs IN ('act', 'answer')"
-            " AND c.answered_by IS NULL AND " + exempt, (project_id, OPERATOR_SEAT_ID)):
+            " AND c.answered_by IS NULL AND " + exempt, (project_id,)):
         newest[seat_id] = max(newest.get(seat_id, (created, handle, relay_id, active)),
                               (created, handle, relay_id, active))
     flags += [Flag("idle", relay_id, handle, seat_id, created)
@@ -274,8 +371,10 @@ def points_to(conn, relay_id):
         " ORDER BY kind, ordinal", (relay_id,))]
 
 
-def pointed_from(conn, target):
-    """Edges that point at a target, given as a parsed reference."""
+def pointed_from(conn, target, project_id=None):
+    """Edges that point at a target, given as a parsed reference.  A Git
+    target's repository name maps to J3's repository id (within project_id
+    when given), so a rename keeps matching."""
     if target.kind == "relay":
         handle, _, project = target.relay.partition("@")
         if handle.startswith("#") and not project:
@@ -288,7 +387,13 @@ def pointed_from(conn, target):
             relay_id = handle
         sql, params = "target_relay_id = ?", [relay_id]
     elif target.kind == "git":
-        sql, params = "target_repository_id = ? AND target_path = ?", [target.repo, target.path]
+        named = "SELECT id FROM repositories WHERE name = ?"
+        params = [target.repo]
+        if project_id is not None:
+            named += " AND project_id = ?"
+            params.append(project_id)
+        sql = "target_repository_id IN (" + named + ") AND target_path = ?"
+        params.append(target.path)
         if target.line_start is not None:
             sql += (" AND (target_line_start IS NULL OR"
                     " (target_line_start <= ? AND target_line_end >= ?))")
@@ -309,7 +414,7 @@ def cited_range_changed(conn, edge_id, commit, checkout):
     cited (the whole file when it cites no range); a file gone or too short
     for the range has changed."""
     row = conn.execute(
-        "SELECT target_type, target_repository_id, target_path, target_line_start,"
+        "SELECT target_type, target_repository_name, target_path, target_line_start,"
         " target_line_end, digest_at_submit FROM edges WHERE id = ?", (edge_id,)).fetchone()
     if row is None or row[0] != "git":
         raise ValueError("cited_range_changed takes a Git edge")
@@ -361,18 +466,52 @@ def record_token_counts(conn, seat_id, bundle_id, source, counts, *, at_ms):
 
 
 def record_session(conn, session_id, host, seat_id, start_ms):
-    conn.execute("INSERT INTO seat_sessions (session_id, host, seat_id, start_at)"
-                 " VALUES (?, ?, ?, ?)", (session_id, host, seat_id, start_ms))
-    conn.commit()
+    """A sign-in (J3 with J-A1): session_id is the host's session id; the
+    session takes the seat's open occupant and the next generation of the
+    seat, and closes the seat's previous open session, in one transaction."""
+    if host not in schema.HOSTS:
+        raise ValueError("unknown host %r" % (host,))
+    if conn.in_transaction:
+        raise ValueError("session helper needs a clean connection")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        occupant = conn.execute("SELECT id FROM seat_occupants WHERE seat_id = ? AND ended_at IS NULL",
+                                (seat_id,)).fetchone()
+        if occupant is None:
+            raise ValueError("seat %s has no open occupant" % seat_id)
+        generation = conn.execute("SELECT coalesce(max(generation), 0) + 1 FROM seat_sessions"
+                                  " WHERE seat_id = ?", (seat_id,)).fetchone()[0]
+        conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE seat_id = ? AND ended_at IS NULL",
+                     (start_ms, seat_id))
+        internal_id = new_uuid7(start_ms)
+        conn.execute(
+            "INSERT INTO seat_sessions (id, seat_id, occupant_id, host, host_session_id,"
+            " generation, signed_in_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (internal_id, seat_id, occupant[0], host, session_id, generation, start_ms,
+             start_ms))
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    return internal_id
 
 
 def end_session(conn, session_id, end_ms):
-    cursor = conn.execute("UPDATE seat_sessions SET end_at = ? WHERE session_id = ?"
-                          " AND end_at IS NULL", (end_ms, session_id))
-    if cursor.rowcount != 1:
-        conn.rollback()
-        raise ValueError("no open session %s" % session_id)
-    conn.commit()
+    """End exactly the open internal session id returned by record_session."""
+    if conn.in_transaction:
+        raise ValueError("session helper needs a clean connection")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE id = ?"
+                              " AND ended_at IS NULL", (end_ms, session_id))
+        if cursor.rowcount != 1:
+            raise ValueError("no open session %s" % session_id)
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
 
 
 def bundle_metrics(conn, bundle_id):

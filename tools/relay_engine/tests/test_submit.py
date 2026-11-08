@@ -1,36 +1,63 @@
 """v3 submit pipeline (DD-v3-engine § 4, § 5, § 8, E-OP2; plan Task 4 with erratum 1)."""
 
 import hashlib
+from dataclasses import replace
+import inspect
 import os
 import re
 import sqlite3
 import tempfile
 import threading
+import traceback
 import unittest
 import multiprocessing
 from pathlib import Path
 from unittest import mock
 
+from relay_engine import addresses
 from relay_engine import errors
 from relay_engine import header
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
+from relay_engine.tests.test_addresses import ACCEPTED, REFUSALS
 from relay_engine.tests.test_refs import Repo, clean_git_environment, git
 
 PROJECT = "p"
+TEAMS = {"v3-engine": "t1", "v3-other": "t2", "v3": "t3"}
 SEATS = {
-    address: submit.SeatRef("seat-" + address, address, address.partition(".")[2] or address, "t1",
-                            PROJECT)
+    address: submit.SeatRef("seat-" + address, address, address.partition(".")[2],
+                            TEAMS[address.partition(".")[0]], PROJECT)
     for address in ("v3-engine.planner", "v3-engine.implementer", "v3-other.planner",
                     "v3.orchestrator-planner")
 }
-SEATS["operator"] = submit.SeatRef(submit.OPERATOR_SEAT_ID, "operator", "operator", "t1", PROJECT)
+SEATS["operator"] = submit.SeatRef(submit.OPERATOR_SEAT_ID, "operator", "operator", None, PROJECT)
+FOREIGN = submit.SeatRef("seat-x", "v3-engine.planner@q", "planner", "t9", "q")
+
+
+def platform_rows(conn):
+    """The platform rows the engine's keys need (J3): projects p and q, one open team instance
+    per fixture team, every fixture seat with an open occupant, and repository bivpak."""
+    conn.executemany("INSERT INTO projects (id, name, created_at) VALUES (?, ?, 1)",
+                     [("p", "p"), ("q", "q")])
+    conn.executemany("INSERT INTO team_instances (id, project_id, name, level, opened_at,"
+                     " opened_by) VALUES (?, ?, ?, 'pair', 1, 'operator')",
+                     [(tid, PROJECT, name) for name, tid in TEAMS.items()] + [("t9", "q", "v3-engine")])
+    for seat in [seat for seat in SEATS.values() if seat.team_instance_id] + [FOREIGN]:
+        conn.execute("INSERT INTO seats (id, team_instance_id, role, state) VALUES (?, ?, ?,"
+                     " 'occupied')", (seat.seat_id, seat.team_instance_id, seat.role))
+        conn.execute("INSERT INTO seat_occupants (id, seat_id, key_id, key_verifier, issued_at)"
+                     " VALUES (?, ?, ?, 'v', 1)", ("o-" + seat.seat_id, seat.seat_id,
+                                                   "k-" + seat.seat_id))
+    # the same name in q first, so a lookup that ignored the project would find it
+    conn.execute("INSERT INTO repositories (id, project_id, name) VALUES ('repo-q', 'q', 'bivpak')")
+    conn.execute("INSERT INTO repositories (id, project_id, name) VALUES ('repo-1', ?, 'bivpak')",
+                 (PROJECT,))
+    conn.commit()
 PLANNER = SEATS["v3-engine.planner"]
 IMPL = SEATS["v3-engine.implementer"]
 OTHER = SEATS["v3-other.planner"]
 ORCH = SEATS["v3.orchestrator-planner"]
-FOREIGN = submit.SeatRef("seat-x", "v3-engine.planner", "planner", "t9", "q")
 TABLES = ("relays", "bodies", "recipients", "edges", "git_states", "bundles",
           "findings", "finding_events", "refusals")
 GIT_STATE = submit.GitState("repo-1", "a" * 40, "main", 2, "0" * 64)
@@ -41,7 +68,7 @@ class FakeDirectory:
         self.checkouts = dict(checkouts or {})
 
     def resolve(self, address, sender):
-        seat = SEATS.get(address)
+        seat = SEATS.get(address) or {FOREIGN.address: FOREIGN}.get(address)
         if seat is None:
             raise header.AddressRefused("no seat has this address in project %s" % sender.project_id)
         return seat
@@ -76,15 +103,20 @@ class Store(unittest.TestCase):
         self.addCleanup(self.conn.close)
         self.conn.execute("PRAGMA foreign_keys = ON")
         schema.init_v3(self.conn)
+        platform_rows(self.conn)
         self.clock = 1_700_000_000_000
         self.directory = FakeDirectory()
-        clean_git_environment(self)
+        self._submission_sequence = 0
 
     def now(self):
         return self.clock
 
-    def ctx(self, sender=PLANNER, git_state=GIT_STATE):
-        return submit.SubmitContext(sender, git_state, self.now, self.directory)
+    def ctx(self, sender=PLANNER, git_state=GIT_STATE, submission_key=None):
+        if submission_key is None:
+            self._submission_sequence += 1
+            submission_key = "fixture-%d" % self._submission_sequence
+        return submit.SubmitContext(sender, git_state, self.now, self.directory,
+                                    submission_key=submission_key)
 
     def submit(self, data, sender=PLANNER, **kwargs):
         return submit.submit(self.conn, self.ctx(sender, **kwargs), data)
@@ -98,7 +130,7 @@ class Store(unittest.TestCase):
         self.assertEqual(after.pop("refusals"), before.pop("refusals") + 1)
         self.assertEqual(after, before)  # no other row written
         row = self.conn.execute(
-            "SELECT project_id, seat_id, code, line, draft_sha256 FROM refusals"
+            "SELECT project_id, coalesce(seat_id, special), code, line, draft_sha256 FROM refusals"
             " ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(row[:3], (sender.project_id, sender.seat_id, code))
         self.assertEqual(row[4], hashlib.sha256(data).hexdigest())
@@ -119,8 +151,15 @@ class Store(unittest.TestCase):
             self.conn.row_factory = None
 
 
+class GitStore(Store):
+    def setUp(self):
+        super().setUp()
+        clean_git_environment(self)
+
+
 class TestAdmit(Store):
     def test_admit_writes_all_tables(self):
+        clean_git_environment(self)
         repo = Repo({"src/a.py": "one\ntwo\nthree\n"})
         self.addCleanup(repo.close)
         self.directory.checkouts["bivpak"] = repo.path
@@ -147,7 +186,7 @@ class TestAdmit(Store):
         self.assertEqual(self.conn.execute("SELECT body FROM bodies WHERE relay_id = ?",
                                            (reply.relay_id,)).fetchone()[0], b"body\n")
         edges = self.conn.execute(
-            "SELECT kind, ordinal, target_type, spelling, target_relay_id, target_repository_id,"
+            "SELECT kind, ordinal, target_type, spelling, target_relay_id, target_repository_name,"
             " target_commit, target_path, target_line_start, target_line_end, digest_at_submit"
             " FROM edges WHERE from_relay_id = ? ORDER BY kind, ordinal",
             (reply.relay_id,)).fetchall()
@@ -161,6 +200,9 @@ class TestAdmit(Store):
              2, 2, blob),
             ("ref", 3, "relay", "#1", request.relay_id, None, None, None, None, None, None),
         ])
+        self.assertEqual(self.conn.execute(  # J3's id in the sender's project, not repo-q
+            "SELECT target_repository_id FROM edges WHERE target_type = 'git'").fetchall(),
+            [("repo-1",)])
         finding = self.conn.execute(
             "SELECT handle, raised_in, raiser_seat_id, severity, summary, status, bundle_id,"
             " (SELECT ordinal FROM edges WHERE id = check_edge_id) FROM findings").fetchone()
@@ -191,12 +233,14 @@ class TestAdmit(Store):
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
         schema.init_v3(conn)
+        platform_rows(conn)
         with self.assertRaises(ValueError):
             submit.submit(conn, self.ctx(), draft())
         with tempfile.TemporaryDirectory() as name:
             store = submit.open_store(os.path.join(name, "store"))
             try:
                 self.assertEqual(store.execute("PRAGMA foreign_keys").fetchone(), (1,))
+                platform_rows(store)
                 submit.submit(store, self.ctx(), draft())  # positive control
             finally:
                 store.close()
@@ -221,7 +265,7 @@ class TestLineage(Store):
                      line=3)
 
     def test_parent_in_another_project_unknown(self):
-        foreign = submit.SeatRef("seat-x", "v3-engine.planner", "planner", "t9", "q")
+        foreign = FOREIGN
         other = self.submit(draft(), sender=foreign)
         self.refused("E-PARENT-UNKNOWN", draft(parent=other.relay_id), line=3)
 
@@ -233,8 +277,8 @@ class TestLineage(Store):
         self.assertIsNotNone(bundle)
         self.assertEqual({self.relay(r.relay_id)["bundle_id"] for r in (child, grandchild)},
                          {bundle})
-        self.assertEqual(self.conn.execute("SELECT project_id, team_instance_id, name, opened_by"
-                                           " FROM bundles").fetchall(),
+        self.assertEqual(self.conn.execute("SELECT project_id, team_instance_id, name,"
+                                           " opened_by_seat_id FROM bundles").fetchall(),
                          [(PROJECT, "t1", "b1", PLANNER.seat_id)])
         # A2: a second root naming the bundle joins it
         again = self.submit(draft(bundle="b1"), sender=OTHER)
@@ -341,7 +385,7 @@ class TestIds(Store):
         self.assertEqual(times[0], self.clock)
 
     def test_handles_per_project(self):
-        foreign = submit.SeatRef("seat-x", "v3-engine.planner", "planner", "t9", "q")
+        foreign = FOREIGN
         self.assertEqual(self.submit(draft()).handle, 1)
         self.assertEqual(self.submit(draft(), sender=foreign).handle, 1)
         self.assertEqual(self.submit(draft()).handle, 2)
@@ -593,12 +637,14 @@ class TestProjectScope(Store):  # PR-3 fold S5: one witness per project filter
 def _hammer(path, address, count, barrier, queue):
     """One submitter process for the two-process admission test (S3)."""
     conn = submit.open_store(path)
-    ctx = submit.SubmitContext(SEATS[address], None, lambda: 1_700_000_000_000, FakeDirectory())
     seen = []
     try:
         barrier.wait(60)
-        for _ in range(count):
+        for iteration in range(count):
             try:
+                ctx = submit.SubmitContext(
+                    SEATS[address], None, lambda: 1_700_000_000_000, FakeDirectory(),
+                    submission_key="hammer:%s:%d" % (address, iteration))
                 submit.submit(conn, ctx, draft())
             except Exception as error:  # every failure is counted, typed or not
                 seen.append("%s: %s" % (type(error).__name__, error))
@@ -612,7 +658,10 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
         spawn = multiprocessing.get_context("spawn")
         with tempfile.TemporaryDirectory() as name:
             path = os.path.join(name, "store")
-            submit.open_store(path).close()
+            seeded = submit.open_store(path)
+            platform_rows(seeded)
+            seeded.commit()
+            seeded.close()
             barrier, queue = spawn.Barrier(2), spawn.Queue()
             workers = [spawn.Process(target=_hammer, args=(path, address, 300, barrier, queue))
                        for address in ("v3-engine.planner", "v3-engine.implementer")]
@@ -639,7 +688,10 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
             path = os.path.join(name, "store")
             check = Path(os.path.realpath(name)) / "check.txt"
             check.write_bytes(b"ok\n")
-            submit.open_store(path).close()
+            seeded = submit.open_store(path)
+            platform_rows(seeded)
+            seeded.commit()
+            seeded.close()
             inside, release, result = threading.Event(), threading.Event(), {}
             digest = refs.file_digest
 
@@ -707,11 +759,11 @@ class TestSubmitCost(Store):  # PR-3 fold S7
         self.conn.executemany(
             "INSERT INTO relays (id, handle, project_id, kind, needs, subject, sender_seat_id,"
             " created_at, body_sha256, meta_sha256, body_bytes, header_bytes)"
-            " VALUES (?, ?, 'p', 'SITREP', 'none', 's', 'old', ?, ?, ?, 0, 0)",
+            " VALUES (?, ?, 'p', 'SITREP', 'none', 's', '%s', ?, ?, ?, 0, 0)" % OTHER.seat_id,
             [(rid, n, at, "a" * 64, "a" * 64) for rid, n, at in rows])
         self.conn.executemany(
             "INSERT INTO findings (id, handle, project_id, raised_in, raiser_seat_id, severity,"
-            " summary, status) VALUES (?, ?, 'p', ?, 'old', 'advisory', 's', 'withdrawn')",
+            " summary, status) VALUES (?, ?, 'p', ?, '%s', 'advisory', 's', 'withdrawn')" % OTHER.seat_id,
             [("f%07d" % n, n // 10 + 1, rid) for rid, n, _ in rows if n % 10 == 0])
         self.conn.commit()
 
@@ -744,7 +796,8 @@ class TestContext(Store):  # PR-3 fold S6
                 submit.GitState("repo-1", "b" * 64, None, 0, "f" * 64))
         for state in good:
             with self.subTest(state=state):
-                submit.SubmitContext(PLANNER, state, self.now, self.directory)
+                submit.SubmitContext(PLANNER, state, self.now, self.directory,
+                                         submission_key="git-state-fixture")
         bad = (submit.GitState("repo-1", "abc", "main", 2, "0" * 64),
                submit.GitState("repo-1", "A" * 40, "main", 2, "0" * 64),
                submit.GitState("repo-1", "a" * 40, "main", -1, "0" * 64),
@@ -761,7 +814,8 @@ class TestContext(Store):  # PR-3 fold S6
         for state in bad:
             with self.subTest(state=state):
                 with self.assertRaises(ValueError):
-                    submit.SubmitContext(PLANNER, state, self.now, self.directory)
+                    submit.SubmitContext(PLANNER, state, self.now, self.directory,
+                                         submission_key="git-state-fixture")
         self.assertEqual(self.counts(), dict.fromkeys(TABLES, 0))
 
 
@@ -802,7 +856,8 @@ class TestDigest(Store):
         self.assertNotEqual(digest(tight), digest(copied))  # CC is a field of the digest
         self.assertRegex(digest(tight), r"\A[0-9a-f]{64}\Z")
 
-    def test_digest_over_resolved_targets(self):  # PR-3 fold S10, DD § 5
+    def test_digest_over_resolved_targets(self):
+        clean_git_environment(self)  # PR-3 fold S10, DD § 5
         root = self.submit(draft())
         digest = lambda a: self.relay(a.relay_id)["meta_sha256"]
         by_handle = self.submit(draft(parent="#1", refs=("#1",)))
@@ -827,6 +882,1138 @@ class TestDigest(Store):
         wider = self.submit(draft(refs=("bivpak@main:src/a.py#L1-L2",)))
         self.assertNotEqual(digest(named), digest(wider))
 
+
+
+class TestTableDirectory(Store):
+    """Task 6: addresses resolve over platform's tables as the joint lock states."""
+
+    def setUp(self):
+        super().setUp()
+        self.table = submit.TableDirectory(self.conn, PROJECT)
+
+    def test_table_directory_resolves(self):
+        self.assertEqual(self.table.resolve("v3-engine.implementer", PLANNER), IMPL)
+        self.assertEqual(self.table.resolve("v3-engine.planner@q", PLANNER), FOREIGN)
+        operator = self.table.resolve("operator", IMPL)
+        self.assertEqual((operator.seat_id, operator.address, operator.role, operator.project_id),
+                         (submit.OPERATOR_SEAT_ID, "operator", "operator", PROJECT))
+        self.conn.execute("UPDATE team_instances SET closed_at = 5 WHERE id = 't2'")
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (ORCH.seat_id,))
+        for address, reason in (
+                ("orchestrator", "not an address"), ("v3-engine.pair-planner", "unknown role word"),
+                ("v3-engine.pair-implementer", "unknown role word"),
+                ("v3-engine.reviewer", "no seat"), ("nope.planner", "no open team"),
+                ("v3-other.planner", "no open team"), ("v3.orchestrator-planner", "stood down"),
+                ("v3-engine.planner@zz", "no project"), ("operator@q", "operator qualified with @")):
+            with self.subTest(address=address):
+                with self.assertRaises(header.AddressRefused) as caught:
+                    self.table.resolve(address, PLANNER)
+                self.assertIn(reason, caught.exception.reason)
+
+    # J2's reason words, one per platform reason; header.parse names them in E-ADDRESS.
+    J2_REASONS = {
+        addresses.Reason.NOT_AN_ADDRESS: "not an address: no .<role> part and not operator",
+        addresses.Reason.AT_EMPTY_OR_REPEATED: "empty or repeated @",
+        addresses.Reason.UPPERCASE: "uppercase",
+        addresses.Reason.BAD_CHARACTER: "a character outside the grammar",
+        addresses.Reason.UNKNOWN_ROLE: "unknown role word",
+        addresses.Reason.NAME_TOO_LONG: "name too long",
+        addresses.Reason.WHITESPACE_IN_TOKEN: "whitespace inside a token",
+        addresses.Reason.OPERATOR_QUALIFIED: "operator qualified with @",
+    }
+
+    def test_validator_is_platform_s(self):
+        """header.parse refuses what platform's validator refuses, on platform's fixture list
+        (DD-v3-platform J1, J2): the default validator is platform's parse_address, and every
+        refused token is E-ADDRESS with J2's reason, or a header refusal that comes first."""
+        default = inspect.signature(header.parse).parameters["validate_address"].default
+        self.assertIs(default, addresses.parse_address)
+        self.assertEqual(set(self.J2_REASONS), set(addresses.Reason))
+        self.assertEqual(set(REFUSALS), set(addresses.Reason))
+        for token in ACCEPTED:
+            with self.subTest(accepted=token):
+                self.assertEqual(header.parse(draft(to=token)).to, (token,))
+        # Tokens the header line refuses before any address is read: an empty value, and a
+        # value with whitespace at its end (header grammar).
+        before = {"": "E-HEADER-EMPTY", "x.planner\t": "E-HEADER-GRAMMAR"}
+        for reason, tokens in REFUSALS.items():
+            for token in tokens:
+                with self.subTest(reason=reason, token=token):
+                    with self.assertRaises(addresses.AddressRefused):
+                        addresses.parse_address(token)
+                    with self.assertRaises(errors.EngineError) as caught:
+                        header.parse(draft(to=token))
+                    if token in before:
+                        self.assertEqual(caught.exception.code, before[token])
+                        continue
+                    self.assertEqual(caught.exception.code, "E-ADDRESS")
+                    self.assertEqual(caught.exception.params["reason"], self.J2_REASONS[reason])
+        self.assertEqual(set(before), {token for tokens in REFUSALS.values() for token in tokens
+                                       if token in before})
+
+    def test_header_keeps_no_address_grammar(self):
+        """J1, J-T1: the parser calls the validator and keeps no grammar of its own."""
+        for name in ("ROLE_WORDS", "_ALIASES", "syntactic_address", "_address_problem"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(header, name))
+        source = Path(header.__file__).read_text(encoding="utf-8")
+        for word in ("pair-planner", "orchestrator-reviewer", "domain-planner"):
+            with self.subTest(word=word):
+                self.assertNotIn(word, source)
+
+    def test_alias_names_canonical_word(self):
+        with self.assertRaises(header.AddressRefused) as caught:
+            self.table.resolve("v3-engine.pair-planner", PLANNER)
+        self.assertEqual(caught.exception.canonical, "planner")
+
+    def test_reopened_team_resolves_to_new_instance(self):
+        self.conn.execute("UPDATE team_instances SET closed_at = 5 WHERE id = 't2'")
+        self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at,"
+                          " opened_by) VALUES ('t2b', 'p', 'v3-other', 'pair', 6, 'operator')")
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state) VALUES"
+                          " ('seat-new', 't2b', 'planner', 'vacant')")
+        seat = self.table.resolve("v3-other.planner", PLANNER)
+        self.assertEqual((seat.seat_id, seat.team_instance_id), ("seat-new", "t2b"))
+
+    def test_checkout(self):
+        self.assertIsNone(self.table.checkout("bivpak"))
+        self.conn.executemany("INSERT INTO repository_checkouts (repository_id, path,"
+                              " last_seen_at) VALUES ('repo-1', ?, ?)",
+                              [("/w/old", 1), ("/w/new", 9)])
+        self.assertEqual(self.table.checkout("bivpak"), Path("/w/new"))
+        self.assertIsNone(self.table.checkout("nope"))
+        self.assertIsNone(submit.TableDirectory(self.conn, "q").checkout("bivpak"))
+
+    def test_submit_through_tables(self):
+        admitted = submit.submit(self.conn, submit.SubmitContext(
+            PLANNER, GIT_STATE, self.now, self.table, submission_key="table-directory"),
+            draft(to="v3-engine.implementer", cc="operator"))
+        rows = self.conn.execute("SELECT seat_id, special, role FROM recipients WHERE relay_id = ?"
+                                 " ORDER BY role DESC", (admitted.relay_id,)).fetchall()
+        self.assertEqual(rows, [(IMPL.seat_id, None, "to"), (None, "operator", "cc")])
+
+
+class TestParties(Store):
+    """Planner Q1: a party is a seat or a special, written to its exclusive arc."""
+
+    def test_operator_and_system_as_parties(self):
+        question = self.submit(draft(kind="QUESTION", to="operator", needs="answer"), sender=IMPL)
+        answer = self.submit(draft(parent="#%d" % question.handle, to="v3-engine.implementer"),
+                             sender=SEATS["operator"])
+        self.assertEqual(self.conn.execute(
+            "SELECT seat_id, special, answered_by FROM recipients WHERE relay_id = ?",
+            (question.relay_id,)).fetchall(), [(None, "operator", answer.relay_id)])
+        self.assertEqual(self.conn.execute(
+            "SELECT sender_seat_id, sender_special FROM relays WHERE id = ?",
+            (answer.relay_id,)).fetchone(), (None, "operator"))
+        self.assertEqual(self.conn.execute(
+            "SELECT opened_by_seat_id, opened_by_special FROM bundles").fetchall(),
+            [(IMPL.seat_id, None)])
+        self.refused("E-PARENT-UNKNOWN", draft(parent="#9"), sender=SEATS["operator"])
+        self.assertEqual(self.conn.execute(
+            "SELECT seat_id, special FROM refusals").fetchall(), [(None, "operator")])
+        self.assertEqual(submit.party_columns("system"), (None, "system"))
+        from relay_engine import queries
+        queries.read(self.conn, question.relay_id, "operator", 77)  # the operator reads
+        self.assertEqual(self.conn.execute(
+            "SELECT opened_at FROM recipients WHERE relay_id = ?", (question.relay_id,)).fetchone(),
+            (77,))
+        self.assertEqual(self.conn.execute("SELECT seat_id FROM seat_activity").fetchall(),
+                         [(IMPL.seat_id,)])  # the QUESTION's admission (PR-3 R6); none for the operator
+        self.assertEqual(submit.party_columns(IMPL.seat_id), (IMPL.seat_id, None))
+
+    def test_unknown_repository_refused(self):
+        self.directory.checkouts["nope"] = "/x"
+        error = self.refused("E-REF-UNRESOLVED", draft(refs=("nope@main:a.py",)), line=6)
+        self.assertIn("not known to this project", error.cause)
+
+
+class TestAdmissionReplay(Store):
+    """Breaks: lost receipt, party collisions, poisoned keys and missed lock recheck."""
+
+    def require_replay(self):
+        self.assertIn("submission_key", submit.SubmitContext.__dataclass_fields__,
+                      "external admission requires the reviewed submission_key field")
+
+    def full_state(self, conn=None):
+        conn = self.conn if conn is None else conn
+        tables = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        return {table: sorted(conn.execute('SELECT * FROM "' + table + '"').fetchall(),
+                              key=repr) for table in tables}
+
+    def test_replay_returns_exact_receipt(self):
+        self.require_replay()
+        data = draft(subject="original")
+        first = self.submit(data, submission_key="retry")
+        state = self.full_state()
+        self.clock += 500
+        self.assertEqual(self.submit(data, submission_key="retry"), first)
+        self.assertEqual(self.full_state(), state)
+        for changed in (draft(subject="changed"), b"not a valid header\n"):
+            before = self.full_state()
+            with self.assertRaises(errors.EngineError) as caught:
+                self.submit(changed, submission_key="retry")
+            self.assertEqual(caught.exception.code, "E-SUBMISSION-KEY-REUSED")
+            after = self.full_state()
+            self.assertEqual(len(after.pop("refusals")), len(before.pop("refusals")) + 1)
+            self.assertEqual(after, before)
+            self.assertEqual(self.conn.execute(
+                "SELECT code, draft_sha256 FROM refusals ORDER BY id DESC LIMIT 1"
+            ).fetchone(), ("E-SUBMISSION-KEY-REUSED", hashlib.sha256(changed).hexdigest()))
+
+    def test_replay_party_uniqueness(self):
+        self.require_replay()
+        data = draft(to="operator")
+        receipts = []
+        for party in (PLANNER, IMPL, SEATS["operator"]):
+            first = self.submit(data, sender=party, submission_key="shared")
+            state = self.full_state()
+            self.assertEqual(self.submit(data, sender=party, submission_key="shared"), first)
+            self.assertEqual(self.full_state(), state)
+            receipts.append(first.relay_id)
+        self.assertEqual(len(set(receipts)), 3)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM relays").fetchone(), (3,))
+        self.assertEqual(self.conn.execute(
+            "SELECT sender_seat_id, sender_special FROM relays WHERE id=?",
+            (receipts[-1],)).fetchone(), (None, "operator"))
+
+    def test_replay_refusal_does_not_reserve_key(self):
+        self.require_replay()
+        bad = draft(parent="#999")
+        with self.assertRaises(errors.EngineError) as caught:
+            self.submit(bad, submission_key="correctable")
+        self.assertEqual(caught.exception.code, "E-PARENT-UNKNOWN")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM relays").fetchone(), (0,))
+        good = self.submit(draft(), submission_key="correctable")
+        self.assertEqual(good.handle, 1)
+        self.assertEqual(self.conn.execute("SELECT code, draft_sha256 FROM refusals").fetchall(),
+                         [("E-PARENT-UNKNOWN", hashlib.sha256(bad).hexdigest())])
+        state = self.full_state()
+        self.assertEqual(self.submit(draft(), submission_key="correctable"), good)
+        self.assertEqual(self.full_state(), state)
+
+    def test_replay_serialized_connections(self):
+        self.require_replay()
+
+        class SchedulingConnection(sqlite3.Connection):
+            before_begin = None
+
+            def execute(connection, sql, parameters=()):
+                callback = connection.before_begin
+                if sql == "BEGIN IMMEDIATE" and callback is not None:
+                    connection.before_begin = None
+                    callback()
+                return super().execute(sql, parameters)
+
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as name:
+                path = str(Path(name) / "replay.sqlite")
+                first = sqlite3.connect(path, factory=SchedulingConnection)
+                second = None
+                try:
+                    first.execute("PRAGMA foreign_keys = ON")
+                    self.assertEqual(first.execute("PRAGMA journal_mode=WAL").fetchone(),
+                                     ("wal",))
+                    schema.init_v3(first)
+                    platform_rows(first)
+                    second = submit.open_store(path)
+                    data = draft(subject="winner")
+                    incoming = draft(subject="loser") if conflict else data
+                    winner = []
+                    second_ctx = self.ctx(submission_key="race", git_state=None)
+                    first_ctx = self.ctx(submission_key="race", git_state=None)
+                    first.before_begin = lambda: winner.append(
+                        submit.submit(second, second_ctx, data))
+                    if conflict:
+                        with self.assertRaises(errors.EngineError) as caught:
+                            submit.submit(first, first_ctx, incoming)
+                        self.assertEqual(caught.exception.code, "E-SUBMISSION-KEY-REUSED")
+                    else:
+                        receipt = submit.submit(first, first_ctx, incoming)
+                        self.assertEqual(receipt, winner[0])
+                    self.assertEqual(len(winner), 1)
+                    self.assertEqual(first.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+                    self.assertEqual(first.execute("SELECT count(*) FROM bodies").fetchone(), (1,))
+                    self.assertEqual(first.execute("SELECT count(*) FROM refusals").fetchone(),
+                                     (int(conflict),))
+                    state = self.full_state(first)
+                    self.assertEqual(submit.submit(first, first_ctx, data), winner[0])
+                    self.assertEqual(self.full_state(first), state)
+                    self.assertFalse(first.in_transaction)
+                    self.assertFalse(second.in_transaction)
+                finally:
+                    if second is not None:
+                        second.close()
+                    first.close()
+
+    def test_key_shape_and_digest(self):
+        self.require_replay()
+        with self.assertRaises(TypeError):
+            submit.SubmitContext(PLANNER, GIT_STATE, self.now, self.directory)
+        for invalid in (None, "", False, 1, b"key", [], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                submit.SubmitContext(PLANNER, GIT_STATE, self.now, self.directory,
+                                     submission_key=invalid)
+        self.assertEqual(self.full_state()["relays"], [])
+        data = draft(cc="operator", body="exact original bytes\n")
+        receipt = self.submit(data, submission_key="digest")
+        self.assertEqual(self.conn.execute(
+            "SELECT submission_key, draft_sha256 FROM relays WHERE id=?",
+            (receipt.relay_id,)).fetchone(),
+            ("digest", hashlib.sha256(data).hexdigest()))
+
+    def test_sql_fixture_does_not_normalize_environment(self):
+        # The real fixture must succeed while normalization/mutation fail closed.
+        with mock.patch(__name__ + ".clean_git_environment",
+                        side_effect=AssertionError("fixture normalized environment")), \
+                mock.patch.object(os, "putenv", side_effect=AssertionError("putenv")), \
+                mock.patch.object(os, "unsetenv", side_effect=AssertionError("unsetenv")):
+            fixture = Store("runTest")
+            try:
+                fixture.setUp()
+                self.assertEqual(fixture.conn.execute("PRAGMA foreign_keys").fetchone(), (1,))
+                self.assertEqual(fixture.conn.execute("SELECT count(*) FROM projects").fetchone(),
+                                 (2,))
+                self.assertEqual(fixture.conn.execute(
+                    "SELECT count(*) FROM schema_version").fetchone(), (1,))
+                self.assertEqual(fixture.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+            finally:
+                fixture.doCleanups()
+        self.assertNotIn("clean_git_environment(", inspect.getsource(Store.setUp))
+
+    def test_fixture_keys_distinguish_new_and_retry(self):
+        self.require_replay()
+        a, b = self.ctx(), self.ctx()
+        self.assertTrue(a.submission_key)
+        self.assertTrue(b.submission_key)
+        self.assertNotEqual(a.submission_key, b.submission_key)
+        first = submit.submit(self.conn, a, draft())
+        second = submit.submit(self.conn, b, draft())
+        self.assertNotEqual(first.relay_id, second.relay_id)
+        explicit = self.ctx(submission_key="intentional-retry")
+        receipt = submit.submit(self.conn, explicit, draft())
+        state = self.full_state()
+        self.assertEqual(submit.submit(
+            self.conn, self.ctx(submission_key="intentional-retry"), draft()), receipt)
+        self.assertEqual(self.full_state(), state)
+        with self.assertRaises(ValueError):
+            submit.SubmitContext(PLANNER, None, self.now, self.directory, submission_key="")
+
+
+
+class TestAdmissionHook(Store):
+    """Breaks: post-commit callbacks, cached authority, partial writes and unsafe errors."""
+
+    def require_hook(self):
+        self.assertIn("after_admit", submit.SubmitContext.__dataclass_fields__,
+                      "atomic admission requires the reviewed pre-commit hook")
+
+    def hook_ctx(self, hook, writes=frozenset(), **kwargs):
+        return replace(self.ctx(**kwargs), after_admit=hook, after_admit_writes=writes)
+
+    def canaries(self):
+        self.conn.executescript(
+            "CREATE TABLE fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT REFERENCES relays(id));"
+            "CREATE TABLE fixture_other (id TEXT PRIMARY KEY);")
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "test-only"})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def assert_free(self):
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("PRAGMA foreign_keys").fetchone(), (1,))
+        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS fixture_cleanup (n INTEGER)")
+        self.conn.execute("BEGIN")
+        self.conn.execute("ROLLBACK")
+
+    def reject_hook(self, hook, code="E-ADMISSION-HOOK"):
+        before = self.counts()
+        owned = self.conn.execute("SELECT * FROM fixture_owned ORDER BY id").fetchall()
+        other = self.conn.execute("SELECT * FROM fixture_other ORDER BY id").fetchall()
+        activity = self.conn.execute("SELECT * FROM seat_activity ORDER BY seat_id").fetchall()
+        with self.assertRaises(errors.EngineError) as caught:
+            submit.submit(self.conn, self.hook_ctx(hook, frozenset({"fixture_owned"})), draft())
+        self.assertEqual(caught.exception.code, code)
+        after = self.counts()
+        self.assertEqual(after.pop("refusals"), before.pop("refusals") + 1)
+        self.assertEqual(after, before)
+        self.assertEqual(self.conn.execute("SELECT * FROM fixture_owned ORDER BY id").fetchall(), owned)
+        self.assertEqual(self.conn.execute("SELECT * FROM fixture_other ORDER BY id").fetchall(), other)
+        self.assertEqual(self.conn.execute("SELECT * FROM seat_activity ORDER BY seat_id").fetchall(), activity)
+        self.assert_free()
+        return caught.exception
+
+    def test_hook_timing_and_same_transaction(self):
+        self.require_hook()
+        request = self.submit(draft(kind="REVIEW", needs="review", to=IMPL.address))
+        seen = []
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "check.txt"
+            path.write_bytes(b"real check\n")
+            def hook(conn, admitted, parsed, ctx):
+                self.assertIs(conn, self.conn)
+                self.assertTrue(conn.in_transaction)
+                self.assertEqual(conn.execute("SELECT subject FROM relays WHERE id=?",
+                                             (admitted.relay_id,)).fetchone(), ("checked",))
+                self.assertEqual(conn.execute("SELECT raised_in FROM findings").fetchall(),
+                                 [(admitted.relay_id,)])
+                self.assertEqual(conn.execute("SELECT answered_by FROM recipients WHERE relay_id=?",
+                                             (request.relay_id,)).fetchone(), (admitted.relay_id,))
+                self.assertEqual(conn.execute("SELECT last_request_at FROM seat_activity WHERE seat_id=?",
+                                             (IMPL.seat_id,)).fetchone(), (admitted.created_at_ms,))
+                self.assertEqual(parsed.subject, "checked")
+                seen.append(admitted)
+            ctx = self.hook_ctx(hook, sender=IMPL, submission_key="hook-retry")
+            data = draft(kind="REVIEW", to=PLANNER.address, parent="#%d" % request.handle,
+                         verdict="must-revise", subject="checked", refs=("file:" + str(path),),
+                         findings=("blocking 1 actual check",))
+            got = submit.submit(self.conn, ctx, data)
+            self.assertEqual(seen, [got])
+            self.assertEqual(submit.submit(self.conn, ctx, data), got)
+            with self.assertRaises(errors.EngineError):
+                submit.submit(self.conn, replace(ctx, submission_key="bad"), b"bad")
+            self.assertEqual(seen, [got])
+        self.assert_free()
+
+    def test_hook_declared_owned_fk_atomic(self):
+        self.require_hook()
+        self.canaries()
+        def good(conn, admitted, parsed, ctx):
+            conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("positive", admitted.relay_id))
+        admitted = submit.submit(self.conn, self.hook_ctx(good, frozenset({"fixture_owned"})), draft())
+        self.assertEqual(self.conn.execute("SELECT * FROM fixture_owned").fetchall(),
+                         [("positive", admitted.relay_id)])
+        self.assert_free()
+        def bad(conn, admitted, parsed, ctx):
+            conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("negative", admitted.relay_id))
+            raise RuntimeError("must not survive")
+        self.reject_hook(bad)
+
+    def test_hook_engineerror_refusal(self):
+        self.require_hook()
+        self.canaries()
+        original = errors.error_for("E-SUBMISSION-KEY-REUSED")
+        def typed(conn, admitted, parsed, ctx):
+            conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("typed", admitted.relay_id))
+            submit.file_system_relay(conn, ctx, draft(bundle="system"))
+            raise original
+        self.assertIs(self.reject_hook(typed, original.code), original)
+        def plain(conn, admitted, parsed, ctx):
+            conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("plain", admitted.relay_id))
+            submit.file_system_relay(conn, ctx, draft(bundle="system"))
+            raise RuntimeError("PRIVATE-MESSAGE-MUST-NOT-ESCAPE")
+        error = self.reject_hook(plain)
+        self.assertEqual(error.params["kind"], "RuntimeError")
+        self.assertNotIn("PRIVATE-MESSAGE", repr(error.as_dict()) + repr(error.params))
+        self.assertEqual(self.conn.execute("SELECT code FROM refusals ORDER BY id").fetchall(),
+                         [(original.code,), ("E-ADMISSION-HOOK",)])
+
+    def test_hook_warm_transaction_escapes(self):
+        self.require_hook()
+        self.canaries()
+        self.conn.executescript(
+            "BEGIN; COMMIT; BEGIN; ROLLBACK; begin; commit; SAVEPOINT warmed; RELEASE warmed;")
+        self.conn.execute("ATTACH ':memory:' AS warmed")
+        self.conn.execute("DETACH warmed")
+        self.conn.execute("PRAGMA user_version")
+        self.conn.execute("CREATE TABLE fixture_ddl (n INTEGER)")
+        self.conn.execute("DROP TABLE fixture_ddl")
+        def commit_begin(c, ctx):
+            c.commit()
+            c.execute("BEGIN")
+        def rollback(c, ctx):
+            c.rollback()
+        def savepoint(c, ctx):
+            c.execute("SAVEPOINT warmed")
+            c.execute("RELEASE warmed")
+        operations = [
+            ("COMMIT", lambda c, x: c.execute("COMMIT")),
+            ("COMMIT; BEGIN", lambda c, x: c.executescript("COMMIT; BEGIN")),
+            ("conn.commit();BEGIN", commit_begin),
+            ("ROLLBACK;BEGIN", lambda c, x: c.executescript("ROLLBACK; BEGIN")),
+            ("lowercase", lambda c, x: c.executescript("commit; begin")),
+            ("conn.rollback", rollback),
+            ("SAVEPOINT/RELEASE", savepoint),
+            ("ATTACH", lambda c, x: c.execute("ATTACH ':memory:' AS warmed")),
+            ("DETACH", lambda c, x: c.execute("DETACH warmed")),
+            ("PRAGMA", lambda c, x: c.execute("PRAGMA user_version")),
+            ("DDL", lambda c, x: c.execute("CREATE TABLE fixture_ddl (n INTEGER)")),
+            ("nested", lambda c, x: submit.submit(c, x, draft(subject="nested"))),
+        ]
+        for number, (label, operation) in enumerate(operations):
+            with self.subTest(escape=label):
+                def hook(conn, admitted, parsed, ctx):
+                    conn.execute("INSERT INTO fixture_owned VALUES (?,?)", ("escape-%d" % number, admitted.relay_id))
+                    operation(conn, ctx)
+                try:
+                    outcome = self.reject_hook(hook)
+                except BaseException as error:
+                    outcome = error
+                self.assertIsInstance(outcome, errors.EngineError)
+
+    def test_hook_write_set_trigger_cascade(self):
+        self.require_hook()
+        self.canaries()
+        existing = self.submit(draft(subject="original"))
+        self.conn.executescript(
+            "CREATE TABLE fixture_parent (id TEXT PRIMARY KEY);"
+            "CREATE TABLE fixture_child (id TEXT PRIMARY KEY, parent TEXT REFERENCES"
+            " fixture_parent(id) ON DELETE CASCADE);"
+            "INSERT INTO fixture_parent VALUES ('p'); INSERT INTO fixture_child VALUES ('c','p');")
+        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_parent": "test-only"}):
+            operations = [
+                lambda c, a: c.execute("UPDATE relays SET subject='forged'"),
+                lambda c, a: c.execute("DELETE FROM relays"),
+                lambda c, a: c.execute("INSERT INTO fixture_other VALUES ('forged')"),
+                lambda c, a: c.execute("DELETE FROM fixture_parent WHERE id='p'"),
+            ]
+            for operation in operations:
+                with self.subTest(operation=operations.index(operation)):
+                    def hook(c, a, d, x):
+                        operation(c, a)
+                    before = self.counts()
+                    with self.assertRaises(errors.EngineError) as caught:
+                        submit.submit(self.conn, self.hook_ctx(
+                            hook, frozenset({"fixture_owned", "fixture_parent"})), draft())
+                    self.assertEqual(caught.exception.code, "E-ADMISSION-HOOK")
+                    self.assertEqual(caught.exception.params["kind"], "DatabaseError")
+                    after = self.counts()
+                    self.assertEqual(after.pop("refusals"), before.pop("refusals") + 1)
+                    self.assertEqual(after, before)
+                    self.assertEqual(self.relay(existing.relay_id)["subject"], "original")
+                    self.assertEqual(self.conn.execute("SELECT * FROM fixture_child").fetchall(), [("c", "p")])
+                    self.assert_free()
+        for target_sql in ("UPDATE relays SET subject='triggered'",
+                           "INSERT INTO fixture_other VALUES ('triggered')"):
+            with self.subTest(trigger=target_sql):
+                self.conn.execute("CREATE TRIGGER fixture_trigger AFTER INSERT ON fixture_owned"
+                                  " BEGIN " + target_sql + "; END")
+                def hook(c, a, d, x):
+                    c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("trigger", a.relay_id))
+                self.assertEqual(self.reject_hook(hook).params["kind"], "DatabaseError")
+                self.conn.execute("DROP TRIGGER fixture_trigger")
+        def direct(c, a, d, x):
+            c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("direct", a.relay_id))
+        submit.submit(self.conn, self.hook_ctx(direct, frozenset({"fixture_owned"})), draft())
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM fixture_owned").fetchone(), (1,))
+        self.assert_free()
+
+    def test_system_relay_hook_only_atomic(self):
+        self.require_hook()
+        self.canaries()
+        calls, inner = [], []
+        def hook(c, a, d, x):
+            calls.append(a)
+            inner.append(submit.file_system_relay(c, x, draft(bundle="system")))
+        ctx = self.hook_ctx(hook)
+        outer = submit.submit(self.conn, ctx, draft())
+        self.assertEqual(calls, [outer])
+        self.assertEqual(len(inner), 1)
+        row = self.relay(inner[0].relay_id)
+        self.assertEqual((row["sender_seat_id"], row["sender_special"],
+                          row["submission_key"], row["draft_sha256"]), (None, "system", None, None))
+        with self.assertRaises(RuntimeError):
+            submit.file_system_relay(self.conn, ctx, draft())
+        self.assert_free()
+        for data, code in [
+            (draft(to="v3-absent.planner"), "E-ADDRESS"),
+            (draft(parent="#999999"), "E-PARENT-UNKNOWN"),
+            (draft(parent="#%d" % outer.handle), "E-PARENT-NOT-MEMBER"),
+            (draft(refs=("not-a-reference",)), "E-REF-SPELLING"),
+        ]:
+            with self.subTest(code=code):
+                def bad(c, a, d, x):
+                    submit.file_system_relay(c, x, draft(bundle="system-first"))
+                    submit.file_system_relay(c, x, data)
+                self.reject_hook(bad, code)
+
+    def test_system_relay_cached_sql_not_forgeable(self):
+        self.require_hook()
+        class RecordingConnection(sqlite3.Connection):
+            def execute(conn, sql, params=()):
+                if sql.startswith("INSERT INTO relays "):
+                    conn.last_relay_insert = (sql, params)
+                return super().execute(sql, params)
+        self.conn = sqlite3.connect(":memory:", factory=RecordingConnection)
+        self.addCleanup(self.conn.close)
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        schema.init_v3(self.conn)
+        platform_rows(self.conn)
+        self.canaries()
+        attempted = []
+        def hook(c, a, d, x):
+            submit.file_system_relay(c, x, draft(bundle="system"))
+            sql, params = c.last_relay_insert
+            forged = list(params)
+            forged[0], forged[1], forged[8], forged[13] = "forged", 999999, "forged", self.clock + 1000000
+            attempted.append(sql)
+            c.execute(sql, forged)  # identical cached engine INSERT text, new operands
+        self.assertEqual(self.reject_hook(hook).params["kind"], "DatabaseError")
+        self.assertEqual(len(attempted), 1)
+        self.assertTrue(attempted[0].startswith("INSERT INTO relays "))
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM relays WHERE id='forged'").fetchone(), (0,))
+
+    def test_hook_baseexception_and_cleanup(self):
+        self.require_hook()
+        self.canaries()
+        for signal in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(signal=type(signal).__name__):
+                before = self.counts()
+                def hook(c, a, d, x):
+                    c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("signal", a.relay_id))
+                    submit.file_system_relay(c, x, draft(bundle="system"))
+                    raise signal
+                with self.assertRaises(type(signal)) as caught:
+                    submit.submit(self.conn, self.hook_ctx(hook, frozenset({"fixture_owned"})), draft())
+                self.assertIs(caught.exception, signal)
+                self.assertEqual(self.counts(), before)
+                self.assertEqual(self.conn.execute("SELECT * FROM fixture_owned").fetchall(), [])
+                self.assert_free()
+        submit.submit(self.conn, self.hook_ctx(lambda c, a, d, x: None), draft())
+        self.assert_free()
+        with mock.patch.object(submit, "_write_transitions", side_effect=RuntimeError("engine fault")):
+            with self.assertRaises(RuntimeError):
+                self.submit(draft())
+        self.assert_free()
+
+    def test_hook_ended_transaction_guard(self):
+        self.require_hook()
+        self.canaries()
+        self.conn.execute("INSERT INTO fixture_owned VALUES ('duplicate',NULL)")
+        self.conn.commit()
+        states = []
+        def hook(c, a, d, x):
+            # SQLite itself rolls the transaction back on this conflict.
+            try:
+                c.execute("INSERT OR ROLLBACK INTO fixture_owned VALUES ('duplicate',?)", (a.relay_id,))
+            except sqlite3.DatabaseError:
+                pass
+            states.append(c.in_transaction)
+        try:
+            outcome = self.reject_hook(hook)
+        except BaseException as error:
+            outcome = error
+        self.assertEqual(states, [False])
+        self.assertIsInstance(outcome, errors.EngineError)
+        self.assertEqual(outcome.cause_key, "error-admission-hook-ended-transaction-cause")
+        self.assertNotIn("kind", outcome.params)
+
+    def test_hook_ended_transaction_guard_uncaught(self):
+        self.require_hook()
+        self.canaries()
+        self.conn.execute("INSERT INTO fixture_owned VALUES ('duplicate',NULL)")
+        self.conn.commit()
+        tables = (*TABLES, "fixture_owned", "fixture_other")
+        before = {table: self.conn.execute("SELECT * FROM " + table).fetchall()
+                  for table in tables}
+        def hook(c, a, d, x):
+            c.execute("INSERT OR ROLLBACK INTO fixture_owned VALUES ('duplicate',?)",
+                      (a.relay_id,))
+        try:
+            outcome = submit.submit(
+                self.conn, self.hook_ctx(hook, frozenset({"fixture_owned"})), draft())
+        except BaseException as error:
+            outcome = error
+        self.assertIsInstance(outcome, errors.EngineError)
+        self.assertEqual(outcome.code, "E-ADMISSION-HOOK")
+        self.assertEqual(outcome.cause_key, "error-admission-hook-ended-transaction-cause")
+        self.assertNotIn("kind", outcome.params)
+        for table, rows in before.items():
+            after = self.conn.execute("SELECT * FROM " + table).fetchall()
+            if table == "refusals":
+                self.assertEqual(len(after), len(rows) + 1)
+                self.assertEqual(after[:-1], rows)
+            else:
+                self.assertEqual(after, rows, table)
+        self.assertEqual(self.conn.execute(
+            "SELECT code FROM refusals ORDER BY id DESC LIMIT 1").fetchone(),
+            ("E-ADMISSION-HOOK",))
+        self.assert_free()
+
+    def test_hook_allowed_actions_admit(self):
+        self.require_hook()
+        self.canaries()
+        expected_recursive = [(n,) for n in range(1, 4)]
+        expected_count = self.conn.execute("SELECT count(*) FROM relays").fetchone()[0] + 1
+        seen = {}
+        def hook(c, a, d, x):
+            c.execute("INSERT INTO fixture_owned VALUES ('updated',?)", (a.relay_id,))
+            c.execute("INSERT INTO fixture_owned VALUES ('deleted',?)", (a.relay_id,))
+            c.execute("UPDATE fixture_owned SET id='kept' WHERE id='updated'")
+            c.execute("DELETE FROM fixture_owned WHERE id='deleted'")
+            seen["recursive"] = c.execute(
+                "WITH RECURSIVE seq(n) AS "
+                "(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<3) "
+                "SELECT n FROM seq ORDER BY n").fetchall()
+            seen["count"] = c.execute("SELECT count(*) FROM relays").fetchone()[0]
+        try:
+            outcome = submit.submit(
+                self.conn, self.hook_ctx(hook, frozenset({"fixture_owned"})), draft())
+        except BaseException as error:
+            outcome = error
+        self.assertIsInstance(outcome, submit.Admitted)
+        self.assertEqual(seen.get("recursive"), expected_recursive)
+        self.assertEqual(seen.get("count"), expected_count)
+        self.assertEqual(
+            self.conn.execute("SELECT * FROM fixture_owned ORDER BY id").fetchall(),
+            [("kept", outcome.relay_id)])
+        self.assert_free()
+
+    def test_hook_default_preserves_existing(self):
+        self.require_hook()
+        ctx = self.ctx()
+        self.assertIsNone(ctx.after_admit)
+        self.assertEqual(ctx.after_admit_writes, frozenset())
+        got = submit.submit(self.conn, ctx, draft())
+        self.assertEqual(self.relay(got.relay_id)["subject"], "s")
+        self.assert_free()
+
+
+class TestAdmissionHookAtomicity(Store):
+    """Breaks: post-rollback durability, partial internal filing and unsafe hook errors."""
+
+    def test_submit_without_autocommit_attribute_admits(self):
+        # Breaks: admission reads the 3.12-only attribute on a 3.11 connection.
+        class WithoutAutocommit(sqlite3.Connection):
+            @property
+            def autocommit(self):
+                raise AttributeError("autocommit is unavailable")
+
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "legacy.db"
+            conn = sqlite3.connect(path, factory=WithoutAutocommit)
+            try:
+                conn.execute("PRAGMA foreign_keys=ON")
+                schema.init_v3(conn)
+                platform_rows(conn)
+                receipt = submit.submit(conn, self.ctx(), draft())
+            finally:
+                conn.close()
+            fresh = sqlite3.connect(path)
+            try:
+                self.assertEqual(fresh.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+                self.assertEqual(fresh.execute("SELECT id FROM relays").fetchone(),
+                                 (receipt.relay_id,))
+            finally:
+                fresh.close()
+
+    def file_store(self, path, *, mode="legacy", conflict_rollback=False):
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+        conn.execute("PRAGMA foreign_keys=ON")
+        schema.init_v3(conn)
+        platform_rows(conn)
+        conflict = " ON CONFLICT ROLLBACK" if conflict_rollback else ""
+        conn.executescript(
+            "CREATE TABLE fixture_owned (id TEXT PRIMARY KEY" + conflict
+            + ", relay_id TEXT REFERENCES relays(id));"
+            "INSERT INTO fixture_owned VALUES ('duplicate',NULL);")
+        if mode == "isolation-none":
+            conn.isolation_level = None
+        elif mode == "autocommit-true":
+            conn.autocommit = True
+        elif mode == "autocommit-false":
+            conn.autocommit = False
+        return conn
+
+    def file_state(self, path):
+        conn = sqlite3.connect(path)
+        try:
+            return {table: conn.execute("SELECT count(*) FROM " + table).fetchone()[0]
+                    for table in TABLES + ("fixture_owned",)}
+        finally:
+            conn.close()
+
+    def assert_file_free(self, conn):
+        self.assertFalse(conn.in_transaction)
+        self.assertEqual(conn.execute("PRAGMA foreign_keys").fetchone(), (1,))
+        conn.execute("BEGIN")
+        conn.execute("ROLLBACK")
+
+    def test_hook_rows_never_outlive_rolled_back_admission(self):
+        # A cached VM must not write after SQLite rolls back the admission.
+        observed, expected = [], []
+        modes = ("legacy", "isolation-none")
+        if hasattr(sqlite3.Connection, "autocommit"):
+            modes += ("autocommit-true",)
+        attacks = ("fresh-cte", "cached-cte", "table-rollback", "plain")
+        cte = "WITH value(id,relay_id) AS (VALUES (?,?)) INSERT INTO fixture_owned SELECT * FROM value"
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            for mode in modes:
+                path = Path(name) / (mode + "-control.db")
+                conn = self.file_store(path, mode=mode)
+                def control(c, a, d, x):
+                    c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("control", a.relay_id))
+                ctx = replace(self.ctx(), after_admit=control,
+                              after_admit_writes=frozenset({"fixture_owned"}))
+                submit.submit(conn, ctx, draft())
+                state = self.file_state(path)
+                self.assertEqual((state["relays"], state["fixture_owned"], state["refusals"]),
+                                 (1, 2, 0))
+                self.assert_file_free(conn)
+                for attack in attacks:
+                    path = Path(name) / (mode + "-" + attack + ".db")
+                    conn = self.file_store(path, mode=mode,
+                                           conflict_rollback=attack == "table-rollback")
+                    before = self.file_state(path)
+                    def hook(c, a, d, x):
+                        if attack == "cached-cte":
+                            c.execute(cte, ("warmed", a.relay_id))
+                        sql = ("INSERT INTO fixture_owned VALUES ('duplicate',NULL)"
+                               if attack == "table-rollback" else
+                               "INSERT OR ROLLBACK INTO fixture_owned VALUES ('duplicate',NULL)")
+                        try:
+                            c.execute(sql)
+                        except sqlite3.DatabaseError:
+                            pass
+                        try:
+                            c.execute("INSERT INTO fixture_owned VALUES (?,?)"
+                                      if attack == "plain" else cte, ("after", None))
+                        except sqlite3.DatabaseError:
+                            pass
+                    ctx = replace(self.ctx(), after_admit=hook,
+                                  after_admit_writes=frozenset({"fixture_owned"}))
+                    refusal = None
+                    try:
+                        submit.submit(conn, ctx, draft())
+                    except BaseException as error:
+                        refusal = error.code if isinstance(error, errors.EngineError) else type(error).__name__
+                    state = self.file_state(path)
+                    want = dict(before)
+                    want["refusals"] += 1
+                    observed.append((mode, attack, refusal, state))
+                    expected.append((mode, attack, "E-ADMISSION-HOOK", want))
+                    self.assert_file_free(conn)
+            if hasattr(sqlite3.Connection, "autocommit"):
+                path = Path(name) / "unsupported.db"
+                conn = self.file_store(path, mode="autocommit-false")
+                before, statements = self.file_state(path), []
+                conn.set_trace_callback(statements.append)
+                outcome = None
+                try:
+                    submit.submit(conn, self.ctx(), draft())
+                except (ValueError, sqlite3.OperationalError) as error:
+                    outcome = type(error).__name__
+                finally:
+                    conn.set_trace_callback(None)
+                observed.append(("autocommit-false", outcome, statements, self.file_state(path)))
+                expected.append(("autocommit-false", "ValueError", [], before))
+            else:
+                self.assertFalse(hasattr(self.conn, "autocommit"))
+        self.assertEqual(observed, expected,
+                         "hook writes must not survive a rolled-back admission in any supported mode")
+
+    def test_system_filing_failure_leaves_no_rows(self):
+        # A caught internal FK failure must not commit its earlier table writes.
+        snapshots, filed = [], []
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "caught.db"
+            conn = self.file_store(path)
+            check = Path(name) / "check.txt"
+            check.write_text("real finding evidence\n")
+            bad = draft(kind="REVIEW", verdict="must-revise", bundle="failed-system", subject="failed-system",
+                        refs=("file:" + str(check),), findings=("blocking 1 failed filing",))
+            def hook(c, a, d, x):
+                before = {table: c.execute("SELECT count(*) FROM " + table).fetchone()[0]
+                          for table in TABLES}
+                try:
+                    submit.file_system_relay(c, x, bad)
+                except sqlite3.IntegrityError:
+                    pass
+                else:
+                    self.fail("the system finding must fail its real seat foreign key")
+                after = {table: c.execute("SELECT count(*) FROM " + table).fetchone()[0]
+                         for table in TABLES}
+                snapshots.append((before, after))
+                filed.append(submit.file_system_relay(
+                    c, x, draft(bundle="valid-system", subject="valid-system")))
+            submit.submit(conn, replace(self.ctx(), after_admit=hook), draft())
+            self.assertEqual(len(filed), 1)
+            reader = sqlite3.connect(path)
+            try:
+                self.assertEqual(reader.execute(
+                    "SELECT count(*) FROM relays WHERE subject='valid-system'").fetchone(), (1,))
+                failed_rows = reader.execute(
+                    "SELECT count(*) FROM relays WHERE subject='failed-system'").fetchone()[0]
+            finally:
+                reader.close()
+            self.assert_file_free(conn)
+            control_path = Path(name) / "propagated.db"
+            control = self.file_store(control_path)
+            before = self.file_state(control_path)
+            def propagates(c, a, d, x):
+                submit.file_system_relay(c, x, bad)
+            with self.assertRaises(errors.EngineError):
+                submit.submit(control, replace(self.ctx(), after_admit=propagates), draft())
+            want = dict(before)
+            want["refusals"] += 1
+            self.assertEqual(self.file_state(control_path), want)
+            self.assert_file_free(control)
+        self.assertEqual((snapshots[0][1], failed_rows), (snapshots[0][0], 0),
+                         "caught system filing failure must roll back all of its own rows")
+
+    def test_hook_exception_kind_fallback(self):
+        observed = []
+        for kind in (type("ÖFault", (Exception,), {}), type("bad-name", (Exception,), {})):
+            before = self.counts()
+            private_message = "PRIVATE-HOOK-PAYLOAD-739"
+            def hook(c, a, d, x):
+                raise kind(private_message)
+            error = None
+            try:
+                submit.submit(self.conn, replace(self.ctx(), after_admit=hook), draft())
+            except (errors.EngineError, ValueError) as caught:
+                error = caught
+            want = dict(before)
+            want["refusals"] += 1
+            observed.append((isinstance(error, errors.EngineError),
+                             getattr(error, "code", None),
+                             getattr(error, "params", {}).get("kind"),
+                             self.counts() == want,
+                             private_message not in "".join(traceback.format_exception(error))))
+            TestAdmissionHook.assert_free(self)
+        self.assertEqual(observed, [(True, "E-ADMISSION-HOOK", "Exception", True, True)] * 2)
+
+    def test_hook_name_fallback(self):
+        observed = []
+        for raises in (True, False):
+            def hook(c, a, d, x):
+                if raises:
+                    raise RuntimeError("private hook failure")
+            hook.__module__ = None
+            before = self.counts()
+            outcome = None
+            try:
+                outcome = submit.submit(self.conn, replace(self.ctx(), after_admit=hook), draft())
+            except (errors.EngineError, TypeError) as error:
+                outcome = error
+            if raises:
+                want = dict(before)
+                want["refusals"] += 1
+                observed.append((getattr(outcome, "code", None),
+                                 getattr(outcome, "params", {}).get("hook"),
+                                 self.counts() == want))
+            else:
+                observed.append((isinstance(outcome, submit.Admitted),
+                                 self.counts()["relays"] == before["relays"] + 1))
+            TestAdmissionHook.assert_free(self)
+        self.assertEqual(observed, [("E-ADMISSION-HOOK", "relay_engine.submit.unknown_hook", True),
+                                    (True, True)])
+
+    def test_hook_closing_connection_raising_discloses_nothing(self):
+        private_message = "PRIVATE-CLOSED-HOOK-PAYLOAD-918"
+        disclosed = []
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            for closing in (True, False):
+                path = Path(name) / ("closed-raise.db" if closing else "open-raise.db")
+                conn = self.file_store(path)
+                before = self.file_state(path)
+                def hook(c, a, d, x):
+                    c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("raised", a.relay_id))
+                    if closing:
+                        c.close()
+                    raise RuntimeError(private_message)
+                outcome = None
+                try:
+                    outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                                  after_admit_writes=frozenset({"fixture_owned"})), draft())
+                except BaseException as caught:
+                    outcome = caught
+                want = dict(before)
+                if closing:
+                    self.assertIsInstance(outcome, sqlite3.ProgrammingError)
+                    self.assertEqual(str(outcome), "the admission hook closed the store connection")
+                else:
+                    self.assertIsInstance(outcome, errors.EngineError)
+                    self.assertEqual(outcome.code, "E-ADMISSION-HOOK")
+                    self.assertEqual(outcome.params["kind"], "RuntimeError")
+                    want["refusals"] += 1
+                    self.assert_file_free(conn)
+                self.assertEqual(self.file_state(path), want)
+                self.assertNotIn(conn, submit._HOOK_FRAMES)
+                pending, seen = [outcome], set()
+                while pending:
+                    error = pending.pop()
+                    if error is None or id(error) in seen:
+                        continue
+                    seen.add(id(error))
+                    self.assertNotIn(private_message, str(error))
+                    pending.extend((error.__cause__, error.__context__))
+                disclosed.append(private_message in "".join(traceback.format_exception(outcome)))
+        self.assertEqual(disclosed, [False, False],
+                         "closed and open hook failures must not disclose the private payload")
+
+    def test_hook_closing_connection_cleans_frame(self):
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            path = Path(name) / "closed.db"
+            conn = self.file_store(path)
+            before = self.file_state(path)
+            def hook(c, a, d, x):
+                c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("closed", a.relay_id))
+                c.close()
+            outcome = None
+            try:
+                outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                              after_admit_writes=frozenset({"fixture_owned"})), draft())
+            except BaseException as caught:
+                outcome = caught
+            self.assertIsInstance(outcome, sqlite3.ProgrammingError)
+            self.assertEqual(str(outcome), "the admission hook closed the store connection")
+            self.assertIsNone(outcome.__cause__)
+            self.assertIsNone(outcome.__context__)
+            self.assertEqual(self.file_state(path), before)
+            self.assertNotIn(conn, submit._HOOK_FRAMES,
+                             "closing a hook connection must not leak its ownership frame")
+
+    def test_hook_closing_connection_interrupt_propagates(self):
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            path = Path(name) / "closed-interrupt.db"
+            conn = self.file_store(path)
+            before = self.file_state(path)
+            interrupt = KeyboardInterrupt("closed-hook-interrupt")
+            def hook(c, a, d, x):
+                c.execute("INSERT INTO fixture_owned VALUES (?,?)", ("interrupt", a.relay_id))
+                c.close()
+                raise interrupt
+            outcome = None
+            try:
+                outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                              after_admit_writes=frozenset({"fixture_owned"})), draft())
+            except BaseException as caught:
+                outcome = caught
+            self.assertIs(outcome, interrupt)
+            self.assertEqual(self.file_state(path), before)
+            self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+    def test_hook_writes_outside_main_refused(self):
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            for database in ("fixture_attached", "temp"):
+                with self.subTest(database=database):
+                    path = Path(name) / (database + ".db")
+                    conn = self.file_store(path)
+                    conn.execute("ATTACH ':memory:' AS fixture_attached")
+                    conn.execute("CREATE TABLE fixture_attached.fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT)")
+                    conn.execute("CREATE TEMP TABLE fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT)")
+                    before = self.file_state(path)
+                    def hook(c, a, d, x):
+                        c.execute("INSERT INTO " + database + ".fixture_owned VALUES (?,?)",
+                                  ("outside", a.relay_id))
+                    outcome = None
+                    try:
+                        outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                                      after_admit_writes=frozenset({"fixture_owned"})), draft())
+                    except BaseException as caught:
+                        outcome = caught
+                    self.assertIsInstance(outcome, errors.EngineError)
+                    self.assertEqual(outcome.code, "E-ADMISSION-HOOK")
+                    want = dict(before)
+                    want["refusals"] += 1
+                    self.assertEqual(self.file_state(path), want)
+                    for target in ("fixture_attached", "temp"):
+                        self.assertEqual(conn.execute("SELECT * FROM " + target + ".fixture_owned").fetchall(), [])
+                    self.assert_file_free(conn)
+
+    def test_system_filing_with_foreign_context_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            conn = self.file_store(Path(name) / "foreign-context.db")
+            foreign_ctx = self.ctx(sender=FOREIGN, git_state=None)
+            attempts = []
+            def hook(c, a, d, x):
+                try:
+                    attempts.append(submit.file_system_relay(
+                        c, foreign_ctx, draft(to=FOREIGN.address, bundle="foreign-system")))
+                except BaseException as caught:
+                    attempts.append(caught)
+            outcome = None
+            try:
+                outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook), draft())
+            except BaseException as caught:
+                outcome = caught
+            self.assertIsInstance(outcome, submit.Admitted)
+            self.assertEqual(len(attempts), 1)
+            self.assertIsInstance(attempts[0], RuntimeError)
+            self.assertEqual(str(attempts[0]),
+                             "system filing requires this connection's active admission hook")
+            self.assertEqual(conn.execute("SELECT project_id, count(*) FROM relays GROUP BY project_id").fetchall(),
+                             [("p", 1)])
+            self.assert_file_free(conn)
+
+
+    def test_hook_closing_connection_engine_error_discloses_nothing(self):
+        private_message = "PRIVATE-CLOSED-ENGINEERROR-PAYLOAD-467"
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            for route in ("raised", "system-filing"):
+                with self.subTest(route=route):
+                    path = Path(name) / (route + ".db")
+                    conn = self.file_store(path)
+                    before = self.file_state(path)
+                    def hook(c, a, d, x):
+                        c.execute("INSERT INTO fixture_owned VALUES (?,?)",
+                                  ("engine-error", a.relay_id))
+                        if route == "raised":
+                            c.close()
+                            try:
+                                raise RuntimeError(private_message)
+                            except RuntimeError:
+                                raise errors.error_for("E-SUBMISSION-KEY-REUSED")
+                        else:
+                            try:
+                                submit.file_system_relay(
+                                    c, x, ("invalid " + private_message + "\n").encode())
+                            except errors.EngineError:
+                                c.close()
+                                raise
+                    outcome = None
+                    try:
+                        outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                                      after_admit_writes=frozenset({"fixture_owned"})), draft())
+                    except BaseException as caught:
+                        outcome = caught
+                    self.assertIsInstance(outcome, sqlite3.ProgrammingError)
+                    self.assertEqual(str(outcome), "the admission hook closed the store connection")
+                    self.assertIsNone(outcome.__cause__)
+                    self.assertIsNone(outcome.__context__)
+                    pending, seen = [outcome], set()
+                    while pending:
+                        error = pending.pop()
+                        if error is None or id(error) in seen:
+                            continue
+                        seen.add(id(error))
+                        self.assertNotIn(private_message, str(error))
+                        pending.extend((error.__cause__, error.__context__))
+                    self.assertNotIn(private_message, "".join(traceback.format_exception(outcome)))
+                    self.assertEqual(self.file_state(path), before)
+                    self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+
+class TestAdmissionKeyBoundary(Store):
+    """Breaks: accepting a key SQLite cannot store or outside the UTF-8 byte bound."""
+
+    def test_key_boundary_refuses_unstorable_keys(self):
+        refused = []
+        for key in ("\x00abc", "a\x00", "\udcff", "é" * 128 + "x"):
+            try:
+                self.ctx(submission_key=key)
+            except ValueError:
+                refused.append(True)
+            else:
+                refused.append(False)
+        for key in ("é" * 128, "ключ"):
+            ctx = self.ctx(submission_key=key)
+            data = draft(subject="key boundary " + key[:1])
+            admitted = submit.submit(self.conn, ctx, data)
+            before = self.counts()
+            self.assertEqual(submit.submit(self.conn, ctx, data), admitted)
+            self.assertEqual(self.counts(), before)
+        self.assertEqual(refused, [True, True, True, True],
+                         "SubmitContext must refuse unstorable and over-256-byte keys")
 
 if __name__ == "__main__":
     unittest.main()

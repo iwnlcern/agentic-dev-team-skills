@@ -1,5 +1,6 @@
 """v3 tables: STRICT, versioned, atomic, checked against the header registry (DD-v3-engine § 4, § 8, § 9)."""
 
+from dataclasses import replace
 import os
 import re
 import sqlite3
@@ -10,11 +11,13 @@ from unittest import mock
 from relay_engine import errors
 from relay_engine import header
 from relay_engine import schema
+from relay_engine.tests.test_submit import Store as SubmitStore
 
 
 TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
-          "seat_sessions", "token_counts", "schema_version"}
+          "seat_sessions", "token_counts", "schema_version", "projects", "repositories",
+          "repository_checkouts", "team_instances", "seats", "seat_occupants"}
 
 INDEXES = {
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
@@ -41,6 +44,22 @@ def check_values(conn, column):
     return set(re.findall(r"'([^']*)'", found[0]))
 
 
+def platform_rows(conn):
+    """The platform rows the engine's foreign keys need: projects p and q, an open pair team
+    in each, seats s-a (planner, with occupant o1) and s-b in p, and repository repo-1."""
+    conn.executescript("""
+        INSERT INTO projects (id, name, created_at) VALUES ('p', 'p', 1), ('q', 'q', 1);
+        INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)
+            VALUES ('t1', 'p', 'v3-engine', 'pair', 1, 'operator'),
+                   ('t9', 'q', 'v3-engine', 'pair', 1, 'operator');
+        INSERT INTO seats (id, team_instance_id, role, state)
+            VALUES ('s-a', 't1', 'planner', 'occupied'), ('s-b', 't1', 'implementer', 'vacant');
+        INSERT INTO seat_occupants (id, seat_id, key_id, key_verifier, issued_at)
+            VALUES ('o1', 's-a', 'k1', 'v', 1);
+        INSERT INTO repositories (id, project_id, name) VALUES ('repo-1', 'p', 'bivpak');
+    """)
+
+
 class Store(unittest.TestCase):
     def connect(self, init=True):
         conn = sqlite3.connect(":memory:")
@@ -48,6 +67,7 @@ class Store(unittest.TestCase):
         conn.execute("PRAGMA foreign_keys = ON")
         if init:
             schema.init_v3(conn)
+            platform_rows(conn)
         return conn
 
     def objects(self, conn):
@@ -56,12 +76,14 @@ class Store(unittest.TestCase):
         ).fetchall())
 
     def relay(self, conn, rid, handle, *, kind="SITREP", verdict=None, needs="none",
-              sender="a.planner", created=None, body_sha=SHA, project="p", meta_sha=SHA):
+              sender="s-a", special=None, created=None, body_sha=SHA, project="p", meta_sha=SHA):
         conn.execute(
             "INSERT INTO relays (id, handle, project_id, kind, verdict, needs, subject,"
-            " sender_seat_id, created_at, body_sha256, meta_sha256, body_bytes, header_bytes)"
-            " VALUES (?, ?, ?, ?, ?, ?, 's', ?, ?, ?, ?, 0, 10)",
-            (rid, handle, project, kind, verdict, needs, sender,
+            " sender_seat_id, sender_special, created_at, body_sha256, meta_sha256, body_bytes,"
+            " header_bytes) VALUES (?, ?, ?, ?, ?, ?, 's', ?, ?, ?, ?, ?, 0, 10)",
+            (rid, handle, project, kind, verdict, needs,
+             None if sender in schema.SPECIALS else sender,
+             sender if sender in schema.SPECIALS else special,
              handle if created is None else created, body_sha, meta_sha))
 
     def refused(self, conn, sql, params=()):
@@ -94,7 +116,7 @@ class TestShape(Store):
     def test_wrong_type_refused(self):
         conn = self.connect()
         sql = ("INSERT INTO refusals (project_id, seat_id, code, line, at, draft_sha256)"
-               " VALUES ('p', 's', 'E-HEADER-GRAMMAR', ?, 1, ?)")
+               " VALUES ('p', 's-a', 'E-HEADER-GRAMMAR', ?, 1, ?)")
         self.refused(conn, sql, ("line three", SHA))
         conn.execute(sql, (3, SHA))  # positive control
         self.assertEqual(conn.execute("SELECT line FROM refusals").fetchone(), (3,))
@@ -117,7 +139,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 17)
+        self.assertEqual(len(named), 22)
 
 
 class TestChecks(Store):
@@ -152,7 +174,7 @@ class TestChecks(Store):
         conn = self.connect()
         self.relay(conn, "b1", 1, kind="BOOT", sender="system")
         with self.assertRaises(sqlite3.IntegrityError):
-            self.relay(conn, "b2", 2, kind="BOOT", sender="a.planner")
+            self.relay(conn, "b2", 2, kind="BOOT", sender="s-a")
 
     def test_verdict_tied_to_kind(self):
         conn = self.connect()
@@ -196,7 +218,7 @@ class TestChecks(Store):
                 with self.assertRaises(sqlite3.IntegrityError):
                     self.relay(conn, "m-%s" % bad, 1, meta_sha=bad)
         state = ("INSERT INTO git_states (id, repository_id, head_commit, dirty_paths,"
-                 " porcelain_sha256, measured_at) VALUES (?, 'r', ?, ?, ?, 1)")
+                 " porcelain_sha256, measured_at) VALUES (?, 'repo-1', ?, ?, ?, 1)")
         conn.execute(state, ("g1", None, 0, SHA))          # an unborn branch has no head
         conn.execute(state, ("g2", "c" * 40, 3, SHA))
         conn.execute(state, ("g3", "c" * 64, 0, SHA))
@@ -206,13 +228,14 @@ class TestChecks(Store):
                 self.refused(conn, state, (name, head, dirty, SHA))
         self.relay(conn, "r1", 1)
         edge = ("INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
-                " target_relay_id, target_repository_id, target_commit, target_path,"
-                " digest_at_submit) VALUES (?, 'r1', ?, 'ref', ?, 's', NULL, ?, ?, '/p', ?)")
-        conn.execute(edge, ("e1", 1, "git", "repo", "c" * 40, "b" * 40))   # a Git blob id
-        conn.execute(edge, ("e2", 2, "git", "repo", "c" * 40, "b" * 64))
+                " target_relay_id, target_repository_name, target_repository_id, target_commit,"
+                " target_path, digest_at_submit) VALUES (?1, 'r1', ?2, 'ref', ?3, 's', NULL,"
+                " (SELECT name FROM repositories WHERE id = ?4), ?4, ?5, '/p', ?6)")
+        conn.execute(edge, ("e1", 1, "git", "repo-1", "c" * 40, "b" * 40))   # a Git blob id
+        conn.execute(edge, ("e2", 2, "git", "repo-1", "c" * 40, "b" * 64))
         conn.execute(edge, ("e3", 3, "path", None, None, SHA))
         self.refused(conn, edge, ("e4", 4, "path", None, None, "b" * 40))  # a file: sha256 only
-        self.refused(conn, edge, ("e5", 5, "git", "repo", "c" * 40, "B" * 40))
+        self.refused(conn, edge, ("e5", 5, "git", "repo-1", "c" * 40, "B" * 40))
 
     def test_foreign_keys(self):
         conn = self.connect()
@@ -226,17 +249,18 @@ class TestChecks(Store):
     def test_recipient_and_edge_rows(self):
         conn = self.connect()
         self.relay(conn, "r1", 1)
-        conn.execute("INSERT INTO recipients (relay_id, seat_id, role) VALUES ('r1', 's', 'to')")
-        self.refused(conn, "INSERT INTO recipients (relay_id, seat_id, role) VALUES ('r1', 't', 'bcc')")
+        conn.execute("INSERT INTO recipients (relay_id, seat_id, role) VALUES ('r1', 's-a', 'to')")
+        self.refused(conn, "INSERT INTO recipients (relay_id, seat_id, role) VALUES ('r1', 's-b', 'bcc')")
         edge = ("INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
-                " target_relay_id, target_repository_id, target_commit, target_path)"
-                " VALUES (?, 'r1', ?, ?, ?, 's', ?, ?, ?, ?)")
+                " target_relay_id, target_repository_name, target_repository_id, target_commit,"
+                " target_path) VALUES (?1, 'r1', ?2, ?3, ?4, 's', ?5,"
+                " (SELECT name FROM repositories WHERE id = ?6), ?6, ?7, ?8)")
         conn.execute(edge, ("e1", 0, "ref", "relay", "r1", None, None, None))
-        conn.execute(edge, ("e2", 1, "ref", "git", None, "repo", "c" * 40, "a.md"))
+        conn.execute(edge, ("e2", 1, "ref", "git", None, "repo-1", "c" * 40, "a.md"))
         conn.execute(edge, ("e3", 2, "ref", "path", None, None, None, "~/x"))
         for args in (("e4", 3, "link", "relay", "r1", None, None, None),     # edge kind
                      ("e5", 4, "ref", "relay", None, None, None, None),       # relay without target
-                     ("e6", 5, "ref", "git", None, "repo", None, "a.md"),     # git without commit
+                     ("e6", 5, "ref", "git", None, "repo-1", None, "a.md"),   # git without commit
                      ("e7", 6, "ref", "path", None, None, None, None),        # path without path
                      ("e8", 7, "ref", "path", "r1", None, None, "~/x")):      # path with a relay
             with self.subTest(edge=args[0]):
@@ -246,7 +270,7 @@ class TestChecks(Store):
         conn = self.connect()
         self.relay(conn, "r1", 1, kind="REVIEW", verdict="must-revise", needs="act")
         finding = ("INSERT INTO findings (id, handle, project_id, raised_in, raiser_seat_id,"
-                   " severity, summary, status) VALUES (?, ?, 'p', 'r1', 's', ?, ?, ?)")
+                   " severity, summary, status) VALUES (?, ?, 'p', 'r1', 's-a', ?, ?, ?)")
         conn.execute(finding, ("f1", 1, "blocking", "x" * 200, "withdrawn"))
         for args in (("f2", 2, "minor", "s", "open"), ("f3", 3, "advisory", "x" * 201, "open"),
                      ("f4", 4, "advisory", "s", "fix-refused")):
@@ -364,6 +388,265 @@ class TestSqlVersion(unittest.TestCase):
             with self.assertRaises(errors.EngineError):
                 schema.init_v3(conn)
 
+
+
+# J3 with amendment J-A1, transcribed from the frozen copy
+# designs/DD-v3-platform-20261104-jl-a1.md, sha256
+# 6e2022761164a7b3d8f2df3653a35fe58bdae11d4d42930dbc979735ad2e5dcd (never read at test time:
+# the sprint tree is untracked and absent from worktrees).
+PLATFORM_COLUMNS = {
+    "projects": ["id", "name", "created_at", "top_seat_id"],
+    "repositories": ["id", "project_id", "name"],
+    "repository_checkouts": ["repository_id", "path", "last_seen_at"],
+    "team_instances": ["id", "project_id", "name", "level", "parent_instance_id", "opened_at",
+                       "opened_by", "closed_at"],
+    "seats": ["id", "team_instance_id", "role", "state"],
+    "seat_occupants": ["id", "seat_id", "key_id", "key_verifier", "issued_at", "ended_at"],
+    "seat_sessions": ["id", "seat_id", "occupant_id", "host", "host_session_id", "generation",
+                      "signed_in_at", "last_seen_at", "ended_at"],
+}
+# Exclusive arcs (v3-engine/SITREP-pair-planner-20261104-074637.md Q1): column prefix, specials.
+ARCS = {"relays": ("sender_", {"operator", "system"}), "recipients": ("", {"operator"}),
+        "refusals": ("", {"operator", "system"}), "bundles": ("opened_by_", {"operator", "system"})}
+
+
+class TestPlatform(Store):
+    def test_platform_tables_match_spec(self):
+        conn = self.connect()
+        for table, columns in PLATFORM_COLUMNS.items():
+            with self.subTest(table=table):
+                self.assertEqual([row[1] for row in conn.execute(
+                    "SELECT * FROM pragma_table_info(?)", (table,))], columns)
+
+    def test_seat_sessions_ja1(self):
+        conn = self.connect()
+        conn.execute("INSERT INTO seat_occupants (id, seat_id, key_id, key_verifier, issued_at)"
+                     " VALUES ('o2', 's-b', 'k2', ?, 1)", (SHA,))
+        row = ("INSERT INTO seat_sessions (id, seat_id, occupant_id, host, host_session_id,"
+               " generation, signed_in_at, last_seen_at, ended_at) VALUES (?, ?, ?, ?, 'h', ?, 1, 1,"
+               " ?)")
+        conn.execute(row, ("x1", "s-a", "o1", "claude-code", 1, None))
+        for name, values in (("second open session", ("x2", "s-a", "o1", "codex", 2, None)),
+                             ("generation reused", ("x2", "s-a", "o1", "codex", 1, 5)),
+                             ("generation zero", ("x2", "s-a", "o1", "codex", 0, 5)),
+                             ("unknown host", ("x2", "s-a", "o1", "vim", 2, 5)),
+                             ("another seat's occupant", ("x2", "s-a", "o2", "codex", 2, 5)),
+                             ("generation as text", ("x2", "s-a", "o1", "codex", "two", 5))):
+            with self.subTest(name):
+                self.refused(conn, row, values)
+        conn.execute("UPDATE seat_sessions SET ended_at = 2 WHERE id = 'x1'")
+        for host, generation in (("codex", 2), ("frank", 3)):  # positive control
+            conn.execute("UPDATE seat_sessions SET ended_at = 9 WHERE ended_at IS NULL")
+            conn.execute(row, ("x%d" % generation, "s-a", "o1", host, generation, None))
+        conn.execute(row, ("y1", "s-b", "o2", "other", 1, None))  # generations are per seat
+
+    def test_platform_invariants(self):
+        conn = self.connect()
+        cases = (
+            ("project name taken", "INSERT INTO projects (id, name, created_at) VALUES ('p3', 'p',"
+             " 1)"),
+            ("repository name taken in its project",
+             "INSERT INTO repositories (id, project_id, name) VALUES ('r2', 'p', 'bivpak')"),
+            ("open team name taken", "INSERT INTO team_instances (id, project_id, name, level,"
+             " opened_at, opened_by) VALUES ('t2', 'p', 'v3-engine', 'pair', 1, 'operator')"),
+            ("unknown level", "INSERT INTO team_instances (id, project_id, name, level, opened_at,"
+             " opened_by) VALUES ('t2', 'p', 'new', 'squad', 1, 'operator')"),
+            ("parent in another project", "INSERT INTO team_instances (id, project_id, name,"
+             " level, parent_instance_id, opened_at, opened_by) VALUES ('t2', 'q', 'new', 'pair',"
+             " 't1', 1, 'operator')"),
+            ("seat role taken", "INSERT INTO seats (id, team_instance_id, role, state) VALUES"
+             " ('s-z', 't1', 'planner', 'vacant')"),
+            ("unknown seat state", "INSERT INTO seats (id, team_instance_id, role, state) VALUES"
+             " ('s-z', 't1', 'reviewer', 'gone')"),
+            ("second open occupant", "INSERT INTO seat_occupants (id, seat_id, key_id,"
+             " key_verifier, issued_at) VALUES ('o9', 's-a', 'k9', 'v', 1)"),
+            ("checkout of an unknown repository", "INSERT INTO repository_checkouts"
+             " (repository_id, path, last_seen_at) VALUES ('nope', '/x', 1)"),
+        )
+        for name, sql in cases:
+            with self.subTest(name):
+                self.refused(conn, sql)
+        # positive controls: same names elsewhere, a closed team's name reused, a sub-team
+        conn.execute("INSERT INTO repositories (id, project_id, name) VALUES ('r2', 'q', 'bivpak')")
+        conn.execute("UPDATE team_instances SET closed_at = 5 WHERE id = 't1'")
+        conn.execute("INSERT INTO team_instances (id, project_id, name, level, parent_instance_id,"
+                     " opened_at, opened_by) VALUES ('t2', 'p', 'v3-engine', 'pair', 't1', 6,"
+                     " 'operator')")
+        conn.execute("INSERT INTO seats (id, team_instance_id, role, state) VALUES"
+                     " ('s-z', 't2', 'planner', 'vacant')")
+        conn.execute("UPDATE seat_occupants SET ended_at = 2 WHERE id = 'o1'")
+        conn.execute("INSERT INTO seat_occupants (id, seat_id, key_id, key_verifier, issued_at)"
+                     " VALUES ('o9', 's-a', 'k9', 'v', 3)")
+
+    def arc_insert(self, conn, table, seat, special):
+        prefix = ARCS[table][0]
+        if table == "relays":
+            self.relay(conn, "r-arc", 9, sender=seat, special=special)
+        elif table == "recipients":
+            self.relay(conn, "r-to", 8)
+            conn.execute("INSERT INTO recipients (relay_id, seat_id, special, role) VALUES"
+                         " ('r-to', ?, ?, 'to')", (seat, special))
+        elif table == "refusals":
+            conn.execute("INSERT INTO refusals (project_id, seat_id, special, code, at,"
+                         " draft_sha256) VALUES ('p', ?, ?, 'E-HEADER-GRAMMAR', 1, ?)",
+                         (seat, special, SHA))
+        else:
+            conn.execute("INSERT INTO bundles (id, project_id, name, %sseat_id, %sspecial) VALUES"
+                         " ('b-arc', 'p', 'arc', ?, ?)" % (prefix, prefix), (seat, special))
+
+    def test_party_arcs(self):
+        for table, (_, allowed) in ARCS.items():
+            for seat, special, admitted in (
+                    [("s-a", None, True), ("s-a", "operator", False), (None, None, False),
+                     ("nope", None, False)]
+                    + [(None, name, name in allowed) for name in ("operator", "system", "x")]):
+                with self.subTest(table=table, seat=seat, special=special):
+                    conn = self.connect()
+                    if admitted:
+                        self.arc_insert(conn, table, seat, special)
+                    else:
+                        with self.assertRaises(sqlite3.IntegrityError):
+                            self.arc_insert(conn, table, seat, special)
+
+    def test_seat_only_columns(self):
+        conn = self.connect()
+        for sql in ("INSERT INTO seat_activity (seat_id, last_request_at) VALUES (?, 1)",
+                    "INSERT INTO token_counts (seat_id, source, input, output, cache_read,"
+                    " cache_write, copied_at) VALUES (?, 'host-log', 0, 0, 0, 0, 1)"):
+            with self.subTest(sql=sql):
+                for value in ("nope", "operator", None):
+                    self.refused(conn, sql, (value,))
+                conn.execute(sql, ("s-a",))
+
+    def test_engine_foreign_keys(self):
+        conn = self.connect()
+        self.relay(conn, "r1", 1)
+        for name, sql in (
+                ("relay in an unknown project", "INSERT INTO relays (id, handle, project_id,"
+                 " kind, needs, subject, sender_seat_id, created_at, body_sha256, meta_sha256,"
+                 " body_bytes, header_bytes) VALUES ('r9', 9, 'zz', 'SITREP', 'none', 's', 's-a',"
+                 " 9, '%s', '%s', 0, 1)" % (SHA, SHA)),
+                ("relay in an unknown team", "UPDATE relays SET team_instance_id = 'nope'"),
+                ("finding raised by an unknown seat", "INSERT INTO findings (id, handle,"
+                 " project_id, raised_in, raiser_seat_id, severity, summary, status) VALUES"
+                 " ('f', 1, 'p', 'r1', 'nope', 'advisory', 's', 'open')"),
+                ("git state of an unknown repository", "INSERT INTO git_states (id,"
+                 " repository_id, dirty_paths, porcelain_sha256, measured_at) VALUES ('g',"
+                 " 'bivpak', 0, '%s', 1)" % SHA),
+                ("edge to an unknown repository", "INSERT INTO edges (id, from_relay_id, ordinal,"
+                 " kind, target_type, spelling, target_repository_name, target_repository_id,"
+                 " target_commit, target_path) VALUES ('e', 'r1', 1, 'ref', 'git', 's', 'bivpak',"
+                 " 'nope', '%s', 'a')" % ("c" * 40)),
+                ("git edge without its repository id", "INSERT INTO edges (id, from_relay_id,"
+                 " ordinal, kind, target_type, spelling, target_repository_name, target_commit,"
+                 " target_path) VALUES ('e', 'r1', 1, 'ref', 'git', 's', 'bivpak', '%s', 'a')"
+                 % ("c" * 40))):
+            with self.subTest(name):
+                self.refused(conn, sql)
+        conn.execute("INSERT INTO git_states (id, repository_id, dirty_paths, porcelain_sha256,"
+                     " measured_at) VALUES ('g', 'repo-1', 0, ?, 1)", (SHA,))
+        conn.execute("INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling,"
+                     " target_repository_name, target_repository_id, target_commit, target_path)"
+                     " VALUES ('e', 'r1', 1, 'ref', 'git', 's', 'bivpak', 'repo-1', ?, 'a')",
+                     ("c" * 40,))
+
+
+class TestAdmissionReplaySchema(Store):
+    """Breaks: unpaired receipt metadata, seat-only uniqueness and silent DDL drift."""
+
+    def require_replay_columns(self, conn):
+        names = {row[1] for row in conn.execute("PRAGMA table_info(relays)")}
+        self.assertIn("submission_key", names, "replay key must be persisted atomically")
+        self.assertIn("draft_sha256", names, "the full original input digest must be persisted")
+
+    def test_replay_schema_pairing(self):
+        conn = self.connect()
+        self.require_replay_columns(conn)
+        self.relay(conn, "seat", 1)
+        self.relay(conn, "system", 2, sender="system")
+        self.assertEqual(conn.execute(
+            "SELECT submission_key, draft_sha256 FROM relays WHERE id='system'").fetchone(),
+            (None, None))
+        for key, digest in (("key", None), (None, SHA), ("", SHA), ("key", "bad"),
+                            ("key", "A" * 64), ("key", b"x" * 64)):
+            with self.subTest(key=key, digest=digest):
+                self.refused(conn, "UPDATE relays SET submission_key=?, draft_sha256=?"
+                                   " WHERE id='seat'", (key, digest))
+        conn.execute("UPDATE relays SET submission_key='valid', draft_sha256=? WHERE id='seat'",
+                     (SHA,))
+        self.assertEqual(conn.execute(
+            "SELECT submission_key, draft_sha256 FROM relays WHERE id='seat'").fetchone(),
+            ("valid", SHA))
+
+    def test_replay_party_unique_index(self):
+        conn = self.connect()
+        self.require_replay_columns(conn)
+        for rid, handle, sender in (("a", 1, "s-a"), ("b", 2, "s-b"),
+                                    ("o1", 3, "operator"), ("o2", 4, "operator"),
+                                    ("a2", 5, "s-a")):
+            self.relay(conn, rid, handle, sender=sender)
+        for rid in ("a", "b", "o1"):
+            conn.execute("UPDATE relays SET submission_key='same', draft_sha256=? WHERE id=?",
+                         (SHA, rid))
+        for rid in ("o2", "a2"):
+            self.refused(conn, "UPDATE relays SET submission_key='same', draft_sha256=? WHERE id=?",
+                         (SHA, rid))
+        self.assertEqual(conn.execute(
+            "SELECT count(*) FROM relays WHERE submission_key='same'").fetchone(), (3,))
+
+    def test_replay_ddl_digest_refuses_old_store(self):
+        # Build a real pre-replay store with its own genuine DDL digest.
+        old_tables = tuple(re.sub(
+            r"    submission_key TEXT[\s\S]*?(?=    UNIQUE \(project_id, handle\))", "", sql)
+            if "CREATE TABLE IF NOT EXISTS relays " in sql else sql
+            for sql in schema._TABLES)
+        old_indexes = tuple(sql for sql in schema._INDEXES
+                            if "relays_submission_party" not in sql)
+        conn = self.connect(init=False)
+        with mock.patch.object(schema, "_TABLES", old_tables), mock.patch.object(
+                schema, "_INDEXES", old_indexes):
+            schema.init_v3(conn)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(relays)")}
+        self.assertNotIn("submission_key", columns)
+        self.assertNotIn("draft_sha256", columns)
+        before = self.objects(conn)
+        digest = conn.execute("SELECT ddl_sha256 FROM schema_version").fetchone()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")
+        self.assertEqual(self.objects(conn), before)
+        self.assertEqual(conn.execute("SELECT ddl_sha256 FROM schema_version").fetchone(), digest)
+        control = self.connect()
+        objects = self.objects(control)
+        schema.init_v3(control)
+        self.assertEqual(self.objects(control), objects)
+
+
+
+class TestTableOwners(Store):
+    """Breaks: incomplete or permissive production ownership declarations."""
+
+    def test_table_owners_complete(self):
+        self.assertTrue(hasattr(schema, "TABLE_OWNERS"),
+                        "the hook needs the complete production table-owner registry")
+        conn = self.connect()
+        actual = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        self.assertEqual(set(schema.TABLE_OWNERS), actual)
+        platform = {"projects", "repositories", "repository_checkouts", "team_instances",
+                    "seats", "seat_occupants", "seat_sessions"}
+        self.assertEqual(len(actual), 19)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform)
+        fixture = SubmitStore()
+        fixture.setUp()
+        try:
+            for table in sorted(actual | {"missing_table"}):
+                with self.subTest(table=table):
+                    with self.assertRaises(ValueError):
+                        replace(fixture.ctx(), after_admit_writes=frozenset({table}))
+        finally:
+            fixture.doCleanups()
 
 if __name__ == "__main__":
     unittest.main()
