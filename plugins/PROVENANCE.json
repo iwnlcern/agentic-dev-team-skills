@@ -10718,13 +10718,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/generated/api/api_3_0.ts",
-    "sha256": "5760bcf93d8067b92e94ad505450786738fba7792397dbbb492ef8b47681455c",
+    "sha256": "7ac024493878801f43641dbe16e0060a0471b4603eecd8d8e9bb708a76302dae",
     "source": "tools/relay_engine/generated/api/api_3_0.ts"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/generated/api/manifest.json",
-    "sha256": "a0193b5d2ec722ec2fba823959aa4dc1c8c008eebda8dbe3366e085f921eb6f1",
+    "sha256": "40324c848e90b9e9083e105d8b7fa0d73dfa990ee6b459e2a0cddc454c0f3264",
     "source": "tools/relay_engine/generated/api/manifest.json"
   },
   {
@@ -21476,13 +21476,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/generated/api/api_3_0.ts",
-    "sha256": "5760bcf93d8067b92e94ad505450786738fba7792397dbbb492ef8b47681455c",
+    "sha256": "7ac024493878801f43641dbe16e0060a0471b4603eecd8d8e9bb708a76302dae",
     "source": "tools/relay_engine/generated/api/api_3_0.ts"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/generated/api/manifest.json",
-    "sha256": "a0193b5d2ec722ec2fba823959aa4dc1c8c008eebda8dbe3366e085f921eb6f1",
+    "sha256": "40324c848e90b9e9083e105d8b7fa0d73dfa990ee6b459e2a0cddc454c0f3264",
     "source": "tools/relay_engine/generated/api/manifest.json"
   },
   {
@@ -32150,13 +32150,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/generated/api/api_3_0.ts",
-    "sha256": "5760bcf93d8067b92e94ad505450786738fba7792397dbbb492ef8b47681455c",
+    "sha256": "7ac024493878801f43641dbe16e0060a0471b4603eecd8d8e9bb708a76302dae",
     "source": "tools/relay_engine/generated/api/api_3_0.ts"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/generated/api/manifest.json",
-    "sha256": "a0193b5d2ec722ec2fba823959aa4dc1c8c008eebda8dbe3366e085f921eb6f1",
+    "sha256": "40324c848e90b9e9083e105d8b7fa0d73dfa990ee6b459e2a0cddc454c0f3264",
     "source": "tools/relay_engine/generated/api/manifest.json"
   },
   {

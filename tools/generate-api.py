@@ -516,7 +516,7 @@ def emit_typescript(registry, artifact: api_schema.SchemaArtifact) -> bytes:
     types.append('export type Types = {' + ';'.join(_quoted(name) + ': ' + name for name in registry.types) + '};')
     variants, arms, _ = _response_bindings(registry, 'ts')
     body = _runtime_constants(TYPESCRIPT_RUNTIME).replace('@SCHEMA@', artifact.canonical_bytes.decode()).replace('@RESPONSE_VARIANTS@', variants).replace('@RESPONSE_ARMS@', arms)
-    return ('\n'.join(types) + '\n' + body + '\n').encode()
+    return ('\n'.join(types) + '\n' + body.rstrip('\n') + '\n').encode()
 
 
 if __name__ == '__main__':

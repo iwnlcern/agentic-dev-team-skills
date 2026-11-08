@@ -166,6 +166,15 @@ def load_generator():
 
 
 class TestGenerator(unittest.TestCase):
+    def test_typescript_ends_with_exactly_one_newline(self):
+        from relay_engine import api_schema
+        generator = load_generator()
+        compiled = generator.build_registry()
+        artifact = api_schema.export_schema(compiled, '3.0')
+        output = generator.emit_typescript(compiled, artifact)
+        self.assertTrue(output.endswith(b'\n'))
+        self.assertFalse(output.endswith(b'\n\n'))
+
     def test_committed_schema_equals_export(self):
         from relay_engine import api_protocol, api_schema
         generator = load_generator()

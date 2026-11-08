@@ -287,4 +287,3 @@ if (operation === "protocol.schema") { const typed = result as SchemaResult; if 
         throw Error('operation');
     } catch { return { kind: 'unavailable' }; }
 }
-
