@@ -308,7 +308,8 @@ _TABLES = _PLATFORM_TABLES + (
     has_bytes INTEGER NOT NULL CHECK (has_bytes IN (0, 1)),
     locked_by TEXT REFERENCES relays (id),
     locked_at INTEGER,
-    CHECK ((locked_by IS NULL) = (locked_at IS NULL))
+    CHECK ((locked_by IS NULL) = (locked_at IS NULL)),
+    CHECK (has_bytes = 0 OR bytes_len <= 1048576)
 ) STRICT""" % _sha("content_sha256"),
     """CREATE TABLE IF NOT EXISTS schema_version (
     id INTEGER PRIMARY KEY CHECK (id = 1),

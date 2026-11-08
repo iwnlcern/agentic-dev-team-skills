@@ -715,6 +715,37 @@ class TestSnapshotSchema(Store):
             self.assertEqual(refs.read_file(p, 6), (digest, 7, None))
             self.assertEqual(refs.file_digest(p), digest)
 
+    def test_snapshot_bytes_check(self):
+        from relay_engine.tests import test_submit
+        fixture = test_submit.Snapshots()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        ref = fixture.artifact("bytes-check", b"x")
+        fixture.request(ref)
+        row = list(fixture.conn.execute("SELECT * FROM snapshots").fetchone())
+        names = [col[1] for col in fixture.conn.execute("PRAGMA table_info(snapshots)")]
+        fixture.conn.execute("DELETE FROM snapshots")
+        fixture.conn.commit()
+        row[names.index("has_bytes")] = 1
+        row[names.index("bytes_len")] = 1048577
+        sql = "INSERT INTO snapshots VALUES (" + ",".join("?" for _ in row) + ")"
+        caught = None
+        try:
+            fixture.conn.execute(sql, row)
+        except Exception as exc:
+            caught = exc
+        self.assertIsInstance(caught, sqlite3.IntegrityError)
+        self.assertIn("CHECK", str(caught))
+        row[names.index("bytes_len")] = 1048576
+        caught = None
+        try:
+            fixture.conn.execute(sql, row)
+        except Exception as exc:
+            caught = exc
+        self.assertIsNone(caught)
+        self.assertEqual(fixture.conn.execute("SELECT bytes_len, has_bytes FROM snapshots").fetchall(),
+                         [(1048576, 1)])
+
 
 if __name__ == "__main__":
     unittest.main()

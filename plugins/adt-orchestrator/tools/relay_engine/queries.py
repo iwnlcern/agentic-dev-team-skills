@@ -2,6 +2,7 @@ from relay_engine import strings
 import os
 import io
 import hashlib
+import tempfile
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11; plan Task 5).
 
 Every check after submit is a query: reads and read state, the bounded
@@ -20,6 +21,7 @@ from typing import Callable
 from relay_engine import errors
 from relay_engine import refs
 from relay_engine import schema
+from relay_engine import submit
 from relay_engine.submit import OPERATOR_SEAT_ID, new_uuid7, party_sql
 
 UNOPENED_MS = 900_000  # amendment 4 A4.4 (operator P9): 15 minutes from admission
@@ -598,9 +600,11 @@ def locked_snapshot(conn, artifact, *, project_id):
     return None if row is None else _snapshot_row(row)
 
 
-def _snapshot(conn, handle):
-    row = conn.execute("SELECT " + _SNAPSHOT_COLUMNS + " FROM snapshots WHERE handle = ?",
-                       (handle,)).fetchone()
+def _snapshot(conn, handle, project_id):
+    columns = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
+    row = conn.execute(
+        "SELECT " + columns + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+        " WHERE s.handle = ? AND r.project_id = ?", (handle, project_id)).fetchone()
     if row is None:
         raise KeyError(handle)
     return _snapshot_row(row)
@@ -610,12 +614,23 @@ def _snapshot(conn, handle):
 
 def _snapshot_bytes(conn, snapshot, store, directory):
     if snapshot.has_bytes:
-        return store.get(snapshot.content_sha256)
+        if store is None:
+            reason = "no evidence store was given to read its bytes"
+        else:
+            try:
+                data = store.get(snapshot.content_sha256)
+            except KeyError:
+                reason = "the evidence store does not hold its bytes"
+            else:
+                if hashlib.sha256(data).hexdigest() != snapshot.content_sha256:
+                    raise ValueError("stored bytes no longer match snapshot %d" % snapshot.handle)
+                return data
+        raise errors.error_for("E-SNAPSHOT-NO-BYTES", handle=snapshot.handle, reason=reason)
     edge = conn.execute("SELECT target_type, target_repository_name, digest_at_submit FROM edges"
                         " WHERE id = ?", (snapshot.edge_id,)).fetchone()
     if edge[0] != "git":
         reason = ("the file was over 1 MiB when the request was submitted"
-                  if snapshot.bytes_len > (1 << 20) else
+                  if snapshot.bytes_len > submit.SNAPSHOT_BYTES_MAX else
                   "no evidence store was configured when the request was submitted")
     elif directory is None:
         reason = "a Git snapshot is read from its repository, which was not given"
@@ -638,9 +653,9 @@ def _snapshot_bytes(conn, snapshot, store, directory):
     raise errors.error_for("E-SNAPSHOT-NO-BYTES", handle=snapshot.handle, reason=reason)
 
 
-def snapshot_diff(conn, a_handle, b_handle, store, directory=None):
+def snapshot_diff(conn, a_handle, b_handle, store, directory=None, *, project_id):
     """The unified line difference between two snapshots of one artifact."""
-    first, second = _snapshot(conn, a_handle), _snapshot(conn, b_handle)
+    first, second = _snapshot(conn, a_handle, project_id), _snapshot(conn, b_handle, project_id)
     if first.artifact != second.artifact:
         raise ValueError("snapshots %d and %d are of different artifacts" % (a_handle, b_handle))
     texts = []
@@ -655,24 +670,38 @@ def snapshot_diff(conn, a_handle, b_handle, store, directory=None):
         fromfile="snapshot %d" % a_handle, tofile="snapshot %d" % b_handle))
 
 
-def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None):
-    """Write a snapshot's exact bytes to out; an existing file is replaced
-    only when overwrite is true, and a final symlink is never followed."""
-    snapshot = _snapshot(conn, handle)
+def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None, project_id):
+    """Write a snapshot's exact bytes; overwrite replaces the directory entry."""
+    snapshot = _snapshot(conn, handle, project_id)
     data = _snapshot_bytes(conn, snapshot, store, directory)
-    flags = (os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
-             | (os.O_TRUNC if overwrite else os.O_EXCL))
+    if overwrite:
+        # mkstemp uses O_EXCL: even a final symlink is never followed.
+        fd, target = tempfile.mkstemp(prefix=".snapshot-", dir=Path(out).parent)
+    else:
+        target = out
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            fd = os.open(out, flags, 0o644)
+        except FileExistsError:
+            shown = os.fspath(out)
+            raise errors.error_for(
+                "E-OUTPUT-EXISTS",
+                path=shown if strings._is_show_text(shown) and len(shown) <= 300
+                else errors._rejected_identity(shown)) from None
     try:
-        fd = os.open(out, flags, 0o644)
-    except FileExistsError:
-        shown = os.fspath(out)
-        raise errors.error_for(
-            "E-OUTPUT-EXISTS",
-            path=shown if strings._is_show_text(shown) and len(shown) <= 300
-            else errors._rejected_identity(shown)) from None
-    with io.FileIO(fd, mode="wb", closefd=True) as stream:
-        view = memoryview(data)
-        while view:
-            view = view[stream.write(view):]
-
-
+        with io.FileIO(fd, mode="wb", closefd=True) as stream:
+            view = memoryview(data)
+            while view:
+                written = os.write(stream.fileno(), view)
+                if written <= 0:
+                    raise OSError("snapshot write made no progress")
+                view = view[written:]
+            os.fsync(stream.fileno())
+        if overwrite:
+            os.replace(target, out)
+    except BaseException:
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise

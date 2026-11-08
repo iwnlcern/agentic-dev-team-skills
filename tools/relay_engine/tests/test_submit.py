@@ -2017,6 +2017,13 @@ class TestAdmissionKeyBoundary(Store):
         self.assertEqual(refused, [True, True, True, True],
                          "SubmitContext must refuse unstorable and over-256-byte keys")
 
+def snapshot_outcome(action):
+    try:
+        return ("ok", action())
+    except Exception as exc:
+        return (getattr(exc, "code", type(exc).__name__), exc)
+
+
 class FakeStore:
     """An in-memory evidence store that counts what it was asked to keep."""
 
@@ -2033,7 +2040,7 @@ class FakeStore:
         return self.objects[sha256]
 
     def captured_by(self, sha256):
-        return None
+        return "fixture" if sha256 in self.objects else None
 
 MIB = 1 << 20
 
@@ -2177,6 +2184,55 @@ class TestSnapshots(Snapshots):
         self.assertEqual(self.rows()[1][5],1)
         self.assertEqual(self.store.puts,1)
 
+    def test_non_approve_replies_lock_nothing(self):
+        ref = self.artifact("non-approve", b"same")
+        request = self.request(ref)
+        for data in (self.reply(request, ref, verdict="must-revise"),
+                     draft(parent="#" + str(request.handle), refs=(ref,))):
+            result = snapshot_outcome(lambda: self.submit(data, sender=IMPL))
+            self.assertEqual(result[0], "ok", result)
+            self.assertTrue(all(row[6] is None for row in self.rows()))
+
+    def test_store_dedupe_by_store(self):
+        from relay_engine import queries
+        ref = self.artifact("dedupe", b"same")
+        first_store = self.store
+        self.store = None
+        self.request(ref)
+        self.store = first_store
+        self.request(ref)
+        self.assertEqual(first_store.puts, 1)
+        out = self.folder / "dedupe-copy"
+        result = snapshot_outcome(lambda: queries.write_snapshot(
+            self.conn, 2, out, first_store, project_id=PROJECT))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(out.read_bytes(), b"same")
+        self.request(ref)
+        self.assertEqual(first_store.puts, 1)
+        second_store = FakeStore()
+        self.store = second_store
+        self.request(ref)
+        self.request(ref)
+        self.assertEqual(second_store.puts, 1)
+        result = snapshot_outcome(lambda: queries.write_snapshot(
+            self.conn, 4, out, second_store, True, project_id=PROJECT))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(out.read_bytes(), b"same")
+
+    def test_resolve_keeps_bytes_only_for_snapshots(self):
+        ref = self.artifact("keep", b"bytes")
+        keeps = []
+        original = refs.read_file
+        def read(path, keep):
+            keeps.append(keep)
+            return original(path, keep)
+        with mock.patch.object(refs, "read_file", side_effect=read):
+            result = snapshot_outcome(lambda: self.submit(draft(refs=(ref,))))
+            self.assertEqual(result[0], "ok", result)
+            result = snapshot_outcome(lambda: self.request(ref, kind="PLAN"))
+            self.assertEqual(result[0], "ok", result)
+        self.assertEqual(keeps, [0, submit.SNAPSHOT_BYTES_MAX])
+
 class GitSnapshots(Snapshots, GitStore):
     def repository(self):
         repo=Repo({'d.md':'one\n'});self.addCleanup(repo.close)
@@ -2204,6 +2260,29 @@ class TestGitSnapshots(GitSnapshots):
         reply=self.approve(request,'bivpak@'+commit+':d.md')
         self.assertEqual(len(self.rows()),1)
         self.assertEqual(self.rows()[0][6],reply.relay_id)
+
+    def test_lock_matches_each_snapshot(self):
+        repo = self.repository()
+        one = git(repo.path, "rev-parse", "HEAD")
+        repo.commit_files({"d.md": "two\n"})
+        two = git(repo.path, "rev-parse", "HEAD")
+        a, b = "bivpak@" + one + ":d.md", "bivpak@" + two + ":d.md"
+        result = snapshot_outcome(lambda: self.request(a, b))
+        self.assertEqual(result[0], "ok", result)
+        request = result[1]
+        result = snapshot_outcome(lambda: self.approve(request, a))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual([row[6] for row in self.rows()], [result[1].relay_id, None])
+        result = snapshot_outcome(lambda: self.request(a, b))
+        self.assertEqual(result[0], "ok", result)
+        second = result[1]
+        result = snapshot_outcome(lambda: self.approve(second, a, b))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual([row[6] for row in self.rows()][2:], [result[1].relay_id] * 2)
+        repo.commit_files({"d.md": "three\n"})
+        result = snapshot_outcome(lambda: self.request(a, b))
+        self.assertEqual(result[0], "ok", result)
+        self.refused("E-SNAPSHOT-STALE", self.reply(result[1], "bivpak@main:d.md"), sender=IMPL)
 
 
 BODY_READS = (
@@ -2377,6 +2456,25 @@ class TestReadGuard(Store):
         self.assertIn('RuntimeError',result[1].cause)
         self.assertEqual(observed[-1],"a read guard inside a hook cannot deny more than the hook's own read denials")
         self.assertEqual(self.conn.execute('SELECT count(*) FROM relays').fetchone(),(1,))
+
+        observed.clear()
+        def own_subset(c, a, d, x):
+            with submit.read_guard(c, frozenset({"edges"})):
+                observed.append(c.execute("SELECT count(*) FROM snapshots").fetchone())
+        ctx = replace(self.ctx(), after_admit=own_subset,
+                      after_admit_reads_denied=frozenset({"bodies", "edges"}))
+        result = self.outcome(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(observed, [(0,)])
+        def foreign_superset(c, a, d, x):
+            with submit.read_guard(c, frozenset({"relays"})):
+                pass
+        ctx = replace(self.ctx(), after_admit=foreign_superset,
+                      after_admit_reads_denied=frozenset({"bodies", "edges"}))
+        result = self.outcome(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertEqual(result[0], "EngineError", result)
+        self.assertEqual(result[1].code, "E-ADMISSION-HOOK")
+        self.assertIn("RuntimeError", result[1].cause)
 
     def test_submit_refused_inside_read_guard(self):
         before=self.counts()

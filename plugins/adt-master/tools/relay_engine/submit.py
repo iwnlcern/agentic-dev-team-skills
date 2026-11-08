@@ -249,6 +249,8 @@ def submit(conn, ctx, data):
 # whose changes outlive the submit.
 # This SQL write boundary trusts Python code in the process, including calls to
 # set_authorizer, set_progress_handler and blobopen.
+# Read denials cover cooperating code, not prepared statements already being stepped;
+# schema objects created inside the hook can outlive its read boundary.
 _HOOK_FRAMES = {}
 _READ_GUARDS = {}
 
@@ -567,13 +569,15 @@ def _references(conn, ctx, draft, lines):
     for index, text in enumerate(draft.refs):
         line = lines.of("REF", index)
         try:
-            targets.append((text, _resolve(conn, ctx, refs.parse_ref(text))))
+            targets.append((text, _resolve(
+                conn, ctx, refs.parse_ref(text),
+                keep=SNAPSHOT_BYTES_MAX if draft.kind in SNAPSHOT_KINDS and draft.needs == "review" else 0)))
         except errors.EngineError as error:
             raise _at(line, error)
     return targets
 
 
-def _resolve(conn, ctx, spec):
+def _resolve(conn, ctx, spec, *, keep=0):
     if spec.kind == "relay":
         handle, _, project = spec.relay.partition("@")
         row = _find_relay(conn, project or ctx.sender.project_id, handle)
@@ -593,7 +597,7 @@ def _resolve(conn, ctx, spec):
                     "E-REF-UNRESOLVED", value=header._display(spec.text),
                     reason="this user has no home directory in the password database") from None
             path = os.path.join(home, path[2:])
-        digest, length, kept = refs.read_file(Path(path), SNAPSHOT_BYTES_MAX)
+        digest, length, kept = refs.read_file(Path(path), keep)
         return {"target_type": "path", "target_path": path,
                 "digest_at_submit": digest, "_length": length, "_bytes": kept}
     known = conn.execute("SELECT id FROM repositories WHERE project_id = ? AND name = ?",
@@ -686,12 +690,16 @@ def _lock_plan(conn, sender, draft, lines, parent, targets):
     referenced = [row for row in snapshots if row[1] in named]
     if not referenced:
         raise errors.error_for("E-SNAPSHOT-NO-REF", line=line, handle=request)
-    for _, artifact, digest in referenced:
-        for index, now in named[artifact]:
-            if now != digest:
+    for artifact, citations in named.items():
+        digests = {digest for _, name, digest in referenced if name == artifact}
+        if not digests:
+            continue
+        for index, now in citations:
+            if now not in digests:
                 raise errors.error_for("E-SNAPSHOT-STALE", line=lines.of("REF", index),
                                        value=header._display(artifact), handle=request)
-    return [handle for handle, _, _ in referenced]
+    return [handle for handle, artifact, digest in referenced
+            if any(now == digest for _, now in named[artifact])]
 
 
 def _write_snapshots(conn, store, relay_id, created, edge_ids, plan):
@@ -700,9 +708,7 @@ def _write_snapshots(conn, store, relay_id, created, edge_ids, plan):
     for handle, (index, artifact, sha, length, data) in enumerate(plan, start=last + 1):
         if store is None:
             data = None
-        if data is not None and conn.execute(
-                "SELECT 1 FROM snapshots WHERE content_sha256 = ? AND has_bytes = 1",
-                (sha,)).fetchone() is None:
+        if data is not None and store.captured_by(sha) is None:
             key = store.put(data)
             if key != sha:
                 raise ValueError("the evidence store keyed the bytes as %r, not their sha256"
@@ -893,7 +899,12 @@ class TableDirectory:
 
 @contextmanager
 def read_guard(conn, denied=frozenset({"bodies"})):
-    """Deny named table reads for this block, retaining an outer guard or hook."""
+    """Deny cooperating code's table reads, retaining an outer guard or hook.
+
+    This is not a sandbox: statements prepared before the guard keep their
+    authorization while stepped, blobopen and other in-process Python can
+    read any table, and schema objects created inside a guard outlive it.
+    """
     _validate_read_denials(denied)
     frame = _HOOK_FRAMES.get(conn)
     if frame is not None:
