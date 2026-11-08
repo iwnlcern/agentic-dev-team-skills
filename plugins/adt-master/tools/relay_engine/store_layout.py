@@ -1,4 +1,5 @@
 """Store paths and guarded per-project opening (DD-v3-store slice 1)."""
+from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import sys
@@ -14,6 +15,22 @@ class LayoutFault(Exception):
     def __init__(self, cause):
         self.cause = cause
         super().__init__(cause)
+
+
+class RouteUnavailable(Exception):
+    """A route is absent or its durable creation has not completed."""
+
+    def __init__(self, cause):
+        self.cause = cause
+        super().__init__(cause)
+
+
+@dataclass(frozen=True)
+class ProjectRoute:
+    project_id: str
+    name: str
+    state: str
+    ledger_path: Path
 
 
 def _canonical_id(value):
@@ -138,3 +155,52 @@ def open_catalogue(root, *, kind: str | None = None):
         conn.close()
         raise
     return conn
+
+
+def route(catalogue_conn, *, project_id: str | None = None, name: str | None = None):
+    """Resolve one active route using the catalogue's authoritative name."""
+    if (project_id is None) == (name is None):
+        raise ValueError('supply exactly one route selector')
+    if project_id is not None:
+        row = _row(catalogue_conn, 'SELECT project_id,name,state FROM project_routes '
+                   'WHERE project_id=?', (_canonical_id(project_id),))
+    else:
+        row = _row(catalogue_conn, 'SELECT project_id,name,state FROM project_routes '
+                   'WHERE name=?', (name,))
+    if row is None:
+        raise RouteUnavailable('not-found')
+    if row[2] == 'creating':
+        raise RouteUnavailable('creating')
+    cursor = catalogue_conn.execute('PRAGMA database_list')
+    try:
+        filename = next(path for _, database, path in cursor if database == 'main')
+    finally:
+        cursor.close()
+    if not filename:
+        raise ValueError('route requires a file-backed catalogue')
+    return ProjectRoute(*row, ledger_path(Path(filename).parent, row[0]))
+
+
+def route_key(catalogue_conn, key_id: str):
+    """Locate a key's ledger; this does not authenticate its occupant."""
+    row = _row(catalogue_conn, 'SELECT project_id FROM key_routes WHERE key_id=?',
+               (_canonical_id(key_id),))
+    return row[0] if row is not None else None
+
+
+def reserve_project(catalogue_conn, project_id: str, name: str, now_ms: int) -> None:
+    """Creation step 1, in the caller's catalogue transaction."""
+    catalogue_conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+                           (_canonical_id(project_id), name, 'creating', now_ms)).close()
+
+
+def activate_project(catalogue_conn, project_id: str) -> None:
+    """Creation step 3, after the ledger step has committed."""
+    catalogue_conn.execute("UPDATE project_routes SET state='active' WHERE project_id=?",
+                           (_canonical_id(project_id),)).close()
+
+
+def add_key_route(catalogue_conn, key_id: str, project_id: str, now_ms: int) -> None:
+    """Insert an immutable locator before the caller provisions the occupant."""
+    catalogue_conn.execute('INSERT INTO key_routes VALUES (?, ?, ?)',
+                           (_canonical_id(key_id), _canonical_id(project_id), now_ms)).close()
