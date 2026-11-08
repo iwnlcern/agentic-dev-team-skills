@@ -134,7 +134,7 @@ def open_catalogue(root, *, kind: str | None = None):
         raise ValueError('unknown catalogue kind')
     root = Path(root)
     root.mkdir(mode=0o700, exist_ok=True)
-    conn = sqlite3.connect(root / 'catalogue.sqlite3')
+    conn = sqlite3.connect(root / 'machine.sqlite3')
     try:
         _pragma(conn, 'PRAGMA foreign_keys=ON')
         catalogue.init_catalogue(conn)

@@ -157,6 +157,17 @@ class TestStoreLayout(unittest.TestCase):
         for path in [self.root, self.root / 'projects', self.root / 'projects' / P]:
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
 
+    def test_openers_create_only_declared_entries(self):
+        self.catalogue()
+        self.opened()
+        actual = {path.relative_to(self.root).as_posix() for path in self.root.rglob('*')}
+        ledger = 'projects/' + P + '/ledger.sqlite3'
+        required = {'machine.sqlite3', 'projects', 'projects/' + P, ledger}
+        sqlite_side_files = {database + suffix for database in ['machine.sqlite3', ledger]
+                             for suffix in ['-wal', '-shm', '-journal']}
+        self.assertEqual(actual - sqlite_side_files, required)
+        self.assertLessEqual(actual, required | sqlite_side_files)
+
     def catalogue(self):
         conn = store_layout.open_catalogue(self.root)
         self.addCleanup(conn.close)
@@ -363,7 +374,7 @@ class TestDeclaredLocks(unittest.TestCase):
                 ledger.close()
 
     def connect(self, name, timeout=2):
-        path = (self.root / 'catalogue.sqlite3' if name == 'catalogue'
+        path = (self.root / 'machine.sqlite3' if name == 'catalogue'
                 else store_layout.ledger_path(self.root, name))
         conn = sqlite3.connect(path, timeout=timeout)
         conn.execute('PRAGMA foreign_keys=ON').close()

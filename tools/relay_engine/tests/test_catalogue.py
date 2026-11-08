@@ -47,6 +47,14 @@ class TestCatalogue(unittest.TestCase):
         self.assertEqual(self.identity(self.opened(production)), rows)
         self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone(), ('ok',))
 
+    def test_catalogue_file_is_machine_sqlite3(self):
+        self.opened()
+        entries = {path.name for path in self.root.iterdir()}
+        self.assertIn('machine.sqlite3', entries)
+        self.assertNotIn('catalogue.sqlite3', entries)
+        self.assertLessEqual(entries, {'machine.sqlite3', 'machine.sqlite3-wal',
+                                      'machine.sqlite3-shm', 'machine.sqlite3-journal'})
+
     def test_bound_call_never_resolves_default(self):
         with mock.patch.object(store_layout, 'production_root', side_effect=AssertionError) as resolver:
             for index, kwargs in enumerate([{}, {'kind': 'isolated'}]):
