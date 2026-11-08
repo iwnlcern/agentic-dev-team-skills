@@ -260,7 +260,11 @@ def _run_hook(conn, ctx, admitted, draft):
         try:
             ctx.after_admit(conn, admitted, draft, ctx)
         except errors.EngineError as exc:
-            failure = exc
+            if _transaction_state(conn) == "closed":
+                failure = sqlite3.ProgrammingError(
+                    "the admission hook closed the store connection")
+            else:
+                failure = exc
         except Exception as exc:
             state = _transaction_state(conn)
             if state == "closed":

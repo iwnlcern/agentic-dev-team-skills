@@ -1884,6 +1884,54 @@ class TestAdmissionHookAtomicity(Store):
             self.assert_file_free(conn)
 
 
+    def test_hook_closing_connection_engine_error_discloses_nothing(self):
+        private_message = "PRIVATE-CLOSED-ENGINEERROR-PAYLOAD-467"
+        with tempfile.TemporaryDirectory() as name, mock.patch.dict(
+                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+            for route in ("raised", "system-filing"):
+                with self.subTest(route=route):
+                    path = Path(name) / (route + ".db")
+                    conn = self.file_store(path)
+                    before = self.file_state(path)
+                    def hook(c, a, d, x):
+                        c.execute("INSERT INTO fixture_owned VALUES (?,?)",
+                                  ("engine-error", a.relay_id))
+                        if route == "raised":
+                            c.close()
+                            try:
+                                raise RuntimeError(private_message)
+                            except RuntimeError:
+                                raise errors.error_for("E-SUBMISSION-KEY-REUSED")
+                        else:
+                            try:
+                                submit.file_system_relay(
+                                    c, x, ("invalid " + private_message + "\n").encode())
+                            except errors.EngineError:
+                                c.close()
+                                raise
+                    outcome = None
+                    try:
+                        outcome = submit.submit(conn, replace(self.ctx(), after_admit=hook,
+                                      after_admit_writes=frozenset({"fixture_owned"})), draft())
+                    except BaseException as caught:
+                        outcome = caught
+                    self.assertIsInstance(outcome, sqlite3.ProgrammingError)
+                    self.assertEqual(str(outcome), "the admission hook closed the store connection")
+                    self.assertIsNone(outcome.__cause__)
+                    self.assertIsNone(outcome.__context__)
+                    pending, seen = [outcome], set()
+                    while pending:
+                        error = pending.pop()
+                        if error is None or id(error) in seen:
+                            continue
+                        seen.add(id(error))
+                        self.assertNotIn(private_message, str(error))
+                        pending.extend((error.__cause__, error.__context__))
+                    self.assertNotIn(private_message, "".join(traceback.format_exception(outcome)))
+                    self.assertEqual(self.file_state(path), before)
+                    self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+
 class TestAdmissionKeyBoundary(Store):
     """Breaks: accepting a key SQLite cannot store or outside the UTF-8 byte bound."""
 
