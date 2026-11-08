@@ -1076,5 +1076,34 @@ class TestQueryCost(unittest.TestCase):
         self.assertEqual(record[50000]["flags"]["rows"], 301)  # 300 unopened, 1 idle (newest)
 
 
+
+class TestLockedSnapshots(submit_tests.Snapshots):
+    def locked(self, ref, project='p'):
+        return queries.locked_snapshot(self.conn,ref[5:],project_id=project)
+
+    def test_locked_snapshot(self):
+        ref=self.artifact('a',b'x');self.assertIsNone(self.locked(ref))
+        first=self.request(ref);self.assertIsNone(self.locked(ref));self.approve(first,ref)
+        second=self.request(ref);reply=self.approve(second,ref);self.request(ref)
+        row=self.locked(ref);self.assertIsNotNone(row)
+        self.assertEqual((row.relay_id,row.locked_by),(second.relay_id,reply.relay_id))
+        self.assertTrue(row.has_bytes)
+
+    def test_locked_snapshot_latest_lock_wins(self):
+        ref=self.artifact('a',b'x');a=self.request(ref)
+        self.artifact('a',b'y');b=self.request(ref);self.approve(b,ref)
+        self.artifact('a',b'x');reply=self.approve(a,ref)
+        row=self.locked(ref);self.assertIsNotNone(row)
+        self.assertEqual((row.relay_id,row.locked_by),(a.relay_id,reply.relay_id))
+
+    def test_locked_snapshot_project_scoped(self):
+        ref=self.artifact('a',b'x')
+        request=submit.submit(self.conn,self.ctx(FOREIGN,git_state=None),draft(kind='PLAN',needs='review',to=FOREIGN.address,refs=(ref,)))
+        reply=submit.submit(self.conn,self.ctx(FOREIGN,git_state=None),draft(kind='PLAN-REVIEW',verdict='approve',parent='#'+str(request.handle),to=FOREIGN.address,refs=(ref,)))
+        self.assertIsNone(self.locked(ref))
+        self.assertEqual(self.locked(ref,'q').locked_by,reply.relay_id)
+        p=self.request(ref);r=self.approve(p,ref)
+        self.assertEqual(self.locked(ref).locked_by,r.relay_id)
+
 if __name__ == "__main__":
     unittest.main()

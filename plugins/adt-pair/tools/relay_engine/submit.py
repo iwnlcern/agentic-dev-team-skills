@@ -27,6 +27,9 @@ from relay_engine import jcs
 from relay_engine import refs
 from relay_engine import schema
 
+SNAPSHOT_KINDS = frozenset({"DESIGN", "PLAN"})
+SNAPSHOT_BYTES_MAX = 1 << 20
+
 SYSTEM = "system"  # the reserved sender of engine-written relays
 ORCHESTRATOR_ROLE = "orchestrator-planner"
 OPERATOR_SEAT_ID = "operator"  # J2's machine-wide special: one queue, no team seat
@@ -98,6 +101,19 @@ def _check_git_state(state):
         raise ValueError("git_state.branch is a non-empty string or None")
 
 
+class EvidenceStore(Protocol):
+    """Platform's content-addressed evidence store (DD § 17, amendment5)."""
+
+    def put(self, data: bytes) -> str:
+        """Keep bytes under their sha256 and return that key."""
+
+    def get(self, sha256: str) -> bytes:
+        """Return the bytes retained under sha256."""
+
+    def captured_by(self, sha256: str) -> str | None:
+        """Return host-observed, seat-supplied, or None for an absent record."""
+
+
 @dataclass(frozen=True)
 class SubmitContext:
     sender: SeatRef
@@ -107,6 +123,7 @@ class SubmitContext:
     submission_key: str
     after_admit: Callable[[sqlite3.Connection, "Admitted", header.Draft, "SubmitContext"], None] | None = None
     after_admit_writes: frozenset[str] = frozenset()
+    store: EvidenceStore | None = None
 
     def __post_init__(self):
         _check_git_state(self.git_state)
@@ -369,6 +386,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
     parent = _parent(conn, sender, draft, lines)
     targets = _references(conn, ctx, draft, lines)
     transitions = _transitions(draft, lines)
+    snapshot_plan = _snapshot_plan(draft, lines, targets)
     if not _system:
         conn.execute("BEGIN IMMEDIATE")
     try:
@@ -379,6 +397,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
             conn.execute("ROLLBACK")
             return replay
         _check_findings(conn, sender, transitions)
+        locks = _lock_plan(conn, sender, draft, lines, parent, targets)
         handle, created, relay_id = _identity(conn, sender.project_id, now)
         bundle_id = (parent[1] if parent is not None
                      else _bundle(conn, sender, draft.bundle, created))
@@ -407,6 +426,10 @@ def _admit(conn, ctx, data, now, *, _system=False):
                 " target_relay_id) VALUES (?, ?, 1, 'parent', 'relay', ?, ?)",
                 (new_uuid7(created), relay_id, draft.parent, parent[0]))
         edge_ids = _write_references(conn, relay_id, created, targets)
+        _write_snapshots(conn, ctx.store, relay_id, created, edge_ids, snapshot_plan)
+        conn.executemany("UPDATE snapshots SET locked_by = ?, locked_at = ?"
+                         " WHERE handle = ? AND locked_by IS NULL",
+                         [(relay_id, created, h) for h in locks])
         _write_findings(conn, sender, draft, relay_id, bundle_id, edge_ids, created)
         _write_transitions(conn, sender, transitions, relay_id, created)
         if parent is not None:
@@ -554,8 +577,9 @@ def _resolve(conn, ctx, spec):
                     "E-REF-UNRESOLVED", value=header._display(spec.text),
                     reason="this user has no home directory in the password database") from None
             path = os.path.join(home, path[2:])
+        digest, length, kept = refs.read_file(Path(path), SNAPSHOT_BYTES_MAX)
         return {"target_type": "path", "target_path": path,
-                "digest_at_submit": refs.file_digest(Path(path))}
+                "digest_at_submit": digest, "_length": length, "_bytes": kept}
     known = conn.execute("SELECT id FROM repositories WHERE project_id = ? AND name = ?",
                          (ctx.sender.project_id, spec.repo)).fetchone()
     checkout = None if known is None else ctx.directory.checkout(spec.repo)
@@ -568,7 +592,7 @@ def _resolve(conn, ctx, spec):
             "target_repository_id": known[0], "target_rev": spec.rev,
             "target_commit": resolved.commit, "target_path": spec.path,
             "target_line_start": spec.line_start, "target_line_end": spec.line_end,
-            "digest_at_submit": resolved.blob_sha}
+            "digest_at_submit": resolved.blob_sha, "_checkout": checkout}
 
 
 _EDGE_COLUMNS = ("target_type", "target_relay_id", "target_repository_name",
@@ -589,6 +613,89 @@ def _write_references(conn, relay_id, created, targets):
              *[target.get(column) for column in _EDGE_COLUMNS]))
         edge_ids.append(edge_id)
     return edge_ids
+
+
+def _artifact(target):
+    """The artifact a file or Git target names, as snapshots key it."""
+    if target["target_type"] == "path":
+        return target["target_path"]
+    if target["target_type"] == "git":
+        return "%s:%s" % (target["target_repository_id"], target["target_path"])
+    return None
+
+
+def _snapshot_plan(draft, lines, targets):
+    """(ref index, artifact, sha256, length, bytes or None) for each file or
+    Git target of a review request (DD § 17)."""
+    if draft.kind not in SNAPSHOT_KINDS or draft.needs != "review":
+        return []
+    plan = []
+    for index, (_, target) in enumerate(targets):
+        artifact = _artifact(target)
+        if artifact is None:
+            continue
+        if target["target_type"] == "path":
+            plan.append((index, artifact, target["digest_at_submit"], target["_length"],
+                         target["_bytes"]))
+            continue
+        try:
+            blob = refs.read_blob(target["_checkout"], target["digest_at_submit"])
+        except errors.EngineError as error:
+            raise _at(lines.of("REF", index), error)
+        plan.append((index, artifact, hashlib.sha256(blob).hexdigest(), len(blob), None))
+    return plan
+
+
+def _lock_plan(conn, sender, draft, lines, parent, targets):
+    """Handles of the request's snapshots an approve locks; an approve from a
+    non-TO seat, naming none of them, or naming a changed one is refused."""
+    if draft.verdict != "approve" or parent is None:
+        return []
+    snapshots = conn.execute(
+        "SELECT s.handle, s.artifact, e.digest_at_submit FROM snapshots s"
+        " JOIN edges e ON e.id = s.edge_id WHERE s.relay_id = ? ORDER BY s.handle",
+        (parent[0],)).fetchall()
+    if not snapshots:
+        return []
+    request = conn.execute("SELECT handle FROM relays WHERE id = ?", (parent[0],)).fetchone()[0]
+    line = lines.of("VERDICT")
+    if conn.execute("SELECT 1 FROM recipients WHERE relay_id = ? AND coalesce(seat_id, special) = ? AND role = 'to'",
+                    (parent[0], sender.seat_id)).fetchone() is None:
+        raise errors.error_for("E-SNAPSHOT-NOT-TO", line=line, handle=request)
+    named = {}
+    for index, (_, target) in enumerate(targets):
+        artifact = _artifact(target)
+        if artifact is not None:
+            named.setdefault(artifact, []).append((index, target["digest_at_submit"]))
+    referenced = [row for row in snapshots if row[1] in named]
+    if not referenced:
+        raise errors.error_for("E-SNAPSHOT-NO-REF", line=line, handle=request)
+    for _, artifact, digest in referenced:
+        for index, now in named[artifact]:
+            if now != digest:
+                raise errors.error_for("E-SNAPSHOT-STALE", line=lines.of("REF", index),
+                                       value=header._display(artifact), handle=request)
+    return [handle for handle, _, _ in referenced]
+
+
+def _write_snapshots(conn, store, relay_id, created, edge_ids, plan):
+    """Snapshot rows, and their bytes in the evidence store once per digest."""
+    last = conn.execute("SELECT coalesce(max(handle), 0) FROM snapshots").fetchone()[0]
+    for handle, (index, artifact, sha, length, data) in enumerate(plan, start=last + 1):
+        if store is None:
+            data = None
+        if data is not None and conn.execute(
+                "SELECT 1 FROM snapshots WHERE content_sha256 = ? AND has_bytes = 1",
+                (sha,)).fetchone() is None:
+            key = store.put(data)
+            if key != sha:
+                raise ValueError("the evidence store keyed the bytes as %r, not their sha256"
+                                 % (key,))
+        conn.execute(
+            "INSERT INTO snapshots (id, handle, relay_id, edge_id, artifact, content_sha256,"
+            " bytes_len, has_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_uuid7(created), handle, relay_id, edge_ids[index], artifact, sha, length,
+             int(data is not None)))
 
 
 def _identity(conn, project_id, now):

@@ -693,12 +693,12 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
             seeded.commit()
             seeded.close()
             inside, release, result = threading.Event(), threading.Event(), {}
-            digest = refs.file_digest
+            read_file = refs.read_file
 
-            def slow(target):
+            def slow(target, keep):
                 inside.set()
                 release.wait(30)
-                return digest(target)
+                return read_file(target, keep)
 
             def first():
                 conn = submit.open_store(path)
@@ -709,7 +709,7 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
                 finally:
                     conn.close()
 
-            with mock.patch.object(refs, "file_digest", slow):
+            with mock.patch.object(refs, "read_file", slow):
                 thread = threading.Thread(target=first)
                 thread.start()
                 try:
@@ -2014,6 +2014,189 @@ class TestAdmissionKeyBoundary(Store):
             self.assertEqual(self.counts(), before)
         self.assertEqual(refused, [True, True, True, True],
                          "SubmitContext must refuse unstorable and over-256-byte keys")
+
+class FakeStore:
+    """An in-memory evidence store that counts what it was asked to keep."""
+
+    def __init__(self):
+        self.objects, self.puts = {}, 0
+
+    def put(self, data):
+        self.puts += 1
+        key = hashlib.sha256(data).hexdigest()
+        self.objects[key] = bytes(data)
+        return key
+
+    def get(self, sha256):
+        return self.objects[sha256]
+
+    def captured_by(self, sha256):
+        return None
+
+MIB = 1 << 20
+
+class Snapshots(Store):
+    def counts(self):
+        return dict(super().counts(), snapshots=self.conn.execute("SELECT count(*) FROM snapshots").fetchone()[0])
+
+    """DD § 17: what each review saw, and which copy an approve locked."""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(os.path.realpath(folder.name))
+        self.store = FakeStore()
+
+    def ctx(self, *args, **kwargs):
+        ctx = super().ctx(*args, **kwargs)
+        return replace(ctx, store=self.store) if hasattr(ctx, "store") else ctx
+
+    def artifact(self, name, data):
+        path = self.folder / name
+        path.write_bytes(data)
+        return "file:" + str(path)
+
+    def request(self, *refs_, kind="DESIGN", cc=None):
+        result = self.submit(draft(kind=kind, needs="review", to="v3-engine.implementer", cc=cc,
+                                   refs=refs_))
+        self.assertIn("snapshots", {name for name, in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")},
+            "review requests must persist their snapshot rows")
+        return result
+
+    def approve(self, request, *refs_, verdict="approve", sender=IMPL):
+        return self.submit(self.reply(request, *refs_, verdict=verdict), sender=sender)
+
+    def reply(self, request, *refs_, verdict="approve"):
+        return draft(kind="DESIGN-REVIEW", verdict=verdict, parent="#%d" % request.handle,
+                     to="v3-engine.planner", refs=refs_)
+
+    def rows(self):
+        return self.conn.execute(
+            "SELECT handle, relay_id, artifact, content_sha256, bytes_len, has_bytes, locked_by"
+            " FROM snapshots ORDER BY handle").fetchall()
+
+
+class TestSnapshots(Snapshots):
+    def test_snapshot_on_review_request(self):
+        ref = self.artifact('design.md', b'# design\nline\n')
+        first = self.request(ref, kind='PLAN')
+        sha = hashlib.sha256(b'# design\nline\n').hexdigest()
+        self.assertEqual(self.rows(), [(1, first.relay_id, ref[5:], sha, 14, 1, None)])
+        self.assertEqual(self.store.get(sha), b'# design\nline\n')
+        self.request(ref, kind='DESIGN')
+        self.assertEqual(len(self.rows()), 2)
+        self.assertEqual(self.store.puts, 1)
+        for kind, needs in [('SITREP','none'), ('DESIGN','act'), ('AUDIT','review')]:
+            self.submit(draft(kind=kind, needs=needs, refs=(ref,)))
+            self.assertEqual(len(self.rows()), 2)
+
+    def test_lock_marks_latest_approved(self):
+        ref = self.artifact('d.md', b'v1\n')
+        request = self.request(ref, cc='v3-other.planner')
+        self.refused('E-SNAPSHOT-NOT-TO', self.reply(request, ref), sender=OTHER)
+        self.refused('E-SNAPSHOT-NO-REF', self.reply(request), sender=IMPL)
+        Path(ref[5:]).write_bytes(b'v2\n')
+        self.refused('E-SNAPSHOT-STALE', self.reply(request, ref), sender=IMPL)
+        Path(ref[5:]).write_bytes(b'v1\n')
+        reply = self.approve(request, ref)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0][6], reply.relay_id)
+        self.assertEqual(self.conn.execute('SELECT locked_at FROM snapshots').fetchone(), (reply.created_at_ms,))
+        self.approve(request, ref)
+        self.assertEqual(self.rows()[0][6], reply.relay_id)
+
+    def test_lock_per_artifact(self):
+        a = self.artifact('a.md', b'a\n'); b = self.artifact('b.md', b'b\n')
+        request = self.request(a,b)
+        reply = self.approve(request,a)
+        self.assertEqual([r[6] for r in self.rows()], [reply.relay_id,None])
+        second = self.request(a,b)
+        Path(b[5:]).write_bytes(b'changed')
+        self.refused('E-SNAPSHOT-STALE', self.reply(second,a,b), sender=IMPL)
+        self.assertEqual([r[6] for r in self.rows()], [reply.relay_id,None,None,None])
+
+    def test_hook_sees_own_lock(self):
+        from relay_engine import queries
+        ref = self.artifact('a.md', b'a\n')
+        request = self.request(ref)
+        seen = []
+        def hook(conn, admitted, data, ctx):
+            row = queries.locked_snapshot(conn, ref[5:], project_id=PROJECT)
+            seen.append(row)
+            self.assertIsNotNone(row)
+            self.assertEqual(row.locked_by, admitted.relay_id)
+        try:
+            reply = submit.submit(self.conn, replace(self.ctx(IMPL), after_admit=hook), self.reply(request,ref))
+            outcome = reply.relay_id
+        except errors.EngineError as exc:
+            outcome = exc.code
+        self.assertNotEqual(outcome, 'E-ADMISSION-HOOK')
+        self.assertEqual(seen[0].locked_by, outcome)
+        second = self.request(ref)
+        before = self.conn.execute('SELECT * FROM snapshots').fetchall()
+        def failing(conn, admitted, data, ctx):
+            hook(conn,admitted,data,ctx)
+            raise RuntimeError('fixture')
+        with self.assertRaises(errors.EngineError) as caught:
+            submit.submit(self.conn, replace(self.ctx(IMPL), after_admit=failing), self.reply(second,ref))
+        self.assertEqual(caught.exception.code,'E-ADMISSION-HOOK')
+        self.assertEqual(self.conn.execute('SELECT * FROM snapshots').fetchall(), before)
+        self.assertIsNone(self.conn.execute('SELECT id FROM relays WHERE id=?',(seen[-1].locked_by,)).fetchone())
+
+    def test_replayed_approve_locks_nothing(self):
+        ref=self.artifact('a.md',b'a'); request=self.request(ref); calls=[]
+        ctx=replace(self.ctx(IMPL),after_admit=lambda *a:calls.append(1))
+        data=self.reply(request,ref); reply=submit.submit(self.conn,ctx,data)
+        self.assertEqual(len(self.rows()),1)
+        self.assertEqual(self.rows()[0][6],reply.relay_id)
+        before=self.conn.execute('SELECT * FROM snapshots').fetchall()
+        self.assertEqual(submit.submit(self.conn,ctx,data),reply)
+        self.assertEqual(self.conn.execute('SELECT * FROM snapshots').fetchall(),before)
+        self.assertEqual(calls,[1])
+
+    def test_snapshot_without_store_is_digest_only(self):
+        ref=self.artifact('a.md',b'a'); stored=self.request(ref); self.approve(stored,ref)
+        self.store=None
+        bare=self.request(ref); self.approve(bare,ref)
+        self.assertEqual(len(self.rows()),2)
+        self.assertEqual([r[3] for r in self.rows()],[hashlib.sha256(b'a').hexdigest()]*2)
+        self.assertEqual([r[5] for r in self.rows()],[1,0])
+        self.assertTrue(all(r[6] for r in self.rows()))
+
+    def test_large_file_snapshot_digest_only(self):
+        big=b'x'*(MIB+1); ref=self.artifact('big',big)
+        self.request(ref)
+        self.assertEqual(len(self.rows()),1)
+        self.assertEqual(self.rows()[0][3:6],(hashlib.sha256(big).hexdigest(),len(big),0))
+        self.assertEqual(self.store.puts,0)
+        self.request(self.artifact('exact',b'y'*MIB))
+        self.assertEqual(self.rows()[1][5],1)
+        self.assertEqual(self.store.puts,1)
+
+class GitSnapshots(Snapshots, GitStore):
+    def repository(self):
+        repo=Repo({'d.md':'one\n'});self.addCleanup(repo.close)
+        self.directory.checkouts['bivpak']=repo.path
+        return repo
+
+class TestGitSnapshots(GitSnapshots):
+    def test_git_snapshot_identity(self):
+        repo=self.repository(); request=self.request('bivpak@main:d.md')
+        self.assertEqual(self.rows(),[(1,request.relay_id,'repo-1:d.md',hashlib.sha256(b'one\n').hexdigest(),4,0,None)])
+        blob=git(repo.path,'rev-parse','main:d.md')
+        self.assertNotEqual(self.rows()[0][3],blob)
+        self.assertEqual(self.store.puts,0)
+
+    def test_git_lock_and_changed_blob(self):
+        repo=self.repository(); request=self.request('bivpak@main:d.md')
+        commit=git(repo.path,'rev-parse','HEAD')
+        repo.commit_files({'d.md':'two\n'})
+        self.refused('E-SNAPSHOT-STALE', self.reply(request,'bivpak@main:d.md'),sender=IMPL)
+        reply=self.approve(request,'bivpak@'+commit+':d.md')
+        self.assertEqual(len(self.rows()),1)
+        self.assertEqual(self.rows()[0][6],reply.relay_id)
 
 if __name__ == "__main__":
     unittest.main()

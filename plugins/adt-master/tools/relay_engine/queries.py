@@ -94,6 +94,21 @@ class BundleMetrics:
 
 
 @dataclass(frozen=True)
+class SnapshotRow:
+    handle: int
+    relay_id: str
+    edge_id: str
+    artifact: str
+    content_sha256: str
+    bytes_len: int
+    has_bytes: bool
+    locked_by: str | None
+    locked_at: int | None
+
+
+
+
+@dataclass(frozen=True)
 class ReadResult:
     body: bytes
     envelope: dict
@@ -559,3 +574,21 @@ def loop_flags(conn, bundle_id, checkout):
 def refusal_counts(conn, project_id):
     return dict(conn.execute("SELECT code, count(*) FROM refusals WHERE project_id = ?"
                              " GROUP BY code ORDER BY code", (project_id,)).fetchall())
+
+
+_SNAPSHOT_COLUMNS = ("handle, relay_id, edge_id, artifact, content_sha256, bytes_len, has_bytes,"
+                     " locked_by, locked_at")
+
+
+def _snapshot_row(row):
+    return SnapshotRow(*row[:6], bool(row[6]), *row[7:])
+
+
+def locked_snapshot(conn, artifact, *, project_id):
+    """Latest approval lock of the exact artifact in this project."""
+    columns = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
+    row = conn.execute(
+        "SELECT " + columns + " FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+        " WHERE s.artifact = ? AND r.project_id = ? AND s.locked_by IS NOT NULL"
+        " ORDER BY s.locked_at DESC, s.handle DESC LIMIT 1", (artifact, project_id)).fetchone()
+    return None if row is None else _snapshot_row(row)
