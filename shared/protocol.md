@@ -93,7 +93,7 @@ Only an addressed grant authorizes action; visibility and notifications do not.
 For apparently misrouted work, ask its sender rather than acting.
 Copy only seats whose next decision depends on the relay.
 Set `HUMAN_GATE_REQUIRED` anew for the requested transition: yes only for a fresh operator decision, with its ask; otherwise no with a reason.
-For delivery, use `relay connect --key <key-path>` with the literal run root; DD-v3-adapter § 4.1–4.2 governs the consequence: at most 20 TO relays ring at connect, then `relay connect --list` shows the remaining count; CC never rings.
+For delivery, use `adt connect --key <key-path> [--switch]`; DD-v3-adapter § 4.1–4.2 governs the consequence: at most 20 TO relays ring at connect, then `adt connect --list` shows the remaining count; CC never rings.
 If a relay cannot be read, report unavailable-file and do not act on it.
 An arrival is E0; read the filed bytes before interpreting authority.
 

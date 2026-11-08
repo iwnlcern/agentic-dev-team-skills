@@ -41,8 +41,8 @@ Do not proxy-author another seat's relay: `FROM` must be your own address.
 Do not spawn your own reviewer for orchestration or pair-review authority; route to the addressed reviewer seat.
 Use qualified role nouns (`pair Planner`, `Implementer`, `Orchestrator Planner`, `Orchestrator Reviewer`) when ambiguity could change who acts.
 
-**Delivery.** For v3, connect with `relay connect --key <key-path> --root <run-root>` using your existing key (DD-v3-adapter § 4.1–4.2).
-At most 20 `TO` relays ring at connect, then `relay connect --list` shows the remainder; CC never rings.
+**Delivery.** For v3, connect with `adt connect --key <key-path> [--switch]` using your existing key (DD-v3-adapter § 4.1–4.2).
+At most 20 `TO` relays ring at connect, then `adt connect --list` shows the remainder; CC never rings.
 Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
 Keep the terminal handoff pointer as the fallback.
 

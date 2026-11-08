@@ -46,8 +46,8 @@ Urgency, “just fix it now,” “ship today,” “skip review,” or “it is
 Out-of-phase implementation artifacts are not accepted by this workflow unless the operator explicitly reassigns/rebases the run after dispatch.
 For the managed-root direct-message rule, see `protocol.md` § Authority check before acting.
 
-**Delivery.** For v3, connect with `relay connect --key <key-path> --root <run-root>` using your existing key (DD-v3-adapter § 4.1–4.2).
-At most 20 `TO` relays ring at connect, then `relay connect --list` shows the remainder; CC never rings.
+**Delivery.** For v3, connect with `adt connect --key <key-path> [--switch]` using your existing key (DD-v3-adapter § 4.1–4.2).
+At most 20 `TO` relays ring at connect, then `adt connect --list` shows the remainder; CC never rings.
 Read the filed bytes before acting; follow `protocol.md` § Work in progress and § Addressing and delivery.
 Keep the terminal handoff pointer as the fallback.
 

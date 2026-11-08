@@ -91,7 +91,7 @@ Do not assume `.relays/` is shared across worktrees or sessions. If a receiver c
 
 For a standalone pair run, the operator boots seats directly; do not create a `boot/` subtree.
 Operator quickstart: open one session per seat and load its role skill; boot the standalone Planner and Implementer sessions directly, or for an orchestrator-team run boot the Orchestrator Planner and trigger `init`.
-For the v3 delivery contract, connect with `relay connect --key <key-path> --root <run-root>` (DD-v3-adapter § 4.1–4.2).
+For the v3 delivery contract, connect with `adt connect --key <key-path> [--switch]` (DD-v3-adapter § 4.1–4.2).
 Only `TO` rings; carry the handoff pointer to seats using the fallback.
 Use the same relay tree, naming conventions, and `INDEX.md` discipline otherwise.
 The artifacts are never optional; who writes them depends on the root's mode.

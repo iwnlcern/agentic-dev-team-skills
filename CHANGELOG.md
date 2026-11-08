@@ -10,7 +10,7 @@ Kit 3.0 is a large change, not a patch; its migration steps will be listed here 
 ### Changed
 
 - The v3 rulebook is under 15 KB, backed by a sentence census; edit one working design or plan and retain evidence on disk.
-- v3 delivery uses `relay connect` with an existing seat key; only `TO` rings, at most 20 on connect, then `relay connect --list` shows the remainder.
+- v3 delivery uses `adt connect` with an existing seat key; only `TO` rings, at most 20 on connect, then `adt connect --list` shows the remainder.
   Filing no longer binds or switches a seat; the old cross-root watcher gap is retired by the connect contract (DD-v3-adapter § 4.1–4.2).
 - Use `relay lint` before filing and `tools/TESTING.md` for test practice.
 - At the release head, rewrite the moved-root warning in `sprint-doc-setup` against the v3 store; its measured 2.9.7 statement remains pinned until then.
