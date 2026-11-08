@@ -1499,6 +1499,67 @@ class TestAdmissionHook(Store):
         self.assertEqual(outcome.cause_key, "error-admission-hook-ended-transaction-cause")
         self.assertNotIn("kind", outcome.params)
 
+    def test_hook_ended_transaction_guard_uncaught(self):
+        self.require_hook()
+        self.canaries()
+        self.conn.execute("INSERT INTO fixture_owned VALUES ('duplicate',NULL)")
+        self.conn.commit()
+        tables = (*TABLES, "fixture_owned", "fixture_other")
+        before = {table: self.conn.execute("SELECT * FROM " + table).fetchall()
+                  for table in tables}
+        def hook(c, a, d, x):
+            c.execute("INSERT OR ROLLBACK INTO fixture_owned VALUES ('duplicate',?)",
+                      (a.relay_id,))
+        try:
+            outcome = submit.submit(
+                self.conn, self.hook_ctx(hook, frozenset({"fixture_owned"})), draft())
+        except BaseException as error:
+            outcome = error
+        self.assertIsInstance(outcome, errors.EngineError)
+        self.assertEqual(outcome.code, "E-ADMISSION-HOOK")
+        self.assertEqual(outcome.cause_key, "error-admission-hook-ended-transaction-cause")
+        self.assertNotIn("kind", outcome.params)
+        for table, rows in before.items():
+            after = self.conn.execute("SELECT * FROM " + table).fetchall()
+            if table == "refusals":
+                self.assertEqual(len(after), len(rows) + 1)
+                self.assertEqual(after[:-1], rows)
+            else:
+                self.assertEqual(after, rows, table)
+        self.assertEqual(self.conn.execute(
+            "SELECT code FROM refusals ORDER BY id DESC LIMIT 1").fetchone(),
+            ("E-ADMISSION-HOOK",))
+        self.assert_free()
+
+    def test_hook_allowed_actions_admit(self):
+        self.require_hook()
+        self.canaries()
+        expected_recursive = [(n,) for n in range(1, 4)]
+        expected_count = self.conn.execute("SELECT count(*) FROM relays").fetchone()[0] + 1
+        seen = {}
+        def hook(c, a, d, x):
+            c.execute("INSERT INTO fixture_owned VALUES ('updated',?)", (a.relay_id,))
+            c.execute("INSERT INTO fixture_owned VALUES ('deleted',?)", (a.relay_id,))
+            c.execute("UPDATE fixture_owned SET id='kept' WHERE id='updated'")
+            c.execute("DELETE FROM fixture_owned WHERE id='deleted'")
+            seen["recursive"] = c.execute(
+                "WITH RECURSIVE seq(n) AS "
+                "(SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<3) "
+                "SELECT n FROM seq ORDER BY n").fetchall()
+            seen["count"] = c.execute("SELECT count(*) FROM relays").fetchone()[0]
+        try:
+            outcome = submit.submit(
+                self.conn, self.hook_ctx(hook, frozenset({"fixture_owned"})), draft())
+        except BaseException as error:
+            outcome = error
+        self.assertIsInstance(outcome, submit.Admitted)
+        self.assertEqual(seen.get("recursive"), expected_recursive)
+        self.assertEqual(seen.get("count"), expected_count)
+        self.assertEqual(
+            self.conn.execute("SELECT * FROM fixture_owned ORDER BY id").fetchall(),
+            [("kept", outcome.relay_id)])
+        self.assert_free()
+
     def test_hook_default_preserves_existing(self):
         self.require_hook()
         ctx = self.ctx()
