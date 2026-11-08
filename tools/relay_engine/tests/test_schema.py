@@ -95,6 +95,85 @@ class Store(unittest.TestCase):
             conn.execute(sql, params)
 
 
+class TestReservedNames(Store):
+    @staticmethod
+    def catalogue(conn):
+        # Independent of the production filter and Store.objects' old wildcard.
+        return conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "ORDER BY type, name").fetchall()
+
+    @staticmethod
+    def opening_error(conn):
+        try:
+            schema.init_v3(conn)
+        except errors.EngineError as error:
+            return error
+        return None
+
+    def test_lookalike_objects_refuse(self):
+        # Breaks: _definitions hides user objects after an unescaped sqlite_ prefix.
+        cases = (
+            ("table", "sqliteX", "CREATE TABLE sqliteX (value TEXT)"),
+            ("index", "sqlite1", "CREATE INDEX sqlite1 ON relays (subject)"),
+            ("view", "sqlitev", "CREATE VIEW sqlitev AS SELECT id FROM relays"),
+            ("trigger", "sqlitet", "CREATE TRIGGER sqlitet AFTER INSERT ON relays "
+             "BEGIN SELECT 1; END"),
+            ("table", "SQLiteX", "CREATE TABLE SQLiteX (value TEXT)"),
+        )
+        for kind, name, statement in cases:
+            with self.subTest(kind=kind, name=name):
+                conn = self.connect(init=False)
+                schema.init_v3(conn)
+                conn.execute(statement)
+                conn.commit()
+                before = self.catalogue(conn)
+                self.assertIn((kind, name), {(row[0], row[1]) for row in before})
+                error = self.opening_error(conn)
+                self.assertIsNotNone(error, "a lookalike user object must refuse")
+                self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
+                self.assertIn("an extra %s %s" % (kind, name), error.cause)
+                self.assertEqual(self.catalogue(conn), before)
+                self.assertFalse(conn.in_transaction)
+
+    def test_lookalike_only_file_refuses(self):
+        # Breaks: init_v3 treats a lookalike-only file as empty, or counts 0 tables.
+        conn = self.connect(init=False)
+        conn.execute("CREATE TABLE sqliteX (value TEXT)")
+        conn.commit()
+        before = self.catalogue(conn)
+        error = self.opening_error(conn)
+        self.assertIsNotNone(error, "a nonempty lookalike-only file must refuse")
+        self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
+        self.assertIn("1 table and no v3 version record", error.cause)
+        self.assertEqual(self.catalogue(conn), before)
+        self.assertEqual(conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall(), [("sqliteX",)])
+        self.assertFalse(conn.in_transaction)
+
+    def test_sqlite_owned_objects_still_ignored(self):
+        # Breaks: a literal backslash without ESCAPE exposes sqlite_stat1 as drift.
+        for analysed in (False, True):
+            with self.subTest(analysed=analysed):
+                conn = self.connect(init=False)
+                schema.init_v3(conn)
+                if analysed:
+                    conn.execute("ANALYZE")
+                    conn.commit()
+                    self.assertIsNotNone(conn.execute(
+                        "SELECT name FROM sqlite_master WHERE name='sqlite_stat1'"
+                    ).fetchone(), "ANALYZE must supply the SQLite-owned control")
+                before = self.catalogue(conn)
+                version = conn.execute("SELECT * FROM schema_version").fetchall()
+                error = self.opening_error(conn)
+                self.assertIsNone(error, str(error))
+                self.assertEqual(self.catalogue(conn), before)
+                self.assertEqual(conn.execute("SELECT * FROM schema_version").fetchall(),
+                                 version)
+                self.assertFalse(conn.in_transaction)
+
+
 class TestShape(Store):
     def test_tables_are_strict(self):
         conn = self.connect()
