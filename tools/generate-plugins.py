@@ -27,6 +27,7 @@ assert ENGINE_SET == (
     "relay_engine/addresses.py",
     "relay_engine/api_definitions.py",
     "relay_engine/api_registry.py",
+    "relay_engine/api_schema.py",
     "relay_engine/authority.py",
     "relay_engine/cli.py",
     "relay_engine/client.py",
