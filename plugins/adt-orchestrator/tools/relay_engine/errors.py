@@ -6,6 +6,7 @@ import json
 import re
 
 from relay_engine import strings
+from relay_engine import api_definitions
 
 
 E_DAEMON_DOWN_ESCALATION = "Hand-relay this escalation to the eligible starter: master-planner if a master tier exists (never the orchestrator session), else orchestrator-planner, else the operator. This escalation is the sole exception to daemon admission."
@@ -788,3 +789,62 @@ def explain_for(code):
                 strings.render("error-version-mismatch-explain-remedy"))
     return (strings.render(spec.explain_key),
             strings.render(spec.remedy_key))
+
+
+def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
+    """Export the sole closed discovery error catalog, separate from legacy errors."""
+    d = api_definitions
+    # Reuse the neutral producer's nodes rather than author a second window/digest type.
+    types = [t for t in d.discovery_definitions().types
+             if t.name in {"ProtocolVersion", "ProtocolWindow", "Digest"}]
+    types.append(d.TypeDef("ApiPinField", d.LiteralSet(("build_id", "schema_digest"))))
+    rows = (
+        ("E_API_PROTOCOL", "wire", "ApiProtocolCause", (
+            ("malformed_frame", "resend_valid_request"),
+            ("malformed_json", "resend_valid_request"),
+            ("invalid_envelope", "resend_valid_request"),
+            ("invalid_args", "resend_valid_request"),
+            ("unknown_operation", "refresh_schema"),
+        )),
+        ("E_API_STATE", "wire", "ApiStateCause", (
+            ("handshake_required", "reconnect_explicitly"),
+            ("already_connected", "reconnect_explicitly"),
+            ("non_increasing_request_id", "reconnect_explicitly"),
+        )),
+        ("E_API_INCOMPATIBLE", "version", "ApiIncompatibleCause", (
+            ("protocol_window", "update_client"),
+            ("pin_mismatch", "select_matching_candidate"),
+        )),
+        ("E_API_UNAVAILABLE", "unavailable", "ApiUnavailableCause", (
+            ("runtime_not_ready", "restore_expected_runtime"),
+            ("schema_unavailable", "restore_expected_runtime"),
+        )),
+        ("E_API_INTERNAL", "internal", "ApiInternalCause", (
+            ("handler_fault", "report_nonsecret_failure"),
+        )),
+    )
+    variants = []
+    for code, api_class, cause_name, branches in rows:
+        arms = []
+        branch_defs = []
+        for kind, remedy in sorted(branches):
+            suffix = "".join(part.title() for part in kind.split("_"))
+            kind_name = "ApiKind" + suffix
+            leaf_name = "ApiCause" + suffix
+            types.append(d.TypeDef(kind_name, d.LiteralSet((kind,))))
+            members = [d.FieldDef("kind", d.TypeRef(kind_name))]
+            if kind == "protocol_window":
+                members.extend((d.FieldDef("requested", d.TypeRef("ProtocolWindow")),
+                                d.FieldDef("supported", d.TypeRef("ProtocolWindow"))))
+            elif kind == "pin_mismatch":
+                members.extend((d.FieldDef("field", d.TypeRef("ApiPinField")),
+                                d.FieldDef("required", d.TypeRef("Digest")),
+                                d.FieldDef("actual", d.TypeRef("Digest"))))
+            types.append(d.TypeDef(leaf_name, d.Record(tuple(members))))
+            arms.append(d.TypeRef(leaf_name))
+            branch_defs.append(d.ErrorBranchDef(kind, remedy))
+        types.append(d.TypeDef(cause_name, d.TaggedUnion("kind", tuple(arms))))
+        variants.append(d.ErrorVariantDef(code, api_class, d.TypeRef(cause_name),
+                                         tuple(branch_defs)))
+    return d.ClosedErrorDefinitions(tuple(sorted(types, key=lambda item: item.name)),
+                                    tuple(sorted(variants, key=lambda item: item.code)))
