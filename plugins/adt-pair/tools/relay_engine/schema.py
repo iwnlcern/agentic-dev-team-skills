@@ -182,7 +182,38 @@ TABLE_OWNERS: dict[str, str] = {
     "imported_relays": "store",
 }
 
-_TABLES = _PLATFORM_TABLES + (
+_AUTHORITY_TABLES = (
+    """CREATE TABLE IF NOT EXISTS reviewer_assignments (
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    team_instance_id TEXT NOT NULL PRIMARY KEY REFERENCES team_instances (id),
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    assigned_at INTEGER NOT NULL
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS verification_requests (
+    claim_relay_id TEXT NOT NULL REFERENCES relays (id),
+    artifact TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('design', 'plan')),
+    snapshot_handle INTEGER NOT NULL REFERENCES snapshots (handle),
+    snapshot_request_relay_id TEXT NOT NULL REFERENCES relays (id),
+    content_sha256 TEXT NOT NULL %s,
+    request_relay_id TEXT NOT NULL REFERENCES relays (id),
+    reviewer_seat_id TEXT NOT NULL REFERENCES seats (id),
+    created_at INTEGER NOT NULL,
+    UNIQUE (claim_relay_id, artifact)
+) STRICT""" % _sha('content_sha256'),
+    """CREATE TABLE IF NOT EXISTS waivers (
+    claim_relay_id TEXT NOT NULL REFERENCES relays (id),
+    kind TEXT NOT NULL CHECK (kind IN ('design', 'plan')),
+    %s,
+    words TEXT NOT NULL CHECK (length(words) > 0),
+    created_at INTEGER NOT NULL,
+    UNIQUE (claim_relay_id, kind)
+) STRICT""" % _arc('by_', {'operator'}),
+)
+TABLE_OWNERS.update({name: 'authority' for name in
+                    ('reviewer_assignments', 'verification_requests', 'waivers')})
+
+_TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
     """CREATE TABLE IF NOT EXISTS imported_relays (
     relay_id TEXT NOT NULL REFERENCES relays(id),
     root_uuid TEXT NOT NULL,

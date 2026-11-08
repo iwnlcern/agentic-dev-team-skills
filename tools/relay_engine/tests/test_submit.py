@@ -2225,9 +2225,14 @@ class TestHookWriteOwners(Store):
                 with self.assertRaises(ValueError, msg=owner) as caught:
                     replace(self.ctx(), after_admit_writes=frozenset({"fixture_owned"}))
                 self.assertEqual(str(caught.exception), message)
-        for table in sorted(schema.TABLE_OWNERS):
-            with self.assertRaises(ValueError, msg=table):
-                replace(self.ctx(), after_admit_writes=frozenset({table}))
+        for table, owner in sorted(schema.TABLE_OWNERS.items()):
+            if owner == "authority":
+                ctx = replace(self.ctx(), after_admit_writes=frozenset({table}))
+                self.assertEqual(ctx.after_admit_writes, frozenset({table}), table)
+            else:
+                with self.assertRaises(ValueError, msg=table) as caught:
+                    replace(self.ctx(), after_admit_writes=frozenset({table}))
+                self.assertEqual(str(caught.exception), message)
 
 
 class TestSenderCheck(Store):

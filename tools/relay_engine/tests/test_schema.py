@@ -17,7 +17,7 @@ from relay_engine.tests import test_submit
 from relay_engine.tests.test_submit import Store as SubmitStore
 
 
-TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
+TABLES = {"reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
@@ -875,19 +875,23 @@ class TestTableOwners(Store):
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
-        self.assertEqual(len(actual), 35)
+        self.assertEqual(len(actual), 38)
+        authority = {"reviewer_assignments", "verification_requests", "waivers"}
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "authority"}, authority)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)
         console = {"lifecycle_outbox", "lifecycle_outbox_events"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "console"}, console)
-        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console - store)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console - store - authority)
         fixture = SubmitStore()
         fixture.setUp()
         try:
-            for table in sorted(actual | {"missing_table"}):
+            for table in sorted((actual - authority) | {"missing_table"}):
                 with self.subTest(table=table):
                     with self.assertRaises(ValueError):
                         replace(fixture.ctx(), after_admit_writes=frozenset({table}))
+            for table in sorted(authority):
+                replace(fixture.ctx(), after_admit_writes=frozenset({table}))
         finally:
             fixture.doCleanups()
 
