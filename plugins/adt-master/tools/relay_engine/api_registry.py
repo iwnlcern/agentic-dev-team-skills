@@ -264,7 +264,8 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
         kind = types[kind_ref.name].shape.values[0]
         prefix = 'ApiError' + ''.join(part.title() for part in
                                      (arm.code.removeprefix('E_API_') + '_' + kind).split('_'))
-        if any(prefix + suffix in types for suffix in ('', 'Code', 'Class', 'Remedy')):
+        if any(not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,127}', prefix + suffix) or
+               prefix + suffix in types for suffix in ('', 'Code', 'Class', 'Remedy')):
             raise RegistryCompileError('invalid_error')
         members = []
         for field, value in (('code', arm.code), ('class', arm.wire_class), ('remedy', arm.remedy)):

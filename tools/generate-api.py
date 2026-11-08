@@ -197,7 +197,7 @@ def _runtime_constants(source):
 def _identifier(value):
     parts = re.findall(r'[A-Za-z0-9]+', value)
     name = ''.join(part[:1].upper() + part[1:] for part in parts)
-    if not name or name[0].isdigit():
+    if not name or name[0].isdigit() or name == 'Self':
         name = 'Value' + name
     return name
 

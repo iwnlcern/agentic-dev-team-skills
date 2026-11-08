@@ -289,6 +289,31 @@ class TestCompile(unittest.TestCase):
             self.compile(graph=graph)
         self.assertEqual(caught.exception.reason, 'invalid_error')
 
+    def test_invalid_synthetic_error_names_are_refused(self):
+        from relay_engine import errors
+        from dataclasses import replace
+        from unittest.mock import patch
+        variant = self.catalog.variants[0]
+        cause = next(t for t in self.catalog.types if t.name == variant.cause_ref.name)
+        leaf_ref = cause.shape.arms[0]
+        leaf = next(t for t in self.catalog.types if t.name == leaf_ref.name)
+        kind_ref = next(f.type_ref for f in leaf.shape.fields if f.name == 'kind')
+        kind = next(t for t in self.catalog.types if t.name == kind_ref.name)
+        original = kind.shape.values[0]
+        # The last spelling keeps the record name in bounds but overflows its
+        # generated Code/Class/Remedy type names.
+        for invalid in ('pin-mismatch', 'pin.mismatch', 'x' * 110):
+            catalog = replace(self.catalog,
+                types=tuple(replace(t, shape=d.LiteralSet((invalid,))) if t == kind else t
+                            for t in self.catalog.types),
+                variants=tuple(replace(v, branches=tuple(
+                    replace(branch, cause_kind=invalid) if branch.cause_kind == original else branch
+                    for branch in v.branches)) if v == variant else v for v in self.catalog.variants))
+            with self.subTest(kind=invalid), patch.object(errors, 'api_error_catalog', return_value=catalog):
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(catalog=catalog)
+                self.assertEqual(caught.exception.reason, 'invalid_error')
+
     def test_capabilities_are_exactly_two(self):
         registry = self.compile()
         self.assertEqual(registry.capabilities(), ('protocol.connect', 'protocol.schema'))

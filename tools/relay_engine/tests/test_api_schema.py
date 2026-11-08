@@ -216,13 +216,14 @@ class TestGenerator(unittest.TestCase):
         from relay_engine import api_schema
         generator = load_generator()
         compiled = generator.build_registry()
-        types = dict(compiled.types, Collision=d.TypeDef('Collision', d.LiteralSet(('a-b', 'a_b'))))
-        compiled = replace(compiled, types=types)
-        artifact = api_schema.export_schema(compiled, '3.0')
-        for emit in (generator.emit_rust, generator.emit_typescript):
-            with self.subTest(language=emit.__name__):
-                with self.assertRaisesRegex(ValueError, '^binding_name_collision$'):
-                    emit(compiled, artifact)
+        for values in (('a-b', 'a_b'), ('self', 'ValueSelf')):
+            types = dict(compiled.types, Collision=d.TypeDef('Collision', d.LiteralSet(values)))
+            collision = replace(compiled, types=types)
+            artifact = api_schema.export_schema(collision, '3.0')
+            for emit in (generator.emit_rust, generator.emit_typescript):
+                with self.subTest(language=emit.__name__, values=values):
+                    with self.assertRaisesRegex(ValueError, '^binding_name_collision$'):
+                        emit(collision, artifact)
 
     def test_runtime_placeholders_do_not_rewrite_graph_literals(self):
         from relay_engine import api_schema
@@ -504,6 +505,21 @@ class TestGeneratedConsumers(unittest.TestCase):
                 changed[index] = jcs.jcs_encode(wrong).decode()
                 with self.assertRaises(AssertionError):
                     self.assertEqual(lines, changed)
+
+    def test_self_literal_compiles_in_both_bindings(self):
+        from relay_engine import api_schema
+        generator = load_generator()
+        compiled = generator.build_registry()
+        compiled = replace(compiled, types=dict(compiled.types,
+            SelfLiteral=d.TypeDef('SelfLiteral', d.LiteralSet(('self',)))))
+        artifact = api_schema.export_schema(compiled, '3.0')
+        cases = [({'action': 'validate', 'type': 'SelfLiteral', 'value': 'self'}, {'valid': True}),
+                 ({'action': 'validate', 'type': 'SelfLiteral', 'value': 'ValueSelf'}, {'valid': False})]
+        for language, emit in [('rs', generator.emit_rust), ('ts', generator.emit_typescript)]:
+            with self.subTest(language=language):
+                binding = emit(compiled, artifact)
+                self.run_consumer(language, cases=cases, binding=binding)
+                self.assertTrue(b'ValueSelf' in binding, 'reserved literal must use ValueSelf')
 
     def test_third_operation_round_trips_in_both_bindings(self):
         from relay_engine import api_protocol as p, api_schema
