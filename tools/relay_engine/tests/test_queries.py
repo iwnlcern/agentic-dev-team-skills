@@ -1294,6 +1294,7 @@ class TestSessionSteps(Store):
             self.conn.set_trace_callback(None)
         self.assertEqual(armed, ["RELEASE engine_record_session"])
         self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
+        self.assertEqual(outcome.sqlite_errorname, "SQLITE_INTERRUPT")
         self.assertTrue(self.conn.in_transaction)
         self.assertEqual(self.conn.execute("SELECT seat_id, issued_at FROM seat_occupants"
                                            " WHERE seat_id IN (?, ?) ORDER BY seat_id",
@@ -1391,6 +1392,68 @@ class TestSessionSteps(Store):
         self.assertFalse(self.conn.in_transaction)
         self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
                          [(previous, None)])
+
+    def test_session_step_release_ending_transaction_keeps_error(self):
+        """M21/M22: a success RELEASE failure that ends the transaction re-raises
+        SQLite's own error object, with no context."""
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+        failure = sqlite3.OperationalError("database or disk is full")
+
+        class EndingRelease:
+            def __init__(self, conn):
+                self._conn = conn
+                self.fired = False
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args):
+                # Only the step's success RELEASE, once; the error is raised outside any except.
+                if sql != "RELEASE engine_record_session" or self.fired:
+                    return self._conn.execute(sql, *args)
+                self.fired = True
+                self._conn.execute("ROLLBACK")
+                raise failure
+
+        proxy = EndingRelease(self.conn)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            outcome = queries.record_session_step(proxy, "failing", "codex", IMPL.seat_id, 20)
+        except BaseException as error:
+            outcome = error
+        self.assertTrue(proxy.fired)
+        self.assertIs(outcome, failure)
+        self.assertIsNone(outcome.__context__)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                         [(previous, None)])
+
+    def test_record_session_rolls_back_after_completed_step(self):
+        """M23: a sign-in interrupted after its step completed commits nothing."""
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+        step = queries.record_session_step
+        interrupt = KeyboardInterrupt()
+        completed = []
+
+        def step_then_interrupt(*args, **kwargs):
+            completed.append(step(*args, **kwargs))
+            raise interrupt
+
+        # The interrupt is caught here: one escaping a test would abort the whole run.
+        with mock.patch.object(queries, "record_session_step", step_then_interrupt):
+            try:
+                outcome = queries.record_session(self.conn, "interrupted", "codex", IMPL.seat_id, 20)
+            except BaseException as error:
+                outcome = error
+        self.assertEqual(len(completed), 1)
+        self.assertIs(outcome, interrupt)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                         [(previous, None)])
+        following = queries.record_session(self.conn, "following", "codex", IMPL.seat_id, 30)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
+                                           " ORDER BY generation").fetchall(),
+                         [(previous, 30), (following, None)])
 
 
 class TestGitIsolation(unittest.TestCase):
