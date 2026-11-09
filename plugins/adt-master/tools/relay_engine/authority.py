@@ -668,3 +668,38 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     return {'allowed':not reasons,'reasons':sorted(reasons),'relay':relay_path,
             'seat':seat,'action':action,'checked_at':datetime.now().strftime('%Y%m%d-%H%M%S'),
             'external':external}
+
+
+def working_copy_digest(path):
+    """Digest the current regular working copy, holding on missing or unreadable bytes."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def act_entry(conn, seat_id, effect, now_ms):
+    """Isolate act's writes while keeping the caller's write transaction open."""
+    if not conn.in_transaction:
+        raise ValueError('act_entry needs an open transaction')
+    from relay_engine import slips, strings, submit
+
+    opened = False
+    try:
+        conn.execute('SAVEPOINT authority_act')
+        opened = True
+        with submit.read_guard(conn):
+            answer = slips.act(conn, seat_id, effect, now_ms, digest=working_copy_digest)
+        if answer.outcome == 'held' and answer.code == 'authority.check-unavailable':
+            conn.execute('ROLLBACK TO authority_act')
+        conn.execute('RELEASE authority_act')
+        opened = False
+        return answer
+    except Exception:
+        if opened:
+            try:
+                conn.execute('ROLLBACK TO authority_act')
+            finally:
+                conn.execute('RELEASE authority_act')
+        return slips.Answer('held', 'authority.check-unavailable',
+                            strings.render('authority-fault'), 'operator', None, None)
