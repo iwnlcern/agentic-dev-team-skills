@@ -490,6 +490,8 @@ def record_session_step(conn, session_id: str, host: str, seat_id: str, start_ms
 
     The closing UPDATE takes the write lock before reading the occupant, even
     in a deferred transaction. A refusal rolls back only this step's writes.
+    It never begins, commits or rolls back the caller's transaction, and it
+    cannot run inside an admission hook, whose authorizer denies SAVEPOINT.
     """
     if host not in schema.HOSTS:
         raise ValueError("unknown host %r" % (host,))
@@ -511,12 +513,12 @@ def record_session_step(conn, session_id: str, host: str, seat_id: str, start_ms
             " generation, signed_in_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (internal_id, seat_id, occupant[0], host, session_id, generation, start_ms,
              start_ms))
-        conn.execute("RELEASE engine_record_session")
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK TO engine_record_session")
             conn.execute("RELEASE engine_record_session")
         raise
+    conn.execute("RELEASE engine_record_session")
     return internal_id
 
 

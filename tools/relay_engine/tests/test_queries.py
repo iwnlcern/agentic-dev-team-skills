@@ -1156,6 +1156,117 @@ class TestSessionSteps(Store):
                 signing_in.close()
                 replacing.close()
 
+    def test_session_step_non_value_errors_roll_back(self):
+        """M9/M10/M14: any failure after the closing UPDATE rolls the step back and
+        re-raises the same object."""
+        class Refusal(ValueError):
+            pass
+
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+        failures = (KeyboardInterrupt("fixture interrupt"),
+                    sqlite3.OperationalError("fixture operational error"),
+                    Refusal("fixture refusal"))
+        for issued, failure in enumerate(failures, start=321):
+            def occupant_read(cursor, row, failure=failure):
+                if [column[0] for column in cursor.description] == ["id"]:
+                    raise failure
+                return row
+
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute("UPDATE seat_occupants SET issued_at = ? WHERE seat_id = ?",
+                              (issued, PLANNER.seat_id))
+            self.conn.row_factory = occupant_read
+            try:
+                outcome = queries.record_session_step(self.conn, "failing", "codex",
+                                                      IMPL.seat_id, 20)
+            except BaseException as error:
+                outcome = error
+            finally:
+                self.conn.row_factory = None
+            self.assertIs(outcome, failure)
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                               (PLANNER.seat_id,)).fetchone(), (issued,))
+            self.conn.commit()
+            self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                             [(previous, None)], repr(failure))
+
+    def test_record_session_refusal_ends_transaction(self):
+        """M11: a refused sign-in leaves no transaction open on the connection."""
+        self.conn.execute("UPDATE seat_occupants SET ended_at = 12 WHERE seat_id = ?",
+                          (IMPL.seat_id,))
+        self.conn.commit()
+        for seat in (IMPL.seat_id, "v3-unknown.seat"):
+            with self.assertRaisesRegex(ValueError, "has no open occupant"):
+                queries.record_session(self.conn, "refused-" + seat, "codex", seat, 20)
+            self.assertFalse(self.conn.in_transaction, seat)
+        current = queries.record_session(self.conn, "after-refusals", "codex",
+                                         PLANNER.seat_id, 30)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT id, host_session_id FROM seat_sessions")
+                         .fetchall(), [(current, "after-refusals")])
+
+    def test_session_step_release_is_outside_cleanup(self):
+        """M8: an interrupt just after the step's RELEASE must not run its cleanup
+        against the caller's same-named savepoint."""
+        interrupt = KeyboardInterrupt("fixture interrupt after release")
+
+        class InterruptAfterRelease:
+            def __init__(self, conn):
+                self._conn = conn
+                self.fired = False
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args):
+                result = self._conn.execute(sql, *args)
+                if sql == "RELEASE engine_record_session" and not self.fired:
+                    self.fired = True
+                    raise interrupt
+                return result
+
+        proxy = InterruptAfterRelease(self.conn)
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT engine_record_session")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 654 WHERE seat_id = ?",
+                          (PLANNER.seat_id,))
+        try:
+            outcome = queries.record_session_step(proxy, "inside", "codex", IMPL.seat_id, 10)
+        except BaseException as error:
+            outcome = error
+        self.assertIs(outcome, interrupt)
+        self.assertTrue(proxy.fired)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                           (PLANNER.seat_id,)).fetchone(), (654,))
+        # Capturing the caller's RELEASE makes a missing savepoint an assertion, not an ERROR.
+        try:
+            self.conn.execute("RELEASE engine_record_session")
+            released = None
+        except sqlite3.Error as error:
+            released = error
+        self.assertIsNone(released)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+
+    def test_end_step_refuses_host_session_id(self):
+        """M12: the end step matches only the internal session id."""
+        current = queries.record_session(self.conn, "host-unique", "codex", IMPL.seat_id, 10)
+        self.conn.execute("BEGIN IMMEDIATE")
+        with self.assertRaisesRegex(ValueError, "no open session"):
+            queries.end_session_step(self.conn, "host-unique", 20)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.commit()
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                         [(current, None)])
+
+    def test_step_checks_host_before_transaction(self):
+        """M13: an unknown host is refused before the transaction check."""
+        with self.assertRaisesRegex(ValueError, "unknown host"):
+            queries.record_session_step(self.conn, "bad-host", "vim", IMPL.seat_id, 10)
+        self.assertFalse(self.conn.in_transaction)
+
 
 class TestGitIsolation(unittest.TestCase):
     def test_store_tests_ignore_ambient_git_names(self):
