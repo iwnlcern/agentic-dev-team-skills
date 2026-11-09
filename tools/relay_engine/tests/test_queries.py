@@ -1411,6 +1411,52 @@ class TestSnapshotCopies(submit_tests.Snapshots):
         finally:
             os.umask(previous)
 
+    def test_overwrite_keeps_other_bits(self):
+        # Breaks: masking the kept mode, or not keeping it; umask 0o022 never gives 0o664.
+        self.snapshots_pair()
+        previous = os.umask(0o022)
+        try:
+            out = self.folder / "other-bits"
+            out.write_bytes(b"old")
+            out.chmod(0o664)
+            result = snapshot_outcome(lambda: queries.write_snapshot(
+                self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
+            self.assertEqual(result[0], "ok", result)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o664)
+            self.assertEqual(out.read_bytes(), b"one\n")
+        finally:
+            os.umask(previous)
+
+    def test_overwrite_mode_set_once_after_writes(self):
+        # Breaks: changing the stage's mode more than once, or before the last write.
+        self.snapshots_pair()
+        real_fchmod, real_write = os.fchmod, os.write
+        events = []
+
+        def changing(fd, mode):
+            events.append(("fchmod", mode))
+            return real_fchmod(fd, mode)
+
+        def writing(fd, data):
+            # One byte per call, so the write loop runs once per byte.
+            events.append(("write", None))
+            return real_write(fd, bytes(data[:1]))
+
+        out = self.folder / "mode-once"
+        out.write_bytes(b"old")
+        out.chmod(0o600)
+        with mock.patch.object(queries.os, "fchmod", side_effect=changing), \
+                mock.patch.object(queries.os, "write", side_effect=writing):
+            result = snapshot_outcome(lambda: queries.write_snapshot(
+                self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "ok", result)
+        self.assertIn(("write", None), events)
+        self.assertEqual([event for event in events if event[0] == "fchmod"],
+                         [("fchmod", 0o600)])
+        self.assertEqual(events[-1], ("fchmod", 0o600))
+        self.assertEqual(out.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(out.read_bytes(), b"one\n")
+
     def test_overwrite_stage_private_from_creation(self):
         # Breaks: opening a private replacement's stage wider, or widening before writing.
         self.snapshots_pair()

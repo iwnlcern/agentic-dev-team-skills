@@ -385,7 +385,7 @@ def sweep_tmp(root):
     """Remove abandoned TempWrite regular files without following links."""
     if not isinstance(root, Root) or root.dirfd is None:
         raise TypeError("open Root required")
-    fd = os.dup(root.dirfd)
+    fd = os.open(".", _DIRECTORY_FLAGS, dir_fd=root.dirfd)
     try:
         return _sweep_dir(fd)
     finally:

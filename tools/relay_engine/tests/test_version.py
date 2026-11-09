@@ -92,6 +92,16 @@ def _tree_state(root):
     return tuple(state)
 
 
+def _marker_state(path):
+    """None when absent, else the entry's type, bytes and mtime; read-only."""
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        return None
+    content = path.read_bytes() if stat.S_ISREG(status.st_mode) else None
+    return (stat.S_IFMT(status.st_mode), content, status.st_mtime_ns)
+
+
 def _invoke_rules(tools_dir):
     environment = os.environ.copy()
     prior = environment.get("PYTHONPATH")
@@ -195,13 +205,17 @@ class TestVersion(unittest.TestCase):
             live_cache_state = {
                 cache: _tree_state(cache) for cache in live_generated_caches
             }
+            checkout_marker = (
+                TOOLS / "relay_engine" / "__pycache__" / "ignored.pyc")
+            checkout_marker_state = _marker_state(checkout_marker)
 
             before = []
             after = []
             for copy in copies:
-                cache = copy / "relay_engine" / "__pycache__"
-                cache.mkdir(exist_ok=True)
-                (cache / "ignored.pyc").write_bytes(b"ignored cache")
+                if copy != TOOLS:
+                    cache = copy / "relay_engine" / "__pycache__"
+                    cache.mkdir(exist_ok=True)
+                    (cache / "ignored.pyc").write_bytes(b"ignored cache")
                 before.append(fingerprint(copy))
                 invoked = _invoke_rules(copy)
                 self.assertEqual(invoked.returncode, 0, invoked.stderr)
@@ -211,6 +225,10 @@ class TestVersion(unittest.TestCase):
                 {cache: _tree_state(cache) for cache in live_generated_caches},
                 live_cache_state,
             )
+            # The checkout may be read-only: the marker goes only into copies,
+            # and one an earlier version of this test left stays as it was.
+            self.assertEqual(
+                _marker_state(checkout_marker), checkout_marker_state)
 
     def test_generated_bundles_report_the_canonical_version_and_fingerprint(self):
         generator = _load_generator()
