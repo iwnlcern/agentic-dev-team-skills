@@ -173,6 +173,41 @@ class TestReservedNames(Store):
                                  version)
                 self.assertFalse(conn.in_transaction)
 
+    def test_sqlite_owned_only_file_initializes(self):
+        # Breaks: init_v3's emptiness check counts sqlite_sequence as a user object.
+        conn = self.connect(init=False)
+        conn.execute("CREATE TABLE counted (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)")
+        conn.execute("INSERT INTO counted (value) VALUES ('one')")
+        conn.execute("DROP TABLE counted")
+        conn.commit()
+        self.assertEqual([row[1] for row in self.catalogue(conn)], ["sqlite_sequence"])
+        error = self.opening_error(conn)
+        self.assertIsNone(error, "a file holding only SQLite's own objects must initialize")
+        self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchall(),
+                         [(schema.SCHEMA_V3,)])
+        names = {row[1] for row in self.catalogue(conn) if row[0] == "table"}
+        for sql in schema._TABLES:
+            table = re.search(r"CREATE TABLE IF NOT EXISTS (\w+) ", sql).group(1)
+            self.assertIn(table, names)
+        self.assertFalse(conn.in_transaction)
+
+    def test_autoincrement_only_file_counts_one_table(self):
+        # Breaks: the table count includes sqlite_sequence or the index.
+        conn = self.connect(init=False)
+        conn.execute("CREATE TABLE counted (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)")
+        conn.execute("CREATE INDEX counted_value ON counted (value)")
+        conn.execute("INSERT INTO counted (value) VALUES ('one')")
+        conn.commit()
+        before = self.catalogue(conn)
+        self.assertEqual({row[1] for row in before},
+                         {"counted", "counted_value", "sqlite_sequence"})
+        error = self.opening_error(conn)
+        self.assertIsNotNone(error, "a file with one user table and no version record must refuse")
+        self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
+        self.assertIn("1 table and no v3 version record", error.cause)
+        self.assertEqual(self.catalogue(conn), before)
+        self.assertFalse(conn.in_transaction)
+
 
 class TestShape(Store):
     def test_tables_are_strict(self):
