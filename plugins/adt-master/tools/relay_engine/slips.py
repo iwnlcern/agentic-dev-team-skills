@@ -48,8 +48,34 @@ class Effect:
 
 import json
 from pathlib import Path
+from types import MappingProxyType
 
 from . import claims, queries, strings, submit
+
+# Erratum 3 r2 B3: a commit's answer by the committing seat's role word; a role absent
+# from the table answers slip-missing and never allow.
+COMMIT_ROLE_RULE = MappingProxyType({
+    'planner': 'planner', 'orchestrator-planner': 'planner',
+    'master-planner': 'planner', 'domain-planner': 'planner',
+    'implementer': 'slip',
+    'reviewer': 'slip', 'orchestrator-reviewer': 'slip',
+    'master-reviewer': 'slip', 'domain-reviewer': 'slip',
+})
+_REVIEW_KINDS = {'PLAN-REVIEW': 'plan', 'DESIGN-REVIEW': 'design'}
+
+
+def git_digest_algorithm(object_id):
+    """The working-copy algorithm for a recorded Git object id (erratum 4 r2 R4).
+
+    Engine records only 40-digit ids today, since every `git` REF resolves through
+    rules.xroot_repository_and_commit, which refuses a commit that is not 40
+    lowercase hex; a 64-digit id is a SHA-256 repository's.
+    """
+    if len(object_id) == 40:
+        return 'git-sha1'
+    if len(object_id) == 64:
+        return 'git-sha256'
+    raise ValueError('a Git object id has 40 or 64 digits')
 
 ANSWER_CODES = {
     'authority.' + code: ('deny' if code in ('slip-missing', 'slip-invalid', 'lineage-incomplete', 'not-issuer') else 'held')
@@ -112,15 +138,66 @@ def _issuer(conn, principal, target):
     return None
 
 
+def _references(conn, relay_id):
+    """(artifact, reference type, recorded digest) for each artifact edge of a relay, in order."""
+    found = []
+    for edge in queries.points_to(conn, relay_id):
+        artifact = claims.edge_artifact(edge)
+        if artifact is not None:
+            found.append((artifact, edge.target_type, edge.digest_at_submit))
+    return found
+
+
+def _decide(conn, walk, holder):
+    """Erratum 3 r2 B1's walk, oldest first: each referenced path's newest reference,
+    the design paths, and each decided path's state, ('locked', claim relay, kind, lock)
+    or ('objected', review relay, request relay)."""
+    oldest_first = walk[::-1]
+    references = {row.id: _references(conn, row.id) for row in oldest_first}
+    design_paths = {artifact for row in oldest_first
+                    if row.kind == 'DESIGN-REVIEW' and row.parent_id in references
+                    for artifact, _, _ in references[row.parent_id]}
+    newest, state = {}, {}
+    for row in oldest_first:
+        for artifact, reference, digest in references[row.id]:
+            newest[artifact] = (reference, digest)
+        kind = _REVIEW_KINDS.get(row.kind)
+        # A review request carries no verdict and decides nothing (erratum 4 r2 R1).
+        if kind is None or row.verdict is None or (kind == 'plan' and row.sender_seat_id != holder):
+            continue
+        def decides(artifact):
+            return (artifact in design_paths) == (kind == 'design')
+        def locked_content(artifact):
+            current = state.get(artifact)
+            return current[3].content_sha256 if current and current[0] == 'locked' else None
+        if row.verdict == 'approve':
+            for lock in claims.claim_locks(conn, row.id):
+                if decides(lock.artifact) and locked_content(lock.artifact) != lock.content_sha256:
+                    state[lock.artifact] = ('locked', row.id, kind, lock)
+            continue
+        held = {}
+        for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
+                                              ' WHERE relay_id = ?', (row.parent_id,)):
+            held.setdefault(artifact, set()).add(content)
+        named = {artifact for artifact, _, _ in references[row.id]}
+        for artifact in sorted(held.keys() & named if named else held):
+            if decides(artifact) and held[artifact] != {locked_content(artifact)}:
+                state[artifact] = ('objected', row.id, row.parent_id)
+    return newest, design_paths, state
+
+
 def _evidence(conn, relay_id, principal, holder):
+    """(failure, binds, objected) for an IMPL relay: failure is None, 'not-issuer',
+    'lineage-long' or 'lineage-incomplete'; objected names (artifact, review, request)
+    when an objected path is why."""
     target = _seat(conn, holder)
     mode = None if target is None else _issuer(conn, principal, target)
-    binds = {'claims': [], 'waived': []}
+    binds = {'claims': [], 'digests': [], 'waived': []}
     if mode is None or target[2] != 'implementer':
-        return 'not-issuer', binds
+        return 'not-issuer', binds, None
     walk = queries.lineage(conn, relay_id)
     if not walk or walk[-1].parent_id is not None:
-        return 'lineage-long', binds
+        return 'lineage-long', binds, None
     if mode == 'pair':
         delegated = any(row.kind == 'PLAN' and row.needs == 'act'
                         and _issuer(conn, row.sender_seat_id, target) == 'direct'
@@ -129,47 +206,47 @@ def _evidence(conn, relay_id, principal, holder):
                                          (row.id, principal)).fetchone()
                         for row in walk)
         if not delegated:
-            return 'lineage-incomplete', binds
-    seen_plan = False
-    approved_design_requests = set()
-    for row in walk:
-        kind = {'PLAN-REVIEW': 'plan', 'DESIGN-REVIEW': 'design'}.get(row.kind)
-        if kind is None or row.verdict != 'approve' or (kind == 'plan' and (seen_plan or row.sender_seat_id != holder)):
+            return 'lineage-incomplete', binds, None
+    newest, design_paths, state = _decide(conn, walk, holder)
+    grouped = {}
+    for artifact, (reference, digest) in newest.items():
+        current = state.get(artifact)
+        if current and current[0] == 'locked':
+            _, claim, kind, lock = current
+            grouped.setdefault(claim, {'kind': kind, 'claim': claim, 'locks': []})['locks'].append(
+                {'artifact': lock.artifact, 'snapshot_handle': lock.snapshot_handle,
+                 'request_relay_id': lock.request_relay_id, 'content_sha256': lock.content_sha256})
             continue
-        locks = claims.claim_locks(conn, row.id)
-        if not locks:
-            continue
-        if kind == 'plan':
-            seen_plan = True
-        else:
-            approved_design_requests.update((lock.request_relay_id, lock.artifact) for lock in locks)
-        binds['claims'].append({'kind': kind, 'claim': row.id, 'locks': [
-            {'artifact': lock.artifact, 'snapshot_handle': lock.snapshot_handle,
-             'request_relay_id': lock.request_relay_id, 'content_sha256': lock.content_sha256}
-            for lock in locks]})
-    if not seen_plan:
+        if current:
+            if mode != 'operator':
+                return 'lineage-incomplete', binds, (artifact, current[1], current[2])
+            binds['waived'].append('objected:' + artifact)
+        binds['digests'].append({'artifact': artifact, 'kind': 'design' if artifact in design_paths else 'plan',
+                                 'reference': reference, 'digest': digest})
+    binds['claims'] = list(grouped.values())
+    # Erratum 3 r2 B2: digests alone never issue a slip.
+    if not any(claim['kind'] == 'plan' for claim in binds['claims']):
         if mode == 'operator':
             binds['waived'].append('plan-lock')
         else:
-            return 'lineage-incomplete', binds
-    for row in walk:
-        if row.kind == 'DESIGN':
-            for edge in queries.points_to(conn, row.id):
-                if edge.kind != 'ref' or edge.target_type not in ('path', 'git'):
-                    continue
-                artifact = (edge.target_path if edge.target_type == 'path' else
-                            edge.target_repository_id + ':' + edge.target_path)
-                if (row.id, artifact) not in approved_design_requests:
-                    if mode == 'operator':
-                        binds['waived'].append('design-lock:' + artifact)
-                    else:
-                        return 'lineage-incomplete', binds
+            return 'lineage-incomplete', binds, None
     if mode == 'operator':
         binds['waived'].append('issuer-preconditions')
         for claim in binds['claims']:
             if claims.verification_state(conn, claim['claim']) not in ('approved', 'waived'):
                 binds['waived'].append('verification:' + claim['claim'])
-    return None, binds
+    return None, binds, None
+
+
+def _lineage_answer(failed, objected, relay, unblocker, slip=None):
+    if failed == 'lineage-long':
+        return _answer('lineage-incomplete', strings.render('authority-lineage-long', relay=relay), unblocker, slip)
+    if objected is not None:
+        return _answer('lineage-incomplete', strings.render('authority-objected', relay=relay, artifact=objected[0],
+                                                            review=objected[1], request=objected[2]),
+                       unblocker, slip)
+    return _answer('not-issuer' if failed == 'not-issuer' else 'lineage-incomplete',
+                   strings.render('authority-lineage', relay=relay), unblocker, slip)
 
 
 def on_admitted(conn, admitted, draft, ctx):
@@ -184,7 +261,7 @@ def on_admitted(conn, admitted, draft, ctx):
     target = _seat(conn, holder)
     if target is None or target[1] != ctx.sender.project_id or target[2] != 'implementer':
         return
-    failed, binds = _evidence(conn, admitted.relay_id, ctx.sender.seat_id, holder)
+    failed, binds, _ = _evidence(conn, admitted.relay_id, ctx.sender.seat_id, holder)
     if failed:
         return
     repo = ctx.git_state.repository_id if ctx.git_state else None
@@ -215,7 +292,10 @@ def working_path(conn, artifact, effect):
         repository, marker, relative = artifact.partition(':')
         if not marker or not relative or Path(relative).is_absolute() or '..' in Path(relative).parts:
             return None
-        if repository == effect.repository_id and effect.path:
+        if repository == effect.repository_id:
+            # The commit's own worktree is its repository's working copy (M1).
+            if not effect.path:
+                return None
             base = effect.path
         else:
             rows = conn.execute('SELECT path FROM repository_checkouts WHERE repository_id = ?',
@@ -235,13 +315,9 @@ def _checked_slip(conn, slip, effect, digest):
     if slip['repository_id'] != effect.repository_id:
         return _answer('slip-invalid', strings.render('authority-repository', repository=slip['repository_id']), planner, slip)
     principal = slip['issuer_seat_id'] or slip['issuer_special']
-    failed, _ = _evidence(conn, slip['issued_in'], principal, slip['seat_id'])
+    failed, _, objected = _evidence(conn, slip['issued_in'], principal, slip['seat_id'])
     if failed:
-        code = 'not-issuer' if failed == 'not-issuer' else 'lineage-incomplete'
-        reason = (strings.render('authority-lineage-long', relay=slip['issued_in'])
-                  if failed == 'lineage-long' else
-                  strings.render('authority-lineage', relay=slip['issued_in']))
-        return _answer(code, reason, planner, slip)
+        return _lineage_answer(failed, objected, slip['issued_in'], planner, slip)
     binds = json.loads(slip['binds'])
     for claim in binds['claims']:
         for lock in claim['locks']:
@@ -249,6 +325,19 @@ def _checked_slip(conn, slip, effect, digest):
             if path is None or digest(path) != lock['content_sha256']:
                 return _answer(claim['kind'] + '-changed',
                                strings.render('authority-artifact', artifact=lock['artifact']), planner, slip)
+    for bound in binds['digests']:
+        path = working_path(conn, bound['artifact'], effect)
+        recorded = bound['digest']
+        if path is None or recorded is None:
+            now = None
+        elif bound['reference'] == 'git':
+            now = digest(path, git_digest_algorithm(recorded))
+        else:
+            now = digest(path)
+        if now is None or now != recorded:
+            return _answer(bound['kind'] + '-changed',
+                           strings.render('authority-artifact', artifact=bound['artifact']), planner, slip)
+    for claim in binds['claims']:
         if 'verification:' + claim['claim'] in binds['waived']:
             continue
         state = claims.verification_state(conn, claim['claim'])
@@ -272,10 +361,17 @@ def _act(conn, seat_id, effect, now_ms, digest):
         return _answer('slip-missing', strings.render('authority-no-merge'), root)
     if effect.kind != 'commit':
         return _answer('check-unavailable', strings.render('authority-guardrail'), root)
-    if seat[2] != 'implementer':
+    rule = COMMIT_ROLE_RULE.get(seat[2])
+    if rule == 'planner':
         return _allow()
+    if rule is None:
+        return _answer('slip-missing', strings.render('authority-missing'), _planner(conn, seat_id))
     if not conn.in_transaction:
         raise ValueError('act needs the caller transaction')
+    # S1: only a seat that holds a slip of the kind is answered from slips.
+    if conn.execute("SELECT 1 FROM slips WHERE seat_id = ? AND kind = 'implement' LIMIT 1",
+                    (seat_id,)).fetchone() is None:
+        return _diagnostic(conn, seat, seat_id)
     if not effect.repository_id or not effect.ref:
         return _answer('slip-invalid', strings.render('authority-context'), _planner(conn, seat_id))
     binding = conn.execute('SELECT seat_id, bundle_id FROM branch_bindings WHERE repository_id = ? AND branch = ?',
@@ -304,20 +400,21 @@ def _act(conn, seat_id, effect, now_ms, digest):
                          ' VALUES (?, ?, ?, ?, ?)',
                          (effect.repository_id, effect.ref, seat_id, slip['bundle_id'], now_ms))
         return answer
-    if binding:
-        return _answer('slip-invalid', strings.render('authority-binding'), root)
+    # The seat holds a slip of the kind, so only a bound branch with no slip for its bundle is left.
+    return _answer('slip-invalid', strings.render('authority-binding'), root)
+
+
+def _diagnostic(conn, seat, seat_id):
+    """Line 148's answer for a seat holding no implement slip: its newest IMPL, else slip-missing."""
+    planner = _planner(conn, seat_id)
     row = conn.execute("SELECT r.id, coalesce(r.sender_seat_id, r.sender_special) FROM relays r"
                        " JOIN recipients c ON c.relay_id = r.id WHERE r.project_id = ?"
                        " AND r.kind = 'IMPL' AND r.needs = 'act' AND c.role = 'to' AND c.seat_id = ?"
                        ' ORDER BY r.created_at DESC LIMIT 1', (seat[1], seat_id)).fetchone()
     if row:
-        failed, _ = _evidence(conn, row[0], row[1], seat_id)
-        code = 'not-issuer' if failed == 'not-issuer' else 'lineage-incomplete'
-        reason = (strings.render('authority-lineage-long', relay=row[0])
-                  if failed == 'lineage-long' else
-                  strings.render('authority-lineage', relay=row[0]))
-        return _answer(code, reason, _planner(conn, seat_id))
-    return _answer('slip-missing', strings.render('authority-missing'), _planner(conn, seat_id))
+        failed, _, objected = _evidence(conn, row[0], row[1], seat_id)
+        return _lineage_answer(failed or 'lineage-incomplete', objected, row[0], planner)
+    return _answer('slip-missing', strings.render('authority-missing'), planner)
 
 
 def act(conn, seat_id, effect, now_ms, *, digest):

@@ -25,15 +25,22 @@ class ClaimLock:
     content_sha256: str
 
 
+def edge_artifact(edge):
+    """The snapshot artifact key an edge references, or None for a relay or parent edge."""
+    if edge.kind != 'ref' or edge.target_type not in ('path', 'git'):
+        return None
+    return (edge.target_path if edge.target_type == 'path' else
+            edge.target_repository_id + ':' + edge.target_path)
+
+
 def claim_of(conn, admitted, draft, project_id):
     if draft.verdict != 'approve' or draft.kind not in ('DESIGN-REVIEW', 'PLAN-REVIEW'):
         return None
     locks = {}
     for edge in queries.points_to(conn, admitted.relay_id):
-        if edge.kind != 'ref' or edge.target_type not in ('path', 'git'):
+        artifact = edge_artifact(edge)
+        if artifact is None:
             continue
-        artifact = (edge.target_path if edge.target_type == 'path' else
-                    edge.target_repository_id + ':' + edge.target_path)
         snap = queries.locked_snapshot(conn, artifact, project_id=project_id)
         if snap is not None and snap.locked_by == admitted.relay_id:
             locks[artifact] = ClaimLock(artifact, snap.handle, snap.relay_id, snap.content_sha256)

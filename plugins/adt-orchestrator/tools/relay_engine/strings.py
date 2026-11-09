@@ -66,6 +66,7 @@ INVENTORY.update({
     "authority-context": "the commit needs a repository and branch",
     "authority-lineage": "relay {relay} is missing a permitted issuer or approved plan or design lock",
     "authority-lineage-long": "relay {relay}: the relay chain is longer than the 256 relays checked",
+    "authority-objected": "relay {relay}: {artifact} was answered other than approve in review {review} of request {request}; an earlier approval does not stand in for it",
     "authority-artifact": "the working copy changed or cannot be read: {artifact}; re-request review of the current copy, then issue a fresh go",
     "authority-verification": "the {kind} verification is {state}",
     "authority-no-merge": "merge slips are not issued by this build",

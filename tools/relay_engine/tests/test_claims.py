@@ -32,6 +32,29 @@ class CommitFault:
         return self.conn.execute(sql, parameters)
 
 
+class BodyReader:
+    """Pass every statement through, first trying a read of `bodies` and noting
+    whether the active guard denied it; the reading variant for the no-body rule."""
+    def __init__(self, conn, attempts):
+        self.conn = conn
+        self.attempts = attempts
+
+    @property
+    def in_transaction(self):
+        return self.conn.in_transaction
+
+    def set_authorizer(self, callback):
+        self.conn.set_authorizer(callback)
+
+    def execute(self, sql, parameters=()):
+        try:
+            self.conn.execute('SELECT body FROM bodies LIMIT 1').fetchall()
+            self.attempts.append('read')
+        except sqlite3.DatabaseError:
+            self.attempts.append('denied')
+        return self.conn.execute(sql, parameters)
+
+
 class ClaimStore(Store):
     def setUp(self):
         super().setUp()
@@ -85,8 +108,17 @@ class ClaimStore(Store):
 class TestClaims(ClaimStore):
     def test_triggers(self):
         for kind in ('plan', 'design'):
+            reviews = self.conn.execute("SELECT count(*) FROM relays WHERE kind = 'REVIEW'").fetchone()[0]
             _, reply = self.claim(kind)
-            self.assertEqual(self.request(reply)[1], REVIEWER.seat_id)
+            rows = self.conn.execute('SELECT DISTINCT request_relay_id, reviewer_seat_id, kind'
+                                     ' FROM verification_requests WHERE claim_relay_id = ?',
+                                     (reply.relay_id,)).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][1:], (REVIEWER.seat_id, kind))
+            self.assertEqual(self.conn.execute('SELECT kind, needs FROM relays WHERE id = ?',
+                                               (rows[0][0],)).fetchone(), ('REVIEW', 'review'))
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM relays WHERE kind = 'REVIEW'").fetchone()[0],
+                             reviews + 1)
         before = self.conn.execute('SELECT count(*) FROM verification_requests').fetchone()[0]
         self.submit(draft())
         self.claim('design', verdict='must-revise')
@@ -160,6 +192,14 @@ class TestClaims(ClaimStore):
         self.assertEqual(refused.exception.code, 'E-PARENT-NOT-MEMBER')
         self.assertEqual(self.request(claim)[1], REVIEWER.seat_id)
         self.assertEqual(self.state(claim), 'pending')
+        # Engine admits no reply from a seat other than the recorded reviewer, since the
+        # request's only member is that reviewer (121938); one CC recipient row makes OTHER
+        # a member, so its approve is filed through admission and must still not count.
+        self.conn.execute("INSERT INTO recipients (relay_id, seat_id, role) VALUES (?, ?, 'cc')",
+                          (self.request(claim)[0], OTHER.seat_id))
+        self.conn.commit()
+        self.verify(claim, sender=OTHER)
+        self.assertEqual(self.state(claim), 'pending')
         self.verify(claim)
         self.assertEqual(self.state(claim), 'approved')
         self.verify(claim, 'must-revise')
@@ -210,9 +250,16 @@ class TestClaims(ClaimStore):
         _, claim = self.claim()
         self.assertEqual(self.state(claim), 'pending')
         self.verify(claim)
-        self.assertEqual(self.state(claim), 'approved')
-        with submit.read_guard(self.conn), self.assertRaises(sqlite3.DatabaseError):
-            self.conn.execute('SELECT body FROM bodies').fetchall()
+        attempts = []
+        reader = BodyReader(self.conn, attempts)
+        self.assertEqual(claims.verification_state(reader, claim.relay_id), 'approved')
+        self.assertEqual(len(claims.claim_locks(reader, claim.relay_id)), 1)
+        self.assertEqual(claims.reviewer_for(reader, 't1'), REVIEWER.seat_id)
+        self.assertTrue(attempts)
+        self.assertEqual(set(attempts), {'denied'})
+        # Control: the same reading outside the readers' guard reaches the bodies.
+        reader.execute('SELECT 1')
+        self.assertEqual(attempts[-1], 'read')
 
     def test_own_filing_refusal_is_a_hook_fault(self):
         req = self.submit(draft(kind='PLAN', needs='review', to=IMPL.address,
@@ -233,6 +280,8 @@ class TestClaims(ClaimStore):
         after = self.counts()
         self.assertEqual(after.pop('refusals'), before.pop('refusals') + 1)
         self.assertEqual(after, before)
+        self.assertEqual(self.conn.execute('SELECT code FROM refusals ORDER BY id DESC LIMIT 1').fetchone(),
+                         ('E-ADMISSION-HOOK',))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM verification_requests').fetchone()[0], 0)
         self.assertIsNotNone(self.submit(data, IMPL))
 

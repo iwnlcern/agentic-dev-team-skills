@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import time
 
 from relay_engine import cycles, envelope, errors, rules
@@ -670,12 +671,31 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
             'external':external}
 
 
-def working_copy_digest(path):
-    """Digest the current regular working copy, holding on missing or unreadable bytes."""
+_GIT_BLOB_HASHES = {'git-sha1': hashlib.sha1, 'git-sha256': hashlib.sha256}
+
+
+def working_copy_digest(path, algorithm='sha256'):
+    """Digest the current regular working copy, holding on missing or unreadable bytes.
+
+    One read under the regular-file rule (F6): the last path component is never
+    followed as a symbolic link, and a directory, FIFO or device answers None
+    without being read, since the caller holds the store's write lock.
+    `algorithm` is `sha256`, or `git-sha1` or `git-sha256` for a Git blob id of the
+    bytes (erratum 4 r2 R3); any other value raises ValueError.
+    """
+    if algorithm != 'sha256' and algorithm not in _GIT_BLOB_HASHES:
+        raise ValueError('unknown working-copy digest algorithm')
     try:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        parent = os.open(os.path.dirname(path) or '.', os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            data = _read_regular_at(parent, os.path.basename(path))
+        finally:
+            os.close(parent)
     except OSError:
         return None
+    if algorithm == 'sha256':
+        return hashlib.sha256(data).hexdigest()
+    return _GIT_BLOB_HASHES[algorithm](b'blob %d\0' % len(data) + data).hexdigest()
 
 
 def act_entry(conn, seat_id, effect, now_ms):
@@ -696,10 +716,14 @@ def act_entry(conn, seat_id, effect, now_ms):
         opened = False
         return answer
     except Exception:
-        if opened:
+        # A callee that ended the caller's transaction took the savepoint with it (F4).
+        if opened and conn.in_transaction:
             try:
-                conn.execute('ROLLBACK TO authority_act')
-            finally:
-                conn.execute('RELEASE authority_act')
+                try:
+                    conn.execute('ROLLBACK TO authority_act')
+                finally:
+                    conn.execute('RELEASE authority_act')
+            except sqlite3.Error:
+                pass
         return slips.Answer('held', 'authority.check-unavailable',
                             strings.render('authority-fault'), 'operator', None, None)

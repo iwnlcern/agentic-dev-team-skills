@@ -1,7 +1,9 @@
 """Authority entry uses real admission and leaves the caller's transaction intact."""
 import hashlib
+import os
 from pathlib import Path
 import sqlite3
+import threading
 from unittest import mock
 
 from relay_engine import authority, slips
@@ -40,14 +42,71 @@ class TestAuthorityV3(SlipStore):
         self.conn.commit()
 
     def test_working_copy_digest(self):
-        self.assertEqual(authority.working_copy_digest(str(self.plan)),
-                         hashlib.sha256(self.plan.read_bytes()).hexdigest())
-        self.assertIsNone(authority.working_copy_digest(str(self.plan.with_name('missing'))))
-        with mock.patch.object(Path, 'open', side_effect=PermissionError('unreadable working copy')):
-            self.assertIsNone(authority.working_copy_digest(str(self.plan)))
+        digest = authority.working_copy_digest
+        self.assertEqual(digest(str(self.plan)), hashlib.sha256(self.plan.read_bytes()).hexdigest())
+        self.assertIsNone(digest(str(self.plan.with_name('missing'))))
+        with mock.patch.object(os, 'open', side_effect=PermissionError('unreadable working copy')):
+            self.assertIsNone(digest(str(self.plan)))
         self.plan.write_bytes(b'changed working copy\n')
-        self.assertEqual(authority.working_copy_digest(str(self.plan)),
-                         hashlib.sha256(b'changed working copy\n').hexdigest())
+        self.assertEqual(digest(str(self.plan)), hashlib.sha256(b'changed working copy\n').hexdigest())
+        # F6: only a regular file is a working copy; nothing else is followed or read.
+        folder = self.plan.with_name('folder'); folder.mkdir()
+        self.assertIsNone(digest(str(folder)))
+        link = self.plan.with_name('link.md'); link.symlink_to(self.plan)
+        self.assertIsNone(digest(str(link)))
+        pipe = self.plan.with_name('pipe'); os.mkfifo(pipe)
+        results = []
+        reader = threading.Thread(target=lambda: results.append(digest(str(pipe))), daemon=True)
+        reader.start(); reader.join(5)
+        blocked = reader.is_alive()
+        if blocked:
+            try:  # a writer's open releases the blocked reader, so the thread ends
+                os.close(os.open(pipe, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+            reader.join(5)
+        self.assertFalse(blocked, 'working_copy_digest blocked on a FIFO')
+        self.assertEqual(results, [None])
+        # Erratum 4 r2 R3: the Git algorithms, against fixed `git hash-object --no-filters`
+        # values (SHA-1 from a default repository, SHA-256 from one made with
+        # --object-format=sha256); no Git runs here.
+        self.plan.write_bytes(b'plan X\n')
+        empty = self.plan.with_name('empty'); empty.write_bytes(b'')
+        expected = {(str(self.plan), 'git-sha1'): 'af9994ac749e94382d55b9f7807071468f65dbc4',
+                    (str(self.plan), 'git-sha256'): '780764d7815dbb5562d62e834f0830644482c141fefbea62b208ef3fe28f60a1',
+                    (str(empty), 'git-sha1'): 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391',
+                    (str(empty), 'git-sha256'): '473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813',
+                    (str(self.plan), 'sha256'): hashlib.sha256(b'plan X\n').hexdigest()}
+        try:
+            found = {key: digest(*key) for key in expected}
+        except TypeError as error:
+            self.fail('working_copy_digest takes no algorithm: %s' % error)
+        self.assertEqual(found, expected)
+        self.assertIsNone(digest(str(link), 'git-sha1'))
+        for algorithm in ('md5', 'git-sha512', '', None):
+            with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):
+                digest(str(self.plan), algorithm)
+
+    def test_act_entry_callee_ends_transaction(self):
+        # F4: a callee that ends the caller's transaction leaves no savepoint; the entry answers held.
+        self.build()
+        for mode in ('allow', 'raise'):
+            with self.subTest(mode=mode):
+                def ending(conn, *args, **kwargs):
+                    conn.commit()
+                    if mode == 'raise':
+                        raise RuntimeError('fault after the transaction ended')
+                    return slips.Answer('allow', None, None, None, None, None)
+                self.conn.execute('BEGIN IMMEDIATE')
+                with mock.patch.object(slips, 'act', side_effect=ending):
+                    try:
+                        answer = self.entry(branch=mode)
+                    except sqlite3.Error as error:
+                        self.fail('act_entry raised %r' % error)
+                self.assertEqual((answer.outcome, answer.code), ('held', 'authority.check-unavailable'))
+                self.assertTrue(answer.reason)
+                self.assertTrue(answer.unblocker)
+                self.assertFalse(self.conn.in_transaction)
 
     def test_act_entry_requires_open_transaction(self):
         before = self.conn.total_changes
