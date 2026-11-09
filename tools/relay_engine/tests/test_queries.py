@@ -1146,7 +1146,7 @@ class TestSessionSteps(Store):
                 except BaseException as error:
                     outcome = error
                 self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
-                self.assertEqual(outcome.sqlite_errorcode, 517)
+                self.assertEqual(getattr(outcome, "sqlite_errorcode", None), 517)
                 self.assertTrue(signing_in.in_transaction)
                 self.assertEqual(signing_in.execute("SELECT * FROM seat_sessions").fetchall(), before)
                 signing_in.rollback()
@@ -1294,7 +1294,7 @@ class TestSessionSteps(Store):
             self.conn.set_trace_callback(None)
         self.assertEqual(armed, ["RELEASE engine_record_session"])
         self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
-        self.assertEqual(outcome.sqlite_errorname, "SQLITE_INTERRUPT")
+        self.assertEqual(getattr(outcome, "sqlite_errorname", None), "SQLITE_INTERRUPT")
         self.assertTrue(self.conn.in_transaction)
         self.assertEqual(self.conn.execute("SELECT seat_id, issued_at FROM seat_occupants"
                                            " WHERE seat_id IN (?, ?) ORDER BY seat_id",
