@@ -2212,6 +2212,16 @@ class TestSnapshots(Snapshots):
         self.assertEqual(len(self.rows()), 1)
         self.assertEqual(self.rows()[0][6], result[1].relay_id)
 
+    def test_unsnapshotted_first_citation_keeps_checking(self):
+        # Breaks: stopping the stale check at a cited artifact the request never snapshotted.
+        a = self.artifact("keeps-checking", b"a\n")
+        request = self.request(a)
+        Path(a[5:]).write_bytes(b"changed\n")
+        other = self.artifact("never-cited", b"other\n")
+        self.refused("E-SNAPSHOT-STALE", self.reply(request, other, a), sender=IMPL)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIsNone(self.rows()[0][6])
+
     def test_not_to_precedes_no_ref(self):
         # Breaks: testing missing references before the approver's TO membership.
         ref = self.artifact("not-to", b"same")
@@ -2292,6 +2302,18 @@ class TestGitSnapshots(GitSnapshots):
         repo.commit_files({"d.md": "two\n"})
         self.refused("E-SNAPSHOT-STALE", self.reply(request, original,
             "bivpak@main:d.md"), sender=IMPL)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIsNone(self.rows()[0][6])
+
+    def test_stale_first_citation_refuses(self):
+        # Breaks: comparing only the last citation of each snapshotted artifact.
+        repo = self.repository()
+        one = git(repo.path, "rev-parse", "HEAD")
+        original = "bivpak@" + one + ":d.md"
+        request = self.request(original)
+        repo.commit_files({"d.md": "two\n"})
+        self.refused("E-SNAPSHOT-STALE", self.reply(request, "bivpak@main:d.md",
+            original), sender=IMPL)
         self.assertEqual(len(self.rows()), 1)
         self.assertIsNone(self.rows()[0][6])
 
