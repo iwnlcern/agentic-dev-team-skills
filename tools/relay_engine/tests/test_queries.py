@@ -1412,17 +1412,17 @@ class TestSnapshotCopies(submit_tests.Snapshots):
             os.umask(previous)
 
     def test_overwrite_keeps_other_bits(self):
-        # Breaks: masking the kept mode so the other-read bit is lost.
+        # Breaks: masking the kept mode, or not keeping it; umask 0o022 never gives 0o664.
         self.snapshots_pair()
         previous = os.umask(0o022)
         try:
             out = self.folder / "other-bits"
             out.write_bytes(b"old")
-            out.chmod(0o644)
+            out.chmod(0o664)
             result = snapshot_outcome(lambda: queries.write_snapshot(
                 self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
             self.assertEqual(result[0], "ok", result)
-            self.assertEqual(out.stat().st_mode & 0o7777, 0o644)
+            self.assertEqual(out.stat().st_mode & 0o7777, 0o664)
             self.assertEqual(out.read_bytes(), b"one\n")
         finally:
             os.umask(previous)
@@ -1438,8 +1438,9 @@ class TestSnapshotCopies(submit_tests.Snapshots):
             return real_fchmod(fd, mode)
 
         def writing(fd, data):
+            # One byte per call, so the write loop runs once per byte.
             events.append(("write", None))
-            return real_write(fd, data)
+            return real_write(fd, bytes(data[:1]))
 
         out = self.folder / "mode-once"
         out.write_bytes(b"old")

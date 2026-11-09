@@ -2218,7 +2218,10 @@ class TestSnapshots(Snapshots):
         request = self.request(a)
         Path(a[5:]).write_bytes(b"changed\n")
         other = self.artifact("never-cited", b"other\n")
-        self.refused("E-SNAPSHOT-STALE", self.reply(request, other, a), sender=IMPL)
+        data = self.reply(request, other, a)
+        stale = [number for number, text in enumerate(data.split(b"\n"), 1)
+                 if text.startswith(b"REF: ")][1]
+        self.refused("E-SNAPSHOT-STALE", data, sender=IMPL, line=stale)
         self.assertEqual(len(self.rows()), 1)
         self.assertIsNone(self.rows()[0][6])
 
@@ -2312,8 +2315,10 @@ class TestGitSnapshots(GitSnapshots):
         original = "bivpak@" + one + ":d.md"
         request = self.request(original)
         repo.commit_files({"d.md": "two\n"})
-        self.refused("E-SNAPSHOT-STALE", self.reply(request, "bivpak@main:d.md",
-            original), sender=IMPL)
+        data = self.reply(request, "bivpak@main:d.md", original)
+        stale = [number for number, text in enumerate(data.split(b"\n"), 1)
+                 if text.startswith(b"REF: ")][0]
+        self.refused("E-SNAPSHOT-STALE", data, sender=IMPL, line=stale)
         self.assertEqual(len(self.rows()), 1)
         self.assertIsNone(self.rows()[0][6])
 
