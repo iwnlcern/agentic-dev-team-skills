@@ -1127,6 +1127,13 @@ class TestErratum5(SlipStore):
         both = self.answer(self.ask('plan', objection, self.plan, self.design), 'approve', self.plan, self.design)
         self.verify(both)
         self.refused(self.issue(both), self.design, objection)
+        # Nor does a holder PLAN-REVIEW must-revise naming the design, then its approve: the second
+        # implementer's objection stays the one in force (Authority Planner 151024).  7017c97 answered
+        # the same, since there plan reviews never decided a path a DESIGN-REVIEW's parent referenced.
+        revising = self.answer(self.ask('plan', objection, self.plan, self.design), 'must-revise', self.design)
+        again = self.answer(self.ask('plan', revising, self.plan, self.design), 'approve', self.plan, self.design)
+        self.verify(again)
+        self.refused(self.issue(again), self.design, objection)
         # The holder's qualifying DESIGN-REVIEW approve then lets the slip issue with the design claim.
         renewed = self.answer(self.ask('design', both, self.design), 'approve', self.design, kind='design')
         self.verify(renewed)
