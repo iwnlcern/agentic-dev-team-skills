@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import re
-import sqlite3
 import time
 
 from relay_engine import cycles, envelope, errors, rules
@@ -713,17 +712,14 @@ def act_entry(conn, seat_id, effect, now_ms):
         if answer.outcome == 'held' and answer.code == 'authority.check-unavailable':
             conn.execute('ROLLBACK TO authority_act')
         conn.execute('RELEASE authority_act')
-        opened = False
         return answer
     except Exception:
-        # A callee that ended the caller's transaction took the savepoint with it (F4).
-        if opened and conn.in_transaction:
-            try:
-                try:
-                    conn.execute('ROLLBACK TO authority_act')
-                finally:
-                    conn.execute('RELEASE authority_act')
-            except sqlite3.Error:
-                pass
-        return slips.Answer('held', 'authority.check-unavailable',
-                            strings.render('authority-fault'), 'operator', None, None)
+        pass
+    # Erratum 4 r3 R5: the cleanup runs after the except clause, so an error here escapes
+    # with nothing of the first fault attached, for the caller to roll back (F5).  A callee
+    # that ended the caller's transaction took the savepoint with it (F4): nothing to undo.
+    if opened and conn.in_transaction:
+        conn.execute('ROLLBACK TO authority_act')
+        conn.execute('RELEASE authority_act')
+    return slips.Answer('held', 'authority.check-unavailable',
+                        strings.render('authority-fault'), 'operator', None, None)

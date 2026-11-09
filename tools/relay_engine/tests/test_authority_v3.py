@@ -108,6 +108,42 @@ class TestAuthorityV3(SlipStore):
                 self.assertTrue(answer.unblocker)
                 self.assertFalse(self.conn.in_transaction)
 
+    def test_act_entry_failed_cleanup_escapes(self):
+        # Erratum 4 r3 R5: a cleanup that fails in an open transaction escapes act_entry, never a
+        # held answer, and carries nothing of the first fault.  A callee that ends the caller's
+        # transaction and begins another leaves no savepoint to roll back to.
+        self.build()
+        for mode in ('raise', 'allow'):
+            with self.subTest(mode=mode):
+                def reopening(conn, *args, **kwargs):
+                    conn.commit()
+                    conn.execute('BEGIN IMMEDIATE')
+                    if mode == 'raise':
+                        raise RuntimeError('callee fault text')
+                    return slips.Answer('allow', None, None, None, None, None)
+                self.conn.execute('BEGIN IMMEDIATE')
+                try:
+                    with mock.patch.object(slips, 'act', side_effect=reopening):
+                        with self.assertRaises(sqlite3.OperationalError) as caught:
+                            self.entry(branch=mode)
+                    self.assertIn('authority_act', str(caught.exception))
+                    self.assertIsNone(caught.exception.__cause__)
+                    self.assertIsNone(caught.exception.__context__)
+                    self.assertTrue(self.conn.in_transaction)
+                finally:
+                    self.conn.rollback()
+        # Root 133408 point 2: a callee that closes the connection makes the open-transaction
+        # read raise, and that error escapes the same way; nothing uses the connection after.
+        def closing(conn, *args, **kwargs):
+            conn.close()
+            raise RuntimeError('callee fault text')
+        self.conn.execute('BEGIN IMMEDIATE')
+        with mock.patch.object(slips, 'act', side_effect=closing):
+            with self.assertRaises(sqlite3.ProgrammingError) as caught:
+                self.entry(branch='closed')
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+
     def test_act_entry_requires_open_transaction(self):
         before = self.conn.total_changes
         with mock.patch.object(slips, 'act') as act:
