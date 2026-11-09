@@ -408,11 +408,21 @@ class TestQueries(SlipStore):
         _, dc = self.designed()
         own = self.ask('plan', dc, self.plan)
         foreign = self.submit(draft(kind='PLAN', needs='review', to=QIMPL.address, refs=refs), FOREIGN)
+        # Past every relay's time, so the foreign review and the own approve take the same one.
+        self.clock = self.conn.execute('SELECT max(created_at) FROM relays').fetchone()[0] + 1
         self.submit(draft(kind='PLAN-REVIEW', verdict='approve', to=FOREIGN.address,
                           parent=foreign.relay_id, refs=refs), QIMPL)
         approval = self.answer(own, 'approve', self.plan)
-        # Both locks carry the same clock and the other project's snapshot has the higher
-        # handle, so only the project filter keeps that lock from being read as the newest.
+        # The premise: equal lock times and the foreign snapshot's handle the higher, so only
+        # the project filter keeps that lock from being read as the newest.
+        locks = {project: (locked_at, handle) for project, locked_at, handle in self.conn.execute(
+            'SELECT r.project_id, s.locked_at, s.handle FROM snapshots s JOIN relays r ON r.id = s.relay_id'
+            ' WHERE s.artifact = ? AND s.locked_by IS NOT NULL', (str(self.plan),))}
+        self.assertEqual(sorted(locks), sorted((PLANNER.project_id, FOREIGN.project_id)))
+        self.assertEqual(locks[PLANNER.project_id][0], locks[FOREIGN.project_id][0],
+                         'the two locks carry different times')
+        self.assertGreater(locks[FOREIGN.project_id][1], locks[PLANNER.project_id][1],
+                           'the foreign snapshot does not carry the higher handle')
         self.assertIsNotNone(self.request(approval), 'the approval filed no claim')
         self.verify(approval)
         impl = self.issue(approval)
