@@ -856,15 +856,14 @@ class TestErratum3(SlipStore):
                 choose('c' * digits)
 
     def test_digests_alone_issue_nothing(self):
+        # Erratum 5 r4 S1: the lineage binds digest-bound paths only, with no locked claim at all.
         context = self.file('context.md', b'context X\n')
         go = self.go(refs=('file:' + str(context),))
-        dc = self.approved('design', parent=go.relay_id)
-        self.verify(dc)
-        impl = self.issue(dc, refs=('file:' + str(self.plan),))
+        impl = self.issue(go, refs=('file:' + str(self.plan),))
         self.assertIsNone(self.slip(impl))
         self.code('lineage-incomplete')
         # Control: one holder PLAN-REVIEW lock in the same lineage lets a slip issue.
-        approval = self.answer(self.ask('plan', dc, self.plan), 'approve', self.plan)
+        approval = self.answer(self.ask('plan', go, self.plan), 'approve', self.plan)
         self.verify(approval)
         impl = self.issue(approval)
         self.assertEqual(self.act().slip_id, self.issued(impl))
@@ -919,12 +918,16 @@ class TestErratum3(SlipStore):
         self.assertIsNotNone(rule, 'slips.COMMIT_ROLE_RULE is not defined')
         self.assertEqual(set(rule), set(addresses.ROLE_WORDS))
         self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)"
-                          " VALUES ('tr', 'p', 'v3-roster', 'pair', 1, 'operator')")
+                          " VALUES ('tr', 'p', 'v3-roster', 'pair', 1, 'operator'),"
+                          " ('tz', 'p', 'v3-unlisted', 'pair', 1, 'operator')")
         roster = {}
         for role in sorted(addresses.ROLE_WORDS) + ['unlisted-role']:
-            seat = submit.SeatRef('seat-roster-' + role, 'v3-roster.' + role, role, 'tr', 'p')
-            self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state) VALUES (?, 'tr', ?, 'occupied')",
-                              (seat.seat_id, role))
+            # An unlisted role word cannot appear in a TO address (E-ADDRESS), so that seat is
+            # reached through a parseable address whose directory entry is that seat.
+            team, address = ('tz', 'v3-unlisted.implementer') if role == 'unlisted-role' else ('tr', 'v3-roster.' + role)
+            seat = submit.SeatRef('seat-roster-' + role, address, role, team, 'p')
+            self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state) VALUES (?, ?, ?, 'occupied')",
+                              (seat.seat_id, team, role))
             self.conn.execute("INSERT INTO seat_occupants (id, seat_id, key_id, key_verifier, issued_at)"
                               " VALUES (?, ?, ?, 'v', 1)", ('o-' + seat.seat_id, seat.seat_id, 'k-' + seat.seat_id))
             roster[role] = seat
@@ -947,6 +950,11 @@ class TestErratum3(SlipStore):
             for branch in ('free', 'bound'):
                 with self.subTest(role=role, branch=branch, addressed=True):
                     self.assertEqual(self.act(seat=roster[role], branch=branch).code, 'authority.not-issuer')
+        # Erratum 5 r4 S2: the unlisted role answers slip-missing with an IMPL addressed to it too.
+        self.submit(draft(kind='IMPL', needs='act', to=roster['unlisted-role'].address, bundle='roster-unlisted'))
+        for branch in ('free', 'bound'):
+            with self.subTest(role='unlisted-role', branch=branch, addressed=True):
+                self.assertEqual(self.act(seat=roster['unlisted-role'], branch=branch).code, 'authority.slip-missing')
         # The table decides: a planner role taken out of it answers slip-missing.
         with mock.patch.object(slips, 'COMMIT_ROLE_RULE', {k: v for k, v in rule.items() if k != 'planner'}):
             self.assertEqual(self.act(seat=roster['planner'], branch='free').code, 'authority.slip-missing')
@@ -992,7 +1000,179 @@ class TestErratum3(SlipStore):
         operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
         impl = self.submit(draft(kind='IMPL', needs='act', parent=objection.relay_id, to=IMPL.address), operator)
         self.assertIn('objected:' + str(self.plan), self.binds(impl)['waived'])
+        # Erratum 5 r4 S3: B2's plan-lock waiver stays beside it (erratum 4 r3 R2).
+        self.assertIn('plan-lock', self.binds(impl)['waived'])
         self.assertEqual(self.digest_artifacts(impl), {str(self.plan): sha(b'plan Y\n')})
         self.assertEqual(self.act().slip_id, self.issued(impl))
         self.plan.write_bytes(b'plan Z\n')
         self.assertIn(str(self.plan), self.code('plan-changed').reason)
+
+
+class TestErratum5(SlipStore):
+    """Erratum 5 r4's E1, E2 and E3, each with its control."""
+
+    def file(self, name, data):
+        path = self.plan.with_name(name)
+        path.write_bytes(data)
+        return path
+
+    def refs(self, *paths):
+        return tuple('file:' + str(path) for path in paths)
+
+    def objected(self):
+        """Design approved; plan.md and extra.md approved by the holder at X and verified;
+        plan.md rewritten to Y and answered must-revise by the holder naming plan.md."""
+        extra = self.file('extra.md', b'extra X\n')
+        _, dc = self.designed()
+        approval = self.answer(self.ask('plan', dc, self.plan, extra), 'approve', self.plan, extra)
+        self.verify(approval)
+        self.plan.write_bytes(b'plan Y\n')
+        return self.answer(self.ask('plan', approval, self.plan), 'must-revise', self.plan)
+
+    def refused(self, impl, path, review):
+        self.assertIsNone(self.slip(impl), 'a slip issued over the objection')
+        denied = self.code('lineage-incomplete')
+        self.assertEqual(denied.outcome, 'deny')
+        self.assertIn(str(path), denied.reason)
+        self.assertIn(review.relay_id, denied.reason)
+
+    def test_unqualified_design_review_decides_nothing(self):
+        plan = lambda: self.refs(self.plan)
+        def design_request(objection, to, needs='review'):
+            return self.submit(draft(kind='DESIGN', needs=needs, parent=objection.relay_id, to=to.address,
+                                     refs=plan()))
+        def design_review(parent, sender, verdict='approve'):
+            fields = {'verdict': verdict} if verdict else {'needs': 'review'}
+            return self.submit(draft(kind='DESIGN-REVIEW', parent=parent.relay_id, to=PLANNER.address,
+                                     refs=plan(), **fields), sender)
+        cases = {
+            # (a) a verdictless DESIGN-REVIEW from the pair Planner parented to the objection
+            'a-verdictless-planner': lambda o: self.submit(draft(
+                kind='DESIGN-REVIEW', needs='review', parent=o.relay_id, to=IMPL.address, refs=plan())),
+            # (b) another seat's approve under a DESIGN with NEEDS review referencing plan.md at Y
+            'b-other-seat': lambda o: design_review(design_request(o, SECOND), SECOND),
+            # (c) the holder's approve under a SITREP referencing plan.md
+            'c-under-sitrep': lambda o: design_review(self.submit(draft(
+                parent=o.relay_id, to=IMPL.address, refs=plan())), IMPL),
+            # (d) the holder's verdict under a DESIGN without NEEDS review, which holds no snapshot
+            'd-no-snapshot': lambda o: design_review(design_request(o, IMPL, needs='none'), IMPL),
+            # (e) the holder's verdictless review under a DESIGN with NEEDS review holding plan.md
+            'e-verdictless-holder': lambda o: design_review(design_request(o, IMPL), IMPL, verdict=None),
+            # (f) the holder's approve under a PLAN with NEEDS review holding plan.md
+            'f-plan-parent': lambda o: design_review(self.ask('plan', o, self.plan), IMPL),
+        }
+        for name, file_review in cases.items():
+            with self.subTest(case=name):
+                self.conn.close(); self.setUp()
+                objection = self.objected()
+                self.refused(self.issue(file_review(objection)), self.plan, objection)
+        # Control: the same lineage with no DESIGN-REVIEW answers the same.
+        self.conn.close(); self.setUp()
+        objection = self.objected()
+        self.refused(self.issue(objection), self.plan, objection)
+
+    def test_design_review_cannot_reclassify_approved_plan(self):
+        _, dc = self.designed()
+        approval = self.answer(self.ask('plan', dc, self.plan), 'approve', self.plan)
+        self.verify(approval)
+        self.plan.write_bytes(b'plan Z\n')
+        sitrep = self.submit(draft(parent=approval.relay_id, to=IMPL.address, refs=self.refs(self.plan)))
+        review = self.submit(draft(kind='DESIGN-REVIEW', needs='review', parent=sitrep.relay_id,
+                                   to=IMPL.address, refs=self.refs(self.plan)))
+        impl = self.issue(review)
+        self.assertEqual(self.claim_artifacts(impl, 'plan'), {('plan', approval.relay_id): [str(self.plan)]})
+        self.assertNotIn(str(self.plan), self.digest_artifacts(impl))
+        self.assertIn(str(self.plan), self.code('plan-changed').reason)
+        self.plan.write_bytes(b'plan X\n')
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def other_seat_design(self, verdict):
+        """A DESIGN of the design TO a second implementer, answered by that implementer."""
+        go = self.go()
+        request = self.submit(draft(kind='DESIGN', needs='review', parent=go.relay_id, to=SECOND.address,
+                                    refs=self.refs(self.design)))
+        return self.submit(draft(kind='DESIGN-REVIEW', verdict=verdict, parent=request.relay_id,
+                                 to=PLANNER.address, refs=self.refs(self.design)), SECOND)
+
+    def test_other_seat_design_binds_as_plan_path(self):
+        other = self.other_seat_design('approve')
+        approval = self.answer(self.ask('plan', other, self.plan, self.design), 'approve', self.plan)
+        self.verify(approval)
+        impl = self.issue(approval)
+        self.assertEqual(self.claim_artifacts(impl), {('plan', approval.relay_id): [str(self.plan)]})
+        self.assertEqual(self.digest_artifacts(impl), {str(self.design): sha(b'design X\n')})
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        self.design.write_bytes(b'design Y\n')
+        self.assertIn(str(self.design), self.code('plan-changed').reason)
+        # Control: the same lineage with the holder's DESIGN-REVIEW binds the design claim.
+        self.conn.close(); self.setUp()
+        go = self.go()
+        own = self.answer(self.ask('design', go, self.design), 'approve', self.design, kind='design')
+        self.verify(own)
+        approval = self.answer(self.ask('plan', own, self.plan, self.design), 'approve', self.plan)
+        self.verify(approval)
+        impl = self.issue(approval)
+        self.assertEqual(self.claim_artifacts(impl, 'design'), {('design', own.relay_id): [str(self.design)]})
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        self.design.write_bytes(b'design Y\n')
+        self.code('design-changed')
+
+    def test_other_seat_design_objection_refuses(self):
+        objection = self.other_seat_design('must-revise')
+        approval = self.answer(self.ask('plan', objection, self.plan, self.design), 'approve', self.plan)
+        self.verify(approval)
+        # 7017c97 answered the same: any DESIGN-REVIEW with a verdict decided its paths, so no slip.
+        self.refused(self.issue(approval), self.design, objection)
+        # The holder's PLAN-REVIEW approve whose lock holds the design replaces nothing.
+        both = self.answer(self.ask('plan', objection, self.plan, self.design), 'approve', self.plan, self.design)
+        self.verify(both)
+        self.refused(self.issue(both), self.design, objection)
+        # The holder's qualifying DESIGN-REVIEW approve then lets the slip issue with the design claim.
+        renewed = self.answer(self.ask('design', both, self.design), 'approve', self.design, kind='design')
+        self.verify(renewed)
+        impl = self.issue(renewed)
+        self.assertEqual(self.claim_artifacts(impl, 'design'), {('design', renewed.relay_id): [str(self.design)]})
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        # Control: the second implementer's approve instead binds the design by digest.
+        self.conn.close(); self.setUp()
+        other = self.other_seat_design('approve')
+        approval = self.answer(self.ask('plan', other, self.plan, self.design), 'approve', self.plan)
+        self.verify(approval)
+        impl = self.issue(approval)
+        self.assertEqual(self.digest_artifacts(impl), {str(self.design): sha(b'design X\n')})
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_operator_slip_checks_verification(self):
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        def lineage():
+            _, dc = self.designed()
+            approval = self.answer(self.ask('plan', dc, self.plan), 'approve', self.plan,
+                                   cc=self.issuers + ', operator')
+            impl = self.submit(draft(kind='IMPL', needs='act', parent=approval.relay_id, to=IMPL.address), operator)
+            return approval, impl
+        approval, impl = lineage()
+        self.assertEqual([w for w in self.binds(impl)['waived'] if w.startswith('verification:')], [])
+        self.code('verification-pending')
+        self.verify(approval)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        # A second operator lineage: the reviewer's must-revise holds, and only the operator's
+        # waiver through claims.waive lets it allow.
+        self.conn.close(); self.setUp()
+        approval, impl = lineage()
+        self.verify(approval, 'must-revise')
+        self.code('verification-objected')
+        claims.waive(self.conn, approval.relay_id, 'plan', 'operator', 'the operator accepts this plan', self.clock)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_non_approve_naming_unheld_path_objects_all(self):
+        _, base, _ = self.build(issue=False)
+        extra = self.file('extra.md', b'extra X\n')
+        unrelated = self.file('unrelated.md', b'unrelated X\n')
+        objection = self.answer(self.ask('plan', base, extra), 'must-revise', unrelated)
+        self.refused(self.issue(objection), extra, objection)
+        # Control: the same must-revise naming the requested path answers the same.
+        self.conn.close(); self.setUp()
+        _, base, _ = self.build(issue=False)
+        extra = self.file('extra.md', b'extra X\n')
+        objection = self.answer(self.ask('plan', base, extra), 'must-revise', extra)
+        self.refused(self.issue(objection), extra, objection)

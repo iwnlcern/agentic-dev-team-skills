@@ -153,10 +153,20 @@ def _decide(conn, walk, holder):
     the design paths, and each decided path's state, ('locked', claim relay, kind, lock)
     or ('objected', review relay, request relay)."""
     oldest_first = walk[::-1]
+    kinds = {row.id: row.kind for row in oldest_first}
     references = {row.id: _references(conn, row.id) for row in oldest_first}
-    design_paths = {artifact for row in oldest_first
-                    if row.kind == 'DESIGN-REVIEW' and row.parent_id in references
-                    for artifact, _, _ in references[row.parent_id]}
+    def held_by(relay_id):
+        held = {}
+        for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
+                                              ' WHERE relay_id = ?', (relay_id,)):
+            held.setdefault(artifact, set()).add(content)
+        return held
+    def qualifies(row):
+        # Erratum 5 r4 E1: a verdict, sent by the holder, answering a DESIGN relay.
+        return (row.kind == 'DESIGN-REVIEW' and row.verdict is not None and row.sender_seat_id == holder
+                and kinds.get(row.parent_id) == 'DESIGN')
+    # The design paths are what a qualifying review's parent's snapshots hold, not its references.
+    design_paths = {artifact for row in oldest_first if qualifies(row) for artifact in held_by(row.parent_id)}
     newest, state = {}, {}
     for row in oldest_first:
         for artifact, reference, digest in references[row.id]:
@@ -165,24 +175,34 @@ def _decide(conn, walk, holder):
         # A review request carries no verdict and decides nothing (erratum 4 r2 R1).
         if kind is None or row.verdict is None or (kind == 'plan' and row.sender_seat_id != holder):
             continue
+        # Erratum 5 r4 E1: a DESIGN-REVIEW that does not qualify locks nothing and classifies
+        # nothing, but one answering other than approve under a DESIGN relay still objects.
+        objects_only = kind == 'design' and not qualifies(row)
+        if objects_only and (row.verdict == 'approve' or kinds.get(row.parent_id) != 'DESIGN'):
+            continue
         def decides(artifact):
-            return (artifact in design_paths) == (kind == 'design')
+            return objects_only or (artifact in design_paths) == (kind == 'design')
         def locked_content(artifact):
             current = state.get(artifact)
             return current[3].content_sha256 if current and current[0] == 'locked' else None
         if row.verdict == 'approve':
             for lock in claims.claim_locks(conn, row.id):
+                current = state.get(lock.artifact)
+                # An objection a DESIGN-REVIEW set is replaced only by a qualifying design approve.
+                if current and current[0] == 'objected' and current[3] == 'design' and kind != 'design':
+                    continue
                 if decides(lock.artifact) and locked_content(lock.artifact) != lock.content_sha256:
                     state[lock.artifact] = ('locked', row.id, kind, lock)
             continue
-        held = {}
-        for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
-                                              ' WHERE relay_id = ?', (row.parent_id,)):
-            held.setdefault(artifact, set()).add(content)
+        held = held_by(row.parent_id)
         named = {artifact for artifact, _, _ in references[row.id]}
-        for artifact in sorted(held.keys() & named if named else held):
+        # Erratum 5 r4 E3: naming none of the parent's paths decides all of them.
+        for artifact in sorted((held.keys() & named) or held):
+            current = state.get(artifact)
+            if current and current[0] == 'objected' and current[3] == 'design' and kind != 'design':
+                continue  # still objected, and still only a qualifying design approve replaces it
             if decides(artifact) and held[artifact] != {locked_content(artifact)}:
-                state[artifact] = ('objected', row.id, row.parent_id)
+                state[artifact] = ('objected', row.id, row.parent_id, kind)
     return newest, design_paths, state
 
 
@@ -231,10 +251,9 @@ def _evidence(conn, relay_id, principal, holder):
         else:
             return 'lineage-incomplete', binds, None
     if mode == 'operator':
+        # Erratum 5 r4 E2: issuance preconditions only; act checks every claim's verification,
+        # and the operator waives one through claims.waive.
         binds['waived'].append('issuer-preconditions')
-        for claim in binds['claims']:
-            if claims.verification_state(conn, claim['claim']) not in ('approved', 'waived'):
-                binds['waived'].append('verification:' + claim['claim'])
     return None, binds, None
 
 
@@ -338,8 +357,6 @@ def _checked_slip(conn, slip, effect, digest):
             return _answer(bound['kind'] + '-changed',
                            strings.render('authority-artifact', artifact=bound['artifact']), planner, slip)
     for claim in binds['claims']:
-        if 'verification:' + claim['claim'] in binds['waived']:
-            continue
         state = claims.verification_state(conn, claim['claim'])
         if state not in ('approved', 'waived'):
             row = conn.execute('SELECT reviewer_seat_id FROM verification_requests WHERE claim_relay_id = ? LIMIT 1',
