@@ -1267,6 +1267,131 @@ class TestSessionSteps(Store):
             queries.record_session_step(self.conn, "bad-host", "vim", IMPL.seat_id, 10)
         self.assertFalse(self.conn.in_transaction)
 
+    def test_session_step_release_failure_rolls_back(self):
+        """M15: a success RELEASE that fails inside SQLite rolls the step back and
+        leaves no step savepoint."""
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 321 WHERE seat_id = ?",
+                          (PLANNER.seat_id,))
+        self.conn.execute("SAVEPOINT engine_record_session")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 654 WHERE seat_id = ?",
+                          (IMPL.seat_id,))
+        armed = []
+
+        def trace(statement):
+            # A progress handler never runs inside a RELEASE; an interrupt at its start does.
+            if statement == "RELEASE engine_record_session" and not armed:
+                armed.append(statement)
+                self.conn.interrupt()
+
+        self.conn.set_trace_callback(trace)
+        try:
+            outcome = queries.record_session_step(self.conn, "failing", "codex", IMPL.seat_id, 20)
+        except BaseException as error:
+            outcome = error
+        finally:
+            self.conn.set_trace_callback(None)
+        self.assertEqual(armed, ["RELEASE engine_record_session"])
+        self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT seat_id, issued_at FROM seat_occupants"
+                                           " WHERE seat_id IN (?, ?) ORDER BY seat_id",
+                                           (PLANNER.seat_id, IMPL.seat_id)).fetchall(),
+                         sorted([(PLANNER.seat_id, 321), (IMPL.seat_id, 654)]))
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                         [(previous, None)])
+        # Capturing the caller's RELEASE makes a missing savepoint an assertion, not an ERROR.
+        try:
+            self.conn.execute("RELEASE engine_record_session")
+            released = None
+        except sqlite3.Error as error:
+            released = error
+        self.assertIsNone(released)
+        with self.assertRaisesRegex(sqlite3.OperationalError, "no such savepoint"):
+            self.conn.execute("RELEASE engine_record_session")
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+
+    def test_session_helpers_end_transaction_on_base_exceptions(self):
+        """M17/M18/M19: an interrupt inside either helper ends its transaction."""
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+        record_interrupt = KeyboardInterrupt("fixture record interrupt")
+
+        def occupant_read(cursor, row):
+            if [column[0] for column in cursor.description] == ["id"]:
+                raise record_interrupt
+            return row
+
+        self.conn.row_factory = occupant_read
+        try:
+            outcome = queries.record_session(self.conn, "interrupted", "codex", IMPL.seat_id, 20)
+        except BaseException as error:
+            outcome = error
+        finally:
+            self.conn.row_factory = None
+        self.assertIs(outcome, record_interrupt)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                         [(previous, None)])
+        other = queries.record_session(self.conn, "after-record", "codex", PLANNER.seat_id, 30)
+        self.assertIsInstance(other, str)
+
+        end_interrupt = KeyboardInterrupt("fixture end interrupt")
+        real_step = queries.end_session_step
+
+        def ending(conn, session_id, end_ms):
+            real_step(conn, session_id, end_ms)
+            raise end_interrupt
+
+        with mock.patch.object(queries, "end_session_step", side_effect=ending):
+            try:
+                outcome = queries.end_session(self.conn, previous, 40)
+            except BaseException as error:
+                outcome = error
+        self.assertIs(outcome, end_interrupt)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT ended_at FROM seat_sessions WHERE id = ?",
+                                           (previous,)).fetchone(), (None,))
+        queries.end_session(self.conn, previous, 50)
+        self.assertEqual(self.conn.execute("SELECT ended_at FROM seat_sessions WHERE id = ?",
+                                           (previous,)).fetchone(), (50,))
+
+    def test_session_step_keeps_error_when_sqlite_ends_transaction(self):
+        """M20: when SQLite itself ends the transaction, the step raises SQLite's error."""
+        previous = queries.record_session(self.conn, "previous", "codex", IMPL.seat_id, 10)
+
+        class InterruptInsert:
+            def __init__(self, conn):
+                self._conn = conn
+                self.fired = False
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, *args):
+                if not sql.startswith("INSERT INTO seat_sessions"):
+                    return self._conn.execute(sql, *args)
+                self.fired = True
+                self._conn.set_progress_handler(lambda: 1, 1)
+                try:
+                    return self._conn.execute(sql, *args)
+                finally:
+                    self._conn.set_progress_handler(None, 1)
+
+        proxy = InterruptInsert(self.conn)
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            outcome = queries.record_session_step(proxy, "interrupted", "codex", IMPL.seat_id, 20)
+        except BaseException as error:
+            outcome = error
+        self.assertTrue(proxy.fired)
+        self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
+        self.assertEqual(str(outcome), "interrupted")
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
+                         [(previous, None)])
+
 
 class TestGitIsolation(unittest.TestCase):
     def test_store_tests_ignore_ambient_git_names(self):

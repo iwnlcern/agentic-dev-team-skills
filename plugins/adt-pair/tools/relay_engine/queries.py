@@ -518,7 +518,13 @@ def record_session_step(conn, session_id: str, host: str, seat_id: str, start_ms
             conn.execute("ROLLBACK TO engine_record_session")
             conn.execute("RELEASE engine_record_session")
         raise
-    conn.execute("RELEASE engine_record_session")
+    try:
+        conn.execute("RELEASE engine_record_session")
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK TO engine_record_session")
+            conn.execute("RELEASE engine_record_session")
+        raise
     return internal_id
 
 
