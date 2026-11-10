@@ -902,7 +902,7 @@ from pathlib import Path
 import mtbattery as mt
 name, mode, root = sys.argv[1:]
 root = Path(root)
-(root / (name + '.pid')).write_text(str(os.getpid()))
+staged = root / (name + '.pid.' + str(os.getpid()) + '.tmp'); staged.write_text(str(os.getpid())); os.replace(staged, root / (name + '.pid'))
 if mode == 'ordered':
     if name == 'z':
         while not (root/'release').exists(): time.sleep(0.01)
@@ -919,10 +919,10 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' 
 from pathlib import Path
 from types import SimpleNamespace
 root = Path(__file__).parent
-(root/'child.pid').write_text(str(os.getpid()))
+staged = root/('child.pid.' + str(os.getpid()) + '.tmp'); staged.write_text(str(os.getpid())); os.replace(staged, root/'child.pid')
 def load_linter(): return SimpleNamespace()
 def main():
-    subprocess.run([sys.executable, '-c', "import os,time; from pathlib import Path; Path(" + repr(str(root/'grandchild.pid')) + ").write_text(str(os.getpid())); time.sleep(60)"])
+    subprocess.run([sys.executable, '-c', "import os,time; from pathlib import Path; p = Path(" + repr(str(root/'grandchild.pid')) + "); t = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp'); t.write_text(str(os.getpid())); os.replace(t, p); time.sleep(60)"])
     return 0
 """)
             driver = root/'driver.py'
@@ -953,6 +953,16 @@ raise SystemExit(code)
             time.sleep(0.02)
         self.fail('child did not reach the synchronization point')
 
+    def wait_for_pid(self, path, timeout=8):
+        # A pid file's existence is not its pid: wait until its text parses.
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            try: text = Path(path).read_text().strip()
+            except FileNotFoundError: text = ''
+            if text.isascii() and text.isdigit() and int(text) > 0: return int(text)
+            time.sleep(0.02)
+        self.fail('child did not reach the synchronization point')
+
     def test_stop_forwards_to_child_and_cancels_queue(self):
         import os, signal, subprocess
         for sig, group in [(signal.SIGTERM, False), (signal.SIGINT, True)]:
@@ -962,6 +972,7 @@ raise SystemExit(code)
                     try:
                         self.wait_for(lambda: (root/'grandchild.pid').exists() or process.poll() is not None)
                         self.assertIsNone(process.poll(), (root/'output').read_text())
+                        pids = [self.wait_for_pid(root/name) for name in ('grandchild.pid', 'a.pid', 'child.pid')]
                         os.killpg(process.pid, sig) if group else os.kill(process.pid, sig)
                         self.assertEqual(process.wait(timeout=10), 7)
                         self.assertEqual((root/'starts').read_text().splitlines(), ['z', 'a'])
@@ -971,8 +982,8 @@ raise SystemExit(code)
                         self.assertIn('UNOBSERVED ARM=b', output)
                         self.assertTrue(output.rstrip().endswith('RUN end'), output)
                         self.assertFalse(list(root.glob('arm-*')))
-                        for name in ('a.pid', 'child.pid', 'grandchild.pid'):
-                            with self.assertRaises(ProcessLookupError): os.kill(int((root/name).read_text()), 0)
+                        for pid in pids:
+                            with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
                     finally:
                         if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
                         process.wait()
@@ -996,7 +1007,9 @@ raise SystemExit(code)
                 if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
 
-    def test_suite_runner_notices_parent_death(self):
+    def run_parent_death(self, publish):
+        # The parent starts a suite runner, publishes its pid by `publish`
+        # and is killed; the runner must notice the death and exit.
         import os, signal, subprocess, sys
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); harness_path = root/'harness.py'; parent = root/'parent.py'
@@ -1011,15 +1024,14 @@ def main():
             parent.write_text('''import os, subprocess, sys, time
 from pathlib import Path
 p = subprocess.Popen([sys.executable, '-B', sys.argv[1], '--suite-runner', sys.argv[2]], env={**os.environ, 'MTBATTERY_PARENT_PID': str(os.getpid())})
-Path(sys.argv[3]).write_text(str(p.pid))
+''' + publish + '''
 time.sleep(60)
 ''')
             with (root/'output').open('w+') as out:
                 process = subprocess.Popen([sys.executable, '-B', str(parent), mt.__file__, str(harness_path), str(root/'suite.pid')], stdout=out, stderr=out, start_new_session=True)
                 try:
-                    self.wait_for(lambda: (root/'suite.pid').exists())
+                    pid = self.wait_for_pid(root/'suite.pid')
                     os.kill(process.pid, signal.SIGKILL);process.wait()
-                    pid = int((root/'suite.pid').read_text())
                     def gone():
                         try: os.kill(pid, 0)
                         except ProcessLookupError: return True
@@ -1030,18 +1042,52 @@ time.sleep(60)
                     except ProcessLookupError: pass
                     process.wait()
 
+    def test_suite_runner_notices_parent_death(self):
+        self.run_parent_death("staged = Path(sys.argv[3] + '.' + str(os.getpid()) + '.tmp'); staged.write_text(str(p.pid)); os.replace(staged, sys.argv[3])")
+
+    def test_parent_death_survives_slow_pid_write(self):
+        # Create-then-write on purpose: suite.pid exists empty for 0.5 s,
+        # the window in which a reader of an existing file finds no pid.
+        self.run_parent_death("Path(sys.argv[3]).touch(); time.sleep(0.5); staged = Path(sys.argv[3] + '.' + str(os.getpid()) + '.tmp'); staged.write_text(str(p.pid)); os.replace(staged, sys.argv[3])")
+
+    def test_wait_for_pid_waits_through_an_empty_file(self):
+        import subprocess, sys, threading
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); path = root/'slow.pid'
+            # Create-then-write on purpose: the child writes only once `go`
+            # exists, so the helper is certain to meet the empty file first.
+            child = subprocess.Popen([sys.executable, '-c', "import os,sys,time; from pathlib import Path; p = Path(sys.argv[1]); go = Path(sys.argv[2]); p.touch()\nwhile not go.exists(): time.sleep(0.01)\np.write_text(str(os.getpid())); time.sleep(60)", str(path), str(root/'go')])
+            try:
+                self.wait_for(path.exists)
+                self.assertEqual(path.read_text(), '')
+                with self.assertRaises(AssertionError) as caught: self.wait_for_pid(path, timeout=0.1)
+                self.assertEqual(str(caught.exception), 'child did not reach the synchronization point')
+                release = threading.Timer(0.3, (root/'go').touch)
+                release.start()
+                try: self.assertEqual(self.wait_for_pid(path), child.pid)
+                finally: release.join()
+            finally:
+                child.kill(); child.wait()
+
+    def test_wait_for_pid_fails_on_a_file_that_stays_empty(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw)/'empty.pid'; path.touch()
+            with self.assertRaises(AssertionError) as caught: self.wait_for_pid(path, timeout=0.2)
+            self.assertEqual(str(caught.exception), 'child did not reach the synchronization point')
+
     def test_killed_worker_keeps_signal_and_reaps_suite(self):
         import os, signal, subprocess
         with self.driver() as (root, command), (root/'output').open('w+') as out:
             process = subprocess.Popen(command, stdout=out, stderr=out, start_new_session=True)
             try:
-                self.wait_for(lambda: (root/'grandchild.pid').exists())
-                os.kill(int((root/'a.pid').read_text()), signal.SIGKILL)
+                grandchild = self.wait_for_pid(root/'grandchild.pid')
+                child = self.wait_for_pid(root/'child.pid')
+                os.kill(self.wait_for_pid(root/'a.pid'), signal.SIGKILL)
                 self.assertEqual(process.wait(timeout=8), 7)
                 output = (root/'output').read_text()
                 self.assertIn('SIGKILL', output)
-                for name in ('child.pid', 'grandchild.pid'):
-                    with self.assertRaises(ProcessLookupError): os.kill(int((root/name).read_text()), 0)
+                for pid in (child, grandchild):
+                    with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
                 self.assertNotIn('Errno 66', output)
                 self.assertIn('ARM=b ok', output)
                 self.assertFalse(list(root.glob('arm-*')))
@@ -1056,7 +1102,7 @@ time.sleep(60)
             driver.write_text('''import subprocess, sys
 import mtbattery as mt
 def work(*args):
-    subprocess.run([sys.executable, '-c', "from pathlib import Path; import os,time; Path(" + repr(sys.argv[1]) + ").write_text(str(os.getpid())); time.sleep(60)"])
+    subprocess.run([sys.executable, '-c', "from pathlib import Path; import os,time; p = Path(" + repr(sys.argv[1]) + "); t = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp'); t.write_text(str(os.getpid())); os.replace(t, p); time.sleep(60)"])
     return 0
 mt.worker_main = work
 raise SystemExit(mt.main(['--spec', 'unused', '--worker-arm', 'standin', '--run-file', 'unused']))
@@ -1064,10 +1110,10 @@ raise SystemExit(mt.main(['--spec', 'unused', '--worker-arm', 'standin', '--run-
             with (root/'output').open('w+') as out:
                 process = subprocess.Popen([sys.executable, '-B', str(driver), str(root/'child.pid')], stdout=out, stderr=out, start_new_session=True)
                 try:
-                    self.wait_for(lambda: (root/'child.pid').exists())
+                    child = self.wait_for_pid(root/'child.pid')
                     os.kill(process.pid, signal.SIGTERM)
                     self.assertNotEqual(process.wait(timeout=7), 0)
-                    with self.assertRaises(ProcessLookupError): os.kill(int((root/'child.pid').read_text()), 0)
+                    with self.assertRaises(ProcessLookupError): os.kill(child, 0)
                 finally:
                     try: os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError: pass
@@ -1186,7 +1232,7 @@ from unittest import mock
 import mtbattery as mt
 root=Path(sys.argv[1])
 def preflight(*args):
-    subprocess.run([sys.executable, '-B', '-c', "import os,time; from pathlib import Path; Path(" + repr(str(root/'child.pid')) + ").write_text(str(os.getpid())); time.sleep(60)"])
+    subprocess.run([sys.executable, '-B', '-c', "import os,time; from pathlib import Path; p = Path(" + repr(str(root/'child.pid')) + "); t = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp'); t.write_text(str(os.getpid())); os.replace(t, p); time.sleep(60)"])
     return []
 with mock.patch.object(mt,'tree_digest',return_value={}), mock.patch.object(mt,'structural_errors',side_effect=preflight), mock.patch.object(mt,'load_module',return_value=SimpleNamespace(ARMS=[{'name':'a','row':'C1'}])):
     raise SystemExit(mt.main(['--spec',str(root/'spec.py')]))
@@ -1194,10 +1240,10 @@ with mock.patch.object(mt,'tree_digest',return_value={}), mock.patch.object(mt,'
             with (root/'output').open('w+') as out:
                 process = subprocess.Popen([sys.executable, '-B', str(driver), str(root)], stdout=out, stderr=out, start_new_session=True)
                 try:
-                    TestFoldLifecycle().wait_for(lambda: (root/'child.pid').exists())
+                    child = TestFoldLifecycle().wait_for_pid(root/'child.pid')
                     os.kill(process.pid, signal.SIGTERM)
                     self.assertEqual(process.wait(timeout=6), 7)
-                    with self.assertRaises(ProcessLookupError): os.kill(int((root/'child.pid').read_text()), 0)
+                    with self.assertRaises(ProcessLookupError): os.kill(child, 0)
                     output = (root/'output').read_text()
                     self.assertIn('UNOBSERVED ARM=a', output)
                     self.assertTrue(output.splitlines()[-1].startswith('RUN wall_seconds='))
