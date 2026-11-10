@@ -69,6 +69,28 @@ class UnslottedCopy:
     surface: str
 
 
+# Plan r2 erratum 2 section E2: values that only the type check refuses.
+class _Str(str):
+    pass
+
+
+class _AlwaysEqual:
+    def __eq__(self, other):
+        return True
+
+    def __hash__(self):
+        return 0
+
+
+def construction_error(cls, value):
+    """Answer the exception constructing cls(value) raised, or None when it constructed."""
+    try:
+        cls(value)
+    except Exception as error:
+        return error
+    return None
+
+
 class TestOperatorPrincipal(unittest.TestCase):
     def test_operator_principal_accepts_each_surface(self):
         self.assertEqual(p.OPERATOR_SURFACES, ("frank_panel", "page"))
@@ -80,11 +102,11 @@ class TestOperatorPrincipal(unittest.TestCase):
         self.assertNotEqual(p.OperatorPrincipal("page"), p.OperatorPrincipal("frank_panel"))
 
     def test_operator_principal_refuses_other_values(self):
-        for value in ("Page", "page ", "operator", None, b"page"):
+        for value in ("Page", "page ", "operator", None, b"page", _Str("page"), _AlwaysEqual()):
             with self.subTest(value=value):
-                with self.assertRaises(ValueError) as caught:
-                    p.OperatorPrincipal(value)
-                self.assertEqual(caught.exception.args, ("invalid_operator_surface",))
+                error = construction_error(p.OperatorPrincipal, value)
+                self.assertIs(type(error), ValueError)
+                self.assertEqual(error.args, ("invalid_operator_surface",))
 
 
 class TestServicePrincipal(unittest.TestCase):
@@ -96,13 +118,15 @@ class TestServicePrincipal(unittest.TestCase):
             self.assertEqual(principal.service, service)
             self.assertEqual(principal, p.ServicePrincipal(service))
             self.assertEqual(hash(principal), hash(p.ServicePrincipal(service)))
+        self.assertNotEqual(p.ServicePrincipal("console_queue"), p.ServicePrincipal("engine_liveness"))
 
     def test_service_principal_refuses_other_values(self):
-        for value in ("Console_Queue", "platform", "", None):
+        for value in ("Console_Queue", "console_queue ", "platform", "", None,
+                      _Str("console_queue"), _AlwaysEqual()):
             with self.subTest(value=value):
-                with self.assertRaises(ValueError) as caught:
-                    p.ServicePrincipal(value)
-                self.assertEqual(caught.exception.args, ("invalid_service_principal",))
+                error = construction_error(p.ServicePrincipal, value)
+                self.assertIs(type(error), ValueError)
+                self.assertEqual(error.args, ("invalid_service_principal",))
 
 
 class TestShape(unittest.TestCase):
