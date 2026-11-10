@@ -1048,7 +1048,7 @@ time.sleep(60)
     def test_parent_death_survives_slow_pid_write(self):
         # Create-then-write on purpose: suite.pid exists empty for 0.5 s,
         # the window in which a reader of an existing file finds no pid.
-        self.run_parent_death("Path(sys.argv[3]).touch(); time.sleep(0.5); Path(sys.argv[3]).write_text(str(p.pid))")
+        self.run_parent_death("Path(sys.argv[3]).touch(); time.sleep(0.5); staged = Path(sys.argv[3] + '.' + str(os.getpid()) + '.tmp'); staged.write_text(str(p.pid)); os.replace(staged, sys.argv[3])")
 
     def test_wait_for_pid_waits_through_an_empty_file(self):
         import subprocess, sys, threading
@@ -1060,6 +1060,8 @@ time.sleep(60)
             try:
                 self.wait_for(path.exists)
                 self.assertEqual(path.read_text(), '')
+                with self.assertRaises(AssertionError) as caught: self.wait_for_pid(path, timeout=0.1)
+                self.assertEqual(str(caught.exception), 'child did not reach the synchronization point')
                 release = threading.Timer(0.3, (root/'go').touch)
                 release.start()
                 try: self.assertEqual(self.wait_for_pid(path), child.pid)
