@@ -1,0 +1,289 @@
+export const AcceptedOlderKindValues = {AcceptedOlder: "accepted_older"} as const;
+export type AcceptedOlderKind = "accepted_older";
+export type AcceptedOlderNotice = {readonly "kind": AcceptedOlderKind;readonly "negotiated": ProtocolVersion;readonly "newest": ProtocolVersion;readonly "remedy": UpdateClientRemedy};
+export type ApiCauseAlreadyConnected = {readonly "kind": ApiKindAlreadyConnected};
+export type ApiCauseHandlerFault = {readonly "kind": ApiKindHandlerFault};
+export type ApiCauseHandshakeRequired = {readonly "kind": ApiKindHandshakeRequired};
+export type ApiCauseInvalidArgs = {readonly "kind": ApiKindInvalidArgs};
+export type ApiCauseInvalidEnvelope = {readonly "kind": ApiKindInvalidEnvelope};
+export type ApiCauseMalformedFrame = {readonly "kind": ApiKindMalformedFrame};
+export type ApiCauseMalformedJson = {readonly "kind": ApiKindMalformedJson};
+export type ApiCauseNonIncreasingRequestId = {readonly "kind": ApiKindNonIncreasingRequestId};
+export type ApiCausePinMismatch = {readonly "kind": ApiKindPinMismatch;readonly "field": ApiPinField;readonly "required": Digest;readonly "actual": Digest};
+export type ApiCauseProtocolWindow = {readonly "kind": ApiKindProtocolWindow;readonly "requested": ProtocolWindow;readonly "supported": ProtocolWindow};
+export type ApiCauseRuntimeNotReady = {readonly "kind": ApiKindRuntimeNotReady};
+export type ApiCauseSchemaUnavailable = {readonly "kind": ApiKindSchemaUnavailable};
+export type ApiCauseUnknownOperation = {readonly "kind": ApiKindUnknownOperation};
+export type ApiError = ApiErrorIncompatiblePinMismatch | ApiErrorIncompatibleProtocolWindow | ApiErrorInternalHandlerFault | ApiErrorProtocolInvalidArgs | ApiErrorProtocolInvalidEnvelope | ApiErrorProtocolMalformedFrame | ApiErrorProtocolMalformedJson | ApiErrorProtocolUnknownOperation | ApiErrorStateAlreadyConnected | ApiErrorStateHandshakeRequired | ApiErrorStateNonIncreasingRequestId | ApiErrorUnavailableRuntimeNotReady | ApiErrorUnavailableSchemaUnavailable;
+export type ApiErrorIncompatiblePinMismatch = {readonly "code": ApiErrorIncompatiblePinMismatchCode;readonly "class": ApiErrorIncompatiblePinMismatchClass;readonly "cause": ApiCausePinMismatch;readonly "remedy": ApiErrorIncompatiblePinMismatchRemedy};
+export const ApiErrorIncompatiblePinMismatchClassValues = {Version: "version"} as const;
+export type ApiErrorIncompatiblePinMismatchClass = "version";
+export const ApiErrorIncompatiblePinMismatchCodeValues = {EAPIINCOMPATIBLE: "E_API_INCOMPATIBLE"} as const;
+export type ApiErrorIncompatiblePinMismatchCode = "E_API_INCOMPATIBLE";
+export const ApiErrorIncompatiblePinMismatchRemedyValues = {SelectMatchingCandidate: "select_matching_candidate"} as const;
+export type ApiErrorIncompatiblePinMismatchRemedy = "select_matching_candidate";
+export type ApiErrorIncompatibleProtocolWindow = {readonly "code": ApiErrorIncompatibleProtocolWindowCode;readonly "class": ApiErrorIncompatibleProtocolWindowClass;readonly "cause": ApiCauseProtocolWindow;readonly "remedy": ApiErrorIncompatibleProtocolWindowRemedy};
+export const ApiErrorIncompatibleProtocolWindowClassValues = {Version: "version"} as const;
+export type ApiErrorIncompatibleProtocolWindowClass = "version";
+export const ApiErrorIncompatibleProtocolWindowCodeValues = {EAPIINCOMPATIBLE: "E_API_INCOMPATIBLE"} as const;
+export type ApiErrorIncompatibleProtocolWindowCode = "E_API_INCOMPATIBLE";
+export const ApiErrorIncompatibleProtocolWindowRemedyValues = {UpdateClient: "update_client"} as const;
+export type ApiErrorIncompatibleProtocolWindowRemedy = "update_client";
+export type ApiErrorInternalHandlerFault = {readonly "code": ApiErrorInternalHandlerFaultCode;readonly "class": ApiErrorInternalHandlerFaultClass;readonly "cause": ApiCauseHandlerFault;readonly "remedy": ApiErrorInternalHandlerFaultRemedy};
+export const ApiErrorInternalHandlerFaultClassValues = {Internal: "internal"} as const;
+export type ApiErrorInternalHandlerFaultClass = "internal";
+export const ApiErrorInternalHandlerFaultCodeValues = {EAPIINTERNAL: "E_API_INTERNAL"} as const;
+export type ApiErrorInternalHandlerFaultCode = "E_API_INTERNAL";
+export const ApiErrorInternalHandlerFaultRemedyValues = {ReportNonsecretFailure: "report_nonsecret_failure"} as const;
+export type ApiErrorInternalHandlerFaultRemedy = "report_nonsecret_failure";
+export type ApiErrorProtocolInvalidArgs = {readonly "code": ApiErrorProtocolInvalidArgsCode;readonly "class": ApiErrorProtocolInvalidArgsClass;readonly "cause": ApiCauseInvalidArgs;readonly "remedy": ApiErrorProtocolInvalidArgsRemedy};
+export const ApiErrorProtocolInvalidArgsClassValues = {Wire: "wire"} as const;
+export type ApiErrorProtocolInvalidArgsClass = "wire";
+export const ApiErrorProtocolInvalidArgsCodeValues = {EAPIPROTOCOL: "E_API_PROTOCOL"} as const;
+export type ApiErrorProtocolInvalidArgsCode = "E_API_PROTOCOL";
+export const ApiErrorProtocolInvalidArgsRemedyValues = {ResendValidRequest: "resend_valid_request"} as const;
+export type ApiErrorProtocolInvalidArgsRemedy = "resend_valid_request";
+export type ApiErrorProtocolInvalidEnvelope = {readonly "code": ApiErrorProtocolInvalidEnvelopeCode;readonly "class": ApiErrorProtocolInvalidEnvelopeClass;readonly "cause": ApiCauseInvalidEnvelope;readonly "remedy": ApiErrorProtocolInvalidEnvelopeRemedy};
+export const ApiErrorProtocolInvalidEnvelopeClassValues = {Wire: "wire"} as const;
+export type ApiErrorProtocolInvalidEnvelopeClass = "wire";
+export const ApiErrorProtocolInvalidEnvelopeCodeValues = {EAPIPROTOCOL: "E_API_PROTOCOL"} as const;
+export type ApiErrorProtocolInvalidEnvelopeCode = "E_API_PROTOCOL";
+export const ApiErrorProtocolInvalidEnvelopeRemedyValues = {ResendValidRequest: "resend_valid_request"} as const;
+export type ApiErrorProtocolInvalidEnvelopeRemedy = "resend_valid_request";
+export type ApiErrorProtocolMalformedFrame = {readonly "code": ApiErrorProtocolMalformedFrameCode;readonly "class": ApiErrorProtocolMalformedFrameClass;readonly "cause": ApiCauseMalformedFrame;readonly "remedy": ApiErrorProtocolMalformedFrameRemedy};
+export const ApiErrorProtocolMalformedFrameClassValues = {Wire: "wire"} as const;
+export type ApiErrorProtocolMalformedFrameClass = "wire";
+export const ApiErrorProtocolMalformedFrameCodeValues = {EAPIPROTOCOL: "E_API_PROTOCOL"} as const;
+export type ApiErrorProtocolMalformedFrameCode = "E_API_PROTOCOL";
+export const ApiErrorProtocolMalformedFrameRemedyValues = {ResendValidRequest: "resend_valid_request"} as const;
+export type ApiErrorProtocolMalformedFrameRemedy = "resend_valid_request";
+export type ApiErrorProtocolMalformedJson = {readonly "code": ApiErrorProtocolMalformedJsonCode;readonly "class": ApiErrorProtocolMalformedJsonClass;readonly "cause": ApiCauseMalformedJson;readonly "remedy": ApiErrorProtocolMalformedJsonRemedy};
+export const ApiErrorProtocolMalformedJsonClassValues = {Wire: "wire"} as const;
+export type ApiErrorProtocolMalformedJsonClass = "wire";
+export const ApiErrorProtocolMalformedJsonCodeValues = {EAPIPROTOCOL: "E_API_PROTOCOL"} as const;
+export type ApiErrorProtocolMalformedJsonCode = "E_API_PROTOCOL";
+export const ApiErrorProtocolMalformedJsonRemedyValues = {ResendValidRequest: "resend_valid_request"} as const;
+export type ApiErrorProtocolMalformedJsonRemedy = "resend_valid_request";
+export type ApiErrorProtocolUnknownOperation = {readonly "code": ApiErrorProtocolUnknownOperationCode;readonly "class": ApiErrorProtocolUnknownOperationClass;readonly "cause": ApiCauseUnknownOperation;readonly "remedy": ApiErrorProtocolUnknownOperationRemedy};
+export const ApiErrorProtocolUnknownOperationClassValues = {Wire: "wire"} as const;
+export type ApiErrorProtocolUnknownOperationClass = "wire";
+export const ApiErrorProtocolUnknownOperationCodeValues = {EAPIPROTOCOL: "E_API_PROTOCOL"} as const;
+export type ApiErrorProtocolUnknownOperationCode = "E_API_PROTOCOL";
+export const ApiErrorProtocolUnknownOperationRemedyValues = {RefreshSchema: "refresh_schema"} as const;
+export type ApiErrorProtocolUnknownOperationRemedy = "refresh_schema";
+export type ApiErrorStateAlreadyConnected = {readonly "code": ApiErrorStateAlreadyConnectedCode;readonly "class": ApiErrorStateAlreadyConnectedClass;readonly "cause": ApiCauseAlreadyConnected;readonly "remedy": ApiErrorStateAlreadyConnectedRemedy};
+export const ApiErrorStateAlreadyConnectedClassValues = {Wire: "wire"} as const;
+export type ApiErrorStateAlreadyConnectedClass = "wire";
+export const ApiErrorStateAlreadyConnectedCodeValues = {EAPISTATE: "E_API_STATE"} as const;
+export type ApiErrorStateAlreadyConnectedCode = "E_API_STATE";
+export const ApiErrorStateAlreadyConnectedRemedyValues = {ReconnectExplicitly: "reconnect_explicitly"} as const;
+export type ApiErrorStateAlreadyConnectedRemedy = "reconnect_explicitly";
+export type ApiErrorStateHandshakeRequired = {readonly "code": ApiErrorStateHandshakeRequiredCode;readonly "class": ApiErrorStateHandshakeRequiredClass;readonly "cause": ApiCauseHandshakeRequired;readonly "remedy": ApiErrorStateHandshakeRequiredRemedy};
+export const ApiErrorStateHandshakeRequiredClassValues = {Wire: "wire"} as const;
+export type ApiErrorStateHandshakeRequiredClass = "wire";
+export const ApiErrorStateHandshakeRequiredCodeValues = {EAPISTATE: "E_API_STATE"} as const;
+export type ApiErrorStateHandshakeRequiredCode = "E_API_STATE";
+export const ApiErrorStateHandshakeRequiredRemedyValues = {ReconnectExplicitly: "reconnect_explicitly"} as const;
+export type ApiErrorStateHandshakeRequiredRemedy = "reconnect_explicitly";
+export type ApiErrorStateNonIncreasingRequestId = {readonly "code": ApiErrorStateNonIncreasingRequestIdCode;readonly "class": ApiErrorStateNonIncreasingRequestIdClass;readonly "cause": ApiCauseNonIncreasingRequestId;readonly "remedy": ApiErrorStateNonIncreasingRequestIdRemedy};
+export const ApiErrorStateNonIncreasingRequestIdClassValues = {Wire: "wire"} as const;
+export type ApiErrorStateNonIncreasingRequestIdClass = "wire";
+export const ApiErrorStateNonIncreasingRequestIdCodeValues = {EAPISTATE: "E_API_STATE"} as const;
+export type ApiErrorStateNonIncreasingRequestIdCode = "E_API_STATE";
+export const ApiErrorStateNonIncreasingRequestIdRemedyValues = {ReconnectExplicitly: "reconnect_explicitly"} as const;
+export type ApiErrorStateNonIncreasingRequestIdRemedy = "reconnect_explicitly";
+export type ApiErrorUnavailableRuntimeNotReady = {readonly "code": ApiErrorUnavailableRuntimeNotReadyCode;readonly "class": ApiErrorUnavailableRuntimeNotReadyClass;readonly "cause": ApiCauseRuntimeNotReady;readonly "remedy": ApiErrorUnavailableRuntimeNotReadyRemedy};
+export const ApiErrorUnavailableRuntimeNotReadyClassValues = {Unavailable: "unavailable"} as const;
+export type ApiErrorUnavailableRuntimeNotReadyClass = "unavailable";
+export const ApiErrorUnavailableRuntimeNotReadyCodeValues = {EAPIUNAVAILABLE: "E_API_UNAVAILABLE"} as const;
+export type ApiErrorUnavailableRuntimeNotReadyCode = "E_API_UNAVAILABLE";
+export const ApiErrorUnavailableRuntimeNotReadyRemedyValues = {RestoreExpectedRuntime: "restore_expected_runtime"} as const;
+export type ApiErrorUnavailableRuntimeNotReadyRemedy = "restore_expected_runtime";
+export type ApiErrorUnavailableSchemaUnavailable = {readonly "code": ApiErrorUnavailableSchemaUnavailableCode;readonly "class": ApiErrorUnavailableSchemaUnavailableClass;readonly "cause": ApiCauseSchemaUnavailable;readonly "remedy": ApiErrorUnavailableSchemaUnavailableRemedy};
+export const ApiErrorUnavailableSchemaUnavailableClassValues = {Unavailable: "unavailable"} as const;
+export type ApiErrorUnavailableSchemaUnavailableClass = "unavailable";
+export const ApiErrorUnavailableSchemaUnavailableCodeValues = {EAPIUNAVAILABLE: "E_API_UNAVAILABLE"} as const;
+export type ApiErrorUnavailableSchemaUnavailableCode = "E_API_UNAVAILABLE";
+export const ApiErrorUnavailableSchemaUnavailableRemedyValues = {RestoreExpectedRuntime: "restore_expected_runtime"} as const;
+export type ApiErrorUnavailableSchemaUnavailableRemedy = "restore_expected_runtime";
+export type ApiIncompatibleCause = ApiCausePinMismatch | ApiCauseProtocolWindow;
+export type ApiInternalCause = ApiCauseHandlerFault;
+export const ApiKindAlreadyConnectedValues = {AlreadyConnected: "already_connected"} as const;
+export type ApiKindAlreadyConnected = "already_connected";
+export const ApiKindHandlerFaultValues = {HandlerFault: "handler_fault"} as const;
+export type ApiKindHandlerFault = "handler_fault";
+export const ApiKindHandshakeRequiredValues = {HandshakeRequired: "handshake_required"} as const;
+export type ApiKindHandshakeRequired = "handshake_required";
+export const ApiKindInvalidArgsValues = {InvalidArgs: "invalid_args"} as const;
+export type ApiKindInvalidArgs = "invalid_args";
+export const ApiKindInvalidEnvelopeValues = {InvalidEnvelope: "invalid_envelope"} as const;
+export type ApiKindInvalidEnvelope = "invalid_envelope";
+export const ApiKindMalformedFrameValues = {MalformedFrame: "malformed_frame"} as const;
+export type ApiKindMalformedFrame = "malformed_frame";
+export const ApiKindMalformedJsonValues = {MalformedJson: "malformed_json"} as const;
+export type ApiKindMalformedJson = "malformed_json";
+export const ApiKindNonIncreasingRequestIdValues = {NonIncreasingRequestId: "non_increasing_request_id"} as const;
+export type ApiKindNonIncreasingRequestId = "non_increasing_request_id";
+export const ApiKindPinMismatchValues = {PinMismatch: "pin_mismatch"} as const;
+export type ApiKindPinMismatch = "pin_mismatch";
+export const ApiKindProtocolWindowValues = {ProtocolWindow: "protocol_window"} as const;
+export type ApiKindProtocolWindow = "protocol_window";
+export const ApiKindRuntimeNotReadyValues = {RuntimeNotReady: "runtime_not_ready"} as const;
+export type ApiKindRuntimeNotReady = "runtime_not_ready";
+export const ApiKindSchemaUnavailableValues = {SchemaUnavailable: "schema_unavailable"} as const;
+export type ApiKindSchemaUnavailable = "schema_unavailable";
+export const ApiKindUnknownOperationValues = {UnknownOperation: "unknown_operation"} as const;
+export type ApiKindUnknownOperation = "unknown_operation";
+export const ApiPinFieldValues = {BuildId: "build_id",SchemaDigest: "schema_digest"} as const;
+export type ApiPinField = "build_id" | "schema_digest";
+export type ApiProtocolCause = ApiCauseInvalidArgs | ApiCauseInvalidEnvelope | ApiCauseMalformedFrame | ApiCauseMalformedJson | ApiCauseUnknownOperation;
+export type ApiStateCause = ApiCauseAlreadyConnected | ApiCauseHandshakeRequired | ApiCauseNonIncreasingRequestId;
+export type ApiUnavailableCause = ApiCauseRuntimeNotReady | ApiCauseSchemaUnavailable;
+export type CanonicalSchemaBase64 = string;
+export type Capabilities = ReadonlyArray<Capability>;
+export type Capability = {readonly "operation": OperationName};
+export type ConnectArgs = {readonly "supported": ProtocolWindow;readonly "required_build_id"?: Digest;readonly "required_schema_digest"?: Digest};
+export type ConnectResult = {readonly "protocol": ProtocolVersion;readonly "engine_version": EngineVersion;readonly "build_id": Digest;readonly "schema_digest": Digest;readonly "store_id": OpaqueId;readonly "store_kind": StoreKind;readonly "runtime_instance_id": OpaqueId;readonly "supported": ProtocolWindow;readonly "capabilities": Capabilities;readonly "deprecation": DeprecationNotice};
+export type DeprecationNotice = AcceptedOlderNotice | null;
+export type Digest = string;
+export type EngineVersion = string;
+export type OpaqueId = string;
+export type OperationName = string;
+export type ProtocolVersion = string;
+export type ProtocolWindow = {readonly "min": ProtocolVersion;readonly "max": ProtocolVersion};
+export type RequestId = string;
+export type SchemaArgs = {};
+export const SchemaEncodingValues = {Base64: "base64"} as const;
+export type SchemaEncoding = "base64";
+export type SchemaResult = {readonly "protocol": ProtocolVersion;readonly "schema_digest": Digest;readonly "schema_encoding": SchemaEncoding;readonly "schema_byte_count": UInt64;readonly "schema_bytes_base64": CanonicalSchemaBase64};
+export const StoreKindValues = {Production: "production",Isolated: "isolated"} as const;
+export type StoreKind = "production" | "isolated";
+export type UInt64 = string;
+export const UpdateClientRemedyValues = {UpdateClient: "update_client"} as const;
+export type UpdateClientRemedy = "update_client";
+export type Types = {"AcceptedOlderKind": AcceptedOlderKind;"AcceptedOlderNotice": AcceptedOlderNotice;"ApiCauseAlreadyConnected": ApiCauseAlreadyConnected;"ApiCauseHandlerFault": ApiCauseHandlerFault;"ApiCauseHandshakeRequired": ApiCauseHandshakeRequired;"ApiCauseInvalidArgs": ApiCauseInvalidArgs;"ApiCauseInvalidEnvelope": ApiCauseInvalidEnvelope;"ApiCauseMalformedFrame": ApiCauseMalformedFrame;"ApiCauseMalformedJson": ApiCauseMalformedJson;"ApiCauseNonIncreasingRequestId": ApiCauseNonIncreasingRequestId;"ApiCausePinMismatch": ApiCausePinMismatch;"ApiCauseProtocolWindow": ApiCauseProtocolWindow;"ApiCauseRuntimeNotReady": ApiCauseRuntimeNotReady;"ApiCauseSchemaUnavailable": ApiCauseSchemaUnavailable;"ApiCauseUnknownOperation": ApiCauseUnknownOperation;"ApiError": ApiError;"ApiErrorIncompatiblePinMismatch": ApiErrorIncompatiblePinMismatch;"ApiErrorIncompatiblePinMismatchClass": ApiErrorIncompatiblePinMismatchClass;"ApiErrorIncompatiblePinMismatchCode": ApiErrorIncompatiblePinMismatchCode;"ApiErrorIncompatiblePinMismatchRemedy": ApiErrorIncompatiblePinMismatchRemedy;"ApiErrorIncompatibleProtocolWindow": ApiErrorIncompatibleProtocolWindow;"ApiErrorIncompatibleProtocolWindowClass": ApiErrorIncompatibleProtocolWindowClass;"ApiErrorIncompatibleProtocolWindowCode": ApiErrorIncompatibleProtocolWindowCode;"ApiErrorIncompatibleProtocolWindowRemedy": ApiErrorIncompatibleProtocolWindowRemedy;"ApiErrorInternalHandlerFault": ApiErrorInternalHandlerFault;"ApiErrorInternalHandlerFaultClass": ApiErrorInternalHandlerFaultClass;"ApiErrorInternalHandlerFaultCode": ApiErrorInternalHandlerFaultCode;"ApiErrorInternalHandlerFaultRemedy": ApiErrorInternalHandlerFaultRemedy;"ApiErrorProtocolInvalidArgs": ApiErrorProtocolInvalidArgs;"ApiErrorProtocolInvalidArgsClass": ApiErrorProtocolInvalidArgsClass;"ApiErrorProtocolInvalidArgsCode": ApiErrorProtocolInvalidArgsCode;"ApiErrorProtocolInvalidArgsRemedy": ApiErrorProtocolInvalidArgsRemedy;"ApiErrorProtocolInvalidEnvelope": ApiErrorProtocolInvalidEnvelope;"ApiErrorProtocolInvalidEnvelopeClass": ApiErrorProtocolInvalidEnvelopeClass;"ApiErrorProtocolInvalidEnvelopeCode": ApiErrorProtocolInvalidEnvelopeCode;"ApiErrorProtocolInvalidEnvelopeRemedy": ApiErrorProtocolInvalidEnvelopeRemedy;"ApiErrorProtocolMalformedFrame": ApiErrorProtocolMalformedFrame;"ApiErrorProtocolMalformedFrameClass": ApiErrorProtocolMalformedFrameClass;"ApiErrorProtocolMalformedFrameCode": ApiErrorProtocolMalformedFrameCode;"ApiErrorProtocolMalformedFrameRemedy": ApiErrorProtocolMalformedFrameRemedy;"ApiErrorProtocolMalformedJson": ApiErrorProtocolMalformedJson;"ApiErrorProtocolMalformedJsonClass": ApiErrorProtocolMalformedJsonClass;"ApiErrorProtocolMalformedJsonCode": ApiErrorProtocolMalformedJsonCode;"ApiErrorProtocolMalformedJsonRemedy": ApiErrorProtocolMalformedJsonRemedy;"ApiErrorProtocolUnknownOperation": ApiErrorProtocolUnknownOperation;"ApiErrorProtocolUnknownOperationClass": ApiErrorProtocolUnknownOperationClass;"ApiErrorProtocolUnknownOperationCode": ApiErrorProtocolUnknownOperationCode;"ApiErrorProtocolUnknownOperationRemedy": ApiErrorProtocolUnknownOperationRemedy;"ApiErrorStateAlreadyConnected": ApiErrorStateAlreadyConnected;"ApiErrorStateAlreadyConnectedClass": ApiErrorStateAlreadyConnectedClass;"ApiErrorStateAlreadyConnectedCode": ApiErrorStateAlreadyConnectedCode;"ApiErrorStateAlreadyConnectedRemedy": ApiErrorStateAlreadyConnectedRemedy;"ApiErrorStateHandshakeRequired": ApiErrorStateHandshakeRequired;"ApiErrorStateHandshakeRequiredClass": ApiErrorStateHandshakeRequiredClass;"ApiErrorStateHandshakeRequiredCode": ApiErrorStateHandshakeRequiredCode;"ApiErrorStateHandshakeRequiredRemedy": ApiErrorStateHandshakeRequiredRemedy;"ApiErrorStateNonIncreasingRequestId": ApiErrorStateNonIncreasingRequestId;"ApiErrorStateNonIncreasingRequestIdClass": ApiErrorStateNonIncreasingRequestIdClass;"ApiErrorStateNonIncreasingRequestIdCode": ApiErrorStateNonIncreasingRequestIdCode;"ApiErrorStateNonIncreasingRequestIdRemedy": ApiErrorStateNonIncreasingRequestIdRemedy;"ApiErrorUnavailableRuntimeNotReady": ApiErrorUnavailableRuntimeNotReady;"ApiErrorUnavailableRuntimeNotReadyClass": ApiErrorUnavailableRuntimeNotReadyClass;"ApiErrorUnavailableRuntimeNotReadyCode": ApiErrorUnavailableRuntimeNotReadyCode;"ApiErrorUnavailableRuntimeNotReadyRemedy": ApiErrorUnavailableRuntimeNotReadyRemedy;"ApiErrorUnavailableSchemaUnavailable": ApiErrorUnavailableSchemaUnavailable;"ApiErrorUnavailableSchemaUnavailableClass": ApiErrorUnavailableSchemaUnavailableClass;"ApiErrorUnavailableSchemaUnavailableCode": ApiErrorUnavailableSchemaUnavailableCode;"ApiErrorUnavailableSchemaUnavailableRemedy": ApiErrorUnavailableSchemaUnavailableRemedy;"ApiIncompatibleCause": ApiIncompatibleCause;"ApiInternalCause": ApiInternalCause;"ApiKindAlreadyConnected": ApiKindAlreadyConnected;"ApiKindHandlerFault": ApiKindHandlerFault;"ApiKindHandshakeRequired": ApiKindHandshakeRequired;"ApiKindInvalidArgs": ApiKindInvalidArgs;"ApiKindInvalidEnvelope": ApiKindInvalidEnvelope;"ApiKindMalformedFrame": ApiKindMalformedFrame;"ApiKindMalformedJson": ApiKindMalformedJson;"ApiKindNonIncreasingRequestId": ApiKindNonIncreasingRequestId;"ApiKindPinMismatch": ApiKindPinMismatch;"ApiKindProtocolWindow": ApiKindProtocolWindow;"ApiKindRuntimeNotReady": ApiKindRuntimeNotReady;"ApiKindSchemaUnavailable": ApiKindSchemaUnavailable;"ApiKindUnknownOperation": ApiKindUnknownOperation;"ApiPinField": ApiPinField;"ApiProtocolCause": ApiProtocolCause;"ApiStateCause": ApiStateCause;"ApiUnavailableCause": ApiUnavailableCause;"CanonicalSchemaBase64": CanonicalSchemaBase64;"Capabilities": Capabilities;"Capability": Capability;"ConnectArgs": ConnectArgs;"ConnectResult": ConnectResult;"DeprecationNotice": DeprecationNotice;"Digest": Digest;"EngineVersion": EngineVersion;"OpaqueId": OpaqueId;"OperationName": OperationName;"ProtocolVersion": ProtocolVersion;"ProtocolWindow": ProtocolWindow;"RequestId": RequestId;"SchemaArgs": SchemaArgs;"SchemaEncoding": SchemaEncoding;"SchemaResult": SchemaResult;"StoreKind": StoreKind;"UInt64": UInt64;"UpdateClientRemedy": UpdateClientRemedy};
+
+// Generated by tools/generate-api.py. Runtime validation precedes every typed adoption.
+export type Json = null | boolean | string | Json[] | { [key: string]: Json };
+type Obj = { [key: string]: unknown };
+function object(v: unknown): v is Obj { return typeof v === 'object' && v !== null && !Array.isArray(v) && (Object.getPrototypeOf(v) === null || Object.getPrototypeOf(v) === Object.prototype); }
+function record(v: unknown): Obj { if (!object(v)) throw Error('protocol_unavailable'); return v; }
+function string(v: unknown): string { if (typeof v !== 'string') throw Error('protocol_unavailable'); return v; }
+function scalar(s: string): boolean { for (const c of s) { const n = c.codePointAt(0)!; if (n >= 0xd800 && n <= 0xdfff) return false; } return true; }
+function parse(text: string, numbers: boolean): unknown {
+    let at = 0;
+    const ws = (): void => { while (at < text.length && ' \t\r\n'.includes(text[at])) at++; };
+    const take = (c: string): void => { if (text[at++] !== c) throw Error('invalid_json'); };
+    const quoted = (): string => {
+        const start = at; take('"');
+        while (at < text.length) { const c = text[at++]; if (c === '"') { const value: unknown = JSON.parse(text.slice(start, at)); const s = string(value); if (!scalar(s)) throw Error('invalid_unicode'); return s; } if (c === '\\') at++; }
+        throw Error('invalid_json');
+    };
+    const value = (depth: number): unknown => {
+        if (depth > 64) throw Error('depth'); ws();
+        const c = text[at];
+        if (c === '"') return quoted();
+        if (c === '{') { at++; ws(); const out: Obj = Object.create(null); if (text[at] === '}') { at++; return out; } while (true) { ws(); const key = quoted(); if (Object.hasOwn(out, key)) throw Error('duplicate_key'); ws(); take(':'); out[key] = value(depth + 1); ws(); if (text[at] === '}') { at++; return out; } take(','); } }
+        if (c === '[') { at++; ws(); const out: unknown[] = []; if (text[at] === ']') { at++; return out; } while (true) { out.push(value(depth + 1)); ws(); if (text[at] === ']') { at++; return out; } take(','); } }
+        for (const [word, result] of [['true', true], ['false', false], ['null', null]] as const) if (text.startsWith(word, at)) { at += word.length; return result; }
+        if (numbers) { const m = /^(?:0|[1-9][0-9]*)/.exec(text.slice(at)); if (m) { at += m[0].length; const n = Number(m[0]); if (!Number.isSafeInteger(n)) throw Error('number'); return n; } }
+        throw Error('invalid_json');
+    };
+    const result = value(0); ws(); if (at !== text.length) throw Error('trailing_data'); return result;
+}
+function wire(value: unknown, depth = 0): value is Json {
+    if (depth > 64) return false;
+    if (value === null || typeof value === 'boolean') return true;
+    if (typeof value === 'string') return scalar(value);
+    if (Array.isArray(value)) return Object.keys(value).length === value.length && value.every(x => wire(x, depth + 1));
+    if (!object(value)) return false;
+    return Reflect.ownKeys(value).length === Object.keys(value).length && Object.entries(Object.getOwnPropertyDescriptors(value)).every(([key, desc]) => scalar(key) && 'value' in desc && desc.enumerable && wire(desc.value, depth + 1));
+}
+export function parseStrictJson(text: string): Json { const v = parse(text, false); if (!wire(v)) throw Error('invalid_json'); return v; }
+export function canonical(value: unknown): string {
+    if (value === null || typeof value === 'boolean' || typeof value === 'number') return JSON.stringify(value);
+    if (typeof value === 'string') { if (!scalar(value)) throw Error('invalid_unicode'); return JSON.stringify(value); }
+    if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+    const o = record(value); return '{' + Object.keys(o).sort().map(k => JSON.stringify(k) + ':' + canonical(o[k])).join(',') + '}';
+}
+const encoder = new TextEncoder();
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function encodeBase64(raw: Uint8Array): string {
+    const parts: string[] = []; for (let i = 0; i < raw.length; i += 3) { const a = raw[i], b = raw[i + 1] ?? 0, c = raw[i + 2] ?? 0; parts.push(alphabet[a >> 2] + alphabet[(a & 3) * 16 + (b >> 4)] + (i + 1 < raw.length ? alphabet[(b & 15) * 4 + (c >> 6)] : '=') + (i + 2 < raw.length ? alphabet[c & 63] : '=')); } return parts.join('');
+}
+function decodeBase64(s: string): Uint8Array {
+    if (s.length > 11184812 || s.length % 4 !== 0) throw Error('base64');
+    const out: number[] = []; for (let i = 0; i < s.length; i += 4) { let n = 0; for (let j = 0; j < 4; j++) { const c = s[i + j], digit = c === '=' ? 0 : alphabet.indexOf(c); if (digit < 0) throw Error('base64'); n = (n << 6) | digit; } out.push((n >>> 16) & 255); if (s[i + 2] !== '=') out.push((n >>> 8) & 255); if (s[i + 3] !== '=') out.push(n & 255); }
+    const raw = new Uint8Array(out); if (raw.length > 8388608 || encodeBase64(raw) !== s) throw Error('base64'); return raw;
+}
+async function digest(raw: Uint8Array): Promise<string> { const input = new Uint8Array(raw); return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', input.buffer))).map(x => x.toString(16).padStart(2, '0')).join(''); }
+const schema: unknown = {"$defs":{"AcceptedOlderKind":{"enum":["accepted_older"],"type":"string"},"AcceptedOlderNotice":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/AcceptedOlderKind"},"negotiated":{"$ref":"#/$defs/ProtocolVersion"},"newest":{"$ref":"#/$defs/ProtocolVersion"},"remedy":{"$ref":"#/$defs/UpdateClientRemedy"}},"required":["kind","negotiated","newest","remedy"],"type":"object"},"ApiCauseAlreadyConnected":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindAlreadyConnected"}},"required":["kind"],"type":"object"},"ApiCauseHandlerFault":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindHandlerFault"}},"required":["kind"],"type":"object"},"ApiCauseHandshakeRequired":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindHandshakeRequired"}},"required":["kind"],"type":"object"},"ApiCauseInvalidArgs":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindInvalidArgs"}},"required":["kind"],"type":"object"},"ApiCauseInvalidEnvelope":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindInvalidEnvelope"}},"required":["kind"],"type":"object"},"ApiCauseMalformedFrame":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindMalformedFrame"}},"required":["kind"],"type":"object"},"ApiCauseMalformedJson":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindMalformedJson"}},"required":["kind"],"type":"object"},"ApiCauseNonIncreasingRequestId":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindNonIncreasingRequestId"}},"required":["kind"],"type":"object"},"ApiCausePinMismatch":{"additionalProperties":false,"properties":{"actual":{"$ref":"#/$defs/Digest"},"field":{"$ref":"#/$defs/ApiPinField"},"kind":{"$ref":"#/$defs/ApiKindPinMismatch"},"required":{"$ref":"#/$defs/Digest"}},"required":["kind","field","required","actual"],"type":"object"},"ApiCauseProtocolWindow":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindProtocolWindow"},"requested":{"$ref":"#/$defs/ProtocolWindow"},"supported":{"$ref":"#/$defs/ProtocolWindow"}},"required":["kind","requested","supported"],"type":"object"},"ApiCauseRuntimeNotReady":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindRuntimeNotReady"}},"required":["kind"],"type":"object"},"ApiCauseSchemaUnavailable":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindSchemaUnavailable"}},"required":["kind"],"type":"object"},"ApiCauseUnknownOperation":{"additionalProperties":false,"properties":{"kind":{"$ref":"#/$defs/ApiKindUnknownOperation"}},"required":["kind"],"type":"object"},"ApiError":{"oneOf":[{"$ref":"#/$defs/ApiErrorIncompatiblePinMismatch"},{"$ref":"#/$defs/ApiErrorIncompatibleProtocolWindow"},{"$ref":"#/$defs/ApiErrorInternalHandlerFault"},{"$ref":"#/$defs/ApiErrorProtocolInvalidArgs"},{"$ref":"#/$defs/ApiErrorProtocolInvalidEnvelope"},{"$ref":"#/$defs/ApiErrorProtocolMalformedFrame"},{"$ref":"#/$defs/ApiErrorProtocolMalformedJson"},{"$ref":"#/$defs/ApiErrorProtocolUnknownOperation"},{"$ref":"#/$defs/ApiErrorStateAlreadyConnected"},{"$ref":"#/$defs/ApiErrorStateHandshakeRequired"},{"$ref":"#/$defs/ApiErrorStateNonIncreasingRequestId"},{"$ref":"#/$defs/ApiErrorUnavailableRuntimeNotReady"},{"$ref":"#/$defs/ApiErrorUnavailableSchemaUnavailable"}]},"ApiErrorIncompatiblePinMismatch":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCausePinMismatch"},"class":{"$ref":"#/$defs/ApiErrorIncompatiblePinMismatchClass"},"code":{"$ref":"#/$defs/ApiErrorIncompatiblePinMismatchCode"},"remedy":{"$ref":"#/$defs/ApiErrorIncompatiblePinMismatchRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorIncompatiblePinMismatchClass":{"enum":["version"],"type":"string"},"ApiErrorIncompatiblePinMismatchCode":{"enum":["E_API_INCOMPATIBLE"],"type":"string"},"ApiErrorIncompatiblePinMismatchRemedy":{"enum":["select_matching_candidate"],"type":"string"},"ApiErrorIncompatibleProtocolWindow":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseProtocolWindow"},"class":{"$ref":"#/$defs/ApiErrorIncompatibleProtocolWindowClass"},"code":{"$ref":"#/$defs/ApiErrorIncompatibleProtocolWindowCode"},"remedy":{"$ref":"#/$defs/ApiErrorIncompatibleProtocolWindowRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorIncompatibleProtocolWindowClass":{"enum":["version"],"type":"string"},"ApiErrorIncompatibleProtocolWindowCode":{"enum":["E_API_INCOMPATIBLE"],"type":"string"},"ApiErrorIncompatibleProtocolWindowRemedy":{"enum":["update_client"],"type":"string"},"ApiErrorInternalHandlerFault":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseHandlerFault"},"class":{"$ref":"#/$defs/ApiErrorInternalHandlerFaultClass"},"code":{"$ref":"#/$defs/ApiErrorInternalHandlerFaultCode"},"remedy":{"$ref":"#/$defs/ApiErrorInternalHandlerFaultRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorInternalHandlerFaultClass":{"enum":["internal"],"type":"string"},"ApiErrorInternalHandlerFaultCode":{"enum":["E_API_INTERNAL"],"type":"string"},"ApiErrorInternalHandlerFaultRemedy":{"enum":["report_nonsecret_failure"],"type":"string"},"ApiErrorProtocolInvalidArgs":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseInvalidArgs"},"class":{"$ref":"#/$defs/ApiErrorProtocolInvalidArgsClass"},"code":{"$ref":"#/$defs/ApiErrorProtocolInvalidArgsCode"},"remedy":{"$ref":"#/$defs/ApiErrorProtocolInvalidArgsRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorProtocolInvalidArgsClass":{"enum":["wire"],"type":"string"},"ApiErrorProtocolInvalidArgsCode":{"enum":["E_API_PROTOCOL"],"type":"string"},"ApiErrorProtocolInvalidArgsRemedy":{"enum":["resend_valid_request"],"type":"string"},"ApiErrorProtocolInvalidEnvelope":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseInvalidEnvelope"},"class":{"$ref":"#/$defs/ApiErrorProtocolInvalidEnvelopeClass"},"code":{"$ref":"#/$defs/ApiErrorProtocolInvalidEnvelopeCode"},"remedy":{"$ref":"#/$defs/ApiErrorProtocolInvalidEnvelopeRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorProtocolInvalidEnvelopeClass":{"enum":["wire"],"type":"string"},"ApiErrorProtocolInvalidEnvelopeCode":{"enum":["E_API_PROTOCOL"],"type":"string"},"ApiErrorProtocolInvalidEnvelopeRemedy":{"enum":["resend_valid_request"],"type":"string"},"ApiErrorProtocolMalformedFrame":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseMalformedFrame"},"class":{"$ref":"#/$defs/ApiErrorProtocolMalformedFrameClass"},"code":{"$ref":"#/$defs/ApiErrorProtocolMalformedFrameCode"},"remedy":{"$ref":"#/$defs/ApiErrorProtocolMalformedFrameRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorProtocolMalformedFrameClass":{"enum":["wire"],"type":"string"},"ApiErrorProtocolMalformedFrameCode":{"enum":["E_API_PROTOCOL"],"type":"string"},"ApiErrorProtocolMalformedFrameRemedy":{"enum":["resend_valid_request"],"type":"string"},"ApiErrorProtocolMalformedJson":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseMalformedJson"},"class":{"$ref":"#/$defs/ApiErrorProtocolMalformedJsonClass"},"code":{"$ref":"#/$defs/ApiErrorProtocolMalformedJsonCode"},"remedy":{"$ref":"#/$defs/ApiErrorProtocolMalformedJsonRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorProtocolMalformedJsonClass":{"enum":["wire"],"type":"string"},"ApiErrorProtocolMalformedJsonCode":{"enum":["E_API_PROTOCOL"],"type":"string"},"ApiErrorProtocolMalformedJsonRemedy":{"enum":["resend_valid_request"],"type":"string"},"ApiErrorProtocolUnknownOperation":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseUnknownOperation"},"class":{"$ref":"#/$defs/ApiErrorProtocolUnknownOperationClass"},"code":{"$ref":"#/$defs/ApiErrorProtocolUnknownOperationCode"},"remedy":{"$ref":"#/$defs/ApiErrorProtocolUnknownOperationRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorProtocolUnknownOperationClass":{"enum":["wire"],"type":"string"},"ApiErrorProtocolUnknownOperationCode":{"enum":["E_API_PROTOCOL"],"type":"string"},"ApiErrorProtocolUnknownOperationRemedy":{"enum":["refresh_schema"],"type":"string"},"ApiErrorStateAlreadyConnected":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseAlreadyConnected"},"class":{"$ref":"#/$defs/ApiErrorStateAlreadyConnectedClass"},"code":{"$ref":"#/$defs/ApiErrorStateAlreadyConnectedCode"},"remedy":{"$ref":"#/$defs/ApiErrorStateAlreadyConnectedRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorStateAlreadyConnectedClass":{"enum":["wire"],"type":"string"},"ApiErrorStateAlreadyConnectedCode":{"enum":["E_API_STATE"],"type":"string"},"ApiErrorStateAlreadyConnectedRemedy":{"enum":["reconnect_explicitly"],"type":"string"},"ApiErrorStateHandshakeRequired":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseHandshakeRequired"},"class":{"$ref":"#/$defs/ApiErrorStateHandshakeRequiredClass"},"code":{"$ref":"#/$defs/ApiErrorStateHandshakeRequiredCode"},"remedy":{"$ref":"#/$defs/ApiErrorStateHandshakeRequiredRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorStateHandshakeRequiredClass":{"enum":["wire"],"type":"string"},"ApiErrorStateHandshakeRequiredCode":{"enum":["E_API_STATE"],"type":"string"},"ApiErrorStateHandshakeRequiredRemedy":{"enum":["reconnect_explicitly"],"type":"string"},"ApiErrorStateNonIncreasingRequestId":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseNonIncreasingRequestId"},"class":{"$ref":"#/$defs/ApiErrorStateNonIncreasingRequestIdClass"},"code":{"$ref":"#/$defs/ApiErrorStateNonIncreasingRequestIdCode"},"remedy":{"$ref":"#/$defs/ApiErrorStateNonIncreasingRequestIdRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorStateNonIncreasingRequestIdClass":{"enum":["wire"],"type":"string"},"ApiErrorStateNonIncreasingRequestIdCode":{"enum":["E_API_STATE"],"type":"string"},"ApiErrorStateNonIncreasingRequestIdRemedy":{"enum":["reconnect_explicitly"],"type":"string"},"ApiErrorUnavailableRuntimeNotReady":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseRuntimeNotReady"},"class":{"$ref":"#/$defs/ApiErrorUnavailableRuntimeNotReadyClass"},"code":{"$ref":"#/$defs/ApiErrorUnavailableRuntimeNotReadyCode"},"remedy":{"$ref":"#/$defs/ApiErrorUnavailableRuntimeNotReadyRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorUnavailableRuntimeNotReadyClass":{"enum":["unavailable"],"type":"string"},"ApiErrorUnavailableRuntimeNotReadyCode":{"enum":["E_API_UNAVAILABLE"],"type":"string"},"ApiErrorUnavailableRuntimeNotReadyRemedy":{"enum":["restore_expected_runtime"],"type":"string"},"ApiErrorUnavailableSchemaUnavailable":{"additionalProperties":false,"properties":{"cause":{"$ref":"#/$defs/ApiCauseSchemaUnavailable"},"class":{"$ref":"#/$defs/ApiErrorUnavailableSchemaUnavailableClass"},"code":{"$ref":"#/$defs/ApiErrorUnavailableSchemaUnavailableCode"},"remedy":{"$ref":"#/$defs/ApiErrorUnavailableSchemaUnavailableRemedy"}},"required":["code","class","cause","remedy"],"type":"object"},"ApiErrorUnavailableSchemaUnavailableClass":{"enum":["unavailable"],"type":"string"},"ApiErrorUnavailableSchemaUnavailableCode":{"enum":["E_API_UNAVAILABLE"],"type":"string"},"ApiErrorUnavailableSchemaUnavailableRemedy":{"enum":["restore_expected_runtime"],"type":"string"},"ApiFailure":{"additionalProperties":false,"properties":{"error":{"$ref":"#/$defs/ApiError"},"request_id":{"oneOf":[{"$ref":"#/$defs/RequestId"},{"type":"null"}]}},"required":["request_id","error"],"type":"object"},"ApiIncompatibleCause":{"oneOf":[{"$ref":"#/$defs/ApiCausePinMismatch"},{"$ref":"#/$defs/ApiCauseProtocolWindow"}]},"ApiInternalCause":{"oneOf":[{"$ref":"#/$defs/ApiCauseHandlerFault"}]},"ApiKindAlreadyConnected":{"enum":["already_connected"],"type":"string"},"ApiKindHandlerFault":{"enum":["handler_fault"],"type":"string"},"ApiKindHandshakeRequired":{"enum":["handshake_required"],"type":"string"},"ApiKindInvalidArgs":{"enum":["invalid_args"],"type":"string"},"ApiKindInvalidEnvelope":{"enum":["invalid_envelope"],"type":"string"},"ApiKindMalformedFrame":{"enum":["malformed_frame"],"type":"string"},"ApiKindMalformedJson":{"enum":["malformed_json"],"type":"string"},"ApiKindNonIncreasingRequestId":{"enum":["non_increasing_request_id"],"type":"string"},"ApiKindPinMismatch":{"enum":["pin_mismatch"],"type":"string"},"ApiKindProtocolWindow":{"enum":["protocol_window"],"type":"string"},"ApiKindRuntimeNotReady":{"enum":["runtime_not_ready"],"type":"string"},"ApiKindSchemaUnavailable":{"enum":["schema_unavailable"],"type":"string"},"ApiKindUnknownOperation":{"enum":["unknown_operation"],"type":"string"},"ApiPinField":{"enum":["build_id","schema_digest"],"type":"string"},"ApiProtocolCause":{"oneOf":[{"$ref":"#/$defs/ApiCauseInvalidArgs"},{"$ref":"#/$defs/ApiCauseInvalidEnvelope"},{"$ref":"#/$defs/ApiCauseMalformedFrame"},{"$ref":"#/$defs/ApiCauseMalformedJson"},{"$ref":"#/$defs/ApiCauseUnknownOperation"}]},"ApiRequest":{"oneOf":[{"$ref":"#/$defs/Request_protocol_connect"},{"$ref":"#/$defs/Request_protocol_schema"}]},"ApiResponse":{"oneOf":[{"$ref":"#/$defs/Success_protocol_connect"},{"$ref":"#/$defs/Success_protocol_schema"},{"$ref":"#/$defs/ApiFailure"}]},"ApiStateCause":{"oneOf":[{"$ref":"#/$defs/ApiCauseAlreadyConnected"},{"$ref":"#/$defs/ApiCauseHandshakeRequired"},{"$ref":"#/$defs/ApiCauseNonIncreasingRequestId"}]},"ApiUnavailableCause":{"oneOf":[{"$ref":"#/$defs/ApiCauseRuntimeNotReady"},{"$ref":"#/$defs/ApiCauseSchemaUnavailable"}]},"CanonicalSchemaBase64":{"maxLength":11184812,"minLength":0,"pattern":"^(?:(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$(?![\\s\\S])","type":"string"},"Capabilities":{"items":{"$ref":"#/$defs/Capability"},"maxItems":4096,"type":"array"},"Capability":{"additionalProperties":false,"properties":{"operation":{"$ref":"#/$defs/OperationName"}},"required":["operation"],"type":"object"},"ConnectArgs":{"additionalProperties":false,"properties":{"required_build_id":{"$ref":"#/$defs/Digest"},"required_schema_digest":{"$ref":"#/$defs/Digest"},"supported":{"$ref":"#/$defs/ProtocolWindow"}},"required":["supported"],"type":"object"},"ConnectResult":{"additionalProperties":false,"properties":{"build_id":{"$ref":"#/$defs/Digest"},"capabilities":{"$ref":"#/$defs/Capabilities"},"deprecation":{"$ref":"#/$defs/DeprecationNotice"},"engine_version":{"$ref":"#/$defs/EngineVersion"},"protocol":{"$ref":"#/$defs/ProtocolVersion"},"runtime_instance_id":{"$ref":"#/$defs/OpaqueId"},"schema_digest":{"$ref":"#/$defs/Digest"},"store_id":{"$ref":"#/$defs/OpaqueId"},"store_kind":{"$ref":"#/$defs/StoreKind"},"supported":{"$ref":"#/$defs/ProtocolWindow"}},"required":["protocol","engine_version","build_id","schema_digest","store_id","store_kind","runtime_instance_id","supported","capabilities","deprecation"],"type":"object"},"DeprecationNotice":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/AcceptedOlderNotice"}]},"Digest":{"maxLength":64,"minLength":64,"pattern":"^(?:[0-9a-f]{64})$(?![\\s\\S])","type":"string"},"EngineVersion":{"maxLength":17,"minLength":5,"pattern":"^(?:(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])\\.(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])\\.(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))$(?![\\s\\S])","type":"string"},"OpaqueId":{"maxLength":256,"minLength":1,"pattern":"^(?:[^\\x00]+)$(?![\\s\\S])","type":"string"},"OperationName":{"maxLength":96,"minLength":1,"pattern":"^(?:[a-z][a-z0-9.\\-]{0,95})$(?![\\s\\S])","type":"string"},"ProtocolVersion":{"maxLength":11,"minLength":3,"pattern":"^(?:(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])\\.(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))$(?![\\s\\S])","type":"string"},"ProtocolWindow":{"additionalProperties":false,"properties":{"max":{"$ref":"#/$defs/ProtocolVersion"},"min":{"$ref":"#/$defs/ProtocolVersion"}},"required":["min","max"],"type":"object"},"RequestId":{"maxLength":20,"minLength":1,"pattern":"^(?:[1-9][0-9]{0,19})$(?![\\s\\S])","type":"string"},"Request_protocol_connect":{"additionalProperties":false,"properties":{"args":{"$ref":"#/$defs/ConnectArgs"},"op":{"const":"protocol.connect"},"request_id":{"$ref":"#/$defs/RequestId"}},"required":["request_id","op","args"],"type":"object"},"Request_protocol_schema":{"additionalProperties":false,"properties":{"args":{"$ref":"#/$defs/SchemaArgs"},"op":{"const":"protocol.schema"},"request_id":{"$ref":"#/$defs/RequestId"}},"required":["request_id","op","args"],"type":"object"},"SchemaArgs":{"additionalProperties":false,"properties":{},"required":[],"type":"object"},"SchemaEncoding":{"enum":["base64"],"type":"string"},"SchemaResult":{"additionalProperties":false,"properties":{"protocol":{"$ref":"#/$defs/ProtocolVersion"},"schema_byte_count":{"$ref":"#/$defs/UInt64"},"schema_bytes_base64":{"$ref":"#/$defs/CanonicalSchemaBase64"},"schema_digest":{"$ref":"#/$defs/Digest"},"schema_encoding":{"$ref":"#/$defs/SchemaEncoding"}},"required":["protocol","schema_digest","schema_encoding","schema_byte_count","schema_bytes_base64"],"type":"object"},"StoreKind":{"enum":["production","isolated"],"type":"string"},"Success_protocol_connect":{"additionalProperties":false,"properties":{"request_id":{"$ref":"#/$defs/RequestId"},"result":{"$ref":"#/$defs/ConnectResult"}},"required":["request_id","result"],"type":"object"},"Success_protocol_schema":{"additionalProperties":false,"properties":{"request_id":{"$ref":"#/$defs/RequestId"},"result":{"$ref":"#/$defs/SchemaResult"}},"required":["request_id","result"],"type":"object"},"UInt64":{"maxLength":20,"minLength":1,"pattern":"^(?:(?:0|[1-9][0-9]{0,19}))$(?![\\s\\S])","type":"string"},"UpdateClientRemedy":{"enum":["update_client"],"type":"string"}},"$id":"urn:adt:api:3.0","$schema":"https://json-schema.org/draft/2020-12/schema","oneOf":[{"$ref":"#/$defs/ApiRequest"},{"$ref":"#/$defs/ApiResponse"}],"x-adt":{"format":"adt-api-v1","operations":[{"browser_get":"connect","effect":"connection_metadata","error_ref":"ApiError","name":"protocol.connect","principal":"unsigned","request_ref":"ConnectArgs","result_ref":"ConnectResult","retry":"read_repeat"},{"browser_get":"schema","effect":"pure_observation","error_ref":"ApiError","name":"protocol.schema","principal":"unsigned","request_ref":"SchemaArgs","result_ref":"SchemaResult","retry":"read_repeat"}],"protocol":"3.0","rules":[{"kind":"canonical_base64","type_ref":"CanonicalSchemaBase64"},{"array_ref":"Capabilities","key":"operation","kind":"sorted_unique"},{"kind":"utf8_max_bytes","limit":256,"type_ref":"OpaqueId"},{"kind":"protocol_window_v1","max_field":"max","min_field":"min","relation":"same_major_and_ordered","type_ref":"ProtocolWindow"},{"kind":"canonical_uint64","type_ref":"RequestId"},{"bytes_field":"schema_bytes_base64","count_field":"schema_byte_count","digest_algorithm":"sha256","digest_field":"schema_digest","encoding":"base64","encoding_field":"schema_encoding","kind":"schema_payload_v1","max_decoded_bytes":8388608,"type_ref":"SchemaResult"},{"kind":"canonical_uint64","type_ref":"UInt64"},{"context_kind":"schema_reply","digest_field":"schema_digest","digest_slot":"negotiated_schema_digest","kind":"negotiated_schema_v1","operation":"protocol.schema","protocol_field":"protocol","protocol_slot":"negotiated_protocol","result_ref":"SchemaResult"}]}};
+const document = record(schema), definitions = record(document['$defs']);
+const metadata = record(document['x-adt']);
+const rawRules = metadata['rules'];
+if (!Array.isArray(rawRules)) throw Error('unsupported_schema');
+const requiredRules: unknown[] = rawRules;
+export function supportsSchema(text: string): boolean {
+    try { const rules = record(record(parse(text, true))['x-adt'])['rules']; return Array.isArray(rules) && canonical(rules) === canonical(requiredRules); } catch { return false; }
+}
+async function validate(name: string, value: unknown, cache: Map<string, Uint8Array>, depth: number): Promise<boolean> {
+    if (depth > 64 || !Object.hasOwn(definitions, name)) return false;
+    const node = record(definitions[name]);
+    const reference = async (ref: unknown, x: unknown): Promise<boolean> => { const text = string(ref); return text.startsWith('#/$defs/') && validate(text.slice(8), x, cache, depth + 1); };
+    if (Array.isArray(node['oneOf'])) { let count = 0; for (const branch of node['oneOf']) { const b = record(branch); if (b['type'] === 'null' ? value === null : await reference(b['$ref'], value)) count++; } if (count !== 1) return false; }
+    else if (node['type'] === 'string') {
+        if (typeof value !== 'string' || !scalar(value)) return false;
+        if (Array.isArray(node['enum']) && !node['enum'].includes(value)) return false;
+        const count = [...value].length;
+        if (typeof node['minLength'] === 'number' && count < node['minLength']) return false;
+        if (typeof node['maxLength'] === 'number' && count > node['maxLength']) return false;
+        const canonicalBase64 = requiredRules.some(raw => { const rule = record(raw); return rule['kind'] === 'canonical_base64' && rule['type_ref'] === name; });
+        if (!canonicalBase64 && typeof node['pattern'] === 'string' && !new RegExp(node['pattern'], 'u').test(value)) return false;
+    } else if (node['type'] === 'object') {
+        if (!object(value)) return false;
+        const properties = record(node['properties']), required = node['required'];
+        if (!Array.isArray(required) || Object.keys(value).some(k => !Object.hasOwn(properties, k)) || required.some(k => typeof k !== 'string' || !Object.hasOwn(value, k))) return false;
+        for (const [key, item] of Object.entries(value)) if (!await reference(record(properties[key])['$ref'], item)) return false;
+    } else if (node['type'] === 'array') {
+        if (!Array.isArray(value) || typeof node['maxItems'] !== 'number' || value.length > node['maxItems']) return false;
+        for (const item of value) if (!await reference(record(node['items'])['$ref'], item)) return false;
+    } else return false;
+    for (const raw of requiredRules) {
+        const rule = record(raw); if ((rule['type_ref'] ?? rule['array_ref']) !== name) continue;
+        const kind = rule['kind'];
+        if (kind === 'utf8_max_bytes') { if (encoder.encode(string(value)).length > Number(rule['limit'])) return false; }
+        else if (kind === 'canonical_uint64') { if (BigInt(string(value)) > 18446744073709551615n) return false; }
+        else if (kind === 'canonical_base64') { const s = string(value); if (!cache.has(s)) cache.set(s, decodeBase64(s)); }
+        else if (kind === 'sorted_unique') { if (!Array.isArray(value)) return false; const names = value.map(x => string(record(x)[string(rule['key'])])); if (names.some((x, i) => i > 0 && names[i - 1] >= x)) return false; }
+        else if (kind === 'protocol_window_v1') { const o = record(value), a = string(o[string(rule['min_field'])]).split('.').map(Number), b = string(o[string(rule['max_field'])]).split('.').map(Number); if (a[0] !== b[0] || a[0] > b[0] || (a[0] === b[0] && a[1] > b[1])) return false; }
+        else if (kind === 'schema_payload_v1') { const o = record(value), raw = cache.get(string(o[string(rule['bytes_field'])])); if (!raw || String(raw.length) !== o[string(rule['count_field'])] || await digest(raw) !== o[string(rule['digest_field'])]) return false; }
+        else return false;
+    }
+    return true;
+}
+export async function validateType(name: keyof Types, value: unknown): Promise<boolean> { try { return wire(value) && await validate(name, value, new Map(), 0); } catch { return false; } }
+declare const contextBrand: unique symbol;
+export type ValidatedConnect = Readonly<{ protocol: string; digest: string; [contextBrand]: true }>;
+const contexts = new WeakSet<object>();
+function connectContext(result: ConnectResult): ValidatedConnect { const ctx = Object.freeze({ protocol: result.protocol, digest: result.schema_digest }); contexts.add(ctx); return ctx as ValidatedConnect; }
+export async function validateOperationResult(operation: string, value: unknown, context?: ValidatedConnect): Promise<boolean> {
+    try { const operations = metadata['operations']; if (!Array.isArray(operations)) return false; const op = operations.find(x => record(x)['name'] === operation); if (!op || !wire(value) || !await validate(string(record(op)['result_ref']), value, new Map(), 0)) return false;
+        for (const raw of requiredRules) { const rule = record(raw); if (rule['operation'] !== operation) continue; if (rule['kind'] !== 'negotiated_schema_v1' || !context || !contexts.has(context)) return false; const o = record(value); if (o[string(rule['protocol_field'])] !== context.protocol || o[string(rule['digest_field'])] !== context.digest) return false; } return true;
+    } catch { return false; }
+}
+export async function encodeRequest(operation: string, id: string, args: unknown): Promise<Uint8Array> {
+    const operations = metadata['operations']; if (!Array.isArray(operations)) throw Error('operation'); const op = operations.find(x => record(x)['name'] === operation);
+    if (!op || !await validateType('RequestId', id) || !wire(args) || !await validate(string(record(op)['request_ref']), args, new Map(), 0)) throw Error('invalid_request');
+    const raw = encoder.encode(canonical({ request_id: id, op: operation, args })); if (raw.length === 0 || raw.length > 16777216) throw Error('frame'); const frame = new Uint8Array(4 + raw.length); new DataView(frame.buffer).setUint32(0, raw.length); frame.set(raw, 4); return frame;
+}
+export type DecodedResponse = { kind: "connect"; result: ConnectResult; context: ValidatedConnect } | { kind: "schema"; result: SchemaResult } | { kind: 'error'; error: ApiError } | { kind: 'unavailable' };
+export async function decodeResponse(frame: Uint8Array, operation: string, outstanding: string, context?: ValidatedConnect): Promise<DecodedResponse> {
+    try { if (!await validateType('RequestId', outstanding) || frame.length < 5) throw Error('frame'); const n = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(0); if (n === 0 || n > 16777216 || frame.length !== n + 4) throw Error('frame'); const value = record(parseStrictJson(decoder.decode(frame.subarray(4)))); if (Object.keys(value).length !== 2 || value['request_id'] !== outstanding) throw Error('correlation');
+        if (Object.hasOwn(value, 'error')) { if (!await validateType('ApiError', value['error'])) throw Error('error'); return { kind: 'error', error: value['error'] as ApiError }; }
+        const result = value['result']; if (!await validateOperationResult(operation, result, context)) throw Error('result');
+        if (operation === "protocol.connect") { const typed = result as ConnectResult; return { kind: "connect", result: typed, context: connectContext(typed) }; }
+if (operation === "protocol.schema") { const typed = result as SchemaResult; if (!supportsSchema(decoder.decode(decodeBase64(typed.schema_bytes_base64)))) throw Error('unsupported_schema');return { kind: "schema", result: typed }; }
+        throw Error('operation');
+    } catch { return { kind: 'unavailable' }; }
+}
