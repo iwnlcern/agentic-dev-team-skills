@@ -381,7 +381,7 @@ def init_v3(conn):
     conn.execute("BEGIN IMMEDIATE")
     try:
         names = {name for (name,) in conn.execute(
-            "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+            "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")}
         if names:
             _require_matching(conn, names)
             conn.execute("ROLLBACK")
@@ -400,7 +400,7 @@ def init_v3(conn):
 
 def _require_matching(conn, names):
     tables = {name for (name,) in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")}
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")}
     row = None
     if "schema_version" in tables:
         row = conn.execute(
@@ -422,7 +422,7 @@ def _require_matching(conn, names):
 
 def _definitions(conn):
     return {(kind, name): sql for kind, name, sql in conn.execute(
-        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")}
 
 
 def _definition_difference(conn):
