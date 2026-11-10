@@ -162,8 +162,8 @@ A typical run:
    ```
 
    Read the receipt and use its filed path; a clean structural check does not prove the claims.
-   For the v3 delivery contract (DD-v3-adapter § 4.1–4.2), connect with `relay connect --key <seat-key> --root .relays/<run>`.
-   Only `TO` rings, at most 20 on connect; `relay connect --list` shows the remaining count.
+   For the v3 delivery contract (DD-v3-adapter § 4.1–4.2), connect with `adt connect --key <seat-key> [--switch]`.
+   Only `TO` rings, at most 20 on connect; `adt connect --list` shows the remaining count.
    Keep the terminal handoff pointer for seats using the fallback.
 
 Running more than one pair at once is what the orchestrator roles are for: `orchestrator-planner`

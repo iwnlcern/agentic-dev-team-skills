@@ -37,11 +37,11 @@ The procedure in `protocol.md` § Authority check before acting is the same on C
 
 The v3 connection contract is DD-v3-adapter § 4.1–4.2; these steps describe that contract for the v3 release.
 
-- Connect using `relay connect --key <key-path> --root <run-root>` with your existing seat key; do not register or replace a resumed seat.
+- Connect using `adt connect --key <key-path> [--switch]` with your existing seat key; do not register or replace a resumed seat.
 - A window with no connection says `not connected — ask for your seat name and key` and rings for nothing.
 - Connecting another window as the same seat moves delivery; the old window reports `relay: replaced by another window`.
   Changing seats in an already connected window requires `--switch`; the previous seat keeps its engine delivery position.
-- Delivery rings only for `TO`, oldest first: at most 20 on connect, then a remaining count with `relay connect --list`.
+- Delivery rings only for `TO`, oldest first: at most 20 on connect, then a remaining count with `adt connect --list`.
   CC supplies visibility and never rings.
 - On Codex the window identity is `CODEX_THREAD_ID`.
   `startup`, `clear` and `fork` require connect in the new thread; `resume` and `compact` continue while the doorbell holds the window's lifetime lock.

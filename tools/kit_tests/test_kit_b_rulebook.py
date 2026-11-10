@@ -156,7 +156,7 @@ class TestRulebook(KitTreeCase):
 
     def test_engine_sentences_point_at_functions(self):
         text = self.canonical_text('shared/protocol.md')
-        command = re.compile(r'`(?:tools/)?relay [a-z]')
+        command = re.compile(r'`(?:tools/)?(?:relay|adt) [a-z]')
         citation = re.compile(r'`([A-Za-z_]\w*)` in `(tools/[^`]+\.py)`')
         found = 0
         for line in text.splitlines():
@@ -204,7 +204,14 @@ class TestRulebook(KitTreeCase):
             for old in ('relay-monitor.py bind', 'relay-monitor.py status'):
                 self.assertNotIn(old, text, str(path.relative_to(ROOT)))
         for rel in ('shared/protocol.md', 'shared/harness-codex.md', 'skills/pair-planner/SKILL.md', 'skills/pair-implementer/SKILL.md'):
-            self.assertIn('relay connect', self.canonical_text(rel), rel)
+            self.assertIn('adt connect', self.canonical_text(rel), rel)
+        for path in [*files, ROOT / 'README.md']:
+            rel = str(path.relative_to(ROOT))
+            text = path.read_text()
+            self.assertNotIn('relay connect', text, rel)
+            for line in text.splitlines():
+                if 'adt connect' in line:
+                    self.assertNotIn('--root', line, rel)
 
     def test_no_linter_script_named(self):
         paths = [ROOT / 'README.md', *(ROOT / 'skills').rglob('*'), *(ROOT / 'shared').rglob('*')]
