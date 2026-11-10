@@ -2,6 +2,7 @@
 import ast
 import dataclasses
 import os
+import sys
 import tempfile
 import unittest
 
@@ -24,6 +25,48 @@ def principal_calls(path):
         elif isinstance(func, ast.Attribute) and func.attr in NAMES:
             found.append(func.attr)
     return found
+
+
+# Plan r2 erratum 1 section E2: a principal cannot be changed after construction; the error
+# type is not part of that contract.  A field is refused with FrozenInstanceError on every
+# supported Python; a name that is not a field is refused with TypeError before 3.14, from the
+# generated __setattr__ and __delattr__ of a slotted frozen dataclass, and FrozenInstanceError
+# from 3.14 (section E1, measured on the release image's 3.11.18 and on 3.14.6).
+NON_FIELD_ERROR = dataclasses.FrozenInstanceError if sys.version_info >= (3, 14) else TypeError
+
+
+def raised(action):
+    """Answer the exact type action raised, or None when it raised nothing."""
+    try:
+        action()
+    except Exception as error:
+        return type(error)
+    return None
+
+
+def mutation_attempts(instance, field, value):
+    """The four section E3 attempts, as (label, exact error type or None)."""
+    return [
+        ("set field", raised(lambda: setattr(instance, field, value))),
+        ("set extra", raised(lambda: setattr(instance, "extra", "x"))),
+        ("delete field", raised(lambda: delattr(instance, field))),
+        ("delete extra", raised(lambda: delattr(instance, "extra"))),
+    ]
+
+
+@dataclasses.dataclass(frozen=False, slots=True)
+class MutableOperatorCopy:
+    surface: str
+
+
+@dataclasses.dataclass(frozen=False, slots=True)
+class MutableServiceCopy:
+    service: str
+
+
+@dataclasses.dataclass(frozen=True)
+class UnslottedCopy:
+    surface: str
 
 
 class TestOperatorPrincipal(unittest.TestCase):
@@ -64,20 +107,34 @@ class TestServicePrincipal(unittest.TestCase):
 
 class TestShape(unittest.TestCase):
     def test_principals_are_frozen(self):
-        operator = p.OperatorPrincipal("page")
-        service = p.ServicePrincipal("console_queue")
-        attempts = (
-            (operator, "surface", "frank_panel"),
-            (service, "service", "engine_liveness"),
-            (operator, "extra", "x"),
-            (service, "extra", "x"),
-        )
-        for instance, name, value in attempts:
-            with self.subTest(instance=instance, name=name):
-                with self.assertRaises((dataclasses.FrozenInstanceError, AttributeError)):
-                    setattr(instance, name, value)
-        self.assertEqual(operator.surface, "page")
-        self.assertEqual(service.service, "console_queue")
+        expected = [("set field", dataclasses.FrozenInstanceError), ("set extra", NON_FIELD_ERROR),
+                    ("delete field", dataclasses.FrozenInstanceError), ("delete extra", NON_FIELD_ERROR)]
+        cases = ((p.OperatorPrincipal("page"), "surface", "frank_panel", "page"),
+                 (p.ServicePrincipal("console_queue"), "service", "engine_liveness", "console_queue"))
+        for instance, field, value, constructed in cases:
+            with self.subTest(principal=type(instance).__name__):
+                for (label, got), (_, want) in zip(mutation_attempts(instance, field, value), expected):
+                    with self.subTest(attempt=label):
+                        self.assertIs(got, want)
+                self.assertEqual(getattr(instance, field), constructed)
+                self.assertFalse(hasattr(instance, "extra"))
+        # Control: a copy that is not frozen accepts the field assignment, so the
+        # assertions above tell a type that can be changed from one that cannot.
+        for copy, field, value in ((MutableOperatorCopy("page"), "surface", "frank_panel"),
+                                   (MutableServiceCopy("console_queue"), "service", "engine_liveness")):
+            with self.subTest(control=type(copy).__name__):
+                self.assertIsNone(raised(lambda: setattr(copy, field, value)))
+                self.assertEqual(getattr(copy, field), value)
+
+    def test_principals_keep_the_api_shape(self):
+        for cls, instance in ((p.OperatorPrincipal, p.OperatorPrincipal("page")),
+                              (p.ServicePrincipal, p.ServicePrincipal("console_queue"))):
+            with self.subTest(principal=cls.__name__):
+                self.assertIn("__slots__", cls.__dict__)
+                self.assertFalse(hasattr(instance, "__dict__"))
+        # Control: a frozen class without slots fails both checks.
+        self.assertNotIn("__slots__", UnslottedCopy.__dict__)
+        self.assertTrue(hasattr(UnslottedCopy("page"), "__dict__"))
 
     def test_module_imports_only_stdlib(self):
         with open(p.__file__, encoding="utf-8") as handle:
