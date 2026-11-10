@@ -982,14 +982,46 @@ class TestErratum3(SlipStore):
         expected = {('design', dc.relay_id): [str(self.design)], ('plan', approval.relay_id): [str(self.plan)]}
         self.assertEqual(self.claim_artifacts(impl), expected)
         self.assertEqual(self.act().slip_id, self.issued(impl))
-        # A review of content already locked decides nothing for that path, whatever its verdict.
+        # Erratum 6 r3 R-D: a refusal naming the plan at its locked bytes objects it.
         again = self.answer(self.ask('plan', approval, self.plan), 'must-revise', self.plan)
         later = self.issue(again)
-        self.assertEqual(self.claim_artifacts(later), expected)
+        self.assertIsNone(self.slip(later))
+        # Erratum 8 Y1 (reading A): a later review in another request's lineage does not end a
+        # live slip (design lines 84, 91 and 92), so `act` still allows under `impl`.
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        # The holder's approve naming the plan then locks it under its own claim.
         repeat = self.answer(self.ask('plan', again, self.plan), 'approve', self.plan)
         last = self.issue(repeat)
-        self.assertEqual(self.claim_artifacts(last), expected)
+        self.assertEqual(self.claim_artifacts(last), {('design', dc.relay_id): [str(self.design)],
+                                                      ('plan', repeat.relay_id): [str(self.plan)]})
+        self.code('verification-pending')
+        self.verify(repeat)
         self.assertEqual(self.act().slip_id, self.issued(last))
+
+    def test_revoking_newest_slip_leaves_earlier_live(self):
+        # Erratum 8 Y2b (Orchestrator Reviewer 185143, root 185219): issuing a slip ends no earlier
+        # slip, so revoking the newest leaves the earlier one answering; only revoking every live
+        # slip of the bundle stops the seat.  Today's answers, the baseline for
+        # OB-SLIP-EARLIER-LIVE-AFTER-REVOKE-1.
+        _, dc = self.designed()
+        approval = self.answer(self.ask('plan', dc, self.plan, self.design), 'approve', self.plan, self.design)
+        self.verify(approval)
+        impl = self.issue(approval)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        self.plan.write_bytes(b'plan Y\n')
+        again = self.answer(self.ask('plan', approval, self.plan), 'approve', self.plan)
+        self.verify(again)
+        last = self.issue(again)
+        self.assertEqual(self.act().slip_id, self.issued(last))
+        self.assertEqual(slips.revoke(self.conn, self.issued(last), PLANNER.seat_id, 'stop', self.clock).outcome,
+                         'allow')
+        held = self.code('plan-changed')
+        self.assertEqual(held.slip_id, self.issued(impl))
+        self.plan.write_bytes(b'plan X\n')
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        self.assertEqual(slips.revoke(self.conn, self.issued(impl), PLANNER.seat_id, 'stop', self.clock).outcome,
+                         'allow')
+        self.assertIn('revoked', self.code('slip-invalid').reason)
 
     def test_operator_objection_waived_still_binds_digest(self):
         # Erratum 4 r2 R2's control.
@@ -1070,6 +1102,25 @@ class TestErratum5(SlipStore):
         self.conn.close(); self.setUp()
         objection = self.objected()
         self.refused(self.issue(objection), self.plan, objection)
+        # (g) Erratum 7 X3 (F1), on its own lineage with a path no earlier relay names: H's verdictless
+        # DESIGN-REVIEW naming p under a DESIGN holding p fails `qualifies`, so p is no design path,
+        # H's later approve of a PLAN holding p locks it in a plan claim, left unverified, and `act`
+        # holds; under F1 p is a design path, the lock only pins it, p binds by digest and `act` allows.
+        with self.subTest(case='g-verdictless-holder-own-lineage'):
+            self.conn.close(); self.setUp()
+            # Section E's prefix, as TestErratum6.based builds it; `answer` leaves a claim unverified.
+            base = self.file('b.md', b'b X\n')
+            prefix = self.answer(self.ask('plan', self.go(), base), 'approve', base)
+            self.verify(prefix)
+            p = self.file('p.md', b'p X\n')
+            design = self.ask('design', prefix, p)
+            verdictless = self.submit(draft(kind='DESIGN-REVIEW', needs='review', parent=design.relay_id,
+                                            to=PLANNER.address, refs=self.refs(p)), IMPL)
+            approval = self.answer(self.ask('plan', verdictless, p), 'approve', p)
+            impl = self.issue(approval)
+            self.assertEqual(self.claim_artifacts(impl, 'plan').get(('plan', approval.relay_id)), [str(p)])
+            self.assertNotIn(str(p), self.digest_artifacts(impl))
+            self.code('verification-pending')
 
     def test_design_review_cannot_reclassify_approved_plan(self):
         _, dc = self.designed()
@@ -1183,3 +1234,693 @@ class TestErratum5(SlipStore):
         extra = self.file('extra.md', b'extra X\n')
         objection = self.answer(self.ask('plan', base, extra), 'must-revise', extra)
         self.refused(self.issue(objection), extra, objection)
+
+
+# Erratum 6 r5 section E: the bounded enumeration's alphabet, as count_space_r4.py and
+# count_suite_r4.py spell it (the Authority Planner's sizing scripts).
+import itertools
+import sys
+
+LINEAGE_REFSETS = (('p',), ('q',), ('p', 'q'))
+LINEAGE_NAMESETS = ((), ('p',), ('q',), ('p', 'q'))
+LINEAGE_KINDS = ('D', 'Dn', 'P', 'S', 'D2', 'PC')
+LINEAGE_REQUESTS = [('R', ())] + [(kind, refs) for kind in LINEAGE_KINDS for refs in LINEAGE_REFSETS]
+LINEAGE_RESPONSES = ([None] + [('H', kind, verdict, names) for kind in ('PR', 'DR')
+                               for verdict in ('approve', 'must-revise') for names in LINEAGE_NAMESETS]
+                     + [('V', names) for names in LINEAGE_NAMESETS]
+                     + [('O', 'DR', verdict, names) for verdict in ('approve', 'must-revise')
+                        for names in LINEAGE_NAMESETS])
+LINEAGE_SNAPSHOT_TO = {'D': 'H', 'P': 'H', 'D2': 'O', 'PC': 'H'}
+# Who besides the Planner is a member of each request, so may reply under it (E-PARENT-NOT-MEMBER).
+LINEAGE_MEMBERS = {'D': {'H'}, 'Dn': {'H'}, 'P': {'H'}, 'S': {'H'}, 'D2': {'O'}, 'PC': {'H', 'O'}}
+
+
+def lineage_sender(response):
+    """H sends its own reviews and the verdictless review (erratum 6 r5 E); O is the second implementer."""
+    return 'H' if response[0] in ('H', 'V') else 'O'
+
+
+def lineage_admissible(request, response, members_only=True):
+    """count_space_r4.py's pruning: a reply with no response is a no-op; an approve under a
+    request with snapshots comes from its TO seat and names at least one held reference; and a
+    response to a new request comes from one of its members.  A reply to the last relay from a
+    non-member is kept and refused at submit."""
+    kind, refs = request
+    if kind == 'R' and response is None:
+        return False
+    if members_only and response is not None and kind != 'R' and lineage_sender(response) not in LINEAGE_MEMBERS[kind]:
+        return False
+    if response is None or response[0] == 'V' or response[2] != 'approve':
+        return True
+    if kind in LINEAGE_SNAPSHOT_TO:
+        return (LINEAGE_SNAPSHOT_TO[kind] == response[0] and len(response[3]) > 0
+                and set(response[3]) <= set(refs))
+    return True
+
+
+def lineage_rounds(edits, requests, responses, members_only=True):
+    return [(edit, request, response) for edit in edits for request in requests for response in responses
+            if lineage_admissible(request, response, members_only)]
+
+
+_SUITE_REQUESTS = [('R', ()), ('D', ('p',)), ('D', ('p', 'q')), ('Dn', ('p',)), ('P', ('p',)), ('S', ('p',)),
+                   ('D2', ('p',)), ('PC', ('p',))]
+_SUITE_RESPONSES = [None, ('H', 'PR', 'approve', ('p',)), ('H', 'PR', 'must-revise', ('p',)),
+                    ('H', 'PR', 'must-revise', ()), ('H', 'DR', 'approve', ('p',)), ('H', 'DR', 'approve', ('q',)),
+                    ('H', 'DR', 'must-revise', ('p',)), ('H', 'DR', 'must-revise', ('q',)),
+                    ('H', 'DR', 'must-revise', ()), ('V', ('p',)), ('V', ()), ('O', 'DR', 'approve', ('p',)),
+                    ('O', 'DR', 'must-revise', ('p',)), ('O', 'DR', 'must-revise', ())]
+LINEAGE_FULL_ROUNDS = lineage_rounds((None, 'p', 'q'), LINEAGE_REQUESTS, LINEAGE_RESPONSES)
+LINEAGE_FULL_UNPRUNED = lineage_rounds((None, 'p', 'q'), LINEAGE_REQUESTS, LINEAGE_RESPONSES, members_only=False)
+LINEAGE_SUITE_ROUNDS = lineage_rounds((None, 'p'), _SUITE_REQUESTS, _SUITE_RESPONSES)
+LINEAGE_SUITE_UNPRUNED = lineage_rounds((None, 'p'), _SUITE_REQUESTS, _SUITE_RESPONSES, members_only=False)
+_D, _P, _S, _PC = ('D', ('p', 'q')), ('P', ('p',)), ('S', ('p',)), ('PC', ('p',))
+LINEAGE_NAMED_WORDS = {
+    'P1': ((None, _P, ('H', 'PR', 'approve', ('p',))), ('p', _D, ('H', 'DR', 'approve', ('q',)))),
+    'P2': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, _D, ('H', 'DR', 'approve', ('q',)))),
+    'P4': ((None, _D, ('H', 'DR', 'approve', ('q',))), ('p', _P, ('H', 'PR', 'must-revise', ('p',)))),
+    'P5': ((None, _S, ('H', 'PR', 'must-revise', ('p',))),),
+    'item4': ((None, _D, ('H', 'DR', 'must-revise', ())), (None, _P, ('H', 'PR', 'approve', ('p',)))),
+    'RD': ((None, _P, ('H', 'PR', 'approve', ('p',))), (None, _P, ('H', 'PR', 'must-revise', ('p',)))),
+    'a': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, ('R', ()), ('V', ()))),
+    'b': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, ('D2', ('p',)), ('O', 'DR', 'approve', ('p',)))),
+    'c': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, _S, ('H', 'DR', 'approve', ('p',)))),
+    'd': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, ('Dn', ('p',)), ('H', 'DR', 'approve', ('p',)))),
+    'e': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, ('D', ('p',)), ('V', ('p',)))),
+    'f': (('p', _P, ('H', 'PR', 'must-revise', ('p',))), (None, _P, ('H', 'DR', 'approve', ('p',)))),
+    'PIN': ((None, _P, ('H', 'DR', 'approve', ('p',))), ('p', ('D', ('p',)), None)),
+    'PIN-V': ((None, _P, ('H', 'DR', 'approve', ('p',))), ('p', ('R', ()), ('V', ('p',)))),
+    'RC': ((None, _PC, ('O', 'DR', 'must-revise', ('p',))),),
+    'RC-none': ((None, _PC, ('O', 'DR', 'must-revise', ())),),
+    'OPIN': ((None, ('D2', ('p',)), ('O', 'DR', 'approve', ('p',))), ('p', _S, None)),
+}
+# Erratum 6 r5's control prediction at aa84dbc: which oracles flag each named word.
+LINEAGE_CONTROL_PREDICTION = {
+    **{name: 'O1+O2' for name in ('P1', 'P2', 'P4', 'P5', 'RD', 'PIN', 'PIN-V')},
+    **{name: 'O1' for name in ('RC', 'RC-none', 'OPIN')},
+    **{name: None for name in ('a', 'b', 'c', 'd', 'e', 'f', 'item4')},
+}
+_REVIEW_KINDS6 = ('PLAN-REVIEW', 'DESIGN-REVIEW')
+
+
+def lineage_canonical(word):
+    """p and q are symmetric: a lineage is kept only when the first free file it mentions is p."""
+    for edit, (_, refs), response in word:
+        for name in ([edit] if edit else []) + list(refs) + (list(response[-1]) if response else []):
+            return name == 'p'
+    return True
+
+
+def _lineage_first_mention(round_):
+    edit, (_, refs), response = round_
+    for name in ([edit] if edit else []) + list(refs) + (list(response[-1]) if response else []):
+        return name
+    return None
+
+
+def lineage_word_count(rounds, canonical):
+    """The number of words of at most two rounds over `rounds`, without building any."""
+    if not canonical:
+        return 1 + len(rounds) + len(rounds) ** 2
+    first = [_lineage_first_mention(round_) for round_ in rounds]
+    alone = sum(1 for name in first if name in (None, 'p'))
+    return 1 + alone + sum(len(rounds) if name == 'p' else alone if name is None else 0 for name in first)
+
+
+class LineageStore:
+    """What the oracles read, by SQL alone: relays, snapshots, locks and reference edges."""
+
+    def __init__(self, conn, impl_id):
+        rows, relay = [], impl_id
+        while relay is not None:
+            row = conn.execute('SELECT id, kind, verdict, sender_seat_id, parent_id FROM relays WHERE id = ?',
+                               (relay,)).fetchone()
+            rows.append(row)
+            relay = row[4]
+        self.rows = rows[::-1][:-1]          # oldest first, the IMPL itself left out
+        self.kind = {row[0]: row[1] for row in self.rows}
+        self.held = {row[0]: dict(conn.execute('SELECT artifact, content_sha256 FROM snapshots WHERE relay_id = ?',
+                                               (row[0],))) for row in self.rows}
+        self.locked = {row[0]: dict(conn.execute('SELECT artifact, content_sha256 FROM snapshots'
+                                                 ' WHERE locked_by = ?', (row[0],))) for row in self.rows}
+        self.named = {row[0]: [(path, digest) for path, digest in conn.execute(
+            "SELECT target_path, digest_at_submit FROM edges WHERE from_relay_id = ? AND kind = 'ref'"
+            " AND target_type = 'path' ORDER BY ordinal", (row[0],))] for row in self.rows}
+        self.newest = {}
+        for row in self.rows:
+            for path, digest in self.named[row[0]]:
+                self.newest[path] = digest
+
+    def held_by_parent(self, row):
+        return self.held.get(row[4], {})
+
+
+def lineage_model(store, holder):
+    """O1: erratum 6 r5's sections D and R, computed from the relays alone.  Returns
+    (issues, expected) where expected maps each path the lineage references to the digest
+    P1 lets `act` allow it at: a decided path's lock, else its newest holder pin, else its
+    newest pin by any seat, else the digest at its newest reference."""
+    def qualifying(row):
+        return (row[1] == 'DESIGN-REVIEW' and row[2] is not None and row[3] == holder
+                and store.kind.get(row[4]) == 'DESIGN')
+
+    def reaches(row):
+        held, named = store.held_by_parent(row), dict(store.named[row[0]])
+        out = {}
+        if held:
+            inside = [path for path in named if path in held]
+            for path in inside:
+                out[path] = (held[path], False)
+            if not inside:
+                for path, digest in held.items():
+                    out[path] = (digest, True)
+        for path, digest in named.items():
+            if path not in held:
+                out[path] = (digest, False)
+        return out
+
+    def counted(row):
+        return row[3] == holder or row[1] == 'DESIGN-REVIEW'
+
+    def run(design):
+        state, block, fallback_design = {}, False, set()
+        for row in store.rows:
+            if row[1] not in _REVIEW_KINDS6 or row[2] is None:
+                continue
+            if row[2] == 'approve':
+                if row[1] == 'PLAN-REVIEW' and row[3] == holder:
+                    deciding, source = {p: d for p, d in store.locked[row[0]].items() if p not in design}, 'plan'
+                elif qualifying(row):
+                    deciding, source = store.locked[row[0]], 'design'
+                else:
+                    continue
+                if deciding:
+                    block = False
+                for path, digest in deciding.items():
+                    current = state.get(path)
+                    if current and current[0] == 'objected' and source != 'design' and (
+                            current[1] == 'design' or path in design):
+                        continue
+                    if current and current[0] == 'locked' and current[1] == digest:
+                        continue
+                    state[path] = ('locked', digest, source)
+                continue
+            if not counted(row):
+                continue
+            if row[3] == holder and not store.held_by_parent(row) and not store.named[row[0]]:
+                block = True
+            for path, (digest, fallback) in reaches(row).items():
+                current = state.get(path)
+                if fallback and current and current[0] == 'locked' and current[1] == digest:
+                    continue
+                if current and current[0] == 'objected' and current[1] == 'design' and row[1] != 'DESIGN-REVIEW':
+                    continue
+                state[path] = ('objected', 'design' if row[1] == 'DESIGN-REVIEW' else 'plan')
+                if fallback and qualifying(row):
+                    fallback_design.add(path)
+        return state, block, fallback_design
+
+    design = set()
+    for row in store.rows:
+        if qualifying(row):
+            if row[2] == 'approve':
+                design |= set(store.locked[row[0]])
+            else:
+                design |= {path for path, (_, fallback) in reaches(row).items() if not fallback}
+    while True:
+        state, block, fallback_design = run(design)
+        if fallback_design <= design:
+            break
+        design |= fallback_design
+    issues = (not block and not any(entry[0] == 'objected' for entry in state.values())
+              and any(entry[0] == 'locked' and entry[2] == 'plan' for entry in state.values()))
+    pins = {}
+    for row in store.rows:
+        if row[1] in _REVIEW_KINDS6 and row[2] == 'approve':
+            for path, digest in store.locked[row[0]].items():
+                pins.setdefault(path, {})['holder' if row[3] == holder else 'other'] = digest
+    def binding(path, digest):
+        if path in state:
+            return state[path][1]
+        pinned = pins.get(path, {})
+        return pinned.get('holder', pinned.get('other', digest))
+    expected = {path: binding(path, digest) for path, digest in store.newest.items()}
+    return issues, expected
+
+
+def lineage_holder_words(store, holder, issued, allowed):
+    """O2: the holder's own words and P1's second branch, with no class or fallback logic.
+    `allowed` maps each content assignment (path -> digest) that `act` allowed."""
+    found = []
+    reviews = [(index, row) for index, row in enumerate(store.rows) if row[1] in _REVIEW_KINDS6]
+    refusals = [(index, row) for index, row in reviews if row[3] == holder and row[2] not in (None, 'approve')]
+    approvals = [(index, path, digest) for index, row in reviews if row[3] == holder and row[2] == 'approve'
+                 for path, digest in store.locked[row[0]].items()]
+    touched = set()
+    for _, row in reviews:
+        if row[2] is None:
+            continue
+        touched |= set(store.locked[row[0]])
+        if row[2] != 'approve':
+            touched |= set(store.held_by_parent(row)) | {path for path, _ in store.named[row[0]]}
+    for assignment in allowed:
+        for index, row in refusals:
+            for path, digest in store.named[row[0]]:
+                if assignment.get(path) == digest and not any(
+                        later > index and p == path and d == digest for later, p, d in approvals):
+                    found.append(('i', path, row[0]))
+        for path in {p for _, p, _ in approvals}:
+            if path in assignment and assignment[path] not in {d for _, p, d in approvals if p == path}:
+                found.append(('ii', path, None))
+        for path, digest in store.newest.items():
+            if path not in touched and assignment.get(path) != digest:
+                found.append(('iii', path, None))
+    if issued:
+        for index, row in refusals:
+            for path, _ in store.named[row[0]]:
+                if not any(later > index and p == path for later, p, _ in approvals):
+                    found.append(('iv', path, row[0]))
+    return sorted(set(found), key=repr)
+
+
+class TestErratum6(SlipStore):
+    """Erratum 6 r5: what decides a path (D), the property `act` keeps (P), the rules (R-A to
+    R-E) and section E's bounded enumeration, judged by two oracles that share no code with
+    `slips._decide`."""
+
+    def file(self, name, data):
+        path = self.plan.with_name(name)
+        path.write_bytes(data)
+        return path
+
+    def refs(self, *paths):
+        return tuple('file:' + str(path) for path in paths)
+
+    def refused(self, impl, path, review):
+        self.assertIsNone(self.slip(impl), 'a slip issued over the objection')
+        denied = self.code('lineage-incomplete')
+        self.assertEqual(denied.outcome, 'deny')
+        if path is not None:
+            self.assertIn(str(path), denied.reason)
+        self.assertIn(review.relay_id, denied.reason)
+
+    def based(self):
+        """Section E's prefix: the delegating PLAN, a PLAN NEEDS review TO the holder holding
+        b, the holder's approve of b and its verification."""
+        base = self.file('b.md', b'b X\n')
+        approval = self.answer(self.ask('plan', self.go(), base), 'approve', base)
+        self.verify(approval)
+        return approval
+
+    def requested(self, kind, parent, *paths, to=IMPL):
+        """A request from the Planner: D, Dn, P, S, D2 or PC of section E."""
+        fields = {'D': ('DESIGN', 'review'), 'Dn': ('DESIGN', 'none'), 'P': ('PLAN', 'review'),
+                  'S': ('SITREP', 'none'), 'D2': ('DESIGN', 'review'), 'PC': ('PLAN', 'review')}[kind]
+        extra = {'cc': SECOND.address} if kind == 'PC' else {}
+        return self.submit(draft(kind=fields[0], needs=fields[1], parent=parent.relay_id,
+                                 to=(SECOND if kind == 'D2' else to).address, refs=self.refs(*paths), **extra))
+
+    def reviewed(self, request, verdict, *paths, kind='plan', sender=IMPL):
+        """A review; any claim it records is verified at once, off the lineage."""
+        reply = self.submit(draft(kind=kind.upper() + '-REVIEW', verdict=verdict, parent=request.relay_id,
+                                  to=PLANNER.address, cc=self.issuers, refs=self.refs(*paths)), sender)
+        if verdict == 'approve' and self.request(reply) is not None:
+            self.verify(reply)
+        return reply
+
+    def test_holder_refusal_survives_design_context(self):
+        p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+        # (P4) D holding q and p answered by H's DESIGN-REVIEW approve naming q, then p flipped and
+        # H's PLAN-REVIEW must-revise of it.  aa84dbc: p was a design path, the slip bound it by digest.
+        design = self.reviewed(self.requested('D', self.based(), q, p), 'approve', q, kind='design')
+        p.write_bytes(b'p Y\n')
+        objection = self.reviewed(self.requested('P', design, p), 'must-revise', p)
+        self.refused(self.issue(objection), p, objection)
+        # (P2) the same two rounds in the other order.
+        self.conn.close(); self.setUp()
+        p, q = self.file('p.md', b'p Y\n'), self.file('q.md', b'q X\n')
+        objection = self.reviewed(self.requested('P', self.based(), p), 'must-revise', p)
+        design = self.reviewed(self.requested('D', objection, q, p), 'approve', q, kind='design')
+        self.refused(self.issue(design), p, objection)
+        # Control: D holding q alone answers the same deny, at aa84dbc and after.
+        for order in ('P4', 'P2'):
+            self.conn.close(); self.setUp()
+            p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+            if order == 'P4':
+                design = self.reviewed(self.requested('D', self.based(), q), 'approve', q, kind='design')
+                p.write_bytes(b'p Y\n')
+                objection = last = self.reviewed(self.requested('P', design, p), 'must-revise', p)
+            else:
+                p.write_bytes(b'p Y\n')
+                objection = self.reviewed(self.requested('P', self.based(), p), 'must-revise', p)
+                last = self.reviewed(self.requested('D', objection, q), 'approve', q, kind='design')
+            with self.subTest(control=order):
+                self.refused(self.issue(last), p, objection)
+        # (P3, three rounds) q approved by H's DESIGN-REVIEW at X, p flipped and refused by H's
+        # PLAN-REVIEW, then H's DESIGN-REVIEW must-revise naming q at its locked bytes under D
+        # holding q and p.  aa84dbc: that must-revise decided nothing, p was a design path, and
+        # the slip allowed p at its refused bytes (probe P3).  Under R-D it objects q, which is
+        # referenced before p, so the deny names q.
+        self.conn.close(); self.setUp()
+        p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+        design = self.reviewed(self.requested('D', self.based(), q), 'approve', q, kind='design')
+        p.write_bytes(b'p Y\n')
+        objection = self.reviewed(self.requested('P', design, p), 'must-revise', p)
+        revising = self.reviewed(self.requested('D', objection, q, p), 'must-revise', q, kind='design')
+        self.refused(self.issue(revising), q, revising)
+
+    def test_design_review_cannot_move_approved_plan_bytes(self):
+        p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+        approval = self.reviewed(self.requested('P', self.go(), p), 'approve', p)
+        p.write_bytes(b'p Y\n')
+        design = self.reviewed(self.requested('D', approval, q, p), 'approve', q, kind='design')
+        impl = self.issue(design)
+        # aa84dbc: p, held by a DESIGN the holder approved naming q, was a design path, so the
+        # slip bound p by digest at Y and `act` allowed there.
+        self.assertEqual(self.claim_artifacts(impl, 'plan'), {('plan', approval.relay_id): [str(p)]})
+        self.assertNotIn(str(p), self.digest_artifacts(impl))
+        self.assertIn(str(p), self.code('plan-changed').reason)
+        p.write_bytes(b'p X\n')
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_refusal_without_snapshot_objects_named(self):
+        def build(request):
+            new = self.file('new.md', b'new X\n')
+            parent = self.based()
+            if request == 'S':
+                return new, self.requested('S', parent, new)
+            return new, self.submit(draft(kind='PLAN', needs='none', parent=parent.relay_id, to=IMPL.address,
+                                          refs=self.refs(new)))
+        for request in ('S', 'P-without-needs'):
+            with self.subTest(case=request):
+                self.conn.close(); self.setUp()
+                new, parent = build(request)
+                objection = self.reviewed(parent, 'must-revise', new)
+                # aa84dbc: a refusal whose parent holds no snapshot decided nothing.
+                self.refused(self.issue(objection), new, objection)
+        # A holder refusal naming nothing under a parent with no snapshot blocks issuance until a
+        # later D1 or D2 approve.
+        self.conn.close(); self.setUp()
+        new, parent = build('S')
+        block = self.reviewed(parent, 'must-revise')
+        self.refused(self.issue(block), None, block)
+        approval = self.reviewed(self.requested('P', block, new), 'approve', new)
+        impl = self.issue(approval)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_design_refusal_under_any_parent_objects(self):
+        # A PLAN with NEEDS review TO H holding p, with the second implementer on CC so that its
+        # reply is admitted; aa84dbc's line 181 let another seat's DESIGN-REVIEW refusal object
+        # only under a DESIGN, so a slip issued in both cases.
+        for case, named in (('names-p', True), ('names-nothing', False)):
+            with self.subTest(case=case):
+                self.conn.close(); self.setUp()
+                p = self.file('p.md', b'p Y\n')
+                request = self.requested('PC', self.based(), p)
+                objection = self.reviewed(request, 'must-revise', *((p,) if named else ()),
+                                          kind='design', sender=SECOND)
+                self.refused(self.issue(objection), p, objection)
+        # Control: without the CC, Engine refuses the second implementer's reply at submit.
+        self.conn.close(); self.setUp()
+        p = self.file('p.md', b'p Y\n')
+        request = self.requested('P', self.based(), p)
+        with self.assertRaises(errors.EngineError) as caught:
+            self.reviewed(request, 'must-revise', p, kind='design', sender=SECOND)
+        self.assertEqual(caught.exception.code, 'E-PARENT-NOT-MEMBER')
+
+    def test_design_refusal_naming_nothing_holds_context_plan(self):
+        p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+        refusal = self.reviewed(self.requested('D', self.based(), q, p), 'must-revise', kind='design')
+        lifted = self.reviewed(self.requested('D', refusal, q), 'approve', q, kind='design')
+        approval = self.reviewed(self.requested('P', lifted, p), 'approve', p)
+        # A design objection is lifted only by a qualifying DESIGN-REVIEW approve: a hold the
+        # Planner clears by a design request.
+        self.refused(self.issue(approval), p, refusal)
+        request = self.requested('D', approval, p)
+        renewed = self.submit(draft(kind='DESIGN-REVIEW', verdict='approve', parent=request.relay_id,
+                                    to=PLANNER.address, cc=self.issuers, refs=self.refs(p)), IMPL)
+        impl = self.issue(renewed)
+        self.assertIn(str(p), self.claim_artifacts(impl, 'design')[('design', renewed.relay_id)])
+        self.code('verification-pending')
+        self.verify(renewed)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_plan_approve_cannot_move_design_lock(self):
+        _, dc = self.designed()
+        self.design.write_bytes(b'design Y\n')
+        approval = self.reviewed(self.ask('plan', dc, self.plan, self.design), 'approve', self.plan, self.design)
+        impl = self.issue(approval)
+        # K5's witness: with `decides` answering yes for every review, the plan approve's lock at
+        # Y replaced the design lock with a plan claim and `act` allowed at Y.
+        self.assertEqual(self.claim_artifacts(impl), {('design', dc.relay_id): [str(self.design)],
+                                                      ('plan', approval.relay_id): [str(self.plan)]})
+        self.code('design-changed')
+        self.design.write_bytes(b'design X\n')
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_named_refusal_of_locked_bytes_refuses(self):
+        p = self.file('p.md', b'p X\n')
+        approval = self.reviewed(self.requested('P', self.go(), p), 'approve', p)
+        objection = self.reviewed(self.requested('P', approval, p), 'must-revise', p)
+        # aa84dbc: a review of content already locked decided nothing, so the slip issued under
+        # the first claim and `act` allowed.
+        self.refused(self.issue(objection), p, objection)
+        request = self.requested('P', objection, p)
+        repeat = self.submit(draft(kind='PLAN-REVIEW', verdict='approve', parent=request.relay_id,
+                                   to=PLANNER.address, cc=self.issuers, refs=self.refs(p)), IMPL)
+        impl = self.issue(repeat)
+        self.assertEqual(self.claim_artifacts(impl), {('plan', repeat.relay_id): [str(p)]})
+        self.code('verification-pending')
+        self.verify(repeat)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_refusal_of_unheld_named_path_refuses(self):
+        p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+        approval = self.reviewed(self.requested('P', self.based(), p), 'approve', p)
+        objection = self.reviewed(self.requested('D', approval, p), 'must-revise', q, kind='design')
+        # aa84dbc denies too, naming p: there the DESIGN holding p made p a design path.
+        self.refused(self.issue(objection), q, objection)
+
+    def test_reapprove_of_locked_bytes_keeps_verified_claim(self):
+        # Erratum 7 X2 (K7): H's approve of p at X is verified; a second PLAN holding p at X is
+        # approved by H and left unverified (`reviewed` would verify it, so it is submitted
+        # directly).  Re-approving content already locked keeps the older claim, so the slip binds
+        # p in the first approve's claim and `act` allows; under K7 the unverified claim replaces it.
+        p = self.file('p.md', b'p X\n')
+        approval = self.reviewed(self.requested('P', self.go(), p), 'approve', p)
+        request = self.requested('P', approval, p)
+        again = self.submit(draft(kind='PLAN-REVIEW', verdict='approve', parent=request.relay_id,
+                                  to=PLANNER.address, cc=self.issuers, refs=self.refs(p)), IMPL)
+        impl = self.issue(again)
+        self.assertEqual(self.claim_artifacts(impl), {('plan', approval.relay_id): [str(p)]})
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_mis_kinded_approve_pins_bytes(self):
+        x, y = b'p X\n', b'p Y\n'
+        # (PIN) H's DESIGN-REVIEW approve under a PLAN locks p at X and decides nothing; p is then
+        # flipped and referenced by a DESIGN holding p at Y with no response.  aa84dbc bound p by
+        # its newest reference at Y and `act` allowed there.
+        p = self.file('p.md', x)
+        pin = self.reviewed(self.requested('P', self.based(), p), 'approve', p, kind='design')
+        p.write_bytes(y)
+        impl = self.issue(self.requested('D', pin, p))
+        self.assertEqual(self.digest_artifacts(impl)[str(p)], sha(x))
+        self.assertIn(str(p), self.code('plan-changed').reason)
+        p.write_bytes(x)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        # A pin never moves a decided path: H's PLAN-REVIEW approve locks p at X (D1), then H's
+        # DESIGN-REVIEW approve under a PLAN holding p at Y locks it there and decides nothing.
+        self.conn.close(); self.setUp()
+        p = self.file('p.md', x)
+        approval = self.reviewed(self.requested('P', self.based(), p), 'approve', p)
+        p.write_bytes(y)
+        impl = self.issue(self.reviewed(self.requested('P', approval, p), 'approve', p, kind='design'))
+        self.assertIn(('plan', approval.relay_id), self.claim_artifacts(impl, 'plan'))
+        self.assertNotIn(str(p), self.digest_artifacts(impl))
+        self.assertIn(str(p), self.code('plan-changed').reason)
+        p.write_bytes(x)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        # Control: H's verdictless review in place of the approve locks nothing, so p binds by its
+        # newest reference at Y (erratum 3 r2 B1) and `act` allows there.
+        self.conn.close(); self.setUp()
+        p = self.file('p.md', x)
+        request = self.requested('P', self.based(), p)
+        verdictless = self.submit(draft(kind='DESIGN-REVIEW', needs='review', parent=request.relay_id,
+                                        to=PLANNER.address, refs=self.refs(p)), IMPL)
+        p.write_bytes(y)
+        impl = self.issue(self.requested('D', verdictless, p))
+        self.assertEqual(self.digest_artifacts(impl)[str(p)], sha(y))
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_unlocked_approve_does_not_move_pin(self):
+        # (PIN-V's shape) the pin at X, then p flipped and H's PLAN-REVIEW approve naming p at Y as
+        # a reply to H's own DESIGN-REVIEW, whose parent holds no snapshot, so it locks nothing.
+        # aa84dbc bound p by its newest reference at Y and `act` allowed there.
+        x, y = b'p X\n', b'p Y\n'
+        p = self.file('p.md', x)
+        pin = self.reviewed(self.requested('P', self.based(), p), 'approve', p, kind='design')
+        p.write_bytes(y)
+        unlocked = self.reviewed(pin, 'approve', p)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM snapshots WHERE locked_by = ?',
+                                           (unlocked.relay_id,)).fetchone()[0], 0)
+        impl = self.issue(unlocked)
+        self.assertIn(str(p), self.code('plan-changed').reason)
+        p.write_bytes(x)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_other_seat_lock_pins_bytes(self):
+        # (OPIN) D2 holding p at X answered approve by the second implementer, then p flipped and a
+        # SITREP referencing p at Y.  aa84dbc bound p by its newest reference at Y and allowed there.
+        x, y, z = b'p X\n', b'p Y\n', b'p Z\n'
+        p = self.file('p.md', x)
+        other = self.reviewed(self.requested('D2', self.based(), p), 'approve', p, kind='design', sender=SECOND)
+        p.write_bytes(y)
+        impl = self.issue(self.requested('S', other, p))
+        self.assertEqual(self.digest_artifacts(impl)[str(p)], sha(x))
+        self.assertIn(str(p), self.code('plan-changed').reason)
+        p.write_bytes(x)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+        # The holder's pin outranks a newer pin by another seat: H's DESIGN-REVIEW approve under a
+        # PLAN pins p at X, then p flipped to Z and the second implementer approves it under D2.
+        # aa84dbc allowed at Z, the newest reference.
+        self.conn.close(); self.setUp()
+        p = self.file('p.md', x)
+        pin = self.reviewed(self.requested('P', self.based(), p), 'approve', p, kind='design')
+        p.write_bytes(z)
+        impl = self.issue(self.reviewed(self.requested('D2', pin, p), 'approve', p, kind='design', sender=SECOND))
+        self.assertEqual(self.digest_artifacts(impl)[str(p)], sha(x))
+        self.assertIn(str(p), self.code('plan-changed').reason)
+        p.write_bytes(x)
+        self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    # Section E: every lineage of up to two rounds after the prefix.
+
+    def lineage_space(self, rounds, *, canonical=False, shard=None):
+        """Enumerate words over `rounds`, two rounds deep, each built through `submit` on a
+        clone of the store, then an IMPL and `act` at every assignment of p's and q's contents.
+        `shard` is (index, count) over the first round's option index.  Returns the record."""
+        files = {name: self.file(name + '.md', b'') for name in ('p', 'q')}
+        contents = {name: (name.encode() + b' X\n', name.encode() + b' Y\n') for name in files}
+        def write(state):
+            for name, index in state.items():
+                files[name].write_bytes(contents[name][index])
+        def clone(conn):
+            copy = sqlite3.connect(':memory:')
+            conn.backup(copy)
+            copy.execute('PRAGMA foreign_keys = ON')
+            return copy
+        def build(conn, last, state, round_):
+            self.conn = clone(conn)
+            edit, (kind, refs), response = round_
+            state = dict(state)
+            if edit:
+                state[edit] ^= 1
+            write(state)
+            paths = [files[name] for name in refs]
+            request = last if kind == 'R' else self.requested(kind, last, *paths)
+            if response is None:
+                return self.conn, request, state
+            names = [files[name] for name in response[-1]]
+            if response[0] == 'V':
+                reply = self.submit(draft(kind='DESIGN-REVIEW', needs='review', parent=request.relay_id,
+                                          to=PLANNER.address, refs=self.refs(*names)), IMPL)
+            else:
+                reply = self.reviewed(request, response[2], *names,
+                                      kind={'PR': 'plan', 'DR': 'design'}[response[1]],
+                                      sender=IMPL if response[0] == 'H' else SECOND)
+            return self.conn, reply, state
+        holder = IMPL.seat_id
+        record = {'admitted': 0, 'refused': 0, 'violating': 0, 'refusal_codes': {}, 'violations': []}
+        assignments = list(itertools.product((0, 1), repeat=2))
+        def leaf(conn, last, state, word):
+            # Consumes `conn`, a clone made for this word alone.
+            self.conn = conn
+            try:
+                write(state)
+                impl = self.issue(last)
+                issued = self.slip(impl) is not None
+                answers = {}
+                for index, (cp, cq) in enumerate(assignments):
+                    write({'p': cp, 'q': cq})
+                    answers[(cp, cq)] = self.act(branch='lineage-%d' % index).outcome == 'allow'
+                store = LineageStore(self.conn, impl.relay_id)
+                model_issues, expected = lineage_model(store, holder)
+                digests = {name: tuple(hashlib.sha256(data).hexdigest() for data in contents[name]) for name in files}
+                def at(cp, cq):
+                    return {str(files['p']): digests['p'][cp], str(files['q']): digests['q'][cq]}
+                model = {key: model_issues and all(at(*key)[path] == digest
+                                                   for path, digest in expected.items() if path in at(*key))
+                         for key in assignments}
+                holder_words = lineage_holder_words(store, holder, issued,
+                                                    [at(*key) for key in assignments if answers[key]])
+                o1 = issued != model_issues or answers != model
+                if o1 or holder_words:
+                    record['violating'] += 1
+                    record['violations'].append({'word': word, 'issued': issued, 'act': sorted(k for k, v in answers.items() if v),
+                                                 'o1_issues': model_issues, 'o1_allow': sorted(k for k, v in model.items() if v),
+                                                 'o1': o1, 'o2': holder_words})
+                record['admitted'] += 1
+            finally:
+                self.conn.close()
+        def refused(error, extensions):
+            record['refused'] += extensions
+            record['refusal_codes'][error.code] = record['refusal_codes'].get(error.code, 0) + extensions
+        base = self.conn
+        start = self.based()
+        state0 = {'p': 0, 'q': 0}
+        write(state0)
+        prefix = clone(base)
+        try:
+            if shard is None or shard[0] == 0:
+                leaf(clone(prefix), start, state0, ())
+            for index, first in enumerate(rounds):
+                if shard is not None and index % shard[1] != shard[0]:
+                    continue
+                keep_first = not canonical or lineage_canonical((first,))
+                seconds = [second for second in rounds if not canonical or lineage_canonical((first, second))]
+                try:
+                    state1_conn, last1, state1 = build(prefix, start, state0, first)
+                except errors.EngineError as error:
+                    self.conn.close()
+                    refused(error, int(keep_first) + len(seconds))
+                    continue
+                try:
+                    if keep_first:
+                        leaf(clone(state1_conn), last1, state1, (first,))
+                    for second in seconds:
+                        try:
+                            conn2, last2, state2 = build(state1_conn, last1, state1, second)
+                        except errors.EngineError as error:
+                            self.conn.close()
+                            refused(error, 1)
+                            continue
+                        leaf(conn2, last2, state2, (first, second))
+                finally:
+                    state1_conn.close()
+        finally:
+            prefix.close()
+            self.conn = base
+        return record
+
+    def test_bounded_lineages_keep_the_property(self):
+        self.assertEqual((len(LINEAGE_FULL_ROUNDS), len(LINEAGE_SUITE_ROUNDS)), (999, 164))
+        self.assertEqual(lineage_word_count(LINEAGE_FULL_ROUNDS, True), 558942)
+        for name, word in LINEAGE_NAMED_WORDS.items():
+            self.assertTrue(all(round_ in LINEAGE_SUITE_ROUNDS for round_ in word), name)
+            self.assertTrue(all(round_ in LINEAGE_FULL_ROUNDS for round_ in word) and lineage_canonical(word), name)
+        record = self.lineage_space(LINEAGE_SUITE_ROUNDS)
+        violating = {tuple(v['word']): v for v in record['violations']}
+        named = {name: (None if word not in violating else
+                        'O1+O2' if violating[word]['o1'] and violating[word]['o2'] else
+                        'O1' if violating[word]['o1'] else 'O2')
+                 for name, word in LINEAGE_NAMED_WORDS.items()}
+        summary = {key: record[key] for key in ('admitted', 'refused', 'violating', 'refusal_codes')}
+        summary['pruned'] = (lineage_word_count(LINEAGE_SUITE_UNPRUNED, False)
+                             - lineage_word_count(LINEAGE_SUITE_ROUNDS, False))
+        summary['named_flagged_by'] = named
+        summary['o2_only'] = sum(1 for v in record['violations'] if v['o2'] and not v['o1'])
+        print('LINEAGE-SUMMARY ' + json.dumps(summary, sort_keys=True), file=sys.stderr)
+        for violation in record['violations']:
+            print('LINEAGE-VIOLATION ' + json.dumps(violation, sort_keys=True, default=repr), file=sys.stderr)
+        self.assertEqual(record['admitted'] + record['refused'], lineage_word_count(LINEAGE_SUITE_ROUNDS, False))
+        self.assertEqual(record['violations'], [], 'lineages violate the property: %s' % json.dumps(summary))

@@ -149,67 +149,124 @@ def _references(conn, relay_id):
 
 
 def _decide(conn, walk, holder):
-    """Erratum 3 r2 B1's walk, oldest first: each referenced path's newest reference,
-    the design paths, and each decided path's state, ('locked', claim relay, kind, lock)
-    or ('objected', review relay, request relay)."""
+    """Erratum 6 r5's sections D and R over the walk, oldest first: each referenced path's
+    newest reference, the design paths, each decided path's state, ('locked', claim relay,
+    kind, lock) or ('objected', review relay, request relay, the deciding review's kind), and
+    the issuance block, (review relay, request relay) of a holder refusal that names no path
+    under a parent holding no snapshot with no later deciding approve, or None, and each
+    undecided path's binding pin, the content an approve locked it at (R-E)."""
     oldest_first = walk[::-1]
     kinds = {row.id: row.kind for row in oldest_first}
     references = {row.id: _references(conn, row.id) for row in oldest_first}
+    held_cache = {}
     def held_by(relay_id):
-        held = {}
-        for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
-                                              ' WHERE relay_id = ?', (relay_id,)):
-            held.setdefault(artifact, set()).add(content)
-        return held
+        if relay_id not in held_cache:
+            held = {}
+            for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
+                                                  ' WHERE relay_id = ?', (relay_id,)):
+                held.setdefault(artifact, set()).add(content)
+            held_cache[relay_id] = held
+        return held_cache[relay_id]
     def qualifies(row):
         # Erratum 5 r4 E1: a verdict, sent by the holder, answering a DESIGN relay.
         return (row.kind == 'DESIGN-REVIEW' and row.verdict is not None and row.sender_seat_id == holder
                 and kinds.get(row.parent_id) == 'DESIGN')
-    # The design paths are what a qualifying review's parent's snapshots hold, not its references.
-    design_paths = {artifact for row in oldest_first if qualifies(row) for artifact in held_by(row.parent_id)}
-    newest, state = {}, {}
+    def reaches(row):
+        # D: the held paths a refusal names, or every held path when it names none of them (the
+        # names-none fallback, marked True), and each path it names that its parent does not hold.
+        held, named = held_by(row.parent_id), {}
+        for artifact, _, digest in references[row.id]:
+            named.setdefault(artifact, digest)
+        inside = [artifact for artifact in named if artifact in held]
+        out = {artifact: (held[artifact], False) for artifact in inside}
+        if held and not inside:
+            out.update((artifact, (contents, True)) for artifact, contents in held.items())
+        out.update((artifact, ({digest}, False)) for artifact, digest in named.items() if artifact not in held)
+        return out
+    def run(design_paths):
+        state, block, fallback_design = {}, None, set()
+        for row in oldest_first:
+            kind = _REVIEW_KINDS.get(row.kind)
+            # A review request carries no verdict and decides nothing (erratum 4 r2 R1).
+            if kind is None or row.verdict is None:
+                continue
+            if row.verdict == 'approve':
+                # D1: the holder's PLAN-REVIEW approve of a plan path; D2: a qualifying DESIGN-REVIEW approve.
+                if kind == 'plan' and row.sender_seat_id == holder:
+                    source = 'plan'
+                elif qualifies(row):
+                    source = 'design'
+                else:
+                    continue
+                decided = False
+                for lock in claims.claim_locks(conn, row.id):
+                    if source == 'plan' and lock.artifact in design_paths:
+                        continue
+                    decided = True
+                    current = state.get(lock.artifact)
+                    # R-B: an objection a DESIGN-REVIEW set, or one on a design path, is lifted only by D2.
+                    if (current and current[0] == 'objected' and source != 'design'
+                            and (current[3] == 'design' or lock.artifact in design_paths)):
+                        continue
+                    if current and current[0] == 'locked' and current[3].content_sha256 == lock.content_sha256:
+                        continue  # re-approving content already locked keeps the older claim
+                    state[lock.artifact] = ('locked', row.id, source, lock)
+                if decided:
+                    block = None
+                continue
+            # D3: a refusal decides what it reaches when the holder sent it or it is a DESIGN-REVIEW
+            # from any seat (R-C); another seat's PLAN-REVIEW decides nothing.
+            if row.sender_seat_id != holder and kind != 'design':
+                continue
+            if row.sender_seat_id == holder and not held_by(row.parent_id) and not references[row.id]:
+                block = (row.id, row.parent_id)
+            for artifact, (contents, fallback) in sorted(reaches(row).items()):
+                current = state.get(artifact)
+                # R-D: only a path the names-none fallback reached at its locked bytes is left alone.
+                if fallback and current and current[0] == 'locked' and contents == {current[3].content_sha256}:
+                    continue
+                # A later objection replaces one a DESIGN-REVIEW set only when it is a DESIGN-REVIEW.
+                if current and current[0] == 'objected' and current[3] == 'design' and kind != 'design':
+                    continue
+                state[artifact] = ('objected', row.id, row.parent_id, kind)
+                if fallback and qualifies(row):
+                    fallback_design.add(artifact)
+        return state, block, fallback_design
+    # R-A: a design path is one a qualifying DESIGN-REVIEW decided.  Its fallback objections and
+    # the locks they leave alone depend on each other, so the least fixed point is taken.
+    design_paths = set()
+    for row in oldest_first:
+        if qualifies(row):
+            if row.verdict == 'approve':
+                design_paths |= {lock.artifact for lock in claims.claim_locks(conn, row.id)}
+            else:
+                design_paths |= {artifact for artifact, (_, fallback) in reaches(row).items() if not fallback}
+    while True:
+        state, block, fallback_design = run(design_paths)
+        if fallback_design <= design_paths:
+            break
+        design_paths |= fallback_design
+    newest = {}
     for row in oldest_first:
         for artifact, reference, digest in references[row.id]:
             newest[artifact] = (reference, digest)
-        kind = _REVIEW_KINDS.get(row.kind)
-        # A review request carries no verdict and decides nothing (erratum 4 r2 R1).
-        if kind is None or row.verdict is None or (kind == 'plan' and row.sender_seat_id != holder):
+    # R-E: an approve's lock that decides nothing pins the path; an undecided path binds at its
+    # newest pin by the holder, else at its newest pin by any seat (erratum 6 r5).
+    found = {}
+    for row in oldest_first:
+        if _REVIEW_KINDS.get(row.kind) is None or row.verdict != 'approve':
             continue
-        # Erratum 5 r4 E1: a DESIGN-REVIEW that does not qualify locks nothing and classifies
-        # nothing, but one answering other than approve under a DESIGN relay still objects.
-        objects_only = kind == 'design' and not qualifies(row)
-        if objects_only and (row.verdict == 'approve' or kinds.get(row.parent_id) != 'DESIGN'):
-            continue
-        def decides(artifact):
-            return objects_only or (artifact in design_paths) == (kind == 'design')
-        def locked_content(artifact):
-            current = state.get(artifact)
-            return current[3].content_sha256 if current and current[0] == 'locked' else None
-        if row.verdict == 'approve':
-            for lock in claims.claim_locks(conn, row.id):
-                current = state.get(lock.artifact)
-                # An objection a DESIGN-REVIEW set is replaced only by a qualifying design approve.
-                if current and current[0] == 'objected' and current[3] == 'design' and kind != 'design':
-                    continue
-                if decides(lock.artifact) and locked_content(lock.artifact) != lock.content_sha256:
-                    state[lock.artifact] = ('locked', row.id, kind, lock)
-            continue
-        held = held_by(row.parent_id)
-        named = {artifact for artifact, _, _ in references[row.id]}
-        # Erratum 5 r4 E3: naming none of the parent's paths decides all of them.
-        for artifact in sorted((held.keys() & named) or held):
-            current = state.get(artifact)
-            if current and current[0] == 'objected' and current[3] == 'design' and kind != 'design':
-                continue  # still objected, and still only a qualifying design approve replaces it
-            if decides(artifact) and held[artifact] != {locked_content(artifact)}:
-                state[artifact] = ('objected', row.id, row.parent_id, kind)
-    return newest, design_paths, state
+        for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
+                                              ' WHERE locked_by = ?', (row.id,)):
+            found.setdefault(artifact, {})['holder' if row.sender_seat_id == holder else 'other'] = content
+    pins = {artifact: by.get('holder', by.get('other')) for artifact, by in found.items() if artifact not in state}
+    return newest, design_paths, state, block, pins
 
 
 def _evidence(conn, relay_id, principal, holder):
     """(failure, binds, objected) for an IMPL relay: failure is None, 'not-issuer',
     'lineage-long' or 'lineage-incomplete'; objected names (artifact, review, request)
-    when an objected path is why."""
+    when an objected path is why, and (None, review, request) when an issuance block is."""
     target = _seat(conn, holder)
     mode = None if target is None else _issuer(conn, principal, target)
     binds = {'claims': [], 'digests': [], 'waived': []}
@@ -227,7 +284,7 @@ def _evidence(conn, relay_id, principal, holder):
                         for row in walk)
         if not delegated:
             return 'lineage-incomplete', binds, None
-    newest, design_paths, state = _decide(conn, walk, holder)
+    newest, design_paths, state, block, pins = _decide(conn, walk, holder)
     grouped = {}
     for artifact, (reference, digest) in newest.items():
         current = state.get(artifact)
@@ -241,9 +298,17 @@ def _evidence(conn, relay_id, principal, holder):
             if mode != 'operator':
                 return 'lineage-incomplete', binds, (artifact, current[1], current[2])
             binds['waived'].append('objected:' + artifact)
+        if not current and artifact in pins:
+            # R-E: an undecided path binds at its binding pin's locked content, as a plan path.
+            reference, digest = 'path', pins[artifact]
         binds['digests'].append({'artifact': artifact, 'kind': 'design' if artifact in design_paths else 'plan',
                                  'reference': reference, 'digest': digest})
     binds['claims'] = list(grouped.values())
+    # R-B: a holder refusal naming no path under a parent with no snapshot blocks issuance.
+    if block is not None:
+        if mode != 'operator':
+            return 'lineage-incomplete', binds, (None, block[0], block[1])
+        binds['waived'].append('blocked:' + block[0])
     # Erratum 3 r2 B2: digests alone never issue a slip.
     if not any(claim['kind'] == 'plan' for claim in binds['claims']):
         if mode == 'operator':
@@ -260,6 +325,10 @@ def _evidence(conn, relay_id, principal, holder):
 def _lineage_answer(failed, objected, relay, unblocker, slip=None):
     if failed == 'lineage-long':
         return _answer('lineage-incomplete', strings.render('authority-lineage-long', relay=relay), unblocker, slip)
+    if objected is not None and objected[0] is None:
+        return _answer('lineage-incomplete', strings.render('authority-blocked', relay=relay, review=objected[1],
+                                                            request=objected[2]),
+                       unblocker, slip)
     if objected is not None:
         return _answer('lineage-incomplete', strings.render('authority-objected', relay=relay, artifact=objected[0],
                                                             review=objected[1], request=objected[2]),
