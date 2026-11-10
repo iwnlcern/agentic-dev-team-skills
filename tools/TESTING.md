@@ -21,6 +21,16 @@ Run one engine module from the repository root, with the results environment the
 
 The summary must read `OK` with no `skipped=` count; the release check fails a module that skips a test or runs none.
 
+The engine suite's `test_api_schema` compiles the generated Rust and TypeScript bindings, so it needs three pinned toolchains: rustc, node, and TypeScript with its native package for the platform.
+It looks for them under `$ADT_TOOLCHAINS`, else `~/.local/share/adt-toolchains`, at `rust-1.99.1/bin/rustc`, `node-v26.13.0/bin/node` and `typescript-7.0.2/node_modules/typescript/bin/tsc`, with the native package at `typescript-7.0.2/node_modules/@typescript/typescript-<platform>`.
+It checks each version exactly: rustc and node by their whole banners, so a rustc build whose banner is not `rustc 1.99.1 (58cf8f9c3 2026-10-13)` fails, and tsc by its `Version` line.
+The test never names the native package, so a missing one shows as tsc failing, not as a missing file.
+`$ADT_TOOLCHAINS` replaces the default folder rather than adding to it, and an empty value resolves to the current directory.
+Without the toolchains `test_api_schema` fails or errors; no other test module needs them.
+The linux leg installs the same versions, with pinned digests, in its image (`tools/release-check.Dockerfile`), so only the mac leg and a contributor's machine need a local install.
+After any change to the API registry, its definitions or `tools/generate-api.py` itself, run `python3 tools/generate-api.py --write` first and `python3 tools/generate-plugins.py` second, because the plugin generator copies the four generated API files into `plugins/`; in the other order the plugin copies stay stale and `generate-plugins.py --check` fails.
+`python3 tools/generate-api.py --check` verifies the generated files without writing them.
+
 Run the release runner's own tests (they need Docker):
 
     python3 -m unittest discover -s tools/release_check_tests -v
