@@ -20,6 +20,7 @@ Run one engine module from the repository root, with the results environment the
     PYTHONPATH=tools PYTHONWARNINGS=error::ResourceWarning RELAY_ENGINE_RESULTS_ROOT="$(mktemp -d "$HOME/.cache/relay-engine-results.XXXXXX")" RELAY_ENGINE_MATRIX_RUN="$(python3 -c 'import uuid; print(uuid.uuid4())')" python3 -m unittest relay_engine.tests.<module>
 
 The summary must read `OK` with no `skipped=` count; the release check fails a module that skips a test or runs none.
+On a Linux host, also set `RELAY_ENGINE_ACL_DIR` to a folder on a file system that accepts a default ACL (the release image uses `/var/tmp`); the ACL tests fail, never skip, without it.
 
 The engine suite's `test_api_schema` compiles the generated Rust and TypeScript bindings, so it needs three pinned toolchains: rustc, node, and TypeScript with its native package for the platform.
 It looks for them under `$ADT_TOOLCHAINS`, else `~/.local/share/adt-toolchains`, at `rust-1.99.1/bin/rustc`, `node-v26.13.0/bin/node` and `typescript-7.0.2/node_modules/typescript/bin/tsc`, with the native package at `typescript-7.0.2/node_modules/@typescript/typescript-<platform>`.
