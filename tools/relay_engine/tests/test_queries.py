@@ -6,6 +6,7 @@ import inspect
 import json
 from dataclasses import FrozenInstanceError, asdict
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -1159,7 +1160,10 @@ class TestSessionSteps(Store):
 
     def test_session_step_non_value_errors_roll_back(self):
         """M9/M10/M14: any failure after the closing UPDATE rolls the step back and
-        re-raises the same object."""
+        re-raises the same object.
+
+        Its commits after the KeyboardInterrupt and OperationalError cases show the
+        step's cleanup today; the step's contract does not promise a caller them."""
         class Refusal(ValueError):
             pass
 
@@ -1209,27 +1213,31 @@ class TestSessionSteps(Store):
 
     def test_session_step_release_is_outside_cleanup(self):
         """M8: an interrupt just after the step's RELEASE must not run its cleanup
-        against the caller's same-named savepoint."""
+        against the caller's savepoint."""
         interrupt = KeyboardInterrupt("fixture interrupt after release")
 
         class InterruptAfterRelease:
             def __init__(self, conn):
                 self._conn = conn
                 self.fired = False
+                self.step_name = None
 
             def __getattr__(self, name):
                 return getattr(self._conn, name)
 
             def execute(self, sql, *args):
+                # The step's name is read from its own first SAVEPOINT, never assumed.
+                if self.step_name is None and sql.startswith("SAVEPOINT "):
+                    self.step_name = sql[len("SAVEPOINT "):]
                 result = self._conn.execute(sql, *args)
-                if sql == "RELEASE engine_record_session" and not self.fired:
+                if self.step_name is not None and sql == "RELEASE " + self.step_name and not self.fired:
                     self.fired = True
                     raise interrupt
                 return result
 
         proxy = InterruptAfterRelease(self.conn)
         self.conn.execute("BEGIN IMMEDIATE")
-        self.conn.execute("SAVEPOINT engine_record_session")
+        self.conn.execute("SAVEPOINT caller_savepoint")
         self.conn.execute("UPDATE seat_occupants SET issued_at = 654 WHERE seat_id = ?",
                           (PLANNER.seat_id,))
         try:
@@ -1243,7 +1251,7 @@ class TestSessionSteps(Store):
                                            (PLANNER.seat_id,)).fetchone(), (654,))
         # Capturing the caller's RELEASE makes a missing savepoint an assertion, not an ERROR.
         try:
-            self.conn.execute("RELEASE engine_record_session")
+            self.conn.execute("RELEASE caller_savepoint")
             released = None
         except sqlite3.Error as error:
             released = error
@@ -1275,14 +1283,18 @@ class TestSessionSteps(Store):
         self.conn.execute("BEGIN IMMEDIATE")
         self.conn.execute("UPDATE seat_occupants SET issued_at = 321 WHERE seat_id = ?",
                           (PLANNER.seat_id,))
-        self.conn.execute("SAVEPOINT engine_record_session")
+        self.conn.execute("SAVEPOINT caller_savepoint")
         self.conn.execute("UPDATE seat_occupants SET issued_at = 654 WHERE seat_id = ?",
                           (IMPL.seat_id,))
         armed = []
+        names = []
 
         def trace(statement):
+            # The step's name is read from its own first SAVEPOINT, never assumed.
+            if not names and statement.startswith("SAVEPOINT "):
+                names.append(statement[len("SAVEPOINT "):])
             # A progress handler never runs inside a RELEASE; an interrupt at its start does.
-            if statement == "RELEASE engine_record_session" and not armed:
+            if names and statement == "RELEASE " + names[0] and not armed:
                 armed.append(statement)
                 self.conn.interrupt()
 
@@ -1293,7 +1305,9 @@ class TestSessionSteps(Store):
             outcome = error
         finally:
             self.conn.set_trace_callback(None)
-        self.assertEqual(armed, ["RELEASE engine_record_session"])
+        self.assertEqual(len(names), 1, names)
+        name = names[0]
+        self.assertEqual(armed, ["RELEASE " + name])
         self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
         self.assertEqual(getattr(outcome, "sqlite_errorname", None), "SQLITE_INTERRUPT")
         self.assertTrue(self.conn.in_transaction)
@@ -1303,15 +1317,22 @@ class TestSessionSteps(Store):
                          sorted([(PLANNER.seat_id, 321), (IMPL.seat_id, 654)]))
         self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions").fetchall(),
                          [(previous, None)])
+        # The step's savepoint is checked before the caller releases its own, since releasing an
+        # outer savepoint also releases every savepoint opened after it.
+        try:
+            self.conn.execute("RELEASE " + name)
+            leftover = None
+        except sqlite3.Error as error:
+            leftover = error
+        self.assertIsInstance(leftover, sqlite3.OperationalError, "the step left its savepoint open")
+        self.assertIn("no such savepoint", str(leftover))
         # Capturing the caller's RELEASE makes a missing savepoint an assertion, not an ERROR.
         try:
-            self.conn.execute("RELEASE engine_record_session")
+            self.conn.execute("RELEASE caller_savepoint")
             released = None
         except sqlite3.Error as error:
             released = error
         self.assertIsNone(released)
-        with self.assertRaisesRegex(sqlite3.OperationalError, "no such savepoint"):
-            self.conn.execute("RELEASE engine_record_session")
         self.assertTrue(self.conn.in_transaction)
         self.conn.rollback()
 
@@ -1404,13 +1425,17 @@ class TestSessionSteps(Store):
             def __init__(self, conn):
                 self._conn = conn
                 self.fired = False
+                self.step_name = None
 
             def __getattr__(self, name):
                 return getattr(self._conn, name)
 
             def execute(self, sql, *args):
+                # The step's name is read from its own first SAVEPOINT, never assumed.
+                if self.step_name is None and sql.startswith("SAVEPOINT "):
+                    self.step_name = sql[len("SAVEPOINT "):]
                 # Only the step's success RELEASE, once; the error is raised outside any except.
-                if sql != "RELEASE engine_record_session" or self.fired:
+                if self.step_name is None or sql != "RELEASE " + self.step_name or self.fired:
                     return self._conn.execute(sql, *args)
                 self.fired = True
                 self._conn.execute("ROLLBACK")
@@ -1455,6 +1480,92 @@ class TestSessionSteps(Store):
         self.assertEqual(self.conn.execute("SELECT id, ended_at FROM seat_sessions"
                                            " ORDER BY generation").fetchall(),
                          [(previous, 30), (following, None)])
+
+    def test_step_savepoint_name_cannot_shadow_caller(self):
+        """K1: a savepoint the step leaves open must not shadow one its caller holds,
+        even one with the step's old fixed name."""
+        self.conn.execute("BEGIN IMMEDIATE")
+        before = self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                   (PLANNER.seat_id,)).fetchone()
+        # The reserved name, deliberately: it is the fixed name a caller written before
+        # unique step names may hold.
+        self.conn.execute("SAVEPOINT engine_record_session")
+        self.conn.execute("UPDATE seat_occupants SET issued_at = 654 WHERE seat_id = ?",
+                          (PLANNER.seat_id,))
+        names = []
+        fired = []
+
+        def trace(statement):
+            # The step's name is read from its own first SAVEPOINT, never assumed.
+            if not names and statement.startswith("SAVEPOINT "):
+                names.append(statement[len("SAVEPOINT "):])
+            # The success RELEASE and the cleanup's RELEASE, each interrupted at its start,
+            # leave the step's emptied savepoint open (design residual 2).
+            if names and statement == "RELEASE " + names[0] and len(fired) < 2:
+                fired.append(statement)
+                self.conn.interrupt()
+
+        self.conn.set_trace_callback(trace)
+        try:
+            outcome = queries.record_session_step(self.conn, "shadowing", "codex", IMPL.seat_id, 20)
+        except BaseException as error:
+            outcome = error
+        finally:
+            self.conn.set_trace_callback(None)
+        self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
+        self.assertEqual(getattr(outcome, "sqlite_errorname", None), "SQLITE_INTERRUPT")
+        self.assertEqual(len(fired), 2, fired)
+        self.assertTrue(self.conn.in_transaction)
+        # Capturing the caller's statements makes a missing savepoint an assertion, not an ERROR.
+        outcomes = []
+        for statement in ("ROLLBACK TO engine_record_session", "RELEASE engine_record_session"):
+            try:
+                self.conn.execute(statement)
+                outcomes.append(None)
+            except sqlite3.Error as error:
+                outcomes.append(error)
+        self.assertEqual(outcomes, [None, None])
+        self.assertEqual(self.conn.execute("SELECT issued_at FROM seat_occupants WHERE seat_id = ?",
+                                           (PLANNER.seat_id,)).fetchone(), before,
+                         "the caller's ROLLBACK TO must undo the caller's own write")
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+
+    def test_step_savepoint_names_are_unique(self):
+        """K2/K4: each record step names its savepoint engine_step_<n>, with n no other
+        call in the process has, in one transaction or on another connection."""
+        other = sqlite3.connect(":memory:")
+        self.addCleanup(other.close)
+        self.conn.backup(other)
+        other.execute("PRAGMA foreign_keys = ON")
+        calls = []
+
+        def traced(conn, *args):
+            statements = []
+            conn.set_trace_callback(
+                lambda statement: statements.append(statement)
+                if statement.startswith(("SAVEPOINT ", "RELEASE ")) else None)
+            try:
+                queries.record_session_step(conn, *args)
+            finally:
+                conn.set_trace_callback(None)
+            calls.append(statements)
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        traced(self.conn, "first", "codex", IMPL.seat_id, 10)
+        traced(self.conn, "second", "frank", PLANNER.seat_id, 11)
+        self.conn.rollback()
+        other.execute("BEGIN IMMEDIATE")
+        traced(other, "third", "codex", IMPL.seat_id, 12)
+        other.rollback()
+        for statements in calls:
+            self.assertTrue(statements and statements[0].startswith("SAVEPOINT "), statements)
+        names = [statements[0][len("SAVEPOINT "):] for statements in calls]
+        self.assertEqual(len(set(names)), 3, names)
+        for name in names:
+            self.assertIsNotNone(re.fullmatch(r"engine_step_[1-9][0-9]*", name), name)
+        for name, statements in zip(names, calls):
+            self.assertEqual(statements, ["SAVEPOINT " + name, "RELEASE " + name])
 
 
 class TestStoreSupport(Store):
