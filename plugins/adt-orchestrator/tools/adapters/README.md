@@ -178,7 +178,7 @@ Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` opt
 The status grammar separates follower readiness from binding observations and install identity:
 
 ```text
-relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> window=<key> doorbell=<kit>@<sha> client=<id> daemon=<id>[ engine=wedged] updated=<stamp>[ miss=submit-near-miss][ last-bind=<reason>][ identity=mismatch]
+relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> window=<key> doorbell=<kit>@<sha> client=<id> daemon=<id>[ engine=no-answer] updated=<stamp>[ miss=submit-near-miss][ last-bind=<reason>][ identity=mismatch]
 [remedy: <one line>]
 [rebind: <one line>]
 ```
@@ -288,11 +288,11 @@ An engine outage is not an exit: the doorbell keeps polling.
 
 ### Bounded status
 
-`status` and SessionStart make every read under one 1.3 s deadline, with the engine's identity checks under a shared 1.0 s part of it, so both return well within 2 s on a wedged engine, a hung `ps` or a busy note; a timed-out engine check shows `daemon=-` with `engine=wedged`.
+`status` and SessionStart make every read under one 1.3 s deadline, with the engine's identity checks under a shared 1.0 s part of it, so both return well within 2 s on a wedged engine, a hung `ps` or a busy note; an engine check that runs out of its share shows `daemon=-` with `engine=no-answer` and a remedy naming the direct command.
 Neither takes the window lock or waits on the note's lock: the note is read whole without it, and a write that cannot get it within 0.1 s is skipped.
 Process start times come from the kernel (`proc_pidinfo` on macOS, `/proc` on Linux), so these paths start no `ps` where the kernel answers.
 On Linux the window lookup also reads each ancestor's parent and name from `/proc`, so a host without `ps` still finds its window; macOS reads them from `ps`.
-The answer is cached in the note for 60 s per root and plugin root; a wedged answer is never cached.
+The answer is cached in the note for 60 s per root and plugin root; a `no-answer` result is never cached.
 
 ### Host token logs
 

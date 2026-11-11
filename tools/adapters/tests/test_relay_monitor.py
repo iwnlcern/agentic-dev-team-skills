@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -1615,12 +1616,22 @@ class BoundedStatusTests(TmpEnv):
                               env=dict(os.environ), timeout=40)
         return time.monotonic() - start, proc
 
+    def no_answer_remedy(self, plugin_root):
+        # DD-v3-adapter erratum 2: the remedy names the program run_relay starts, quoted so it pastes as a command
+        command = shlex.join(["python3", str(pathlib.Path(plugin_root) / "tools" / "relay"), "status", "--root", str(self.root)])
+        return f"remedy: the engine check did not answer within 1.0 s; run {command} to see the daemon's state"
+
+    def assert_no_answer(self, text, plugin_root):
+        first = text.splitlines()[0] + " "
+        self.assertIn(" daemon=- ", first)
+        self.assertIn(" engine=no-answer ", first)
+        self.assertNotIn("engine=wedged", text)
+        self.assertIn(self.no_answer_remedy(plugin_root), text.splitlines())
+
     def test_status_returns_within_two_seconds_on_wedged_engine(self):
         elapsed, proc = self.timed(["status", "--session", "sess", "--plugin-root", str(self.wedged)])
         self.assertLess(elapsed, 2.0, proc.stdout)
-        first = proc.stdout.splitlines()[0] + " "
-        self.assertIn(" daemon=- ", first)
-        self.assertIn(" engine=wedged ", first)
+        self.assert_no_answer(proc.stdout, self.wedged)
 
     def test_session_start_is_bounded_too(self):
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
@@ -1628,7 +1639,7 @@ class BoundedStatusTests(TmpEnv):
             ["session-start", "--host", "claude-code", "--plugin-root", str(self.wedged)], stdin=payload
         )
         self.assertLess(elapsed, 2.0, proc.stdout)
-        self.assertIn("engine=wedged", json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"])
+        self.assert_no_answer(json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"], self.wedged)
 
     def test_status_names_own_version(self):
         # fold T1: the cell comes from the leader record, not from the status process's own file
@@ -1654,7 +1665,7 @@ class BoundedStatusTests(TmpEnv):
             "time.sleep(30)\n"))
         elapsed, proc = self.timed(["status", "--session", "sess", "--plugin-root", str(stub)])
         self.assertLess(elapsed, 2.0, proc.stdout)
-        self.assertIn(" engine=wedged ", proc.stdout.splitlines()[0] + " ")
+        self.assert_no_answer(proc.stdout, stub)
 
     def test_status_bounded_while_state_lock_held(self):
         # fold F3: another process holding the note's state lock must not hold status past 2 s
@@ -1678,7 +1689,8 @@ class BoundedStatusTests(TmpEnv):
                     proc = subprocess.run([sys.executable, str(SCRIPT), *argv, "--plugin-root", str(self.wedged)],
                                           input=stdin, capture_output=True, text=True, env=env, timeout=40)
                     self.assertLess(time.monotonic() - start, 1.6, proc.stdout + proc.stderr)
-                    self.assertIn("engine=wedged", proc.stdout)
+                    self.assertIn("engine=no-answer", proc.stdout)
+                    self.assertNotIn("engine=wedged", proc.stdout)
 
     def test_session_start_bounded_while_state_lock_held(self):
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
@@ -1707,14 +1719,14 @@ class BoundedStatusTests(TmpEnv):
                               env=dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}"))
         self.assertLess(time.monotonic() - start, 2.0, proc.stdout + proc.stderr)
 
-    def test_identity_cache_keyed_by_plugin_root_and_never_wedged(self):
-        # fold F3/M3: another plugin root is its own cache entry; a wedged answer is never reused
+    def test_identity_cache_keyed_by_plugin_root_and_never_no_answer(self):
+        # fold F3/M3: another plugin root is its own cache entry; a no-answer result is never reused (erratum 2)
         calls, answers = [], {"a": "ok", "b": "ok"}
 
         def relay(plugin_root, *argv, **kw):
             calls.append((plugin_root, argv[0]))
-            if answers[plugin_root] == "wedged":
-                return {"code": "E-WEDGED", "detail": "x"}, 124
+            if answers[plugin_root] == "no-answer":
+                return {"code": "E-NO-ANSWER", "detail": "x"}, 124
             if argv[0] == "version":
                 return {"kit": "9", "fingerprint": "f" * 16}, 0
             return {"daemon": {"identity": {"kit": "9", "fp": "f" * 16}}}, 0
@@ -1723,11 +1735,36 @@ class BoundedStatusTests(TmpEnv):
             self.rm.status_line(self.store, "a")
             self.rm.status_line(self.store, "b")
             self.assertEqual([c for c in calls if c[1] == "version"], [("a", "version"), ("b", "version")])
-            answers["a"] = "wedged"
+            answers["a"] = "no-answer"
             self.store.update(lambda n: n.pop("identity_cache", None))
-            self.assertIn("engine=wedged", self.rm.status_line(self.store, "a"))
+            self.assertIn("engine=no-answer", self.rm.status_line(self.store, "a"))
             answers["a"] = "ok"
-            self.assertNotIn("engine=wedged", self.rm.status_line(self.store, "a"))
+            self.assertNotIn("engine=no-answer", self.rm.status_line(self.store, "a"))
+
+    def test_no_answer_when_no_time_is_left(self):
+        # erratum 2 paths 2 and 4: the share is spent before `relay status` can start, so none is started
+        self.assertTrue((self.root / ".engine").is_dir())  # else check_identity stops at hand-root first
+        with self.subTest("path-2"):
+            calls = []
+
+            def spends_the_share(plugin_root, *argv, timeout=10.0):
+                calls.append(argv[0])
+                if argv[0] == "version":
+                    time.sleep(timeout)  # answers, but only once its whole share has gone
+                    return {"kit": "9", "fingerprint": "f" * 16}, 0
+                return {"daemon": {"identity": {"kit": "9", "fp": "f" * 16}}}, 0
+
+            with mock.patch.object(self.rm, "run_relay", spends_the_share):
+                ident, client, _ = self.rm.check_identity(None, str(self.root), budget=0.2)
+            self.assertEqual(ident, "no-answer")
+            self.assertEqual(client, {"kit": "9", "fp": "f" * 16})
+            self.assertEqual(calls, ["version"])
+        with self.subTest("path-4"):
+            calls = []
+            with mock.patch.object(self.rm, "run_relay", lambda *a, **k: calls.append(a) or ({}, 1)):
+                text = self.rm.status_line(self.store, str(self.wedged), end=time.monotonic() - 1)
+            self.assertEqual(calls, [])
+            self.assert_no_answer(text, self.wedged)
 
     def test_identity_cache_reused_within_60s(self):
         calls, clock = [], [1000.0]
@@ -6507,12 +6544,18 @@ t.assertEqual(commands,['version','status']);t.assertEqual(hint_calls,['fifo'])
         remedy = next(
             line for line in direct.stderr.splitlines() if line.startswith("remedy:")
         )
+        # erratum 2: these assert the classifier, so they give the real CLI 10 s instead of the 1.0 s share,
+        # and no longer depend on two process starts finishing inside one second on a busy machine
         with self.subTest("classification"):
             self.assertEqual(
-                self.rm.check_identity(None, str(self.root))[0], "daemon-down"
+                self.rm.check_identity(None, str(self.root), budget=10.0)[0], "daemon-down"
             )
         out = io.StringIO()
-        with mock.patch("sys.stdout", out):
+        with (
+            mock.patch("sys.stdout", out),
+            mock.patch.object(self.rm, "IDENTITY_BUDGET", 10.0),
+            mock.patch.object(self.rm, "STATUS_BUDGET", 10.0),
+        ):
             self.assertEqual(self.rm.status(ns(session="sess")), 0)
         with self.subTest("rendered daemon"):
             self.assertIn("daemon=down", out.getvalue())

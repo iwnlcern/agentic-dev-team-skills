@@ -2430,12 +2430,17 @@ def _drain_locked(
 MODES["drain"] = drain
 
 
-def run_relay(plugin_root: str | None, *argv, timeout=10.0):
-    relay = (
+def relay_program(plugin_root: str | None) -> Path:
+    """The `relay` program run_relay starts: the plugin root's when one is given, else this tree's."""
+    return (
         Path(plugin_root) / "tools" / "relay"
         if plugin_root
         else Path(__file__).resolve().parent.parent / "relay"
     )
+
+
+def run_relay(plugin_root: str | None, *argv, timeout=10.0):
+    relay = relay_program(plugin_root)
     try:
         proc = subprocess.run(
             ["python3", str(relay), *argv],
@@ -2444,7 +2449,9 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return {"code": "E-WEDGED", "detail": f"no answer within {timeout:.1f}s"}, 124
+        # erratum 2: a call that runs out of time is no answer; the monitor cannot tell a hung engine from a slow
+        # machine, so it reports only what it saw
+        return {"code": "E-NO-ANSWER", "detail": f"no answer within {timeout:.1f}s"}, 124
     except (OSError, subprocess.SubprocessError) as exc:
         return {"code": "E-EXEC", "detail": str(exc)}, 1
     text = proc.stdout.strip() or proc.stderr.strip()
@@ -2457,8 +2464,8 @@ def run_relay(plugin_root: str | None, *argv, timeout=10.0):
 def check_identity(plugin_root: str | None, root: str | None, budget: float = IDENTITY_BUDGET):
     end = time.monotonic() + budget  # one deadline across both engine calls (DD A6, item 8)
     client, rc = run_relay(plugin_root, "version", timeout=max(0.05, end - time.monotonic()))
-    if isinstance(client, dict) and client.get("code") == "E-WEDGED":
-        return "wedged", {"kit": None, "fp": None}, None
+    if isinstance(client, dict) and client.get("code") == "E-NO-ANSWER":
+        return "no-answer", {"kit": None, "fp": None}, None
     client = client if isinstance(client, dict) else {}
     client_id = (
         {"kit": client.get("kit"), "fp": client.get("fingerprint")}
@@ -2473,7 +2480,7 @@ def check_identity(plugin_root: str | None, root: str | None, budget: float = ID
     if not engine.value:
         return "hand-root", client_id, None
     if end - time.monotonic() <= 0.05:
-        return "wedged", client_id, None
+        return "no-answer", client_id, None
     status_doc, rc = run_relay(plugin_root, "status", "--root", root, timeout=end - time.monotonic())
     status_doc = status_doc if isinstance(status_doc, dict) else {}
     if rc != 0:
@@ -2581,17 +2588,17 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
         if (
             cache.get("root") == note["root"]
             and cache.get("plugin_root") == plugin_root
-            and cache.get("ident") != "wedged"
+            and cache.get("ident") != "no-answer"
             and 0 <= now - float(cache.get("at") or 0) < IDENTITY_TTL
         ):
             ident, client_id, daemon = cache.get("ident"), cache.get("client") or {}, cache.get("daemon")
         else:
             budget = min(IDENTITY_BUDGET, _remaining(end))
             ident, client_id, daemon = (
-                check_identity(plugin_root, note.get("root"), budget) if budget > 0.05 else ("wedged", {}, None)
+                check_identity(plugin_root, note.get("root"), budget) if budget > 0.05 else ("no-answer", {}, None)
             )
-            # keyed by root and plugin root; a wedged answer is never reused (M3)
-            cache = None if ident == "wedged" else {
+            # keyed by root and plugin root; a no-answer result is never reused (M3, erratum 2)
+            cache = None if ident == "no-answer" else {
                 "root": note["root"], "plugin_root": plugin_root, "at": now, "ident": ident,
                 "client": client_id, "daemon": daemon,
             }
@@ -2616,7 +2623,7 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
         "hand-root": "hand-root",
         "daemon-down": "down",
         "unchecked": "-",
-        "wedged": "-",
+        "no-answer": "-",
     }.get(ident, fp(daemon))
     own = (note.get("leader") or {}).get("doorbell") or {}
     doorbell_txt = f"{own.get('kit') or '-'}@{own.get('sha') or '-'}" if own else "-"
@@ -2630,7 +2637,7 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
         f"root={note.get('root') or '-'} cursor={cur} "
         f"binding={binding} window={note.get('window') or '-'} doorbell={doorbell_txt} client={fp(client_id)} "
         f"daemon={daemon_txt} "
-        f"{'engine=wedged ' if ident == 'wedged' else ''}"
+        f"{'engine=no-answer ' if ident == 'no-answer' else ''}"
         f"updated={note.get('updated') or '-'}"
         f"{' miss=' + miss if miss else ''}"
         f"{' last-bind=' + last_bind if last_bind else ''}"
@@ -2642,6 +2649,12 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
     )
     if ident == "version-mismatch" and not remedy:
         remedy = "remedy: align the relay client and daemon installs before filing; delivery remains available"
+    if ident == "no-answer" and not remedy:
+        command = shlex.join(["python3", str(relay_program(plugin_root)), "status", "--root", note["root"]])
+        remedy = (
+            f"remedy: the engine check did not answer within {IDENTITY_BUDGET:.1f} s; run {command}"
+            " to see the daemon's state"
+        )
     hint = rebind_line(note, store.session)
     return "\n".join(printable_text(text) for text in (line, remedy, hint) if text)
 
