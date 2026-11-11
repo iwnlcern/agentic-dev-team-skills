@@ -257,7 +257,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 25)
+        self.assertEqual(len(named), 26)
 
 
 class TestChecks(Store):

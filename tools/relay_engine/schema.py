@@ -353,6 +353,9 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS snapshots_relay ON snapshots (relay_id)",
     "CREATE INDEX IF NOT EXISTS snapshots_artifact ON snapshots (artifact, handle)",
     "CREATE INDEX IF NOT EXISTS snapshots_content ON snapshots (content_sha256)",
+    # evidence_pointed's probe stops at the first stored row of a digest (slice 2a D3).
+    "CREATE INDEX IF NOT EXISTS snapshots_content_bytes ON snapshots (content_sha256)"
+    " WHERE has_bytes = 1",
 )
 
 
@@ -360,7 +363,11 @@ _TRIGGERS = tuple(
     """CREATE TRIGGER IF NOT EXISTS %s_handle_fixed BEFORE UPDATE OF handle ON %s
 WHEN NEW.handle IS NOT OLD.handle
 BEGIN SELECT RAISE(ABORT, 'a handle never changes'); END""" % (table, table)
-    for table in ("relays", "findings"))
+    for table in ("relays", "findings")) + (
+    # A closed bundle stays closed (slice 2a D4); setting it once, or to the same value, is allowed.
+    """CREATE TRIGGER IF NOT EXISTS bundles_closed_at_fixed BEFORE UPDATE OF closed_at ON bundles
+WHEN OLD.closed_at IS NOT NULL AND NEW.closed_at IS NOT OLD.closed_at
+BEGIN SELECT RAISE(ABORT, 'a closed bundle stays closed'); END""",)
 
 
 def ddl_digest():

@@ -1456,6 +1456,137 @@ class TestSessionSteps(Store):
                          [(previous, 30), (following, None)])
 
 
+class TestStoreSupport(Store):
+    """Breaks: the storage pair's sweep reads (slice 2a D3, D4) and the closed-bundle guarantee."""
+
+    def setUp(self):
+        super().setUp()
+        self.rows = 0
+
+    def snapshot_rows(self, relay_id, digest, has_bytes, count=1):
+        """Fixture snapshots of one digest, each on its own path edge of the relay."""
+        first = self.rows + 1
+        self.rows += count
+        numbers = range(first, self.rows + 1)
+        self.conn.executemany(
+            "INSERT INTO edges (id, from_relay_id, ordinal, kind, target_type, spelling, target_path)"
+            " VALUES (?, ?, ?, 'ref', 'path', 'fixture', 'fixture')",
+            [("edge-%d" % n, relay_id, n) for n in numbers])
+        self.conn.executemany(
+            "INSERT INTO snapshots (id, handle, relay_id, edge_id, artifact, content_sha256, bytes_len,"
+            " has_bytes) VALUES (?, ?, ?, ?, 'fixture', ?, 0, ?)",
+            [("snapshot-%d" % n, n, relay_id, "edge-%d" % n, digest, has_bytes) for n in numbers])
+        self.conn.commit()
+
+    def statements(self, call):
+        """The outcome of a call and the SQL statements it ran."""
+        seen = []
+        self.conn.set_trace_callback(seen.append)
+        try:
+            return snapshot_outcome(call), seen
+        finally:
+            self.conn.set_trace_callback(None)
+
+    def bundle(self, name, sender=PLANNER):
+        relay = self.submit(draft(bundle=name), sender=sender)
+        return self.relay(relay.relay_id)["bundle_id"]
+
+    def test_evidence_pointed(self):
+        pointed = queries.evidence_pointed  # read first: until it exists, the test errors here
+        mine = self.submit(draft()).relay_id
+        theirs = self.submit(draft(), sender=FOREIGN).relay_id
+        stored, digest_only, foreign, absent = ("a" * 64, "b" * 64, "c" * 64, "d" * 64)
+        self.snapshot_rows(mine, stored, 1)
+        self.snapshot_rows(mine, digest_only, 0)
+        self.snapshot_rows(theirs, foreign, 1)
+        outcome = snapshot_outcome(lambda: pointed(
+            self.conn, submit_tests.PROJECT, [stored, digest_only, foreign, absent, stored]))
+        self.assertEqual(outcome, ("ok", frozenset({stored})))
+        self.assertEqual(snapshot_outcome(lambda: pointed(self.conn, "q", [stored, foreign])),
+                         ("ok", frozenset({foreign})))
+        self.assertEqual(snapshot_outcome(lambda: pointed(self.conn, submit_tests.PROJECT, [])),
+                         ("ok", frozenset()))
+        many = ["%064x" % n for n in range(501)]
+        for refused in (many, ["A" * 64], ["a" * 63], [stored, 7]):
+            (kind, _), seen = self.statements(lambda: pointed(
+                self.conn, submit_tests.PROJECT, refused))
+            self.assertEqual((kind, seen), ("ValueError", []), refused[:2])
+
+    def test_evidence_pointed_bounded(self):
+        pointed = queries.evidence_pointed  # read first: until it exists, the test errors here
+        mine = self.submit(draft()).relay_id
+        target = "a" * 64
+        candidates = [target] + ["%064x" % n for n in range(1, 500)]
+        self.snapshot_rows(mine, target, 1)
+        answers = []
+
+        def call():
+            answers.append(snapshot_outcome(lambda: pointed(
+                self.conn, submit_tests.PROJECT, candidates)))
+        lean = vm_steps(self.conn, call)
+        self.conn.execute("DELETE FROM snapshots")
+        self.conn.commit()
+        # The digest-only rows come first, so a probe that cannot skip them visits every one.
+        self.snapshot_rows(mine, target, 0, 5000)
+        self.snapshot_rows(mine, target, 1)
+        heavy = vm_steps(self.conn, call)
+        self.assertEqual(answers, [("ok", frozenset({target}))] * 2)
+        self.assertLessEqual(heavy, lean + 200, (lean, heavy))
+
+    def test_bundle_closed_at(self):
+        closed_at = queries.bundle_closed_at  # read first: until it exists, the test errors here
+        opened, closed = self.bundle("open-one"), self.bundle("closed-one")
+        theirs = self.bundle("theirs", sender=FOREIGN)
+        self.conn.execute("UPDATE bundles SET closed_at = 77 WHERE id = ?", (closed,))
+        self.conn.commit()
+        outcome = snapshot_outcome(lambda: closed_at(
+            self.conn, submit_tests.PROJECT, [opened, closed, opened]))
+        self.assertEqual(outcome, ("ok", {opened: None, closed: 77}))
+        for unknown, text in ((["no-such-bundle"], "1 bundle id names no bundle of this project"),
+                              ([opened, theirs], "1 bundle id names no bundle of this project"),
+                              ([theirs, "no-such-bundle", closed],
+                               "2 bundle ids name no bundle of this project")):
+            kind, error = snapshot_outcome(lambda: closed_at(
+                self.conn, submit_tests.PROJECT, unknown))
+            self.assertEqual((kind, str(error)), ("ValueError", text), unknown)
+        for refused in (["bundle-%d" % n for n in range(501)], [""], [opened, None]):
+            (kind, _), seen = self.statements(lambda: closed_at(
+                self.conn, submit_tests.PROJECT, refused))
+            self.assertEqual((kind, seen), ("ValueError", []), refused[:2])
+
+    def test_new_readers_are_pure(self):
+        pointed, closed_at = queries.evidence_pointed, queries.bundle_closed_at  # errors here until both exist
+        relay = self.submit(draft(bundle="pure")).relay_id
+        bundle = self.relay(relay)["bundle_id"]
+        self.snapshot_rows(relay, "a" * 64, 1)
+        for call in (lambda: pointed(self.conn, submit_tests.PROJECT, ["a" * 64]),
+                     lambda: closed_at(self.conn, submit_tests.PROJECT, [bundle])):
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("SELECT count(*) FROM relays").fetchone()
+                changes = self.conn.total_changes
+                outcome = snapshot_outcome(call)
+                state = (outcome[0], self.conn.in_transaction, self.conn.total_changes)
+            finally:
+                self.conn.execute("ROLLBACK")
+            self.assertEqual(state, ("ok", True, changes), outcome)
+
+    def test_bundle_close_is_write_once(self):
+        bundle = self.bundle("closing")
+        update = "UPDATE bundles SET closed_at = ? WHERE id = ?"
+        for value in (10, 10):  # setting it from NULL, then writing the same value
+            outcome = snapshot_outcome(lambda: self.conn.execute(update, (value, bundle)))
+            self.assertEqual(outcome[0], "ok", outcome)
+            self.conn.commit()
+        for value in (None, 11):  # clearing it, and changing it
+            kind, error = snapshot_outcome(lambda: self.conn.execute(update, (value, bundle)))
+            self.conn.rollback()
+            self.assertEqual((kind, str(error) if kind != "ok" else None),
+                             ("IntegrityError", "a closed bundle stays closed"), value)
+        self.assertEqual(self.conn.execute("SELECT closed_at FROM bundles WHERE id = ?",
+                                           (bundle,)).fetchone(), (10,))
+
+
 class TestGitIsolation(unittest.TestCase):
     def test_store_tests_ignore_ambient_git_names(self):
         # Breaks: a Store consumer reaches Git through an unisolated fixture.
