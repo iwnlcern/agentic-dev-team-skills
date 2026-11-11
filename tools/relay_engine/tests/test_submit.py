@@ -978,7 +978,7 @@ class TestTableDirectory(Store):
     def test_checkout(self):
         self.assertIsNone(self.table.checkout("bivpak"))
         self.conn.executemany("INSERT INTO repository_checkouts (repository_id, path,"
-                              " last_seen_at) VALUES ('repo-1', ?, ?)",
+                              " last_seen_at, checkout_id, route_created_at) VALUES ('repo-1', ?, ?, 'table-checkout', 1)",
                               [("/w/old", 1), ("/w/new", 9)])
         self.assertEqual(self.table.checkout("bivpak"), Path("/w/new"))
         self.assertIsNone(self.table.checkout("nope"))

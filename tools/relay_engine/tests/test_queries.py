@@ -2032,7 +2032,7 @@ class TestGitSnapshotCopies(submit_tests.GitSnapshots):
         other = Repo({"unrelated": "none"})
         self.addCleanup(other.close)
         self.conn.executemany(
-            "INSERT INTO repository_checkouts (repository_id,path,last_seen_at) VALUES (?,?,1)", [(
+            "INSERT INTO repository_checkouts (repository_id,path,last_seen_at,checkout_id,route_created_at) VALUES (?,?,1,'snapshot-checkout',1)", [(
             "repo-1", str(repo.path)), ("repo-q", str(other.path))])
         self.conn.commit()
         directory = submit.TableDirectory(self.conn, submit_tests.PROJECT)

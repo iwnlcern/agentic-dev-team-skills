@@ -86,7 +86,10 @@ _PLATFORM_TABLES = (
     """CREATE TABLE IF NOT EXISTS repository_checkouts (
     repository_id TEXT NOT NULL REFERENCES repositories (id),
     path TEXT NOT NULL PRIMARY KEY,
-    last_seen_at INTEGER NOT NULL
+    last_seen_at INTEGER NOT NULL,
+    checkout_id TEXT NOT NULL,
+    route_created_at INTEGER NOT NULL,
+    ended_at INTEGER
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS team_instances (
     id TEXT NOT NULL PRIMARY KEY,
