@@ -32,6 +32,42 @@ class TestLifecycleTables(unittest.TestCase):
     def execute(self, sql, parameters=()):
         self.conn.execute(sql, parameters).close()
 
+    def test_store_wide_start_ends_the_store_stop(self):
+        # Catches equality against NULL when finding the open store stop.
+        self.assertEqual(store_layout.record_stop(self.conn, 'store', None, 'one'), 1)
+        self.assertEqual(store_layout.record_start(self.conn, 'store', None, 'two'), 2)
+        self.assertEqual(store_layout.open_stops(self.conn), [])
+        self.assertEqual([(e.kind, e.scope, e.project_id)
+                          for e in store_layout.stop_events_after(self.conn, 0)],
+                         [('stop', 'store', None), ('start', 'store', None)])
+        self.assertIsNone(store_layout.record_start(self.conn, 'store', None, 'three'))
+
+    def test_one_open_store_stop(self):
+        # Catches a unique index that permits duplicate NULL project ids.
+        store_layout.record_stop(self.conn, 'store', None, 'one')
+        with self.assertRaises(sqlite3.IntegrityError):
+            store_layout.record_stop(self.conn, 'store', None, 'two')
+        self.assertEqual([(s.scope, s.project_id, s.stopped_by)
+                          for s in store_layout.open_stops(self.conn)],
+                         [('store', None, 'one')])
+
+    def test_end_cannot_change_other_columns(self):
+        # Catches an end guard that also permits changing immutable columns.
+        store_layout.record_stop(self.conn, 'project', P, 'one')
+        for change in ["scope='store', project_id=NULL", "stopped_at='other'",
+                       "stopped_by='other'"]:
+            with self.subTest(change=change):
+                self.execute('SAVEPOINT end_guard')
+                try:
+                    with self.assertRaisesRegex(sqlite3.IntegrityError, 'engine_stops'):
+                        self.execute("UPDATE engine_stops SET ended_at='x', ended_by='y', " + change)
+                    self.assertEqual([(s.row_id, s.scope, s.project_id, s.ended_at)
+                                      for s in store_layout.open_stops(self.conn)],
+                                     [(1, 'project', P, None)])
+                finally:
+                    self.execute('ROLLBACK TO end_guard')
+                    self.execute('RELEASE end_guard')
+
     def test_event_ids_never_reused(self):
         self.assertEqual(store_layout.record_stop(self.conn, 'project', P, 'one'), 1)
         self.assertEqual(store_layout.record_start(self.conn, 'project', P, 'two'), 2)

@@ -10,6 +10,7 @@ from relay_engine import checkout_store as jobs, schema, store_layout
 
 P = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 Q = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+R = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
 
 class CheckoutCase(unittest.TestCase):
@@ -64,8 +65,38 @@ class CheckoutCase(unittest.TestCase):
 
 
 class TestCheckoutSteps(CheckoutCase):
+    def test_register_catalogue_floor_decides(self):
+        # Catches using only the clock and retained-ledger floor.
+        self.assertEqual(self.register(self.new(checkout_id='old'), now=2000),
+                         jobs.Registered(2000))
+        self.cat.execute("UPDATE checkout_routes SET ended_at=2001, end_reason='matched'").close()
+        self.assertEqual(self.register(self.new(checkout_id='next'), floor=1099, now=1001),
+                         jobs.Registered(2001))
+
+    def test_ensure_reads_ledger_floor_across_repositories(self):
+        # Catches restricting the ledger floor to the requested repository.
+        self.assertEqual(self.ensure().ledger_order, 0)
+        other = jobs.ensure_repository_step(self.ledger, P, 'other', now_ms=11)
+        self.ledger.execute('INSERT INTO repository_checkouts VALUES (?, ?, ?, ?, ?, ?)',
+                            (other.repository_id, '/other', 1, 'retained', 1099, 2)).close()
+        later = self.ensure()
+        self.assertFalse(later.inserted)
+        self.assertEqual(later.ledger_order, 1099)
+
+    def test_register_refuses_other_project_elsewhere(self):
+        # Catches comparing only the repository id of the open inode owner.
+        self.cat.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+                         (R, 'second', 'active', 1)).close()
+        self.register(self.new())
+        before = self.routes()
+        with self.assertRaises(jobs.CheckoutRefused) as caught:
+            self.register(replace(self.new(), project_id=R))
+        self.assertEqual(caught.exception.reason, 'checkout_registered_elsewhere')
+        self.assertEqual(caught.exception.detail, {'project_id': P, 'repository_id': 'repo'})
+        self.assertEqual(self.routes(), before)
+
     def test_ensure_repository_inserts_once(self):
-        # Catches duplicate repository insertion and a per-repository order floor.
+        # Catches duplicate repository insertion; the floor across repositories is test_ensure_reads_ledger_floor_across_repositories.
         first = self.ensure()
         second = self.ensure()
         self.assertTrue(first.inserted)
@@ -82,7 +113,7 @@ class TestCheckoutSteps(CheckoutCase):
         self.assertEqual(self.rows(self.ledger, 'SELECT id FROM repositories'), [])
 
     def test_register_orders_above_both_floors(self):
-        # Catches either missing catalogue or retained-ledger floor.
+        # Catches a missing retained-ledger floor; the catalogue floor is test_register_catalogue_floor_decides.
         self.assertEqual(self.register(self.new(checkout_id='old'), now=1000), jobs.Registered(1000))
         self.cat.execute("UPDATE checkout_routes SET ended_at=1001, end_reason='matched'").close()
         self.assertEqual(self.register(self.new(checkout_id='next'), floor=1099, now=1001),
