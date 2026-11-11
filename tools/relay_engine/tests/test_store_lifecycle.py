@@ -133,3 +133,95 @@ class TestLifecycleTables(unittest.TestCase):
         store_layout.record_start(self.conn, 'project', P, 'start')
         self.assertEqual(store_layout.stop_events_after(self.conn, 2), [])
         self.assertEqual(store_layout.stop_events_after(self.conn, 99), [])
+
+
+class TestCheckoutRoutes(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.conn = store_layout.open_catalogue(self.root)
+        self.addCleanup(self.conn.close)
+        self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+                          (P, 'example', 'active', 1)).close()
+        self.conn.commit()
+
+    def insert(self, checkout_id, created, ended=None, reason=None, *, dev=1):
+        values = (checkout_id, P, 'repository', '/git', '/work', dev, 2,
+                  created, ended, reason, None)
+        self.conn.execute('INSERT INTO checkout_routes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                          values).close()
+        return values
+
+    def test_checkout_routes_read(self):
+        # Catches filtering away ended rows, wrong order/inode and lost columns.
+        from dataclasses import astuple
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        newest = self.insert('open', 30)
+        oldest = self.insert('oldest', 10, 15, 'matched')
+        middle = self.insert('middle', 20, 25, 'unmatched')
+        self.insert('elsewhere', 40, dev=9)
+        self.conn.commit()
+        reader = store_layout.open_catalogue_readonly(self.root)
+        self.addCleanup(reader.close)
+        rows = store_layout.checkout_routes(reader, dev=1, ino=2)
+        self.assertEqual([astuple(row) for row in rows], [oldest, middle, newest])
+        self.assertFalse(reader.in_transaction)
+
+    def test_checkout_routes_read_keeps_caller_transaction(self):
+        # Catches a read that commits or rolls back its caller's pending row.
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        self.insert('pending', 10)
+        rows = store_layout.checkout_routes(self.conn, dev=1, ino=2)
+        self.assertEqual([r.checkout_id for r in rows], ['pending'])
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute('SELECT checkout_id FROM checkout_routes').fetchall(), [])
+        # The caller also keeps ownership when the SELECT raises.
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        self.insert('pending-error', 20)
+        self.conn.execute('DROP TABLE checkout_routes').close()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.checkout_routes(self.conn, dev=1, ino=2)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute('SELECT checkout_id FROM checkout_routes').fetchall(), [])
+
+    def test_checkout_routes_read_cleans_up_its_own(self):
+        # Catches leaking the owned read transaction on success or failure.
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(store_layout.checkout_routes(self.conn, dev=1, ino=2), [])
+        self.assertFalse(self.conn.in_transaction)
+        self.conn.execute('DROP TABLE checkout_routes').close()
+        self.conn.commit()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.checkout_routes(self.conn, dev=1, ino=2)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_restore_revives_ended_route_inert(self):
+        # Catalogue-half witness only: restoring the file revives its old route.
+        import os
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        self.insert('revived', 10)
+        self.conn.commit()
+        backup_path = self.root / 'backup.sqlite3'
+        backup = sqlite3.connect(backup_path)
+        try:
+            self.conn.backup(backup)
+        finally:
+            backup.close()
+        self.conn.execute("UPDATE checkout_routes SET ended_at=20, end_reason='matched'").close()
+        self.conn.commit()
+        self.assertEqual(self.conn.execute('SELECT ended_at FROM checkout_routes').fetchall(), [(20,)])
+        self.conn.close()
+        path = store_layout.catalogue_path(self.root)
+        self.assertFalse(Path(str(path) + '-wal').exists())
+        self.assertFalse(Path(str(backup_path) + '-wal').exists())
+        os.replace(backup_path, path)
+        writer = store_layout.open_catalogue(self.root)
+        self.addCleanup(writer.close)
+        reader = store_layout.open_catalogue_readonly(self.root)
+        self.addCleanup(reader.close)
+        rows = store_layout.checkout_routes(reader, dev=1, ino=2)
+        self.assertEqual([(r.checkout_id, r.ended_at, r.end_reason) for r in rows],
+                         [('revived', None, None)])

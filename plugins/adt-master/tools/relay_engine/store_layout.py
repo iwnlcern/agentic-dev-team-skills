@@ -465,3 +465,40 @@ def stop_events_after(conn, event_id: int) -> list[EngineStopEvent]:
         return [EngineStopEvent(*row) for row in cursor]
     finally:
         cursor.close()
+
+
+@dataclass(frozen=True)
+class CheckoutRoute:
+    checkout_id: str
+    project_id: str
+    repository_id: str
+    git_common_dir: str
+    worktree_path: str
+    dev: int
+    ino: int
+    created_at: int
+    ended_at: int | None
+    end_reason: str | None
+    ledger_synced_at: int | None
+
+
+def checkout_routes(catalogue_conn, *, dev: int, ino: int) -> list[CheckoutRoute]:
+    """Read inode history, controlling only a transaction this read starts."""
+    owns_transaction = not catalogue_conn.in_transaction
+    if owns_transaction:
+        _pragma(catalogue_conn, 'BEGIN')
+    try:
+        cursor = catalogue_conn.execute(
+            'SELECT checkout_id, project_id, repository_id, git_common_dir, worktree_path, '
+            'dev, ino, created_at, ended_at, end_reason, ledger_synced_at '
+            'FROM checkout_routes WHERE dev=? AND ino=? ORDER BY created_at', (dev, ino))
+        try:
+            result = [CheckoutRoute(*row) for row in cursor]
+        finally:
+            cursor.close()
+        if owns_transaction:
+            _pragma(catalogue_conn, 'COMMIT')
+        return result
+    finally:
+        if owns_transaction and catalogue_conn.in_transaction:
+            _pragma(catalogue_conn, 'ROLLBACK')
