@@ -1674,23 +1674,92 @@ class BoundedStatusTests(TmpEnv):
         self.assertLess(elapsed, 2.0, proc.stdout + proc.stderr)
         self.assertTrue(proc.stdout.startswith("relay-monitor: "), proc.stdout + proc.stderr)
 
-    def test_combined_worst_case_leaves_headroom(self):
-        # fold 2 G2: wedged engine, hung `ps` and a held note lock together stay well inside SA3's 2 s
-        bindir = self.base / "bin"
-        bindir.mkdir()
-        (bindir / "ps").write_text("#!/bin/sh\nsleep 30\n")
-        (bindir / "ps").chmod(0o755)
-        env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    def _virtual_status(self, mode: str) -> dict:
+        # Keep the actual status path; only its blocking operations advance this clock.
+        code = '''import contextlib, hashlib, importlib.util, io, json, pathlib, sys, time, subprocess
+script, mode, plugin = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("virtual_monitor", script)
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+identity = {"script": str(pathlib.Path(script).resolve()),
+            "script_sha256": hashlib.sha256(pathlib.Path(script).read_bytes()).hexdigest(),
+            "window": str(pathlib.Path(m.window.__file__).resolve()),
+            "window_sha256": hashlib.sha256(pathlib.Path(m.window.__file__).read_bytes()).hexdigest()}
+now, waits = [1024.0], []
+class Clock:
+    def monotonic(self):
+        return now[0]
+    def sleep(self, seconds):
+        now[0] += seconds
+    def __getattr__(self, name):
+        return getattr(time, name)
+class Process:
+    def run(self, argv, **kwargs):
+        timeout = kwargs["timeout"]
+        waits.append(["run", argv[2], timeout])
+        now[0] += timeout
+        raise subprocess.TimeoutExpired(argv, timeout)
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+class Window:
+    def process_start(self, pid, timeout):
+        waits.append(["ps", timeout])
+        now[0] += timeout
+        return None
+    def __getattr__(self, name):
+        return getattr(real_window, name)
+real_window = m.window
+m.time, m.subprocess, m.window = Clock(), Process(), Window()
+argv = (["status", "--session", "sess"] if mode == "status" else
+        ["session-start", "--host", "claude-code"])
+output = io.StringIO()
+with contextlib.redirect_stdout(output):
+    exit_code = m.main([*argv, "--plugin-root", plugin])
+print(json.dumps({"elapsed": now[0] - 1024.0, "waits": waits,
+                  "output": output.getvalue(), "exit": exit_code, "identity": identity}))
+'''
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
-        with self.store.state_lock():
-            for argv, stdin in ((["status", "--session", "sess"], ""), (["session-start", "--host", "claude-code"], payload)):
-                with self.subTest(mode=argv[0]):
-                    start = time.monotonic()
-                    proc = subprocess.run([sys.executable, str(SCRIPT), *argv, "--plugin-root", str(self.wedged)],
-                                          input=stdin, capture_output=True, text=True, env=env, timeout=40)
-                    self.assertLess(time.monotonic() - start, 1.6, proc.stdout + proc.stderr)
-                    self.assertIn("engine=no-answer", proc.stdout)
-                    self.assertNotIn("engine=wedged", proc.stdout)
+        lock = self.rm.WindowLock(self.rm.session_window_key("sess"))
+        self.assertTrue(lock.acquire())
+        try:
+            self.assertTrue(lock.stamp("virtual-status-parent", os.getpid(), None))
+            with self.store.state_lock():
+                proc = subprocess.run(
+                    [sys.executable, "-c", code, str(SCRIPT), mode, str(self.wedged)],
+                    input=payload if mode == "session-start" else "", capture_output=True,
+                    text=True, env=dict(os.environ), timeout=10,
+                )
+        finally:
+            lock.release()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_combined_worst_case_fits_status_budget(self):
+        # Reverting G2, restarting the deadline or unbounded waits must exceed 1.33 virtual seconds.
+        for mode in ("status", "session-start"):
+            with self.subTest(mode=mode):
+                record = self._virtual_status(mode)
+                print("STATUS_BUDGET_PROBE " + json.dumps({
+                    "mode": mode, "elapsed": record["elapsed"], "waits": record["waits"],
+                }))
+                self.assertEqual(record["identity"]["script"], str(pathlib.Path(SCRIPT).resolve()), "script_identity")
+                self.assertTrue(any(w[0] == "ps" for w in record["waits"]), "ps_reached")
+                self.assertLessEqual(record["elapsed"], 1.33, "elapsed_bound")
+                versions = [w for w in record["waits"] if w[:2] == ["run", "version"]]
+                self.assertEqual(len(versions), 1, "version_wait")
+                self.assertLessEqual(versions[0][2], 1.0, "version_wait")
+                self.assertFalse(any(w[:2] == ["run", "status"] for w in record["waits"]), "version_wait")
+                self.assertIn(["ps", 0.25], record["waits"], "ps_wait")
+                self.assertEqual(self.rm.STATUS_BUDGET, 1.3, "constants")
+                self.assertEqual(self.rm.LOCK_STEP, 0.01, "constants")
+                text = (record["output"] if mode == "status" else
+                        json.loads(record["output"])["hookSpecificOutput"]["additionalContext"])
+                self.assertIn("engine=no-answer", text)
+                self.assertNotIn("engine=wedged", text)
+                self.assert_no_answer(text, self.wedged)
+                self.assertEqual(record["exit"], 0)
 
     def test_session_start_bounded_while_state_lock_held(self):
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
