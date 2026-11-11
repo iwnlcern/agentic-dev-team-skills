@@ -104,8 +104,10 @@ class TestOperatorPrincipal(unittest.TestCase):
         self.assertEqual(p.OPERATOR_SURFACES, ("frank_panel", "page", "terminal"))
 
     def test_operator_principal_refuses_other_values(self):
+        probes = tuple(value for surface in p.OPERATOR_SURFACES
+                       for value in (" " + surface, surface + "\n", surface.upper()))
         for value in ("Page", "page ", "Terminal", "terminal ", "", "operator", None,
-                      b"page", _Str("page"), _AlwaysEqual()):
+                      b"page", _Str("page"), _AlwaysEqual(), "terminals") + probes:
             with self.subTest(value=value):
                 error = construction_error(p.OperatorPrincipal, value)
                 self.assertIs(type(error), ValueError)
