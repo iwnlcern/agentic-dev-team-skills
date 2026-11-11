@@ -64,8 +64,12 @@ GIT_STATE = submit.GitState("repo-1", "a" * 40, "main", 2, "0" * 64)
 
 
 class FakeDirectory:
-    def __init__(self, checkouts=None):
+    def __init__(self, checkouts=None, repositories=None):
         self.checkouts = dict(checkouts or {})
+        self.repositories = None if repositories is None else set(repositories)
+
+    def has_repository(self, repo):
+        return repo in (self.checkouts if self.repositories is None else self.repositories)
 
     def resolve(self, address, sender):
         seat = SEATS.get(address) or {FOREIGN.address: FOREIGN}.get(address)
@@ -978,10 +982,16 @@ class TestTableDirectory(Store):
     def test_checkout(self):
         self.assertIsNone(self.table.checkout("bivpak"))
         self.conn.executemany("INSERT INTO repository_checkouts (repository_id, path,"
-                              " last_seen_at) VALUES ('repo-1', ?, ?)",
+                              " last_seen_at, checkout_id, route_created_at) VALUES ('repo-1', ?, ?, 'table-checkout', 1)",
                               [("/w/old", 1), ("/w/new", 9)])
         self.assertEqual(self.table.checkout("bivpak"), Path("/w/new"))
+        self.conn.execute("UPDATE repository_checkouts SET ended_at = 10 WHERE path = '/w/new'")
+        self.assertEqual(self.table.checkout("bivpak"), Path("/w/old"))
+        self.conn.execute("UPDATE repository_checkouts SET ended_at = 11 WHERE path = '/w/old'")
+        self.assertIsNone(self.table.checkout("bivpak"))
         self.assertIsNone(self.table.checkout("nope"))
+        self.assertTrue(self.table.has_repository("bivpak"))
+        self.assertFalse(self.table.has_repository("nope"))
         self.assertIsNone(submit.TableDirectory(self.conn, "q").checkout("bivpak"))
 
     def test_submit_through_tables(self):
@@ -1026,6 +1036,11 @@ class TestParties(Store):
         self.directory.checkouts["nope"] = "/x"
         error = self.refused("E-REF-UNRESOLVED", draft(refs=("nope@main:a.py",)), line=6)
         self.assertIn("not known to this project", error.cause)
+
+    def test_known_repository_without_open_checkout_refused(self):
+        error = self.refused("E-REF-UNRESOLVED", draft(refs=("bivpak@main:a.py",)), line=6)
+        self.assertIn("repository bivpak has no registered checkout in this project", error.cause)
+        self.assertNotIn("not known to this project", error.cause)
 
 
 class TestAdmissionReplay(Store):

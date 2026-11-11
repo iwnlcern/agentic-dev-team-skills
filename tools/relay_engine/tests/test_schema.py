@@ -547,7 +547,7 @@ class TestSqlVersion(unittest.TestCase):
 PLATFORM_COLUMNS = {
     "projects": ["id", "name", "created_at", "top_seat_id"],
     "repositories": ["id", "project_id", "name"],
-    "repository_checkouts": ["repository_id", "path", "last_seen_at"],
+    "repository_checkouts": ["repository_id", "path", "last_seen_at", "checkout_id", "route_created_at", "ended_at"],
     "team_instances": ["id", "project_id", "name", "level", "parent_instance_id", "opened_at",
                        "opened_by", "closed_at"],
     "seats": ["id", "team_instance_id", "role", "state"],
@@ -611,7 +611,8 @@ class TestPlatform(Store):
             ("second open occupant", "INSERT INTO seat_occupants (id, seat_id, key_id,"
              " key_verifier, issued_at) VALUES ('o9', 's-a', 'k9', 'v', 1)"),
             ("checkout of an unknown repository", "INSERT INTO repository_checkouts"
-             " (repository_id, path, last_seen_at) VALUES ('nope', '/x', 1)"),
+             " (repository_id, path, last_seen_at, checkout_id, route_created_at)"
+             " VALUES ('nope', '/x', 1, 'checkout-unknown', 1)"),
         )
         for name, sql in cases:
             with self.subTest(name):

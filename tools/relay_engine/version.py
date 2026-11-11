@@ -19,6 +19,7 @@ ROSTER = (
     "relay_engine/api_wire.py",
     "relay_engine/authority.py",
     "relay_engine/catalogue.py",
+    "relay_engine/checkout_store.py",
     "relay_engine/cli.py",
     "relay_engine/client.py",
     "relay_engine/commission.py",

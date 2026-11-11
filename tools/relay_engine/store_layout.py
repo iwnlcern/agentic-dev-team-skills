@@ -1,5 +1,7 @@
 """Store paths and guarded per-project opening (DD-v3-store slice 1)."""
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Literal
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 import os
@@ -382,3 +384,121 @@ def begin_declared(conns: Mapping[str, sqlite3.Connection], *, root,
         for name, error in rollback_declared(conns).items():
             original.add_note(f'{name}: {type(error).__name__}: {error}')
         raise
+
+
+@dataclass(frozen=True)
+class EngineStop:
+    row_id: int
+    scope: str
+    project_id: str | None
+    stopped_at: str
+    stopped_by: str
+    ended_at: str | None
+    ended_by: str | None
+
+
+@dataclass(frozen=True)
+class EngineStopEvent:
+    event_id: int
+    row_id: int
+    kind: str
+    at: str
+    by: str
+    scope: str
+    project_id: str | None
+
+
+def record_stop(conn, scope: Literal['store', 'project'], project_id: str | None,
+                by: str) -> int:
+    """Record a stop and its event in the caller's transaction."""
+    at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    cursor = conn.execute('INSERT INTO engine_stops '
+                          '(scope, project_id, stopped_at, stopped_by) VALUES (?, ?, ?, ?)',
+                          (scope, project_id, at, by))
+    try:
+        row_id = cursor.lastrowid
+    finally:
+        cursor.close()
+    cursor = conn.execute("INSERT INTO engine_stop_events (row_id, kind, at, by) "
+                          "VALUES (?, 'stop', ?, ?)", (row_id, at, by))
+    try:
+        return cursor.lastrowid
+    finally:
+        cursor.close()
+
+
+def record_start(conn, scope, project_id, by: str) -> int | None:
+    """End the open stop, if any, without controlling the transaction."""
+    row = _row(conn, 'SELECT row_id FROM engine_stops WHERE scope=? '
+               'AND project_id IS ? AND ended_at IS NULL', (scope, project_id))
+    if row is None:
+        return None
+    at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    conn.execute('UPDATE engine_stops SET ended_at=?, ended_by=? WHERE row_id=?',
+                 (at, by, row[0])).close()
+    cursor = conn.execute("INSERT INTO engine_stop_events (row_id, kind, at, by) "
+                          "VALUES (?, 'start', ?, ?)", (row[0], at, by))
+    try:
+        return cursor.lastrowid
+    finally:
+        cursor.close()
+
+
+def open_stops(conn) -> list[EngineStop]:
+    """Read open stops in row order."""
+    cursor = conn.execute('SELECT row_id, scope, project_id, stopped_at, stopped_by, '
+                          'ended_at, ended_by FROM engine_stops '
+                          'WHERE ended_at IS NULL ORDER BY row_id')
+    try:
+        return [EngineStop(*row) for row in cursor]
+    finally:
+        cursor.close()
+
+
+def stop_events_after(conn, event_id: int) -> list[EngineStopEvent]:
+    """Read ordered events and their immutable scope in one statement."""
+    cursor = conn.execute('SELECT e.event_id, e.row_id, e.kind, e.at, e.by, '
+                          's.scope, s.project_id FROM engine_stop_events AS e '
+                          'JOIN engine_stops AS s ON s.row_id=e.row_id '
+                          'WHERE e.event_id > ? ORDER BY e.event_id', (event_id,))
+    try:
+        return [EngineStopEvent(*row) for row in cursor]
+    finally:
+        cursor.close()
+
+
+@dataclass(frozen=True)
+class CheckoutRoute:
+    checkout_id: str
+    project_id: str
+    repository_id: str
+    git_common_dir: str
+    worktree_path: str
+    dev: int
+    ino: int
+    created_at: int
+    ended_at: int | None
+    end_reason: str | None
+    ledger_synced_at: int | None
+
+
+def checkout_routes(catalogue_conn, *, dev: int, ino: int) -> list[CheckoutRoute]:
+    """Read inode history, controlling only a transaction this read starts."""
+    owns_transaction = not catalogue_conn.in_transaction
+    if owns_transaction:
+        _pragma(catalogue_conn, 'BEGIN')
+    try:
+        cursor = catalogue_conn.execute(
+            'SELECT checkout_id, project_id, repository_id, git_common_dir, worktree_path, '
+            'dev, ino, created_at, ended_at, end_reason, ledger_synced_at '
+            'FROM checkout_routes WHERE dev=? AND ino=? ORDER BY created_at', (dev, ino))
+        try:
+            result = [CheckoutRoute(*row) for row in cursor]
+        finally:
+            cursor.close()
+        if owns_transaction:
+            _pragma(catalogue_conn, 'COMMIT')
+        return result
+    finally:
+        if owns_transaction and catalogue_conn.in_transaction:
+            _pragma(catalogue_conn, 'ROLLBACK')

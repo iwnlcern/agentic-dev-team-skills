@@ -213,7 +213,7 @@ class TestCatalogue(unittest.TestCase):
         conn = self.opened()
         definitions = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, 'd81174ed62148caa30f62315bb498f1724629cc1225d31a98786c4375d199ee2')
+        self.assertEqual(digest, 'dad3adc23563b1213c4bd2765d5dfb66cb053ca880a82148886e27b6de3e298f')
 
     def test_constraints_hold(self):
         conn = self.opened()

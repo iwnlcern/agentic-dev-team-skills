@@ -10,6 +10,9 @@ TABLE_OWNERS: dict[str, str] = {
     'project_routes': 'store',
     'key_routes': 'store',
     'schema_version': 'store',
+    'engine_stops': 'store',
+    'engine_stop_events': 'store',
+    'checkout_routes': 'store',
 }
 
 _TABLES = (
@@ -35,6 +38,55 @@ _TABLES = (
     version TEXT NOT NULL,
     ddl_sha256 TEXT NOT NULL
 ) STRICT""",
+    """CREATE TABLE engine_stops (
+    row_id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL CHECK (scope IN ('store', 'project')),
+    project_id TEXT REFERENCES project_routes (project_id),
+    stopped_at TEXT NOT NULL,
+    stopped_by TEXT NOT NULL,
+    ended_at TEXT,
+    ended_by TEXT,
+    CHECK ((scope = 'store') = (project_id IS NULL)),
+    CHECK ((ended_at IS NULL) = (ended_by IS NULL))
+) STRICT""",
+    """CREATE UNIQUE INDEX engine_stops_one_open
+ON engine_stops (scope, ifnull(project_id, '')) WHERE ended_at IS NULL""",
+    """CREATE TABLE engine_stop_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    row_id INTEGER NOT NULL REFERENCES engine_stops (row_id),
+    kind TEXT NOT NULL CHECK (kind IN ('stop', 'start')),
+    at TEXT NOT NULL,
+    by TEXT NOT NULL
+) STRICT""",
+    """CREATE TRIGGER engine_stops_guard_update BEFORE UPDATE ON engine_stops
+WHEN NOT (OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL AND NEW.ended_by IS NOT NULL
+          AND NEW.row_id IS OLD.row_id AND NEW.scope IS OLD.scope
+          AND NEW.project_id IS OLD.project_id AND NEW.stopped_at IS OLD.stopped_at
+          AND NEW.stopped_by IS OLD.stopped_by)
+BEGIN SELECT RAISE(ABORT, 'engine_stops is immutable except its first end'); END""",
+    """CREATE TRIGGER engine_stops_guard_delete BEFORE DELETE ON engine_stops
+BEGIN SELECT RAISE(ABORT, 'engine_stops cannot be deleted'); END""",
+    """CREATE TRIGGER engine_stop_events_guard_update BEFORE UPDATE ON engine_stop_events
+BEGIN SELECT RAISE(ABORT, 'engine_stop_events cannot be updated'); END""",
+    """CREATE TRIGGER engine_stop_events_guard_delete BEFORE DELETE ON engine_stop_events
+BEGIN SELECT RAISE(ABORT, 'engine_stop_events cannot be deleted'); END""",
+    """CREATE TABLE checkout_routes (
+    checkout_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES project_routes (project_id),
+    repository_id TEXT NOT NULL,
+    git_common_dir TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    dev INTEGER NOT NULL,
+    ino INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    end_reason TEXT,
+    ledger_synced_at INTEGER,
+    CHECK ((ended_at IS NULL) = (end_reason IS NULL)),
+    CHECK (end_reason IN ('matched', 'unmatched'))
+) STRICT""",
+    """CREATE UNIQUE INDEX checkout_routes_one_open
+ON checkout_routes (dev, ino) WHERE ended_at IS NULL""",
 )
 
 
