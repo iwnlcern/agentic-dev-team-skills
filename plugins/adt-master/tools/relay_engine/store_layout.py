@@ -319,14 +319,22 @@ def declared_order(catalogue: bool, project_ids: Iterable[str]) -> tuple[str, ..
     return (('catalogue',) if catalogue else ()) + tuple(sorted(projects))
 
 
-def rollback_declared(conns: Mapping[str, sqlite3.Connection]) -> None:
-    """Release every transaction, including one whose BEGIN failed."""
-    for conn in conns.values():
-        if conn.in_transaction:
-            _pragma(conn, 'ROLLBACK')
+def rollback_declared(conns: Mapping[str, sqlite3.Connection]) -> Mapping[str, BaseException]:
+    """Try every transaction in declared order and return errors by label."""
+    failures = {}
+    order = sorted((name for name in conns if isinstance(name, str)),
+                   key=lambda name: (name != 'catalogue', name))
+    order.extend(name for name in conns if not isinstance(name, str))
+    for name in order:
+        try:
+            if conns[name].in_transaction:
+                _pragma(conns[name], 'ROLLBACK')
+        except BaseException as error:
+            failures[name] = error
+    return failures
 
 
-def begin_declared(conns: Mapping[str, sqlite3.Connection], *,
+def begin_declared(conns: Mapping[str, sqlite3.Connection], *, root,
                    except_written: str | None = None) -> None:
     """Acquire F-2 locks; the caller commits only its one written file.
 
@@ -346,9 +354,31 @@ def begin_declared(conns: Mapping[str, sqlite3.Connection], *,
             raise ValueError('written file must be last in the declared order')
         if any(conn.in_transaction for conn in conns.values()):
             raise ValueError('declared connection already has a transaction')
+        identities = []
+        for name in order:
+            cursor = conns[name].execute('PRAGMA database_list')
+            try:
+                databases = cursor.fetchall()
+            finally:
+                cursor.close()
+            main = next((row[2] for row in databases if row[1] == 'main'), '')
+            if not main:
+                raise ValueError('declared connection holds another file')
+            expected = catalogue_path(root) if name == 'catalogue' else ledger_path(root, name)
+            try:
+                actual_stat = os.stat(main)
+                expected_stat = os.stat(expected)
+            except FileNotFoundError:
+                raise ValueError('declared connection holds another file') from None
+            if (actual_stat.st_dev, actual_stat.st_ino) != (expected_stat.st_dev, expected_stat.st_ino):
+                raise ValueError('declared connection holds another file')
+            identities.append((actual_stat.st_dev, actual_stat.st_ino))
+        if len(set(identities)) != len(identities):
+            raise ValueError('declared connections hold one file')
         for name in order:
             if name != except_written:
                 _pragma(conns[name], 'BEGIN IMMEDIATE')
-    except BaseException:
-        rollback_declared(conns)
+    except BaseException as original:
+        for name, error in rollback_declared(conns).items():
+            original.add_note(f'{name}: {type(error).__name__}: {error}')
         raise
