@@ -7407,11 +7407,17 @@ class BoundedRootCallTests(TmpEnv):
 
     def _probe(self, body):
         import textwrap
-        bootstrap = '''import importlib.util, sys, threading, time, unittest, errno
+        bootstrap = '''import importlib.util, sys, threading, time, unittest, errno, hashlib, json, pathlib
 spec = importlib.util.spec_from_file_location("budget_probe", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
 spec.loader.exec_module(m)
+print("BUDGET_PROBE_IDENTITY " + json.dumps({
+    "script": str(pathlib.Path(m.__file__).resolve()),
+    "script_sha256": hashlib.sha256(pathlib.Path(m.__file__).read_bytes()).hexdigest(),
+    "window": str(pathlib.Path(m.window.__file__).resolve()),
+    "window_sha256": hashlib.sha256(pathlib.Path(m.window.__file__).read_bytes()).hexdigest(),
+}), flush=True)
 t = unittest.TestCase()
 release = threading.Event()
 entered = threading.Event()
@@ -7466,18 +7472,153 @@ def reap():
 
     def test_immediate_stall_consumes_no_budget(self):
         self._probe('''
-            with m.root_budget(.02):
-                t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
-            with m.root_budget() as budget:
-                before = budget.remaining()
-                t.assertEqual(m.bounded_root_call(lambda: None).kind, "stalled")
-                t.assertEqual(budget.remaining(), before)
-            reap()
-            with m.root_budget() as budget:
-                before = budget.remaining()
-                t.assertEqual(m.bounded_root_call(lambda: threading.Event().wait(.3)).kind, "ok")
-                t.assertGreaterEqual(before - budget.remaining(), .3)
+            from types import SimpleNamespace
+            original = m.threading
+            starts, callbacks = [], []
+            def worker_thread(*args, **kwargs):
+                starts.append(1)
+                return threading.Thread(*args, **kwargs)
+            m.threading = SimpleNamespace(Thread=worker_thread, Event=threading.Event)
+            try:
+                with m.root_budget(.02):
+                    t.assertEqual(m.bounded_root_call(blocked).kind, "stalled")
+                t.assertTrue(entered.is_set())
+                with m.root_budget() as budget:
+                    before = budget.remaining()
+                    t.assertEqual(m.bounded_root_call(lambda: callbacks.append(1)).kind, "stalled")
+                    t.assertEqual(budget.remaining(), before, "immediate_stall_balance")
+                    t.assertEqual(starts, [1])
+                    t.assertEqual(callbacks, [])
+            finally:
+                m.threading = original
+                reap()
         ''')
+
+    def _accounting_probe(self, scenario):
+        self._probe("scenario = " + repr(scenario) + "\n" + '''
+from types import SimpleNamespace
+clock = SimpleNamespace(now=16.0)
+states, workers, timeouts = [], [], []
+original_time, original_threading = m.time, m.threading
+schedule = [(0.125, False, None)] if scenario == "cap" else [(0.125, True, 0.25)]
+if scenario == "shared":
+    schedule += [(0.0, False, None), (0.0, False, None)]
+
+class Completion:
+    def __init__(self):
+        self.pre_wait, self.complete, self.caller_wait = schedule[len(states)]
+        self.done = threading.Event()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.callbacks = 0
+        states.append(self)
+
+    def is_set(self):
+        return self.done.is_set()
+
+    def set(self):
+        self.done.set()
+
+    def wait(self, timeout):
+        timeouts.append(timeout)
+        if self.complete:
+            self.release.set()
+            finished = self.done.wait(2)
+            t.assertTrue(finished, "actual worker did not complete")
+            clock.now += self.caller_wait
+        else:
+            finished = self.done.wait(0)
+            t.assertFalse(finished, "incomplete worker escaped its barrier")
+            clock.now += timeout
+        return finished
+
+class Worker:
+    def __init__(self, **kwargs):
+        self.state = states[-1]
+        self.thread = threading.Thread(**kwargs)
+        workers.append(self.thread)
+
+    def start(self):
+        self.thread.start()
+        t.assertTrue(self.state.entered.wait(2), "worker did not enter callback")
+        # Advance before the caller samples started_wait, never the real clock.
+        clock.now += self.state.pre_wait
+
+def callback():
+    state = states[-1]
+    state.callbacks += 1
+    state.entered.set()
+    if not state.release.wait(2):
+        raise AssertionError("callback release timed out")
+    return "actual-value"
+
+def release_workers():
+    for state in states:
+        state.release.set()
+    for worker in workers:
+        worker.join(2)
+        t.assertFalse(worker.is_alive(), "controlled worker not reaped")
+
+m.time = SimpleNamespace(monotonic=lambda: clock.now)
+m.threading = SimpleNamespace(Event=Completion, Thread=Worker)
+try:
+    t.assertIsNone(m.current_budget())
+    with m.root_budget(1.0, cap=16.5 if scenario == "cap" else None) as budget:
+        t.assertIs(m.current_budget(), budget)
+        t.assertEqual(budget.remaining(), 1.0)
+        result = m.bounded_root_call(callback)
+        if scenario == "cap":
+            t.assertEqual(timeouts, [0.375], "absolute_deadline_timeout")
+            t.assertEqual(result.kind, "stalled")
+            t.assertIsNone(result.value)
+            t.assertEqual(budget.remaining(), 0.625)
+            t.assertFalse(states[0].is_set())
+        else:
+            t.assertEqual((result.kind, result.value), ("ok", "actual-value"))
+            t.assertEqual(budget.remaining(), 0.75,
+                          "shared_scope_balance" if scenario == "shared" else "caller_wait_balance")
+            t.assertEqual(timeouts, [0.875], "completed_deadline_timeout")
+            t.assertTrue(states[0].is_set())
+        t.assertEqual(len(workers), 1)
+        t.assertEqual([state.callbacks for state in states], [1])
+        if scenario == "shared":
+            result = m.bounded_root_call(callback)
+            t.assertEqual(timeouts, [0.875, 0.75], "shared_scope_timeout")
+            t.assertEqual(result.kind, "stalled")
+            t.assertIsNone(result.value)
+            t.assertEqual(budget.remaining(), 0.0, "exhausted_scope_balance")
+            t.assertFalse(states[1].is_set())
+            t.assertEqual(m.bounded_root_call(lambda: t.fail("spent callback")).kind, "stalled")
+            t.assertEqual(len(workers), 2, "spent scope started another worker")
+            t.assertEqual(timeouts, [0.875, 0.75])
+            t.assertEqual([state.callbacks for state in states], [1, 1])
+    t.assertIsNone(m.current_budget())
+    if scenario == "shared":
+        release_workers()
+        with m.root_budget(1.0) as fresh:
+            t.assertEqual(fresh.remaining(), 1.0)
+            result = m.bounded_root_call(callback)
+            t.assertEqual(timeouts, [0.875, 0.75, 1.0], "fresh_scope_timeout")
+            t.assertEqual(result.kind, "stalled")
+            t.assertEqual(fresh.remaining(), 0.0)
+            t.assertEqual(len(workers), 3)
+            t.assertEqual([state.callbacks for state in states], [1, 1, 1])
+        t.assertIsNone(m.current_budget())
+finally:
+    try:
+        release_workers()
+    finally:
+        m.time, m.threading = original_time, original_threading
+''')
+
+    def test_completed_call_debits_only_caller_wait(self):
+        self._accounting_probe("completed")
+
+    def test_scoped_remainder_and_fresh_scope_are_distinct(self):
+        self._accounting_probe("shared")
+
+    def test_pre_worker_deadline_remains_absolute(self):
+        self._accounting_probe("cap")
 
     def test_spent_budget_returns_stalled_without_a_thread(self):
         self._probe('''
