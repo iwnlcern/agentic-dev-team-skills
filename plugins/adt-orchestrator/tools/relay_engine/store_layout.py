@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+import os
 import sqlite3
 import sys
 import time
@@ -53,6 +54,15 @@ def production_root():
 
 def ledger_path(root, project_id: str):
     return Path(root) / 'projects' / _canonical_id(project_id) / 'ledger.sqlite3'
+
+
+def catalogue_path(root):
+    return Path(root) / 'machine.sqlite3'
+
+
+def resolve_root(root):
+    """The one spelling of a store root, taken once by its starter (delta 1 D4)."""
+    return Path(os.path.realpath(root))
 
 
 def evidence_dir(root, project_id: str):
@@ -139,7 +149,7 @@ def open_catalogue(root, *, kind: str | None = None):
     if kind not in (None, 'production', 'isolated'):
         raise ValueError('unknown catalogue kind')
     root = Path(root)
-    path = root / 'machine.sqlite3'
+    path = catalogue_path(root)
     projects = root / 'projects'
     has_projects = projects.exists() and any(projects.iterdir())
     if has_projects and (not path.exists() or path.stat().st_size == 0):
@@ -177,6 +187,74 @@ def open_catalogue(root, *, kind: str | None = None):
         conn.close()
         raise
     return conn
+
+
+def _open_readonly(path, check):
+    """Read a file the writer holds; refuse rather than create or write (delta 1 D1)."""
+    if not path.exists():
+        raise LayoutFault('missing')
+    for suffix in ('-wal', '-shm'):
+        if not Path(str(path) + suffix).exists():
+            raise LayoutFault('no-writer')
+    conn = sqlite3.connect(path.absolute().as_uri() + '?mode=ro', uri=True, isolation_level=None)
+    try:
+        try:
+            _pragma(conn, 'PRAGMA query_only=ON')
+            schema.require_sqlite()
+            if _row(conn, 'PRAGMA journal_mode') != ('wal',):
+                raise LayoutFault('not-wal')
+            check(conn)
+        except sqlite3.OperationalError as exc:
+            if getattr(exc, 'sqlite_errorname', None) == 'SQLITE_READONLY_DIRECTORY':
+                raise LayoutFault('no-writer') from None
+            raise
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def open_ledger_readonly(root, project_id: str):
+    """A read-only connection to a ledger the writer holds."""
+    def check(conn):
+        if _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'") is None:
+            raise LayoutFault('no-project-row')
+        rows = conn.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')
+        try:
+            projects = rows.fetchall()
+        finally:
+            rows.close()
+        if projects and projects != [(project_id,)]:
+            raise LayoutFault('wrong-project')
+        if not projects:
+            raise LayoutFault('no-project-row')
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")
+        try:
+            names = {name for (name,) in cursor}
+        finally:
+            cursor.close()
+        schema._require_matching(conn, names)
+
+    return _open_readonly(ledger_path(root, project_id), check)
+
+
+def open_catalogue_readonly(root):
+    """A read-only connection to the catalogue the writer holds."""
+    from relay_engine import catalogue
+
+    def check(conn):
+        catalogue._require_matching(conn)
+        if _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1') is None:
+            raise LayoutFault('no-identity')
+
+    return _open_readonly(catalogue_path(root), check)
+
+
+def route_state(catalogue_conn, project_id: str):
+    """'active', 'creating' or 'absent', never RouteUnavailable (delta 1 D2)."""
+    row = _row(catalogue_conn, 'SELECT state FROM project_routes WHERE project_id=?',
+               (_canonical_id(project_id),))
+    return 'absent' if row is None else row[0]
 
 
 def route(catalogue_conn, *, project_id: str | None = None, name: str | None = None):
