@@ -888,11 +888,19 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' 
                     self.assertGreater(peak, 1)
 
 
+# After a killed worker the battery promises no immediate reap: the suite
+# runner notices its parent's death on stop_scope's `while not
+# finished.wait(0.05):` poll and then tears down, so each suite process is
+# gone within one watcher poll plus STOP_GRACE.
+WATCH_POLL_SECONDS = 0.05
+REAP_BOUND = mt.STOP_GRACE + WATCH_POLL_SECONDS
+
+
 class TestFoldLifecycle(unittest.TestCase):
     # Child processes exercise signal delivery, descriptor inheritance and
     # partial output across the actual worker scheduler, not mocked futures.
     @contextlib.contextmanager
-    def driver(self, mode='block'):
+    def driver(self, mode='block', hold_teardown=False):
         import sys
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -915,11 +923,19 @@ else:
             if result.returncode: raise SystemExit(7)
 print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' ok'], errors=[], completed=True)), flush=True)
 ''')
+            # A held teardown keeps the suite runner alive at its exit until
+            # `release` exists, so it is certain to outlive the driver.
+            hold = '''import atexit, time
+def hold_teardown():
+    end = time.monotonic() + 20
+    while not (root/'release').exists() and time.monotonic() < end: time.sleep(0.01)
+atexit.register(hold_teardown)
+''' if hold_teardown else ''
             (root/'harness.py').write_text("""import os, subprocess, sys
 from pathlib import Path
 from types import SimpleNamespace
 root = Path(__file__).parent
-staged = root/('child.pid.' + str(os.getpid()) + '.tmp'); staged.write_text(str(os.getpid())); os.replace(staged, root/'child.pid')
+""" + hold + """staged = root/('child.pid.' + str(os.getpid()) + '.tmp'); staged.write_text(str(os.getpid())); os.replace(staged, root/'child.pid')
 def load_linter(): return SimpleNamespace()
 def main():
     subprocess.run([sys.executable, '-c', "import os,time; from pathlib import Path; p = Path(" + repr(str(root/'grandchild.pid')) + "); t = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp'); t.write_text(str(os.getpid())); os.replace(t, p); time.sleep(60)"])
@@ -962,6 +978,16 @@ raise SystemExit(code)
             if text.isascii() and text.isdigit() and int(text) > 0: return int(text)
             time.sleep(0.02)
         self.fail('child did not reach the synchronization point')
+
+    def wait_until_gone(self, pid, bound=REAP_BOUND):
+        import os
+        end = time.monotonic() + bound
+        while True:
+            try: os.kill(pid, 0)
+            except ProcessLookupError: return
+            if time.monotonic() >= end: break
+            time.sleep(0.02)
+        self.fail(f'suite process {pid} not gone within {bound:.2f} s (watcher poll plus STOP_GRACE)')
 
     def test_stop_forwards_to_child_and_cancels_queue(self):
         import os, signal, subprocess
@@ -1087,13 +1113,45 @@ time.sleep(60)
                 output = (root/'output').read_text()
                 self.assertIn('SIGKILL', output)
                 for pid in (child, grandchild):
-                    with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
+                    self.wait_until_gone(pid)
                 self.assertNotIn('Errno 66', output)
                 self.assertIn('ARM=b ok', output)
                 self.assertFalse(list(root.glob('arm-*')))
             finally:
                 if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+
+    def test_reap_check_waits_out_a_held_teardown(self):
+        # The driver does not wait for its worker's descendants, so a suite
+        # runner held at its exit is still alive when the driver exits 7.
+        import os, signal, subprocess
+        with self.driver(hold_teardown=True) as (root, command), (root/'output').open('w+') as out:
+            process = subprocess.Popen(command, stdout=out, stderr=out, start_new_session=True)
+            try:
+                grandchild = self.wait_for_pid(root/'grandchild.pid')
+                child = self.wait_for_pid(root/'child.pid')
+                os.kill(self.wait_for_pid(root/'a.pid'), signal.SIGKILL)
+                self.assertEqual(process.wait(timeout=8), 7)
+                os.kill(child, 0)  # held: the suite runner outlives the driver's exit
+                (root/'release').touch()
+                for pid in (child, grandchild):
+                    self.wait_until_gone(pid)
+            finally:
+                (root/'release').touch()
+                if process.poll() is None: os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+    def test_wait_until_gone_fails_on_a_live_process(self):
+        import subprocess
+        child = subprocess.Popen(['sleep', '60'])
+        try:
+            with self.assertRaises(AssertionError) as caught: self.wait_until_gone(child.pid, bound=0.2)
+            self.assertEqual(str(caught.exception),
+                             f'suite process {child.pid} not gone within 0.20 s (watcher poll plus STOP_GRACE)')
+        finally:
+            child.kill(); child.wait()
+        # Control: once the child is killed and waited, the helper returns at once.
+        self.wait_until_gone(child.pid, bound=0.2)
 
     def test_worker_entry_unwinds_owned_subprocess(self):
         import os, signal, subprocess, sys
