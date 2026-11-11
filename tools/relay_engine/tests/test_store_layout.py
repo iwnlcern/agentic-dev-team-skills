@@ -839,5 +839,334 @@ class TestDeclaredLocks(unittest.TestCase):
         store_layout.rollback_declared(conns)
 
 
+R = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+
+
+class ReadonlyDirectory(sqlite3.OperationalError):
+    """A first-statement failure carrying SQLite's read-only-directory name."""
+
+    sqlite_errorname = 'SQLITE_READONLY_DIRECTORY'
+    sqlite_errorcode = 1544
+
+
+class StandInConnection:
+    """A connection whose first statement fails as a read-only directory does."""
+
+    def __init__(self):
+        self.closed = False
+
+    def execute(self, *args, **kwargs):
+        raise ReadonlyDirectory('attempt to write a readonly database')
+
+    def close(self):
+        self.closed = True
+
+
+def route_state_calls(source):
+    """Calls of store_layout.route_state in one module's source, by any alias."""
+    import ast
+
+    tree = ast.parse(source)
+    modules, functions = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.endswith('store_layout') and alias.asname:
+                    modules.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == 'store_layout':
+                    modules.add(alias.asname or alias.name)
+                elif alias.name == 'route_state' and (node.module or '').endswith('store_layout'):
+                    functions.add(alias.asname or alias.name)
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in functions:
+            calls.append(node.lineno)
+        elif isinstance(func, ast.Attribute) and func.attr == 'route_state':
+            value = func.value
+            if isinstance(value, ast.Name) and value.id in modules:
+                calls.append(node.lineno)
+            elif isinstance(value, ast.Attribute) and value.attr == 'store_layout':
+                calls.append(node.lineno)
+    return calls
+
+
+class TestReadonlyOpeners(unittest.TestCase):
+    """Delta 1 r3 D1, D2 and D4: readers that write no page, and one served path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'store'
+
+    def keep(self, conn):
+        self.addCleanup(conn.close)
+        return conn
+
+    def ledger_writer(self, project=P, row=P):
+        conn = self.keep(store_layout.open_ledger(self.root, project, create=True))
+        if row is not None:
+            conn.execute('INSERT INTO projects(id, name, created_at) VALUES (?, ?, 1)',
+                         (row, 'example'))
+            conn.execute('COMMIT')
+        else:
+            # A connection that has run nothing since the switch to WAL holds no side files yet;
+            # one read opens them, so the file is held as D5's cases require.
+            conn.execute('SELECT count(*) FROM projects').fetchall()
+        return conn
+
+    def catalogue_writer(self):
+        return self.keep(store_layout.open_catalogue(self.root))
+
+    def names(self, directory):
+        return sorted(os.listdir(directory))
+
+    def main_name(self, conn):
+        return next(path for _, database, path in conn.execute('PRAGMA database_list')
+                    if database == 'main')
+
+    def test_readonly_openers_write_nothing(self):
+        ledger = store_layout.ledger_path(self.root, P)
+        catalogue = self.root / 'machine.sqlite3'
+        self.catalogue_writer()  # before any ledger: open_catalogue refuses a missing catalogue beside projects
+        self.ledger_writer()
+        openers = [(ledger, lambda: store_layout.open_ledger_readonly(self.root, P), 'projects'),
+                   (catalogue, lambda: store_layout.open_catalogue_readonly(self.root),
+                    'catalogue_identity')]
+        for path, opener, table in openers:
+            with self.subTest(path=path.name):
+                before = (path.read_bytes(), Path(str(path) + '-wal').read_bytes(),
+                          self.names(path.parent))
+                reader = opener()
+                try:
+                    self.assertIsNone(reader.isolation_level)
+                    self.assertEqual(reader.execute('PRAGMA query_only').fetchone(), (1,))
+                    self.assertTrue(reader.execute('SELECT * FROM ' + table).fetchall())
+                    self.assertFalse(reader.in_transaction)
+                finally:
+                    reader.close()
+                after = (path.read_bytes(), Path(str(path) + '-wal').read_bytes(),
+                         self.names(path.parent))
+                self.assertEqual(before, after)
+                # With query_only lifted, the mode=ro connection itself refuses the write.
+                reader = opener()
+                try:
+                    reader.execute('PRAGMA query_only=OFF')
+                    with self.assertRaises(sqlite3.OperationalError) as caught:
+                        reader.execute('CREATE TABLE ro_probe(a)')
+                    self.assertIn('attempt to write a readonly database', str(caught.exception))
+                finally:
+                    reader.close()
+        self.writer_waits_reader_returns(ledger, catalogue)
+
+    def writer_waits_reader_returns(self, ledger, catalogue):
+        # Control: the writer openers wait the busy timeout behind a held BEGIN IMMEDIATE,
+        # while the read-only openers return at once.
+        connect = sqlite3.connect
+
+        def short_timeout(*args, **kwargs):
+            kwargs['timeout'] = 0.5
+            return connect(*args, **kwargs)
+
+        cases = [(ledger, lambda: store_layout.open_ledger(self.root, P),
+                  lambda: store_layout.open_ledger_readonly(self.root, P)),
+                 (catalogue, lambda: store_layout.open_catalogue(self.root),
+                  lambda: store_layout.open_catalogue_readonly(self.root))]
+        for path, writer_opener, reader_opener in cases:
+            with self.subTest(path=path.name):
+                holder = self.keep(connect(path, timeout=0))
+                holder.execute('BEGIN IMMEDIATE')
+                try:
+                    with mock.patch.object(sqlite3, 'connect', side_effect=short_timeout):
+                        started = time.monotonic()
+                        with self.assertRaises(sqlite3.OperationalError) as caught:
+                            writer_opener().close()
+                        waited = time.monotonic() - started
+                        self.assertIn('locked', str(caught.exception))
+                        self.assertGreaterEqual(waited, 0.4)
+                        started = time.monotonic()
+                        reader_opener().close()
+                        self.assertLess(time.monotonic() - started, 0.4)
+                finally:
+                    holder.execute('ROLLBACK')
+
+    def refusal(self, opener, cause, directory):
+        before = self.names(directory)
+        with self.assertRaises(store_layout.LayoutFault) as caught:
+            opener()
+        self.assertEqual(caught.exception.cause, cause)
+        self.assertEqual(self.names(directory), before)
+
+    def test_readonly_openers_refuse(self):
+        ledger = store_layout.ledger_path(self.root, P)
+        ledger_open = lambda: store_layout.open_ledger_readonly(self.root, P)
+        catalogue_open = lambda: store_layout.open_catalogue_readonly(self.root)
+        # Missing: nothing is created.
+        self.root.mkdir()
+        self.refusal(ledger_open, 'missing', self.root)
+        self.refusal(catalogue_open, 'missing', self.root)
+        # No writer: both files exist with their side files gone after a clean close.
+        store_layout.open_catalogue(self.root).close()
+        store_layout.open_ledger(self.root, P, create=True).close()
+        self.assertEqual(self.names(ledger.parent), ['ledger.sqlite3'])
+        self.refusal(ledger_open, 'no-writer', ledger.parent)
+        self.refusal(catalogue_open, 'no-writer', self.root)
+        # Control: a plain mode=ro connection opens it and leaves both side files behind.
+        plain = sqlite3.connect(ledger.absolute().as_uri() + '?mode=ro', uri=True)
+        plain.execute('PRAGMA journal_mode').fetchone()
+        plain.close()
+        self.assertEqual(self.names(ledger.parent),
+                         ['ledger.sqlite3', 'ledger.sqlite3-shm', 'ledger.sqlite3-wal'])
+        for suffix in ['-wal', '-shm']:
+            Path(str(ledger) + suffix).unlink()
+        ledger.unlink()
+        self.refuse_held_files(ledger, ledger_open, catalogue_open)
+        self.refuse_changed_ddl()
+        self.refuse_delete_mode()
+
+    def refuse_held_files(self, ledger, ledger_open, catalogue_open):
+        # Every case after missing and no-writer runs with a connection holding the file.
+        writer = self.ledger_writer(row=None)
+        self.refusal(ledger_open, 'no-project-row', ledger.parent)
+        writer.execute('INSERT INTO projects(id, name, created_at) VALUES (?, ?, 1)', (Q, 'other'))
+        writer.execute('COMMIT')
+        self.refusal(ledger_open, 'wrong-project', ledger.parent)
+        catalogue = self.catalogue_writer()
+        catalogue.execute('DELETE FROM catalogue_identity')
+        catalogue.commit()
+        self.refusal(catalogue_open, 'no-identity', self.root)
+        # An injected read-only-directory failure at the first statement is no writer.
+        stand_in = StandInConnection()
+        with mock.patch.object(sqlite3, 'connect', return_value=stand_in):
+            self.refusal(ledger_open, 'no-writer', ledger.parent)
+        self.assertTrue(stand_in.closed)
+
+    def refuse_changed_ddl(self):
+        self.root = Path(self.tmp.name) / 'ddl-store'
+        catalogue = self.catalogue_writer()
+        writer = self.ledger_writer()
+        writer.execute('CREATE TABLE extra_ledger_table(a)')
+        writer.commit()
+        ledger = store_layout.ledger_path(self.root, P)
+        before = self.names(ledger.parent)
+        with self.assertRaises(errors.EngineError) as caught:
+            store_layout.open_ledger_readonly(self.root, P)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.names(ledger.parent), before)
+        catalogue.execute('CREATE TABLE extra_catalogue_table(a)')
+        catalogue.commit()
+        before = self.names(self.root)
+        with self.assertRaises(errors.EngineError) as caught:
+            store_layout.open_catalogue_readonly(self.root)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.names(self.root), before)
+
+    def refuse_delete_mode(self):
+        # A delete-mode file has no side files while held, so empty ones are planted.
+        self.root = Path(self.tmp.name) / 'delete-store'
+        ledger = store_layout.ledger_path(self.root, P)
+        ledger.parent.mkdir(parents=True)
+        holder = self.keep(sqlite3.connect(ledger))
+        holder.execute('CREATE TABLE t(a)')
+        holder.commit()
+        self.assertEqual(holder.execute('PRAGMA journal_mode').fetchone(), ('delete',))
+        for suffix in ['-wal', '-shm']:
+            Path(str(ledger) + suffix).write_bytes(b'')
+        self.refusal(lambda: store_layout.open_ledger_readonly(self.root, P), 'not-wal',
+                     ledger.parent)
+
+    def test_route_state_reports_every_state(self):
+        catalogue = self.catalogue_writer()
+        catalogue.execute('BEGIN IMMEDIATE').close()
+        store_layout.reserve_project(catalogue, P, 'active-one', 1)
+        store_layout.activate_project(catalogue, P)
+        store_layout.reserve_project(catalogue, Q, 'creating-one', 1)
+        catalogue.execute('COMMIT').close()
+        reader = self.keep(store_layout.open_catalogue_readonly(self.root))
+        for conn in [catalogue, reader]:
+            with self.subTest(conn='writer' if conn is catalogue else 'reader'):
+                self.assertEqual(store_layout.route_state(conn, P), 'active')
+                self.assertEqual(store_layout.route_state(conn, Q), 'creating')
+                self.assertEqual(store_layout.route_state(conn, R), 'absent')
+                self.assertFalse(conn.in_transaction)
+                statements = []
+                conn.set_trace_callback(statements.append)
+                try:
+                    for bad in [P.upper(), 'not-a-uuid', None]:
+                        with self.assertRaises(ValueError):
+                            store_layout.route_state(conn, bad)
+                finally:
+                    conn.set_trace_callback(None)
+                self.assertEqual(statements, [])
+        with self.assertRaises(store_layout.RouteUnavailable) as caught:
+            store_layout.route(catalogue, project_id=Q)
+        self.assertEqual(caught.exception.cause, 'creating')
+
+    def test_route_state_one_caller(self):
+        package = Path(store_layout.__file__).resolve().parent
+        callers = {}
+        for path in sorted(package.rglob('*.py')):
+            calls = route_state_calls(path.read_text(encoding='utf-8'))
+            if calls:
+                callers[path.relative_to(package).as_posix()] = calls
+        self.assertTrue(callers, 'the scan found no call at all, not even this module')
+        for relative in callers:
+            self.assertTrue(relative.startswith('tests/'), relative)
+        # Control: the scanner sees aliases and ignores a field of the same name.
+        samples = {
+            'from relay_engine import store_layout\nstore_layout.route_state(c, p)\n': 1,
+            'from relay_engine import store_layout as sl\nsl.route_state(c, p)\n': 1,
+            'import relay_engine.store_layout as sl\nsl.route_state(c, p)\n': 1,
+            'from relay_engine.store_layout import route_state as rs\nrs(c, p)\n': 1,
+            'import relay_engine\nrelay_engine.store_layout.route_state(c, p)\n': 1,
+            'confirmation.route_state\nrecord(route_state=1)\n': 0,
+            'from relay_engine import store_layout\nconfirmation.route_state(c)\n': 0,
+        }
+        for source, count in samples.items():
+            with self.subTest(source=source):
+                self.assertEqual(len(route_state_calls(source)), count)
+
+    def test_served_path_one_spelling(self):
+        real = Path(self.tmp.name) / 'real'
+        real.mkdir()
+        link = Path(self.tmp.name) / 'link'
+        link.symlink_to(real, target_is_directory=True)
+        resolved = store_layout.resolve_root(link)
+        self.assertEqual(resolved, Path(os.path.realpath(link)))
+        self.assertEqual(store_layout.catalogue_path(resolved), resolved / 'machine.sqlite3')
+        catalogue = self.keep(store_layout.open_catalogue(resolved))
+        catalogue.execute('BEGIN IMMEDIATE').close()
+        store_layout.reserve_project(catalogue, P, 'example', 1)
+        store_layout.activate_project(catalogue, P)
+        catalogue.execute('COMMIT').close()
+        writer = self.keep(store_layout.open_ledger(resolved, P, create=True))
+        writer.execute('INSERT INTO projects(id, name, created_at) VALUES (?, ?, 1)', (P, 'example'))
+        writer.execute('COMMIT')
+        ledger_reader = self.keep(store_layout.open_ledger_readonly(resolved, P))
+        catalogue_reader = self.keep(store_layout.open_catalogue_readonly(resolved))
+        pairs = [
+            (str(store_layout.route(catalogue, project_id=P).ledger_path),
+             str(store_layout.ledger_path(resolved, P))),
+            (self.main_name(ledger_reader), str(store_layout.ledger_path(resolved, P))),
+            (self.main_name(catalogue_reader), str(store_layout.catalogue_path(resolved))),
+        ]
+        for first, second in pairs:
+            with self.subTest(pair=first):
+                self.assertEqual(first, second)
+                self.assertEqual(os.stat(first).st_ino, os.stat(second).st_ino)
+        # Control: built from the unresolved link, at least one pair differs.
+        unresolved = [
+            (str(store_layout.route(catalogue, project_id=P).ledger_path),
+             str(store_layout.ledger_path(link, P))),
+            (self.main_name(ledger_reader), str(store_layout.ledger_path(link, P))),
+            (self.main_name(catalogue_reader), str(store_layout.catalogue_path(link))),
+        ]
+        self.assertTrue(any(first != second for first, second in unresolved))
+
+
 if __name__ == '__main__':
     unittest.main()
