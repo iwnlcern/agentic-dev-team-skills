@@ -1160,7 +1160,7 @@ time.sleep(60)
             driver.write_text('''import subprocess, sys
 import mtbattery as mt
 def work(*args):
-    subprocess.run([sys.executable, '-c', "from pathlib import Path; import os,time; p = Path(" + repr(sys.argv[1]) + "); t = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp'); t.write_text(str(os.getpid())); os.replace(t, p); time.sleep(60)"])
+    mt.managed_run([sys.executable, '-c', "from pathlib import Path; import os,time; p = Path(" + repr(sys.argv[1]) + "); t = p.with_name(p.name + '.' + str(os.getpid()) + '.tmp'); t.write_text(str(os.getpid())); os.replace(t, p); time.sleep(60)"])
     return 0
 mt.worker_main = work
 raise SystemExit(mt.main(['--spec', 'unused', '--worker-arm', 'standin', '--run-file', 'unused']))
@@ -1309,3 +1309,115 @@ with mock.patch.object(mt,'tree_digest',return_value={}), mock.patch.object(mt,'
                     try: os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError: pass
                     process.wait()
+
+
+class TestManagedRunDeferredStop(unittest.TestCase):
+    @contextlib.contextmanager
+    def _signal_during_construction(self, when, pids):
+        import os, signal, subprocess
+        original = subprocess.Popen._execute_child
+        processes = []
+
+        def execute(process, *args, **kwargs):
+            # Keep the real handle alive through the assertion and cleanup,
+            # including when __init__ unwinds before returning that handle.
+            processes.append(process)
+            try:
+                if when == 'before':
+                    signal.raise_signal(signal.SIGTERM)
+                result = original(process, *args, **kwargs)
+                if when == 'after':
+                    signal.raise_signal(signal.SIGTERM)
+                return result
+            finally:
+                pids.append(process.pid)
+
+        try:
+            with mock.patch.object(subprocess.Popen, '_execute_child', new=execute):
+                yield
+        finally:
+            for process in processes:
+                if process.pid is not None:
+                    # waitpid proves ownership before any signal, so cleanup
+                    # never targets an unrelated process that reused the pid.
+                    try:
+                        waited, status = os.waitpid(process.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        process.poll()
+                    else:
+                        if waited == 0:
+                            try:
+                                os.kill(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            _, status = os.waitpid(process.pid, 0)
+                        process.returncode = os.waitstatus_to_exitcode(status)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+
+    def test_stop_during_construction_reaps_child_then_raises(self):
+        # Without construction deferral, RunStopped escapes Popen.__init__
+        # while the real sleeping child is still alive and unreaped.
+        import os, sys
+        pids = []
+        with mt.stop_scope(raise_on_stop=True), self._signal_during_construction('after', pids):
+            with self.assertRaises(mt.RunStopped) as caught:
+                mt.managed_run([sys.executable, '-c', 'import time; time.sleep(60)'])
+            self.assertEqual(caught.exception.code, 143)
+            self.assertEqual(len(pids), 1)
+            self.assertIsInstance(pids[0], int)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pids[0], 0)
+
+
+    def test_stop_before_failed_start_raises_from_start_error(self):
+        import os
+        pids = []
+        with tempfile.TemporaryDirectory() as raw, mt.stop_scope(raise_on_stop=True) as state:
+            saved_defer = state.defer
+            with self._signal_during_construction('before', pids):
+                with self.assertRaises(mt.RunStopped) as caught:
+                    mt.managed_run([str(Path(raw) / 'missing')])
+                self.assertEqual(caught.exception.code, 143)
+                self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
+                self.assertEqual(state.defer, saved_defer)
+                self.assertTrue(pids, 'construction must record even on failure')
+                self.assertEqual(len(pids), 1)
+                if pids[0] is not None:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pids[0], 0)
+
+    def test_failed_start_without_stop_keeps_error(self):
+        with tempfile.TemporaryDirectory() as raw, mt.stop_scope(raise_on_stop=True) as state:
+            saved_defer = state.defer
+            with self.assertRaises(FileNotFoundError):
+                mt.managed_run([str(Path(raw) / 'missing')])
+            self.assertEqual(state.defer, saved_defer)
+
+    def test_stop_during_construction_in_non_raising_scope_returns(self):
+        import os, signal, subprocess, sys
+        pids = []
+        with mt.stop_scope(), self._signal_during_construction('after', pids):
+            result = mt.managed_run([sys.executable, '-c', 'import time; time.sleep(60)'])
+            self.assertIsInstance(result, subprocess.CompletedProcess)
+            self.assertEqual(result.returncode, -signal.SIGTERM)
+            self.assertEqual(len(pids), 1)
+            self.assertIsInstance(pids[0], int)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pids[0], 0)
+
+    def test_stop_during_construction_under_outer_defer_returns(self):
+        import os, signal, subprocess, sys
+        pids = []
+        with mt.stop_scope(raise_on_stop=True) as state:
+            state.defer = True
+            with self._signal_during_construction('after', pids):
+                result = mt.managed_run([sys.executable, '-c', 'import time; time.sleep(60)'])
+                self.assertIsInstance(result, subprocess.CompletedProcess)
+                self.assertEqual(result.returncode, -signal.SIGTERM)
+                self.assertEqual(len(pids), 1)
+                self.assertIsInstance(pids[0], int)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pids[0], 0)
+                self.assertTrue(state.defer)
