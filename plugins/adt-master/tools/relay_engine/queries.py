@@ -645,6 +645,11 @@ def _snapshot(conn, handle, project_id):
     return _snapshot_row(row)
 
 
+_UNAVAILABLE_TEXT = {"missing": "the evidence store reports its bytes missing",
+                     "corrupt": "the evidence store reports its bytes corrupt",
+                     "unsupported-codec": "the evidence store cannot decode its bytes"}
+
+
 def _snapshot_bytes(conn, snapshot, store, directory):
     if snapshot.has_bytes:
         if store is None:
@@ -654,6 +659,8 @@ def _snapshot_bytes(conn, snapshot, store, directory):
                 data = store.get(snapshot.content_sha256)
             except KeyError:
                 reason = "the evidence store does not hold its bytes"
+            except submit.EvidenceUnavailable as unavailable:
+                reason = _UNAVAILABLE_TEXT[unavailable.reason]
             else:
                 if hashlib.sha256(data).hexdigest() != snapshot.content_sha256:
                     raise ValueError("stored bytes no longer match snapshot %d" % snapshot.handle)

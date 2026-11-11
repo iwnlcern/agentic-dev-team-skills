@@ -1717,6 +1717,30 @@ class TestSnapshotCopies(submit_tests.Snapshots):
                 self.assertIn("snapshot 1", str(result[1]))
                 self.assertFalse(out.exists())
 
+    def test_store_unavailable_typed(self):
+        self.snapshots_pair()
+        out = self.folder / "unavailable-copy"
+        texts = {"missing": "the evidence store reports its bytes missing",
+                 "corrupt": "the evidence store reports its bytes corrupt",
+                 "unsupported-codec": "the evidence store cannot decode its bytes"}
+        actions = (lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+            project_id=submit_tests.PROJECT), lambda: queries.snapshot_diff(self.conn, 1, 2, self.store,
+            project_id=submit_tests.PROJECT))
+        for literal, text in texts.items():
+            unavailable = submit.EvidenceUnavailable(literal)
+            self.assertEqual(unavailable.reason, literal)
+            with mock.patch.object(self.store, "get", side_effect=unavailable):
+                for action in actions:
+                    result = snapshot_outcome(action)
+                    self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES", result)
+                    self.assertIn(text, result[1].cause)
+                    self.assertIsNone(result[1].__cause__)
+                    self.assertIsNone(result[1].__context__)
+                    self.assertFalse(out.exists())
+        for other in ("other", "", None):
+            with self.assertRaises(ValueError, msg=repr(other)):
+                submit.EvidenceUnavailable(other)
+
     def test_overwrite_replaces_entry(self):
         self.snapshots_pair()
         target = self.folder / "target"

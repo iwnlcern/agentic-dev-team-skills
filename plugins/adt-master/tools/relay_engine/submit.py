@@ -105,6 +105,22 @@ def _check_git_state(state):
         raise ValueError("git_state.branch is a non-empty string or None")
 
 
+# Only Authority's tables may be named as hook-writable (slice 2a D1).
+HOOK_WRITE_OWNERS = frozenset({"authority"})
+
+_UNAVAILABLE_REASONS = frozenset({"missing", "corrupt", "unsupported-codec"})
+
+
+class EvidenceUnavailable(Exception):
+    """A store knows an object but cannot return its bytes; reason says why."""
+
+    def __init__(self, reason):
+        if not isinstance(reason, str) or reason not in _UNAVAILABLE_REASONS:
+            raise ValueError("EvidenceUnavailable reason is missing, corrupt or unsupported-codec")
+        super().__init__(reason)
+        self.reason = reason
+
+
 class EvidenceStore(Protocol):
     """Platform's content-addressed evidence store (DD § 17, amendment5)."""
 
@@ -112,7 +128,10 @@ class EvidenceStore(Protocol):
         """Keep bytes under their sha256 and return that key."""
 
     def get(self, sha256: str) -> bytes:
-        """Return the bytes retained under sha256."""
+        """Return the bytes retained under sha256.
+
+        Raise KeyError for an object the store never held, and
+        EvidenceUnavailable for a known object it cannot return."""
 
     def captured_by(self, sha256: str) -> str | None:
         """Return host-observed, seat-supplied, or None for an absent record."""
@@ -156,7 +175,7 @@ class SubmitContext:
             raise ValueError("after_admit_writes is a frozenset of owned table names")
         for table in self.after_admit_writes:
             if (not isinstance(table, str) or table not in schema.TABLE_OWNERS
-                    or schema.TABLE_OWNERS[table] in {"engine", "platform"}):
+                    or schema.TABLE_OWNERS[table] not in HOOK_WRITE_OWNERS):
                 raise ValueError("after_admit_writes names only declared hook-owned tables")
 
 

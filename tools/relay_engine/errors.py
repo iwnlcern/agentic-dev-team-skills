@@ -482,7 +482,10 @@ _NO_BYTES_REASONS = {"the file was over 1 MiB when the request was submitted",
                      "no evidence store was configured when the request was submitted",
                      "the blob cannot be read from its checkout",
                      "no evidence store was given to read its bytes",
-                     "the evidence store does not hold its bytes"}
+                     "the evidence store does not hold its bytes",
+                     "the evidence store reports its bytes missing",
+                     "the evidence store reports its bytes corrupt",
+                     "the evidence store cannot decode its bytes"}
 strings.register_inventory(_SNAPSHOT_TEXT, {
     (key, field): {"line": _is_line, "value": _is_header_text,
                    "handle": lambda v: strings._is_count(v) and v >= 1,

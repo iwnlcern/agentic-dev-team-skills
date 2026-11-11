@@ -1231,7 +1231,7 @@ class TestAdmissionHook(Store):
         self.conn.executescript(
             "CREATE TABLE fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT REFERENCES relays(id));"
             "CREATE TABLE fixture_other (id TEXT PRIMARY KEY);")
-        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "test-only"})
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "authority"})
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -1376,7 +1376,7 @@ class TestAdmissionHook(Store):
             "CREATE TABLE fixture_child (id TEXT PRIMARY KEY, parent TEXT REFERENCES"
             " fixture_parent(id) ON DELETE CASCADE);"
             "INSERT INTO fixture_parent VALUES ('p'); INSERT INTO fixture_child VALUES ('c','p');")
-        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_parent": "test-only"}):
+        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_parent": "authority"}):
             operations = [
                 lambda c, a: c.execute("UPDATE relays SET subject='forged'"),
                 lambda c, a: c.execute("DELETE FROM relays"),
@@ -1655,7 +1655,7 @@ class TestAdmissionHookAtomicity(Store):
         attacks = ("fresh-cte", "cached-cte", "table-rollback", "plain")
         cte = "WITH value(id,relay_id) AS (VALUES (?,?)) INSERT INTO fixture_owned SELECT * FROM value"
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for mode in modes:
                 path = Path(name) / (mode + "-control.db")
                 conn = self.file_store(path, mode=mode)
@@ -1823,7 +1823,7 @@ class TestAdmissionHookAtomicity(Store):
         private_message = "PRIVATE-CLOSED-HOOK-PAYLOAD-918"
         disclosed = []
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for closing in (True, False):
                 path = Path(name) / ("closed-raise.db" if closing else "open-raise.db")
                 conn = self.file_store(path)
@@ -1865,7 +1865,7 @@ class TestAdmissionHookAtomicity(Store):
 
     def test_hook_closing_connection_cleans_frame(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             path = Path(name) / "closed.db"
             conn = self.file_store(path)
             before = self.file_state(path)
@@ -1888,7 +1888,7 @@ class TestAdmissionHookAtomicity(Store):
 
     def test_hook_closing_connection_interrupt_propagates(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             path = Path(name) / "closed-interrupt.db"
             conn = self.file_store(path)
             before = self.file_state(path)
@@ -1909,7 +1909,7 @@ class TestAdmissionHookAtomicity(Store):
 
     def test_hook_writes_outside_main_refused(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for database in ("fixture_attached", "temp"):
                 with self.subTest(database=database):
                     path = Path(name) / (database + ".db")
@@ -1965,7 +1965,7 @@ class TestAdmissionHookAtomicity(Store):
     def test_hook_closing_connection_engine_error_discloses_nothing(self):
         private_message = "PRIVATE-CLOSED-ENGINEERROR-PAYLOAD-467"
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for route in ("raised", "system-filing"):
                 with self.subTest(route=route):
                     path = Path(name) / (route + ".db")
@@ -2008,6 +2008,24 @@ class TestAdmissionHookAtomicity(Store):
                     self.assertNotIn(private_message, "".join(traceback.format_exception(outcome)))
                     self.assertEqual(self.file_state(path), before)
                     self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+
+class TestHookWriteOwners(Store):
+    """Breaks: a hook may write a table whose declared owner is not Authority (slice 2a D1)."""
+
+    def test_hook_write_owner_allowlist(self):
+        message = "after_admit_writes names only declared hook-owned tables"
+        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
+            ctx = replace(self.ctx(), after_admit_writes=frozenset({"fixture_owned"}))
+            self.assertEqual(ctx.after_admit_writes, frozenset({"fixture_owned"}))
+        for owner in ("console", "store", "test-only"):
+            with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": owner}):
+                with self.assertRaises(ValueError, msg=owner) as caught:
+                    replace(self.ctx(), after_admit_writes=frozenset({"fixture_owned"}))
+                self.assertEqual(str(caught.exception), message)
+        for table in sorted(schema.TABLE_OWNERS):
+            with self.assertRaises(ValueError, msg=table):
+                replace(self.ctx(), after_admit_writes=frozenset({table}))
 
 
 class TestAdmissionKeyBoundary(Store):
@@ -2454,7 +2472,7 @@ class TestReadGuard(Store):
         super().setUp()
         self.conn.execute("CREATE TABLE fixture_guard (value TEXT)")
         self.conn.commit()
-        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_guard": "test-only"})
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_guard": "authority"})
         patch.start()
         self.addCleanup(patch.stop)
 
