@@ -569,6 +569,110 @@ class TestDeclaredLocks(unittest.TestCase):
         finally:
             cursor.close()
 
+    def test_begin_declared_refuses_another_file(self):
+        # F1-M1: accepting a Q ledger as P would lock and use the wrong file.
+        for label, actual in [(P, Q), ('catalogue', P)]:
+            conn = self.connect(actual)
+            self.addCleanup(conn.close)
+            with self.assertRaisesRegex(ValueError, '^declared connection holds another file$'):
+                store_layout.begin_declared({label: conn}, root=self.root)
+            self.assertFalse(conn.in_transaction)
+            for name in {label, actual}:
+                other = self.connect(name, timeout=0)
+                try:
+                    other.execute('BEGIN IMMEDIATE').close()
+                    other.execute('ROLLBACK').close()
+                finally:
+                    other.close()
+        memory = sqlite3.connect(':memory:')
+        self.addCleanup(memory.close)
+        with self.assertRaisesRegex(ValueError, '^declared connection holds another file$'):
+            store_layout.begin_declared({P: memory}, root=self.root)
+        link = self.root.parent / 'store-link'
+        link.symlink_to(self.root, target_is_directory=True)
+        conns = {name: sqlite3.connect(path) for name, path in [
+            ('catalogue', store_layout.catalogue_path(link)),
+            (P, store_layout.ledger_path(link, P)),
+        ]}
+        for conn in conns.values():
+            self.addCleanup(conn.close)
+        store_layout.begin_declared(conns, root=link)
+        self.assertTrue(all(conn.in_transaction for conn in conns.values()))
+        store_layout.rollback_declared(conns)
+
+    def test_rollback_declared_tries_every_connection(self):
+        # F1-M3: propagating the first rollback error strands later locks.
+        conns = self.connections(('catalogue', P, Q))
+        for conn in conns.values():
+            conn.execute('BEGIN IMMEDIATE').close()
+        rollback_error = sqlite3.OperationalError('rollback failed')
+        first = conns['catalogue']
+
+        class FailingRollback:
+            @property
+            def in_transaction(self):
+                return first.in_transaction
+
+            def execute(self, sql):
+                if sql == 'ROLLBACK':
+                    raise rollback_error
+                return first.execute(sql)
+
+        conns['catalogue'] = FailingRollback()
+        caught = None
+        failures = None
+        try:
+            failures = store_layout.rollback_declared(conns)
+        except BaseException as error:
+            caught = error
+        self.assertIsNone(caught)
+        self.assertEqual(set(failures), {'catalogue'})
+        self.assertIs(failures['catalogue'], rollback_error)
+        self.assertFalse(conns[P].in_transaction)
+        self.assertFalse(conns[Q].in_transaction)
+
+    def test_begin_declared_keeps_original_error(self):
+        # F1-M4: a rollback error must not replace the failed BEGIN's cause.
+        for begin_failure, rollback_failure in [(P, 'catalogue'), (Q, P)]:
+            with self.subTest(begin=begin_failure, rollback=rollback_failure):
+                conns = self.connections(('catalogue', P, Q))
+                wrapped = conns[rollback_failure]
+                failing = conns[begin_failure]
+
+                class FailingRollback:
+                    @property
+                    def in_transaction(self):
+                        return wrapped.in_transaction
+
+                    def execute(self, sql):
+                        cursor = wrapped.execute(sql)
+                        if sql == 'ROLLBACK':
+                            cursor.close()
+                            raise sqlite3.OperationalError('rollback failed')
+                        return cursor
+
+                class FailingBegin:
+                    @property
+                    def in_transaction(self):
+                        return failing.in_transaction
+
+                    def execute(self, sql):
+                        if sql == 'BEGIN IMMEDIATE':
+                            raise sqlite3.OperationalError('database is locked')
+                        return failing.execute(sql)
+
+                conns[rollback_failure] = FailingRollback()
+                conns[begin_failure] = FailingBegin()
+                with self.assertRaises(sqlite3.OperationalError) as caught:
+                    store_layout.begin_declared(conns, root=self.root)
+                self.assertEqual(str(caught.exception), 'database is locked')
+                notes = caught.exception.__notes__
+                self.assertEqual(len(notes), 1)
+                self.assertIn(rollback_failure, notes[0])
+                self.assertIn('OperationalError', notes[0])
+                self.assertIn('rollback failed', notes[0])
+                self.assertFalse(any(conn.in_transaction for conn in conns.values()))
+
     def test_declared_order_is_canonical(self):
         self.assertEqual(store_layout.declared_order(True, [Q, P]), ('catalogue', P, Q))
         self.assertEqual(store_layout.declared_order(False, [Q, P]), (P, Q))
@@ -586,7 +690,7 @@ class TestDeclaredLocks(unittest.TestCase):
                 conn.set_trace_callback(lambda sql, name=name: trace.append((name, sql)))
             written = 'catalogue' if index % 2 == 0 else P
             try:
-                store_layout.begin_declared(conns)
+                store_layout.begin_declared(conns, root=self.root)
                 if written == 'catalogue':
                     self.scalar(conns[P], 'SELECT ended_at FROM seat_sessions LIMIT 1')
                     conns[written].execute('UPDATE project_routes SET created_at=created_at+1 '
@@ -630,7 +734,7 @@ class TestDeclaredLocks(unittest.TestCase):
             finally:
                 conn.close()
 
-        store_layout.begin_declared(conns)
+        store_layout.begin_declared(conns, root=self.root)
         self.assertIsNone(self.scalar(conns[P],
                           "SELECT ended_at FROM seat_sessions WHERE id='session-planner'"))
         started, finished = threading.Event(), threading.Event()
@@ -649,7 +753,7 @@ class TestDeclaredLocks(unittest.TestCase):
         # Control: catalogue-only exclusion permits an end before its commit.
         conns[P].execute("UPDATE seat_sessions SET ended_at=NULL WHERE id='session-planner'").close()
         conns[P].execute('COMMIT').close()
-        store_layout.begin_declared({'catalogue': conns['catalogue']})
+        store_layout.begin_declared({'catalogue': conns['catalogue']}, root=self.root)
         self.assertIsNone(self.scalar(conns[P],
                           "SELECT ended_at FROM seat_sessions WHERE id='session-planner'"))
         started, finished = threading.Event(), threading.Event()
@@ -676,7 +780,7 @@ class TestDeclaredLocks(unittest.TestCase):
                                    lambda: 1_700_000_000_000, Directory(), submission_key='lock-1')
         data = (b'KIND: SITREP\nTO: v3-store.implementer\nBUNDLE: b1\n'
                 b'NEEDS: none\nSUBJECT: locked\n\nbody\n')
-        store_layout.begin_declared(conns, except_written=P)
+        store_layout.begin_declared(conns, except_written=P, root=self.root)
         try:
             admitted = submit.submit(conns[P], ctx, data)
             self.assertEqual(admitted.handle, 1)
@@ -697,12 +801,12 @@ class TestDeclaredLocks(unittest.TestCase):
         for name, conn in conns.items():
             conn.set_trace_callback(lambda sql, name=name:
                                     trace.append(name) if sql == 'BEGIN IMMEDIATE' else None)
-        store_layout.begin_declared(conns)
+        store_layout.begin_declared(conns, root=self.root)
         self.assertEqual(trace, ['catalogue', P, Q])
         store_layout.rollback_declared(conns)
         self.assertFalse(any(conn.in_transaction for conn in conns.values()))
         trace.clear()
-        store_layout.begin_declared(conns, except_written=Q)
+        store_layout.begin_declared(conns, except_written=Q, root=self.root)
         self.assertEqual(trace, ['catalogue', P])
         self.assertFalse(conns[Q].in_transaction)
         store_layout.rollback_declared(conns)
@@ -712,9 +816,9 @@ class TestDeclaredLocks(unittest.TestCase):
         # M15: deferring P's lock until after Q breaks the global order.
         conns = self.connections((Q, P, 'catalogue'))
         with self.assertRaises(ValueError):
-            store_layout.begin_declared(conns, except_written=P)
+            store_layout.begin_declared(conns, except_written=P, root=self.root)
         self.assertFalse(any(conn.in_transaction for conn in conns.values()))
-        store_layout.begin_declared(conns, except_written=Q)
+        store_layout.begin_declared(conns, except_written=Q, root=self.root)
         self.assertTrue(conns['catalogue'].in_transaction)
         self.assertTrue(conns[P].in_transaction)
         self.assertFalse(conns[Q].in_transaction)
@@ -723,7 +827,7 @@ class TestDeclaredLocks(unittest.TestCase):
     def test_except_written_outside_set_refuses(self):
         conns = self.connections()
         with self.assertRaises(ValueError):
-            store_layout.begin_declared(conns, except_written=Q)
+            store_layout.begin_declared(conns, except_written=Q, root=self.root)
         self.assertFalse(any(conn.in_transaction for conn in conns.values()))
 
     def test_mixed_order_control_deadlocks_only_when_mixed(self):
@@ -748,7 +852,7 @@ class TestDeclaredLocks(unittest.TestCase):
             conns = {name: self.connect(name, timeout=0.2) for name in ['catalogue', P]}
             try:
                 if canonical:
-                    store_layout.begin_declared({'catalogue': FirstLock(conns['catalogue']), P: conns[P]})
+                    store_layout.begin_declared({'catalogue': FirstLock(conns['catalogue']), P: conns[P]}, root=self.root)
                 else:
                     conns[P].execute('BEGIN IMMEDIATE').close()
                     first_locks.wait()
@@ -775,7 +879,7 @@ class TestDeclaredLocks(unittest.TestCase):
             conns = {name: self.connect(name) for name in ['catalogue', P]}
             try:
                 start.wait()  # Before all acquisitions; no post-lock handshake.
-                store_layout.begin_declared(conns)
+                store_layout.begin_declared(conns, root=self.root)
                 conns['catalogue'].execute('UPDATE project_routes SET created_at=created_at+1').close()
                 conns['catalogue'].execute('COMMIT').close()
                 return 'committed'
@@ -797,10 +901,10 @@ class TestDeclaredLocks(unittest.TestCase):
         blocker.execute('BEGIN IMMEDIATE').close()
         conns[P].execute('PRAGMA busy_timeout=50').close()
         with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
-            store_layout.begin_declared(conns)
+            store_layout.begin_declared(conns, root=self.root)
         self.assertFalse(any(conn.in_transaction for conn in conns.values()))
         blocker.execute('ROLLBACK').close()
-        store_layout.begin_declared(conns)
+        store_layout.begin_declared(conns, root=self.root)
         store_layout.rollback_declared(conns)
 
     def test_open_transaction_is_refused(self):
@@ -810,11 +914,11 @@ class TestDeclaredLocks(unittest.TestCase):
         for name, conn in conns.items():
             conn.set_trace_callback(lambda sql, name=name: trace.append((name, sql)))
         with self.assertRaises(ValueError):
-            store_layout.begin_declared(conns)
+            store_layout.begin_declared(conns, root=self.root)
         self.assertFalse(any(sql.startswith('BEGIN') for _, sql in trace))
         self.assertFalse(any(conn.in_transaction for conn in conns.values()))
         trace.clear()
-        store_layout.begin_declared(conns)
+        store_layout.begin_declared(conns, root=self.root)
         self.assertEqual([name for name, sql in trace if sql == 'BEGIN IMMEDIATE'], ['catalogue', P])
         store_layout.rollback_declared(conns)
 
@@ -830,12 +934,12 @@ class TestDeclaredLocks(unittest.TestCase):
         self.assertFalse(conns[P].in_transaction)
         started = time.monotonic()
         with self.assertRaises(sqlite3.OperationalError) as caught:
-            store_layout.begin_declared(conns)
+            store_layout.begin_declared(conns, root=self.root)
         self.assertEqual(caught.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY_SNAPSHOT)
         self.assertLess(time.monotonic() - started, 1)  # Busy timeout is 2 seconds.
         self.assertFalse(any(conn.in_transaction for conn in conns.values()))
         cursor.close()
-        store_layout.begin_declared(conns)
+        store_layout.begin_declared(conns, root=self.root)
         store_layout.rollback_declared(conns)
 
 
