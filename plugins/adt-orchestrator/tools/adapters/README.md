@@ -313,8 +313,9 @@ These host behaviours were measured on this kit's hosts and govern installs and 
 - Codex re-approves kit hooks after each update (see Consent and migration).
 - A watch started with Claude Code's Monitor tool, rather than as a plugin monitor, ends when its timeout expires, at most 30 minutes; re-arm it and read the root's `INDEX.md` for relays filed in the gap.
 - One doorbell runs per window, and each doorbell exit prints one `relay-monitor: stopped:` line (above).
-- On Claude Code 2.1.322, `--resume`, `--continue` and in-window `/resume` keep or restore the resumed conversation's own host session id (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
-- On Claude Code 2.1.322, `/clear`, in-window `/branch` and `--fork-session` each make a new host session id (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
-- On Claude Code 2.1.322, `/branch` and `--fork-session` fire SessionStart with source `fork`, and that hook's input names no parent session (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
+- On Claude Code 2.1.322, `--resume` and `--continue` in a headless `claude -p` run, and in-window `/resume`, keep or restore the resumed conversation's own host session id (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
+- On Claude Code 2.1.322, `/clear`, in-window `/branch` and `--fork-session` in a headless `claude -p` run each make a new host session id (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
+- On Claude Code 2.1.322, in-window `/branch` and headless `--fork-session` fire SessionStart with source `fork`, and that hook's input names no parent session (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
 - On Claude Code 2.1.322, SessionEnd fires with reason `clear` before `/clear` and reason `resume` before in-window `/resume` and `/branch` while the window lives, and with reason `prompt_input_exit` on `/exit` (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
 - On Claude Code 2.1.322, `/fork` was refused for the measured window's launch flags and remains unmeasured (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).
+- On Claude Code 2.1.322, an interactive launch with `--resume`, `--continue` or `--fork-session` remains unmeasured (source: `v3-adapter/SITREP-pair-planner-20261111-044515.md`).

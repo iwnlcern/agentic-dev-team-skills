@@ -9,10 +9,30 @@ import tools.adapters.delivery_interface as delivery_interface
 
 class DeliveryInterfaceTests(unittest.TestCase):
     def assert_intervals(self, module):
+        self.assertIs(type(module.DOORBELL_POLL_INTERVAL_S), float)
+        self.assertIs(type(module.NOT_HEARD_AFTER_S), float)
         self.assertEqual(module.DOORBELL_POLL_INTERVAL_S, 5.0)
         self.assertEqual(module.NOT_HEARD_AFTER_S, 10.0)
+        self.assertEqual(module.NOT_HEARD_AFTER_S, 2 * module.DOORBELL_POLL_INTERVAL_S)
+
+    def assert_bound_tracks_interval(self, source):
+        tree = ast.parse(source)
+        for node in tree.body:
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "DOORBELL_POLL_INTERVAL_S"
+            ):
+                node.value = ast.Constant(value=4.0)
+                break
+        else:
+            self.fail("poll interval declaration missing")
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(tree), "<interval-control>", "exec"), namespace)
+        self.assertEqual(namespace["NOT_HEARD_AFTER_S"], 8.0)
 
     def assert_reasons(self, module):
+        self.assertNotIn("not-heard", module.OFF_REASONS)
         self.assertEqual(
             module.OFF_REASONS,
             (
@@ -25,7 +45,6 @@ class DeliveryInterfaceTests(unittest.TestCase):
                 "new-conversation",
             ),
         )
-        self.assertNotIn("not-heard", module.OFF_REASONS)
         self.assertEqual(module.STATES, ("armed", "unavailable", "off"))
         self.assertEqual(module.ARMED_REASONS, ("backlog",))
         self.assertEqual(module.UNAVAILABLE_REASONS, ("monitor-tool",))
@@ -34,13 +53,22 @@ class DeliveryInterfaceTests(unittest.TestCase):
         imports = [
             node for node in ast.walk(ast.parse(source))
             if isinstance(node, (ast.Import, ast.ImportFrom))
+            or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "__import__"
+            )
         ]
         self.assertEqual(imports, [])
 
     def test_poll_interval_is_the_exported_constant(self):
         self.assert_intervals(delivery_interface)
+        self.assert_bound_tracks_interval(inspect.getsource(delivery_interface))
         changed = types.SimpleNamespace(**vars(delivery_interface))
         changed.DOORBELL_POLL_INTERVAL_S = 4.0
+        with self.assertRaises(AssertionError):
+            self.assert_intervals(changed)
+        changed.DOORBELL_POLL_INTERVAL_S = 5
         with self.assertRaises(AssertionError):
             self.assert_intervals(changed)
 
@@ -56,6 +84,8 @@ class DeliveryInterfaceTests(unittest.TestCase):
         self.assert_no_imports(source)
         with self.assertRaises(AssertionError):
             self.assert_no_imports(source + "\nimport os\n")
+        with self.assertRaises(AssertionError):
+            self.assert_no_imports(source + "\n__import__('os')\n")
 
 
 if __name__ == "__main__":

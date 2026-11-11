@@ -308,7 +308,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "a39ae3c2c93cbb353bf23ab31d06f2ce0f52c560c2b344755df736be0d162182",
+    "sha256": "1f90b562150cfb93764b41d7e3046ea0fb1ece22d788f62a2dc8219c0e68719e",
     "source": "tools/adapters/README.md"
   },
   {
@@ -488,7 +488,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_delivery_interface.py",
-    "sha256": "9d1b82e841ad129f7aef05767075440961d65ff2f2cbc8d15ed00ee931b72d53",
+    "sha256": "ecd116e72d1fa0f4ac278268735a6a3d954faf06f40fabd4c4e949d8b630ca2b",
     "source": "tools/adapters/tests/test_delivery_interface.py"
   },
   {
@@ -11114,7 +11114,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "a39ae3c2c93cbb353bf23ab31d06f2ce0f52c560c2b344755df736be0d162182",
+    "sha256": "1f90b562150cfb93764b41d7e3046ea0fb1ece22d788f62a2dc8219c0e68719e",
     "source": "tools/adapters/README.md"
   },
   {
@@ -11294,7 +11294,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_delivery_interface.py",
-    "sha256": "9d1b82e841ad129f7aef05767075440961d65ff2f2cbc8d15ed00ee931b72d53",
+    "sha256": "ecd116e72d1fa0f4ac278268735a6a3d954faf06f40fabd4c4e949d8b630ca2b",
     "source": "tools/adapters/tests/test_delivery_interface.py"
   },
   {
@@ -21836,7 +21836,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "a39ae3c2c93cbb353bf23ab31d06f2ce0f52c560c2b344755df736be0d162182",
+    "sha256": "1f90b562150cfb93764b41d7e3046ea0fb1ece22d788f62a2dc8219c0e68719e",
     "source": "tools/adapters/README.md"
   },
   {
@@ -22016,7 +22016,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_delivery_interface.py",
-    "sha256": "9d1b82e841ad129f7aef05767075440961d65ff2f2cbc8d15ed00ee931b72d53",
+    "sha256": "ecd116e72d1fa0f4ac278268735a6a3d954faf06f40fabd4c4e949d8b630ca2b",
     "source": "tools/adapters/tests/test_delivery_interface.py"
   },
   {
