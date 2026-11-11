@@ -17,6 +17,7 @@ POLICY_CODES = {
     "E-SUPERSEDED",
     "E-PATH-ESCAPE",
     "E-VERSION-MISMATCH",
+    "E-SENDER-NOT-CURRENT",
 }
 
 ALL_CODES = POLICY_CODES | {
@@ -118,6 +119,21 @@ class TestErrorRegistry(unittest.TestCase):
             self.assertTrue(strings.INVENTORY[spec.explain_key])
             self.assertEqual(strings._placeholders(
                 strings.INVENTORY[spec.explain_key]), ())
+
+    def test_sender_not_current_code(self):
+        self.assertIn("E-SENDER-NOT-CURRENT", errors.ERRORS)
+        self.assertEqual(errors.ERRORS["E-SENDER-NOT-CURRENT"].cls, "policy")
+        for reason in ("key_replaced", "seat_stood_down", "session_not_current"):
+            error = errors.error_for("E-SENDER-NOT-CURRENT", reason=reason)
+            self.assertEqual((error.code, error.cls), ("E-SENDER-NOT-CURRENT", "policy"))
+            self.assertIn(reason, error.cause)
+            self.assertTrue(error.remedy)
+        for reason in ("other", "", None, ["key_replaced"]):
+            with self.assertRaises(ValueError, msg=repr(reason)):
+                errors.error_for("E-SENDER-NOT-CURRENT", reason=reason)
+        explanation = errors.explain_for("E-SENDER-NOT-CURRENT")[0]
+        for reason in ("key_replaced", "seat_stood_down", "session_not_current"):
+            self.assertIn(reason, explanation)
 
     def test_commissioning_refusals_are_command_class(self):
         for code in ("commission-conflict", "commission-late",
