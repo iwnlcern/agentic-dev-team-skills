@@ -8138,7 +8138,12 @@ t.assertLess(time.monotonic()-start,1.25)
         os.mkfifo(self.index)
         # Established cursor exercises recovery without the later startup policy.
         self.rm.NoteStore('psess').update(lambda n:n.update(seat='b.implementer',root=str(self.root),binding_source='hook',progress={str(self.root):dict(file=None,position=0)}))
-        p=self.spawn()
+        # Start-up alone outlasts the 1.25 s budget-plus-slack window, so a clock started at spawn fails here.
+        p=self.spawn(extra_env={'ADT_TEST_STARTUP_DELAY':'1.5'})
+        # B7's promise is one 1.0 s budget per follower wake plus 0.25 s slack, so the window starts at the
+        # follower's own leader record, written before its first index read, as _b7_spawn does; 9.5 s is that
+        # helper's 8 s start-up allowance plus the 1.5 s delay
+        self.wait_note(lambda n:(n.get('leader') or {}).get('pid')==p.pid,timeout=9.5)
         self.wait_note(lambda n:n.get('reason')=='index-unreadable',timeout=1.25)
         time.sleep(self.rm.POLL_INDEX)
         self.assertIsNone(p.poll())
