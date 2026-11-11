@@ -322,7 +322,10 @@ def declared_order(catalogue: bool, project_ids: Iterable[str]) -> tuple[str, ..
 def rollback_declared(conns: Mapping[str, sqlite3.Connection]) -> Mapping[str, BaseException]:
     """Try every transaction in declared order and return errors by label."""
     failures = {}
-    for name in sorted(conns, key=lambda name: (name != 'catalogue', name)):
+    order = sorted((name for name in conns if isinstance(name, str)),
+                   key=lambda name: (name != 'catalogue', name))
+    order.extend(name for name in conns if not isinstance(name, str))
+    for name in order:
         try:
             if conns[name].in_transaction:
                 _pragma(conns[name], 'ROLLBACK')
@@ -351,6 +354,7 @@ def begin_declared(conns: Mapping[str, sqlite3.Connection], *, root,
             raise ValueError('written file must be last in the declared order')
         if any(conn.in_transaction for conn in conns.values()):
             raise ValueError('declared connection already has a transaction')
+        identities = []
         for name in order:
             cursor = conns[name].execute('PRAGMA database_list')
             try:
@@ -368,6 +372,9 @@ def begin_declared(conns: Mapping[str, sqlite3.Connection], *, root,
                 raise ValueError('declared connection holds another file') from None
             if (actual_stat.st_dev, actual_stat.st_ino) != (expected_stat.st_dev, expected_stat.st_ino):
                 raise ValueError('declared connection holds another file')
+            identities.append((actual_stat.st_dev, actual_stat.st_ino))
+        if len(set(identities)) != len(identities):
+            raise ValueError('declared connections hold one file')
         for name in order:
             if name != except_written:
                 _pragma(conns[name], 'BEGIN IMMEDIATE')

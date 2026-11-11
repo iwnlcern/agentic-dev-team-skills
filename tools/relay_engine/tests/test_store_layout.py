@@ -12,6 +12,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+import uuid
 from unittest import mock
 
 from relay_engine import errors, schema, store_layout, submit
@@ -599,6 +600,92 @@ class TestDeclaredLocks(unittest.TestCase):
         store_layout.begin_declared(conns, root=link)
         self.assertTrue(all(conn.in_transaction for conn in conns.values()))
         store_layout.rollback_declared(conns)
+
+    def test_begin_declared_refuses_one_file_under_two_labels(self):
+        conns = {name: self.connect(name) for name in (P, Q)}
+        try:
+            store_layout.begin_declared(conns, root=self.root, except_written=Q)
+            self.assertTrue(conns[P].in_transaction)
+            self.assertFalse(conns[Q].in_transaction)
+            store_layout.rollback_declared(conns)
+        finally:
+            for conn in conns.values():
+                conn.close()
+
+        p_path = store_layout.ledger_path(self.root, P)
+        q_path = store_layout.ledger_path(self.root, Q)
+        for alias in ('hard link', 'symbolic link'):
+            with self.subTest(alias=alias):
+                # Close all connections before replacing this temporary fixture's path.
+                q_path.unlink()
+                for suffix in ('-wal', '-shm'):
+                    Path(str(q_path) + suffix).unlink(missing_ok=True)
+                if alias == 'hard link':
+                    os.link(p_path, q_path)
+                else:
+                    q_path.symlink_to(p_path)
+                conns = {name: self.connect(name) for name in (P, Q)}
+                try:
+                    with self.assertRaisesRegex(ValueError, '^declared connections hold one file$'):
+                        store_layout.begin_declared(conns, root=self.root, except_written=Q)
+                    self.assertFalse(any(conn.in_transaction for conn in conns.values()))
+                    other = self.connect(P, timeout=0)
+                    try:
+                        other.execute('BEGIN IMMEDIATE').close()
+                        other.execute('ROLLBACK').close()
+                    finally:
+                        other.close()
+                finally:
+                    for conn in conns.values():
+                        conn.close()
+
+    def test_malformed_labels_keep_original_error_and_clean_up(self):
+        for mode in ('begin', 'rollback', 'valid labels'):
+            with self.subTest(mode=mode):
+                raw = {name: self.connect(name) for name in ('catalogue', P, Q)}
+                labels = ('catalogue', Q, P) if mode == 'valid labels' else ('catalogue', uuid.UUID(P), None)
+                trace = []
+
+                class RecordingRollback:
+                    def __init__(self, label, conn):
+                        self.label = label
+                        self.conn = conn
+
+                    @property
+                    def in_transaction(self):
+                        return self.conn.in_transaction
+
+                    def execute(self, sql):
+                        if sql == 'ROLLBACK':
+                            trace.append(self.label)
+                        return self.conn.execute(sql)
+
+                conns = {label: RecordingRollback(label, conn)
+                         for label, conn in zip(labels, raw.values())}
+                try:
+                    for conn in raw.values():
+                        conn.execute('BEGIN IMMEDIATE').close()
+                    caught = None
+                    failures = None
+                    try:
+                        if mode == 'begin':
+                            store_layout.begin_declared(conns, root=self.root)
+                        else:
+                            failures = store_layout.rollback_declared(conns)
+                    except BaseException as error:
+                        caught = error
+                    if mode == 'begin':
+                        self.assertIs(type(caught), ValueError)
+                        self.assertEqual(str(caught), 'id must be canonical lowercase UUID text')
+                    else:
+                        self.assertIsNone(caught)
+                        self.assertEqual(failures, {})
+                    self.assertFalse(any(conn.in_transaction for conn in raw.values()))
+                    expected = ['catalogue', P, Q] if mode == 'valid labels' else list(labels)
+                    self.assertEqual(trace, expected)
+                finally:
+                    for conn in raw.values():
+                        conn.close()
 
     def test_rollback_declared_tries_every_connection(self):
         # F1-M3: propagating the first rollback error strands later locks.
