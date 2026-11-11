@@ -670,7 +670,9 @@ def _snapshot_bytes(conn, snapshot, store, directory):
     else:
         checkout = directory.checkout(edge[1])
         if checkout is None:
-            reason = "a Git snapshot's repository is not known to this project"
+            reason = ("a Git snapshot's repository has no registered checkout in this project"
+                      if directory.has_repository(edge[1]) else
+                      "a Git snapshot's repository is not known to this project")
         else:
             try:
                 data = refs.read_blob(checkout, edge[2])

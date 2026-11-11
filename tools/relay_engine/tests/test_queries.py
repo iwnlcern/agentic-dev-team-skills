@@ -2058,7 +2058,8 @@ class TestGitSnapshotCopies(submit_tests.GitSnapshots):
         self.addCleanup(other.close)
         cases = [(None, "which was not given"), (submit_tests.FakeDirectory({"repo-1": repo.path}),
             "not known to this project"), (submit_tests.FakeDirectory({"bivpak": other.path}),
-            "the blob cannot be read from")]
+            "the blob cannot be read from"), (submit_tests.FakeDirectory({}, repositories={"bivpak"}),
+            "a Git snapshot's repository has no registered checkout in this project")]
         for directory, reason in cases:
             for action in (lambda: queries.write_snapshot(self.conn, 1, self.folder / "copy", self.store,
                 directory=directory, project_id=submit_tests.PROJECT), lambda: queries.snapshot_diff(
@@ -2068,6 +2069,29 @@ class TestGitSnapshotCopies(submit_tests.GitSnapshots):
                 self.assertIn(reason, result[1].cause)
                 self.assertIsNone(result[1].__cause__)
                 self.assertIsNone(result[1].__context__)
+
+    def test_git_snapshot_after_checkout_ended(self):
+        repo = self.repository()
+        self.request("bivpak@main:d.md")
+        self.conn.execute(
+            "INSERT INTO repository_checkouts (repository_id, path, last_seen_at, checkout_id,"
+            " route_created_at, ended_at) VALUES ('repo-1', ?, 1, 'ended-snapshot-checkout', 1, 2)",
+            (str(repo.path),))
+        self.conn.commit()
+        directory = submit.TableDirectory(self.conn, submit_tests.PROJECT)
+        out = self.folder / "ended-git-copy"
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+            directory=directory, project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "E-SNAPSHOT-NO-BYTES", result)
+        self.assertIn("a Git snapshot's repository has no registered checkout in this project",
+                      result[1].cause)
+        self.conn.execute("UPDATE repository_checkouts SET ended_at = NULL"
+                          " WHERE checkout_id = 'ended-snapshot-checkout'")
+        self.conn.commit()
+        result = snapshot_outcome(lambda: queries.write_snapshot(self.conn, 1, out, self.store,
+            directory=directory, project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(out.read_bytes(), b"one\n")
 
     def test_git_read_errors_propagate(self):
         self.repository()

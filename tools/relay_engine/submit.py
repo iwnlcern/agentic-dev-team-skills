@@ -63,6 +63,9 @@ class Directory(Protocol):
     def checkout(self, repo: str) -> Path | None:
         """The checkout a Git reference's <repo> names, or None."""
 
+    def has_repository(self, repo: str) -> bool:
+        """Whether this project has a repository of that name."""
+
 
 @dataclass(frozen=True)
 class GitState:
@@ -605,7 +608,9 @@ def _resolve(conn, ctx, spec, *, keep=0):
     checkout = None if known is None else ctx.directory.checkout(spec.repo)
     if checkout is None:
         raise errors.error_for("E-REF-UNRESOLVED", value=header._display(spec.text),
-                               reason="repository %s is not known to this project"
+                               reason=("repository %s is not known to this project"
+                                       if known is None else
+                                       "repository %s has no registered checkout in this project")
                                % header._display(spec.repo, 40))
     resolved = refs.resolve_git(checkout, spec)
     return {"target_type": "git", "target_repository_name": spec.repo,
@@ -889,12 +894,18 @@ class TableDirectory:
         return SeatRef(row[0], address, role, instance[0], project_id)
 
     def checkout(self, repo):
-        """The most recently seen checkout of this project's repository named repo."""
+        """The most recently seen open checkout of this project's repository named repo."""
         row = self.conn.execute(
             "SELECT c.path FROM repositories r JOIN repository_checkouts c ON c.repository_id = r.id"
-            " WHERE r.project_id = ? AND r.name = ? ORDER BY c.last_seen_at DESC LIMIT 1",
+            " WHERE r.project_id = ? AND r.name = ? AND c.ended_at IS NULL"
+            " ORDER BY c.last_seen_at DESC LIMIT 1",
             (self.project_id, repo)).fetchone()
         return None if row is None else Path(row[0])
+
+    def has_repository(self, repo):
+        return self.conn.execute(
+            "SELECT 1 FROM repositories WHERE project_id = ? AND name = ?",
+            (self.project_id, repo)).fetchone() is not None
 
 
 @contextmanager

@@ -478,6 +478,7 @@ _SNAPSHOT_TEXT = {
 _NO_BYTES_REASONS = {"the file was over 1 MiB when the request was submitted",
                      "a Git snapshot is read from its repository, which was not given",
                      "a Git snapshot's repository is not known to this project",
+                     "a Git snapshot's repository has no registered checkout in this project",
                      "no evidence store was configured when the request was submitted",
                      "the blob cannot be read from its checkout",
                      "no evidence store was given to read its bytes",
