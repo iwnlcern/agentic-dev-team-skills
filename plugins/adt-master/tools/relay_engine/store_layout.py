@@ -252,6 +252,31 @@ def open_catalogue_readonly(root):
     return _open_readonly(catalogue_path(root), check)
 
 
+def read_store_id(root) -> str:
+    """Delta 5: read the store id; a read racing an engine start is not guaranteed."""
+    from relay_engine import catalogue
+    path = catalogue_path(root)
+    if not path.exists():
+        raise LayoutFault('missing')
+    if Path(str(path) + '-wal').exists():
+        conn = open_catalogue_readonly(root)
+        try:
+            return _row(conn, 'SELECT store_id FROM catalogue_identity WHERE id=1')[0]
+        finally:
+            conn.close()
+    conn = sqlite3.connect(path.absolute().as_uri() + '?mode=ro&immutable=1',
+                           uri=True, isolation_level=None)
+    try:
+        _pragma(conn, 'PRAGMA query_only=ON')
+        schema.require_sqlite()
+        catalogue._require_matching(conn)
+        if _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1') is None:
+            raise LayoutFault('no-identity')
+        return _row(conn, 'SELECT store_id FROM catalogue_identity WHERE id=1')[0]
+    finally:
+        conn.close()
+
+
 def route_state(catalogue_conn, project_id: str):
     """'active', 'creating' or 'absent', never RouteUnavailable (delta 1 D2)."""
     row = _row(catalogue_conn, 'SELECT state FROM project_routes WHERE project_id=?',
