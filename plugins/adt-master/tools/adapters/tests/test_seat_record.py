@@ -63,6 +63,7 @@ def removal_census(source, *, seat_module=False):
     another function's record path. TemporaryDirectory-derived homes are scratch,
     not a user's persistent records. A name ever bound to a persistent path in
     its scope stays persistent at every use, including after scratch rebinding.
+    Bare operation names are read without resolving imports or import-as aliases.
     """
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
@@ -130,11 +131,17 @@ def removal_census(source, *, seat_module=False):
             break
     found, bad = [], []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Call):
             continue
-        if node.func.attr not in ("unlink", "remove", "rmtree", "rename", "replace"):
+        if isinstance(node.func, ast.Attribute):
+            operation, receiver = node.func.attr, [node.func.value]
+        elif isinstance(node.func, ast.Name):
+            operation, receiver = node.func.id, []
+        else:
             continue
-        if not any(kind(n) == "record" for n in [node.func.value, *node.args, *(k.value for k in node.keywords)]):
+        if operation not in ("unlink", "remove", "rmtree", "rename", "replace"):
+            continue
+        if not any(kind(n) == "record" for n in [*receiver, *node.args, *(k.value for k in node.keywords)]):
             continue
         found.append(node.lineno)
         parent, owner = node, []
@@ -143,7 +150,7 @@ def removal_census(source, *, seat_module=False):
             if isinstance(parent, (ast.FunctionDef, ast.ClassDef)):
                 owner.append(parent.name)
         allowed = seat_module and (owner == ["restore", "SeatTransaction"]
-                                  or node.func.attr in ("rename", "replace") and owner == ["_replace_bytes"])
+                                  or operation in ("rename", "replace") and owner == ["_replace_bytes"])
         if not allowed:
             bad.append(node.lineno)
     return found, bad
@@ -345,6 +352,15 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
             'tmp = tempfile.TemporaryDirectory()\n'
             'p = seat_record.record_path("codex", "id", home=Path(tmp.name))\n'
             'p.unlink()\n'), ([], []))
+        self.assertEqual(removal_census(
+            'from shutil import rmtree\n'
+            'p = seat_record.record_path("codex", "id")\n'
+            'rmtree(p)\n'), ([3], [3]))
+        self.assertEqual(removal_census(
+            'from shutil import rmtree\n'
+            'tmp = tempfile.TemporaryDirectory()\n'
+            'p = seat_record.record_path("codex", "id", home=Path(tmp.name))\n'
+            'rmtree(p)\n'), ([], []))
 
     def test_transaction_wait_constant(self):
         self.assertEqual(self.sr.TRANSACTION_WAIT_S, 15.0)
