@@ -87,6 +87,10 @@ TEST_STARTUP_DELAY = float(os.environ.get("ADT_TEST_STARTUP_DELAY") or 0)  # tes
 # test-only: hold after this process's first written row until a stop arrives or this many seconds pass, so a
 # test's stop lands mid-backlog on any machine load (G-A1 linux leg)
 TEST_PAUSE_AFTER_FIRST_ROW = float(os.environ.get("ADT_TEST_PAUSE_AFTER_FIRST_ROW") or 0)
+try:
+    TEST_ROOT_BUDGET: float | None = max(0.0, min(5.0, float(os.environ.get("ADT_TEST_ROOT_BUDGET") or "")))
+except ValueError:
+    TEST_ROOT_BUDGET = None
 _PAUSED: list[bool] = []
 CLAUDE_PAYLOAD_FIELDS = (
     "prompt_id",
@@ -2243,7 +2247,7 @@ def bind(args) -> int:
                 print("relay-monitor: manual bind refused: " + printable_text(reason), file=sys.stderr)
                 return 1
             return 0
-    with root_budget():
+    with root_budget(TEST_ROOT_BUDGET if TEST_ROOT_BUDGET is not None else ROOT_BUDGET):
         try:
             payload = json.load(sys.stdin)
         except (ValueError, OSError, RecursionError):
@@ -2597,8 +2601,8 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
             ident, client_id, daemon = (
                 check_identity(plugin_root, note.get("root"), budget) if budget > 0.05 else ("no-answer", {}, None)
             )
-            # keyed by root and plugin root; a no-answer result is never reused (M3, erratum 2)
-            cache = None if ident == "no-answer" else {
+            # keyed by root and plugin root; no-answer and unchecked are not reused (erratum 2, PR 78 F1)
+            cache = None if ident in ("no-answer", "unchecked") else {
                 "root": note["root"], "plugin_root": plugin_root, "at": now, "ident": ident,
                 "client": client_id, "daemon": daemon,
             }
@@ -2660,12 +2664,13 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
 
 
 def status(args) -> int:
-    with root_budget():
+    end = time.monotonic() + STATUS_BUDGET
+    with root_budget(cap=end):
         session = resolve_session(args)
         if not valid_session_id(session):
             print("relay-monitor: invalid-session-id", file=sys.stderr)
             return 2
-        store, end = NoteStore(session), time.monotonic() + STATUS_BUDGET
+        store = NoteStore(session)
         with contextlib.suppress(LockTimeout), store.state_lock(timeout=0.05):
             sweep_owner_files(store)  # eventual cleanup; never the referenced file; skipped while busy (F3)
         print(status_line(store, args.plugin_root, end=end))
@@ -2734,7 +2739,8 @@ def arming_text(plugin_root: str, session: str, label: str | None) -> str:
 
 
 def session_start(args) -> int:
-    with root_budget():
+    end = time.monotonic() + STATUS_BUDGET
+    with root_budget(cap=end):
         payload = read_payload()
         session = resolve_session(args, payload)
         if not valid_session_id(session):
@@ -2747,7 +2753,7 @@ def session_start(args) -> int:
                     }
                 }
             )
-        store, end = NoteStore(session), time.monotonic() + STATUS_BUDGET
+        store = NoteStore(session)
         host = decide_host(args, payload, os.environ)
         plugin_root = (
             args.plugin_root
