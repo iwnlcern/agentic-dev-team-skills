@@ -882,7 +882,7 @@ assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/
 assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine_dirty" "$e3_plugin_new" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 B || fail=1
 assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.7" "$e3_plugin_new_fingerprint" || fail=1
 
-if ! (cd "$ROOT" && python3 -m unittest tools.adapters.tests.test_relay_monitor tools.adapters.tests.test_shell_lex tools.adapters.tests.test_scope_proof tools.adapters.tests.test_window tools.adapters.tests.test_hostlogs tools.adapters.tests.test_seat_record 2>"$tmp/unittest.err"); then
+if ! (cd "$ROOT" && python3 -m unittest tools.adapters.tests.test_relay_monitor tools.adapters.tests.test_shell_lex tools.adapters.tests.test_scope_proof tools.adapters.tests.test_window tools.adapters.tests.test_hostlogs tools.adapters.tests.test_seat_record tools.adapters.tests.test_delivery_interface 2>"$tmp/unittest.err"); then
   echo "FAIL relay-monitor unittest" >&2; cat "$tmp/unittest.err" >&2; fail=1
 else
   echo "PASS relay-monitor unittest"
