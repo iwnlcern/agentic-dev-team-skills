@@ -234,6 +234,65 @@ class TestCheckoutRoutes(unittest.TestCase):
             store_layout.checkout_routes(self.conn, dev=1, ino=2)
         self.assertFalse(self.conn.in_transaction)
 
+    def test_checkout_route_by_id(self):
+        # D1: filtering ended routes; D2: additionally filtering by one inode.
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        a = self.insert('A', 10, 15, 'matched')
+        b = self.insert('B', 20)
+        c = self.insert('C', 30, dev=9)
+        self.conn.commit()
+        reader = store_layout.open_catalogue_readonly(self.root)
+        self.addCleanup(reader.close)
+        self.assertEqual(store_layout.checkout_route(reader, 'A'), store_layout.CheckoutRoute(*a))
+        self.assertEqual(store_layout.checkout_route(reader, 'B'), store_layout.CheckoutRoute(*b))
+        self.assertIsNone(store_layout.checkout_route(reader, 'B').ended_at)
+        self.assertEqual(store_layout.checkout_route(reader, 'C'), store_layout.CheckoutRoute(*c))
+        self.assertIsNone(store_layout.checkout_route(reader, 'none'))
+        self.assertFalse(reader.in_transaction)
+
+    def test_checkout_route_keeps_caller_transaction(self):
+        # D3: a read must not commit its caller's pending row.
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        pending = self.insert('pending', 10)
+        self.assertEqual(store_layout.checkout_route(self.conn, 'pending'),
+                         store_layout.CheckoutRoute(*pending))
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertIsNone(store_layout.checkout_route(self.conn, 'pending'))
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        self.insert('pending-error', 20)
+        self.conn.execute('DROP TABLE checkout_routes').close()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.checkout_route(self.conn, 'pending-error')
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertIsNone(store_layout.checkout_route(self.conn, 'pending-error'))
+
+    def test_checkout_route_cleans_up_its_own(self):
+        # D4: omitting ROLLBACK must fail after an owned SELECT raises.
+        self.assertIsNone(store_layout.checkout_route(self.conn, 'none'))
+        self.assertFalse(self.conn.in_transaction)
+        self.conn.execute('DROP TABLE checkout_routes').close()
+        self.conn.commit()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.checkout_route(self.conn, 'none')
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_checkout_reads_select_route_fields(self):
+        # K1 drops a column; K2 swaps inode fields; K3 swaps end fields.
+        import dataclasses
+        trace = []
+        self.conn.set_trace_callback(trace.append)
+        self.addCleanup(self.conn.set_trace_callback, None)
+        self.assertIsNone(store_layout.checkout_route(self.conn, 'none'))
+        self.assertEqual(store_layout.checkout_routes(self.conn, dev=0, ino=0), [])
+        statements = [text for text in trace if text.startswith('SELECT')]
+        self.assertEqual(len(statements), 2)
+        expected = [field.name for field in dataclasses.fields(store_layout.CheckoutRoute)]
+        for name, statement in zip(('checkout_route', 'checkout_routes'), statements):
+            columns = statement.split('SELECT', 1)[1].split('FROM', 1)[0]
+            self.assertEqual([column.strip() for column in columns.split(',')], expected, name)
+
     def test_restore_revives_ended_route_inert(self):
         # Catalogue-half witness only: restoring the file revives its old route.
         import os

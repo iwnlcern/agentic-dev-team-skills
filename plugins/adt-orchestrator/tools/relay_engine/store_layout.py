@@ -1,5 +1,5 @@
 """Store paths and guarded per-project opening (DD-v3-store slice 1)."""
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from typing import Literal
 from collections.abc import Iterable, Mapping
@@ -290,6 +290,24 @@ def route_key(catalogue_conn, key_id: str):
     return row[0] if row is not None else None
 
 
+def project_routes(catalogue_conn) -> list[ProjectRoute]:
+    """List every route in name byte order, including unfinished creation."""
+    rows = _catalogue_read(
+        catalogue_conn,
+        'SELECT project_id, name, state FROM project_routes ORDER BY name', ())
+    if not rows:
+        return []
+    cursor = catalogue_conn.execute('PRAGMA database_list')
+    try:
+        filename = next(path for _, database, path in cursor if database == 'main')
+    finally:
+        cursor.close()
+    if not filename:
+        raise ValueError('route requires a file-backed catalogue')
+    root = Path(filename).parent
+    return [ProjectRoute(*row, ledger_path(root, row[0])) for row in rows]
+
+
 def reserve_project(catalogue_conn, project_id: str, name: str, now_ms: int) -> None:
     """Creation step 1, in the caller's catalogue transaction."""
     catalogue_conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
@@ -482,18 +500,18 @@ class CheckoutRoute:
     ledger_synced_at: int | None
 
 
-def checkout_routes(catalogue_conn, *, dev: int, ino: int) -> list[CheckoutRoute]:
-    """Read inode history, controlling only a transaction this read starts."""
+_CHECKOUT_ROUTE_COLUMNS = ', '.join(field.name for field in fields(CheckoutRoute))
+
+
+def _catalogue_read(catalogue_conn, sql: str, parameters: tuple) -> list[tuple]:
+    """Fetch one query, controlling only a transaction this read starts."""
     owns_transaction = not catalogue_conn.in_transaction
     if owns_transaction:
         _pragma(catalogue_conn, 'BEGIN')
     try:
-        cursor = catalogue_conn.execute(
-            'SELECT checkout_id, project_id, repository_id, git_common_dir, worktree_path, '
-            'dev, ino, created_at, ended_at, end_reason, ledger_synced_at '
-            'FROM checkout_routes WHERE dev=? AND ino=? ORDER BY created_at', (dev, ino))
+        cursor = catalogue_conn.execute(sql, parameters)
         try:
-            result = [CheckoutRoute(*row) for row in cursor]
+            result = cursor.fetchall()
         finally:
             cursor.close()
         if owns_transaction:
@@ -502,3 +520,19 @@ def checkout_routes(catalogue_conn, *, dev: int, ino: int) -> list[CheckoutRoute
     finally:
         if owns_transaction and catalogue_conn.in_transaction:
             _pragma(catalogue_conn, 'ROLLBACK')
+
+
+def checkout_routes(catalogue_conn, *, dev: int, ino: int) -> list[CheckoutRoute]:
+    """Read inode history, controlling only a transaction this read starts."""
+    rows = _catalogue_read(
+        catalogue_conn,
+        'SELECT ' + _CHECKOUT_ROUTE_COLUMNS + ' FROM checkout_routes WHERE dev=? AND ino=? ORDER BY created_at', (dev, ino))
+    return [CheckoutRoute(*row) for row in rows]
+
+
+def checkout_route(catalogue_conn, checkout_id: str) -> CheckoutRoute | None:
+    """Read an open or ended route by its id, regardless of inode."""
+    rows = _catalogue_read(
+        catalogue_conn,
+        'SELECT ' + _CHECKOUT_ROUTE_COLUMNS + ' FROM checkout_routes WHERE checkout_id = ?', (checkout_id,))
+    return CheckoutRoute(*rows[0]) if rows else None

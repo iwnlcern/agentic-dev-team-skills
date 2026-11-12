@@ -211,9 +211,9 @@ class TestCatalogue(unittest.TestCase):
     def test_ddl_is_pinned(self):
         # Pin the actual stored definitions independently of catalogue._TABLES.
         conn = self.opened()
-        definitions = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+        definitions = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, 'dad3adc23563b1213c4bd2765d5dfb66cb053ca880a82148886e27b6de3e298f')
+        self.assertEqual(digest, 'bf9db302287fc2ebc7813ff0a0c56bc11bbdf3210ddd7838aad2c6827f618441')
 
     def test_constraints_hold(self):
         conn = self.opened()
