@@ -16,7 +16,7 @@ from pathlib import Path
 import secrets
 import stat
 import sqlite3
-from typing import Callable
+from typing import Callable, Sequence
 
 from relay_engine import errors
 from relay_engine import refs
@@ -618,6 +618,68 @@ def refusal_counts(conn, project_id):
                              " GROUP BY code ORDER BY code", (project_id,)).fetchall())
 
 
+# The storage pair's sweep reads (slice 2a D3, D4): bounded, pure, and never reading bodies.
+_SWEEP_LIMIT = 500
+_HEX = frozenset("0123456789abcdef")
+
+
+def evidence_pointed(conn, project_id: str, candidates: Sequence[str]) -> frozenset[str]:
+    """The candidate digests a snapshot with stored bytes in this project points at.
+
+    At most 500 candidates, each 64 lowercase hexadecimal characters, else
+    ValueError before any read; duplicates are answered once. Each distinct
+    candidate is one EXISTS probe that stops at its first qualifying row,
+    through the partial index snapshots_content_bytes, so digest-only rows
+    cost nothing. It runs SELECTs only: no transaction control and no write.
+    """
+    candidates = list(candidates)
+    if len(candidates) > _SWEEP_LIMIT:
+        raise ValueError("evidence_pointed takes at most %d candidates" % _SWEEP_LIMIT)
+    for digest in candidates:
+        if not (isinstance(digest, str) and len(digest) == 64 and set(digest) <= _HEX):
+            raise ValueError("each candidate is a 64-character lowercase hexadecimal digest")
+    pointed = set()
+    for digest in dict.fromkeys(candidates):
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM snapshots s JOIN relays r ON r.id = s.relay_id"
+            " WHERE s.content_sha256 = ? AND s.has_bytes = 1 AND r.project_id = ?)",
+            (digest, project_id)).fetchone()
+        if row[0]:
+            pointed.add(digest)
+    return frozenset(pointed)
+
+
+def bundle_closed_at(conn, project_id: str, bundle_ids: Sequence[str]) -> dict[str, int | None]:
+    """Each distinct bundle id of this project mapped to its closed_at, None while open.
+
+    At most 500 ids, each a non-empty string, else ValueError before any read;
+    an id that names no bundle of this project raises ValueError stating how
+    many such ids there were, never the ids. A closed bundle stays closed: the
+    bundles_closed_at_fixed trigger refuses clearing or changing a set
+    closed_at, so a sweep may rely on an answer it has seen. Any way to reopen
+    a bundle is a design change for the storage pair first. It runs SELECTs
+    only: no transaction control and no write.
+    """
+    bundle_ids = list(bundle_ids)
+    if len(bundle_ids) > _SWEEP_LIMIT:
+        raise ValueError("bundle_closed_at takes at most %d bundle ids" % _SWEEP_LIMIT)
+    if any(not isinstance(bundle_id, str) or not bundle_id for bundle_id in bundle_ids):
+        raise ValueError("each bundle id is a non-empty string")
+    distinct = list(dict.fromkeys(bundle_ids))
+    answers = {}
+    for bundle_id in distinct:
+        row = conn.execute("SELECT closed_at FROM bundles WHERE id = ? AND project_id = ?",
+                           (bundle_id, project_id)).fetchone()
+        if row is not None:
+            answers[bundle_id] = row[0]
+    missing = len(distinct) - len(answers)
+    if missing == 1:
+        raise ValueError("1 bundle id names no bundle of this project")
+    if missing:
+        raise ValueError("%d bundle ids name no bundle of this project" % missing)
+    return answers
+
+
 _SNAPSHOT_COLUMNS = ("handle, relay_id, edge_id, artifact, content_sha256, bytes_len, has_bytes,"
                      " locked_by, locked_at")
 _SNAPSHOT_JOIN_COLUMNS = ", ".join("s." + name.strip() for name in _SNAPSHOT_COLUMNS.split(","))
@@ -645,6 +707,11 @@ def _snapshot(conn, handle, project_id):
     return _snapshot_row(row)
 
 
+_UNAVAILABLE_TEXT = {"missing": "the evidence store reports its bytes missing",
+                     "corrupt": "the evidence store reports its bytes corrupt",
+                     "unsupported-codec": "the evidence store cannot decode its bytes"}
+
+
 def _snapshot_bytes(conn, snapshot, store, directory):
     if snapshot.has_bytes:
         if store is None:
@@ -654,6 +721,8 @@ def _snapshot_bytes(conn, snapshot, store, directory):
                 data = store.get(snapshot.content_sha256)
             except KeyError:
                 reason = "the evidence store does not hold its bytes"
+            except submit.EvidenceUnavailable as unavailable:
+                reason = _UNAVAILABLE_TEXT[unavailable.reason]
             else:
                 if hashlib.sha256(data).hexdigest() != snapshot.content_sha256:
                     raise ValueError("stored bytes no longer match snapshot %d" % snapshot.handle)

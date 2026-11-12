@@ -105,6 +105,22 @@ def _check_git_state(state):
         raise ValueError("git_state.branch is a non-empty string or None")
 
 
+# Only Authority's tables may be named as hook-writable (slice 2a D1).
+HOOK_WRITE_OWNERS = frozenset({"authority"})
+
+_UNAVAILABLE_REASONS = frozenset({"missing", "corrupt", "unsupported-codec"})
+
+
+class EvidenceUnavailable(Exception):
+    """A store knows an object but cannot return its bytes; reason says why."""
+
+    def __init__(self, reason):
+        if not isinstance(reason, str) or reason not in _UNAVAILABLE_REASONS:
+            raise ValueError("EvidenceUnavailable reason is missing, corrupt or unsupported-codec")
+        super().__init__(reason)
+        self.reason = reason
+
+
 class EvidenceStore(Protocol):
     """Platform's content-addressed evidence store (DD § 17, amendment5)."""
 
@@ -112,7 +128,10 @@ class EvidenceStore(Protocol):
         """Keep bytes under their sha256 and return that key."""
 
     def get(self, sha256: str) -> bytes:
-        """Return the bytes retained under sha256."""
+        """Return the bytes retained under sha256.
+
+        Raise KeyError for an object the store never held, and
+        EvidenceUnavailable for a known object it cannot return."""
 
     def captured_by(self, sha256: str) -> str | None:
         """Return host-observed, seat-supplied, or None for an absent record."""
@@ -137,6 +156,7 @@ class SubmitContext:
     after_admit_writes: frozenset[str] = frozenset()
     store: EvidenceStore | None = None
     after_admit_reads_denied: frozenset[str] = frozenset({"bodies"})
+    sender_check: Callable[[sqlite3.Connection], None] | None = None
 
     def __post_init__(self):
         _check_git_state(self.git_state)
@@ -156,8 +176,10 @@ class SubmitContext:
             raise ValueError("after_admit_writes is a frozenset of owned table names")
         for table in self.after_admit_writes:
             if (not isinstance(table, str) or table not in schema.TABLE_OWNERS
-                    or schema.TABLE_OWNERS[table] in {"engine", "platform"}):
+                    or schema.TABLE_OWNERS[table] not in HOOK_WRITE_OWNERS):
                 raise ValueError("after_admit_writes names only declared hook-owned tables")
+        if self.sender_check is not None and not callable(self.sender_check):
+            raise ValueError("sender_check is callable or None")
 
 
 @dataclass(frozen=True)
@@ -237,10 +259,16 @@ def submit(conn, ctx, data):
         raise ValueError("submit requires legacy transaction control or autocommit True")
     if conn in _HOOK_FRAMES:
         raise sqlite3.DatabaseError("nested admission is not allowed during a hook")
+    if conn in _CHECK_FRAMES:
+        raise sqlite3.DatabaseError("nested admission is not allowed during a sender check")
     if conn.execute("PRAGMA foreign_keys").fetchone() != (1,):
         raise ValueError("the store connection has foreign keys off; open it with open_store")
     now = ctx.now_ms()
     try:
+        if ctx.sender_check is not None:
+            replay = _checked_replay(conn, ctx, data)
+            if replay is not None:
+                return replay
         return _admit(conn, ctx, data, now)
     except errors.EngineError as error:
         _record_refusal(conn, ctx, data, now, error)
@@ -256,6 +284,7 @@ def submit(conn, ctx, data):
 # schema objects created inside the hook can outlive its read boundary.
 _HOOK_FRAMES = {}
 _READ_GUARDS = {}
+_CHECK_FRAMES = {}
 
 
 def _hook_name(hook):
@@ -337,6 +366,52 @@ def _run_hook(conn, ctx, admitted, draft):
             pass
 
 
+def _run_sender_check(conn, ctx):
+    """D7: the sender check under a read-only frame, inside the caller's transaction.
+
+    The authorizer allows only reads, with the hook's read denials, so the
+    check cannot write, begin or end a transaction, attach, detach or set a
+    pragma; while it runs, submit on this connection refuses as a nested
+    admission, and no hook frame exists for system filing. An EngineError it
+    raises is a refusal; anything else, or a check that ends the transaction
+    or closes the connection, is a fault."""
+    reads = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT,
+             sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+    denied = ctx.after_admit_reads_denied
+
+    def authorize(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_READ and table in denied:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK if action in reads else sqlite3.SQLITE_DENY
+    _CHECK_FRAMES[conn] = ctx
+    try:
+        conn.set_authorizer(authorize)
+        ctx.sender_check(conn)
+        state = _transaction_state(conn)
+        if state == "closed":
+            raise sqlite3.ProgrammingError("the sender check closed the store connection")
+        if state == "ended":
+            raise sqlite3.ProgrammingError("the sender check ended the transaction")
+    finally:
+        _CHECK_FRAMES.pop(conn, None)
+        try:
+            conn.set_authorizer(None)
+        except sqlite3.Error:
+            pass
+
+
+def _checked_replay(conn, ctx, data):
+    """D6 step 1: the sender check, then the replay lookup on the same read
+    snapshot, in one short read transaction ended before any preparation."""
+    conn.execute("BEGIN")
+    try:
+        _run_sender_check(conn, ctx)
+        return _replay(conn, ctx, data)
+    finally:
+        if _transaction_state(conn) == "active":
+            conn.execute("ROLLBACK")
+
+
 def file_system_relay(conn, ctx, data):
     """Engine filing inside this connection's active hook; owns no transaction."""
     frame = _HOOK_FRAMES.get(conn)
@@ -345,7 +420,7 @@ def file_system_relay(conn, ctx, data):
     system = SeatRef(SYSTEM, SYSTEM, SYSTEM, ctx.sender.team_instance_id,
                      ctx.sender.project_id)
     internal = replace(ctx, sender=system, after_admit=None,
-                       after_admit_writes=frozenset())
+                       after_admit_writes=frozenset(), sender_check=None)
     # Each real authorizer transition expires cached prepared statements.
     # A boolean privilege flag would let cached engine INSERTs escape later.
     conn.set_authorizer(None)
@@ -395,7 +470,9 @@ def _replay(conn, ctx, data):
 
 
 def _admit(conn, ctx, data, now, *, _system=False):
-    replay = None if _system else _replay(conn, ctx, data)
+    # With a sender check, submit has already run the checked replay lookup (D6 step 1).
+    checked = not _system and ctx.sender_check is not None
+    replay = None if _system or checked else _replay(conn, ctx, data)
     if replay is not None:
         return replay
     draft = header.parse(data)
@@ -411,6 +488,8 @@ def _admit(conn, ctx, data, now, *, _system=False):
     if not _system:
         conn.execute("BEGIN IMMEDIATE")
     try:
+        if checked:
+            _run_sender_check(conn, ctx)  # D6 step 3: again, under the write lock
         # Reference resolution preceded the lock; another writer may have
         # committed this party/key while we were resolving that input.
         replay = None if _system else _replay(conn, ctx, data)
@@ -910,7 +989,7 @@ class TableDirectory:
 
 @contextmanager
 def read_guard(conn, denied=frozenset({"bodies"})):
-    """Deny cooperating code's table reads, retaining an outer guard or hook.
+    """Deny cooperating code's table reads, retaining an outer guard, hook or sender check.
 
     This is not a sandbox: statements prepared before the guard keep their
     authorization while stepped, blobopen and other in-process Python can
@@ -921,6 +1000,12 @@ def read_guard(conn, denied=frozenset({"bodies"})):
     if frame is not None:
         if not denied <= frame[0].after_admit_reads_denied:
             raise RuntimeError("a read guard inside a hook cannot deny more than the hook's own read denials")
+        yield
+        return
+    check = _CHECK_FRAMES.get(conn)
+    if check is not None:
+        if not denied <= check.after_admit_reads_denied:
+            raise RuntimeError("a read guard inside a sender check cannot deny more than the check's own read denials")
         yield
         return
     previous = _READ_GUARDS.get(conn)

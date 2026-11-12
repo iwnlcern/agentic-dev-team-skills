@@ -1231,7 +1231,7 @@ class TestAdmissionHook(Store):
         self.conn.executescript(
             "CREATE TABLE fixture_owned (id TEXT PRIMARY KEY, relay_id TEXT REFERENCES relays(id));"
             "CREATE TABLE fixture_other (id TEXT PRIMARY KEY);")
-        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "test-only"})
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "authority"})
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -1376,7 +1376,7 @@ class TestAdmissionHook(Store):
             "CREATE TABLE fixture_child (id TEXT PRIMARY KEY, parent TEXT REFERENCES"
             " fixture_parent(id) ON DELETE CASCADE);"
             "INSERT INTO fixture_parent VALUES ('p'); INSERT INTO fixture_child VALUES ('c','p');")
-        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_parent": "test-only"}):
+        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_parent": "authority"}):
             operations = [
                 lambda c, a: c.execute("UPDATE relays SET subject='forged'"),
                 lambda c, a: c.execute("DELETE FROM relays"),
@@ -1655,7 +1655,7 @@ class TestAdmissionHookAtomicity(Store):
         attacks = ("fresh-cte", "cached-cte", "table-rollback", "plain")
         cte = "WITH value(id,relay_id) AS (VALUES (?,?)) INSERT INTO fixture_owned SELECT * FROM value"
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for mode in modes:
                 path = Path(name) / (mode + "-control.db")
                 conn = self.file_store(path, mode=mode)
@@ -1823,7 +1823,7 @@ class TestAdmissionHookAtomicity(Store):
         private_message = "PRIVATE-CLOSED-HOOK-PAYLOAD-918"
         disclosed = []
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for closing in (True, False):
                 path = Path(name) / ("closed-raise.db" if closing else "open-raise.db")
                 conn = self.file_store(path)
@@ -1865,7 +1865,7 @@ class TestAdmissionHookAtomicity(Store):
 
     def test_hook_closing_connection_cleans_frame(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             path = Path(name) / "closed.db"
             conn = self.file_store(path)
             before = self.file_state(path)
@@ -1888,7 +1888,7 @@ class TestAdmissionHookAtomicity(Store):
 
     def test_hook_closing_connection_interrupt_propagates(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             path = Path(name) / "closed-interrupt.db"
             conn = self.file_store(path)
             before = self.file_state(path)
@@ -1909,7 +1909,7 @@ class TestAdmissionHookAtomicity(Store):
 
     def test_hook_writes_outside_main_refused(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for database in ("fixture_attached", "temp"):
                 with self.subTest(database=database):
                     path = Path(name) / (database + ".db")
@@ -1965,7 +1965,7 @@ class TestAdmissionHookAtomicity(Store):
     def test_hook_closing_connection_engine_error_discloses_nothing(self):
         private_message = "PRIVATE-CLOSED-ENGINEERROR-PAYLOAD-467"
         with tempfile.TemporaryDirectory() as name, mock.patch.dict(
-                schema.TABLE_OWNERS, {"fixture_owned": "test-only"}):
+                schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
             for route in ("raised", "system-filing"):
                 with self.subTest(route=route):
                     path = Path(name) / (route + ".db")
@@ -2008,6 +2008,244 @@ class TestAdmissionHookAtomicity(Store):
                     self.assertNotIn(private_message, "".join(traceback.format_exception(outcome)))
                     self.assertEqual(self.file_state(path), before)
                     self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+
+class TestHookWriteOwners(Store):
+    """Breaks: a hook may write a table whose declared owner is not Authority (slice 2a D1)."""
+
+    def test_hook_write_owner_allowlist(self):
+        message = "after_admit_writes names only declared hook-owned tables"
+        with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": "authority"}):
+            ctx = replace(self.ctx(), after_admit_writes=frozenset({"fixture_owned"}))
+            self.assertEqual(ctx.after_admit_writes, frozenset({"fixture_owned"}))
+        for owner in ("console", "store", "test-only"):
+            with mock.patch.dict(schema.TABLE_OWNERS, {"fixture_owned": owner}):
+                with self.assertRaises(ValueError, msg=owner) as caught:
+                    replace(self.ctx(), after_admit_writes=frozenset({"fixture_owned"}))
+                self.assertEqual(str(caught.exception), message)
+        for table in sorted(schema.TABLE_OWNERS):
+            with self.assertRaises(ValueError, msg=table):
+                replace(self.ctx(), after_admit_writes=frozenset({table}))
+
+
+class TestSenderCheck(Store):
+    """Breaks: a served sender replays or admits on a binding that is no longer current, or its
+    check writes, nests or holds a transaction across preparation (slice 2a D6, D7)."""
+
+    def checked(self, check, **kwargs):
+        return replace(self.ctx(**kwargs), sender_check=check)
+
+    def recorder(self, raising=()):
+        """A check counting its calls and recording the transaction state at each; it raises
+        E-SENDER-NOT-CURRENT on the calls numbered in raising."""
+        calls = []
+
+        def check(conn):
+            calls.append(conn.in_transaction)
+            if len(calls) in raising:
+                raise errors.error_for("E-SENDER-NOT-CURRENT", reason="key_replaced")
+        return check, calls
+
+    def last_refusal(self):
+        return self.conn.execute("SELECT project_id, coalesce(seat_id, special), code FROM refusals"
+                                 " ORDER BY id DESC LIMIT 1").fetchone()
+
+    def test_sender_check_once_per_path(self):
+        self.checked(None)  # the field exists, or this test errors here
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = os.path.join(folder.name, "store.sqlite3")
+        conn = submit.open_store(path)
+        self.addCleanup(conn.close)
+        conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        platform_rows(conn)
+        other = sqlite3.connect(path, timeout=0, isolation_level=None)
+        self.addCleanup(other.close)
+        calls, writer, parsed = [], [], []
+
+        def check(c):
+            calls.append(c.in_transaction)
+            c.execute("SELECT count(*) FROM seats").fetchone()
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("ROLLBACK")
+                writer.append("free")
+            except sqlite3.OperationalError as error:
+                writer.append("busy" if "locked" in str(error) else str(error))
+        real = header.parse
+
+        def parse(data):
+            parsed.append(conn.in_transaction)
+            return real(data)
+        ctx = replace(submit.SubmitContext(PLANNER, GIT_STATE, self.now, self.directory,
+                                           submission_key="once"), sender_check=check)
+        data = draft(subject="once")
+        with mock.patch.object(header, "parse", side_effect=parse):
+            first = snapshot_outcome(lambda: submit.submit(conn, ctx, data))
+            self.assertIsInstance(first[1], submit.Admitted, first)
+            self.assertEqual((calls, writer, parsed), ([True, True], ["free", "busy"], [False]))
+            self.assertFalse(conn.in_transaction)
+            del calls[:], writer[:], parsed[:]
+            again = snapshot_outcome(lambda: submit.submit(conn, ctx, data))
+        self.assertEqual(again, ("ok", first[1]))
+        self.assertEqual((calls, writer, parsed), ([True], ["free"], []))
+        self.assertFalse(conn.in_transaction)
+
+    def test_sender_check_refuses_stale_sender(self):
+        stale, stale_calls = self.recorder(raising={1})
+        ctx = self.checked(stale, submission_key="committed")
+        data = draft(subject="stale")
+        self.assertIsInstance(self.submit(data, submission_key="committed"), submit.Admitted)
+        cases = ((ctx, data, stale_calls, 1),)
+        fresh, fresh_calls = self.recorder(raising={1})
+        cases += ((self.checked(fresh, submission_key="fresh"), draft(subject="fresh"), fresh_calls, 1),)
+        late, late_calls = self.recorder(raising={2})
+        cases += ((self.checked(late, submission_key="late"), draft(subject="late"), late_calls, 2),)
+        for case_ctx, case_data, calls, expected_calls in cases:
+            before = self.counts()
+            kind, _ = snapshot_outcome(lambda: submit.submit(self.conn, case_ctx, case_data))
+            after = self.counts()
+            refusals = after.pop("refusals") - before.pop("refusals")
+            self.assertEqual((kind, len(calls), refusals, after), ("E-SENDER-NOT-CURRENT", expected_calls, 1,
+                                                                   before), case_ctx.submission_key)
+            self.assertEqual(self.last_refusal(), (PROJECT, PLANNER.seat_id, "E-SENDER-NOT-CURRENT"))
+            self.assertFalse(self.conn.in_transaction)
+
+    def test_sender_check_replay_without_preparation(self):
+        passing, calls = self.recorder()
+        hooked = []
+        ctx = replace(self.checked(passing, submission_key="cited"),
+                      after_admit=lambda conn, admitted, parsed, context: hooked.append(admitted))
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        cited = Path(os.path.realpath(folder.name)) / "cited"
+        cited.write_bytes(b"cited\n")
+        data = draft(subject="cited", refs=("file:" + str(cited),))
+        first = snapshot_outcome(lambda: submit.submit(self.conn, ctx, data))
+        self.assertIsInstance(first[1], submit.Admitted, first)
+        self.assertEqual(len(hooked), 1)
+        cited.unlink()
+        del calls[:]
+        before = self.counts()
+        again = snapshot_outcome(lambda: submit.submit(self.conn, ctx, data))
+        self.assertEqual((again, len(calls), len(hooked), self.counts()), (("ok", first[1]), 1, 1, before))
+        other = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft(subject="other")))
+        self.assertEqual(other[0], "E-SUBMISSION-KEY-REUSED", other)
+        self.assertEqual(len(hooked), 1)
+
+    def test_sender_check_read_only(self):
+        denied = "not authorized"
+        attempts = {
+            "insert": (lambda c: c.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                                           " VALUES ('seat-new', 't1', 'planner', 'occupied')"), denied),
+            "commit": (lambda c: c.execute("COMMIT"), denied),
+            "attach": (lambda c: c.execute("ATTACH DATABASE ':memory:' AS attached"), denied),
+            "pragma": (lambda c: c.execute("PRAGMA foreign_keys = OFF"), denied),
+            "bodies": (lambda c: c.execute("SELECT body FROM bodies LIMIT 1").fetchone(),
+                       "access to bodies.body is prohibited"),
+        }
+        for name, (attempt, message) in attempts.items():
+            calls = []
+            ctx = self.checked(lambda c: calls.append(name) or attempt(c))
+            before = self.counts()
+            outcome = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft(subject=name)))
+            self.assertIsInstance(outcome[1], sqlite3.DatabaseError, (name, outcome))
+            # The pre-lock check's own attempt is refused, so the check runs once and the lock is never taken.
+            self.assertEqual((str(outcome[1]), len(calls)), (message, 1), name)
+            self.assertEqual(self.counts(), before, name)
+            self.assertFalse(self.conn.in_transaction, name)
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM seats WHERE id = 'seat-new'")
+                             .fetchone(), (0,), name)
+            self.assertEqual(self.conn.execute("PRAGMA foreign_keys").fetchone(), (1,), name)
+        ctx = self.checked(lambda c: c.execute("SELECT count(*) FROM seats").fetchone())
+        outcome = snapshot_outcome(lambda: submit.submit(self.conn, ctx, draft(subject="reads")))
+        self.assertIsInstance(outcome[1], submit.Admitted, outcome)
+
+    def test_sender_check_cannot_nest(self):
+        inner = []
+        nesting = self.checked(lambda c: inner.append(
+            snapshot_outcome(lambda: submit.submit(c, self.ctx(), draft(subject="inner")))))
+        outcome = snapshot_outcome(lambda: submit.submit(self.conn, nesting, draft(subject="outer")))
+        self.assertIsInstance(outcome[1], submit.Admitted, outcome)
+        self.assertEqual([(kind, str(error)) for kind, error in inner],
+                         [("DatabaseError", "nested admission is not allowed during a sender check")] * 2)
+        filing = self.checked(lambda c: inner.append(
+            snapshot_outcome(lambda: submit.file_system_relay(c, filing, draft(bundle="system")))))
+        del inner[:]
+        outcome = snapshot_outcome(lambda: submit.submit(self.conn, filing, draft(subject="filing")))
+        self.assertIsInstance(outcome[1], submit.Admitted, outcome)
+        self.assertEqual([kind for kind, _ in inner], ["RuntimeError"] * 2)
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute("PRAGMA foreign_keys = ON")
+        schema.init_v3(conn)
+        platform_rows(conn)
+        closing = self.checked(lambda c: c.close())
+        outcome = snapshot_outcome(lambda: submit.submit(conn, closing, draft(subject="closing")))
+        self.assertEqual((outcome[0], str(outcome[1])),
+                         ("ProgrammingError", "the sender check closed the store connection"))
+
+    def test_sender_check_read_guard_keeps_frame(self):
+        """Breaks: a nested read guard replaces or clears the sender check's authorizer."""
+        with self.subTest(case="write_after_guard"):
+            seen = []
+
+            def write_after_guard(c):
+                with submit.read_guard(c):
+                    seen.append(c.execute("SELECT count(*) FROM seats").fetchone())
+                c.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES ('seat-check-guard', 't9', 'implementer', 'occupied')")
+            before = self.counts()
+            outcome = snapshot_outcome(lambda: submit.submit(
+                self.conn, self.checked(write_after_guard), draft(subject="guard-write")))
+            self.assertIsInstance(outcome[1], sqlite3.DatabaseError, outcome)
+            self.assertEqual(str(outcome[1]), "not authorized")
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(self.counts(), before)
+            self.assertEqual(self.conn.execute(
+                "SELECT count(*) FROM seats WHERE id='seat-check-guard'").fetchone(), (0,))
+            self.assertFalse(self.conn.in_transaction)
+
+        with self.subTest(case="extra_denials"):
+            def extra_denials(c):
+                with submit.read_guard(c, frozenset({"bodies", "edges"})):
+                    c.execute("SELECT count(*) FROM seats").fetchone()
+            before = self.counts()
+            ctx = replace(self.checked(extra_denials),
+                          after_admit_reads_denied=frozenset({"bodies"}))
+            outcome = snapshot_outcome(lambda: submit.submit(
+                self.conn, ctx, draft(subject="guard-extra-denials")))
+            self.assertIsInstance(outcome[1], RuntimeError, outcome)
+            self.assertEqual(str(outcome[1]),
+                "a read guard inside a sender check cannot deny more than the check's own read denials")
+            self.assertEqual(self.counts(), before)
+            self.assertFalse(self.conn.in_transaction)
+
+        with self.subTest(case="subset_restores"):
+            seen = []
+
+            def subset(c):
+                with submit.read_guard(c, frozenset({"bodies"})):
+                    seen.append(c.execute("SELECT count(*) FROM seats").fetchone())
+            outcome = snapshot_outcome(lambda: submit.submit(
+                self.conn, self.checked(subset), draft(subject="guard-subset")))
+            self.assertIsInstance(outcome[1], submit.Admitted, outcome)
+            self.assertEqual(len(seen), 2)
+            self.assertFalse(self.conn.in_transaction)
+            changed = self.conn.execute("UPDATE seats SET state = state WHERE id = ?",
+                                        (PLANNER.seat_id,))
+            self.assertEqual(changed.rowcount, 1)
+            self.conn.rollback()
+
+    def test_sender_check_none_unchanged(self):
+        ctx = replace(self.ctx(submission_key="plain"), sender_check=None)
+        data = draft(subject="plain")
+        first = submit.submit(self.conn, ctx, data)
+        parsed = []
+        real = header.parse
+        with mock.patch.object(header, "parse", side_effect=lambda d: parsed.append(d) or real(d)):
+            outcome = snapshot_outcome(lambda: submit.submit(self.conn, ctx, data))
+        self.assertEqual((outcome, parsed), (("ok", first), []))
 
 
 class TestAdmissionKeyBoundary(Store):
@@ -2454,7 +2692,7 @@ class TestReadGuard(Store):
         super().setUp()
         self.conn.execute("CREATE TABLE fixture_guard (value TEXT)")
         self.conn.commit()
-        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_guard": "test-only"})
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"fixture_guard": "authority"})
         patch.start()
         self.addCleanup(patch.stop)
 

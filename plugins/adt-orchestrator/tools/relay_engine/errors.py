@@ -454,6 +454,20 @@ strings.register_inventory(_HOOK_TEXT, {
 })
 
 
+# A served sender's binding (slice 2a D5): raised by Platform's binding check, never by Engine.
+_SENDER_REASONS = {"key_replaced", "seat_stood_down", "session_not_current"}
+_SENDER_TEXT = {
+    "error-sender-not-current-cause": "the sender's seat binding is not current ({reason}); nothing from this draft was stored",
+    "error-sender-not-current-remedy": "sign in again with the seat's current key and session, then submit the same draft again",
+    "error-sender-not-current-explain": "a served submit is admitted only while the sender's key, seat and session are current; key_replaced, seat_stood_down and session_not_current name what changed",
+}
+strings.register_inventory(_SENDER_TEXT, {
+    (key, field): {"reason": lambda v: isinstance(v, str) and v in _SENDER_REASONS}[field]
+    for key, template in _SENDER_TEXT.items()
+    for field in strings._placeholders(template)
+})
+
+
 # v3 review snapshots (DD-v3-engine § 17): one code per rule.
 _SNAPSHOT_TEXT = {
     "error-snapshot-stale-cause": "line {line}: {value} changed after review request #{handle} snapshotted it",
@@ -482,7 +496,10 @@ _NO_BYTES_REASONS = {"the file was over 1 MiB when the request was submitted",
                      "no evidence store was configured when the request was submitted",
                      "the blob cannot be read from its checkout",
                      "no evidence store was given to read its bytes",
-                     "the evidence store does not hold its bytes"}
+                     "the evidence store does not hold its bytes",
+                     "the evidence store reports its bytes missing",
+                     "the evidence store reports its bytes corrupt",
+                     "the evidence store cannot decode its bytes"}
 strings.register_inventory(_SNAPSHOT_TEXT, {
     (key, field): {"line": _is_line, "value": _is_header_text,
                    "handle": lambda v: strings._is_count(v) and v >= 1,
@@ -551,6 +568,7 @@ ERRORS = {
     "E-OUTPUT-EXISTS": _spec("output-exists", "command"),
     "E-ADMISSION-HOOK": _spec("admission-hook", "integrity"),
     "E-SUBMISSION-KEY-REUSED": _spec("submission-key-reused", "integrity"),
+    "E-SENDER-NOT-CURRENT": _spec("sender-not-current", "policy"),
     "E-DRAFT-SHAPE": _spec("draft-shape", "integrity"),
     "no-top-seat": _spec("no-top-seat", "command"),
     "E-KEY-MISMATCH": _spec("key-mismatch", "policy"),
