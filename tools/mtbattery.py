@@ -927,7 +927,7 @@ def stop_scope(watch_parent=False, raise_on_stop=False):
         yield _STOP
         return
     state = SimpleNamespace(event=threading.Event(), signal=None, launch=threading.Condition(),
-                            defer=False, selected=[], printed=set())
+                            defer=False, raise_on_stop=raise_on_stop, selected=[], printed=set())
     old = {}
     finished = threading.Event()
     parent = int(os.environ.get('MTBATTERY_PARENT_PID', os.getppid()))
@@ -940,7 +940,7 @@ def stop_scope(watch_parent=False, raise_on_stop=False):
             state.signal = signum
             state.event.set()
             state.launch.notify_all()
-        if raise_on_stop and not state.defer:
+        if state.raise_on_stop and not state.defer:
             raise RunStopped(128 + signum)
     def watch():
         while not finished.wait(0.05):
@@ -980,9 +980,23 @@ def managed_run(command, *, cwd=None, env=None, capture_output=True, text=True, 
     if _STOP is not None and _STOP.event.is_set():
         return subprocess.CompletedProcess(command, 128 + (_STOP.signal or signal.SIGTERM), '', '')
     child_env = {**(os.environ if env is None else env), 'MTBATTERY_PARENT_PID': str(os.getpid())}
-    with subprocess.Popen(command, cwd=cwd, env=child_env,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text) as process:
+    state = _STOP
+    prior_defer = state.defer if state is not None else False
+    if state is not None:
+        state.defer = True
+    try:
+        process = subprocess.Popen(command, cwd=cwd, env=child_env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text)
+    except BaseException as error:
+        if state is not None:
+            state.defer = prior_defer
+            if state.event.is_set() and state.raise_on_stop and not prior_defer:
+                raise RunStopped(128 + state.signal) from error
+        raise
+    with process:
         try:
+            if state is not None:
+                state.defer = prior_defer
             while True:
                 if _STOP is not None and _STOP.event.is_set():
                     stop_child(process)
@@ -995,6 +1009,8 @@ def managed_run(command, *, cwd=None, env=None, capture_output=True, text=True, 
             stop_child(process)
             process.communicate()
             raise
+    if state is not None and state.event.is_set() and state.raise_on_stop and not prior_defer:
+        raise RunStopped(128 + state.signal)
     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check:
         result.check_returncode()
