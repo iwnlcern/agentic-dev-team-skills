@@ -5,7 +5,7 @@ and service-principal work adds the transport and supervision paths that do.
 """
 from dataclasses import dataclass
 
-OPERATOR_SURFACES: tuple[str, ...] = ("frank_panel", "page")
+OPERATOR_SURFACES: tuple[str, ...] = ("frank_panel", "page", "terminal")
 SERVICE_NAMES: tuple[str, ...] = (
     "authority_service",
     "console_queue",

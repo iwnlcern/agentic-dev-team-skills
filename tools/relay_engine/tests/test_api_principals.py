@@ -93,16 +93,21 @@ def construction_error(cls, value):
 
 class TestOperatorPrincipal(unittest.TestCase):
     def test_operator_principal_accepts_each_surface(self):
-        self.assertEqual(p.OPERATOR_SURFACES, ("frank_panel", "page"))
-        for surface in ("page", "frank_panel"):
+        for surface in ("page", "frank_panel", "terminal"):
             principal = p.OperatorPrincipal(surface)
             self.assertEqual(principal.surface, surface)
             self.assertEqual(principal, p.OperatorPrincipal(surface))
             self.assertEqual(hash(principal), hash(p.OperatorPrincipal(surface)))
         self.assertNotEqual(p.OperatorPrincipal("page"), p.OperatorPrincipal("frank_panel"))
+        self.assertNotEqual(p.OperatorPrincipal("terminal"), p.OperatorPrincipal("page"))
+        self.assertNotEqual(p.OperatorPrincipal("terminal"), p.OperatorPrincipal("frank_panel"))
+        self.assertEqual(p.OPERATOR_SURFACES, ("frank_panel", "page", "terminal"))
 
     def test_operator_principal_refuses_other_values(self):
-        for value in ("Page", "page ", "operator", None, b"page", _Str("page"), _AlwaysEqual()):
+        probes = tuple(value for surface in p.OPERATOR_SURFACES
+                       for value in (" " + surface, surface + "\n", surface.upper()))
+        for value in ("Page", "page ", "Terminal", "terminal ", "", "operator", None,
+                      b"page", _Str("page"), _AlwaysEqual(), "terminals") + probes:
             with self.subTest(value=value):
                 error = construction_error(p.OperatorPrincipal, value)
                 self.assertIs(type(error), ValueError)
