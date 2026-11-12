@@ -61,7 +61,8 @@ def removal_census(source, *, seat_module=False):
 
     Scope-local aliases prevent an unrelated function's `path` from inheriting
     another function's record path. TemporaryDirectory-derived homes are scratch,
-    not a user's persistent records; the negative control has no scratch home.
+    not a user's persistent records. A name ever bound to a persistent path in
+    its scope stays persistent at every use, including after scratch rebinding.
     """
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
@@ -122,7 +123,7 @@ def removal_census(source, *, seat_module=False):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 k = key(target)
-                if k is not None and bindings.get(k) != value:
+                if k is not None and bindings.get(k) != value and bindings.get(k) != "record":
                     bindings[k] = value
                     changed = True
         if not changed:
@@ -334,6 +335,16 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
         print("REMOVAL_CENSUS " + json.dumps(found))
         self.assertEqual(bad, [])
         self.assertTrue(removal_census('p = seat_record.record_path("codex", "id")\np.unlink()\n')[1])
+        self.assertEqual(removal_census(
+            'p = seat_record.record_path("codex", "id")\n'
+            'p.unlink()\n'
+            'tmp = tempfile.TemporaryDirectory()\n'
+            'p = seat_record.record_path("codex", "id", home=Path(tmp.name))\n'),
+            ([2], [2]))
+        self.assertEqual(removal_census(
+            'tmp = tempfile.TemporaryDirectory()\n'
+            'p = seat_record.record_path("codex", "id", home=Path(tmp.name))\n'
+            'p.unlink()\n'), ([], []))
 
     def test_transaction_wait_constant(self):
         self.assertEqual(self.sr.TRANSACTION_WAIT_S, 15.0)
