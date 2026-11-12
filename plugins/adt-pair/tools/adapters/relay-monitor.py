@@ -2664,12 +2664,13 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
 
 
 def status(args) -> int:
-    with root_budget():
+    end = time.monotonic() + STATUS_BUDGET
+    with root_budget(cap=end):
         session = resolve_session(args)
         if not valid_session_id(session):
             print("relay-monitor: invalid-session-id", file=sys.stderr)
             return 2
-        store, end = NoteStore(session), time.monotonic() + STATUS_BUDGET
+        store = NoteStore(session)
         with contextlib.suppress(LockTimeout), store.state_lock(timeout=0.05):
             sweep_owner_files(store)  # eventual cleanup; never the referenced file; skipped while busy (F3)
         print(status_line(store, args.plugin_root, end=end))
@@ -2738,7 +2739,8 @@ def arming_text(plugin_root: str, session: str, label: str | None) -> str:
 
 
 def session_start(args) -> int:
-    with root_budget():
+    end = time.monotonic() + STATUS_BUDGET
+    with root_budget(cap=end):
         payload = read_payload()
         session = resolve_session(args, payload)
         if not valid_session_id(session):
@@ -2751,7 +2753,7 @@ def session_start(args) -> int:
                     }
                 }
             )
-        store, end = NoteStore(session), time.monotonic() + STATUS_BUDGET
+        store = NoteStore(session)
         host = decide_host(args, payload, os.environ)
         plugin_root = (
             args.plugin_root

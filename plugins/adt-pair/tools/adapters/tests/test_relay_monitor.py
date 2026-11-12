@@ -1674,10 +1674,10 @@ class BoundedStatusTests(TmpEnv):
         self.assertLess(elapsed, 2.0, proc.stdout + proc.stderr)
         self.assertTrue(proc.stdout.startswith("relay-monitor: "), proc.stdout + proc.stderr)
 
-    def _virtual_status(self, mode: str) -> dict:
+    def _virtual_status(self, mode: str, *, engine: str = "wedged") -> dict:
         # Keep the actual status path; only its blocking operations advance this clock.
         code = '''import contextlib, hashlib, importlib.util, io, json, pathlib, sys, time, subprocess
-script, mode, plugin = sys.argv[1:]
+script, mode, plugin, engine = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("virtual_monitor", script)
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
@@ -1698,6 +1698,10 @@ class Process:
     def run(self, argv, **kwargs):
         timeout = kwargs["timeout"]
         waits.append(["run", argv[2], timeout])
+        if engine == "late-answer" and argv[2] == "version":
+            now[0] += timeout - 0.01
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"kit": "2.9.7", "fingerprint": "0" * 64}), stderr="")
         now[0] += timeout
         raise subprocess.TimeoutExpired(argv, timeout)
     def __getattr__(self, name):
@@ -1710,6 +1714,31 @@ class Window:
     def __getattr__(self, name):
         return getattr(real_window, name)
 real_window = m.window
+if engine == "late-answer":
+    # Install after exec_module: bounded_root_call keeps its real _root_gate lock.
+    real_threading = m.threading
+    class RootEvent:
+        def wait(self, seconds):
+            waits.append(["root", seconds])
+            now[0] += seconds
+            return False
+        def is_set(self):
+            return False
+        def set(self):
+            pass
+    class RootThread:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+    class Threading:
+        def Event(self):
+            return RootEvent()
+        def Thread(self, *args, **kwargs):
+            return RootThread(*args, **kwargs)
+        def __getattr__(self, name):
+            return getattr(real_threading, name)
+    m.threading = Threading()
 m.time, m.subprocess, m.window = Clock(), Process(), Window()
 argv = (["status", "--session", "sess"] if mode == "status" else
         ["session-start", "--host", "claude-code"])
@@ -1726,7 +1755,7 @@ print(json.dumps({"elapsed": now[0] - 1024.0, "waits": waits,
             self.assertTrue(lock.stamp("virtual-status-parent", os.getpid(), None))
             with self.store.state_lock():
                 proc = subprocess.run(
-                    [sys.executable, "-c", code, str(SCRIPT), mode, str(self.wedged)],
+                    [sys.executable, "-c", code, str(SCRIPT), mode, str(self.wedged), engine],
                     input=payload if mode == "session-start" else "", capture_output=True,
                     text=True, env=dict(os.environ), timeout=10,
                 )
@@ -1760,6 +1789,26 @@ print(json.dumps({"elapsed": now[0] - 1024.0, "waits": waits,
                 self.assertNotIn("engine=wedged", text)
                 self.assert_no_answer(text, self.wedged)
                 self.assertEqual(record["exit"], 0)
+
+    def test_root_reads_stay_inside_the_status_deadline(self):
+        # A late identity answer followed by a stalled root read shares one deadline.
+        for mode in ("status", "session-start"):
+            with self.subTest(mode=mode):
+                record = self._virtual_status(mode, engine="late-answer")
+                print("ROOT_CAP_PROBE " + json.dumps({
+                    "mode": mode, "elapsed": record["elapsed"], "waits": record["waits"],
+                }))
+                self.assertEqual(record["identity"]["script"], str(pathlib.Path(SCRIPT).resolve()), "script_identity")
+                self.assertTrue(any(w[0] == "root" for w in record["waits"]), "root_reached")
+                self.assertLessEqual(record["elapsed"], 1.33, "elapsed_bound")
+                versions = [w for w in record["waits"] if w[:2] == ["run", "version"]]
+                self.assertEqual(len(versions), 1, "version_wait")
+                self.assertLessEqual(versions[0][2], 1.0, "version_wait")
+                self.assertFalse(any(w[:2] == ["run", "status"] for w in record["waits"]), "version_wait")
+                text = (record["output"] if mode == "status" else
+                        json.loads(record["output"])["hookSpecificOutput"]["additionalContext"])
+                self.assertEqual(record["exit"], 0, "exit")
+                self.assertNotIn("engine=wedged", text, "exit")
 
     def test_session_start_bounded_while_state_lock_held(self):
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
