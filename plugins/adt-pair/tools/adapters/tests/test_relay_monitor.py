@@ -1686,7 +1686,7 @@ identity = {"script": str(pathlib.Path(script).resolve()),
             "script_sha256": hashlib.sha256(pathlib.Path(script).read_bytes()).hexdigest(),
             "window": str(pathlib.Path(m.window.__file__).resolve()),
             "window_sha256": hashlib.sha256(pathlib.Path(m.window.__file__).read_bytes()).hexdigest()}
-now, waits = [1024.0], []
+now, waits, cache_writes = [1024.0], [], []
 class Clock:
     def monotonic(self):
         return now[0]
@@ -1715,6 +1715,19 @@ class Window:
         return getattr(real_window, name)
 real_window = m.window
 if engine == "late-answer":
+    real_update = m.NoteStore.update
+    def record_update(self, fn, *args, **kwargs):
+        note = self.load()
+        note.pop("identity_cache", None)
+        try:
+            fn(note)
+        except Exception:
+            pass
+        else:
+            if "identity_cache" in note:
+                cache_writes.append(note["identity_cache"])
+        return real_update(self, fn, *args, **kwargs)
+    m.NoteStore.update = record_update
     # Install after exec_module: bounded_root_call keeps its real _root_gate lock.
     real_threading = m.threading
     class RootEvent:
@@ -1745,7 +1758,7 @@ argv = (["status", "--session", "sess"] if mode == "status" else
 output = io.StringIO()
 with contextlib.redirect_stdout(output):
     exit_code = m.main([*argv, "--plugin-root", plugin])
-print(json.dumps({"elapsed": now[0] - 1024.0, "waits": waits,
+print(json.dumps({"elapsed": now[0] - 1024.0, "waits": waits, "cache_writes": cache_writes,
                   "output": output.getvalue(), "exit": exit_code, "identity": identity}))
 '''
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
@@ -1809,6 +1822,19 @@ print(json.dumps({"elapsed": now[0] - 1024.0, "waits": waits,
                         json.loads(record["output"])["hookSpecificOutput"]["additionalContext"])
                 self.assertEqual(record["exit"], 0, "exit")
                 self.assertNotIn("engine=wedged", text, "exit")
+
+    def test_unchecked_identity_is_not_cached(self):
+        # Reusing an unchecked identity would hide a recovered root for the cache TTL.
+        for mode in ("status", "session-start"):
+            with self.subTest(mode=mode):
+                record = self._virtual_status(mode, engine="late-answer")
+                text = (record["output"] if mode == "status" else
+                        json.loads(record["output"])["hookSpecificOutput"]["additionalContext"])
+                first_line = text.splitlines()[0]
+                self.assertIn(" daemon=- ", first_line, "daemon_unchecked")
+                self.assertNotIn("engine=no-answer", first_line, "daemon_unchecked")
+                self.assertTrue(record["cache_writes"], "cache_write_seen")
+                self.assertTrue(all(value is None for value in record["cache_writes"]), "no_cache")
 
     def test_session_start_bounded_while_state_lock_held(self):
         payload = json.dumps({"session_id": "sess", "hook_event_name": "SessionStart", "source": "startup"})
@@ -5206,13 +5232,13 @@ report.write_text(json.dumps(state))
         # 5 s is a finite test budget, not shown to be enough: session L measured
         # failures at 1.0 s, and no run has measured the longest root-read delay on
         # a saturated Linux leg.
-        # The method's communicate(timeout=10) stays a real-time supervisor bound
-        # and can still stop it under enough contention.
-        # So the method can still go red by load: a child stalling past 5 s fails
-        # its tuple assertion, and a child past 10 s fails on the timeout. Either
-        # is a red gate reported in Tests' fixed form with the in-run load beside
-        # it, under root 174740 item 4: never retried, never classified by the pair,
-        # and never answered by raising the budget without a new grant.
+        # A child past 5 s takes the degraded path: if it records first, its hint
+        # fails the tuple assertion and prevents sibling binding. If a sibling
+        # binds first, it returns without output and the method can pass.
+        # communicate(timeout=10) waits on each child in turn, each with its own
+        # 10 s from when that wait begins, after the previous wait ended.
+        # Either failure is reported with Tests' in-run load under root 174740
+        # item 4: no retry, pair classification or budget increase without a grant.
         payload = self._submit("concurrent")
         env = dict(os.environ, ADT_TEST_ROOT_BUDGET="5")
         children = [subprocess.Popen([sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for _ in range(3)]
@@ -5230,6 +5256,7 @@ report.write_text(json.dumps(state))
     def test_three_concurrent_hooks_one_stalled_child_fails_the_assertion(self):
         # Adapter 174510, root 174740: the first hook handles the call without
         # binding; its siblings do not bind. Known until delivery plan r3 Task 6.
+        # binding_gen == 0 witnesses that fault only when both siblings finish their root reads within 5 s.
         payload = self._submit("concurrent")
         first = subprocess.Popen(
             [sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE,
@@ -6430,8 +6457,23 @@ t.assertGreater(durations[0],1.0-{delay!r}-.2)
             with self.subTest(mode=mode):
                 self._b7_status_probe(f"""
 def slow_relay(plugin_root,*argv,**kw):
-    threading.Event().wait(0.6)  # two calls fit the 1.5 s identity budget (DD A6) yet exceed the 1.0 s root budget
+    now[0] += 0.55
     return relay(plugin_root,*argv,**kw)
+now = [1000.0]
+class Clock:
+    def monotonic(self): return now[0]
+    def sleep(self, seconds): now[0] += seconds
+    def __getattr__(self, name): return getattr(time, name)
+real_threading = m.threading
+class RootThread:
+    def __init__(self, *, target, **kwargs): self.target = target
+    def start(self): self.target()
+class Threading:
+    def Thread(self, *args, **kwargs): return RootThread(*args, **kwargs)
+    def __getattr__(self, name): return getattr(real_threading, name)
+# Engine calls spend 1.10 virtual seconds, exceeding the 1.0 s root pool;
+# the hint retains 0.20 s of status time and a full pool, with root reads inline.
+m.time, m.threading = Clock(), Threading()
 m.run_relay=slow_relay
 output=invoke({mode!r})
 t.assertIn('rebind, may need operator approval:',output)

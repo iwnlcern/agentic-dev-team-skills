@@ -2601,8 +2601,8 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
             ident, client_id, daemon = (
                 check_identity(plugin_root, note.get("root"), budget) if budget > 0.05 else ("no-answer", {}, None)
             )
-            # keyed by root and plugin root; a no-answer result is never reused (M3, erratum 2)
-            cache = None if ident == "no-answer" else {
+            # keyed by root and plugin root; no-answer and unchecked are not reused (erratum 2, PR 78 F1)
+            cache = None if ident in ("no-answer", "unchecked") else {
                 "root": note["root"], "plugin_root": plugin_root, "at": now, "ident": ident,
                 "client": client_id, "daemon": daemon,
             }
