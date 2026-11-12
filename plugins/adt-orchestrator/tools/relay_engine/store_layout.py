@@ -290,6 +290,24 @@ def route_key(catalogue_conn, key_id: str):
     return row[0] if row is not None else None
 
 
+def project_routes(catalogue_conn) -> list[ProjectRoute]:
+    """List every route in name byte order, including unfinished creation."""
+    rows = _catalogue_read(
+        catalogue_conn,
+        'SELECT project_id, name, state FROM project_routes ORDER BY name', ())
+    if not rows:
+        return []
+    cursor = catalogue_conn.execute('PRAGMA database_list')
+    try:
+        filename = next(path for _, database, path in cursor if database == 'main')
+    finally:
+        cursor.close()
+    if not filename:
+        raise ValueError('route requires a file-backed catalogue')
+    root = Path(filename).parent
+    return [ProjectRoute(*row, ledger_path(root, row[0])) for row in rows]
+
+
 def reserve_project(catalogue_conn, project_id: str, name: str, now_ms: int) -> None:
     """Creation step 1, in the caller's catalogue transaction."""
     catalogue_conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',

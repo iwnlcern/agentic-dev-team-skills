@@ -389,6 +389,70 @@ class TestStoreLayout(unittest.TestCase):
             self.assertEqual(caught.exception.cause, 'creating')
         self.assertEqual(conn.execute('SELECT state FROM project_routes').fetchone(), ('creating',))
 
+    def test_project_routes_lists_every_route(self):
+        # R1 filters creating; R2/R3/R4 use id, NOCASE or insertion order.
+        conn = self.catalogue()
+        g = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+        self.reserve(conn, Q, 'beta')
+        self.reserve(conn, g, 'Gamma')
+        self.reserve(conn, P, 'alpha', active=False)
+        reader = store_layout.open_catalogue_readonly(self.root)
+        self.addCleanup(reader.close)
+        self.assertEqual(store_layout.project_routes(reader), [
+            store_layout.ProjectRoute(g, 'Gamma', 'active',
+                                     self.root.resolve() / 'projects' / g / 'ledger.sqlite3'),
+            store_layout.ProjectRoute(P, 'alpha', 'creating',
+                                     self.root.resolve() / 'projects' / P / 'ledger.sqlite3'),
+            store_layout.ProjectRoute(Q, 'beta', 'active',
+                                     self.root.resolve() / 'projects' / Q / 'ledger.sqlite3'),
+        ])
+        with self.assertRaises(store_layout.RouteUnavailable) as caught:
+            store_layout.route(reader, name='alpha')
+        self.assertEqual(caught.exception.cause, 'creating')
+        self.assertFalse(reader.in_transaction)
+
+    def test_project_routes_empty(self):
+        # An empty catalogue must not invent a route or require a ledger.
+        self.assertEqual(store_layout.project_routes(self.catalogue()), [])
+
+    def test_project_routes_keeps_caller_transaction(self):
+        # R5 commits the caller's pending reservation.
+        conn = self.catalogue()
+        conn.execute('BEGIN IMMEDIATE').close()
+        store_layout.reserve_project(conn, P, 'example', 1)
+        self.assertEqual(store_layout.project_routes(conn), [
+            store_layout.ProjectRoute(P, 'example', 'creating',
+                                     self.root.resolve() / 'projects' / P / 'ledger.sqlite3'),
+        ])
+        self.assertTrue(conn.in_transaction)
+        conn.rollback()
+        self.assertEqual(store_layout.project_routes(conn), [])
+
+    def test_project_routes_cleans_up_its_own(self):
+        # R7 omits the rollback after a failing owned SELECT.
+        conn = self.catalogue()
+        self.assertEqual(store_layout.project_routes(conn), [])
+        self.assertFalse(conn.in_transaction)
+        conn.execute('DROP TABLE project_routes').close()
+        conn.commit()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.project_routes(conn)
+        self.assertFalse(conn.in_transaction)
+
+    def test_project_routes_not_file_backed(self):
+        # R6 accepts an empty main filename as the current folder.
+        from relay_engine import catalogue
+        conn = sqlite3.connect(':memory:')
+        self.addCleanup(conn.close)
+        catalogue.init_catalogue(conn)
+        conn.commit()
+        store_layout.reserve_project(conn, P, 'example', 1)
+        conn.commit()
+        self.assertFalse(conn.in_transaction)
+        with self.assertRaisesRegex(ValueError, '^route requires a file-backed catalogue$'):
+            store_layout.project_routes(conn)
+        self.assertFalse(conn.in_transaction)
+
     def creation_attempt(self, root, crash_at=None):
         """Caller saga fixture: stop on both sides of each single-file commit."""
         class Crash(Exception):
