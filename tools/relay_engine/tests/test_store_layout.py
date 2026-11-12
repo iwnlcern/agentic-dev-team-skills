@@ -1422,6 +1422,115 @@ class TestReadonlyOpeners(unittest.TestCase):
         ]
         self.assertTrue(any(first != second for first, second in unresolved))
 
+    def sized(self, directory) -> list[tuple[str, int]]:
+        return sorted((entry.name, entry.stat().st_size) for entry in directory.iterdir())
+
+    def traced_read(self) -> tuple[object, list[tuple[str, sqlite3.Connection]]]:
+        connect = sqlite3.connect
+        conns = []
+
+        def traced_connect(database, *args, **kwargs):
+            conn = connect(database, *args, **kwargs)
+            conns.append((database, conn))
+            self.addCleanup(conn.close)
+            return conn
+
+        try:
+            with mock.patch.object(sqlite3, 'connect', side_effect=traced_connect):
+                value = store_layout.read_store_id(self.root)
+        except Exception as exc:
+            value = exc
+        return value, conns
+
+    def test_read_store_id_writer_open(self):
+        # N1 ignores uncheckpointed creation in WAL; N5 leaves the reader open.
+        writer = self.catalogue_writer()
+        expected = writer.execute('SELECT store_id FROM catalogue_identity WHERE id=1').fetchone()[0]
+        path = store_layout.catalogue_path(self.root)
+        self.assertTrue(Path(str(path) + '-wal').exists())
+        control = self.keep(sqlite3.connect(
+            path.absolute().as_uri() + '?mode=ro&immutable=1', uri=True))
+        self.assertEqual(control.execute('SELECT name FROM sqlite_master').fetchall(), [])
+        value, conns = self.traced_read()
+        self.assertEqual(value, expected)
+        self.assertEqual(sum(database != ':memory:' for database, _ in conns), 1)
+        for _, conn in conns:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute('SELECT 1')
+
+    def test_read_store_id_writer_closed_writes_nothing(self):
+        # N2 demands a writer, N3 makes side files, and N4 leaves the reader open.
+        writer = store_layout.open_catalogue(self.root)
+        expected = writer.execute('SELECT store_id FROM catalogue_identity WHERE id=1').fetchone()[0]
+        writer.close()
+        self.assertEqual(self.names(self.root), ['machine.sqlite3'])
+        before = self.sized(self.root)
+        value, conns = self.traced_read()
+        self.assertEqual(value, expected)
+        self.assertEqual(self.sized(self.root), before)
+        self.assertEqual(sum(database != ':memory:' for database, _ in conns), 1)
+        for _, conn in conns:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute('SELECT 1')
+        self.refusal(lambda: store_layout.open_catalogue_readonly(self.root),
+                     'no-writer', self.root)
+        path = store_layout.catalogue_path(self.root)
+        plain = sqlite3.connect(path.absolute().as_uri() + '?mode=ro', uri=True)
+        try:
+            plain.execute('PRAGMA journal_mode').fetchone()
+        finally:
+            plain.close()
+        self.assertEqual(self.names(self.root),
+                         ['machine.sqlite3', 'machine.sqlite3-shm', 'machine.sqlite3-wal'])
+
+    def test_read_store_id_faults(self):
+        # N6 loses missing, N7 loses no-identity, N8 accepts changed DDL,
+        # and N9 leaves the catalogue connection open when a check raises.
+        self.root.mkdir()
+        before = self.sized(self.root)
+        value, conns = self.traced_read()
+        self.assertIsInstance(value, store_layout.LayoutFault)
+        self.assertEqual(value.cause, 'missing')
+        self.assertEqual(conns, [])
+        self.assertEqual(self.sized(self.root), before)
+
+        store_layout.open_catalogue(self.root).close()
+        direct = sqlite3.connect(store_layout.catalogue_path(self.root))
+        try:
+            direct.execute('DELETE FROM catalogue_identity')
+            direct.commit()
+        finally:
+            direct.close()
+        self.assertEqual(self.names(self.root), ['machine.sqlite3'])
+        before = self.sized(self.root)
+        value, conns = self.traced_read()
+        self.assertIsInstance(value, store_layout.LayoutFault)
+        self.assertEqual(value.cause, 'no-identity')
+        self.assertEqual(self.sized(self.root), before)
+        self.assertEqual(sum(database != ':memory:' for database, _ in conns), 1)
+        for _, conn in conns:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute('SELECT 1')
+
+        self.root = Path(self.tmp.name) / 'ddl-store'
+        store_layout.open_catalogue(self.root).close()
+        direct = sqlite3.connect(store_layout.catalogue_path(self.root))
+        try:
+            direct.execute('CREATE TABLE extra_catalogue_table(a)')
+            direct.commit()
+        finally:
+            direct.close()
+        self.assertEqual(self.names(self.root), ['machine.sqlite3'])
+        before = self.sized(self.root)
+        value, conns = self.traced_read()
+        self.assertIsInstance(value, errors.EngineError)
+        self.assertEqual(value.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.sized(self.root), before)
+        self.assertEqual(sum(database != ':memory:' for database, _ in conns), 1)
+        for _, conn in conns:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute('SELECT 1')
+
 
 if __name__ == '__main__':
     unittest.main()
