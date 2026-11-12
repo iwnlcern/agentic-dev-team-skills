@@ -22,8 +22,20 @@ SIGN_IN_STANDINS = frozenset()
 
 
 def sign_in_census(source):
-    """Find literal sign-in operations and require a preceding transaction write."""
+    """Find sign-in constants in direct arguments or keywords, not comparisons.
+
+    Payload dicts/lists, variables and f-strings are not followed. Transactions
+    use seat_record.transaction or the exact unaliased import-from spelling;
+    other import aliases are not followed. A with-name.write or seat_record.write
+    must occur earlier by line inside the with, not necessarily by execution.
+    G-B1's base erratum pins the real sign-in client method when it first exists.
+    """
     tree = ast.parse(source)
+    imported_transaction = any(
+        isinstance(node, ast.ImportFrom) and node.level == 0
+        and node.module == "tools.adapters.seat_record"
+        and any(alias.name == "transaction" and alias.asname is None for alias in node.names)
+        for node in ast.walk(tree))
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     found, bad = [], []
     for call in ast.walk(tree):
@@ -39,13 +51,20 @@ def sign_in_census(source):
             if isinstance(node, (ast.With, ast.AsyncWith)):
                 for item in node.items:
                     ctx = item.context_expr
-                    if (isinstance(ctx, ast.Call) and isinstance(ctx.func, ast.Attribute)
-                            and isinstance(ctx.func.value, ast.Name) and ctx.func.value.id == "seat_record"
-                            and ctx.func.attr == "transaction" and isinstance(item.optional_vars, ast.Name)):
-                        writer = item.optional_vars.id
+                    if not isinstance(ctx, ast.Call):
+                        continue
+                    module_transaction = (isinstance(ctx.func, ast.Attribute)
+                                          and isinstance(ctx.func.value, ast.Name)
+                                          and ctx.func.value.id == "seat_record"
+                                          and ctx.func.attr == "transaction")
+                    bare_transaction = (imported_transaction and isinstance(ctx.func, ast.Name)
+                                        and ctx.func.id == "transaction")
+                    if module_transaction or bare_transaction:
+                        writer = item.optional_vars.id if isinstance(item.optional_vars, ast.Name) else None
                         valid = any(isinstance(n, ast.Call) and n.lineno < call.lineno
                                     and isinstance(n.func, ast.Attribute) and n.func.attr == "write"
-                                    and isinstance(n.func.value, ast.Name) and n.func.value.id == writer
+                                    and isinstance(n.func.value, ast.Name)
+                                    and n.func.value.id in (writer, "seat_record")
                                     for statement in node.body for n in ast.walk(statement))
                         if valid:
                             break
@@ -59,11 +78,17 @@ def sign_in_census(source):
 def removal_census(source, *, seat_module=False):
     """Census lexical persistent paths, distinguishing proven temporary fixtures.
 
-    Scope-local aliases prevent an unrelated function's `path` from inheriting
-    another function's record path. TemporaryDirectory-derived homes are scratch,
-    not a user's persistent records. A name ever bound to a persistent path in
-    its scope stays persistent at every use, including after scratch rebinding.
-    Bare operation names are read without resolving imports or import-as aliases.
+    Operations are unlink/remove/rmtree/rename/replace on any method receiver,
+    or on arguments/keywords of bare calls and os/shutil/pathlib attributes.
+    str(record) is ignored only as a method receiver, not as a removal argument.
+    Records come from record_path/sessions_dir, strings containing .adt/sessions,
+    the .adt folder itself as a right operand of /, or bound names.
+    Plain/annotated assignments are followed only within their own scope; loop,
+    comprehension, with-as, walrus and tuple targets, helper returns and import
+    aliases are not followed. Passed-in arguments count only where the receiving
+    scope has its own record binding. TemporaryDirectory-derived expressions are
+    scratch; a name once bound to a record stays so, even after scratch rebinding.
+    Writer temporary paths use a .tmp- constant in a path / or + expression.
     """
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
@@ -110,8 +135,15 @@ def removal_census(source, *, seat_module=False):
         strings = [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
         if isinstance(node, ast.BinOp) and any(x.startswith(".tmp-") for x in strings):
             return "temporary"
-        if "record" in children or any("/.adt/sessions" in x for x in strings) or {".adt", "sessions"} <= set(strings):
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                and isinstance(node.right, ast.Constant) and node.right.value == ".adt"):
+            return "folder"
+        if "record" in children or any(".adt/sessions" in x for x in strings) or {".adt", "sessions"} <= set(strings):
             return "record"
+        # The folder itself is persistent; an arbitrary descendant is not
+        # classified just because its left operand is that folder.
+        if not isinstance(node, ast.BinOp) and "folder" in children:
+            return "folder"
         return None
 
     assignments = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))]
@@ -124,7 +156,7 @@ def removal_census(source, *, seat_module=False):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 k = key(target)
-                if k is not None and bindings.get(k) != value and bindings.get(k) != "record":
+                if k is not None and bindings.get(k) != value and bindings.get(k) not in ("record", "folder"):
                     bindings[k] = value
                     changed = True
         if not changed:
@@ -135,13 +167,21 @@ def removal_census(source, *, seat_module=False):
             continue
         if isinstance(node.func, ast.Attribute):
             operation, receiver = node.func.attr, [node.func.value]
+            if (isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "str"):
+                receiver = []
+            read_arguments = (isinstance(node.func.value, ast.Name)
+                              and node.func.value.id in ("os", "shutil", "pathlib"))
         elif isinstance(node.func, ast.Name):
             operation, receiver = node.func.id, []
+            read_arguments = True
         else:
             continue
         if operation not in ("unlink", "remove", "rmtree", "rename", "replace"):
             continue
-        if not any(kind(n) == "record" for n in [*receiver, *node.args, *(k.value for k in node.keywords)]):
+        arguments = [*node.args, *(k.value for k in node.keywords)] if read_arguments else []
+        if not any(kind(n) in ("record", "folder") for n in [*receiver, *arguments]):
             continue
         found.append(node.lineno)
         parent, owner = node, []
@@ -207,8 +247,9 @@ class SeatRecordTests(unittest.TestCase):
                     self.sr.read("codex", "id", home=self.home)
         path.unlink()
         path.mkdir()
-        with self.assertRaises(self.sr.SeatRecordUnreadable):
+        with self.assertRaises(self.sr.SeatRecordUnreadable) as caught:
             self.sr.read("codex", "id", home=self.home)
+        self.assertEqual(caught.exception.cause, "type or owner")
         path.rmdir()
         self.sr.write("codex", "id", "s", "a.planner", "p", home=self.home)
         real = os.fstat
@@ -220,6 +261,34 @@ class SeatRecordTests(unittest.TestCase):
         with mock.patch.object(self.sr.os, "fstat", side_effect=wrong_owner):
             with self.assertRaises(self.sr.SeatRecordUnreadable):
                 self.sr.read("codex", "id", home=self.home)
+
+    def test_deeply_nested_record_is_unreadable(self):
+        path = self.sr.record_path("codex", "id", home=self.home)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"[" * 50_000)
+        with self.assertRaises(self.sr.SeatRecordUnreadable) as caught:
+            self.sr.read("codex", "id", home=self.home)
+        self.assertEqual(caught.exception.cause, "invalid record")
+        parser = mock.Mock()
+        parser.loads.side_effect = RecursionError("nested record")
+        with mock.patch.object(self.sr, "json", parser):
+            with self.assertRaises(self.sr.SeatRecordUnreadable) as caught:
+                self.sr.read("codex", "id", home=self.home)
+        self.assertEqual(caught.exception.cause, "invalid record")
+
+    def test_oversized_record_is_unreadable(self):
+        path = self.sr.record_path("codex", "id", home=self.home)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"x" * (self.sr.RECORD_MAX_BYTES + 1))
+        with self.assertRaises(self.sr.SeatRecordUnreadable) as caught:
+            self.sr.read("codex", "id", home=self.home)
+        self.assertEqual(caught.exception.cause, "too large")
+        path.unlink()
+        with self.assertRaises(self.sr.SeatRecordUnreadable) as caught:
+            self.sr.write("codex", "id", "s", "x" * self.sr.RECORD_MAX_BYTES, "p", home=self.home)
+        self.assertEqual(caught.exception.cause, "too large")
+        self.assertFalse(path.exists())
+        self.assertEqual(list(path.parent.iterdir()), [])
 
     def test_write_is_atomic(self):
         self.sr.write("codex", "id", "initial", "a.planner", "p", home=self.home)
@@ -251,17 +320,20 @@ class SeatRecordTests(unittest.TestCase):
         self.assertEqual(list(self.sr.sessions_dir(home=self.home).iterdir()),
                          [self.sr.record_path("codex", "id", home=self.home)])
 
-    def waiter(self, wait=2):
-        return self.child('''import sys
+    def waiter(self, wait=2, *, elapsed=False):
+        return self.child('''import sys,time
 from pathlib import Path
 from tools.adapters import seat_record as s
 print("ready", flush=True)
+started = time.monotonic()
 try:
     with s.transaction("codex", "id", home=Path(sys.argv[1]), wait_s=float(sys.argv[2])):
         print("acquired", flush=True)
 except s.SeatRecordBusy:
     print("busy", flush=True)
-''', wait)
+    if sys.argv[3] == "1":
+        print(time.monotonic() - started, flush=True)
+''', wait, "1" if elapsed else "0")
 
     def test_transaction_serialises(self):
         with self.sr.transaction("codex", "id", home=self.home):
@@ -273,12 +345,15 @@ except s.SeatRecordBusy:
 
     def test_transaction_busy_after_wait(self):
         with self.sr.transaction("codex", "id", home=self.home):
-            p = self.waiter(0.2)
+            p = self.waiter(0.2, elapsed=True)
             self.assertEqual(p.stdout.readline(), "ready\n")
             started = time.monotonic()
             out, err = p.communicate(timeout=0.5)
             self.assertLess(time.monotonic() - started, 0.5)
-            self.assertEqual((p.returncode, out, err), (0, "busy\n", ""))
+            lines = out.splitlines()
+            self.assertEqual((p.returncode, lines[0], err), (0, "busy", ""))
+            self.assertEqual(len(lines), 2)
+            self.assertGreaterEqual(float(lines[1]), 0.2)
 
     def test_lock_is_on_the_directory(self):
         with self.sr.transaction("codex", "id", home=self.home) as tx:
@@ -331,6 +406,27 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
         self.assertTrue(sign_in_census('with seat_record.transaction("codex", "id") as tx:\n    client.call("session.sign-in")\n    tx.write("s", "a.planner", "p")\n')[1])
         self.assertFalse(sign_in_census('with seat_record.transaction("codex", "id") as tx:\n    tx.write("s", "a.planner", "p")\n    client.call("session.sign-in")\n')[1])
         self.assertEqual(sign_in_census('matched = any(op == "session.sign-in" for op in operations)\n'), ([], []))
+        controls = [
+            ('from tools.adapters.seat_record import transaction\n'
+             'with transaction("codex", "id") as tx:\n'
+             '    tx.write("s", "a.planner", "p")\n'
+             '    client.call("session.sign-in")\n', False),
+            ('from tools.adapters.seat_record import transaction\n'
+             'with transaction("codex", "id") as tx:\n'
+             '    client.call("session.sign-in")\n'
+             '    tx.write("s", "a.planner", "p")\n', True),
+            ('with seat_record.transaction("codex", "id"):\n'
+             '    seat_record.write("codex", "id", "s", "a.planner", "p")\n'
+             '    client.call("session.sign-in")\n', False),
+            ('with seat_record.transaction("codex", "id"):\n'
+             '    client.call("session.sign-in")\n'
+             '    seat_record.write("codex", "id", "s", "a.planner", "p")\n', True),
+        ]
+        for source, flagged in controls:
+            with self.subTest(source=source):
+                found, bad = sign_in_census(source)
+                self.assertEqual(len(found), 1)
+                self.assertEqual(bool(bad), flagged)
 
     def test_no_record_removal_outside_restore(self):
         found, bad = [], []
@@ -361,6 +457,22 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
             'tmp = tempfile.TemporaryDirectory()\n'
             'p = seat_record.record_path("codex", "id", home=Path(tmp.name))\n'
             'rmtree(p)\n'), ([], []))
+        record = 'path = seat_record.record_path("codex", "id")\n'
+        controls = [
+            ('p = Path.home() / ".adt/sessions" / "x"\np.unlink()\n', True),
+            ('shutil.rmtree(Path.home() / ".adt")\n', True),
+            (record + 'os.remove(path)\n', True),
+            (record + 'path.unlink()\n', True),
+            (record + 'os.remove(str(path))\n', True),
+            ('shutil.rmtree(Path.home() / ".adt" / name)\n', False),
+            (record + 'str(path).replace(home, "~")\n', False),
+            (record + 'seen.remove(path)\n', False),
+        ]
+        for source, flagged in controls:
+            with self.subTest(source=source):
+                found, bad = removal_census(source)
+                self.assertEqual(bool(found), flagged)
+                self.assertEqual(bool(bad), flagged)
 
     def test_transaction_wait_constant(self):
         self.assertEqual(self.sr.TRANSACTION_WAIT_S, 15.0)

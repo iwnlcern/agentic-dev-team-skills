@@ -19,6 +19,7 @@ from typing import Iterator
 import uuid
 
 TRANSACTION_WAIT_S: float = 15.0
+RECORD_MAX_BYTES: int = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,10 @@ def _read_bytes(path: Path) -> bytes | None:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise SeatRecordUnreadable(path, "type or owner")
         with os.fdopen(fd, "rb", closefd=False) as stream:
-            return stream.read()
+            data = stream.read(RECORD_MAX_BYTES + 1)
+        if len(data) > RECORD_MAX_BYTES:
+            raise SeatRecordUnreadable(path, "too large")
+        return data
     except OSError as exc:
         raise SeatRecordUnreadable(path, type(exc).__name__) from exc
     finally:
@@ -98,6 +102,8 @@ def _read_bytes(path: Path) -> bytes | None:
 
 
 def _decode(path: Path, data: bytes, host: str, host_session_id: str) -> SeatRecord:
+    if len(data) > RECORD_MAX_BYTES:
+        raise SeatRecordUnreadable(path, "too large")
     try:
         value = json.loads(data)
         if not isinstance(value, dict) or set(value) != set(SeatRecord.__dataclass_fields__):
@@ -110,7 +116,7 @@ def _decode(path: Path, data: bytes, host: str, host_session_id: str) -> SeatRec
         if value["host"] != host or value["host_session_id"] != host_session_id:
             raise ValueError("identity")
         return SeatRecord(**value)
-    except (ValueError, TypeError, UnicodeError) as exc:
+    except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
         raise SeatRecordUnreadable(path, "invalid record") from exc
 
 

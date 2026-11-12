@@ -380,7 +380,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/seat_record.py",
-    "sha256": "21201c9728abd5d512f7872cd616d21f394d4f707229db8b5db7b1faafb929ba",
+    "sha256": "7e6a8a18a363c017656bfd6b0faf65a6abec64a345f3069bc8d98744ae07dcd5",
     "source": "tools/adapters/seat_record.py"
   },
   {
@@ -500,7 +500,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_seat_record.py",
-    "sha256": "fe30d704f6043a6cbf5fe51a222b3f925db3d25a163cc888b584ffeeb67bdd20",
+    "sha256": "9ffc43a256c1c5d0b18a3c8633a8bc009a8e5b584304b52446db004361ad8bcb",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -11174,7 +11174,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/seat_record.py",
-    "sha256": "21201c9728abd5d512f7872cd616d21f394d4f707229db8b5db7b1faafb929ba",
+    "sha256": "7e6a8a18a363c017656bfd6b0faf65a6abec64a345f3069bc8d98744ae07dcd5",
     "source": "tools/adapters/seat_record.py"
   },
   {
@@ -11294,7 +11294,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_seat_record.py",
-    "sha256": "fe30d704f6043a6cbf5fe51a222b3f925db3d25a163cc888b584ffeeb67bdd20",
+    "sha256": "9ffc43a256c1c5d0b18a3c8633a8bc009a8e5b584304b52446db004361ad8bcb",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -21884,7 +21884,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/seat_record.py",
-    "sha256": "21201c9728abd5d512f7872cd616d21f394d4f707229db8b5db7b1faafb929ba",
+    "sha256": "7e6a8a18a363c017656bfd6b0faf65a6abec64a345f3069bc8d98744ae07dcd5",
     "source": "tools/adapters/seat_record.py"
   },
   {
@@ -22004,7 +22004,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_seat_record.py",
-    "sha256": "fe30d704f6043a6cbf5fe51a222b3f925db3d25a163cc888b584ffeeb67bdd20",
+    "sha256": "9ffc43a256c1c5d0b18a3c8633a8bc009a8e5b584304b52446db004361ad8bcb",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
