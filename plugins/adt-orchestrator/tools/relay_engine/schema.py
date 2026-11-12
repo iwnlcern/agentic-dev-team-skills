@@ -168,6 +168,8 @@ TABLE_OWNERS: dict[str, str] = {
     "token_counts": "engine",
     "schema_version": "engine",
     "snapshots": "engine",
+    "lifecycle_outbox": "console",
+    "lifecycle_outbox_events": "console",
 }
 
 _TABLES = _PLATFORM_TABLES + (
@@ -348,6 +350,87 @@ _TABLES = _PLATFORM_TABLES + (
     version TEXT NOT NULL,
     ddl_sha256 TEXT NOT NULL %s
 ) STRICT""" % _sha("ddl_sha256"),
+    """CREATE TABLE IF NOT EXISTS lifecycle_outbox (
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    position INTEGER NOT NULL CHECK (position >= 1),
+    row_id TEXT NOT NULL UNIQUE CHECK (length(row_id) = 32 AND row_id NOT GLOB '*[^0-9a-f]*'),
+    subkind TEXT NOT NULL CHECK (subkind IN ('seat_registered', 'seat_replaced', 'seat_stood_down',
+                                             'settlement_finished', 'settlement_undone',
+                                             'engine_restart_requested', 'operator_act_carried',
+                                             'merge_target_changed', 'seat_unseated')),
+    committed_at_ms INTEGER NOT NULL CHECK (committed_at_ms >= 0),
+    actor_kind TEXT NOT NULL CHECK (actor_kind IN ('occupant', 'operator', 'program')),
+    actor_occupant_id TEXT REFERENCES seat_occupants (id),
+    seat_id TEXT REFERENCES seats (id),
+    old_occupant_id TEXT,
+    new_occupant_id TEXT,
+    chain_id TEXT CHECK (chain_id IS NULL OR length(chain_id) >= 1),
+    runtime_instance_id TEXT CHECK (runtime_instance_id IS NULL OR length(runtime_instance_id) >= 1),
+    transaction_ordinal INTEGER CHECK (transaction_ordinal IS NULL OR transaction_ordinal >= 0),
+    occasion TEXT CHECK (occasion IS NULL OR occasion IN ('start', 'running', 'stop', 'resolve')),
+    act_kind TEXT CHECK (act_kind IS NULL OR length(act_kind) >= 1),
+    instruction_relay_id TEXT CHECK (instruction_relay_id IS NULL OR length(instruction_relay_id) >= 1),
+    event_number INTEGER CHECK (event_number IS NULL OR event_number >= 1),
+    slip_id TEXT CHECK (slip_id IS NULL OR length(slip_id) >= 1),
+    pr INTEGER CHECK (pr IS NULL OR pr >= 1),
+    merge_commit TEXT CHECK (merge_commit IS NULL OR %s),
+    allowed_target TEXT CHECK (allowed_target IS NULL OR length(allowed_target) >= 1),
+    landed_target TEXT CHECK (landed_target IS NULL OR length(landed_target) >= 1),
+    generation INTEGER CHECK (generation IS NULL OR generation >= 1),
+    surface TEXT CHECK (surface IS NULL OR surface IN ('terminal', 'page')),
+    carrying_seat_id TEXT REFERENCES seats (id),
+    PRIMARY KEY (project_id, position),
+    CHECK ((actor_kind = 'occupant') = (actor_occupant_id IS NOT NULL)),
+    CHECK ((subkind IN ('settlement_finished', 'settlement_undone', 'merge_target_changed')) = (actor_kind = 'program')),
+    CHECK ((subkind = 'engine_restart_requested') <= (actor_kind = 'occupant')),
+    CHECK ((subkind = 'operator_act_carried') = (actor_kind = 'operator' AND act_kind IS NOT NULL)),
+    CHECK (occasion IS NULL OR occasion = 'start' OR subkind = 'settlement_undone'),
+    CHECK (CASE subkind
+        WHEN 'seat_registered' THEN seat_id IS NOT NULL AND old_occupant_id IS NULL AND new_occupant_id IS NOT NULL
+        WHEN 'seat_replaced' THEN seat_id IS NOT NULL AND old_occupant_id IS NOT NULL AND new_occupant_id IS NOT NULL
+                                  AND old_occupant_id <> new_occupant_id
+        WHEN 'seat_stood_down' THEN seat_id IS NOT NULL AND new_occupant_id IS NULL
+        WHEN 'settlement_finished' THEN seat_id IS NULL AND old_occupant_id IS NULL AND new_occupant_id IS NULL
+        WHEN 'settlement_undone' THEN seat_id IS NULL AND old_occupant_id IS NULL AND new_occupant_id IS NULL
+        WHEN 'engine_restart_requested' THEN seat_id IS NOT NULL AND old_occupant_id IS NULL AND new_occupant_id IS NULL
+        WHEN 'operator_act_carried' THEN seat_id IS NOT NULL AND old_occupant_id IS NULL AND new_occupant_id IS NULL
+        WHEN 'merge_target_changed' THEN seat_id IS NOT NULL AND old_occupant_id IS NULL AND new_occupant_id IS NULL
+        WHEN 'seat_unseated' THEN seat_id IS NOT NULL AND old_occupant_id IS NULL AND new_occupant_id IS NULL
+        ELSE 0 END),
+    CHECK ((subkind IN ('settlement_finished', 'settlement_undone'))
+           = (runtime_instance_id IS NOT NULL AND transaction_ordinal IS NOT NULL AND occasion IS NOT NULL)),
+    CHECK ((subkind IN ('settlement_finished', 'settlement_undone', 'operator_act_carried')) = (chain_id IS NOT NULL)),
+    CHECK (subkind IN ('settlement_finished', 'settlement_undone')
+           OR (runtime_instance_id IS NULL AND transaction_ordinal IS NULL AND occasion IS NULL)),
+    CHECK ((subkind = 'operator_act_carried')
+           = (act_kind IS NOT NULL AND instruction_relay_id IS NOT NULL AND event_number IS NOT NULL)),
+    CHECK (subkind = 'operator_act_carried' OR (act_kind IS NULL AND event_number IS NULL)),
+    CHECK (subkind IN ('operator_act_carried', 'seat_unseated') OR instruction_relay_id IS NULL),
+    CHECK ((subkind = 'seat_unseated') = (generation IS NOT NULL)),
+    CHECK ((subkind = 'seat_unseated') <= (actor_kind = 'operator')),
+    CHECK (subkind = 'seat_unseated' OR (surface IS NULL AND carrying_seat_id IS NULL)),
+    CHECK (subkind <> 'seat_unseated' OR ((surface IS NULL) <> (carrying_seat_id IS NULL))),
+    CHECK (subkind <> 'seat_unseated' OR ((carrying_seat_id IS NULL) = (instruction_relay_id IS NULL))),
+    CHECK ((subkind = 'merge_target_changed')
+           = (slip_id IS NOT NULL AND pr IS NOT NULL AND merge_commit IS NOT NULL
+              AND allowed_target IS NOT NULL AND landed_target IS NOT NULL)),
+    CHECK (subkind = 'merge_target_changed'
+           OR (slip_id IS NULL AND pr IS NULL AND merge_commit IS NULL
+               AND allowed_target IS NULL AND landed_target IS NULL)),
+    CHECK (landed_target IS NULL OR landed_target <> allowed_target),
+    FOREIGN KEY (old_occupant_id, seat_id) REFERENCES seat_occupants (id, seat_id),
+    FOREIGN KEY (new_occupant_id, seat_id) REFERENCES seat_occupants (id, seat_id)
+) STRICT""" % _object_id("merge_commit"),
+    """CREATE TABLE IF NOT EXISTS lifecycle_outbox_events (
+    project_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    event_index INTEGER NOT NULL CHECK (event_index >= 1),
+    number INTEGER NOT NULL CHECK (number >= 1),
+    kind TEXT NOT NULL CHECK (length(kind) >= 1),
+    subject TEXT NOT NULL CHECK (length(subject) >= 1),
+    PRIMARY KEY (project_id, position, event_index),
+    FOREIGN KEY (project_id, position) REFERENCES lifecycle_outbox (project_id, position)
+) STRICT""",
 )
 
 _INDEXES = (
@@ -398,7 +481,20 @@ BEGIN SELECT RAISE(ABORT, 'a handle never changes'); END""" % (table, table)
     # A closed bundle stays closed (slice 2a D4); setting it once, or to the same value, is allowed.
     """CREATE TRIGGER IF NOT EXISTS bundles_closed_at_fixed BEFORE UPDATE OF closed_at ON bundles
 WHEN OLD.closed_at IS NOT NULL AND NEW.closed_at IS NOT OLD.closed_at
-BEGIN SELECT RAISE(ABORT, 'a closed bundle stays closed'); END""",)
+BEGIN SELECT RAISE(ABORT, 'a closed bundle stays closed'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_fixed BEFORE UPDATE ON lifecycle_outbox
+BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox row never changes'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_kept BEFORE DELETE ON lifecycle_outbox
+BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox row is never deleted'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_events_fixed BEFORE UPDATE ON lifecycle_outbox_events
+BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox event never changes'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_events_kept BEFORE DELETE ON lifecycle_outbox_events
+BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox event is never deleted'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_events_settlement_only BEFORE INSERT ON lifecycle_outbox_events
+WHEN (SELECT subkind FROM lifecycle_outbox WHERE project_id = NEW.project_id AND position = NEW.position)
+     NOT IN ('settlement_finished', 'settlement_undone')
+BEGIN SELECT RAISE(ABORT, 'only a settlement row has events'); END""",
+)
 
 
 def ddl_digest():

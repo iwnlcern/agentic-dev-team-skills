@@ -20,7 +20,8 @@ from relay_engine.tests.test_submit import Store as SubmitStore
 TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
-          "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts"}
+          "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
+          "lifecycle_outbox", "lifecycle_outbox_events"}
 
 INDEXES = {
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
@@ -849,9 +850,11 @@ class TestTableOwners(Store):
         self.assertEqual(set(schema.TABLE_OWNERS), actual)
         platform = {"projects", "repositories", "repository_checkouts", "team_instances",
                     "seats", "seat_occupants", "seat_sessions", "mutation_receipts"}
-        self.assertEqual(len(actual), 23)
+        self.assertEqual(len(actual), 25)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
-        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform)
+        console = {"lifecycle_outbox", "lifecycle_outbox_events"}
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "console"}, console)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console)
         fixture = SubmitStore()
         fixture.setUp()
         try:
