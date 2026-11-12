@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "7813daede97dabc6b24e66bd8ff186b02eaa4cbf54bd0ba68ce0c768ce49a709",
+    "sha256": "c579905e208b1e43dfb20325ba59f7d6002662c7e6e03b880e4eacdeb7af899a",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -376,6 +376,12 @@
     "path": "adt-master/tools/adapters/relay-monitor.py",
     "sha256": "91be723401b8a5e9a4c9f3805e83a546a9c5ae0a1a3f3ca1d4c0e9e0c1391e9c",
     "source": "tools/adapters/relay-monitor.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/seat_record.py",
+    "sha256": "21201c9728abd5d512f7872cd616d21f394d4f707229db8b5db7b1faafb929ba",
+    "source": "tools/adapters/seat_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -490,6 +496,12 @@
     "path": "adt-master/tools/adapters/tests/test_scope_proof.py",
     "sha256": "d8f99b42752584b32d26243cbfc0b835c3ff9563cae6525ae4980961f99d0804",
     "source": "tools/adapters/tests/test_scope_proof.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_seat_record.py",
+    "sha256": "5b60dfe91e82973c5340017f17734727a0e7d29f1c37140dcf4d667bc5385bc1",
+    "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11126,7 +11138,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "7813daede97dabc6b24e66bd8ff186b02eaa4cbf54bd0ba68ce0c768ce49a709",
+    "sha256": "c579905e208b1e43dfb20325ba59f7d6002662c7e6e03b880e4eacdeb7af899a",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11158,6 +11170,12 @@
     "path": "adt-orchestrator/tools/adapters/relay-monitor.py",
     "sha256": "91be723401b8a5e9a4c9f3805e83a546a9c5ae0a1a3f3ca1d4c0e9e0c1391e9c",
     "source": "tools/adapters/relay-monitor.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/seat_record.py",
+    "sha256": "21201c9728abd5d512f7872cd616d21f394d4f707229db8b5db7b1faafb929ba",
+    "source": "tools/adapters/seat_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11272,6 +11290,12 @@
     "path": "adt-orchestrator/tools/adapters/tests/test_scope_proof.py",
     "sha256": "d8f99b42752584b32d26243cbfc0b835c3ff9563cae6525ae4980961f99d0804",
     "source": "tools/adapters/tests/test_scope_proof.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_seat_record.py",
+    "sha256": "5b60dfe91e82973c5340017f17734727a0e7d29f1c37140dcf4d667bc5385bc1",
+    "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -21824,7 +21848,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "7813daede97dabc6b24e66bd8ff186b02eaa4cbf54bd0ba68ce0c768ce49a709",
+    "sha256": "c579905e208b1e43dfb20325ba59f7d6002662c7e6e03b880e4eacdeb7af899a",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -21856,6 +21880,12 @@
     "path": "adt-pair/tools/adapters/relay-monitor.py",
     "sha256": "91be723401b8a5e9a4c9f3805e83a546a9c5ae0a1a3f3ca1d4c0e9e0c1391e9c",
     "source": "tools/adapters/relay-monitor.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/seat_record.py",
+    "sha256": "21201c9728abd5d512f7872cd616d21f394d4f707229db8b5db7b1faafb929ba",
+    "source": "tools/adapters/seat_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -21970,6 +22000,12 @@
     "path": "adt-pair/tools/adapters/tests/test_scope_proof.py",
     "sha256": "d8f99b42752584b32d26243cbfc0b835c3ff9563cae6525ae4980961f99d0804",
     "source": "tools/adapters/tests/test_scope_proof.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_seat_record.py",
+    "sha256": "5b60dfe91e82973c5340017f17734727a0e7d29f1c37140dcf4d667bc5385bc1",
+    "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
     "kit_version": "2.9.7",
