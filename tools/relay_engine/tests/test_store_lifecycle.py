@@ -278,6 +278,21 @@ class TestCheckoutRoutes(unittest.TestCase):
             store_layout.checkout_route(self.conn, 'none')
         self.assertFalse(self.conn.in_transaction)
 
+    def test_checkout_reads_select_route_fields(self):
+        # K1 drops a column; K2 swaps inode fields; K3 swaps end fields.
+        import dataclasses
+        trace = []
+        self.conn.set_trace_callback(trace.append)
+        self.addCleanup(self.conn.set_trace_callback, None)
+        self.assertIsNone(store_layout.checkout_route(self.conn, 'none'))
+        self.assertEqual(store_layout.checkout_routes(self.conn, dev=0, ino=0), [])
+        statements = [text for text in trace if text.startswith('SELECT')]
+        self.assertEqual(len(statements), 2)
+        expected = [field.name for field in dataclasses.fields(store_layout.CheckoutRoute)]
+        for name, statement in zip(('checkout_route', 'checkout_routes'), statements):
+            columns = statement.split('SELECT', 1)[1].split('FROM', 1)[0]
+            self.assertEqual([column.strip() for column in columns.split(',')], expected, name)
+
     def test_restore_revives_ended_route_inert(self):
         # Catalogue-half witness only: restoring the file revives its old route.
         import os

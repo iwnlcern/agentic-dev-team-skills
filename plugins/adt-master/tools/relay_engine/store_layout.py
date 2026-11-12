@@ -1,5 +1,5 @@
 """Store paths and guarded per-project opening (DD-v3-store slice 1)."""
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from typing import Literal
 from collections.abc import Iterable, Mapping
@@ -482,6 +482,9 @@ class CheckoutRoute:
     ledger_synced_at: int | None
 
 
+_CHECKOUT_ROUTE_COLUMNS = ', '.join(field.name for field in fields(CheckoutRoute))
+
+
 def _catalogue_read(catalogue_conn, sql: str, parameters: tuple) -> list[tuple]:
     """Fetch one query, controlling only a transaction this read starts."""
     owns_transaction = not catalogue_conn.in_transaction
@@ -505,9 +508,7 @@ def checkout_routes(catalogue_conn, *, dev: int, ino: int) -> list[CheckoutRoute
     """Read inode history, controlling only a transaction this read starts."""
     rows = _catalogue_read(
         catalogue_conn,
-        'SELECT checkout_id, project_id, repository_id, git_common_dir, worktree_path, '
-        'dev, ino, created_at, ended_at, end_reason, ledger_synced_at '
-        'FROM checkout_routes WHERE dev=? AND ino=? ORDER BY created_at', (dev, ino))
+        'SELECT ' + _CHECKOUT_ROUTE_COLUMNS + ' FROM checkout_routes WHERE dev=? AND ino=? ORDER BY created_at', (dev, ino))
     return [CheckoutRoute(*row) for row in rows]
 
 
@@ -515,7 +516,5 @@ def checkout_route(catalogue_conn, checkout_id: str) -> CheckoutRoute | None:
     """Read an open or ended route by its id, regardless of inode."""
     rows = _catalogue_read(
         catalogue_conn,
-        'SELECT checkout_id, project_id, repository_id, git_common_dir, worktree_path, '
-        'dev, ino, created_at, ended_at, end_reason, ledger_synced_at '
-        'FROM checkout_routes WHERE checkout_id = ?', (checkout_id,))
+        'SELECT ' + _CHECKOUT_ROUTE_COLUMNS + ' FROM checkout_routes WHERE checkout_id = ?', (checkout_id,))
     return CheckoutRoute(*rows[0]) if rows else None
