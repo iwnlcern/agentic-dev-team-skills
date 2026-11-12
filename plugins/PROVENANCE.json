@@ -374,7 +374,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/relay-monitor.py",
-    "sha256": "08e8cc22cf821ce618cffd14995d2bd4d46584590c246aa696b3243d1793f137",
+    "sha256": "0b176a013d1a2af198aeac45023dd1366b635610412f2231088f1bf03e9621ad",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -482,7 +482,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "caebe05be5856556887509c29292710576d15b74f0d967c8bcd34e9e0440d8f3",
+    "sha256": "4d55fcf191ac9056bc3dd72a46f6717ba0c0c6cddbe6beaef6025b0964b2de1c",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -11156,7 +11156,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/relay-monitor.py",
-    "sha256": "08e8cc22cf821ce618cffd14995d2bd4d46584590c246aa696b3243d1793f137",
+    "sha256": "0b176a013d1a2af198aeac45023dd1366b635610412f2231088f1bf03e9621ad",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -11264,7 +11264,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "caebe05be5856556887509c29292710576d15b74f0d967c8bcd34e9e0440d8f3",
+    "sha256": "4d55fcf191ac9056bc3dd72a46f6717ba0c0c6cddbe6beaef6025b0964b2de1c",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -21854,7 +21854,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/relay-monitor.py",
-    "sha256": "08e8cc22cf821ce618cffd14995d2bd4d46584590c246aa696b3243d1793f137",
+    "sha256": "0b176a013d1a2af198aeac45023dd1366b635610412f2231088f1bf03e9621ad",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -21962,7 +21962,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "caebe05be5856556887509c29292710576d15b74f0d967c8bcd34e9e0440d8f3",
+    "sha256": "4d55fcf191ac9056bc3dd72a46f6717ba0c0c6cddbe6beaef6025b0964b2de1c",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {

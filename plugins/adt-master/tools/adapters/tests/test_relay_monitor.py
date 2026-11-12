@@ -5151,8 +5151,22 @@ report.write_text(json.dumps(state))
                 self.assertEqual(self.store.load()["binding_source"], source)
 
     def test_three_concurrent_hooks_one_call_advance_once(self):
+        # Adapter 174510 and root 174740: known on v3 until delivery plan r3 Task 6
+        # removes bind. A tier hook whose root read stalls can mark the call handled
+        # before a sibling binds, and the sibling then does not bind.
+        # 5 s is a finite test budget, not shown to be enough: session L measured
+        # failures at 1.0 s, and no run has measured the longest root-read delay on
+        # a saturated Linux leg.
+        # The method's communicate(timeout=10) stays a real-time supervisor bound
+        # and can still stop it under enough contention.
+        # So the method can still go red by load: a child stalling past 5 s fails
+        # its tuple assertion, and a child past 10 s fails on the timeout. Either
+        # is a red gate reported in Tests' fixed form with the in-run load beside
+        # it, under root 174740 item 4: never retried, never classified by the pair,
+        # and never answered by raising the budget without a new grant.
         payload = self._submit("concurrent")
-        children = [subprocess.Popen([sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(3)]
+        env = dict(os.environ, ADT_TEST_ROOT_BUDGET="5")
+        children = [subprocess.Popen([sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for _ in range(3)]
         for child in children:
             self.addCleanup(lambda p=child: p.kill() if p.poll() is None else None)
             child.stdin.write(payload)
@@ -5163,6 +5177,46 @@ report.write_text(json.dumps(state))
             self.assertEqual((child.returncode, out, err), (0, "", ""))
         self.assertEqual(self.store.load()["binding_gen"], 1)
         self.assertEqual(len(self.store.load()["handled_calls"]), 1)
+
+    def test_three_concurrent_hooks_one_stalled_child_fails_the_assertion(self):
+        # Adapter 174510, root 174740: the first hook handles the call without
+        # binding; its siblings do not bind. Known until delivery plan r3 Task 6.
+        payload = self._submit("concurrent")
+        first = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, ADT_TEST_ROOT_BUDGET="0"),
+        )
+        self.addCleanup(lambda: first.kill() if first.poll() is None else None)
+        out, err = first.communicate(payload, timeout=10)
+        self.assertEqual((first.returncode, err), (0, ""))
+        self.assertEqual(len(out.splitlines()), 1)
+        context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(context.startswith("# rebind: incomplete"), context)
+        self.assertNotEqual((first.returncode, out, err), (0, "", ""))
+        children = [subprocess.Popen(
+            [sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, ADT_TEST_ROOT_BUDGET="5"),
+        ) for _ in range(2)]
+        for child in children:
+            self.addCleanup(lambda p=child: p.kill() if p.poll() is None else None)
+            child.stdin.write(payload)
+            child.stdin.close()
+            child.stdin = None
+        for child in children:
+            out, err = child.communicate(timeout=10)
+            self.assertEqual((child.returncode, out, err), (0, "", ""))
+        self.assertEqual(self.store.load()["binding_gen"], 0)
+
+    def test_root_budget_knob_parsing(self):
+        for value, expected in ((None, None), ("", None), ("abc", None),
+                                ("-1", 0.0), ("9", 5.0), ("0.25", 0.25)):
+            with self.subTest(value=value), mock.patch.dict(os.environ):
+                os.environ.pop("ADT_TEST_ROOT_BUDGET", None)
+                if value is not None:
+                    os.environ["ADT_TEST_ROOT_BUDGET"] = value
+                self.assertEqual(load_script().TEST_ROOT_BUDGET, expected)
 
     def test_no_call_id_only_consecutive_duplicates_collapse(self):
         # Deliberately exercise the weaker guarantee of hosts without a call id.
