@@ -170,6 +170,15 @@ TABLE_OWNERS: dict[str, str] = {
     "snapshots": "engine",
     "lifecycle_outbox": "console",
     "lifecycle_outbox_events": "console",
+    "evidence_objects": "store",
+    "evidence_object_bundles": "store",
+    "evidence_bundles": "store",
+    "evidence_captures": "store",
+    "evidence_uploads": "store",
+    "evidence_retention": "store",
+    "evidence_derive": "store",
+    "evidence_prune_marks": "store",
+    "evidence_pruned": "store",
 }
 
 _TABLES = _PLATFORM_TABLES + (
@@ -431,6 +440,101 @@ _TABLES = _PLATFORM_TABLES + (
     PRIMARY KEY (project_id, position, event_index),
     FOREIGN KEY (project_id, position) REFERENCES lifecycle_outbox (project_id, position)
 ) STRICT""",
+    """CREATE TABLE IF NOT EXISTS evidence_objects (
+    object_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256 TEXT NOT NULL UNIQUE %s,
+    bytes_len INTEGER NOT NULL CHECK (bytes_len >= 0),
+    stored_len INTEGER NOT NULL CHECK (stored_len >= 0),
+    codec TEXT NOT NULL CHECK (codec IN ('zstd', 'zlib', 'raw')),
+    stored_at INTEGER NOT NULL,
+    latest_capture_at INTEGER NOT NULL,
+    bundleless_latest_at INTEGER,
+    any_host_observed INTEGER NOT NULL CHECK (any_host_observed IN (0, 1)),
+    open_bundle_count INTEGER NOT NULL CHECK (open_bundle_count >= 0),
+    latest_bundle_close_at INTEGER,
+    state_seq INTEGER NOT NULL CHECK (state_seq >= 1)
+) STRICT""" % _sha("sha256"),
+    """CREATE TABLE IF NOT EXISTS evidence_object_bundles (
+    association_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    object_id INTEGER NOT NULL,
+    counted_open INTEGER NOT NULL CHECK (counted_open IN (0, 1)),
+    UNIQUE (bundle_id, object_id)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS evidence_bundles (
+    bundle_id TEXT NOT NULL PRIMARY KEY REFERENCES bundles (id),
+    state_seen TEXT NOT NULL CHECK (state_seen IN ('open', 'closed')),
+    closed_at INTEGER,
+    follow_up_cursor INTEGER NOT NULL DEFAULT 0 CHECK (follow_up_cursor >= 0),
+    CHECK ((state_seen = 'open' AND closed_at IS NULL)
+        OR (state_seen = 'closed' AND closed_at IS NOT NULL))
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS evidence_captures (
+    capture_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id INTEGER NOT NULL,
+    sha256 TEXT NOT NULL %s,
+    source TEXT NOT NULL CHECK (source IN ('snapshot', 'upload', 'host-capture')),
+    captured_by TEXT NOT NULL CHECK (captured_by IN ('host-observed', 'seat-supplied')),
+    %s,
+    bundle_id TEXT REFERENCES bundles (id),
+    captured_at INTEGER NOT NULL
+) STRICT""" % (_sha("sha256"), _arc("party_", SPECIALS)),
+    """CREATE TABLE IF NOT EXISTS evidence_uploads (
+    upload_id TEXT NOT NULL PRIMARY KEY,
+    %s,
+    source TEXT NOT NULL CHECK (source IN ('snapshot', 'upload', 'host-capture')),
+    captured_by TEXT NOT NULL CHECK (captured_by IN ('host-observed', 'seat-supplied')),
+    declared_sha256 TEXT NOT NULL %s,
+    declared_len INTEGER NOT NULL CHECK (declared_len BETWEEN 0 AND 268435456),
+    received_len INTEGER NOT NULL CHECK (received_len >= 0 AND received_len <= declared_len),
+    last_chunk_offset INTEGER,
+    last_chunk_sha256 TEXT %s,
+    bundle_id TEXT REFERENCES bundles (id),
+    state TEXT NOT NULL CHECK (state IN ('open', 'committed', 'abandoned')),
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    result_captured_by TEXT CHECK (result_captured_by IN ('host-observed', 'seat-supplied')),
+    CHECK ((last_chunk_offset IS NULL) = (last_chunk_sha256 IS NULL)),
+    CHECK (last_chunk_offset IS NULL OR (last_chunk_offset >= 0 AND last_chunk_offset <= received_len)),
+    CHECK ((state = 'committed') = (result_captured_by IS NOT NULL))
+) STRICT""" % (_arc("party_", SPECIALS), _sha("declared_sha256"), _sha("last_chunk_sha256", nullable=True)),
+    """CREATE TABLE IF NOT EXISTS evidence_retention (
+    project_id TEXT NOT NULL PRIMARY KEY REFERENCES projects (id),
+    next_seq INTEGER NOT NULL CHECK (next_seq >= 1),
+    derive_run_id INTEGER,
+    derive_start_seq INTEGER,
+    derive_cursor INTEGER NOT NULL DEFAULT 0 CHECK (derive_cursor >= 0),
+    derive_finished INTEGER NOT NULL DEFAULT 0 CHECK (derive_finished IN (0, 1)),
+    mark_cursor INTEGER NOT NULL DEFAULT 0 CHECK (mark_cursor >= 0),
+    sweep_cursor INTEGER NOT NULL DEFAULT 0 CHECK (sweep_cursor >= 0),
+    tracker_cursor TEXT NOT NULL DEFAULT '',
+    upload_cursor TEXT NOT NULL DEFAULT '',
+    unlink_cursor INTEGER NOT NULL DEFAULT 0 CHECK (unlink_cursor >= 0),
+    orphan_capture_cursor INTEGER NOT NULL DEFAULT 0 CHECK (orphan_capture_cursor >= 0),
+    orphan_association_cursor INTEGER NOT NULL DEFAULT 0 CHECK (orphan_association_cursor >= 0),
+    orphan_derive_run INTEGER NOT NULL DEFAULT 0 CHECK (orphan_derive_run >= 0),
+    orphan_derive_object INTEGER NOT NULL DEFAULT 0 CHECK (orphan_derive_object >= 0),
+    CHECK ((derive_run_id IS NULL) = (derive_start_seq IS NULL))
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS evidence_derive (
+    run_id INTEGER NOT NULL,
+    object_id INTEGER NOT NULL,
+    open_count INTEGER NOT NULL CHECK (open_count >= 0),
+    latest_close_at INTEGER,
+    PRIMARY KEY (run_id, object_id)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS evidence_prune_marks (
+    object_id INTEGER PRIMARY KEY,
+    sha256 TEXT NOT NULL %s,
+    state_seq INTEGER NOT NULL CHECK (state_seq >= 1),
+    marked_at INTEGER NOT NULL
+) STRICT""" % _sha("sha256"),
+    """CREATE TABLE IF NOT EXISTS evidence_pruned (
+    pruned_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256 TEXT NOT NULL %s,
+    bytes_len INTEGER NOT NULL CHECK (bytes_len >= 0),
+    pruned_at INTEGER NOT NULL
+) STRICT""" % _sha("sha256"),
 )
 
 _INDEXES = (
@@ -470,6 +574,8 @@ _INDEXES = (
     # evidence_pointed's probe stops at the first stored row of a digest (slice 2a D3).
     "CREATE INDEX IF NOT EXISTS snapshots_content_bytes ON snapshots (content_sha256)"
     " WHERE has_bytes = 1",
+    "CREATE INDEX IF NOT EXISTS evidence_object_bundles_object ON evidence_object_bundles (object_id)",
+    "CREATE INDEX IF NOT EXISTS evidence_captures_object ON evidence_captures (object_id)",
 )
 
 

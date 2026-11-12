@@ -21,7 +21,10 @@ TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
-          "lifecycle_outbox", "lifecycle_outbox_events"}
+          "lifecycle_outbox", "lifecycle_outbox_events",
+          "evidence_objects", "evidence_object_bundles", "evidence_bundles",
+          "evidence_captures", "evidence_uploads", "evidence_retention",
+          "evidence_derive", "evidence_prune_marks", "evidence_pruned"}
 
 INDEXES = {
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
@@ -38,6 +41,10 @@ INDEXES = {
 }
 
 SHA = "a" * 64
+
+TABLES_QUERY = (
+    "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+    "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")
 
 
 def check_values(conn, column):
@@ -213,8 +220,7 @@ class TestReservedNames(Store):
 class TestShape(Store):
     def test_tables_are_strict(self):
         conn = self.connect()
-        rows = conn.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'table'").fetchall()
+        rows = conn.execute(TABLES_QUERY).fetchall()
         self.assertEqual({name for name, _ in rows}, TABLES)
         for name, sql in rows:
             with self.subTest(table=name):
@@ -223,6 +229,11 @@ class TestShape(Store):
                     "SELECT strict FROM pragma_table_list WHERE name = ?",
                     (name,)).fetchone()
                 self.assertEqual(strict, (1,))
+
+    def test_tables_query_keeps_sqlite_lookalikes(self):
+        conn = self.connect()
+        conn.execute("CREATE TABLE sqliteX (a INTEGER) STRICT")
+        self.assertIn("sqliteX", {name for name, _ in conn.execute(TABLES_QUERY)})
 
     def test_no_column_is_untyped(self):
         conn = self.connect()
@@ -258,7 +269,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 27)
+        self.assertEqual(len(named), 29)
 
 
 class TestChecks(Store):
@@ -850,11 +861,15 @@ class TestTableOwners(Store):
         self.assertEqual(set(schema.TABLE_OWNERS), actual)
         platform = {"projects", "repositories", "repository_checkouts", "team_instances",
                     "seats", "seat_occupants", "seat_sessions", "mutation_receipts"}
-        self.assertEqual(len(actual), 25)
+        store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
+                 "evidence_captures", "evidence_uploads", "evidence_retention",
+                 "evidence_derive", "evidence_prune_marks", "evidence_pruned"}
+        self.assertEqual(len(actual), 34)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)
         console = {"lifecycle_outbox", "lifecycle_outbox_events"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "console"}, console)
-        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console - store)
         fixture = SubmitStore()
         fixture.setUp()
         try:
