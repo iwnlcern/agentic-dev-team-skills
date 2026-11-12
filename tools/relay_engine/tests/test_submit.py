@@ -2185,6 +2185,58 @@ class TestSenderCheck(Store):
         self.assertEqual((outcome[0], str(outcome[1])),
                          ("ProgrammingError", "the sender check closed the store connection"))
 
+    def test_sender_check_read_guard_keeps_frame(self):
+        """Breaks: a nested read guard replaces or clears the sender check's authorizer."""
+        with self.subTest(case="write_after_guard"):
+            seen = []
+
+            def write_after_guard(c):
+                with submit.read_guard(c):
+                    seen.append(c.execute("SELECT count(*) FROM seats").fetchone())
+                c.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES ('seat-check-guard', 't9', 'implementer', 'occupied')")
+            before = self.counts()
+            outcome = snapshot_outcome(lambda: submit.submit(
+                self.conn, self.checked(write_after_guard), draft(subject="guard-write")))
+            self.assertIsInstance(outcome[1], sqlite3.DatabaseError, outcome)
+            self.assertEqual(str(outcome[1]), "not authorized")
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(self.counts(), before)
+            self.assertEqual(self.conn.execute(
+                "SELECT count(*) FROM seats WHERE id='seat-check-guard'").fetchone(), (0,))
+            self.assertFalse(self.conn.in_transaction)
+
+        with self.subTest(case="extra_denials"):
+            def extra_denials(c):
+                with submit.read_guard(c, frozenset({"bodies", "edges"})):
+                    c.execute("SELECT count(*) FROM seats").fetchone()
+            before = self.counts()
+            ctx = replace(self.checked(extra_denials),
+                          after_admit_reads_denied=frozenset({"bodies"}))
+            outcome = snapshot_outcome(lambda: submit.submit(
+                self.conn, ctx, draft(subject="guard-extra-denials")))
+            self.assertIsInstance(outcome[1], RuntimeError, outcome)
+            self.assertEqual(str(outcome[1]),
+                "a read guard inside a sender check cannot deny more than the check's own read denials")
+            self.assertEqual(self.counts(), before)
+            self.assertFalse(self.conn.in_transaction)
+
+        with self.subTest(case="subset_restores"):
+            seen = []
+
+            def subset(c):
+                with submit.read_guard(c, frozenset({"bodies"})):
+                    seen.append(c.execute("SELECT count(*) FROM seats").fetchone())
+            outcome = snapshot_outcome(lambda: submit.submit(
+                self.conn, self.checked(subset), draft(subject="guard-subset")))
+            self.assertIsInstance(outcome[1], submit.Admitted, outcome)
+            self.assertEqual(len(seen), 2)
+            self.assertFalse(self.conn.in_transaction)
+            changed = self.conn.execute("UPDATE seats SET state = state WHERE id = ?",
+                                        (PLANNER.seat_id,))
+            self.assertEqual(changed.rowcount, 1)
+            self.conn.rollback()
+
     def test_sender_check_none_unchanged(self):
         ctx = replace(self.ctx(submission_key="plain"), sender_check=None)
         data = draft(subject="plain")

@@ -989,7 +989,7 @@ class TableDirectory:
 
 @contextmanager
 def read_guard(conn, denied=frozenset({"bodies"})):
-    """Deny cooperating code's table reads, retaining an outer guard or hook.
+    """Deny cooperating code's table reads, retaining an outer guard, hook or sender check.
 
     This is not a sandbox: statements prepared before the guard keep their
     authorization while stepped, blobopen and other in-process Python can
@@ -1000,6 +1000,12 @@ def read_guard(conn, denied=frozenset({"bodies"})):
     if frame is not None:
         if not denied <= frame[0].after_admit_reads_denied:
             raise RuntimeError("a read guard inside a hook cannot deny more than the hook's own read denials")
+        yield
+        return
+    check = _CHECK_FRAMES.get(conn)
+    if check is not None:
+        if not denied <= check.after_admit_reads_denied:
+            raise RuntimeError("a read guard inside a sender check cannot deny more than the check's own read denials")
         yield
         return
     previous = _READ_GUARDS.get(conn)
