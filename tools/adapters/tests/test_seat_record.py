@@ -88,7 +88,8 @@ def removal_census(source, *, seat_module=False):
     aliases are not followed. Passed-in arguments count only where the receiving
     scope has its own record binding. TemporaryDirectory-derived expressions are
     scratch; a name once bound to a record stays so, even after scratch rebinding.
-    Writer temporary paths use a .tmp- constant in a path / or + expression.
+    Any binary expression with a .tmp- constant is taken as the writer's
+    temporary, even when it also names .adt/sessions.
     """
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
