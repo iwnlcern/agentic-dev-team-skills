@@ -3098,6 +3098,15 @@ def invoke(mode):
                 with self.subTest(token=token,mode=mode):
                     self._b7_bind_probe(f"""
 m.read_index=lambda path:m.IndexSnapshot(error={token!r})
+real_threading = m.threading
+class RootThread:
+    def __init__(self, *, target, **kwargs): self.target = target
+    def start(self): self.target()
+class Threading:
+    def Thread(self, *args, **kwargs): return RootThread(*args, **kwargs)
+    def __getattr__(self, name): return getattr(real_threading, name)
+# Root reads run inline so the result does not depend on the 1.0 s root budget.
+m.threading = Threading()
 rc=invoke({mode!r})
 if {mode!r}=='manual':
     t.assertEqual(rc,1);t.assertEqual(errors.getvalue(),'relay-monitor: manual bind refused: '+{token!r}+'\\n')
