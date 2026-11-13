@@ -119,6 +119,14 @@ Merge is human/operator gated. Tests green plus valid dispatch is not merge auth
 A fictional merge citation is `AUTHORITY_CHECK: allowed merge example-b4/MERGE-GATE-orchestrator-planner-20261013-070000.md 20261013-070001`.
 Copy the actual command output for your act, not these example values.
 
+## Silent counterpart
+
+When a relay you are waiting on from another seat is well past when it was due by your pair's own pace, send that seat one short relay saying what you are waiting for and the last relay you saw from it, and asking it to report or to say it cannot go on.
+Copy the Orchestrator Planner in an orchestrated run, and the silent seat's pair Planner when that is not you.
+First check that the seat is not just waiting its turn behind other work.
+Send one nudge per wait; if it brings nothing, say so to the Orchestrator Planner, or to the operator in a standalone run.
+A nudge grants nothing, changes no grant and starts no work, and it is no reason to act for the silent seat or to read its worktree.
+
 ## Implementation report
 
 Use the report-parent edge in `protocol.md` § Relay transport when filling the skeleton below.

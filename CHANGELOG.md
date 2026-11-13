@@ -14,6 +14,7 @@ Kit 3.0 is a large change, not a patch; its migration steps will be listed here 
   Filing no longer binds or switches a seat; the old cross-root watcher gap is retired by the connect contract (DD-v3-adapter § 4.1–4.2).
 - Use `relay lint` before filing and `tools/TESTING.md` for test practice.
 - At the release head, rewrite the moved-root warning in `sprint-doc-setup` against the v3 store; its measured 2.9.7 statement remains pinned until then.
+- A seat waiting on a relay well past due may send that seat one nudge, which grants nothing; the pair-planner, pair-implementer and orchestrator-planner skills say when and how.
 
 - Superpowers is no longer required: each role skill states the practices it relies on, and Planner skills read a trimmed brainstorming reference vendored at `vendor/obra/superpowers/brainstorming.md` (MIT, modified from Superpowers 7.0.0).
 - Every plugin ships a paper-airplane icon, drawn by the generator.
