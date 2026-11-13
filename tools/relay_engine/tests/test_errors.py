@@ -12,6 +12,8 @@ from relay_engine.jcs import jcs_encode
 
 
 POLICY_CODES = {
+    "E-SETTING-OPERATOR-ONLY",
+    "E-JEV-ACT-NEEDS-RECORD",
     "E-KEY-MISMATCH",
     "E-ID-COLLISION",
     "E-SUPERSEDED",
@@ -21,6 +23,8 @@ POLICY_CODES = {
 }
 
 ALL_CODES = POLICY_CODES | {
+    "E-SETTING-UNKNOWN",
+    "E-SETTING-VALUE",
     "E-SNAPSHOT-STALE",
     "E-SNAPSHOT-NOT-TO",
     "E-SNAPSHOT-NO-REF",
@@ -90,6 +94,25 @@ ALL_CODES = POLICY_CODES | {
 
 
 class TestErrorRegistry(unittest.TestCase):
+    def test_setting_codes(self):
+        codes = {"E-SETTING-OPERATOR-ONLY": "policy", "E-JEV-ACT-NEEDS-RECORD": "policy",
+                 "E-SETTING-UNKNOWN": "command", "E-SETTING-VALUE": "command"}
+        self.assertTrue(set(codes) <= set(errors.ERRORS))
+        from relay_engine import queries
+        for code, kind in codes.items():
+            with self.subTest(code=code):
+                exc = errors.error_for(code)
+                self.assertEqual((exc.code, exc.cls), (code, kind))
+                self.assertTrue(exc.cause)
+                self.assertTrue(exc.remedy)
+                self.assertTrue(errors.explain_for(code)[0])
+                if code in {"E-SETTING-UNKNOWN", "E-SETTING-VALUE"}:
+                    for key in queries.SETTINGS:
+                        self.assertIn(key, exc.remedy)
+                    for fixed in ("bool", "int", "1", "1440"):
+                        self.assertIn(fixed, exc.remedy)
+
+
     def test_snapshot_codes_catalogued(self):
         cases = {"E-SNAPSHOT-STALE": 'integrity',
                  "E-SNAPSHOT-NOT-TO": 'integrity',

@@ -559,7 +559,28 @@ def _spec(stem, cls):
                      "error-%s-explain" % stem, cls)
 
 
+_SETTINGS_TEXT = {
+    "error-setting-operator-only-cause": "only the operator may change project settings",
+    "error-setting-operator-only-remedy": "ask the operator to make this setting change",
+    "error-setting-operator-only-explain": "the setting step accepts only the operator principal supplied by the authenticated caller",
+    "error-setting-unknown-cause": "the setting key is not registered",
+    "error-setting-unknown-remedy": "use jev_record (bool), jev_act (bool), or doorbell_off_minutes (int from 1 to 1440)",
+    "error-setting-unknown-explain": "project settings accept only the three registered keys",
+    "error-setting-value-cause": "the setting value has the wrong type or is outside its range",
+    "error-setting-value-remedy": "use jev_record (bool), jev_act (bool), or doorbell_off_minutes (int from 1 to 1440); bool is not an int for this setting",
+    "error-setting-value-explain": "boolean settings require booleans and the doorbell threshold requires an integer from 1 to 1440",
+    "error-jev-act-needs-record-cause": "Jev act requires Jev record",
+    "error-jev-act-needs-record-remedy": "enable jev_record before jev_act, and disable jev_act before disabling jev_record",
+    "error-jev-act-needs-record-explain": "the setting step refuses either change that would leave Jev act enabled without Jev record",
+}
+strings.register_inventory(_SETTINGS_TEXT, {})
+
+
 ERRORS = {
+    "E-SETTING-OPERATOR-ONLY": _spec("setting-operator-only", "policy"),
+    "E-JEV-ACT-NEEDS-RECORD": _spec("jev-act-needs-record", "policy"),
+    "E-SETTING-UNKNOWN": _spec("setting-unknown", "command"),
+    "E-SETTING-VALUE": _spec("setting-value", "command"),
     "E-SNAPSHOT-STALE": _spec("snapshot-stale", "integrity"),
     "E-SNAPSHOT-NOT-TO": _spec("snapshot-not-to", "integrity"),
     "E-SNAPSHOT-NO-REF": _spec("snapshot-no-ref", "integrity"),

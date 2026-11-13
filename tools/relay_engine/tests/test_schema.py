@@ -20,7 +20,7 @@ from relay_engine.tests.test_submit import Store as SubmitStore
 TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
-          "repository_checkouts", "team_instances", "seats", "seat_occupants"}
+          "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history"}
 
 INDEXES = {
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
@@ -786,7 +786,7 @@ class TestTableOwners(Store):
         self.assertEqual(set(schema.TABLE_OWNERS), actual)
         platform = {"projects", "repositories", "repository_checkouts", "team_instances",
                     "seats", "seat_occupants", "seat_sessions"}
-        self.assertEqual(len(actual), 20)
+        self.assertEqual(len(actual), 22)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform)
         fixture = SubmitStore()

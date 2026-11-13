@@ -8,6 +8,9 @@ schema's indexes; no query reads every body.
 """
 
 from dataclasses import dataclass
+import json
+from types import MappingProxyType
+from typing import Mapping
 import difflib
 import hashlib
 import io
@@ -954,3 +957,94 @@ def doorbell_off(conn, project_id: str, now_ms: int, threshold_ms: int) -> list[
                    if row[7] is None else None)
         conditions.append(DoorbellCondition(*row[:5], address))
     return conditions
+
+
+@dataclass(frozen=True)
+class SettingSpec:
+    value_type: type
+    default: bool | int
+    minimum: int | None = None
+    maximum: int | None = None
+
+
+SETTINGS: Mapping[str, SettingSpec] = MappingProxyType({
+    "jev_record": SettingSpec(bool, False),
+    "jev_act": SettingSpec(bool, False),
+    "doorbell_off_minutes": SettingSpec(int, 15, 1, 1440),
+})
+
+
+class ProjectSettings(NamedTuple):
+    values: dict[str, bool | int]
+    revision: int
+
+
+class SettingChange(NamedTuple):
+    revision: int
+    key: str
+    old: bool | int | None
+    new: bool | int
+    by_principal: str
+    at_ms: int
+
+
+def _settings_project(conn, project_id):
+    if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
+        raise ValueError("unknown project")
+
+
+def project_settings(conn, project_id: str) -> ProjectSettings:
+    """Read every registered setting and the project's current history revision."""
+    _settings_project(conn, project_id)
+    values = {key: spec.default for key, spec in SETTINGS.items()}
+    values.update((key, json.loads(value)) for key, value in conn.execute(
+        "SELECT key, value FROM project_settings WHERE project_id = ?", (project_id,)))
+    revision = conn.execute("SELECT coalesce(max(revision), 0) FROM settings_history"
+                            " WHERE project_id = ?", (project_id,)).fetchone()[0]
+    return ProjectSettings(values, revision)
+
+
+def settings_history(conn, project_id: str, limit: int) -> list[SettingChange]:
+    """Read the newest setting changes without changing the caller's transaction."""
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit must be an integer from 1 to 500")
+    _settings_project(conn, project_id)
+    return [SettingChange(revision, key, None if old is None else json.loads(old),
+                          json.loads(new), by, at)
+            for revision, key, old, new, by, at in conn.execute(
+                "SELECT revision, key, old, new, by_principal, at FROM settings_history"
+                " WHERE project_id = ? ORDER BY revision DESC LIMIT ?", (project_id, limit))]
+
+
+def set_project_setting_step(conn, project_id: str, key: str, value: bool | int,
+                             *, principal: str, now_ms: int) -> int:
+    """Apply one operator change inside the caller's transaction, without committing."""
+    if not conn.in_transaction:
+        raise ValueError("setting step requires a caller transaction")
+    _settings_project(conn, project_id)
+    if principal != "operator":
+        raise errors.error_for("E-SETTING-OPERATOR-ONLY")
+    if not isinstance(key, str) or key not in SETTINGS:
+        raise errors.error_for("E-SETTING-UNKNOWN")
+    spec = SETTINGS[key]
+    if (type(value) is not spec.value_type or
+            (spec.minimum is not None and not spec.minimum <= value <= spec.maximum)):
+        raise errors.error_for("E-SETTING-VALUE")
+    current = project_settings(conn, project_id)
+    if ((key == "jev_act" and value is True and not current.values["jev_record"]) or
+            (key == "jev_record" and value is False and current.values["jev_act"])):
+        raise errors.error_for("E-JEV-ACT-NEEDS-RECORD")
+    if value == current.values[key]:
+        return current.revision
+    stored = conn.execute("SELECT value FROM project_settings WHERE project_id = ? AND key = ?",
+                          (project_id, key)).fetchone()
+    old = None if stored is None else stored[0]
+    new = json.dumps(value, separators=(",", ":"))
+    revision = current.revision + 1
+    conn.execute("INSERT INTO project_settings (project_id, key, value) VALUES (?, ?, ?)"
+                 " ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value",
+                 (project_id, key, new))
+    conn.execute("INSERT INTO settings_history"
+                 " (project_id, revision, key, old, new, by_principal, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (project_id, revision, key, old, new, principal, now_ms))
+    return revision

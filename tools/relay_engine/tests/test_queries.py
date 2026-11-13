@@ -1887,6 +1887,133 @@ class TestQueueReaders(Store):
             w.close();c.close()
 
 
+class TestProjectSettings(Store):
+    def setting_outcome(self, action):
+        try:
+            return ("ok", action())
+        except errors.EngineError as exc:
+            return (exc.code, exc)
+        except Exception as exc:
+            return (type(exc).__name__, exc)
+
+    def setting_rows(self):
+        return (self.conn.execute("SELECT * FROM project_settings ORDER BY project_id,key").fetchall(),
+                self.conn.execute("SELECT * FROM settings_history ORDER BY project_id,revision").fetchall())
+
+    def test_settings_defaults(self):
+        settings = queries.project_settings(self.conn, PLANNER.project_id)
+        self.assertEqual(settings.values, {"jev_record": False, "jev_act": False,
+                                           "doorbell_off_minutes": 15})
+        self.assertIs(type(settings.values["jev_record"]), bool)
+        self.assertIs(type(settings.values["doorbell_off_minutes"]), int)
+        self.assertEqual(settings.revision, 0)
+        self.assertEqual(queries.settings_history(self.conn, PLANNER.project_id, 500), [])
+        self.assertEqual(self.setting_rows(), ([], []))
+        for action in (lambda: queries.project_settings(self.conn, "absent"),
+                       lambda: queries.settings_history(self.conn, "absent", 1)):
+            self.assertEqual(self.setting_outcome(action)[0], "ValueError")
+        for limit in (0, 501, True, "1"):
+            self.assertEqual(self.setting_outcome(lambda: queries.settings_history(
+                self.conn, PLANNER.project_id, limit))[0], "ValueError")
+
+    def test_setting_set_and_history(self):
+        step = queries.set_project_setting_step
+        self.conn.execute("BEGIN")
+        def change(key, value, at):
+            return self.setting_outcome(lambda: step(self.conn, PLANNER.project_id, key, value,
+                principal="operator", now_ms=at))
+        self.assertEqual(change("doorbell_off_minutes", 30, 100), ("ok", 1))
+        rows = self.setting_rows()
+        self.assertEqual(rows, ([(PLANNER.project_id, "doorbell_off_minutes", "30")],
+            [(PLANNER.project_id, 1, "doorbell_off_minutes", None, "30", "operator", 100)]))
+        self.assertEqual(change("doorbell_off_minutes", 30, 101), ("ok", 1))
+        self.assertEqual(change("jev_record", False, 102), ("ok", 1))
+        self.assertEqual(self.setting_rows(), rows)
+        self.assertEqual(change("jev_record", True, 103), ("ok", 2))
+        self.assertEqual(change("jev_act", True, 104), ("ok", 3))
+        settings = queries.project_settings(self.conn, PLANNER.project_id)
+        self.assertEqual((settings.values, settings.revision),
+                         ({"jev_record": True, "jev_act": True, "doorbell_off_minutes": 30}, 3))
+        history = queries.settings_history(self.conn, PLANNER.project_id, 500)
+        self.assertEqual([(h.revision, h.key, h.old, h.new, h.by_principal, h.at_ms) for h in history],
+                         [(3, "jev_act", None, True, "operator", 104),
+                          (2, "jev_record", None, True, "operator", 103),
+                          (1, "doorbell_off_minutes", None, 30, "operator", 100)])
+        self.assertIs(type(history[0].new), bool)
+        self.assertIs(type(history[2].new), int)
+        self.assertEqual(queries.settings_history(self.conn, PLANNER.project_id, 1), history[:1])
+        self.assertEqual(queries.project_settings(self.conn, FOREIGN.project_id).revision, 0)
+        self.assertEqual(queries.settings_history(self.conn, FOREIGN.project_id, 1), [])
+
+    def test_setting_refusals(self):
+        step = queries.set_project_setting_step
+        self.conn.execute("BEGIN")
+        cases = [("jev_record", True, PLANNER.address, "E-SETTING-OPERATOR-ONLY"),
+                 ("unknown", True, "operator", "E-SETTING-UNKNOWN"),
+                 *[("doorbell_off_minutes", v, "operator", "E-SETTING-VALUE")
+                   for v in (0, 1441, "15", True)],
+                 ("jev_record", 1, "operator", "E-SETTING-VALUE"),
+                 ("jev_act", True, "operator", "E-JEV-ACT-NEEDS-RECORD")]
+        for key, value, principal, code in cases:
+            with self.subTest(key=key, value=value, principal=principal):
+                before = self.setting_rows()
+                revision = queries.project_settings(self.conn, PLANNER.project_id).revision
+                outcome = self.setting_outcome(lambda: step(self.conn, PLANNER.project_id,
+                    key, value, principal=principal, now_ms=100))
+                self.assertEqual(outcome[0], code, outcome)
+                self.assertEqual(self.setting_rows(), before)
+                self.assertEqual(queries.project_settings(self.conn, PLANNER.project_id).revision,
+                                 revision)
+        for key in ("jev_record", "jev_act"):
+            self.assertEqual(self.setting_outcome(lambda: step(self.conn, PLANNER.project_id,
+                key, True, principal="operator", now_ms=101))[0], "ok")
+        before = self.setting_rows()
+        outcome = self.setting_outcome(lambda: step(self.conn, PLANNER.project_id,
+            "jev_record", False, principal="operator", now_ms=102))
+        self.assertEqual(outcome[0], "E-JEV-ACT-NEEDS-RECORD", outcome)
+        self.assertEqual(self.setting_rows(), before)
+        self.assertEqual(queries.project_settings(self.conn, PLANNER.project_id).revision, 2)
+        self.assertEqual(self.setting_outcome(lambda: step(self.conn, "absent", "jev_record",
+            True, principal="operator", now_ms=102))[0], "ValueError")
+        self.assertEqual(self.setting_rows(), before)
+
+    def test_setting_step_needs_transaction(self):
+        step = queries.set_project_setting_step
+        self.conn.commit()
+        before = self.setting_rows()
+        outcome = self.setting_outcome(lambda: step(self.conn, PLANNER.project_id,
+            "doorbell_off_minutes", 30, principal="operator", now_ms=100))
+        self.assertEqual(outcome[0], "ValueError", outcome)
+        self.assertEqual(self.setting_rows(), before)
+        self.conn.execute("BEGIN")
+        outcome = self.setting_outcome(lambda: step(self.conn, PLANNER.project_id,
+            "doorbell_off_minutes", 30, principal="operator", now_ms=101))
+        self.assertEqual(outcome, ("ok", 1))
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self.setting_rows(), before)
+        self.assertEqual(queries.project_settings(self.conn, PLANNER.project_id).revision, 0)
+
+    def test_settings_schema(self):
+        tables = {r[0] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertTrue({"project_settings", "settings_history"} <= tables)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("INSERT INTO project_settings VALUES (?, 'unknown', 'true')",
+                              (PLANNER.project_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("INSERT INTO settings_history VALUES (?,1,'jev_record',NULL,'true',?,1)",
+                              (PLANNER.project_id, PLANNER.address))
+        self.conn.execute("INSERT INTO settings_history VALUES (?,1,'jev_record',NULL,'true','operator',1)",
+                          (PLANNER.project_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("INSERT INTO settings_history VALUES (?,1,'jev_act',NULL,'true','operator',2)",
+                              (PLANNER.project_id,))
+        for table in ("project_settings", "settings_history"):
+            self.assertEqual(schema.TABLE_OWNERS[table], "engine")
+            self.assertEqual(next(row[-1] for row in self.conn.execute("PRAGMA table_list")
+                                  if row[1] == table), 1)
+
+
 class TestGitIsolation(unittest.TestCase):
     def test_store_tests_ignore_ambient_git_names(self):
         # Breaks: a Store consumer reaches Git through an unisolated fixture.

@@ -135,6 +135,8 @@ _PLATFORM_TABLES = (
 )
 
 TABLE_OWNERS: dict[str, str] = {
+    "project_settings": "engine",
+    "settings_history": "engine",
     "projects": "platform",
     "repositories": "platform",
     "repository_checkouts": "platform",
@@ -158,6 +160,22 @@ TABLE_OWNERS: dict[str, str] = {
 }
 
 _TABLES = _PLATFORM_TABLES + (
+    """CREATE TABLE IF NOT EXISTS project_settings (
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    key TEXT NOT NULL CHECK (key IN ('jev_record', 'jev_act', 'doorbell_off_minutes')),
+    value TEXT NOT NULL,
+    PRIMARY KEY (project_id, key)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS settings_history (
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    revision INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    old TEXT,
+    new TEXT NOT NULL,
+    by_principal TEXT NOT NULL CHECK (by_principal = 'operator'),
+    at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, revision)
+) STRICT""",
     """CREATE TABLE IF NOT EXISTS git_states (
     id TEXT PRIMARY KEY,
     repository_id TEXT NOT NULL REFERENCES repositories (id),
