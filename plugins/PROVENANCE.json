@@ -10831,6 +10831,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/lifecycle_outbox.py",
+    "sha256": "c5e90fc8fbe96cadb624e5d78d232e5bcbf2cffa052c3d380b1abb8899f6dbd8",
+    "source": "tools/relay_engine/lifecycle_outbox.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/migrate.py",
     "sha256": "1903a7e4c35c1bd4be7fb083e4c10112f79e4748279b1a88864cbb696f0b5caa",
     "source": "tools/relay_engine/migrate.py"
@@ -10922,7 +10928,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "4be985eee8d2f776d562a2b6152c7c73fbfa391babe6ef7d77c8f5aaee8fd113",
+    "sha256": "bdbae777a4a367478e7a6c757dd40b67a4363676e4f20d7b7490ff26573de5d4",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21661,6 +21667,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/lifecycle_outbox.py",
+    "sha256": "c5e90fc8fbe96cadb624e5d78d232e5bcbf2cffa052c3d380b1abb8899f6dbd8",
+    "source": "tools/relay_engine/lifecycle_outbox.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/migrate.py",
     "sha256": "1903a7e4c35c1bd4be7fb083e4c10112f79e4748279b1a88864cbb696f0b5caa",
     "source": "tools/relay_engine/migrate.py"
@@ -21752,7 +21764,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "4be985eee8d2f776d562a2b6152c7c73fbfa391babe6ef7d77c8f5aaee8fd113",
+    "sha256": "bdbae777a4a367478e7a6c757dd40b67a4363676e4f20d7b7490ff26573de5d4",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32407,6 +32419,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/lifecycle_outbox.py",
+    "sha256": "c5e90fc8fbe96cadb624e5d78d232e5bcbf2cffa052c3d380b1abb8899f6dbd8",
+    "source": "tools/relay_engine/lifecycle_outbox.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/migrate.py",
     "sha256": "1903a7e4c35c1bd4be7fb083e4c10112f79e4748279b1a88864cbb696f0b5caa",
     "source": "tools/relay_engine/migrate.py"
@@ -32498,7 +32516,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "4be985eee8d2f776d562a2b6152c7c73fbfa391babe6ef7d77c8f5aaee8fd113",
+    "sha256": "bdbae777a4a367478e7a6c757dd40b67a4363676e4f20d7b7490ff26573de5d4",
     "source": "tools/relay_engine/version.py"
   },
   {
