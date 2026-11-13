@@ -330,6 +330,8 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS relays_bundle ON relays (bundle_id)",
     "CREATE INDEX IF NOT EXISTS relays_sender_kind ON relays (sender_seat_id, kind)",
     "CREATE INDEX IF NOT EXISTS recipients_seat ON recipients (seat_id)",
+    "CREATE INDEX IF NOT EXISTS recipients_undelivered ON recipients (seat_id)"
+    " WHERE role = 'to' AND delivered_at IS NULL AND opened_at IS NULL",
     "CREATE INDEX IF NOT EXISTS recipients_open ON recipients (relay_id)"
     " WHERE role = 'to' AND answered_by IS NULL",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges (from_relay_id)",

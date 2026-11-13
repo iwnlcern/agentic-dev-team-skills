@@ -1004,6 +1004,27 @@ class TestTableDirectory(Store):
 
 
 class TestParties(Store):
+    def test_operator_answer_admission(self):
+        # Breaks: operator answers fail admission, fail to end exemption, or lose replay.
+        from relay_engine import queries
+        operator=SEATS['operator']
+        work=self.submit(draft(to=PLANNER.address,needs='act'),sender=IMPL)
+        q=self.submit(draft(kind='QUESTION',to='operator',needs='answer'))
+        now=self.clock+24*60*60_000
+        self.assertEqual([f for f in queries.unopened_flags(self.conn,'p',now)
+                          if f.seat_id==PLANNER.seat_id],[])
+        data=draft(parent='#%d'%q.handle,to=PLANNER.address,kind='SITREP',needs='none')
+        receipt=self.submit(data,sender=operator,submission_key='operator-answer')
+        self.assertEqual(self.conn.execute("SELECT answered_by FROM recipients WHERE relay_id=?"
+                                           " AND special='operator'",(q.relay_id,)).fetchone(),
+                         (receipt.relay_id,))
+        self.assertIn(work.relay_id,{f.relay_id for f in queries.unopened_flags(self.conn,'p',now)})
+        self.assertEqual(self.submit(data,sender=operator,submission_key='operator-answer'),receipt)
+        with self.assertRaises(errors.EngineError) as caught:
+            self.submit(data+b'other',sender=operator,submission_key='operator-answer')
+        self.assertEqual(caught.exception.code,'E-SUBMISSION-KEY-REUSED')
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM seat_activity WHERE seat_id='operator'").fetchone())
+
     """Planner Q1: a party is a seat or a special, written to its exclusive arc."""
 
     def test_operator_and_system_as_parties(self):

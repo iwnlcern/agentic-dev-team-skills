@@ -13,6 +13,7 @@ import time
 import unittest
 
 from relay_engine import queries
+from relay_engine import addresses, errors
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
@@ -1585,6 +1586,305 @@ class TestStoreSupport(Store):
                              ("IntegrityError", "a closed bundle stays closed"), value)
         self.assertEqual(self.conn.execute("SELECT closed_at FROM bundles WHERE id = ?",
                                            (bundle,)).fetchone(), (10,))
+
+
+class TestQueueReaders(Store):
+    def test_operator_waiting_replaces_question_rule(self):
+        # Breaks: the caller exemption is unioned rather than replacing QUESTION.
+        start = self.clock
+        work = self.submit(draft(to=IMPL.address, needs="act"))
+        late = start + 24 * 60 * 60_000
+        flags = queries.unopened_flags(self.conn, PLANNER.project_id, late,
+                                       operator_waiting=frozenset({IMPL.seat_id}))
+        self.assertEqual(flags, [])
+        self.submit(draft(kind="QUESTION", to="operator", needs="answer"), sender=IMPL)
+        flags = queries.unopened_flags(self.conn, PLANNER.project_id, late,
+                                       operator_waiting=frozenset())
+        self.assertEqual({f.rule for f in flags if f.seat_id == IMPL.seat_id},
+                         {"idle", "unopened"})
+        for bad in ([], set()):
+            with self.assertRaises(ValueError):
+                queries.unopened_flags(self.conn, PLANNER.project_id, late, operator_waiting=bad)
+
+
+    def queue_row(self, *, conn=None, kind="QUESTION", sender=PLANNER, parent=None,
+                  body=b"exact\x00body\n", created=None, to=None, cc=None):
+        conn = self.conn if conn is None else conn
+        handle = conn.execute("SELECT coalesce(max(handle),0)+1 FROM relays WHERE project_id=?",
+                              (sender.project_id,)).fetchone()[0]
+        rid = "00000000-0000-7000-8000-%012x" % (
+            handle + (0 if sender.project_id == "p" else 1 << 32))
+        at = conn.execute("SELECT coalesce(max(created_at),0)+1 FROM relays").fetchone()[0]
+        if created is not None:
+            at = created
+        special = sender.seat_id if sender.seat_id in schema.SPECIALS else None
+        conn.execute("INSERT INTO relays (id,handle,project_id,team_instance_id,kind,needs,"
+                     "subject,parent_id,sender_seat_id,sender_special,sender_role,created_at,"
+                     "body_sha256,meta_sha256,body_bytes,header_bytes) "
+                     "VALUES (?,?,?,?,?,'act','queue',?,?,?,?,?,?,?, ?,10)",
+                     (rid,handle,sender.project_id,sender.team_instance_id,kind,parent,
+                      None if special else sender.seat_id,special,sender.role,at,
+                      hashlib.sha256(body).hexdigest(),"a"*64,len(body)))
+        conn.execute("INSERT INTO bodies VALUES (?,?)", (rid,body))
+        for seat,role in ((to,'to'),(cc,'cc')):
+            if seat:
+                conn.execute("INSERT INTO recipients (relay_id,seat_id,role) VALUES (?,?,?)",
+                             (rid,seat.seat_id,role))
+        return submit.Admitted(rid,handle,at)
+
+    def queue_session(self, seat=IMPL, generation=1, signed=9000, *, conn=None, ended=None):
+        conn = self.conn if conn is None else conn
+        conn.execute("INSERT INTO seat_sessions (id,seat_id,occupant_id,host,host_session_id,"
+                     "generation,signed_in_at,last_seen_at,ended_at) "
+                     "VALUES (?,?,?,'codex',?,?,?,?,?)",
+                     ("session-"+seat.seat_id+str(generation),seat.seat_id,"o-"+seat.seat_id,
+                      "host-"+str(generation),generation,signed,signed,ended))
+
+    def reopen_queue_team(self, old=PLANNER, *, conn=None):
+        conn = self.conn if conn is None else conn
+        name = old.address.rsplit('.',1)[0]
+        tid = "new-"+old.team_instance_id
+        sid = "new-"+old.seat_id
+        conn.execute("INSERT INTO team_instances (id,project_id,name,level,opened_at,opened_by) "
+                     "VALUES (?,?,?,'pair',999,'operator')", (tid,old.project_id,name))
+        conn.execute("INSERT INTO seats VALUES (?,?,?,'occupied')", (sid,tid,old.role))
+        conn.execute("INSERT INTO seat_occupants (id,seat_id,key_id,key_verifier,issued_at) "
+                     "VALUES (?,?,?,'v',999)",("o-"+sid,sid,"k-"+sid))
+        return submit.SeatRef(sid,old.address,old.role,tid,old.project_id)
+
+    def observed_queue_call(self, call):
+        try:
+            value = call()
+        except Exception as error:
+            value = error
+        self.assertNotIsInstance(value, Exception, repr(value))
+        return value
+
+    def test_operator_questions(self):
+        # Breaks: kind/project/page filters, answer-party/project/kind predicates or writes.
+        q1 = self.queue_row(to=IMPL)
+        q2 = self.queue_row(body=b"second\n")
+        self.queue_row(kind="SITREP")
+        self.queue_row(sender=FOREIGN)
+        before = [self.conn.execute("SELECT * FROM "+t).fetchall()
+                  for t in ('recipients','seat_activity')]
+        changes = self.conn.total_changes
+        page = queries.operator_questions(self.conn, PLANNER.project_id, 0, 500)
+        self.assertEqual([r.relay_id for r in page], [q1.relay_id,q2.relay_id])
+        self.assertEqual(page[0].body, b"exact\x00body\n")
+        self.assertIs(page[0].answered, False)
+        self.assertEqual([r.handle for r in queries.operator_questions(self.conn,'p',q1.handle,1)],
+                         [q2.handle])
+        self.assertEqual([self.conn.execute("SELECT * FROM "+t).fetchall()
+                          for t in ('recipients','seat_activity')], before)
+        self.assertEqual(self.conn.total_changes, changes)
+        for after,limit in ((-1,1),(0,0),(0,501)):
+            with self.assertRaises(ValueError):
+                queries.operator_questions(self.conn,'p',after,limit)
+        # Real admission and its derived mark are independently controlled.
+        self.conn.commit()
+        q = self.submit(draft(kind="QUESTION",to="operator",needs="answer"))
+        self.submit(draft(parent="#%d"%q.handle,to=PLANNER.address),sender=OPERATOR)
+        self.conn.execute("UPDATE recipients SET answered_by=NULL WHERE relay_id=?",(q.relay_id,))
+        self.conn.commit()
+        def answered(rid):
+            return next(r.answered for r in queries.operator_questions(self.conn,'p',0,500)
+                        if r.relay_id==rid)
+        self.assertIs(answered(q.relay_id), True)
+        audit = self.queue_row(sender=OPERATOR,kind="AUDIT",parent=q2.relay_id)
+        self.assertIs(answered(q2.relay_id), True)
+        clean = self.queue_row()
+        self.queue_row(kind="SITREP",sender=PLANNER,parent=clean.relay_id)
+        self.assertIs(answered(clean.relay_id), False)
+        self.queue_row(kind="SITREP",sender=IMPL,parent=clean.relay_id)
+        self.assertIs(answered(clean.relay_id), False)
+        foreign_op = submit.SeatRef('operator','operator','operator',None,'q')
+        self.queue_row(sender=foreign_op,kind="SITREP",parent=clean.relay_id)
+        self.assertIs(answered(clean.relay_id), False)
+        system = submit.SeatRef('system','system','system',PLANNER.team_instance_id,'p')
+        self.queue_row(sender=system,kind="SITREP",parent=clean.relay_id)
+        self.assertIs(answered(clean.relay_id), False)
+
+    def test_operator_questions_sender_address(self):
+        # Breaks: rendering closed/reopened or special senders as routable seat addresses.
+        self.directory = submit.TableDirectory(self.conn, PLANNER.project_id)
+        self.conn.execute("UPDATE team_instances SET name='team-a' WHERE id=?",
+                          (PLANNER.team_instance_id,))
+        asker = submit.SeatRef(PLANNER.seat_id,'team-a.planner','planner',PLANNER.team_instance_id,'p')
+        q = self.queue_row(sender=asker)
+        page = queries.operator_questions(self.conn,'p',0,500)
+        self.assertEqual(page[0]._fields[-2:], ('answered','sender_address'))
+        self.assertEqual(page[0].sender_address,'team-a.planner')
+        self.assertEqual(page[0].sender_address,addresses.render(addresses.Address('team-a','planner')))
+        op = self.queue_row(sender=OPERATOR)
+        null = self.queue_row()
+        self.conn.execute("UPDATE relays SET team_instance_id=NULL,sender_role=NULL WHERE id=?",
+                          (null.relay_id,))
+        system = submit.SeatRef('system','system','system',asker.team_instance_id,'p')
+        sysrow = self.queue_row(sender=system)
+        page = self.observed_queue_call(lambda: queries.operator_questions(self.conn,'p',0,500))
+        self.assertEqual(len(page),4)
+        self.assertEqual([r.sender_address for r in page],['team-a.planner',None,None,None])
+        self.conn.execute("UPDATE team_instances SET closed_at=100 WHERE id=?",
+                          (asker.team_instance_id,));self.conn.commit()
+        self.assertIsNone(queries.operator_questions(self.conn,'p',0,1)[0].sender_address)
+        self.refused('E-ADDRESS',draft(to='team-a.planner'),sender=OPERATOR)
+        new = self.reopen_queue_team(asker);self.conn.commit()
+        newq = self.queue_row(sender=new);self.conn.commit()
+        page = queries.operator_questions(self.conn,'p',0,500)
+        self.assertIsNone(page[0].sender_address)
+        self.assertEqual(page[-1].sender_address,'team-a.planner')
+        sent = self.submit(draft(to='team-a.planner'),sender=OPERATOR)
+        self.assertEqual(self.conn.execute("SELECT seat_id FROM recipients WHERE relay_id=?",
+                                           (sent.relay_id,)).fetchall(),[(new.seat_id,)])
+
+    def test_operator_admission(self):
+        # Breaks: replay ignores party or bytes, depends on team state, or filters project.
+        data = draft(to='operator')
+        self.assertIsNone(queries.operator_admission(self.conn,'K',data))
+        self.submit(data,submission_key='seat-only')
+        self.assertIsNone(queries.operator_admission(self.conn,'seat-only',data))
+        first = self.submit(data,sender=OPERATOR,submission_key='K')
+        replay = self.submit(data,sender=OPERATOR,submission_key='K')
+        self.assertEqual(queries.operator_admission(self.conn,'K',data),replay)
+        for call in (lambda: queries.operator_admission(self.conn,'K',data+b'x'),
+                     lambda: self.submit(data+b'x',sender=OPERATOR,submission_key='K')):
+            with self.assertRaises(errors.EngineError) as caught:call()
+            self.assertEqual(caught.exception.code,'E-SUBMISSION-KEY-REUSED')
+        q = self.submit(draft(kind='QUESTION',to='operator',needs='answer'))
+        answer = draft(parent='#%d'%q.handle,to=PLANNER.address)
+        admitted = self.submit(answer,sender=OPERATOR,submission_key='answer')
+        self.conn.execute('UPDATE team_instances SET closed_at=100 WHERE id=?',
+                          (PLANNER.team_instance_id,))
+        self.reopen_queue_team();self.conn.commit()
+        self.assertEqual(queries.operator_admission(self.conn,'answer',answer),admitted)
+        foreign_op = submit.SeatRef('operator','operator','operator',None,'q')
+        self.assertEqual(self.submit(answer,sender=foreign_op,submission_key='answer'),admitted)
+        self.assertEqual(queries.operator_admission(self.conn,'answer',answer),admitted)
+        for key,body in (('',data),('a\x00b',data),('é'*129,data),('K','text')):
+            with self.assertRaises(ValueError):queries.operator_admission(self.conn,key,body)
+        self.conn.execute('BEGIN');changes=self.conn.total_changes
+        self.assertEqual(queries.operator_admission(self.conn,'K',data),first)
+        self.assertTrue(self.conn.in_transaction);self.assertEqual(self.conn.total_changes,changes)
+        self.conn.rollback()
+
+    def test_doorbell_off(self):
+        # Breaks: session/role/opened filters, age, oldest row, closed-team display.
+        self.conn.execute("UPDATE team_instances SET name='team-a' WHERE id=?",
+                          (PLANNER.team_instance_id,))
+        seat=submit.SeatRef(PLANNER.seat_id,'team-a.planner','planner',PLANNER.team_instance_id,'p')
+        self.queue_session(seat,generation=1,signed=9000,ended=9999)
+        self.queue_session(seat,generation=2,signed=9999)
+        old=self.queue_row(kind='SITREP',created=100,to=seat)
+        young=self.queue_row(kind='SITREP',created=150,to=seat)
+        self.assertEqual(queries.doorbell_off(self.conn,'p',199,100),[])
+        rows=queries.doorbell_off(self.conn,'p',200,100)
+        self.assertEqual([tuple(r[:5]) for r in rows],[(seat.seat_id,2,old.relay_id,old.handle,100)])
+        self.assertEqual(rows[0]._fields[-1],'seat_address')
+        self.assertEqual(rows[0].seat_address,'team-a.planner')
+        self.assertEqual(rows[0].seat_address,addresses.render(addresses.Address('team-a','planner')))
+        with self.assertRaises(ValueError):queries.doorbell_off(self.conn,'p',200,0)
+        self.conn.execute('UPDATE recipients SET opened_at=199 WHERE relay_id=?',(old.relay_id,))
+        self.assertEqual(queries.doorbell_off(self.conn,'p',200,100),[])
+        self.assertEqual(queries.doorbell_off(self.conn,'p',250,100)[0].relay_id,young.relay_id)
+        self.conn.execute('UPDATE recipients SET delivered_at=250 WHERE relay_id=?',(young.relay_id,))
+        self.assertEqual(queries.doorbell_off(self.conn,'p',10000,100),[])
+        self.conn.execute('UPDATE recipients SET opened_at=NULL WHERE relay_id=?',(old.relay_id,))
+        self.assertEqual(queries.doorbell_off(self.conn,'p',200,100)[0].relay_id,old.relay_id)
+        self.conn.execute('UPDATE seats SET state=\'stood-down\' WHERE id=?',(seat.seat_id,))
+        self.assertEqual(queries.doorbell_off(self.conn,'p',200,100)[0].seat_address,'team-a.planner')
+        self.conn.execute('UPDATE team_instances SET closed_at=200 WHERE id=?',(seat.team_instance_id,))
+        self.assertIsNone(queries.doorbell_off(self.conn,'p',200,100)[0].seat_address)
+        new=self.reopen_queue_team(seat);self.queue_session(new)
+        self.queue_row(kind='SITREP',created=160,to=new)
+        rows={r.seat_id:r for r in queries.doorbell_off(self.conn,'p',300,100)}
+        self.assertIsNone(rows[seat.seat_id].seat_address)
+        self.assertEqual(rows[new.seat_id].seat_address,'team-a.planner')
+        # Exclusion controls are otherwise old enough and signed in where applicable.
+        self.conn.execute('UPDATE recipients SET delivered_at=300')
+        self.queue_row(kind='SITREP',created=170,cc=new)
+        self.queue_row(kind='SITREP',created=180,to=OTHER)  # no open session
+        self.queue_row(kind='SITREP',created=190,to=new,sender=FOREIGN)  # another project
+        self.assertEqual(queries.doorbell_off(self.conn,'p',10000,100),[])
+        self.conn.execute('UPDATE seat_sessions SET ended_at=10001')
+        self.conn.execute('UPDATE recipients SET delivered_at=NULL WHERE relay_id=?',(old.relay_id,))
+        self.assertEqual(queries.doorbell_off(self.conn,'p',10000,100),[])
+
+    def test_doorbell_off_bounded(self):
+        # Breaks: removing or weakening the partial index makes history cost grow.
+        self.queue_session()
+        live=self.queue_row(kind='SITREP',created=10,to=IMPL)
+        self.assertEqual(len(queries.doorbell_off(self.conn,'p',100,20)),1)
+        base=vm_steps(self.conn,lambda: queries.doorbell_off(self.conn,'p',100,20))
+        for n in range(5000):
+            row=self.queue_row(kind='SITREP',created=1000+n,to=IMPL)
+            column='delivered_at' if n<2500 else 'opened_at'
+            self.conn.execute('UPDATE recipients SET '+column+'=1 WHERE relay_id=?',(row.relay_id,))
+        # A fresh prepare prevents a stale query plan from masking a removed index.
+        self.conn.commit()
+        cost=vm_steps(self.conn,lambda: queries.doorbell_off(self.conn,'p',100,20))
+        self.assertLessEqual(cost,base+200,(base,cost))
+        self.assertEqual([r.relay_id for r in queries.doorbell_off(self.conn,'p',100,20)],
+                         [live.relay_id])
+
+    def test_queue_readers_are_pure(self):
+        # Breaks: writes/transaction control, or fields read on a fresh snapshot.
+        with tempfile.TemporaryDirectory() as directory:
+            path=os.path.join(directory,'queue.sqlite3')
+            c=sqlite3.connect(path);self.addCleanup(c.close)
+            c.execute('PRAGMA journal_mode=WAL');self.conn.backup(c)
+            w=sqlite3.connect(path);self.addCleanup(w.close)
+            w.execute('PRAGMA foreign_keys=ON')
+            self.queue_session(conn=w)
+            q=self.queue_row(conn=w,to=IMPL,created=10);w.commit()
+            queries.operator_questions(c,'p',0,500)  # missing name remains the C1 error
+            c.execute('BEGIN');c.execute('SELECT count(*) FROM relays').fetchone()
+            changes=c.total_changes
+            fresh=self.queue_row(conn=w,to=OTHER,created=20)
+            self.queue_session(OTHER,conn=w);w.commit()
+            page=queries.operator_questions(c,'p',0,500)
+            bell=queries.doorbell_off(c,'p',10000000,1)
+            flags=queries.unopened_flags(c,'p',10000000,unopened_ms=1,idle_ms=1,
+                                         operator_waiting=frozenset())
+            self.assertEqual([r.relay_id for r in page],[q.relay_id])
+            self.assertEqual([r.relay_id for r in bell],[q.relay_id])
+            self.assertEqual({r.relay_id for r in flags},{q.relay_id})
+            self.assertTrue(c.in_transaction);self.assertEqual(c.total_changes,changes)
+            c.rollback()
+            self.assertEqual(len(queries.operator_questions(c,'p',0,500)),2)
+            # The newly signed-in recipient is visible only after ending the snapshot.
+            self.assertEqual({r.relay_id for r in queries.doorbell_off(c,'p',10000000,1)},
+                             {q.relay_id,fresh.relay_id})
+            self.assertIn(fresh.relay_id,{f.relay_id for f in queries.unopened_flags(
+                c,'p',10000000,unopened_ms=1,idle_ms=1,operator_waiting=frozenset())})
+            for change in ('answer','asking-team','doorbell-team'):
+                c.execute('BEGIN');c.execute('SELECT count(*) FROM relays').fetchone()
+                before=c.total_changes
+                if change=='answer':
+                    self.queue_row(conn=w,sender=OPERATOR,kind='SITREP',parent=q.relay_id,created=30)
+                elif change=='asking-team':
+                    w.execute('UPDATE team_instances SET closed_at=100 WHERE id=?',
+                              (PLANNER.team_instance_id,))
+                else:
+                    # Recipient shares the Engine instance; reopen its observed snapshot
+                    # for this independent field control before pinning the next snapshot.
+                    c.rollback();w.execute('UPDATE team_instances SET closed_at=NULL WHERE id=?',
+                                           (IMPL.team_instance_id,));w.commit()
+                    c.execute('BEGIN');c.execute('SELECT count(*) FROM relays').fetchone()
+                    w.execute('UPDATE team_instances SET closed_at=101 WHERE id=?',
+                              (IMPL.team_instance_id,))
+                w.commit()
+                page=self.observed_queue_call(lambda: queries.operator_questions(c,'p',0,500))
+                bell=self.observed_queue_call(lambda: queries.doorbell_off(c,'p',10000000,1))
+                if change=='answer':self.assertIs(page[0].answered,False)
+                elif change=='asking-team':self.assertEqual(page[0].sender_address,PLANNER.address)
+                else:self.assertEqual(bell[0].seat_address,IMPL.address)
+                self.assertTrue(c.in_transaction);self.assertEqual(c.total_changes,before)
+                c.rollback()
+                if change=='answer':self.assertIs(queries.operator_questions(c,'p',0,500)[0].answered,True)
+                elif change=='asking-team':self.assertIsNone(queries.operator_questions(c,'p',0,500)[0].sender_address)
+                else:self.assertIsNone(queries.doorbell_off(c,'p',10000000,1)[0].seat_address)
+            w.close();c.close()
 
 
 class TestGitIsolation(unittest.TestCase):

@@ -16,8 +16,9 @@ from pathlib import Path
 import secrets
 import stat
 import sqlite3
-from typing import Callable, Sequence
+from typing import Callable, NamedTuple, Sequence
 
+from relay_engine import addresses
 from relay_engine import errors
 from relay_engine import refs
 from relay_engine import schema
@@ -347,7 +348,8 @@ def _note_activity(conn, seat_id, at_ms):
                  " max(last_request_at, excluded.last_request_at)", (seat_id, at_ms))
 
 
-def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=IDLE_MS):
+def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=IDLE_MS,
+                   *, operator_waiting: frozenset[str] | None = None):
     """P9 liveness flags for the orchestrator (amendment 4 A4.4): a TO addressee
     of a relay with NEEDS other than none that has not opened it unopened_ms
     after admission, delivered or not and active or not ("unopened"); and a
@@ -356,6 +358,8 @@ def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=ID
     admission of its newest open must-act relay ("idle", naming that relay).
     A seat with an unanswered QUESTION to the operator is never flagged; CC
     and the specials, which are not seats, never flag."""
+    if operator_waiting is not None and not isinstance(operator_waiting, frozenset):
+        raise ValueError("operator_waiting is a frozenset or None")
     # Both rules start from the open TO rows (recipients_open, a partial index),
     # so their cost follows open work, not the project's history (PR-3 R2);
     # CROSS JOIN keeps that join order.  A QUESTION exempts its own project (R12).
@@ -363,6 +367,8 @@ def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=ID
               " WHERE q.sender_seat_id = c.seat_id AND q.kind = 'QUESTION'"
               " AND q.project_id = r.project_id AND o.role = 'to'"
               " AND o.answered_by IS NULL) AND c.special IS NULL")
+    if operator_waiting is not None:
+        exempt = "c.special IS NULL"
     flags = [Flag("unopened", *row) for row in conn.execute(
         "SELECT r.id, r.handle, " + party_sql("c.") + ", r.created_at FROM recipients c"
         " CROSS JOIN relays r ON r.id = c.relay_id"
@@ -382,6 +388,8 @@ def unopened_flags(conn, project_id, now_ms, unopened_ms=UNOPENED_MS, idle_ms=ID
     flags += [Flag("idle", relay_id, handle, seat_id, created)
               for seat_id, (created, handle, relay_id, active) in newest.items()
               if max(created, active or 0) <= now_ms - idle_ms]
+    if operator_waiting is not None:
+        flags = [flag for flag in flags if flag.seat_id not in operator_waiting]
     return sorted(flags, key=lambda f: (f.created_at, f.seat_id, f.rule))
 
 
@@ -830,3 +838,119 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
             os.unlink(target)
         except OSError:
             pass
+
+
+class QuestionRow(NamedTuple):
+    relay_id: str
+    handle: int
+    created_at_ms: int
+    sender_seat_id: str | None
+    parent_id: str | None
+    needs: str
+    subject: str
+    body: bytes
+    answered: bool
+    sender_address: str | None
+
+
+class DoorbellCondition(NamedTuple):
+    seat_id: str
+    generation: int
+    relay_id: str
+    handle: int
+    created_at_ms: int
+    seat_address: str | None
+
+
+def operator_questions(conn, project_id: str, after_handle: int, limit: int) -> list[QuestionRow]:
+    """Page questions and their answer/address fields in the caller's one snapshot.
+
+    An operator child answers regardless of kind or recipient marks. A closed
+    or special sender has no routing address; rendering corrupt stored names
+    is allowed to fail. This read changes no state or transaction boundary.
+    """
+    if type(after_handle) is not int or after_handle < 0:
+        raise ValueError("after_handle is an integer of at least zero")
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit is an integer from 1 to 500")
+    rows = conn.execute(
+        "SELECT r.id, r.handle, r.created_at, r.sender_seat_id, r.parent_id, r.needs,"
+        " r.subject, b.body, EXISTS (SELECT 1 FROM relays child"
+        " WHERE child.parent_id = r.id AND child.project_id = r.project_id"
+        " AND child.sender_special = 'operator'),"
+        " ti.name, r.sender_role, ti.closed_at, r.sender_special"
+        " FROM relays r JOIN bodies b ON b.relay_id = r.id"
+        " LEFT JOIN team_instances ti ON ti.id = r.team_instance_id"
+        " WHERE r.project_id = ? AND r.kind = 'QUESTION' AND r.handle > ?"
+        " ORDER BY r.handle LIMIT ?", (project_id, after_handle, limit)).fetchall()
+    page = []
+    for row in rows:
+        name, role, closed_at, special = row[9:]
+        address = (addresses.render(addresses.Address(team=name, role=role))
+                   if special is None and name is not None and role is not None
+                   and closed_at is None else None)
+        page.append(QuestionRow(*row[:8], bool(row[8]), address))
+    return page
+
+
+def operator_admission(conn, submission_key: str, data: bytes) -> submit.Admitted | None:
+    """Read the operator party's replay receipt for the exact persisted draft bytes.
+
+    The party/key is store-wide, as in submit replay; team and recipient
+    lifecycle state cannot change an already admitted receipt.
+    """
+    if (not isinstance(submission_key, str) or not submission_key
+            or "\x00" in submission_key):
+        raise ValueError("submission_key is a non-empty UTF-8 string without NUL")
+    try:
+        key_bytes = submission_key.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("submission_key must be UTF-8 encodable") from None
+    if len(key_bytes) > 256:
+        raise ValueError("submission_key is at most 256 UTF-8 bytes")
+    if not isinstance(data, bytes):
+        raise ValueError("data must be bytes")
+    row = conn.execute(
+        "SELECT id, handle, created_at, draft_sha256 FROM relays WHERE "
+        + party_sql("sender_") + " = ? AND submission_key = ?",
+        (OPERATOR_SEAT_ID, submission_key)).fetchone()
+    if row is None:
+        return None
+    if row[3] != hashlib.sha256(data).hexdigest():
+        raise errors.error_for("E-SUBMISSION-KEY-REUSED")
+    return submit.Admitted(row[0], row[1], row[2])
+
+
+def doorbell_off(conn, project_id: str, now_ms: int, threshold_ms: int) -> list[DoorbellCondition]:
+    """Oldest unopened, undelivered TO arrival for each seat with an open session.
+
+    Age is admission age, independent of sign-in. The partial recipient
+    index excludes delivered and opened history before the joins. Addresses
+    are display-only and disappear when the seat's own team closes.
+    """
+    if type(threshold_ms) is not int or threshold_ms <= 0:
+        raise ValueError("threshold_ms is a positive integer")
+    rows = conn.execute(
+        "SELECT c.seat_id, ss.generation, r.id, r.handle, r.created_at,"
+        " ti.name, s.role, ti.closed_at"
+        " FROM seat_sessions ss CROSS JOIN recipients c ON c.seat_id = ss.seat_id"
+        " CROSS JOIN relays r ON r.id = c.relay_id"
+        " JOIN seats s ON s.id = c.seat_id"
+        " JOIN team_instances ti ON ti.id = s.team_instance_id"
+        " WHERE ss.ended_at IS NULL AND ss.generation = (SELECT max(latest.generation)"
+        " FROM seat_sessions latest WHERE latest.seat_id = ss.seat_id AND latest.ended_at IS NULL)"
+        " AND c.role = 'to' AND c.delivered_at IS NULL AND c.opened_at IS NULL"
+        " AND r.project_id = ? ORDER BY c.seat_id, r.created_at, r.handle", (project_id,)).fetchall()
+    conditions = []
+    seen = set()
+    for row in rows:
+        seat_id = row[0]
+        if seat_id in seen:
+            continue
+        seen.add(seat_id)
+        if now_ms - row[4] < threshold_ms:
+            continue
+        address = (addresses.render(addresses.Address(team=row[5], role=row[6]))
+                   if row[7] is None else None)
+        conditions.append(DoorbellCondition(*row[:5], address))
+    return conditions
