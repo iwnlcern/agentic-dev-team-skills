@@ -561,3 +561,12 @@ def checkout_route(catalogue_conn, checkout_id: str) -> CheckoutRoute | None:
         catalogue_conn,
         'SELECT ' + _CHECKOUT_ROUTE_COLUMNS + ' FROM checkout_routes WHERE checkout_id = ?', (checkout_id,))
     return CheckoutRoute(*rows[0]) if rows else None
+
+
+def open_checkout_routes(catalogue_conn) -> list[CheckoutRoute]:
+    """Delta 6: read open routes in project, path and checkout-id order."""
+    rows = _catalogue_read(
+        catalogue_conn,
+        'SELECT ' + _CHECKOUT_ROUTE_COLUMNS +
+        ' FROM checkout_routes WHERE ended_at IS NULL ORDER BY project_id, worktree_path, checkout_id', ())
+    return [CheckoutRoute(*row) for row in rows]
