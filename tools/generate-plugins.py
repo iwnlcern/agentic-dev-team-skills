@@ -64,6 +64,7 @@ assert ENGINE_SET == (
     "relay_engine/operator_queue/kinds.py",
     "relay_engine/operator_queue/operations.py",
     "relay_engine/operator_queue/records.py",
+    "relay_engine/operator_queue/saga.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",
