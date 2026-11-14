@@ -882,6 +882,14 @@ class DockerArgs(unittest.TestCase):
         self.assertIn("ADT_EXPECTED_HEAD=abc123", args)
         self.assertEqual(args[args.index("-w") + 1], str(worktree))
 
+    def test_linux_leg_names_the_acl_folder(self):
+        # Breaks: a Linux leg whose ACL tests have no folder that accepts a default ACL.
+        args = rc.docker_args(Path("/Users/someone/worktrees/w"), Path("/Users/someone/repo/.git"),
+                              Path("/Users/someone/out"), "img:tag", "abc123", platform="linux/arm64")
+        values = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "-e"]
+        self.assertEqual(values.count("RELAY_ENGINE_ACL_DIR=/var/tmp"), 1, args)
+        self.assertEqual(args.count("RELAY_ENGINE_ACL_DIR=/var/tmp"), 1, args)
+
 
 class Preflight(unittest.TestCase):
 
@@ -1361,6 +1369,14 @@ class TestingDoc(unittest.TestCase):
         text = TESTING_MD.read_text()
         self.assertEqual(trap_problems(REPO, text), [])
         self.assertIn("release-check.py full", text)
+
+    def test_linux_runs_name_the_acl_folder(self):
+        # Breaks: a contributor's Linux run of the suite that fails the ACL tests unexplained.
+        everyday = TESTING_MD.read_text().split("## Everyday", 1)[1].split("\n## ", 1)[0]
+        commands = (REPO / "AGENTS.md").read_text().split("## Commands", 1)[1].split("\n## ", 1)[0]
+        for name, section in (("tools/TESTING.md Everyday", everyday), ("AGENTS.md Commands", commands)):
+            with self.subTest(section=name):
+                self.assertIn("RELAY_ENGINE_ACL_DIR", section)
 
     def test_module_command_sets_the_results_environment(self):
         # test_e2e_chain skips its census test without these (test_e2e_chain.py:425-436).

@@ -47,6 +47,7 @@ assert ENGINE_SET == (
     "relay_engine/ed25519_verify.py",
     "relay_engine/envelope.py",
     "relay_engine/errors.py",
+    "relay_engine/fileacl.py",
     "relay_engine/generated/api/api_3_0.rs",
     "relay_engine/generated/api/api_3_0.ts",
     "relay_engine/generated/api/manifest.json",

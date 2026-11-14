@@ -511,6 +511,22 @@ strings.register_inventory(_SNAPSHOT_TEXT, {
 })
 
 
+# OB-SNAP-ACL-1 (DD-v3-engine-snapshot-acl D7): an overwrite that cannot keep the file's owner or group.
+_OWNERSHIP_TEXT = {
+    "error-output-ownership-cause": "{path} is not overwritten: the copy cannot keep its {reason}",
+    "error-output-ownership-remedy": "remove the file or write the copy elsewhere",
+    "error-output-ownership-explain": "a copy never takes over a file another user or group owns",
+}
+_OWNERSHIP_REASONS = frozenset({"owner", "group"})
+strings.register_inventory(_OWNERSHIP_TEXT, {
+    (key, field): {"path": lambda v: strings._is_rejected(v) or (
+                       strings._is_show_text(v) and len(v) <= 300),
+                   "reason": lambda v: v in _OWNERSHIP_REASONS}[field]
+    for key, template in _OWNERSHIP_TEXT.items()
+    for field in strings._placeholders(template)
+})
+
+
 # v3 references (DD-v3-engine § 6): one code per refusal rule.
 _REF_TEXT = {
     "error-ref-spelling-cause": "REF {value} is not a reference spelling: {reason}",
@@ -587,6 +603,7 @@ ERRORS = {
     "E-SNAPSHOT-NO-BYTES": _spec("snapshot-no-bytes", "command"),
     "E-SNAPSHOT-NOT-TEXT": _spec("snapshot-not-text", "command"),
     "E-OUTPUT-EXISTS": _spec("output-exists", "command"),
+    "E-OUTPUT-OWNERSHIP": _spec("output-ownership", "command"),
     "E-ADMISSION-HOOK": _spec("admission-hook", "integrity"),
     "E-SUBMISSION-KEY-REUSED": _spec("submission-key-reused", "integrity"),
     "E-SENDER-NOT-CURRENT": _spec("sender-not-current", "policy"),

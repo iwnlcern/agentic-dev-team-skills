@@ -31,6 +31,7 @@ ALL_CODES = POLICY_CODES | {
     "E-SNAPSHOT-NO-BYTES",
     "E-SNAPSHOT-NOT-TEXT",
     "E-OUTPUT-EXISTS",
+    "E-OUTPUT-OWNERSHIP",
 
     "E-SUBMISSION-KEY-REUSED",
     "E-ADMISSION-HOOK",
@@ -119,7 +120,8 @@ class TestErrorRegistry(unittest.TestCase):
                  "E-SNAPSHOT-NO-REF": 'integrity',
                  "E-SNAPSHOT-NO-BYTES": 'command',
                  "E-SNAPSHOT-NOT-TEXT": 'command',
-                 "E-OUTPUT-EXISTS": 'command'}
+                 "E-OUTPUT-EXISTS": 'command',
+                 "E-OUTPUT-OWNERSHIP": 'command'}
         for code, kind in cases.items():
             with self.subTest(code=code):
                 self.assertIn(code, errors.ERRORS)

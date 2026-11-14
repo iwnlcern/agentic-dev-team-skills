@@ -1,11 +1,14 @@
 """v3 queries and metrics (DD-v3-engine § 7, § 8, § 9, § 11, § 15 item 6; plan Task 5)."""
 
+import contextlib
 import difflib
+import errno
 import hashlib
 import inspect
 import json
 from dataclasses import FrozenInstanceError, asdict
 import os
+from pathlib import Path
 import re
 import sqlite3
 import tempfile
@@ -13,11 +16,13 @@ import threading
 import time
 import unittest
 
+from relay_engine import fileacl
 from relay_engine import queries
 from relay_engine import addresses, errors
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
+from relay_engine.tests import acl_support
 from relay_engine.tests import test_submit as submit_tests
 from relay_engine.tests.test_refs import Repo, git
 from unittest import mock
@@ -2654,6 +2659,15 @@ class TestSnapshotCopies(submit_tests.Snapshots):
             written.append(os.fstat(fd).st_mode & 0o7777)
             return real_write(fd, data)
 
+        fileacl._bind()
+        real_openx_np = fileacl._openx_np
+
+        def privately(path, flags, fsec):
+            fd = real_openx_np(path, flags, fsec)
+            if fd >= 0:
+                opened.append((acl_support.filesec_mode(fsec), os.fstat(fd).st_mode & 0o7777))
+            return fd
+
         previous = os.umask(0o022)
         try:
             for final_mode in (0o600, 0o640):
@@ -2663,6 +2677,7 @@ class TestSnapshotCopies(submit_tests.Snapshots):
                 opened.clear()
                 written.clear()
                 with mock.patch.object(queries.os, "open", side_effect=opening), \
+                        mock.patch.object(fileacl, "_openx_np", side_effect=privately), \
                         mock.patch.object(queries.os, "write", side_effect=writing):
                     result = snapshot_outcome(lambda: queries.write_snapshot(
                         self.conn, 1, out, self.store, True, project_id=submit_tests.PROJECT))
@@ -2686,6 +2701,384 @@ class TestSnapshotCopies(submit_tests.Snapshots):
             self.assertEqual(out.read_bytes(), b"one\n")
         finally:
             os.umask(previous)
+
+    # OB-SNAP-ACL-1 (DD-v3-engine-snapshot-acl section 7): an overwrite keeps the
+    # replaced file's group and exact ACL through a stage that never inherits.
+    def overwrite(self, out, handle=1):
+        return snapshot_outcome(lambda: queries.write_snapshot(
+            self.conn, handle, out, self.store, True, project_id=submit_tests.PROJECT))
+
+    def acl_out(self, name, mode=0o600, inherit=False):
+        """out in a fresh ACL folder, with its own ACL cleared before any folder ACL is set."""
+        folder = Path(acl_support.acl_folder(self))
+        out = folder / name
+        out.write_bytes(b"old")
+        out.chmod(mode)
+        acl_support.clear(out)
+        if inherit:
+            acl_support.set_inheritable_grant(self, folder)
+        return folder, out
+
+    def state(self, folder, out):
+        st = os.lstat(out)
+        return (sorted(p.name for p in folder.iterdir()), out.read_bytes(), st.st_mode, st.st_uid,
+                st.st_gid, acl_support.entries(out))
+
+    @staticmethod
+    def reported(st, uid=None, gid=None):
+        fields = list(st)
+        if uid is not None:
+            fields[4] = uid
+        if gid is not None:
+            fields[5] = gid
+        return os.stat_result(fields)
+
+    def reporting(self, out, uid=None, gid=None):
+        """os.lstat reporting out's uid or gid as another, every other path as it is."""
+        real_lstat = os.lstat
+
+        def lstating(path, *args, **kwargs):
+            st = real_lstat(path, *args, **kwargs)
+            if os.fspath(path) == os.fspath(out):
+                return self.reported(st, uid, gid)
+            return st
+        return mock.patch.object(queries.os, "lstat", side_effect=lstating)
+
+    def creations(self, record):
+        """Both creation primitives observed at their return: (primitive, requested mode, mode, grants, entries)."""
+        fileacl._bind()
+        real_open, real_openx_np = os.open, fileacl._openx_np
+
+        def opening(path, flags, mode=0o777, **kwargs):
+            fd = real_open(path, flags, mode, **kwargs)
+            record.append(("open", mode, os.fstat(fd).st_mode & 0o7777, acl_support.grants(fd),
+                           acl_support.entries(fd)))
+            return fd
+
+        def privately(path, flags, fsec):
+            fd = real_openx_np(path, flags, fsec)
+            if fd >= 0:
+                record.append(("openx_np", acl_support.filesec_mode(fsec), os.fstat(fd).st_mode & 0o7777,
+                               acl_support.grants(fd), acl_support.entries(fd)))
+            return fd
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(queries.os, "open", side_effect=opening))
+        stack.enter_context(mock.patch.object(fileacl, "_openx_np", side_effect=privately))
+        return stack
+
+    def install_primitive(self):
+        fileacl._bind()
+        return (fileacl, "_acl_set_fd_np") if acl_support.DARWIN else (queries.os, "setxattr")
+
+    def test_overwrite_stage_never_inherits(self):
+        # Breaks: a stage that carries the folder's inherited granting entry at any moment.
+        self.snapshots_pair()
+        folder, out = self.acl_out("never-inherits", inherit=True)
+        self.assertFalse(acl_support.inherited(out), "fixture precondition")
+        created = []
+        with self.creations(created):
+            result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(len(created), 1, created)
+        primitive, requested, mode, grants, entries = created[0]
+        self.assertEqual(primitive, "openx_np" if acl_support.DARWIN else "open")
+        self.assertEqual((requested, mode), (0o600, 0o600))
+        self.assertFalse(grants, entries)
+        if acl_support.DARWIN:
+            self.assertEqual(entries, [])
+        # Negative control: a create in the same folder, seen by the same observers,
+        # records the folder's inherited granting entry.
+        created.clear()
+        with self.creations(created):
+            result = snapshot_outcome(lambda: queries.write_snapshot(
+                self.conn, 1, folder / "created", self.store, project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual([entry[0] for entry in created], ["open"], created)
+        self.assertTrue(created[0][3], created)
+
+    def test_overwrite_stage_private_writing_life(self):
+        # Breaks: a stage that grants anyone else access while bytes are written.
+        self.snapshots_pair()
+        folder, out = self.acl_out("writing-life", inherit=True)
+        real_write = os.write
+        written = []
+
+        def writing(fd, data):
+            written.append((os.fstat(fd).st_mode & 0o7777, acl_support.grants(fd)))
+            return real_write(fd, data)
+        with mock.patch.object(queries.os, "write", side_effect=writing):
+            result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        self.assertTrue(written)
+        self.assertEqual(written, [(0o600, False)] * len(written))
+        if acl_support.DARWIN:
+            self.assertEqual(acl_support.entries(out), [])
+        else:
+            self.assertIsNone(acl_support.entries(out))
+        self.assertEqual(out.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(out.read_bytes(), b"one\n")
+
+    def test_overwrite_copies_replaced_acl(self):
+        # Breaks: dropping, widening or changing the replaced file's ACL.
+        self.snapshots_pair()
+        folder, out = self.acl_out("copies")
+        acl_support.set_explicit_entry(out)
+        expected = acl_support.entries(out)
+        self.assertTrue(expected, "fixture precondition: out has an explicit entry")
+        mode = out.stat().st_mode & 0o7777
+        raw = None if acl_support.DARWIN else os.getxattr(out, "system.posix_acl_access")
+        result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(acl_support.entries(out), expected)
+        if not acl_support.DARWIN:
+            published = os.getxattr(out, "system.posix_acl_access")
+            self.assertEqual(published, raw)
+            self.assertEqual(acl_support.decode(published), acl_support.named_user_read())
+        self.assertEqual(out.stat().st_mode & 0o7777, mode)
+        self.assertEqual(out.read_bytes(), b"one\n")
+
+    def test_overwrite_access_order(self):
+        # Breaks: the group change after a write, the ACL copy before the last write
+        # or after the mode, or the copy made more than once.
+        self.snapshots_pair()
+        folder, out = self.acl_out("order")
+        acl_support.set_explicit_entry(out)
+        other = os.lstat(out).st_gid + 1
+        events = []
+        real_fchown, real_fchmod, real_write = os.fchown, os.fchmod, os.write
+        real_copy = fileacl.copy_access
+
+        def chowning(fd, uid, gid):
+            events.append(("fchown", uid, gid))
+            return real_fchown(fd, uid, os.fstat(fd).st_gid)
+
+        def copying(source, fd):
+            events.append(("copy_access",))
+            return real_copy(source, fd)
+
+        def changing(fd, mode):
+            events.append(("fchmod", mode))
+            return real_fchmod(fd, mode)
+
+        def writing(fd, data):
+            # One byte per call, so the write loop runs once per byte.
+            events.append(("write",))
+            return real_write(fd, bytes(data[:1]))
+        mode = out.stat().st_mode & 0o7777
+        with self.creations(events), self.reporting(out, gid=other), \
+                mock.patch.object(queries.os, "fchown", side_effect=chowning), \
+                mock.patch.object(fileacl, "copy_access", side_effect=copying), \
+                mock.patch.object(queries.os, "fchmod", side_effect=changing), \
+                mock.patch.object(queries.os, "write", side_effect=writing):
+            result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        names = ["create" if event[0] in ("open", "openx_np") else event[0] for event in events]
+        self.assertEqual(names, ["create", "fchown"] + ["write"] * len(b"one\n") + ["copy_access", "fchmod"],
+                         events)
+        self.assertEqual(events[1], ("fchown", -1, other))
+        self.assertEqual(events[-1], ("fchmod", mode))
+
+    def test_overwrite_without_acl_unchanged(self):
+        # Breaks: a create that loses the folder's inheritance, or an overwrite of a file
+        # with no ACL that publishes anything but its bytes and mode.
+        self.snapshots_pair()
+        folder = Path(acl_support.acl_folder(self))
+        acl_support.set_inheritable_grant(self, folder)
+        created = folder / "created"
+        result = snapshot_outcome(lambda: queries.write_snapshot(
+            self.conn, 1, created, self.store, project_id=submit_tests.PROJECT))
+        self.assertEqual(result[0], "ok", result)
+        self.assertTrue(acl_support.inherited(created), acl_support.entries(created))
+        self.assertTrue(acl_support.grants(created), acl_support.entries(created))
+        plain, out = self.acl_out("plain", mode=0o640)
+        before = os.lstat(out)
+        result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        after = os.lstat(out)
+        self.assertEqual((after.st_mode, after.st_uid, after.st_gid),
+                         (before.st_mode, before.st_uid, before.st_gid))
+        self.assertFalse(acl_support.entries(out), acl_support.entries(out))
+        self.assertEqual(out.read_bytes(), b"one\n")
+        self.assertEqual(sorted(p.name for p in plain.iterdir()), ["plain"])
+
+    def test_overwrite_creation_fails_closed(self):
+        # Breaks: an overwrite that falls back to another creation when the private one is refused.
+        self.snapshots_pair()
+        folder, out = self.acl_out("fails-closed", mode=0o640)
+        fileacl._bind()
+        primitive = (fileacl, "_openx_np") if acl_support.DARWIN else (queries.os, "open")
+        before = self.state(folder, out)
+        for code in (errno.EOPNOTSUPP, errno.EACCES):
+            with self.subTest(code=errno.errorcode[code]):
+                failure = OSError(code, os.strerror(code))
+                with mock.patch.object(*primitive, side_effect=failure):
+                    result = self.overwrite(out)
+                self.assertIs(result[1], failure, result)
+                self.assertEqual(self.state(folder, out), before)
+
+    def test_overwrite_foreign_owner_refused(self):
+        # Breaks: overwriting a file another user owns.
+        self.snapshots_pair()
+        folder, out = self.acl_out("foreign-owner", mode=0o644)
+        before = self.state(folder, out)
+        created = []
+        with self.creations(created), self.reporting(out, uid=os.geteuid() + 1):
+            result = self.overwrite(out)
+        self.assertEqual(result[0], "E-OUTPUT-OWNERSHIP", result)
+        self.assertEqual(result[1].params["reason"], "owner")
+        self.assertEqual(created, [])
+        self.assertEqual(self.state(folder, out), before)
+        # The unwrapped control overwrites, so the refusal turns on the uid alone.
+        result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(out.read_bytes(), b"one\n")
+
+    def test_overwrite_group_changed_before_writing(self):
+        # Breaks: publishing the copy in a group other than the replaced file's.
+        self.snapshots_pair()
+        folder, out = self.acl_out("group-change", inherit=True)
+        other = os.lstat(out).st_gid + 1
+        events = []
+        real_fchown, real_write = os.fchown, os.write
+
+        def chowning(fd, uid, gid):
+            events.append(("fchown", uid, gid, os.fstat(fd).st_mode & 0o7777, acl_support.grants(fd)))
+            # The stage keeps its own gid, so a writer with one group runs this test.
+            return real_fchown(fd, uid, os.fstat(fd).st_gid)
+
+        def writing(fd, data):
+            events.append(("write",))
+            return real_write(fd, data)
+        with self.creations(events), self.reporting(out, gid=other), \
+                mock.patch.object(queries.os, "fchown", side_effect=chowning), \
+                mock.patch.object(queries.os, "write", side_effect=writing):
+            result = self.overwrite(out)
+        self.assertEqual(result[0], "ok", result)
+        self.assertIn(events[0][0], ("open", "openx_np"), events)
+        self.assertEqual([event for event in events if event[0] == "fchown"],
+                         [("fchown", -1, other, 0o600, False)], events)
+        self.assertEqual(events[1][0], "fchown", events)
+        self.assertEqual(events[2][0], "write", events)
+
+    def test_overwrite_foreign_group_refused(self):
+        # Breaks: publishing the copy when its group cannot be the replaced file's.
+        self.snapshots_pair()
+        folder, out = self.acl_out("foreign-group", mode=0o640)
+        acl_support.set_explicit_entry(out)
+        before = self.state(folder, out)
+        calls = []
+
+        def refusing(fd, uid, gid):
+            calls.append(("fchown", gid))
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        real_copy, real_write = fileacl.copy_access, os.write
+        with self.reporting(out, gid=os.lstat(out).st_gid + 1), \
+                mock.patch.object(queries.os, "fchown", side_effect=refusing), \
+                mock.patch.object(fileacl, "copy_access",
+                                  side_effect=lambda *a: calls.append(("copy_access",)) or real_copy(*a)), \
+                mock.patch.object(queries.os, "write",
+                                  side_effect=lambda *a: calls.append(("write",)) or real_write(*a)):
+            result = self.overwrite(out)
+        self.assertEqual(result[0], "E-OUTPUT-OWNERSHIP", result)
+        self.assertEqual(result[1].params["reason"], "group")
+        self.assertEqual(calls, [("fchown", os.lstat(out).st_gid + 1)])
+        self.assertEqual(self.state(folder, out), before)
+
+    def test_acl_installed_on_replaced_group(self):
+        # Breaks: installing the replaced ACL while the stage's group is another.
+        self.snapshots_pair()
+        installs = []
+        real_install = getattr(*self.install_primitive())
+        given = {}
+
+        def installing(fd, *args, **kwargs):
+            installs.append(given.get(fd, os.fstat(fd).st_gid))
+            return real_install(fd, *args, **kwargs)
+
+        def publish(out, *patches):
+            installs.clear()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(*self.install_primitive(), side_effect=installing))
+                for patch in patches:
+                    stack.enter_context(patch)
+                return self.overwrite(out)
+
+        # The same-gid control, unwrapped but for the observer, on every writer.
+        folder, out = self.acl_out("same-group")
+        acl_support.set_explicit_entry(out)
+        result = publish(out)
+        self.assertEqual(result[0], "ok", result)
+        self.assertEqual(installs, [os.lstat(out).st_gid])
+
+        folder, out = self.acl_out("replaced-group")
+        acl_support.set_explicit_entry(out)
+        expected = acl_support.entries(out)
+        own = os.lstat(out).st_gid
+        second = None
+        for gid in sorted(set(os.getgroups()) - {own}):
+            try:
+                os.chown(out, -1, gid)
+            except PermissionError:
+                continue
+            second = gid
+            break
+        if second is not None:
+            # A writer with a second group: out really is in that group.
+            result = publish(out)
+            self.assertEqual(result[0], "ok", result)
+            self.assertEqual(installs, [second])
+            self.assertEqual(os.lstat(out).st_gid, second)
+        else:
+            # A writer with one group: os.lstat and os.fchown report through one
+            # recorded identity model, which the observer reads.
+            other = own + 1
+            real_fchown = os.fchown
+
+            def chowning(fd, uid, gid):
+                given[fd] = gid
+                return real_fchown(fd, uid, os.fstat(fd).st_gid)
+            result = publish(out, self.reporting(out, gid=other),
+                             mock.patch.object(queries.os, "fchown", side_effect=chowning))
+            self.assertEqual(result[0], "ok", result)
+            self.assertEqual(installs, [other])
+        self.assertEqual(acl_support.entries(out), expected)
+
+    def test_ownership_error_shape(self):
+        # Breaks: an ownership refusal worded otherwise, or showing a path E-OUTPUT-EXISTS would not.
+        for reason in ("owner", "group"):
+            with self.subTest(reason=reason):
+                error = errors.error_for("E-OUTPUT-OWNERSHIP", reason=reason, path="/work/copy")
+                self.assertEqual(error.cause, "/work/copy is not overwritten: the copy cannot keep its " + reason)
+                self.assertEqual(error.remedy, "remove the file or write the copy elsewhere")
+                self.assertEqual(error.cls, "command")
+        self.assertEqual(errors.explain_for("E-OUTPUT-OWNERSHIP"),
+                         ("a copy never takes over a file another user or group owns",
+                          "remove the file or write the copy elsewhere"))
+        with self.assertRaises(ValueError):
+            errors.error_for("E-OUTPUT-OWNERSHIP", reason="mode", path="/work/copy")
+        self.snapshots_pair()
+        deep = self.folder / ("d" * 200)
+        deep.mkdir()
+        for out, shown_raw in ((self.folder / "plain-name", True), (deep / ("f" * 200), False),
+                               (self.folder / "escape\x1b[0m", False)):
+            with self.subTest(out=os.fspath(out)[-24:]):
+                out.write_bytes(b"old")
+                exists = snapshot_outcome(lambda: queries.write_snapshot(
+                    self.conn, 1, out, self.store, project_id=submit_tests.PROJECT))
+                self.assertEqual(exists[0], "E-OUTPUT-EXISTS", exists)
+                shown = exists[1].cause[:-len(" already exists")]
+                self.assertEqual(shown == os.fspath(out), shown_raw, shown)
+                with self.reporting(out, uid=os.geteuid() + 1):
+                    owner = self.overwrite(out)
+                self.assertEqual(owner[1].cause,
+                                 shown + " is not overwritten: the copy cannot keep its owner")
+                with self.reporting(out, gid=os.lstat(out).st_gid + 1), \
+                        mock.patch.object(queries.os, "fchown",
+                                          side_effect=PermissionError(errno.EPERM, "fixture")):
+                    group = self.overwrite(out)
+                self.assertEqual(group[1].cause,
+                                 shown + " is not overwritten: the copy cannot keep its group")
+                self.assertEqual(out.read_bytes(), b"old")
 
     def test_create_link_error_propagates(self):
         # Breaks: translating a non-EEXIST link failure or leaving staged bytes behind.

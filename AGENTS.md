@@ -18,6 +18,7 @@ Instructions for coding agents working on this repository.
   Inspect the unittest result summary for `OK` with no skipped tests; diagnostic stdout may follow it.
   `TestCensus.test_census_artifact_schema` in `tools/relay_engine/tests/test_e2e_chain.py` checks the required results environment.
   The run leaves an unretained temporary directory under the system temp root; it does not produce the engine lane's persisted acceptance artifacts, whose retained-environment proof sequence lives in that lane's plan.
+  On a Linux host, also set `RELAY_ENGINE_ACL_DIR` to a folder on a file system that accepts a default ACL (the release image uses `/var/tmp`); the ACL tests fail, never skip, without it.
 - Regenerate the API schema and bindings after any change to the API registry, its definitions or `tools/generate-api.py`, before regenerating plugin trees: `python3 tools/generate-api.py --write`
 - Verify the generated API files match the registry: `python3 tools/generate-api.py --check`
 - Kit tests: `python3 -m unittest discover -s tools/kit_tests`
