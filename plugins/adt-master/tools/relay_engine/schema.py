@@ -494,6 +494,14 @@ BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox event is never deleted'); END""",
 WHEN (SELECT subkind FROM lifecycle_outbox WHERE project_id = NEW.project_id AND position = NEW.position)
      NOT IN ('settlement_finished', 'settlement_undone')
 BEGIN SELECT RAISE(ABORT, 'only a settlement row has events'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_new BEFORE INSERT ON lifecycle_outbox
+WHEN EXISTS (SELECT 1 FROM lifecycle_outbox WHERE project_id = NEW.project_id AND position = NEW.position)
+     OR EXISTS (SELECT 1 FROM lifecycle_outbox WHERE row_id = NEW.row_id)
+BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox row is never replaced'); END""",
+    """CREATE TRIGGER IF NOT EXISTS lifecycle_outbox_events_new BEFORE INSERT ON lifecycle_outbox_events
+WHEN EXISTS (SELECT 1 FROM lifecycle_outbox_events
+             WHERE project_id = NEW.project_id AND position = NEW.position AND event_index = NEW.event_index)
+BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox event is never replaced'); END""",
 )
 
 

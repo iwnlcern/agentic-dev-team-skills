@@ -121,6 +121,49 @@ class TestOutboxDDL(unittest.TestCase):
         insert_header(self.conn, position=3)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM lifecycle_outbox").fetchone()[0], 3)
 
+    def test_rows_never_replaced(self):
+        # Break: REPLACE silently rewrites history behind the reader's cursor.
+        from relay_engine import lifecycle_outbox
+        insert_header(self.conn)
+        insert_header(self.conn, position=2, **settlement())
+        self.conn.execute("INSERT INTO lifecycle_outbox_events VALUES ('p', 2, 1, 1, 'kind', 'subject')")
+        row_id = self.conn.execute("SELECT row_id FROM lifecycle_outbox WHERE position=1").fetchone()[0]
+        header = ("INTO lifecycle_outbox "
+                  "(project_id, position, row_id, subkind, committed_at_ms, actor_kind, seat_id, new_occupant_id) "
+                  "VALUES ('p', ?, ?, 'seat_registered', 99, 'operator', 's-a', 'o1')")
+        first = ('INSERT OR REPLACE ' + header, (1, uuid.uuid4().hex))
+        cases = [(*first, 'row'),
+                 ('INSERT OR REPLACE ' + header, (3, row_id), 'row'),
+                 ("REPLACE INTO lifecycle_outbox_events VALUES ('p', 2, 1, 1, 'another', 'subject')", (), 'event'),
+                 ('INSERT OR IGNORE ' + header, (1, uuid.uuid4().hex), 'row'),
+                 ('INSERT ' + header + ' ON CONFLICT (project_id, position) DO UPDATE SET committed_at_ms = 99',
+                  (1, uuid.uuid4().hex), 'row')]
+        before = [self.conn.execute('SELECT * FROM ' + table + ' ORDER BY 1, 2, 3').fetchall() for table in TABLES]
+        for sql, parameters, kind in cases:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, 'a lifecycle outbox ' + kind + ' is never replaced'):
+                self.conn.execute(sql, parameters)
+            self.assertEqual([self.conn.execute('SELECT * FROM ' + table + ' ORDER BY 1, 2, 3').fetchall()
+                              for table in TABLES], before)
+        self.conn.execute('BEGIN IMMEDIATE')
+        self.assertEqual(lifecycle_outbox.append_seat_row(
+            self.conn, project_id='p', subkind='seat_registered', seat_id='s-a',
+            old_occupant_id=None, new_occupant_id='o1', actor_kind='operator',
+            actor_occupant_id=None, committed_at_ms=10), 3)
+        self.conn.execute('COMMIT')
+        insert_header(self.conn, position=4, **settlement())
+        self.conn.execute("INSERT INTO lifecycle_outbox_events VALUES ('p', 4, 1, 2, 'new', 'event')")
+        self.assertEqual(self.conn.execute("SELECT event_index, number FROM lifecycle_outbox_events WHERE position=4").fetchall(), [(1, 2)])
+        triggers = tuple(sql for sql in schema._TRIGGERS
+                         if not any('IF NOT EXISTS ' + name + ' ' in sql
+                                    for name in ('lifecycle_outbox_new', 'lifecycle_outbox_events_new')))
+        with mock.patch.object(schema, '_TRIGGERS', triggers):
+            unguarded = ledger_db(self)
+        insert_header(unguarded)
+        old_id = unguarded.execute('SELECT row_id FROM lifecycle_outbox').fetchone()[0]
+        unguarded.execute(*first)
+        self.assertNotEqual(unguarded.execute('SELECT row_id FROM lifecycle_outbox').fetchone()[0], old_id)
+        self.assertEqual(unguarded.execute('SELECT row_id FROM lifecycle_outbox').fetchone()[0], first[1][1])
+
     def test_row_shape_checks(self):
         # Break: weakening any seat shape or composite occupant FK admits a false history.
         invalid = [dict(old_occupant_id="o1"), dict(new_occupant_id=None),
@@ -526,13 +569,58 @@ class TestOutboxAPI(unittest.TestCase):
         # Break: another producer can add an event after a header was published.
         import re
         from relay_engine.tests import test_strings_gate
-        expression = re.compile(r'\bINSERT\s+INTO\s+lifecycle_outbox_events\b', re.IGNORECASE)
+        expression = re.compile(r'\b(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+lifecycle_outbox_events\b', re.IGNORECASE)
         sources = {Path(p).name: Path(p).read_text() for p in test_strings_gate.TestGate.production_paths()}
         writers = lambda texts: {name for name, source in texts.items() if expression.search(source)}
         self.assertEqual(writers(sources), {'lifecycle_outbox.py'})
         self.assertNotIn('schema.py', writers(sources))
-        self.assertEqual(writers(dict(sources, extra='insert\n INTO\tlifecycle_outbox_events VALUES (...)')),
-                         {'lifecycle_outbox.py', 'extra'})
+        for source in ('insert\n INTO\tlifecycle_outbox_events VALUES (...)',
+                       'INSERT OR IGNORE INTO lifecycle_outbox_events VALUES (...)',
+                       'replace into lifecycle_outbox_events VALUES (...)'):
+            with self.subTest(source=source):
+                self.assertEqual(writers(dict(sources, extra=source)), {'lifecycle_outbox.py', 'extra'})
+
+    def test_outbox_checks_refuse_alone(self):
+        # Break: another refusal masks a missing range, length or foreign-key check.
+        instructed, merge = self.r6_headers()[1:]
+        cases = [({}, 'committed_at_ms', -1),
+                 (settlement(), 'transaction_ordinal', -1),
+                 (settlement(), 'chain_id', ''),
+                 (settlement(), 'runtime_instance_id', ''),
+                 (instructed, 'act_kind', ''), (instructed, 'instruction_relay_id', ''),
+                 (instructed, 'event_number', 0),
+                 (merge, 'slip_id', ''), (merge, 'allowed_target', ''), (merge, 'landed_target', ''),
+                 (dict(subkind='seat_stood_down', old_occupant_id=None, new_occupant_id=None), 'seat_id', 's-x'),
+                 (self.r6_headers()[0], 'actor_occupant_id', 'o-x'),
+                 (dict(subkind='seat_unseated', new_occupant_id=None, generation=2,
+                       surface=None, carrying_seat_id='s-b', instruction_relay_id='relay'), 'carrying_seat_id', 's-x')]
+        for base, column, invalid in cases:
+            with self.subTest(column=column):
+                control = dict(base, row_id=uuid.uuid4().hex)
+                before = self.conn.execute('SELECT * FROM lifecycle_outbox').fetchall()
+                self.conn.execute('SAVEPOINT inserting_control')
+                insert_header(self.conn, position=self.count() + 1, **control)
+                self.assertEqual(self.count(), len(before) + 1)
+                self.conn.execute('ROLLBACK TO inserting_control')
+                self.conn.execute('RELEASE inserting_control')
+                self.assert_refused_header(dict(control, **{column: invalid}))
+                self.assertEqual(self.conn.execute('SELECT * FROM lifecycle_outbox').fetchall(), before)
+        insert_header(self.conn, **settlement())
+        sql = 'INSERT INTO lifecycle_outbox_events VALUES (?, ?, ?, ?, ?, ?)'
+        for index, column, invalid in ((3, 'number', 0), (4, 'kind', ''), (5, 'subject', '')):
+            with self.subTest(column=column):
+                control = ('p', 1, 1, 1, 'kind', 'subject')
+                before = self.conn.execute('SELECT * FROM lifecycle_outbox_events').fetchall()
+                self.conn.execute('SAVEPOINT inserting_control')
+                self.conn.execute(sql, control)
+                self.assertEqual(self.count(self.conn, TABLES[1]), len(before) + 1)
+                self.conn.execute('ROLLBACK TO inserting_control')
+                self.conn.execute('RELEASE inserting_control')
+                refused = list(control)
+                refused[index] = invalid
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.conn.execute(sql, refused)
+                self.assertEqual(self.conn.execute('SELECT * FROM lifecycle_outbox_events').fetchall(), before)
 
     def r6_headers(self):
         return [
@@ -678,6 +766,8 @@ class TestOutboxAPI(unittest.TestCase):
         invalid += [{key: ''} for key in ('project_id', 'seat_id', 'surface')]
         invalid += [dict(surface=None, carrying_seat_id='', instruction_relay_id='r'),
                     dict(surface=None, carrying_seat_id='s-b', instruction_relay_id='')]
+        invalid += [dict(surface='terminal', carrying_seat_id='s-b', instruction_relay_id=None),
+                    dict(surface='terminal', carrying_seat_id=None, instruction_relay_id='relay')]
         for change in invalid:
             self.assert_value_refusal('append_unseat_row', self.unseat_args(**change))
         for change in (dict(surface='terminal'), dict(surface='page'),
