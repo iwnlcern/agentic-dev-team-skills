@@ -76,6 +76,14 @@ See `protocol.md` § Authority check before acting for continuations.
 11. **REVIEW-FOLD loop** — send blockers/must-haves to the Implementer. Optional findings are Implementer-discretion unless human-directed. After fold-in, run a quick targeted check; do not rerun the full panel unless design/blast radius changed.
 12. **MERGE/LIVE-VERIFY gate** — recommend one verdict from `protocol.md`. Treat merge, deploy, and live verification as separate evidence levels.
 
+## Silent counterpart
+
+When a relay you are waiting on from another seat is well past when it was due by your pair's own pace, send that seat one short relay saying what you are waiting for and the last relay you saw from it, and asking it to report or to say it cannot go on.
+Copy the Orchestrator Planner in an orchestrated run, and the silent seat's pair Planner when that is not you.
+First check that the seat is not just waiting its turn behind other work.
+Send one nudge per wait; if it brings nothing, say so to the Orchestrator Planner, or to the operator in a standalone run.
+A nudge grants nothing, changes no grant and starts no work, and it is no reason to act for the silent seat or to read its worktree.
+
 ## Standalone pair (no orchestrator)
 
 For managed roots, follow the `sprint-doc-setup` skill's `Managed-root setup` section.

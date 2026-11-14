@@ -72,6 +72,12 @@ Once `PROCEED-TO-PLAN` is dispatched and the pair has the approved design contex
 - a sitrep arrives that requires reconciliation;
 - the merge report arrives — then run the MERGE/LIVE-VERIFY gate.
 
+**Silent seats.** When a seat owes you a relay and it is well past when it was due, send that seat one short relay saying what you are waiting for and the last relay you saw from it, and asking it to report or to say it cannot go on; copy its pair Planner.
+First check that the seat is not just waiting its turn behind other work.
+Send one nudge per wait, from waits you already know of; this is not a reason to poll.
+When a nudge, yours or a pair's, brings nothing, tell the operator.
+A nudge grants nothing, changes no grant and starts no work, and it is no reason to act for the silent seat or to read its worktree.
+
 ## Routing rules
 
 Use all available teams. Disjoint surfaces can run in parallel. Shared files, migrations, generated schemas, downstream contracts, or the same asserting test must serialize. Name the colliding file/test/contract.
