@@ -5,9 +5,11 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 import time
+import uuid
 import zlib
 
 from relay_engine import queries, store_layout, submit
@@ -18,6 +20,8 @@ except ImportError:
     _zstd = None
 
 CODEC_WRITE = 'zstd' if _zstd is not None else 'zlib'
+MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+MAX_CHUNK_BYTES = 1024 * 1024
 _SHA = re.compile(r'[0-9a-f]{64}')
 
 
@@ -235,3 +239,158 @@ def read_range(conn, root, project_id: str, sha256: str, offset: int, count: int
         raise ValueError('offset and count must be nonnegative integers')
     data = _read(conn, root, project_id, sha256)
     return EvidenceRead(data[offset:offset + count], offset, len(data))
+
+
+class UploadConflict(ValueError):
+    """The upload's declaration, progress or state refuses this request."""
+
+
+@dataclass(frozen=True)
+class UploadState:
+    upload_id: str
+    sha256: str
+    bytes_len: int
+    received_len: int
+    state: str
+
+
+@dataclass(frozen=True)
+class PreparedUpload:
+    upload_id: str
+    sha256: str
+    bytes_len: int
+    codec: str
+    encoded_name: str
+    encoded_len: int
+
+
+@dataclass(frozen=True)
+class UploadResult:
+    sha256: str
+    bytes_len: int
+    captured_by: str
+    replayed: bool
+
+
+def _upload_path(root, project_id, upload_id):
+    if str(uuid.UUID(upload_id)) != upload_id:
+        raise UploadConflict('invalid upload id')
+    return store_layout.evidence_dir(root, project_id) / 'staging' / upload_id
+
+
+def _upload_row(conn, upload_id):
+    row = _one(conn, 'SELECT declared_sha256,declared_len,received_len,state,'
+               'last_chunk_offset,last_chunk_sha256,source,captured_by,party_seat_id,'
+               'party_special,bundle_id,result_captured_by FROM evidence_uploads WHERE upload_id=?',
+               (upload_id,))
+    if row is None:
+        raise UploadConflict('unknown upload')
+    return row
+
+
+def _upload_state(upload_id, row):
+    return UploadState(upload_id, row[0], row[1], row[2], row[3])
+
+
+def begin_upload(conn, root, project_id, capture, declared_sha256: str, declared_len: int) -> UploadState:
+    _digest(declared_sha256)
+    if type(declared_len) is not int or not 0 <= declared_len <= MAX_UPLOAD_BYTES:
+        raise UploadConflict('upload length exceeds bounds')
+    upload_id = str(uuid.uuid4())
+    path = _upload_path(root, project_id, upload_id)
+    _mkdir(path.parent)
+    with path.open('xb') as file:
+        _sync_file(file)
+    _sync_dir(path.parent)
+    now_ms = time.time_ns() // 1_000_000
+    _execute(conn, 'INSERT INTO evidence_uploads '
+             '(upload_id,party_seat_id,party_special,source,captured_by,declared_sha256,declared_len,'
+             'received_len,bundle_id,state,started_at,updated_at) VALUES (?,?,?,?,?,?,?,0,?,\'open\',?,?)',
+             (upload_id, capture.party_seat_id, capture.party_special, capture.source,
+              capture.captured_by, declared_sha256, declared_len, capture.bundle_id, now_ms, now_ms))
+    return UploadState(upload_id, declared_sha256, declared_len, 0, 'open')
+
+
+def append_chunk(conn, root, project_id, upload_id: str, offset: int, data: bytes) -> UploadState:
+    path = _upload_path(root, project_id, upload_id)
+    if type(offset) is not int or offset < 0 or len(data) > MAX_CHUNK_BYTES:
+        raise UploadConflict('chunk exceeds bounds')
+    row = _upload_row(conn, upload_id)
+    if row[3] != 'open':
+        raise UploadConflict('upload is not open')
+    digest = hashlib.sha256(data).hexdigest()
+    end = offset + len(data)
+    if row[4] == offset and row[5] == digest and end == row[2]:
+        return _upload_state(upload_id, row)
+    if offset != row[2] or end > row[1]:
+        raise UploadConflict('chunk offset or length conflicts')
+    try:
+        with path.open('r+b') as file:
+            if file.seek(0, os.SEEK_END) < row[2]:
+                raise UploadConflict('staging file is incomplete')
+            file.truncate(row[2])
+            file.seek(offset)
+            file.write(data)
+            _sync_file(file)
+    except FileNotFoundError:
+        raise UploadConflict('staging file is missing') from None
+    _execute(conn, 'UPDATE evidence_uploads SET received_len=?,last_chunk_offset=?,'
+             'last_chunk_sha256=?,updated_at=? WHERE upload_id=?',
+             (end, offset, digest, time.time_ns() // 1_000_000, upload_id))
+    return UploadState(upload_id, row[0], row[1], end, 'open')
+
+
+def prepare_upload(root, project_id, upload_id: str) -> PreparedUpload:
+    path = _upload_path(root, project_id, upload_id)
+    ledger = store_layout.ledger_path(root, project_id).absolute()
+    try:
+        conn = sqlite3.connect(ledger.as_uri() + '?mode=ro', uri=True)
+    except sqlite3.OperationalError:
+        raise UploadConflict('ledger is unavailable') from None
+    try:
+        row = _upload_row(conn, upload_id)
+    finally:
+        conn.close()
+    if row[3] != 'open' or row[2] != row[1]:
+        raise UploadConflict('upload is not complete and open')
+    try:
+        with path.open('rb') as file:
+            data = file.read(row[2])
+    except FileNotFoundError:
+        raise UploadConflict('staging file is missing') from None
+    if len(data) != row[1] or hashlib.sha256(data).hexdigest() != row[0]:
+        raise UploadConflict('upload digest or length conflicts')
+    codec, staged, encoded_len = _stage(root, project_id, data)
+    return PreparedUpload(upload_id, row[0], row[1], codec, staged.name, encoded_len)
+
+
+def commit_upload(conn, root, project_id, prepared: PreparedUpload) -> UploadResult:
+    _upload_path(root, project_id, prepared.upload_id)
+    row = _upload_row(conn, prepared.upload_id)
+    matches = prepared.sha256 == row[0] and prepared.bytes_len == row[1]
+    if row[3] == 'committed':
+        if not matches:
+            raise UploadConflict('committed upload conflicts')
+        return UploadResult(row[0], row[1], row[11], True)
+    if row[3] != 'open' or not matches or row[2] != row[1]:
+        raise UploadConflict('prepared upload is stale')
+    if (prepared.codec not in ('raw', 'zlib', 'zstd')
+            or not prepared.encoded_name or Path(prepared.encoded_name).name != prepared.encoded_name
+            or prepared.encoded_name in ('.', '..') or prepared.encoded_len < 0):
+        raise UploadConflict('invalid prepared file')
+    staged = store_layout.evidence_dir(root, project_id) / 'tmp' / prepared.encoded_name
+    try:
+        valid_file = staged.is_file() and staged.stat().st_size == prepared.encoded_len
+    except FileNotFoundError:
+        valid_file = False
+    if not valid_file:
+        raise UploadConflict('prepared file is missing or changed')
+    capture = Capture(row[6], row[7], row[8], row[9], row[10])
+    now_ms = time.time_ns() // 1_000_000
+    _record_object(conn, root, project_id, row[0], row[1], prepared.codec,
+                   staged, prepared.encoded_len, capture, now_ms)
+    label = _one(conn, 'SELECT any_host_observed FROM evidence_objects WHERE sha256=?', (row[0],))[0]
+    captured_by = 'host-observed' if label else 'seat-supplied'
+    _execute(conn, "UPDATE evidence_uploads SET state='committed',result_captured_by=?,updated_at=? "
+             'WHERE upload_id=?', (captured_by, now_ms, prepared.upload_id))
+    return UploadResult(row[0], row[1], captured_by, False)

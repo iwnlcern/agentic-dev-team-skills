@@ -8,11 +8,12 @@ import re
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import zlib
 
-from relay_engine import errors, schema, submit
+from relay_engine import errors, schema, store_layout, submit
 from relay_engine.tests import test_submit
 from relay_engine.tests.test_submit import Store as SubmitStore
 
@@ -327,6 +328,217 @@ class TestEvidenceObjects(unittest.TestCase):
         self.assertEqual(len(statements), 1, statements)
         # A unique object lookup is <200 VM steps; a 10,000-capture walk is not.
         self.assertLessEqual(len(steps), 200)
+
+
+class TestEvidenceUploads(unittest.TestCase):
+    def setUp(self):
+        self.evidence = importlib.import_module('relay_engine.store_evidence')
+        for name in ('begin_upload', 'append_chunk', 'prepare_upload', 'commit_upload'):
+            self.assertTrue(callable(getattr(self.evidence, name, None)),
+                            'missing upload interface: ' + name)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name).resolve()
+        self.conn = store_layout.open_ledger(self.root, PROJECT, create=True)
+        self.addCleanup(lambda: self.conn.close())
+        self.conn.execute("INSERT INTO projects (id,name,created_at) VALUES (?, 'uploads', 1)",
+                          (PROJECT,))
+        self.conn.commit()
+        self.capture = self.evidence.Capture('upload', 'seat-supplied', None, 'operator', None)
+        self.store = self.evidence.LedgerEvidence(self.conn, self.root, PROJECT, self.capture)
+
+    def begin(self, data, *, digest=None):
+        state = self.evidence.begin_upload(self.conn, self.root, PROJECT, self.capture,
+                                          digest or hashlib.sha256(data).hexdigest(), len(data))
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.commit()
+        return state.upload_id
+
+    def append(self, upload, offset, data):
+        return self.evidence.append_chunk(self.conn, self.root, PROJECT, upload, offset, data)
+
+    def ready(self, data):
+        upload = self.begin(data)
+        for offset in range(0, len(data), 1024 * 1024):
+            self.append(upload, offset, data[offset:offset + 1024 * 1024])
+            self.conn.commit()
+        return self.evidence.prepare_upload(self.root, PROJECT, upload)
+
+    def finalize(self, prepared):
+        return self.evidence.commit_upload(self.conn, self.root, PROJECT, prepared)
+
+    def staging(self):
+        return tuple((store_layout.evidence_dir(self.root, PROJECT) / 'staging').iterdir())
+
+    def test_upload_bounds_and_conflicts(self):
+        with self.assertRaises(ValueError):
+            self.evidence.begin_upload(self.conn, self.root, PROJECT, self.capture,
+                                       '0' * 64, 256 * 1024 * 1024 + 1)
+        upload = self.begin(b'abcdef')
+        for offset, data in ((0, b'x' * (1024 * 1024 + 1)), (1, b'a'), (0, b'abcdefg')):
+            with self.subTest(offset=offset, size=len(data)), self.assertRaises(ValueError):
+                self.append(upload, offset, data)
+        first = self.append(upload, 0, b'abc')
+        self.conn.commit()
+        before = self.staging()[0].read_bytes()
+        self.assertEqual(self.append(upload, 0, b'abc'), first)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.staging()[0].read_bytes(), before)
+        with self.assertRaises(ValueError):
+            self.append(upload, 0, b'xyz')
+        self.append(upload, 3, b'def')
+        self.conn.commit()
+        prepared = self.evidence.prepare_upload(self.root, PROJECT, upload)
+        result = self.finalize(prepared)
+        self.conn.commit()
+        self.assertEqual((result.sha256, result.bytes_len, result.captured_by, result.replayed),
+                         (hashlib.sha256(b'abcdef').hexdigest(), 6, 'seat-supplied', False))
+        replay = self.finalize(prepared)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replace(replay, replayed=False), result)
+        bad = self.begin(b'bad', digest='0' * 64)
+        self.append(bad, 0, b'bad')
+        self.conn.commit()
+        with self.assertRaises(ValueError):
+            self.evidence.prepare_upload(self.root, PROJECT, bad)
+
+    def test_rolled_back_append_is_truncated(self):
+        upload = self.begin(b'abcd')
+        self.append(upload, 0, b'ab')
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute('SELECT received_len FROM evidence_uploads').fetchone(), (0,))
+        self.assertEqual(self.staging()[0].read_bytes(), b'ab')
+        self.append(upload, 0, b'ab')
+        self.conn.commit()
+        self.append(upload, 2, b'cd')
+        self.conn.commit()
+        self.assertEqual(self.staging()[0].read_bytes(), b'abcd')
+        prepared = self.evidence.prepare_upload(self.root, PROJECT, upload)
+        self.finalize(prepared)
+        self.conn.commit()
+        self.assertEqual(self.store.get(prepared.sha256), b'abcd')
+
+    def test_rolled_back_finalize_keeps_staging(self):
+        data = b'finalize rollback' * 100
+        prepared = self.ready(data)
+        self.finalize(prepared)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute('SELECT state FROM evidence_uploads').fetchone(), ('open',))
+        self.assertEqual(self.staging()[0].read_bytes(), data)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_objects').fetchone(), (0,))
+        retry = self.evidence.prepare_upload(self.root, PROJECT, prepared.upload_id)
+        self.finalize(retry)
+        self.conn.commit()
+        self.assertEqual(self.store.get(prepared.sha256), data)
+
+    def test_restart_completes_original_upload(self):
+        # Simulate process loss at begin, chunk, prepare and finalize boundaries;
+        # reopen the same ledger and repeat the original requests, never migrate.
+        for boundary in ('begin', 'chunk', 'prepare', 'finalize'):
+            with self.subTest(boundary=boundary):
+                data = ('restart ' + boundary).encode() * 100
+                upload = self.begin(data)
+                if boundary != 'begin':
+                    self.append(upload, 0, data)
+                    self.conn.commit()
+                if boundary in ('prepare', 'finalize'):
+                    prepared = self.evidence.prepare_upload(self.root, PROJECT, upload)
+                if boundary == 'finalize':
+                    self.finalize(prepared)
+                    self.conn.commit()
+                self.conn.close()
+                self.conn = store_layout.open_ledger(self.root, PROJECT)
+                if boundary == 'begin':
+                    self.append(upload, 0, data)
+                    self.conn.commit()
+                if boundary != 'finalize':
+                    prepared = self.evidence.prepare_upload(self.root, PROJECT, upload)
+                result = self.finalize(prepared)
+                self.conn.commit()
+                self.assertEqual(result.replayed, boundary == 'finalize')
+                store = self.evidence.LedgerEvidence(self.conn, self.root, PROJECT, self.capture)
+                self.assertEqual(store.get(result.sha256), data)
+                self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_uploads '
+                                                  'WHERE upload_id=?', (upload,)).fetchone(), (1,))
+
+    def test_finalize_refuses_stale_prepared(self):
+        for changed in ('abandoned', 'digest', 'length'):
+            with self.subTest(changed=changed):
+                prepared = self.ready(('stale ' + changed).encode())
+                if changed == 'abandoned':
+                    sql, value = 'state=?', 'abandoned'
+                elif changed == 'digest':
+                    sql, value = 'declared_sha256=?', '0' * 64
+                else:
+                    sql, value = 'declared_len=?', prepared.bytes_len + 1
+                self.conn.execute('UPDATE evidence_uploads SET ' + sql + ' WHERE upload_id=?',
+                                  (value, prepared.upload_id))
+                self.conn.commit()
+                with self.assertRaises(ValueError):
+                    self.finalize(prepared)
+                self.conn.rollback()
+                self.assertTrue((store_layout.evidence_dir(self.root, PROJECT) / 'tmp' /
+                                 prepared.encoded_name).is_file())
+        prepared = self.ready(b'encoded file length control')
+        path = store_layout.evidence_dir(self.root, PROJECT) / 'tmp' / prepared.encoded_name
+        path.write_bytes(b'wrong')
+        with self.assertRaises(ValueError):
+            self.finalize(prepared)
+        self.conn.rollback()
+
+    def measured_finalize(self, prepared):
+        start = time.monotonic()
+        self.conn.execute('BEGIN IMMEDIATE')
+        with mock.patch.object(hashlib, 'sha256', side_effect=AssertionError('hash inside job')) as hasher, \
+                mock.patch.object(zlib, 'decompress', side_effect=AssertionError('decode inside job')) as decoder:
+            result = self.finalize(prepared)
+            self.conn.commit()
+        duration = time.monotonic() - start
+        self.assertEqual((hasher.call_count, decoder.call_count), (0, 0))
+        return result, duration
+
+    def test_finalize_over_same_codec_orphan_without_reading(self):
+        data = b'orphan replacement' * 1000
+        prepared = self.ready(data)
+        _, clean = self.measured_finalize(prepared)
+        other = data + b'next'
+        prepared = self.ready(other)
+        path = store_layout.evidence_dir(self.root, PROJECT) / 'objects' / prepared.sha256[:2] / (
+            prepared.sha256 + '.' + prepared.codec)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A real 64 MiB orphan; compression and hashing must never touch it.
+        with path.open('wb') as file:
+            for _ in range(64):
+                file.write(b'x' * (1024 * 1024))
+        _, orphan = self.measured_finalize(prepared)
+        print('finalize lock wall seconds (no orphan,64MiB orphan):', clean, orphan)
+        self.assertLess(orphan, 1.0)
+        self.assertLess(abs(orphan - clean), 0.5)
+        self.assertEqual(self.store.get(prepared.sha256), other)
+
+    def test_overlapping_identical_commits_replay(self):
+        first = self.ready(b'overlapping preparations' * 100)
+        second = self.evidence.prepare_upload(self.root, PROJECT, first.upload_id)
+        original = self.finalize(first)
+        self.conn.commit()
+        replay = self.finalize(second)
+        self.assertEqual(replace(replay, replayed=False), original)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_captures').fetchone(), (1,))
+        for bad in (replace(second, sha256='0' * 64), replace(second, bytes_len=1)):
+            with self.assertRaises(ValueError):
+                self.finalize(bad)
+
+    def test_finalize_lock_time_flat(self):
+        # Preparation and all 256 chunks precede the measured transaction.
+        data = b'large finalize bytes' * (256 * 1024 * 1024 // 20)
+        data += b'x' * (256 * 1024 * 1024 - len(data))
+        self.assertEqual(len(data), 256 * 1024 * 1024)
+        prepared = self.ready(data)
+        result, duration = self.measured_finalize(prepared)
+        print('256MiB finalize lock wall seconds:', duration)
+        self.assertLess(duration, 1.0)
+        self.assertEqual(result.sha256, hashlib.sha256(data).hexdigest())
 
 
 if __name__ == '__main__':
