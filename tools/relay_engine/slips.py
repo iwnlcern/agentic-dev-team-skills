@@ -50,7 +50,7 @@ import json
 from pathlib import Path
 from types import MappingProxyType
 
-from . import claims, queries, strings, submit
+from . import claims, header, queries, strings, submit
 
 # Erratum 3 r2 B3: a commit's answer by the committing seat's role word; a role absent
 # from the table answers slip-missing and never allow.
@@ -61,7 +61,8 @@ COMMIT_ROLE_RULE = MappingProxyType({
     'reviewer': 'slip', 'orchestrator-reviewer': 'slip',
     'master-reviewer': 'slip', 'domain-reviewer': 'slip',
 })
-_REVIEW_KINDS = {'PLAN-REVIEW': 'plan', 'DESIGN-REVIEW': 'design'}
+_REVIEW_KINDS = {kind: {'PLAN-REVIEW': 'plan', 'DESIGN-REVIEW': 'design'}.get(kind, 'plain')
+                 for kind, verdicts in header.VERDICTS.items() if 'approve' in verdicts}
 
 
 def git_digest_algorithm(object_id):
@@ -158,6 +159,10 @@ def _decide(conn, walk, holder):
     oldest_first = walk[::-1]
     kinds = {row.id: row.kind for row in oldest_first}
     references = {row.id: _references(conn, row.id) for row in oldest_first}
+    verification_replies = {row.id for row in oldest_first if row.kind == 'REVIEW'
+                            and conn.execute('SELECT 1 FROM verification_requests'
+                                             ' WHERE request_relay_id = ?',
+                                             (row.parent_id,)).fetchone()}
     held_cache = {}
     def held_by(relay_id):
         if relay_id not in held_cache:
@@ -188,7 +193,7 @@ def _decide(conn, walk, holder):
         for row in oldest_first:
             kind = _REVIEW_KINDS.get(row.kind)
             # A review request carries no verdict and decides nothing (erratum 4 r2 R1).
-            if kind is None or row.verdict is None:
+            if kind is None or row.verdict is None or row.id in verification_replies:
                 continue
             if row.verdict == 'approve':
                 # D1: the holder's PLAN-REVIEW approve of a plan path; D2: a qualifying DESIGN-REVIEW approve.
@@ -254,7 +259,8 @@ def _decide(conn, walk, holder):
     # newest pin by the holder, else at its newest pin by any seat (erratum 6 r5).
     found = {}
     for row in oldest_first:
-        if _REVIEW_KINDS.get(row.kind) is None or row.verdict != 'approve':
+        if (_REVIEW_KINDS.get(row.kind) is None or row.verdict != 'approve'
+                or row.id in verification_replies):
             continue
         for artifact, content in conn.execute('SELECT artifact, content_sha256 FROM snapshots'
                                               ' WHERE locked_by = ?', (row.id,)):
@@ -337,6 +343,22 @@ def _lineage_answer(failed, objected, relay, unblocker, slip=None):
                    strings.render('authority-lineage', relay=relay), unblocker, slip)
 
 
+def _open_principal(conn, principal):
+    return principal == 'operator' or conn.execute(
+        'SELECT 1 FROM seats s JOIN team_instances t ON t.id = s.team_instance_id'
+        ' WHERE s.id = ? AND t.closed_at IS NULL', (principal,)).fetchone() is not None
+
+
+def _open_delegation(conn, relay_id, principal, target):
+    return any(row.kind == 'PLAN' and row.needs == 'act'
+               and _issuer(conn, row.sender_seat_id, target) == 'direct'
+               and _open_principal(conn, row.sender_seat_id)
+               and conn.execute("SELECT 1 FROM recipients WHERE relay_id = ?"
+                                " AND seat_id = ? AND role = 'to'",
+                                (row.id, principal)).fetchone()
+               for row in queries.lineage(conn, relay_id))
+
+
 def on_admitted(conn, admitted, draft, ctx):
     claims.on_admitted_claims(conn, admitted, draft, ctx)
     if draft.kind != 'IMPL' or draft.needs != 'act':
@@ -351,6 +373,11 @@ def on_admitted(conn, admitted, draft, ctx):
         return
     failed, binds, _ = _evidence(conn, admitted.relay_id, ctx.sender.seat_id, holder)
     if failed:
+        return
+    if not _open_principal(conn, ctx.sender.seat_id):
+        return
+    if (_issuer(conn, ctx.sender.seat_id, target) == 'pair'
+            and not _open_delegation(conn, admitted.relay_id, ctx.sender.seat_id, target)):
         return
     repo = ctx.git_state.repository_id if ctx.git_state else None
     if repo is None or conn.execute('SELECT 1 FROM repositories WHERE id = ? AND project_id = ?',
@@ -430,11 +457,22 @@ def _checked_slip(conn, slip, effect, digest):
         if state not in ('approved', 'waived'):
             row = conn.execute('SELECT reviewer_seat_id FROM verification_requests WHERE claim_relay_id = ? LIMIT 1',
                                (claim['claim'],)).fetchone()
-            reviewer = _seat(conn, row[0]) if row else None
+            reviewer = _seat(conn, row[0]) if row and row[0] is not None else None
             unblocker = reviewer[3] + '.' + reviewer[2] if reviewer else 'operator'
             code = 'verification-pending' if state == 'pending' else 'verification-objected'
-            return _answer(code, strings.render('authority-verification', kind=claim['kind'], state=state),
-                           unblocker if state == 'pending' else planner, slip)
+            if state == 'pending' and reviewer is None:
+                reason = strings.render('authority-no-reviewer')
+            else:
+                reason = strings.render('authority-verification', kind=claim['kind'], state=state)
+            if state == 'objected':
+                verdict = conn.execute(
+                    'SELECT r.verdict FROM relays r JOIN verification_requests v'
+                    " ON v.request_relay_id = r.parent_id WHERE v.claim_relay_id = ?"
+                    " AND r.sender_seat_id = v.reviewer_seat_id AND r.kind = 'REVIEW'"
+                    ' AND r.verdict IS NOT NULL ORDER BY r.created_at DESC LIMIT 1',
+                    (claim['claim'],)).fetchone()
+                unblocker = 'operator' if verdict and verdict[0] == 'human-decision-required' else planner
+            return _answer(code, reason, unblocker, slip)
     return _allow(slip)
 
 
@@ -499,7 +537,28 @@ def _diagnostic(conn, seat, seat_id):
                        ' ORDER BY r.created_at DESC LIMIT 1', (seat[1], seat_id)).fetchone()
     if row:
         failed, _, objected = _evidence(conn, row[0], row[1], seat_id)
-        return _lineage_answer(failed or 'lineage-incomplete', objected, row[0], planner)
+        if failed:
+            return _lineage_answer(failed, objected, row[0], planner)
+        targets = conn.execute("SELECT seat_id FROM recipients WHERE relay_id = ? AND role = 'to'",
+                               (row[0],)).fetchall()
+        git = conn.execute('SELECT r.git_state_id, g.repository_id FROM relays r'
+                           ' LEFT JOIN git_states g ON g.id = r.git_state_id WHERE r.id = ?',
+                           (row[0],)).fetchone()
+        if len(targets) != 1 or targets[0][0] != seat_id:
+            reason = strings.render('authority-missing-target')
+        elif git[0] is None:
+            reason = strings.render('authority-missing-git')
+        elif conn.execute('SELECT 1 FROM repositories WHERE id = ? AND project_id = ?',
+                          (git[1], seat[1])).fetchone() is None:
+            reason = strings.render('authority-missing-repository')
+        elif not _open_principal(conn, row[1]):
+            reason = strings.render('authority-missing-issuer')
+        elif (_issuer(conn, row[1], seat) == 'pair'
+              and not _open_delegation(conn, row[0], row[1], seat)):
+            reason = strings.render('authority-missing-delegation')
+        else:
+            reason = strings.render('authority-missing-admission')
+        return _answer('slip-missing', reason, planner)
     return _answer('slip-missing', strings.render('authority-missing'), planner)
 
 
@@ -523,8 +582,11 @@ def revoke(conn, slip_id, by_principal, reason, now_ms):
             else:
                 actor = _seat(conn, by_principal)
                 issuer = slip['issuer_seat_id'] or slip['issuer_special']
-                permitted = (by_principal in ('operator', issuer) or
-                             (actor is not None and actor[1] == slip['project_id'] and actor[2] == 'orchestrator-planner'))
+                permitted = (by_principal == 'operator' or
+                             (_open_principal(conn, by_principal) and
+                              (by_principal == issuer or
+                               (actor is not None and actor[1] == slip['project_id']
+                                and actor[2] == 'orchestrator-planner'))))
                 if not permitted:
                     answer = _answer('not-issuer', strings.render('authority-not-issuer'),
                                      _orchestrator(conn, slip['project_id']), slip)

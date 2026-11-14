@@ -59,6 +59,12 @@ INVENTORY = {
 
 INVENTORY.update({
     "authority-missing": "no implement slip exists for this seat",
+    "authority-missing-git": "no implement slip was issued because the IMPL had no Git state at submit",
+    "authority-missing-repository": "no implement slip was issued because the IMPL's repository is outside this project",
+    "authority-missing-target": "no implement slip was issued because TO did not name exactly one implementer",
+    "authority-missing-issuer": "no implement slip was issued because the issuer's team instance is closed",
+    "authority-missing-delegation": "no implement slip was issued because no delegation has an open issuing team instance",
+    "authority-missing-admission": "the lineage is complete but admission recorded no implement slip; report the missing slip to the operator",
     "authority-state": "the slip is {state}",
     "authority-repository": "the slip covers another repository: {repository}",
     "authority-seat": "the branch belongs to another seat: {seat}",
@@ -70,6 +76,8 @@ INVENTORY.update({
     "authority-blocked": "relay {relay}: review {review} of request {request} was answered other than approve and names no path; a later approval of the plan or design must follow it",
     "authority-artifact": "the working copy changed or cannot be read: {artifact}; re-request review of the current copy, then issue a fresh go",
     "authority-verification": "the {kind} verification is {state}",
+    "authority-no-reviewer": "the verification is pending with no reviewer; assign a reviewer, then re-request review, or waive this claim's verification",
+    "authority-claim-lock": "locked bytes for {artifact}: sha256 {digest}",
     "authority-no-merge": "merge slips are not issued by this build",
     "authority-guardrail": "the guardrail rules are the decider for this effect; this check cannot answer it",
     "authority-fault": "the permission check could not answer; report the fault to the operator",

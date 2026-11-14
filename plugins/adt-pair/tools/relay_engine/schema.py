@@ -185,9 +185,10 @@ TABLE_OWNERS: dict[str, str] = {
 _AUTHORITY_TABLES = (
     """CREATE TABLE IF NOT EXISTS reviewer_assignments (
     project_id TEXT NOT NULL REFERENCES projects (id),
-    team_instance_id TEXT NOT NULL PRIMARY KEY REFERENCES team_instances (id),
+    team_instance_id TEXT NOT NULL PRIMARY KEY,
     seat_id TEXT NOT NULL REFERENCES seats (id),
-    assigned_at INTEGER NOT NULL
+    assigned_at INTEGER NOT NULL,
+    FOREIGN KEY (team_instance_id, project_id) REFERENCES team_instances (id, project_id)
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS verification_requests (
     claim_relay_id TEXT NOT NULL REFERENCES relays (id),
@@ -196,19 +197,20 @@ _AUTHORITY_TABLES = (
     snapshot_handle INTEGER NOT NULL REFERENCES snapshots (handle),
     snapshot_request_relay_id TEXT NOT NULL REFERENCES relays (id),
     content_sha256 TEXT NOT NULL %s,
-    request_relay_id TEXT NOT NULL REFERENCES relays (id),
-    reviewer_seat_id TEXT NOT NULL REFERENCES seats (id),
+    request_relay_id TEXT REFERENCES relays (id),
+    reviewer_seat_id TEXT REFERENCES seats (id),
     created_at INTEGER NOT NULL,
+    CHECK ((request_relay_id IS NULL) = (reviewer_seat_id IS NULL)),
     UNIQUE (claim_relay_id, artifact)
 ) STRICT""" % _sha('content_sha256'),
     """CREATE TABLE IF NOT EXISTS waivers (
     claim_relay_id TEXT NOT NULL REFERENCES relays (id),
     kind TEXT NOT NULL CHECK (kind IN ('design', 'plan')),
-    %s,
+    by_special TEXT NOT NULL CHECK (by_special = 'operator'),
     words TEXT NOT NULL CHECK (length(words) > 0),
     created_at INTEGER NOT NULL,
     UNIQUE (claim_relay_id, kind)
-) STRICT""" % _arc('by_', {'operator'}),
+) STRICT""",
 )
 TABLE_OWNERS.update({name: 'authority' for name in
                     ('reviewer_assignments', 'verification_requests', 'waivers')})
@@ -698,6 +700,26 @@ BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox row is never replaced'); END""",
 WHEN EXISTS (SELECT 1 FROM lifecycle_outbox_events
              WHERE project_id = NEW.project_id AND position = NEW.position AND event_index = NEW.event_index)
 BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox event is never replaced'); END""",
+)
+
+_TRIGGERS += (
+    """CREATE TRIGGER IF NOT EXISTS verification_requests_consistent_insert
+BEFORE INSERT ON verification_requests
+WHEN EXISTS (
+    SELECT 1 FROM verification_requests v WHERE v.claim_relay_id = NEW.claim_relay_id
+    AND (v.request_relay_id IS NOT NEW.request_relay_id
+         OR v.kind IS NOT NEW.kind OR v.reviewer_seat_id IS NOT NEW.reviewer_seat_id)
+)
+BEGIN SELECT RAISE(ABORT, 'verification rows must share request, kind and reviewer'); END""",
+    """CREATE TRIGGER IF NOT EXISTS verification_requests_consistent_update
+BEFORE UPDATE OF claim_relay_id, request_relay_id, kind, reviewer_seat_id ON verification_requests
+WHEN EXISTS (
+    SELECT 1 FROM verification_requests v WHERE v.claim_relay_id = NEW.claim_relay_id
+    AND v.rowid != OLD.rowid
+    AND (v.request_relay_id IS NOT NEW.request_relay_id
+         OR v.kind IS NOT NEW.kind OR v.reviewer_seat_id IS NOT NEW.reviewer_seat_id)
+)
+BEGIN SELECT RAISE(ABORT, 'verification rows must share request, kind and reviewer'); END""",
 )
 
 

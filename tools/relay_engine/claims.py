@@ -1,7 +1,7 @@
 """Approval claims and reviewer verification, using admission metadata only."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from . import errors, queries, submit
+from . import errors, header, queries, refs, strings, submit
 
 CLAIM_KINDS = ('design', 'plan')
 CLAIM_CHECKS = {
@@ -34,6 +34,7 @@ def edge_artifact(edge):
 
 
 def claim_of(conn, admitted, draft, project_id):
+    # A plain REVIEW's approve can pin bytes, but never files a D1 or D2 claim.
     if draft.verdict != 'approve' or draft.kind not in ('DESIGN-REVIEW', 'PLAN-REVIEW'):
         return None
     locks = {}
@@ -54,31 +55,50 @@ def file_verification_request(conn, ctx, claim_relay_id, kind, locks, now_ms):
                                 ' JOIN bundles b ON b.id = r.bundle_id WHERE r.id = ?',
                                 (claim_relay_id,)).fetchone()
     reviewer = reviewer_for(conn, team)
-    address = conn.execute('SELECT t.name, s.role FROM seats s JOIN team_instances t'
-                           ' ON t.id = s.team_instance_id WHERE s.id = ?', (reviewer,)).fetchone()
-    refs = ['REF: ' + claim_relay_id]
-    # Reuse the exact resolved edge spelling; a Git artifact key is not a REF spelling.
-    for lock in locks:
-        spelling = conn.execute('SELECT e.spelling FROM snapshots s JOIN edges e'
-                                ' ON e.id = s.edge_id WHERE s.handle = ?',
-                                (lock.snapshot_handle,)).fetchone()[0]
-        refs.append('REF: ' + spelling)
-    data = ('\n'.join(['KIND: REVIEW', 'TO: ' + address[0] + '.' + address[1],
-                       'BUNDLE: ' + bundle, 'NEEDS: review',
-                       'SUBJECT: ' + kind + ' claim verification', *refs]) +
-            '\n\n' + '\n'.join(CLAIM_CHECKS[kind]) + '\n').encode('utf-8')
-    try:
-        request = submit.file_system_relay(conn, ctx, data)
-    except errors.EngineError:
-        raise AuthorityFilingFault() from None
+    address = None
+    if reviewer is not None:
+        team_name, role = conn.execute(
+            'SELECT t.name, s.role FROM seats s JOIN team_instances t'
+            ' ON t.id = s.team_instance_id WHERE s.id = ?', (reviewer,)).fetchone()
+        address = team_name + '.' + role
+        system = submit.SeatRef(submit.SYSTEM, submit.SYSTEM, submit.SYSTEM,
+                                ctx.sender.team_instance_id, ctx.sender.project_id)
+        try:
+            resolved = ctx.directory.resolve(address, system)
+        except header.AddressRefused:
+            resolved = None
+        if resolved is None or resolved.seat_id != reviewer:
+            reviewer = None
+    request_id = None
+    if reviewer is not None:
+        references = ['REF: ' + claim_relay_id]
+        for lock in locks:
+            spelling, reference_type, commit = conn.execute(
+                'SELECT e.spelling, e.target_type, e.target_commit FROM snapshots s'
+                ' JOIN edges e ON e.id = s.edge_id WHERE s.handle = ?',
+                (lock.snapshot_handle,)).fetchone()
+            if reference_type == 'git':
+                spelling = refs.render_ref(replace(refs.parse_ref(spelling), rev=commit))
+            references.append('REF: ' + spelling)
+        body = list(CLAIM_CHECKS[kind])
+        body.extend(strings.render('authority-claim-lock', artifact=lock.artifact,
+                                   digest=lock.content_sha256) for lock in locks)
+        data = ('\n'.join(['KIND: REVIEW', 'TO: ' + address,
+                           'BUNDLE: ' + bundle, 'NEEDS: review',
+                           'SUBJECT: ' + kind + ' claim verification', *references]) +
+                '\n\n' + '\n'.join(body) + '\n').encode('utf-8')
+        try:
+            request_id = submit.file_system_relay(conn, ctx, data).relay_id
+        except errors.EngineError:
+            raise AuthorityFilingFault() from None
     for lock in locks:
         conn.execute('INSERT INTO verification_requests (claim_relay_id, artifact, kind,'
                      ' snapshot_handle, snapshot_request_relay_id, content_sha256,'
                      ' request_relay_id, reviewer_seat_id, created_at)'
                      ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                      (claim_relay_id, lock.artifact, kind, lock.snapshot_handle,
-                      lock.request_relay_id, lock.content_sha256, request.relay_id, reviewer, now_ms))
-    return request.relay_id
+                      lock.request_relay_id, lock.content_sha256, request_id, reviewer, now_ms))
+    return request_id
 
 
 def claim_locks(conn, claim_relay_id):
@@ -100,6 +120,8 @@ def verification_state(conn, claim_relay_id):
         if conn.execute('SELECT 1 FROM waivers WHERE claim_relay_id = ? AND kind = ?',
                         (claim_relay_id, kind)).fetchone():
             return 'waived'
+        if request is None or reviewer is None:
+            return 'pending'
         verdict = conn.execute("SELECT verdict FROM relays WHERE parent_id = ?"
                                " AND sender_seat_id = ? AND kind = 'REVIEW'"
                                " AND verdict IS NOT NULL ORDER BY created_at DESC LIMIT 1",
@@ -111,18 +133,29 @@ def verification_state(conn, claim_relay_id):
 
 def reviewer_for(conn, team_instance_id):
     with submit.read_guard(conn):
+        own = conn.execute('SELECT project_id FROM team_instances WHERE id = ?',
+                           (team_instance_id,)).fetchone()
+        if own is None:
+            return None
+        eligible = conn.execute(
+            'SELECT s.id, s.team_instance_id, s.role FROM seats s'
+            ' JOIN team_instances t ON t.id = s.team_instance_id'
+            " WHERE t.project_id = ? AND t.closed_at IS NULL AND s.state != 'stood-down'",
+            (own[0],)).fetchall()
         assigned = conn.execute('SELECT seat_id FROM reviewer_assignments WHERE team_instance_id = ?',
                                 (team_instance_id,)).fetchone()
         if assigned:
-            return assigned[0]
-        row = conn.execute("SELECT s.id FROM seats s JOIN team_instances t ON t.id = s.team_instance_id"
-                           " JOIN team_instances own ON own.project_id = t.project_id"
-                           " WHERE own.id = ? AND s.role = 'orchestrator-reviewer'"
-                           " AND t.closed_at IS NULL ORDER BY t.opened_at DESC LIMIT 1",
-                           (team_instance_id,)).fetchone()
-        if row is None:
-            raise ValueError('the project has no reviewer')
-        return row[0]
+            return assigned[0] if any(row[0] == assigned[0] for row in eligible) else None
+        candidates = {team: seat for seat, team, role in eligible if role == 'orchestrator-reviewer'}
+        current, seen = team_instance_id, set()
+        while current is not None and current not in seen:
+            seen.add(current)
+            if current in candidates:
+                return candidates[current]
+            parent = conn.execute('SELECT parent_instance_id FROM team_instances'
+                                  ' WHERE id = ? AND project_id = ?', (current, own[0])).fetchone()
+            current = parent[0] if parent else None
+        return next(iter(candidates.values())) if len(candidates) == 1 else None
 
 
 def assign_reviewer(conn, team_instance_id, seat_id, by_principal, now_ms):
@@ -160,7 +193,7 @@ def waive(conn, claim_relay_id, kind, by_principal, words, now_ms):
         with submit.read_guard(conn):
             if conn.execute('SELECT 1 FROM verification_requests WHERE claim_relay_id = ?'
                             ' AND kind = ?', (claim_relay_id, kind)).fetchone() is None:
-                raise ValueError('the claim has no verification request')
+                raise ValueError('the claim has no verification row')
             conn.execute('INSERT INTO waivers (claim_relay_id, kind, by_special, words, created_at)'
                          " VALUES (?, ?, 'operator', ?, ?)", (claim_relay_id, kind, words, now_ms))
             conn.execute('COMMIT')

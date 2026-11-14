@@ -8,6 +8,7 @@ from unittest import mock
 
 from relay_engine import claims, errors, header, queries, submit
 from relay_engine.tests.test_submit import Store, PLANNER, IMPL, ORCH, OTHER, SEATS, draft
+from relay_engine.tests.test_refs import Repo, clean_git_environment, git
 
 REVIEWER = submit.SeatRef('seat-reviewer', 'v3.orchestrator-reviewer',
                           'orchestrator-reviewer', 't3', 'p')
@@ -56,6 +57,10 @@ class BodyReader:
 
 
 class ClaimStore(Store):
+    """Open teams p/q with occupied seats and one p reviewer; individual tests
+    explicitly build closed teams, absent reviewers and alternate parent chains.
+    No live keys, stood-down occupants or provider state are otherwise built.
+    """
     def setUp(self):
         super().setUp()
         for seat in (REVIEWER, SECOND):
@@ -107,6 +112,15 @@ class ClaimStore(Store):
 
 class TestClaims(ClaimStore):
     def test_triggers(self):
+        claims.assign_reviewer(self.conn, 't1', SECOND.seat_id, 'operator', self.clock)
+        observed = []
+        original = claims.on_admitted_claims
+        def record(conn, admitted, data, ctx):
+            original(conn, admitted, data, ctx)
+            observed.append((data.kind, data.verdict, conn.in_transaction,
+                             self.request(admitted)))
+        original_ctx = self.ctx
+        self.ctx = lambda *args, **kwargs: replace(original_ctx(*args, **kwargs), after_admit=record)
         for kind in ('plan', 'design'):
             reviews = self.conn.execute("SELECT count(*) FROM relays WHERE kind = 'REVIEW'").fetchone()[0]
             _, reply = self.claim(kind)
@@ -114,7 +128,8 @@ class TestClaims(ClaimStore):
                                      ' FROM verification_requests WHERE claim_relay_id = ?',
                                      (reply.relay_id,)).fetchall()
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0][1:], (REVIEWER.seat_id, kind))
+            self.assertEqual(rows[0][1:], (SECOND.seat_id, kind))
+            self.assertIn((kind.upper() + '-REVIEW', 'approve', True, rows[0][:2]), observed)
             self.assertEqual(self.conn.execute('SELECT kind, needs FROM relays WHERE id = ?',
                                                (rows[0][0],)).fetchone(), ('REVIEW', 'review'))
             self.assertEqual(self.conn.execute("SELECT count(*) FROM relays WHERE kind = 'REVIEW'").fetchone()[0],
@@ -122,6 +137,7 @@ class TestClaims(ClaimStore):
         before = self.conn.execute('SELECT count(*) FROM verification_requests').fetchone()[0]
         self.submit(draft())
         self.claim('design', verdict='must-revise')
+        self.assertIn(('DESIGN-REVIEW', 'must-revise', True, None), observed)
         self.claim(paths=())
         self.assertEqual(self.conn.execute('SELECT count(*) FROM verification_requests').fetchone()[0], before)
 
@@ -195,9 +211,14 @@ class TestClaims(ClaimStore):
         # Engine admits no reply from a seat other than the recorded reviewer, since the
         # request's only member is that reviewer (121938); one CC recipient row makes OTHER
         # a member, so its approve is filed through admission and must still not count.
-        self.conn.execute("INSERT INTO recipients (relay_id, seat_id, role) VALUES (?, ?, 'cc')",
-                          (self.request(claim)[0], OTHER.seat_id))
-        self.conn.commit()
+        # A second claim's request makes OTHER a member through real engine admission.
+        # Keep the writer's real transaction, guards and recipient resolution.
+        file_system = submit.file_system_relay
+        def with_member(conn, ctx, data):
+            return file_system(conn, ctx, data.replace(b'NEEDS: review\n',
+                               ('CC: ' + OTHER.address + '\nNEEDS: review\n').encode()))
+        with mock.patch.object(submit, 'file_system_relay', side_effect=with_member):
+            _, claim = self.claim()
         self.verify(claim, sender=OTHER)
         self.assertEqual(self.state(claim), 'pending')
         self.verify(claim)
@@ -244,7 +265,121 @@ class TestClaims(ClaimStore):
         self.assertEqual(self.state(claim), 'waived')
 
     def test_claim_filing_is_atomic(self):
-        self.test_multi_artifact_claim()
+        other = self.plan.with_name('second.md')
+        other.write_bytes(b'second plan\n')
+        request = self.submit(draft(kind='PLAN', needs='review', to=IMPL.address,
+                                    refs=('file:' + str(self.plan), 'file:' + str(other))))
+        reached = []
+        self.conn.create_function('saw_first_claim_row', 0, lambda: reached.append(
+            self.conn.execute('SELECT count(*) FROM verification_requests').fetchone()[0]))
+        artifact = str(other).replace("'", "''")
+        self.conn.execute("CREATE TEMP TRIGGER fail_second_claim BEFORE INSERT ON verification_requests "
+                          "WHEN NEW.artifact = '" + artifact + "' BEGIN "
+                          "SELECT saw_first_claim_row(); SELECT RAISE(ABORT, 'second claim insert'); END")
+        self.conn.commit()
+        tables = ('relays', 'bodies', 'recipients', 'edges', 'snapshots', 'verification_requests')
+        before = {t: self.conn.execute('SELECT count(*) FROM ' + t).fetchone()[0] for t in tables}
+        failure = None
+        try:
+            self.submit(draft(kind='PLAN-REVIEW', verdict='approve', parent=request.relay_id,
+                              refs=('file:' + str(self.plan), 'file:' + str(other))), IMPL)
+        except errors.EngineError as error:
+            failure = error
+        self.assertIsNotNone(failure, 'a second-lock insert failure must refuse the whole reply')
+        self.assertEqual(failure.code, 'E-ADMISSION-HOOK')
+        self.assertEqual(reached, [1], 'failure was injected after the first lock row')
+        after = {t: self.conn.execute('SELECT count(*) FROM ' + t).fetchone()[0] for t in tables}
+        self.assertEqual(after, before)
+
+    def test_assign_reviewer_project_scope(self):
+        # GC-16: removing the seat-project predicate must accept this wrong seat.
+        foreign = 'foreign-reviewer'
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES (?, 't9', 'orchestrator-reviewer', 'occupied')", (foreign,))
+        self.conn.commit()
+        with self.assertRaises(ValueError):
+            claims.assign_reviewer(self.conn, 't1', foreign, 'operator', self.clock)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM reviewer_assignments').fetchone()[0], 0)
+
+    def test_reviewer_for_scope(self):
+        # GC-17: all candidates are off-chain; only the project's open one counts.
+        self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at,"
+                          " opened_by, closed_at)"
+                          " VALUES ('closed-p', 'p', 'closed', 'orchestrator', 3, 'operator', 4)")
+        for sid, tid in (('closed-reviewer', 'closed-p'), ('foreign-reviewer', 't9')):
+            self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                              " VALUES (?, ?, 'orchestrator-reviewer', 'occupied')", (sid, tid))
+        self.conn.execute("UPDATE team_instances SET opened_at = 5 WHERE id = 't9'")
+        self.conn.commit()
+        self.assertEqual(claims.reviewer_for(self.conn, 't1'), REVIEWER.seat_id)
+
+    def test_request_reaches_recorded_reviewer(self):
+        # RR-M2: an assigned closed seat must never route to a reopened namesake.
+        claims.assign_reviewer(self.conn, 't1', REVIEWER.seat_id, 'operator', self.clock)
+        self.conn.execute("UPDATE team_instances SET closed_at = 2 WHERE id = 't3'")
+        self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)"
+                          " VALUES ('reopened', 'p', 'v3', 'orchestrator', 3, 'operator')")
+        new = submit.SeatRef('reopened-reviewer', REVIEWER.address, REVIEWER.role, 'reopened', 'p')
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES (?, ?, ?, 'occupied')", (new.seat_id, new.team_instance_id, new.role))
+        self.conn.commit()
+        resolve = self.directory.resolve
+        self.directory.resolve = lambda address, sender: new if address == REVIEWER.address else resolve(address, sender)
+        _, claim = self.claim()
+        self.assertEqual(self.request(claim), (None, None),
+                         'closed assignment must record no request, not reach a reopened seat')
+        self.assertEqual(self.state(claim), 'pending')
+        self.assertIsNone(claims.reviewer_for(self.conn, 't1'),
+                          'a closed team assignment must select no reviewer')
+        claims.assign_reviewer(self.conn, 't1', new.seat_id, 'operator', self.clock)
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (new.seat_id,))
+        self.conn.commit()
+        self.assertIsNone(claims.reviewer_for(self.conn, 't1'),
+                          'a stood-down assignment in an open team must select no reviewer')
+
+    def test_default_reviewer_is_the_claim_teams(self):
+        # RR-M3: newest project reviewer must not override the nearest ancestor.
+        self.conn.execute("UPDATE team_instances SET parent_instance_id = 't3' WHERE id = 't1'")
+        self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)"
+                          " VALUES ('other-orch', 'p', 'other-orch', 'orchestrator', 5, 'operator')")
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES ('other-orch-reviewer', 'other-orch', 'orchestrator-reviewer', 'occupied')")
+        self.conn.commit()
+        self.assertEqual(claims.reviewer_for(self.conn, 't1'), REVIEWER.seat_id)
+        self.conn.execute("UPDATE team_instances SET parent_instance_id = NULL WHERE id = 't1'")
+        self.conn.commit()
+        self.assertIsNone(claims.reviewer_for(self.conn, 't1'), 'two off-chain reviewers give no default')
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.commit()
+        self.assertEqual(claims.reviewer_for(self.conn, 't1'), 'other-orch-reviewer')
+        claims.assign_reviewer(self.conn, 't1', REVIEWER.seat_id, 'operator', self.clock)
+        self.assertIsNone(claims.reviewer_for(self.conn, 't1'), 'a stood-down assignment is no reviewer')
+
+    def test_request_names_locked_bytes(self):
+        # SF-M1: copying main instead of the resolved commit makes a stale request.
+        clean_git_environment(self)
+        repo = Repo({'plan.md': 'git plan X\n'})
+        self.addCleanup(repo.close)
+        self.directory.checkouts['bivpak'] = repo.path
+        locked_commit = git(repo.path, 'rev-parse', 'HEAD')
+        _, claim = self.claim(paths=(), bundle='unused')
+        request = self.submit(draft(kind='PLAN', needs='review', to=IMPL.address,
+                                    refs=('bivpak@main:plan.md',)))
+        claim = self.submit(draft(kind='PLAN-REVIEW', verdict='approve', parent=request.relay_id,
+                                  refs=('bivpak@main:plan.md',)), IMPL)
+        verification = self.request(claim)[0]
+        git_edges = [edge for edge in queries.points_to(self.conn, verification)
+                     if edge.target_type == 'git']
+        body = self.conn.execute('SELECT body FROM bodies WHERE relay_id = ?', (verification,)).fetchone()[0].decode()
+        self.assertEqual([edge.spelling for edge in git_edges],
+                         ['bivpak@' + locked_commit + ':plan.md'],
+                         'verification Git REF must name the locked commit, not main')
+        for lock in claims.claim_locks(self.conn, claim.relay_id):
+            self.assertIn(lock.content_sha256, body)
+        repo.commit_files({'plan.md': 'git plan Y\n'})
+        self.assertNotEqual(git(repo.path, 'rev-parse', 'HEAD'), locked_commit)
+        self.assertEqual(git_edges[0].target_commit, locked_commit)
+        self.assertEqual(git(repo.path, 'show', git_edges[0].target_rev + ':plan.md'), 'git plan X')
 
     def test_claims_read_no_bodies(self):
         _, claim = self.claim()
