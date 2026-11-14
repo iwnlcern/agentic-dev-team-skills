@@ -419,7 +419,7 @@ def working_path(conn, artifact, effect):
                 return None
             base = effect.path
         else:
-            rows = conn.execute('SELECT path FROM repository_checkouts WHERE repository_id = ?',
+            rows = conn.execute('SELECT path FROM repository_checkouts WHERE repository_id = ? AND ended_at IS NULL',
                                 (repository,)).fetchall()
             if len(rows) != 1:
                 return None

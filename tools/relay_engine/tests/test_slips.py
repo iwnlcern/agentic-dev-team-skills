@@ -517,6 +517,28 @@ class TestQueries(SlipStore):
         self.assertIn('repo-1:plan.md', self.code('plan-changed').reason)
         self.assertEqual(self.act(path=str(repo.path)).outcome, 'allow')
 
+
+    def test_working_path_reads_open_checkouts_only(self):
+        ended = Path(self.temp.name) / 'ended-checkout'
+        opened = Path(self.temp.name) / 'open-checkout'
+        self.conn.execute(
+            'INSERT INTO repository_checkouts '
+            '(repository_id, path, last_seen_at, checkout_id, route_created_at, ended_at) '
+            'VALUES (?, ?, 1, ?, 1, 2)',
+            ('repo-2', str(ended), 't6-ended'))
+        self.conn.commit()
+        self.assertIsNone(slips.working_path(
+            self.conn, 'repo-2:plan.md', slips.Effect('commit', 'repo-1')))
+        self.conn.execute(
+            'INSERT INTO repository_checkouts '
+            '(repository_id, path, last_seen_at, checkout_id, route_created_at) '
+            'VALUES (?, ?, 1, ?, 1)',
+            ('repo-2', str(opened), 't6-open'))
+        self.conn.commit()
+        self.assertEqual(slips.working_path(
+            self.conn, 'repo-2:plan.md', slips.Effect('commit', 'repo-1')),
+            str(opened / 'plan.md'))
+
     def test_lineage_truncation_fails_closed(self):
         for extra, prefix in ((250, False), (251, False), (250, True)):
             with self.subTest(extra=extra, prefix=prefix):
