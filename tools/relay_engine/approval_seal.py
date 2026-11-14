@@ -89,6 +89,10 @@ class SealService:
         self._renderer_attached = False
         self._identity_warned = set()
         self.declarations = {}
+        self._mismatch_projects = frozenset()
+
+    def publish_mismatch_projects(self, projects: frozenset[str]) -> None:
+        self._mismatch_projects = projects
 
     def attach_renderer(self, renderer):
         if self._renderer_attached:
@@ -364,7 +368,10 @@ class SealService:
             return self.folder.mark_exists(project, chain)
 
     def folder_state(self, project):
-        return self.folder.folder_state(project)
+        state = self.folder.folder_state(project)
+        if state == 'unreadable':
+            self._report(project, None, 'folder_unusable')
+        return state
 
     def chains(self, project):
         try:
@@ -505,6 +512,9 @@ class SealService:
             except (OSError, slots.CannotRecord):
                 self._fail(project, 'counter_unusable', chain)
             self.declarations[project] = (transaction, tuple(declaration), position + 1)
+            mismatch_projects = self._mismatch_projects
+            if project in mismatch_projects:
+                self._report(project, chain, 'recorded')
             return number
 
     def _entry(self, data, project, chain, number):

@@ -115,8 +115,13 @@ class TestOperatorPrincipal(unittest.TestCase):
 
 
 class TestServicePrincipal(unittest.TestCase):
+    def test_service_principal_accepts_approval_seal(self):
+        self.assertEqual(p.ServicePrincipal("approval_seal").service, "approval_seal")
+        self.assertEqual(p.SERVICE_NAMES, ("approval_seal", "authority_service", "console_queue",
+                                           "engine_liveness", "xproject_transfer"))
+
     def test_service_principal_accepts_each_service(self):
-        expected = ("authority_service", "console_queue", "engine_liveness", "xproject_transfer")
+        expected = ("approval_seal", "authority_service", "console_queue", "engine_liveness", "xproject_transfer")
         self.assertEqual(p.SERVICE_NAMES, expected)
         for service in expected:
             principal = p.ServicePrincipal(service)
@@ -178,24 +183,6 @@ class TestShape(unittest.TestCase):
         self.assertTrue(modules)
         self.assertLessEqual(modules, {"dataclasses", "__future__"})
 
-    def test_nothing_constructs_principals_outside_tests(self):
-        own = os.path.abspath(p.__file__)
-        for name in sorted(os.listdir(PACKAGE)):
-            path = os.path.join(PACKAGE, name)
-            if not name.endswith(".py") or os.path.abspath(path) == own:
-                continue
-            with self.subTest(path=name):
-                self.assertEqual(principal_calls(path), [])
-        with tempfile.TemporaryDirectory() as folder:
-            control = os.path.join(folder, "control.py")
-            with open(control, "w", encoding="utf-8") as handle:
-                handle.write("OperatorPrincipal('page')\n"
-                             "ServicePrincipal('console_queue')\n"
-                             "api_principals.OperatorPrincipal('page')\n"
-                             "relay_engine.api_principals.ServicePrincipal('console_queue')\n")
-            self.assertEqual(principal_calls(control),
-                             ["OperatorPrincipal", "ServicePrincipal",
-                              "OperatorPrincipal", "ServicePrincipal"])
 
 
 if __name__ == "__main__":

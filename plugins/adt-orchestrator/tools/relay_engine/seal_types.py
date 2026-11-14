@@ -120,7 +120,7 @@ class SealReportDropped(Exception):
 
 
 class SealCalleeFailed(Exception):
-    def __init__(self, callee: str, exc_type: str, project_id: str):
+    def __init__(self, callee: str, exc_type: str, project_id: str | None):
         self.callee, self.exc_type, self.project_id = callee, exc_type, project_id
         super().__init__(callee, exc_type, project_id)
 

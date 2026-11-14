@@ -199,3 +199,90 @@ class StoreReader:
         assert threading.get_ident() == self.owner
         self.trace.append(('close', threading.get_ident()))
         self.connection.close(); self.closed = True
+
+
+class Refusal:
+    def __init__(self, code='E_API_UNAVAILABLE', cause_kind='runtime_not_ready'):
+        self.code, self.cause_kind = code, cause_kind
+
+
+class Unavailable(Exception):
+    pass
+
+
+class OpenCondition:
+    def __init__(self, kind, subkind, condition_key, item_id):
+        self.kind, self.subkind = kind, subkind
+        self.condition_key, self.item_id = condition_key, item_id
+
+
+class QueueServiceStandIn:
+    """Only the pinned queue methods; None selects no-project rows."""
+    def __init__(self):
+        self.items = {}
+        self.calls = []
+        self.notifications = 0
+        self.behavior = {}
+        self.before_raise = None
+        self.before_clear = None
+
+    def _answer(self, method, project):
+        answer = self.behavior.get((method, project))
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def run(self, operation: str, args, principal):
+        assert operation == 'queue.raise' and principal.service == 'approval_seal'
+        project = args['project_id']
+        if self.before_raise is not None:
+            self.before_raise(operation, args, principal)
+        answer = self._answer('raise', project)
+        if answer is not None:
+            return answer
+        key = (args['kind'], args['subkind'], project, args['condition_key'])
+        for item in self.items.values():
+            own = (item['kind'], item['subkind'], item['project_id'], item['condition_key'])
+            if item['open'] and own == key:
+                self.calls.append(('raise', item['item_id']))
+                return {'item_id': item['item_id']}
+        item_id = str(len(self.items) + 1)
+        self.items[item_id] = dict(args, item_id=item_id, open=True)
+        self.calls.append(('raise', item_id))
+        self.notifications += 1
+        return {'item_id': item_id}
+
+    def clear_condition(self, principal, item_id, kind, subkind, project_id, condition_key):
+        assert principal.service == 'approval_seal'
+        if self.before_clear is not None:
+            self.before_clear(principal, item_id, kind, subkind, project_id, condition_key)
+        self.calls.append(('clear', item_id))
+        answer = self._answer('clear', project_id)
+        if answer is not None:
+            return answer
+        item = self.items[item_id]
+        assert (item['kind'],item['subkind'],item['project_id'],item['condition_key']) == (kind,subkind,project_id,condition_key)
+        item['open'] = False
+        return {'outcome': 'cleared'}
+
+    def open_condition_items(self, principal, project_id: str | None):
+        assert principal.service == 'approval_seal'
+        self.calls.append(('recover', project_id))
+        answer = self._answer('recover', project_id)
+        if answer is not None:
+            return answer
+        return [OpenCondition(i['kind'], i['subkind'], i['condition_key'], i['item_id'])
+                for i in self.items.values() if i['open'] and i['project_id'] == project_id]
+
+
+def seal_texts(cause: str, chain_id: str):
+    return {'sentence': 'Approvals cannot be recorded: ' + cause,
+            'subject': chain_id}
+
+
+def backup_texts():
+    return {'sentence': 'The approval folder backup exclusion could not be confirmed.'}
+
+
+def backup_pins():
+    return {'folder': 'approval_seal'}
