@@ -55,6 +55,21 @@ class TestQueueRecordAnswer(unittest.TestCase):
         self.assertEqual(self.f.snapshot(), before)
         return result
 
+    def test_record_answer_refuses_notice(self):
+        for subkind, project, condition, enabled, key in (
+                ('seat_registered', P, 'seat', frozenset({'pr3'}), 'answer-seat-registered'),
+                ('notifier_unhealthy', None, 'notifier', kinds.ENABLED_TAGS, 'answer-notifier-unhealthy')):
+            with self.subTest(subkind=subkind):
+                result = records.raise_item(self.c, records.InternalWriter(),
+                    records.RaiseRequest('notice', subkind, project,
+                        {'sentence': 'Notice'}, {}, condition, 'raise-'+subkind),
+                    self.f.clock, enabled=enabled)
+                self.assertNotIsInstance(result, records.QueueRefusal)
+                item = self.view(result.item_id)
+                self.assertEqual((item.state, item.revision), ('pending', 1))
+                refusal = self.refused(item, 'surface_not_allowed', key=key)
+                self.assertEqual(refusal.code, 'E_QUEUE_INVALID')
+
     def test_answer_draft_parses(self):
         item = self.question()
         # Routing follows answer_to, even if display metadata names somebody else.

@@ -46,6 +46,8 @@ def record_answer(conn, principal: OperatorPrincipal, item_id, expected_revision
             {'current_revision': item['revision'], 'current_state': item['state']})
     if item['state'] != 'pending':
         return records.QueueRefusal('E_QUEUE_STATE', 'item_not_pending')
+    if item['kind'] == 'notice':
+        return records.QueueRefusal('E_QUEUE_INVALID', 'surface_not_allowed')
     if not records.route_active(conn, item['project_id']):
         return records.QueueRefusal('E_QUEUE_STATE', 'project_not_active')
     choice, text = answer.get('choice'), answer.get('text', '')
