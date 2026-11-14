@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import queue as channels
 import threading
+from collections.abc import Callable
+import uuid
 
 from . import seal_slots as slots, store_layout, strings
 from .api_principals import ServicePrincipal
@@ -38,6 +40,7 @@ class _Fault:
     cause: str
     first: int
     item_id: str | None = None
+    occurrence: str | None = None
     older: list = field(default_factory=list)
     cleared: bool = False
 
@@ -46,11 +49,16 @@ class _Fault:
         return {'chain_id': self.chain or 'none', 'cause': self.cause}
 
 
+def _new_occurrence_id() -> str:
+    return uuid.uuid4().hex
+
+
 class SealWorker:
     def __init__(self, service, *, channel, store_root, queue, refusal_type,
                  unavailable_types, seal_texts, backup_texts, backup_pins,
                  open_catalogue_reader, route_state, project_routes, clock_ms,
-                 tick, wait, bound_s, on_fault_ended, backup_exclusion):
+                 tick, wait, bound_s, on_fault_ended, backup_exclusion,
+                 new_occurrence_id: Callable[[], str] = _new_occurrence_id):
         if backup_exclusion not in ('excluded', 'add_failed', 'check_failed', 'not_excluded'):
             raise ValueError('invalid_backup_exclusion')
         self.service, self.channel, self.store_root = service, channel, Path(store_root)
@@ -72,6 +80,8 @@ class SealWorker:
         self._reader_failed = False
         self._backup_read, self._backup_item = False, None
         self._backup_raised = False
+        self.new_occurrence_id = new_occurrence_id
+        self._backup_occurrence = None
         self.channel._notify = self._notify
 
     def _notify(self):
@@ -210,7 +220,8 @@ class SealWorker:
             if item_id is not None:
                 old.item_id = item_id
             return old
-        new = _Fault(project, chain, cause, at_ms, item_id)
+        new = _Fault(project, chain, cause, at_ms, item_id,
+                     occurrence=self.new_occurrence_id())
         if old is not None:
             if recovered:
                 if item_id and all(f.item_id != item_id for f in [old]+old.older):
@@ -226,7 +237,8 @@ class SealWorker:
         if fault.item_id is not None or not self._valid(generation):
             return
         if fault.cleared:
-            fault.first = max(self.clock_ms(), fault.first + 1)
+            fault.first = self.clock_ms()
+            fault.occurrence = self.new_occurrence_id()
             fault.cleared = False
         if fault.cause == 'pointer_unset' and self.clock_ms() - fault.first < 60000:
             return
@@ -238,7 +250,7 @@ class SealWorker:
         args = dict(kind='notice', subkind='approval_seal_unusable', project_id=fault.project,
                     condition_key=fault.key, pins=fault.key,
                     texts=texts,
-                    operation_key=':'.join((fault.project,fault.chain or 'none',fault.cause,str(fault.first))))
+                    operation_key=':'.join((fault.project,fault.chain or 'none',fault.cause,fault.occurrence)))
         result = self._call(fault.project,self.queue.run,'queue.raise',args,self.principal)
         if result is not None:
             try:
@@ -331,6 +343,8 @@ class SealWorker:
                 if result is not None:
                     self._backup_item = None
         elif not self._backup_raised:
+            if self._backup_occurrence is None:
+                self._backup_occurrence = self.new_occurrence_id()
             try:
                 texts = self.backup_texts()
                 pins = self.backup_pins()
@@ -339,7 +353,7 @@ class SealWorker:
                 return
             args = dict(kind='notice',subkind='approval_seal_backup_included',project_id=None,
                         condition_key='backup_exclusion',texts=texts,pins=pins,
-                        operation_key='backup_exclusion:'+str(self.clock_ms()))
+                        operation_key='backup_exclusion:'+self._backup_occurrence)
             result = self._call(None,self.queue.run,'queue.raise',args,self.principal)
             if result is not None:
                 try:

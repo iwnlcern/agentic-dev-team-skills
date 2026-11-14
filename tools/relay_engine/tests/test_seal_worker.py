@@ -1,10 +1,13 @@
 """Worker conditions, recovery and catalogue ownership on temporary stores."""
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from collections.abc import Mapping
+from copy import deepcopy
 import importlib
 import os
 import sqlite3
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -51,6 +54,34 @@ class CatalogueReader:
         self.conn.close()
         self.trace.append(('close', threading.get_ident()))
         self.closed = True
+
+
+@contextmanager
+def receipt_queue(queue):
+    state = SimpleNamespace(keys=[], attempts=[], receipts={}, lose_next=False)
+    original = queue.run
+    fields = ('kind', 'subkind', 'project_id', 'texts', 'pins', 'condition_key')
+    def run(operation, args, principal):
+        if operation != 'queue.raise':
+            return original(operation, args, principal)
+        key = args['operation_key']
+        state.keys.append(key)
+        state.attempts.append(deepcopy(args))
+        digest = deepcopy({name: args[name] for name in fields})
+        if key in state.receipts:
+            previous, answer = state.receipts[key]
+            if digest != previous:
+                return st.Refusal('E_API_CONFLICT', 'operation_key_reused')
+            return dict(answer, replayed=True)
+        answer = original(operation, args, principal)
+        if isinstance(answer, Mapping):
+            state.receipts[key] = (digest, dict(answer))
+            if state.lose_next:
+                state.lose_next = False
+                raise ConnectionError('fixture lost committed answer')
+        return answer
+    with mock.patch.object(queue, 'run', side_effect=run):
+        yield state
 
 
 class TestSealWorker(unittest.TestCase):
@@ -335,6 +366,120 @@ class TestSealWorker(unittest.TestCase):
         self.assertEqual(self.items(), [])
         self.assertIn(item, [call[1] for call in clears()])
         self.assertEqual(self.queue.notifications, before + 1)
+
+    def test_operation_key_is_per_occurrence(self):
+        for case in ('retried', 'cleared-equal-clock', 'cleared-clock-back',
+                     'replaced-cause', 'restart'):
+            with self.subTest(case=case):
+                self.queue = st.QueueServiceStandIn(); self.clock.value = 2000
+                with receipt_queue(self.queue) as receipts:
+                    worker = self.worker()
+                    patch = self.folder_fault()
+                    try:
+                        if case == 'retried':
+                            self.queue.behavior[('raise', P)] = st.Refusal()
+                            self.refuse(); self.tick(worker)
+                            self.queue.behavior.clear(); self.tick(worker)
+                            self.assertEqual(len(receipts.keys), 3)
+                            self.assertEqual(len(set(receipts.keys)), 1, 'retry changed occurrence key')
+                            self.assertEqual(receipts.attempts, [receipts.attempts[0]] * 3)
+                            self.assert_cause('folder_unusable', None)
+                            continue
+                        self.refuse()
+                        first = self.assert_cause('folder_unusable', None)
+                        first_key = receipts.keys[-1]
+                        patch.stop(); patch = None
+                        if case == 'replaced-cause':
+                            saved = self.damage('pointer')
+                            self.refuse()
+                            self.assert_cause('pointer_damaged', None)
+                            self.repair(saved)
+                        self.tick(worker)
+                        self.assertEqual(self.items(), [])
+                        self.assertFalse(self.queue.items[first]['open'])
+                        if case == 'restart':
+                            self.stop(worker); worker = self.worker()
+                        if case == 'cleared-clock-back':
+                            self.clock.advance(-1000)
+                        patch = self.folder_fault()
+                        self.refuse()
+                        self.assertNotEqual(receipts.keys[-1], first_key,
+                                            'new occurrence reused raise key')
+                        current = self.assert_cause('folder_unusable', None)
+                        self.assertNotEqual(current, first)
+                        self.assertFalse(self.queue.items[first]['open'])
+                    finally:
+                        if patch is not None:
+                            patch.stop()
+                        self.shutdown()
+
+    def test_lost_raise_answer_restart_meets_open_item(self):
+        self.queue = st.QueueServiceStandIn(); self.clock.value = 2000
+        with receipt_queue(self.queue) as receipts:
+            worker = self.worker(); patch = self.folder_fault()
+            try:
+                receipts.lose_next = True
+                self.refuse()
+                first = self.assert_cause('folder_unusable', None)
+                self.assertIsNone(worker._faults[P].item_id)
+                self.assertEqual([(d.callee, d.exc_type, d.project_id) for d in self.diags],
+                                 [('queue', 'ConnectionError', P)])
+                first_keys = set(receipts.keys)
+                boundary = len(receipts.keys)
+                self.stop(worker)
+                self.queue.behavior[('recover', P)] = st.Refusal()
+                worker = self.worker()
+                self.refuse()
+                self.assertEqual(len(self.items()), 1, 'lost answer opened a second item')
+                self.assertEqual(self.queue.notifications, 1)
+                self.assertEqual(worker._faults[P].item_id, first)
+                self.assertEqual(self.assert_cause('folder_unusable', None), first)
+                patch.stop(); patch = None
+                self.queue.behavior.clear(); self.tick(worker)
+                self.assertEqual(self.items(), [])
+                second_keys = set(receipts.keys[boundary:])
+                self.assertEqual(len(first_keys), 1)
+                self.assertEqual(len(second_keys), 1)
+                self.assertNotEqual(first_keys, second_keys,
+                                    'restart reused lost-answer occurrence key')
+            finally:
+                if patch is not None:
+                    patch.stop()
+                self.shutdown()
+
+    def test_new_occurrence_id_is_injectable(self):
+        for family in ('fault', 'backup'):
+            with self.subTest(family=family):
+                self.queue = st.QueueServiceStandIn()
+                values = []
+                def new_id():
+                    value = 'occ-' + str(len(values) + 1)
+                    values.append(value)
+                    return value
+                with receipt_queue(self.queue) as receipts:
+                    worker = self.worker(backup='add_failed' if family == 'backup' else 'excluded',
+                                         new_occurrence_id=new_id)
+                    patch = None
+                    try:
+                        if family == 'backup':
+                            self.assertIn(receipts.keys[0].removeprefix('backup_exclusion:'), values)
+                            self.assertEqual(receipts.keys[0], 'backup_exclusion:' + values[0])
+                        else:
+                            patch = self.folder_fault(); self.refuse()
+                            first = receipts.keys[-1]
+                            patch.stop(); patch = None
+                            self.tick(worker)
+                            patch = self.folder_fault(); self.refuse()
+                            second = receipts.keys[-1]
+                            prefix = ':'.join((P, 'none', 'folder_unusable')) + ':'
+                            self.assertTrue(first.startswith(prefix) and second.startswith(prefix))
+                            left, right = first[len(prefix):], second[len(prefix):]
+                            self.assertIn(left, values); self.assertIn(right, values)
+                            self.assertLess(values.index(left), values.index(right))
+                    finally:
+                        if patch is not None:
+                            patch.stop()
+                        self.shutdown()
 
     def test_raise_once_per_condition(self):
         self.worker(); self.damage()
@@ -973,6 +1118,37 @@ class TestSealWorker(unittest.TestCase):
         self.queue.behavior[('raise',None)]=st.Refusal();w=self.worker(backup='add_failed')
         self.assertEqual(self.items(None),[]);self.queue.behavior.clear();self.tick(w)
         self.assertEqual(len(self.items(None)),1)
+        self.stop(w)
+        for case in ('two-starts', 'retry-one-key'):
+            with self.subTest(case=case):
+                self.queue = st.QueueServiceStandIn(); self.clock.value = 2000
+                with receipt_queue(self.queue) as receipts:
+                    try:
+                        if case == 'two-starts':
+                            w = self.worker(backup='add_failed')
+                            first = self.items(None)[0]['item_id']
+                            self.stop(w)
+                            w = self.worker(backup='excluded')
+                            self.assertEqual(self.items(None), [])
+                            self.stop(w)
+                            w = self.worker(backup='add_failed')
+                            self.assertNotEqual(receipts.keys[0], receipts.keys[-1],
+                                                'backup restart reused raise key')
+                            self.assertEqual(len(self.items(None)), 1)
+                            self.assertNotEqual(self.items(None)[0]['item_id'], first)
+                            self.assertFalse(self.queue.items[first]['open'])
+                        else:
+                            self.queue.behavior[('raise', None)] = st.Refusal()
+                            w = self.worker(backup='add_failed')
+                            self.assertEqual(self.items(None), [])
+                            before_advance = len(receipts.keys)
+                            self.assertGreater(before_advance, 0)
+                            self.clock.advance(1000); self.queue.behavior.clear(); self.tick(w)
+                            self.assertGreater(len(receipts.keys), before_advance)
+                            self.assertEqual(len(set(receipts.keys)), 1, 'backup retry changed key')
+                            self.assertEqual(len(self.items(None)), 1)
+                    finally:
+                        self.shutdown()
 
     def test_secret_never_in_messages(self):
         self.worker();faults=[]
