@@ -243,17 +243,25 @@ print(json.dumps(sorted(sys.modules)))
         self.assertIn('sqlite3', inspect('import sqlite3'))
 
     def test_key_secret_shape_fails_validation(self):
-        for value in ('short', 'A' * 42, 'A' * 44, '+' * 43, 'é' * 43):
-            with patch.object(self.service, 'run', wraps=self.service.run) as run:
-                args = self.args(); args['key_secret'] = value
-                self.refusal(self.call(args=args), 'invalid_args'); run.assert_not_called()
+        # Break caught: a widened alphabet admitting padding or either base64
+        # punctuation must still refuse before the session service is called.
+        for value in ('short', 'A' * 42, 'A' * 44, 'A' * 42 + '=', '/' * 43,
+                      '+' * 43, 'é' * 43):
+            with self.subTest(value=value):
+                with patch.object(self.service, 'run', wraps=self.service.run) as run:
+                    args = self.args(); args['key_secret'] = value
+                    self.refusal(self.call(args=args), 'invalid_args'); run.assert_not_called()
         self.success(self.call())
 
     def test_key_id_must_be_canonical_lowercase_uuid(self):
-        for value in (self.key['key_id'].upper(), self.key['key_id'].replace('-', ''), 'unknown'):
-            with patch.object(self.service, 'run', wraps=self.service.run) as run:
-                args = self.args(); args['key_id'] = value
-                self.refusal(self.call(args=args), 'invalid_args'); run.assert_not_called()
+        # Break caught: accepting braces, or uppercase letters, before lookup.
+        for value in ('0190A1B2-C3D4-7E5F-8A6B-7C8D9E0F1A2B',
+                      '{' + self.key['key_id'] + '}',
+                      self.key['key_id'].replace('-', ''), 'unknown'):
+            with self.subTest(value=value):
+                with patch.object(self.service, 'run', wraps=self.service.run) as run:
+                    args = self.args(); args['key_id'] = value
+                    self.refusal(self.call(args=args), 'invalid_args'); run.assert_not_called()
         self.success(self.call())
 
     def test_host_outside_four_values_refuses(self):
@@ -525,9 +533,40 @@ print(json.dumps(sorted(sys.modules)))
                          [('session.end',), ('session.sign-in',)])
 
     def test_end_after_newer_sign_in_is_not_current(self):
+        # Break caught: checking currency before queueing misses the newer
+        # sign-in that commits ahead of this connection's end job.
         original = self.call(); signed = self.success(original)
-        newer = self.call(args=self.args(operation_key='new')); new = self.success(newer)
-        self.refusal(self.call('session.end', self.end_args(signed), original.state), 'session_not_current')
+        new_state = self.connection()
+        began, queued, release = (threading.Event() for _ in range(3))
+        first = True
+
+        def phase(name):
+            nonlocal first
+            if name == 'began' and first:
+                first = False
+                began.set()
+                self.assertTrue(release.wait(5))
+            elif name == 'queued' and began.is_set():
+                queued.set()
+
+        self.phase = phase
+        with ThreadPoolExecutor(2) as pool:
+            try:
+                signing_in = pool.submit(self.call, args=self.args(operation_key='new'), state=new_state)
+                self.assertTrue(began.wait(5))
+                ending = pool.submit(self.call, 'session.end', self.end_args(signed), original.state)
+                self.assertTrue(queued.wait(5))
+            finally:
+                release.set()
+            newer = signing_in.result(5)
+            ended = ending.result(5)
+        self.phase = None
+        new = self.success(newer)
+        self.refusal(ended, 'session_not_current')
+        self.assertIsNone(ended.state.binding)
+        self.assertEqual(int(new['generation']), int(signed['generation']) + 1)
+        self.assertEqual(self.rows('SELECT generation,ended_at FROM seat_sessions WHERE id=?',
+                                   (new['session_id'],)), [(int(new['generation']), None)])
         self.success(self.call('session.end', self.end_args(new), newer.state))
 
     def test_busy_store_is_unavailable_then_retry_commits_once(self):
