@@ -214,7 +214,13 @@ def _decide(conn, walk, holder):
                             and (current[3] == 'design' or lock.artifact in design_paths)):
                         continue
                     if current and current[0] == 'locked' and current[3].content_sha256 == lock.content_sha256:
-                        continue  # re-approving content already locked keeps the older claim
+                        reviewer = conn.execute(
+                            'SELECT reviewer_seat_id FROM verification_requests'
+                            ' WHERE claim_relay_id = ? LIMIT 1', (current[1],)).fetchone()
+                        recoverable = (claims.verification_state(conn, current[1]) == 'pending'
+                                       and not claims.reviewer_can_answer(conn, reviewer[0] if reviewer else None))
+                        if not recoverable:
+                            continue  # keep recorded verdicts/waivers and answerable pending claims
                     state[lock.artifact] = ('locked', row.id, source, lock)
                 if decided:
                     block = None
@@ -458,6 +464,8 @@ def _checked_slip(conn, slip, effect, digest):
             row = conn.execute('SELECT reviewer_seat_id FROM verification_requests WHERE claim_relay_id = ? LIMIT 1',
                                (claim['claim'],)).fetchone()
             reviewer = _seat(conn, row[0]) if row and row[0] is not None else None
+            if state == 'pending' and not claims.reviewer_can_answer(conn, row[0] if row else None):
+                reviewer = None
             unblocker = reviewer[3] + '.' + reviewer[2] if reviewer else 'operator'
             code = 'verification-pending' if state == 'pending' else 'verification-objected'
             if state == 'pending' and reviewer is None:

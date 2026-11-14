@@ -146,6 +146,13 @@ QREVIEWER = submit.SeatRef('seat-q-reviewer', 'v3.orchestrator-reviewer@q', 'orc
 
 
 class SlipStore(ClaimStore):
+    """Admission-backed claims/slips over hand-built project, team and seat rows.
+
+    Base rows add master and unrelated teams, q's reviewer and a second repository.
+    Subclass tests add missing/closed/stood-down reviewers, assignments and waivers.
+    No real TableDirectory, authenticated key rotation, session replacement,
+    provider state, or Platform lifecycle admission is built by this fixture.
+    """
     def setUp(self):
         super().setUp()
         for tid, project, name, level in [('tm', 'p', 'v3-master', 'master'),
@@ -1529,10 +1536,12 @@ def lineage_holder_words(store, holder, issued, allowed):
 
 
 class TestTask4PlainReview(SlipStore):
-    """E1 through real admission: one open orchestrator and its assigned reviewer.
+    """Plain reviews and pending-claim recovery through real admission.
 
-    This fixture does not build closed teams, missing reviewers, off-chain reviewer
-    candidates or stood-down seats; Task4's E2-E4 fixtures own those states.
+    Tests build closed/reopened reviewer teams, stood-down/missing reviewers,
+    holder-as-reviewer assignments and operator waivers, beyond SlipStore's rows.
+    No real TableDirectory, authenticated lifecycle/sender checks, key rotation,
+    concurrent reviewer replacement, or multi-project reviewer recovery is built.
     """
 
     def plain_review(self, request, path, sender=IMPL):
@@ -1676,6 +1685,91 @@ class TestTask4PlainReview(SlipStore):
         current = self.approved('plan', parent=claim.relay_id)
         self.assertEqual(self.request(current)[1], SECOND.seat_id)
         self.verify(current, sender=SECOND)
+
+    def test_no_reviewer_claim_recovers_by_re_request(self):
+        # T5-M1: keeping the older NULL-reviewer claim defeats the remedy.
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.commit()
+        first = self.approved('plan', parent=self.go().relay_id)
+        self.assertEqual(self.request(first), (None, None))
+        self.issue(first)
+        claims.assign_reviewer(self.conn, 't1', SECOND.seat_id, 'operator', self.clock)
+        current = self.approved('plan', parent=first.relay_id)
+        issued = self.issue(current)
+        self.assertIn(('plan', current.relay_id), self.claim_artifacts(issued, 'plan'))
+        pending = self.code('verification-pending')
+        self.assertEqual(pending.outcome, 'held')
+        self.assertEqual(pending.unblocker, SECOND.address)
+        self.verify(current, sender=SECOND)
+        allowed = self.act()
+        self.assertEqual(allowed.outcome, 'allow')
+        self.assertEqual(allowed.slip_id, self.issued(issued))
+
+    def reviewer_replacement(self, state, verdict=None):
+        # Identity rows only; claim, request, verification and slip use admission.
+        team = 't5-' + state + ('-objected' if verdict else '-pending')
+        name = 'reviewer-' + team
+        old = submit.SeatRef('s-' + team, name + '.orchestrator-reviewer',
+                             'orchestrator-reviewer', team, 'p')
+        self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)"
+                          " VALUES (?, 'p', ?, 'orchestrator', 1, 'operator')", (team, name))
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES (?, ?, 'orchestrator-reviewer', 'occupied')", (old.seat_id, team))
+        self.conn.commit()
+        original = self.directory.resolve
+        self.directory.resolve = lambda address, sender: old if address == old.address else original(address, sender)
+        claims.assign_reviewer(self.conn, 't1', old.seat_id, 'operator', self.clock)
+        claim = self.approved('plan', parent=self.go(bundle=team).relay_id, bundle=team)
+        self.assertEqual(self.request(claim)[1], old.seat_id)
+        if verdict:
+            self.verify(claim, verdict, old)
+        issued = self.issue(claim)
+        if state == 'closed':
+            self.conn.execute('UPDATE team_instances SET closed_at = 2 WHERE id = ?', (team,))
+        else:
+            self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (old.seat_id,))
+        next_team, next_name = team + '-new', name if state == 'closed' else name + '-new'
+        current = submit.SeatRef('s-' + next_team, next_name + '.orchestrator-reviewer',
+                                 'orchestrator-reviewer', next_team, 'p')
+        self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at, opened_by)"
+                          " VALUES (?, 'p', ?, 'orchestrator', 3, 'operator')", (next_team, next_name))
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES (?, ?, 'orchestrator-reviewer', 'occupied')", (current.seat_id, next_team))
+        self.conn.commit()
+        self.directory.resolve = lambda address, sender: current if address == current.address else original(address, sender)
+        claims.assign_reviewer(self.conn, 't1', current.seat_id, 'operator', self.clock)
+        return claim, issued, current
+
+    def test_closed_reviewer_claim_reads_as_no_reviewer(self):
+        # T5-M3/M4: a dead recorded reviewer must not be the pending unblocker.
+        for state in ('closed', 'stood-down'):
+            with self.subTest(state=state):
+                first, old_issue, reviewer = self.reviewer_replacement(state)
+                pending = self.code('verification-pending', branch=state)
+                self.assertEqual(pending.unblocker, 'operator')
+                self.assertEqual(pending.outcome, 'held')
+                self.assertIn('assign a reviewer', pending.reason)
+                current = self.approved('plan', parent=first.relay_id)
+                self.assertEqual(self.request(current)[1], reviewer.seat_id)
+                self.verify(current, sender=reviewer)
+                issued = self.issue(current)
+                self.assertIn(('plan', current.relay_id), self.claim_artifacts(issued, 'plan'))
+                allowed = self.act(branch=state)
+                self.assertEqual(allowed.outcome, 'allow')
+                self.assertEqual(allowed.slip_id, self.issued(issued))
+                self.assertIn(('plan', first.relay_id), self.claim_artifacts(old_issue, 'plan'))
+
+    def test_objected_claim_not_replaced_after_close(self):
+        # T5-M2: an unavailable reviewer does not erase a recorded objection.
+        for state in ('closed', 'stood-down'):
+            with self.subTest(state=state):
+                first, _, reviewer = self.reviewer_replacement(state, 'must-revise')
+                current = self.approved('plan', parent=first.relay_id)
+                self.verify(current, sender=reviewer)
+                issued = self.issue(current)
+                self.assertIn(('plan', first.relay_id), self.claim_artifacts(issued, 'plan'))
+                held = self.code('verification-objected', branch=state)
+                self.assertEqual(held.outcome, 'held')
 
     def test_closed_orchestrator_neither_issues_nor_revokes(self):
         # CT-M1..4: closing an issuer is an issue-time rule, not a standing rule.

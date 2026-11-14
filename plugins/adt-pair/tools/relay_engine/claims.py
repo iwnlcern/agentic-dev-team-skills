@@ -131,6 +131,17 @@ def verification_state(conn, claim_relay_id):
         return 'approved' if verdict[0] == 'approve' else 'objected'
 
 
+def reviewer_can_answer(conn, seat_id: str | None) -> bool:
+    """Whether the recorded reviewer is a standing seat of an open team."""
+    if seat_id is None:
+        return False
+    with submit.read_guard(conn):
+        return conn.execute(
+            'SELECT 1 FROM seats s JOIN team_instances t ON t.id = s.team_instance_id'
+            " WHERE s.id = ? AND s.state != 'stood-down' AND t.closed_at IS NULL",
+            (seat_id,)).fetchone() is not None
+
+
 def reviewer_for(conn, team_instance_id):
     with submit.read_guard(conn):
         own = conn.execute('SELECT project_id FROM team_instances WHERE id = ?',
@@ -172,6 +183,8 @@ def assign_reviewer(conn, team_instance_id, seat_id, by_principal, now_ms):
                                (team_instance_id, seat_id)).fetchone()
             if row is None:
                 raise ValueError('reviewer must belong to the same project')
+            if not reviewer_can_answer(conn, seat_id):
+                raise ValueError('reviewer must be a seat that can answer')
             conn.execute('INSERT INTO reviewer_assignments (project_id, team_instance_id,'
                          ' seat_id, assigned_at) VALUES (?, ?, ?, ?) ON CONFLICT(team_instance_id)'
                          ' DO UPDATE SET seat_id = excluded.seat_id, assigned_at = excluded.assigned_at',

@@ -75,6 +75,10 @@ def platform_rows(conn):
 
 
 class Store(unittest.TestCase):
+    """Schema fixtures build p/q, open pair teams, occupied/vacant seats and rows
+    for constraints; they do not build reviewer replacement, actual directory
+    resolution, authenticated keys/session lifecycle or concurrent identity changes.
+    """
     def connect(self, init=True):
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)

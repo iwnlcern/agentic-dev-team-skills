@@ -147,6 +147,12 @@ def lineage_space(self, rounds, *, canonical=False, shard=None, words=None):
 
 
 class TestLineageTier(unittest.TestCase):
+    """Enumerate relays over fixed identity rows, immediately verifying claims.
+
+    No missing/NULL reviewer, reviewer reassignment, closed/reopened team,
+    stood-down/vacant seat, operator waiver or authenticated identity lifecycle
+    is built by this enumeration; its directory is the fixture directory.
+    """
     def test_bounded_lineages_keep_the_property(self):
         self.assertEqual((len(LINEAGE_FULL_ROUNDS), len(LINEAGE_SUITE_ROUNDS)), (1431, 290))
         self.assertEqual(lineage_word_count(LINEAGE_FULL_ROUNDS, True), 1147318)
@@ -172,4 +178,3 @@ class TestLineageTier(unittest.TestCase):
             print('LINEAGE-VIOLATION ' + json.dumps(violation, sort_keys=True, default=repr), file=sys.stderr)
         self.assertEqual(record['admitted'] + record['refused'], lineage_word_count(LINEAGE_SUITE_ROUNDS, False))
         self.assertEqual(record['violations'], [], 'lineages violate the property: %s' % json.dumps(summary))
-

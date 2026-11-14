@@ -57,9 +57,14 @@ class BodyReader:
 
 
 class ClaimStore(Store):
-    """Open teams p/q with occupied seats and one p reviewer; individual tests
-    explicitly build closed teams, absent reviewers and alternate parent chains.
-    No live keys, stood-down occupants or provider state are otherwise built.
+    """Hand-built identity rows with claim/verification writes through admission.
+
+    setUp has open pair teams in p/q, occupied p seats and p's reviewer; no
+    assignments, waivers or NULL-reviewer claims until a test explicitly adds them.
+    Tests add closed/stood-down reviewers, missing defaults, alternate chains,
+    same-project/foreign assignments and operator waivers. q has no default reviewer.
+    No real TableDirectory, live keys/key rotation, authenticated sender/session
+    replacement, provider state or Platform lifecycle API is built here.
     """
     def setUp(self):
         super().setUp()
@@ -301,6 +306,25 @@ class TestClaims(ClaimStore):
             claims.assign_reviewer(self.conn, 't1', foreign, 'operator', self.clock)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM reviewer_assignments').fetchone()[0], 0)
 
+    def test_assign_reviewer_refuses_seat_that_cannot_answer(self):
+        # T5-M5: refusing at the call must leave the existing assignment intact.
+        claims.assign_reviewer(self.conn, 't1', SECOND.seat_id, 'operator', self.clock)
+        before = self.conn.execute('SELECT * FROM reviewer_assignments').fetchall()
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.commit()
+        with self.assertRaises(ValueError):
+            claims.assign_reviewer(self.conn, 't1', REVIEWER.seat_id, 'operator', self.clock)
+        self.assertEqual(self.conn.execute('SELECT * FROM reviewer_assignments').fetchall(), before)
+        self.conn.execute("UPDATE seats SET state = 'occupied' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.execute("UPDATE team_instances SET closed_at = 2 WHERE id = ?", (REVIEWER.team_instance_id,))
+        self.conn.commit()
+        with self.assertRaises(ValueError):
+            claims.assign_reviewer(self.conn, 't1', REVIEWER.seat_id, 'operator', self.clock)
+        self.assertEqual(self.conn.execute('SELECT * FROM reviewer_assignments').fetchall(), before)
+        claims.assign_reviewer(self.conn, 't1', IMPL.seat_id, 'operator', self.clock)
+        self.assertEqual(self.conn.execute('SELECT seat_id FROM reviewer_assignments WHERE team_instance_id = ?',
+                                           ('t1',)).fetchone()[0], IMPL.seat_id)
+
     def test_reviewer_for_scope(self):
         # GC-17: all candidates are off-chain; only the project's open one counts.
         self.conn.execute("INSERT INTO team_instances (id, project_id, name, level, opened_at,"
@@ -352,7 +376,11 @@ class TestClaims(ClaimStore):
         self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (REVIEWER.seat_id,))
         self.conn.commit()
         self.assertEqual(claims.reviewer_for(self.conn, 't1'), 'other-orch-reviewer')
+        self.conn.execute("UPDATE seats SET state = 'occupied' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.commit()
         claims.assign_reviewer(self.conn, 't1', REVIEWER.seat_id, 'operator', self.clock)
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.commit()
         self.assertIsNone(claims.reviewer_for(self.conn, 't1'), 'a stood-down assignment is no reviewer')
 
     def test_request_names_locked_bytes(self):
