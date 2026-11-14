@@ -10970,7 +10970,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seal_renderer.py",
-    "sha256": "81822ae18f6b72e14660d1aedc71e9232c75edcd27ad9b637aa23f1eadcd2490",
+    "sha256": "19a6f1f3b0c319a0de02d02fc1f0504655c3f924ee7e5371ab81ef334aadf826",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -21920,7 +21920,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seal_renderer.py",
-    "sha256": "81822ae18f6b72e14660d1aedc71e9232c75edcd27ad9b637aa23f1eadcd2490",
+    "sha256": "19a6f1f3b0c319a0de02d02fc1f0504655c3f924ee7e5371ab81ef334aadf826",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -32786,7 +32786,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seal_renderer.py",
-    "sha256": "81822ae18f6b72e14660d1aedc71e9232c75edcd27ad9b637aa23f1eadcd2490",
+    "sha256": "19a6f1f3b0c319a0de02d02fc1f0504655c3f924ee7e5371ab81ef334aadf826",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {

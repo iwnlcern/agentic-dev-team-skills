@@ -516,6 +516,134 @@ class SealRendererTests(unittest.TestCase):
         self.assertTrue(all(tid == reader.owner for op, tid in reader.trace if op != 'interrupt'))
         self.assertNotEqual(reader.owner, threading.get_ident())
 
+
+    def test_interrupt_never_meets_a_closed_reader(self):
+        order = []
+        stopping, attempted = threading.Event(), threading.Event()
+        interrupting, finish_interrupt = threading.Event(), threading.Event()
+        blocked, entered, release = self.hold(stand.events_after)
+        original_owner = self.module._Owner
+        owners = []
+        class Condition(threading.Condition):
+            def __enter__(condition):
+                if stopping.is_set() and owners and threading.get_ident() == owners[0].ident:
+                    attempted.set()
+                return super().__enter__()
+        def owner(*args):
+            value = original_owner(*args, condition=Condition())
+            owners.append(value)
+            return value
+        class Reader(stand.Reader):
+            def interrupt(reader):
+                stopping.set(); release.set(); interrupting.set()
+                if not finish_interrupt.wait(30):
+                    raise AssertionError('interrupt not released')
+                order.append('interrupt-return')
+            def close(reader):
+                order.append('close')
+                super().close()
+        wait = stand.ManualWait()
+        renderer = self.renderer(reader=lambda root, project: Reader(self.ledger, project),
+                                 events=lambda *a: blocked(*a) if stopping_read.is_set() else stand.events_after(*a),
+                                 wait=wait)
+        stopping_read = threading.Event()
+        with mock.patch.object(self.module, '_Owner', side_effect=owner):
+            self.open(renderer, serving=True)
+        wait.calls.clear(); stopping_read.set()
+        closing = self.spawn(lambda: renderer.ledger_closing(P))
+        self.addCleanup(finish_interrupt.set)
+        self.assertTrue(entered.wait(30)); wait.until_calls(1); wait.expire()
+        self.assertTrue(interrupting.wait(30)); self.assertTrue(attempted.wait(30))
+        finish_interrupt.set()
+        self.assertTrue(closing.wait(30))
+        self.assertEqual(order, ['interrupt-return', 'close'])
+        self.assertEqual(self.errors, [])
+        # A slot already cleared before the half-bound expires is never interrupted.
+        owner = original_owner(P, 2, reader=None)
+        request = self.module._Request('stop')
+        manual = stand.ManualWait(); renderer.wait = manual
+        done = self.spawn(lambda: renderer._hook_wait(owner, request))
+        manual.until_calls(1); manual.expire(); manual.until_calls(2)
+        request.done.set(); self.assertTrue(done.wait(30))
+        self.assertEqual(order, ['interrupt-return', 'close'])
+
+    def test_hook_opened_timed_out(self):
+        # A bound-returning hook must leave the held open owned by its old thread.
+        for reopen in (False, True):
+            if True:  # Keep a failed first schedule from starting another schedule.
+                entered, release, done = threading.Event(), threading.Event(), threading.Event()
+                readers, errors = [], []
+                count = [0]
+                def reader(root, project):
+                    count[0] += 1
+                    if count[0] == 1:
+                        entered.set()
+                        if not release.wait(30):
+                            raise AssertionError('open not released')
+                    value = self.ledger.open_reader(root, project)
+                    readers.append(value); return value
+                wait = stand.ManualWait(); renderer = self.renderer(reader=reader, wait=wait)
+                def opened():
+                    try:
+                        renderer.ledger_opened(P)
+                    except BaseException as exc:
+                        errors.append(exc)
+                    finally:
+                        done.set()
+                thread = threading.Thread(target=opened); thread.start()
+                self.addCleanup(thread.join, 30); self.addCleanup(release.set)
+                self.assertTrue(entered.wait(30))
+                with wait.condition:
+                    registered = wait.condition.wait_for(lambda: wait.calls, timeout=0.1)
+                if registered:
+                    wait.expire()
+                returned_at_bound = done.wait(0.1)
+                if not returned_at_bound:
+                    release.set(); self.assertTrue(done.wait(30))
+                self.assertTrue(returned_at_bound, 'ledger_opened held the lane past the bound')
+                self.assertEqual(wait.calls, [10])
+                self.assertEqual([str(x) for x in errors], ['seal_ledger_open_timed_out'])
+                self.assertEqual(renderer.generations(P)[0].state, 'closing_late')
+                old = renderer._newest(P)
+                with self.assertRaises(RuntimeError):
+                    renderer.drain(P, C, through=0)
+                before = len(self.reports)
+                if reopen:
+                    renderer.ledger_opened(P); renderer.ledger_serving(P)
+                    renderer.ledger_closing(P)
+                    self.assertFalse(release.is_set())
+                    self.assertEqual(renderer.generations(P)[1].state, 'closed')
+                release.set(); old.thread.join(30)
+                self.assertFalse(old.thread.is_alive())
+                self.assertEqual(renderer.generations(P)[0].state, 'closed')
+                self.assertTrue(all(r.closed for r in readers))
+                self.assertEqual(len(self.reports), before)
+                # The late reader's owner has done only its open and close.
+                late = [x[0] for x in self.ledger.trace if x[1] == old.ident]
+                self.assertEqual(late[-2:], ['open', 'close'])
+        # Timeout result is cached; acknowledgment wins before the hook takes its lock.
+        manual = stand.ManualWait()
+        timed_out, proceed = threading.Event(), threading.Event()
+        blocked, entered, release = self.hold(self.ledger.open_reader)
+        events = []
+        def wait(event, seconds):
+            events.append(event)
+            answer = manual(event, seconds)
+            if not answer:
+                timed_out.set()
+                if not proceed.wait(30):
+                    raise AssertionError('hook not released')
+            return answer
+        renderer = self.renderer(reader=blocked, wait=wait)
+        done = self.spawn(lambda: renderer.ledger_opened(P))
+        self.addCleanup(proceed.set)
+        self.assertTrue(entered.wait(30)); manual.until_calls(1); manual.expire()
+        self.assertTrue(timed_out.wait(30))
+        release.set(); self.assertTrue(events[0].wait(30)); proceed.set()
+        self.assertTrue(done.wait(30))
+        self.assertEqual(renderer.generations(P)[-1].state, 'opened')
+        self.assertEqual(self.errors, [])
+
     def test_hook_close_completed(self):
         store = self.real_store(); self.rows(1, ledger=store)
         renderer = self.renderer(reader=store.open_reader, root=store.root)

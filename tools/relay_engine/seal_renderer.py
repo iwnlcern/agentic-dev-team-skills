@@ -84,15 +84,22 @@ class SealRenderer:
         owner.thread = threading.Thread(target=self._own, args=(owner, opened),
                                         name='seal-ledger-' + project_id, daemon=True)
         owner.thread.start()
-        opened.done.wait()
+        completed = self.wait(opened.done, self.bound_s)
+        if not completed:
+            with owner.condition:
+                if not opened.done.is_set():
+                    owner.closing = True
+                    self._state(owner, 'closing_late')
+                    raise RuntimeError('seal_ledger_open_timed_out')
         if opened.error is not None:
             raise opened.error
 
     def _hook_wait(self, owner, request):
         if not self.wait(request.done, self.bound_s / 2):
-            reader = owner.reader
-            if reader is not None:
-                reader.interrupt()
+            with owner.condition:
+                reader = owner.reader
+                if reader is not None:
+                    reader.interrupt()
             completed = self.wait(request.done, self.bound_s / 2)
         else:
             completed = True
@@ -197,8 +204,12 @@ class SealRenderer:
         pending_stop = None
         failed_request = None
         try:
-            owner.reader = self.open_reader(self.store_root, owner.project)
-            opened.done.set()
+            reader = self.open_reader(self.store_root, owner.project)
+            with owner.condition:
+                owner.reader = reader
+                if owner.closing:
+                    return
+                opened.done.set()
             while True:
                 with owner.condition:
                     owner.condition.wait_for(lambda: owner.queue)
@@ -252,11 +263,16 @@ class SealRenderer:
                         queued.error = exc
         finally:
             try:
-                if owner.reader is not None:
-                    owner.reader.close()
-                if owner.ledger_fd is not None:
-                    os.close(owner.ledger_fd)
-                    owner.ledger_fd = None
+                with owner.condition:
+                    reader = owner.reader
+                    owner.reader = None
+                try:
+                    if reader is not None:
+                        reader.close()
+                finally:
+                    if owner.ledger_fd is not None:
+                        os.close(owner.ledger_fd)
+                        owner.ledger_fd = None
             finally:
                 self._state(owner, 'closed')
                 opened.done.set()
