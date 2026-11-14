@@ -22,6 +22,7 @@ except ImportError:
 CODEC_WRITE = 'zstd' if _zstd is not None else 'zlib'
 MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
+RETENTION_PAGE_ROWS = 500
 _SHA = re.compile(r'[0-9a-f]{64}')
 
 
@@ -53,6 +54,14 @@ def _execute(conn, sql, parameters=()):
     cursor = conn.execute(sql, parameters)
     try:
         return cursor.rowcount
+    finally:
+        cursor.close()
+
+
+def _all(conn, sql, parameters=()):
+    cursor = conn.execute(sql, parameters)
+    try:
+        return cursor.fetchall()
     finally:
         cursor.close()
 
@@ -122,6 +131,12 @@ def _sequence(conn, project_id):
     return seq
 
 
+def _invalidate_derived(conn, project_id, object_id):
+    _execute(conn, 'DELETE FROM evidence_derive WHERE run_id='
+             '(SELECT derive_run_id FROM evidence_retention WHERE project_id=?) AND object_id=?',
+             (project_id, object_id))
+
+
 def _capture(conn, project_id, object_id, sha, capture, now_ms):
     closed = None
     if capture.bundle_id is not None:
@@ -138,6 +153,7 @@ def _capture(conn, project_id, object_id, sha, capture, now_ms):
              'state_seq=? WHERE object_id=?',
              (now_ms, capture.bundle_id is None, now_ms, now_ms,
               capture.captured_by == 'host-observed', seq, object_id))
+    _invalidate_derived(conn, project_id, object_id)
     if capture.bundle_id is not None:
         added = _execute(conn, 'INSERT OR IGNORE INTO evidence_object_bundles '
                          '(bundle_id,object_id,counted_open) VALUES (?,?,?)',
@@ -394,3 +410,109 @@ def commit_upload(conn, root, project_id, prepared: PreparedUpload) -> UploadRes
     _execute(conn, "UPDATE evidence_uploads SET state='committed',result_captured_by=?,updated_at=? "
              'WHERE upload_id=?', (captured_by, now_ms, prepared.upload_id))
     return UploadResult(row[0], row[1], captured_by, False)
+
+
+@dataclass(frozen=True)
+class RetentionReport:
+    visited: int = 0
+    changed: int = 0
+    drift: int = 0
+    finished: bool = False
+    run_id: int | None = None
+    tracked: int = 0
+
+
+def _retention(conn, root, project_id):
+    store_layout.evidence_dir(root, project_id)
+    _execute(conn, 'INSERT OR IGNORE INTO evidence_retention (project_id,next_seq) VALUES (?,1)',
+             (project_id,))
+
+
+def follow_up(conn, root, project_id, now_ms) -> RetentionReport:
+    """Observe a tracker page and follow at most 500 associations in that page."""
+    _retention(conn, root, project_id)
+    cursor = _one(conn, 'SELECT tracker_cursor FROM evidence_retention WHERE project_id=?',
+                  (project_id,))[0]
+    trackers = _all(conn, 'SELECT bundle_id,state_seen,closed_at,follow_up_cursor '
+                    'FROM evidence_bundles WHERE bundle_id>? ORDER BY bundle_id LIMIT ?',
+                    (cursor, RETENTION_PAGE_ROWS))
+    opened = [row[0] for row in trackers if row[1] == 'open']
+    observed = queries.bundle_closed_at(conn, project_id, opened) if opened else {}
+    visited = changed = drift = 0
+    for bundle_id, state, closed, continuation in trackers:
+        if state == 'open':
+            closed = observed[bundle_id]
+            if closed is None:
+                continue
+            _execute(conn, "UPDATE evidence_bundles SET state_seen='closed',closed_at=? WHERE bundle_id=?",
+                     (closed, bundle_id))
+        if visited == RETENTION_PAGE_ROWS:
+            continue
+        associations = _all(conn, 'SELECT association_id,object_id,counted_open '
+                            'FROM evidence_object_bundles WHERE bundle_id=? AND object_id>? '
+                            'ORDER BY object_id LIMIT ?',
+                            (bundle_id, continuation, RETENTION_PAGE_ROWS - visited))
+        visited += len(associations)
+        for association_id, object_id, counted_open in associations:
+            if not counted_open:
+                continue
+            _execute(conn, 'UPDATE evidence_object_bundles SET counted_open=0 WHERE association_id=?',
+                     (association_id,))
+            obj = _one(conn, 'SELECT open_bundle_count FROM evidence_objects WHERE object_id=?',
+                       (object_id,))
+            if obj is None:
+                continue
+            drift += obj[0] == 0
+            seq = _sequence(conn, project_id)
+            _execute(conn, 'UPDATE evidence_objects SET open_bundle_count=MAX(open_bundle_count-1,0),'
+                     'latest_bundle_close_at=MAX(COALESCE(latest_bundle_close_at,?),?),state_seq=? '
+                     'WHERE object_id=?', (closed, closed, seq, object_id))
+            _invalidate_derived(conn, project_id, object_id)
+            changed += 1
+        if associations:
+            _execute(conn, 'UPDATE evidence_bundles SET follow_up_cursor=? WHERE bundle_id=?',
+                     (associations[-1][1], bundle_id))
+    next_cursor = trackers[-1][0] if len(trackers) == RETENTION_PAGE_ROWS else ''
+    _execute(conn, 'UPDATE evidence_retention SET tracker_cursor=? WHERE project_id=?',
+             (next_cursor, project_id))
+    return RetentionReport(visited, changed, drift,
+                           len(trackers) < RETENTION_PAGE_ROWS and visited < RETENTION_PAGE_ROWS,
+                           tracked=len(trackers))
+
+
+def derive(conn, root, project_id, now_ms) -> RetentionReport:
+    """Accumulate one keyset page; changed objects cannot supply a run result."""
+    _retention(conn, root, project_id)
+    run_id, start_seq, cursor, finished = _one(conn, 'SELECT derive_run_id,derive_start_seq,'
+                                               'derive_cursor,derive_finished '
+                                               'FROM evidence_retention WHERE project_id=?', (project_id,))
+    if run_id is None or finished:
+        run_id = start_seq = _sequence(conn, project_id)
+        cursor = 0
+        _execute(conn, 'UPDATE evidence_retention SET derive_run_id=?,derive_start_seq=?,'
+                 'derive_cursor=0,derive_finished=0,mark_cursor=0 WHERE project_id=?',
+                 (run_id, start_seq, project_id))
+    associations = _all(conn, 'SELECT association_id,object_id,bundle_id '
+                        'FROM evidence_object_bundles WHERE association_id>? ORDER BY association_id LIMIT ?',
+                        (cursor, RETENTION_PAGE_ROWS))
+    bundles = list(dict.fromkeys(row[2] for row in associations))
+    observed = queries.bundle_closed_at(conn, project_id, bundles) if bundles else {}
+    changed = 0
+    for association_id, object_id, bundle_id in associations:
+        obj = _one(conn, 'SELECT state_seq FROM evidence_objects WHERE object_id=?', (object_id,))
+        if obj is None or obj[0] >= start_seq:
+            _execute(conn, 'DELETE FROM evidence_derive WHERE run_id=? AND object_id=?', (run_id, object_id))
+            continue
+        closed = observed[bundle_id]
+        _execute(conn, 'INSERT INTO evidence_derive (run_id,object_id,open_count,latest_close_at) '
+                 'VALUES (?,?,?,?) ON CONFLICT(run_id,object_id) DO UPDATE SET '
+                 'open_count=open_count+excluded.open_count,latest_close_at='
+                 'CASE WHEN excluded.latest_close_at IS NULL THEN latest_close_at '
+                 'ELSE MAX(COALESCE(latest_close_at,excluded.latest_close_at),excluded.latest_close_at) END',
+                 (run_id, object_id, closed is None, closed))
+        changed += 1
+    finished = len(associations) < RETENTION_PAGE_ROWS
+    next_cursor = associations[-1][0] if associations else cursor
+    _execute(conn, 'UPDATE evidence_retention SET derive_cursor=?,derive_finished=? WHERE project_id=?',
+             (next_cursor, finished, project_id))
+    return RetentionReport(len(associations), changed, finished=finished, run_id=run_id)
