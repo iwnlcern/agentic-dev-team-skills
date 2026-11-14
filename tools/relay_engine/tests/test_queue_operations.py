@@ -8,7 +8,7 @@ from unittest import mock
 from relay_engine import store_layout
 from relay_engine.api_principals import OperatorPrincipal
 from relay_engine.operator_queue import kinds, records, operations
-from relay_engine.tests import test_queue_records as fixtures
+from relay_engine.tests import test_queue_records as fixtures, test_queue_saga as saga_fixtures
 from relay_engine.tests.test_catalogue import P, Q
 
 
@@ -177,6 +177,9 @@ class TestQueueOperations(unittest.TestCase):
                           'VALUES (?,?,?,?,?,?,?,?,?)',
                           (question.item_id, 'answer', 'Exact answer.', 123, 'secret-key', b'secret-draft',
                            '{"secret":"args"}', P, 'recorded')).close()
+        self.conn.execute("UPDATE queue_items SET state='applying',revision=2 WHERE item_id=?",
+                          (question.item_id,)).close()
+        records.append_event(self.conn, question.item_id, 2, 'applying', 'answered', self.operator, 123)
         item = self.get(question.item_id)['item']
         self.assertEqual(item['fields'], {'report_path': 'kept'})
         self.assertEqual(item['answer'], {'answer_id': 'answer', 'answer': 'Exact answer.', 'answered_at_ms': 123})
@@ -324,6 +327,44 @@ class TestQueueWithdrawal(unittest.TestCase):
         result=self.withdraw()
         self.assertEqual((result.code,result.cause_kind),('E_API_AUTH','session_not_current'))
         self.assertEqual(self.f.snapshot(),before);self.assertEqual(self.conn.total_changes,changes)
+
+
+class TestQueueHistorySnapshot(unittest.TestCase):
+    def setUp(self):
+        self.answers = saga_fixtures.TestQueueRecordAnswer()
+        self.answers.setUp()
+        self.addCleanup(self.answers.doCleanups)
+        self.conn = self.answers.c
+        self.item = self.answers.question()
+        self.answers.answer(self.item, value={'text': 'Yes'})
+
+    def test_get_history_coherent_across_confirm(self):
+        # Current answer metadata would mix a confirmed job with H=2.
+        from relay_engine.operator_queue import saga
+        first = operations.get_item(self.conn, self.item.item_id, 1, None)
+        self.assertEqual(first['queue_event_position'], 2)
+        self.assertIsNotNone(first['continuation'])
+        saga.confirm(self.conn, self.item.item_id,
+                     saga.ApplyResult('applied', 'receipt', None, None, None), 500)
+        page = operations.get_item(self.conn, self.item.item_id, 1, first['continuation'])
+        self.assertEqual((page['item']['state'], page['item']['revision']), ('applying', 2))
+        self.assertEqual(page['item']['answer']['answer'], '{"text":"Yes"}')
+        self.assertEqual(page['item']['job']['phase'], 'recorded')
+        self.assertIsNone(page['item']['outcome'])
+        self.assertEqual(page['queue_event_position'], 2)
+
+    def test_get_last_reason_fixed_by_first_page(self):
+        # Omitting the carried reason would expose the later transient result.
+        from relay_engine.operator_queue import saga
+        saga.confirm(self.conn, self.item.item_id,
+                     saga.ApplyResult('transient', None, None, None, 'busy'), 500)
+        first = operations.get_item(self.conn, self.item.item_id, 1, None)
+        self.assertEqual(first['item']['job']['last_reason'], 'busy')
+        self.assertIsNotNone(first['continuation'])
+        saga.confirm(self.conn, self.item.item_id,
+                     saga.ApplyResult('transient', None, None, None, 'closed'), 501)
+        page = operations.get_item(self.conn, self.item.item_id, 1, first['continuation'])
+        self.assertEqual(page['item']['job']['last_reason'], 'busy')
 
 
 if __name__ == '__main__':

@@ -137,7 +137,12 @@ def _decode_token(token, identity, family, scope, selector, maximum):
         value = json.loads(base64.b64decode(token + '=' * (-len(token) % 4), altchars=b'-_', validate=True))
     except (ValueError, UnicodeDecodeError):
         return None
-    if not isinstance(value, dict) or set(value) != {'store_id', 'family', 'scope', 'selector', 'h', 'last'}:
+    fields = {'store_id', 'family', 'scope', 'selector', 'h', 'last'}
+    if family == 'history':
+        fields.add('last_reason')
+    if not isinstance(value, dict) or set(value) != fields:
+        return None
+    if family == 'history' and value['last_reason'] is not None and not isinstance(value['last_reason'], str):
         return None
     if (value['store_id'], value['family'], value['scope'], value['selector']) != (identity, family, scope, selector):
         return None
@@ -215,35 +220,43 @@ def list_items(conn, scope: str, state_filter, kind_filter, page_size: int, cont
 def get_item(conn, item_id, history_page_size: int, history_continuation: str | None):
     _page_size(history_page_size)
     identity = records.store_id(conn)
-    maximum = records.next_position(conn) - 1
+    # Capture the event-less reason and H in the same SQLite statement view.
+    answer = _dicts(conn, 'SELECT (SELECT COALESCE(MAX(position),0) FROM queue_events) AS h,'
+                    'a.answer_id,a.answer,a.answered_at_ms,a.phase,a.last_reason,a.outcome '
+                    'FROM (SELECT 1) AS seed LEFT JOIN queue_answers a ON a.item_id=?', (item_id,))[0]
+    maximum = answer.pop('h')
     selector = request_digest('queue.get', dict(item_id=item_id))
     highwater, last = maximum, 0
+    last_reason = answer['last_reason']
     if history_continuation is not None:
         value = _decode_token(history_continuation, identity, 'history', item_id, selector, maximum)
         if value is None:
             return _refusal('stale_continuation', code='E_QUEUE_INVALID')
         highwater, last = value['h'], value['last']
+        last_reason = value['last_reason']
     rows = _dicts(conn, _SNAPSHOT + 'WHERE i.item_id=? AND i.raised_position<=?',
                   (highwater, item_id, highwater))
     if not rows:
         return _refusal('item_not_found')
     item = _item(rows[0])
-    answers = _dicts(conn, 'SELECT answer_id,answer,answered_at_ms,phase,last_reason,outcome '
-                     'FROM queue_answers WHERE item_id=?', (item_id,))
+    event_kinds = {row[0] for row in records._rows(conn,
+        'SELECT event_kind FROM queue_events WHERE item_id=? AND position<=? '
+        "AND event_kind IN ('answered','applied','superseded','refused','faulted')", (item_id, highwater))}
     item['answer'] = None
     item['job'] = None
     item['outcome'] = None
-    if answers:
-        answer = answers[0]
+    if 'answered' in event_kinds:
+        confirmed = bool(event_kinds & {'applied', 'superseded', 'refused', 'faulted'})
         item['answer'] = {name: answer[name] for name in ('answer_id', 'answer', 'answered_at_ms')}
-        item['job'] = {name: answer[name] for name in ('phase', 'last_reason')}
-        item['outcome'] = answer['outcome']
+        item['job'] = dict(phase=answer['phase'] if confirmed else 'recorded', last_reason=last_reason)
+        item['outcome'] = answer['outcome'] if confirmed else None
     events = _dicts(conn, 'SELECT * FROM queue_events WHERE item_id=? AND position>? AND position<=? '
                    'ORDER BY position LIMIT ?', (item_id, last, highwater, history_page_size + 1))
     selected = events[:history_page_size]
     token = None
     if len(events) > history_page_size:
-        token = _token(identity, 'history', item_id, selector, highwater, selected[-1]['position'])
+        token = _encode_token(dict(store_id=identity, family='history', scope=item_id,
+            selector=selector, h=highwater, last=selected[-1]['position'], last_reason=last_reason))
     return dict(item=item, events=selected, continuation=token, store_id=identity,
                 observed_revision=highwater, queue_event_position=highwater)
 
