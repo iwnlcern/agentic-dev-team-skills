@@ -13,7 +13,7 @@ from relay_engine.submit import new_uuid7
 def answer_draft(item: records.ItemView, choice: str | None, text: str,
                  top_seat_address: str | None) -> bytes:
     texts = json.loads(item.texts)
-    subject = ('Operator answer: ' + texts['subject'])[:400]
+    subject = ('Operator answer: ' + texts['subject'])[:400].rstrip()
     lines = ['KIND: SITREP', 'TO: ' + item.answer_to]
     if top_seat_address is not None and top_seat_address != item.answer_to:
         lines.append('CC: ' + top_seat_address)

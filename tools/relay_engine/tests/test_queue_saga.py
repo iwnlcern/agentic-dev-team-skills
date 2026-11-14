@@ -23,9 +23,7 @@ class TestQueueRecordAnswer(unittest.TestCase):
             self.f.ledger.execute('UPDATE team_instances SET closed_at=2 WHERE id=?',
                                   ((sender or self.f.sender).team_instance_id,)).close()
             self.f.ledger.commit()
-        rows = self.f.rows()
-        cursor = records.read_cursor(self.c, P, 'question')
-        ingest.ingest_questions(self.c, rows, P, cursor, check_rewind=True, now_ms=self.f.clock)
+        ingest.question_ingest_pass(Port(self.f), [P], self.f.clock)
         item_id = next(row[0] for row in self.f.items() if row[1] == q.relay_id)
         return self.view(item_id)
 
@@ -81,6 +79,15 @@ class TestQueueRecordAnswer(unittest.TestCase):
         self.assertEqual(len(parsed.subject), 400)
         self.assertEqual(parsed.subject, ('Operator answer: '+'Q'*398+'\u754c\U0001f642')[:400])
         self.assertEqual(parsed.cc, ())
+        # A byte cut drops the multibyte suffix instead of preserving two code points.
+        item = self.question(subject='Q' * 381 + '界\U0001f642界')
+        parsed = header.parse(saga.answer_draft(item, None, 'Yes', None))
+        self.assertEqual(parsed.subject, 'Operator answer: ' + 'Q' * 381 + '界\U0001f642')
+        self.assertEqual(len(parsed.subject), 400)
+        # Cutting after whitespace must still produce a parseable SUBJECT.
+        item = self.question(subject='Q' * 382 + ' ' + 'R' * 17)
+        parsed = header.parse(saga.answer_draft(item, None, 'Yes', None))
+        self.assertEqual(parsed.subject, 'Operator answer: ' + 'Q' * 382)
 
     def test_answer_text_too_long(self):
         self.refused(self.question(), 'text_too_long', value={'text': '\u754c'*21846})
