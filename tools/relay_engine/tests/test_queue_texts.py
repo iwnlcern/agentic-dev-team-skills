@@ -63,5 +63,17 @@ class TestQueueTexts(unittest.TestCase):
                          ['terminal-notifier', '-title', '\\' + ALARM_TITLE, '-message', '\\' + ALARM_TEXT])
 
 
+    def test_answer_faulted_text(self):
+        expected = "v3 stopped an answer you gave: a different version had already been sent to this agent, which only a fault in v3 can cause. Open the question on v3's page to check it."
+        self.assertEqual(dict(kinds.ANSWER_FAULTED_TEXTS), {'question': expected})
+        self.assertEqual(len(kinds.ANSWER_FAULTED_TEXTS['question'].encode('utf-8')), 167)
+        with self.assertRaises(TypeError):
+            kinds.ANSWER_FAULTED_TEXTS['question'] = 'Changed'
+        for program in ('osascript', 'terminal-notifier', 'notify-send'):
+            argv = notifier.notification_argv(notifier.Notification('i', 1, 'p: team.planner', expected), program)
+            self.assertEqual(argv[-1], ('\\' if program == 'terminal-notifier' else '') + expected)
+            self.assertNotIn(' … [cut:', argv[-1])
+
+
 if __name__ == '__main__':
     unittest.main()

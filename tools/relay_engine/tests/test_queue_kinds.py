@@ -24,6 +24,7 @@ EXPECTED_MATRIX = (
     ('notice', 'notifier_unhealthy', 'queue.raise', 'supervision', 'pr1', frozenset({'notify_worker'})),
     ('notice', 'worker_stalled', 'queue.raise', 'supervision', 'pr1', frozenset(WORKERS)),
     ('notice', 'operator_act_carried', 'internal', 'console_queue', 'pr3c', None),
+    ('notice', 'answer_faulted', 'internal', 'console_queue', 'pr1', None),
 )
 ALL_TAGS = frozenset({'pr1','pr2','pr3','pr3c','pr4','pr5','pr6'})
 NOTICE_NAMES = frozenset({'seat_registered','seat_replaced','seat_stood_down','seat_unseated',
@@ -71,7 +72,7 @@ class TestQueueKinds(unittest.TestCase):
 
     def test_ring_set(self):
         expected = frozenset({'question','cross_project_permission','merge_go_ahead','verification_held',
-                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused'})
+                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted'})
         self.assertEqual(kinds.RING_SET,expected)
         for member in expected:
             parts=member.split('/')
