@@ -137,7 +137,8 @@ class TestBridge(unittest.TestCase):
     def test_status_table(self):
         cases = [('invalid_args', {}, 400), ('already_connected', {}, 400),
                  ('pin_mismatch', {'field': 'build_id', 'required': 'f' * 64, 'actual': 'a' * 64}, 409),
-                 ('runtime_not_ready', {}, 503), ('handler_fault', {}, 500)]
+                 ('runtime_not_ready', {}, 503), ('handler_fault', {}, 500),
+                 ('key_rejected', {}, 401), ('operation_key_reused', {}, 409)]
         for kind, payload, status in cases:
             with self.subTest(kind=kind):
                 error = p.api_error(self.registry, kind, **payload)
@@ -146,6 +147,29 @@ class TestBridge(unittest.TestCase):
                 self.assertEqual(result.status, status)
                 self.assertEqual(envelope, {'request_id': '1', 'error': error})
                 self.assertEqual(self.backends[-1].closed, 1)
+
+    def test_status_by_class_covers_catalogue(self):
+        from relay_engine import errors
+        self.assertEqual(self.b.STATUS_BY_CLASS, {
+            'wire': 400, 'auth': 401, 'version': 409, 'conflict': 409,
+            'internal': 500, 'unavailable': 503})
+
+        def covered():
+            for variant in errors.api_error_catalog().variants:
+                self.assertIn(variant.api_class, self.b.STATUS_BY_CLASS)
+        covered()
+        incomplete = dict(self.b.STATUS_BY_CLASS)
+        del incomplete['conflict']
+        with patch.dict(self.b.STATUS_BY_CLASS, incomplete, clear=True):
+            error = {'code': 'E_API_CONFLICT', 'class': 'conflict',
+                     'cause': {'kind': 'operation_key_reused'}, 'remedy': 'use_new_operation_key'}
+            self.override = lambda req, _response: {'request_id': req.request_id, 'error': error}
+            result, envelope = self.exchange()
+            self.assertEqual(result.status, 500)
+            self.assertEqual(envelope, {'request_id': '1', 'error': error})
+            self.assertEqual(self.backends[-1].closed, 1)
+            with self.assertRaisesRegex(AssertionError, 'conflict'):
+                covered()
 
     def test_known_route_refusals_keep_route_correlation(self):
         requests = [self.req('/api/schema', headers=(('Host', 'other:43210'),)),

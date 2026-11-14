@@ -10,6 +10,12 @@ fn run(v:&Value)->Result<Value,()>{
   "schema"=>Ok(valid(api::supports_schema(string(v,"schema")?))),
   "validate"=>Ok(valid(api::validate_type(string(v,"type")?,v.get("value")?))),
   "encode"=>{let bytes=api::encode_request(string(v,"operation")?,string(v,"id")?,v.get("value")?)?;Ok(object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]))},
+  "encode_error"=>{
+   let error=match api::ApiError::from_value(v.get("value")?){Ok(error)=>error,Err(())=>return Ok(object(vec![("invalid",Value::Bool(true))]))};
+   let body=api::canonical(&object(vec![("request_id",text(string(v,"id")?)),("error",error.to_value())])).into_bytes();
+   let mut bytes=(body.len() as u32).to_be_bytes().to_vec();bytes.extend(body);
+   Ok(object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]))
+  },
   "decode"=>{
    let connect=string(v,"connect")?;let observation=if connect.is_empty(){DecodedResponse::Unavailable}else{api::decode_response(&unhex(connect)?,"protocol.connect","1",None)};
    let context=match &observation {DecodedResponse::Connect(_,ctx)=>Some(ctx),_=>None};

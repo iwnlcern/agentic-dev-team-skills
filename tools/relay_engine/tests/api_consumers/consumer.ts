@@ -10,6 +10,13 @@ async function run(value: Json): Promise<unknown> {
     if (action === 'schema') return { valid: supportsSchema(str(v['schema'])) };
     if (action === 'validate') return { valid: await validateType(str(v['type']) as keyof Types, v['value']) };
     if (action === 'encode') { const bytes = await encodeRequest(str(v['operation']), str(v['id']), v['value']); return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') }; }
+    if (action === 'encode_error') {
+        if (!await validateType('ApiError', v['value'])) return { invalid: true };
+        const body = new TextEncoder().encode(canonical({ request_id: str(v['id']), error: v['value'] }));
+        const bytes = new Uint8Array(body.length + 4);
+        new DataView(bytes.buffer).setUint32(0, body.length, false); bytes.set(body, 4);
+        return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') };
+    }
     if (action === 'decode') {
         let context: ValidatedConnect | undefined;
         if (v['connect'] !== '') { const result = await decodeResponse(unhex(str(v['connect'])), 'protocol.connect', '1'); if (result.kind === 'connect') context = result.context; }

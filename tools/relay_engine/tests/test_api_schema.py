@@ -58,6 +58,15 @@ class TestExport(unittest.TestCase):
         self.assertFalse(a.canonical_bytes.endswith(b'\n'))
         self.assertEqual(a.canonical_bytes, jcs.jcs_encode(json.loads(a.canonical_bytes)))
 
+    def test_schema_digest_changed_and_check_clean(self):
+        # The producer of the old pin is core discovery's committed manifest.
+        old_digest = '9445baeef11240763072427eee4f9f629979f0a3cc03a6951428dc005784044a'
+        artifact = self.export()
+        self.assertNotEqual(artifact.digest, old_digest)
+        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 20)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(load_generator().main(['--check']), 0)
+
     def test_schema_document_shape(self):
         doc = json.loads(self.export().canonical_bytes)
         self.assertEqual(doc['$schema'], 'https://json-schema.org/draft/2020-12/schema')
@@ -78,7 +87,7 @@ class TestExport(unittest.TestCase):
             'protocol_window_v1', 'schema_payload_v1', 'negotiated_schema_v1'})
         scopes = [(rule.get('type_ref', rule.get('array_ref', rule.get('operation'))), rule['kind']) for rule in rules]
         self.assertEqual(scopes, sorted(set(scopes)))
-        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 13)
+        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 20)
         for item in doc['$defs'].values():
             if item.get('type') == 'object':
                 self.assertIs(item['additionalProperties'], False)
@@ -454,6 +463,41 @@ def consumer_scenarios():
 
 
 class TestGeneratedConsumers(unittest.TestCase):
+    def test_auth_and_conflict_consumer_vectors(self):
+        rows = [('key_rejected', 'check_key_file'), ('key_replaced', 'obtain_current_key'),
+                ('seat_stood_down', 'ask_top_seat'), ('session_not_current', 'sign_in_again'),
+                ('not_signed_in', 'sign_in_first'), ('already_bound', 'open_new_connection'),
+                ('operation_key_reused', 'use_new_operation_key')]
+        cases = []
+        def frame(value):
+            raw = jcs.jcs_encode(value)
+            return (len(raw).to_bytes(4, 'big') + raw).hex()
+        for kind, remedy in rows:
+            conflict = kind == 'operation_key_reused'
+            error = {'code': 'E_API_CONFLICT' if conflict else 'E_API_AUTH',
+                     'class': 'conflict' if conflict else 'auth',
+                     'cause': {'kind': kind}, 'remedy': remedy}
+            envelope = {'request_id': '1', 'error': error}
+            bad = dict(error, remedy='unknown_remedy')
+            cases.extend([
+                ({'action': 'encode_error', 'id': '1', 'value': error}, {'hex': frame(envelope)}),
+                ({'action': 'encode_error', 'id': '1', 'value': bad}, {'invalid': True}),
+                ({'action': 'decode', 'id': '1', 'operation': 'protocol.connect', 'connect': '',
+                  'frame': frame(envelope)}, {'error': error}),
+                ({'action': 'decode', 'id': '1', 'operation': 'protocol.connect', 'connect': '',
+                  'frame': frame({'request_id': '1', 'error': bad})}, {'unavailable': True}),
+            ])
+        for language in ('rs', 'ts'):
+            with self.subTest(language=language):
+                # Every positive differs from the negative beside it. Compare a
+                # deliberately wrong expectation too, so passthrough cannot pass.
+                self.run_consumer(language, cases=cases, controls=False)
+                control = list(cases)
+                control[0] = (cases[0][0], {'hex': frame({'request_id': '2', 'error':
+                                                       cases[0][0]['value']})})
+                with self.assertRaises(AssertionError):
+                    self.run_consumer(language, cases=control, controls=False)
+
     def test_manifest_matches_artifacts(self):
         from relay_engine import api_schema
         root = TOOLS / 'relay_engine/generated/api'
