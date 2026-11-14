@@ -130,6 +130,14 @@ def unregister_route_step(conn, *, dev: int, ino: int, checkout_id: str | None,
     return Ended(row[0], reason)
 
 
+def forget_route_step(conn, *, checkout_id: str, now_ms: int) -> Ended | NotRegistered:
+    """Delta 7 D2: end only the selected open route and settle its marker."""
+    changed = _changed(conn, "UPDATE checkout_routes SET ended_at=?, end_reason='unmatched', "
+                       'ledger_synced_at=? WHERE checkout_id=? AND ended_at IS NULL',
+                       (now_ms, now_ms, checkout_id))
+    return Ended(checkout_id, 'unmatched') if changed else NotRegistered()
+
+
 def write_ledger_row_step(conn, route: CheckoutRoute, *, now_ms: int) -> Literal['written', 'superseded']:
     """Write a newer owner or refresh its open row; never revive its ended row."""
     changed = _changed(conn, 'INSERT INTO repository_checkouts '
@@ -151,6 +159,22 @@ def end_ledger_row_step(conn, route: CheckoutRoute, *, now_ms: int) -> Literal['
     changed = _changed(conn, 'UPDATE repository_checkouts SET ended_at=? '
                        'WHERE path=? AND checkout_id=? AND ended_at IS NULL',
                        (now_ms, route.worktree_path, route.checkout_id))
+    return 'ended' if changed else 'unchanged'
+
+
+def forget_ledger_row_step(conn, route: CheckoutRoute, *, now_ms: int) -> Literal['ended', 'unchanged']:
+    """Delta 7 D1: insert an ended owner or end its eligible ledger row."""
+    changed = _changed(conn, 'INSERT INTO repository_checkouts '
+                       '(repository_id, path, last_seen_at, checkout_id, route_created_at, ended_at) '
+                       'VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (path) DO UPDATE SET '
+                       'repository_id = excluded.repository_id, last_seen_at = excluded.last_seen_at, '
+                       'checkout_id = excluded.checkout_id, route_created_at = excluded.route_created_at, '
+                       'ended_at = excluded.ended_at WHERE '
+                       'excluded.route_created_at > repository_checkouts.route_created_at OR '
+                       '(excluded.checkout_id = repository_checkouts.checkout_id '
+                       'AND repository_checkouts.ended_at IS NULL)',
+                       (route.repository_id, route.worktree_path, now_ms,
+                        route.checkout_id, route.created_at, now_ms))
     return 'ended' if changed else 'unchanged'
 
 

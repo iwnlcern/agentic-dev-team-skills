@@ -10730,7 +10730,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/checkout_store.py",
-    "sha256": "5d8507f1fa4f54e989555e0e33881eae1ebef3703501bb33e051f047402a170d",
+    "sha256": "2a1dbb74cb3cde763e76c9580361fd0afea188bcf2a0b50dcf29c314532b12dd",
     "source": "tools/relay_engine/checkout_store.py"
   },
   {
@@ -10916,7 +10916,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/store_layout.py",
-    "sha256": "99eb780528153adbd5dc0fbd3de5c8df1ac78ad5c95555f481a8773b16e3a1af",
+    "sha256": "35ff6942c2526847ddac35c05ef32d27521a382f3276ac2df2e32973298e2047",
     "source": "tools/relay_engine/store_layout.py"
   },
   {
@@ -21578,7 +21578,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/checkout_store.py",
-    "sha256": "5d8507f1fa4f54e989555e0e33881eae1ebef3703501bb33e051f047402a170d",
+    "sha256": "2a1dbb74cb3cde763e76c9580361fd0afea188bcf2a0b50dcf29c314532b12dd",
     "source": "tools/relay_engine/checkout_store.py"
   },
   {
@@ -21764,7 +21764,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/store_layout.py",
-    "sha256": "99eb780528153adbd5dc0fbd3de5c8df1ac78ad5c95555f481a8773b16e3a1af",
+    "sha256": "35ff6942c2526847ddac35c05ef32d27521a382f3276ac2df2e32973298e2047",
     "source": "tools/relay_engine/store_layout.py"
   },
   {
@@ -32342,7 +32342,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/checkout_store.py",
-    "sha256": "5d8507f1fa4f54e989555e0e33881eae1ebef3703501bb33e051f047402a170d",
+    "sha256": "2a1dbb74cb3cde763e76c9580361fd0afea188bcf2a0b50dcf29c314532b12dd",
     "source": "tools/relay_engine/checkout_store.py"
   },
   {
@@ -32528,7 +32528,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/store_layout.py",
-    "sha256": "99eb780528153adbd5dc0fbd3de5c8df1ac78ad5c95555f481a8773b16e3a1af",
+    "sha256": "35ff6942c2526847ddac35c05ef32d27521a382f3276ac2df2e32973298e2047",
     "source": "tools/relay_engine/store_layout.py"
   },
   {

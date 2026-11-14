@@ -570,3 +570,13 @@ def open_checkout_routes(catalogue_conn) -> list[CheckoutRoute]:
         'SELECT ' + _CHECKOUT_ROUTE_COLUMNS +
         ' FROM checkout_routes WHERE ended_at IS NULL ORDER BY project_id, worktree_path, checkout_id', ())
     return [CheckoutRoute(*row) for row in rows]
+
+
+def owed_ended_routes(catalogue_conn, project_id: str) -> list[CheckoutRoute]:
+    """Delta 7 D3: read owed ends oldest first, breaking ties by checkout id."""
+    rows = _catalogue_read(
+        catalogue_conn,
+        'SELECT ' + _CHECKOUT_ROUTE_COLUMNS +
+        ' FROM checkout_routes WHERE project_id = ? AND ended_at IS NOT NULL '
+        'AND ledger_synced_at IS NULL ORDER BY created_at, checkout_id', (project_id,))
+    return [CheckoutRoute(*row) for row in rows]

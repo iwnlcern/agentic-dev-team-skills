@@ -341,6 +341,70 @@ class TestCheckoutRoutes(unittest.TestCase):
             store_layout.open_checkout_routes(self.conn)
         self.assertFalse(self.conn.in_transaction)
 
+    def test_owed_ended_routes_lists_owed_in_order(self):
+        # R1/R2/R3 lose filters; R4/R5 lose the full order or its tie-break.
+        from dataclasses import astuple
+        q = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+        self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+                          (q, 'other', 'active', 1)).close()
+        self.conn.commit()
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        values = {}
+        for n, (cid, project, created, ended, reason, synced) in enumerate((
+                ('o', P, 10, None, None, None),
+                ('s', P, 20, 25, 'matched', 26),
+                ('k', P, 50, 55, 'unmatched', None),
+                ('j', P, 30, 35, 'matched', None),
+                ('i', P, 30, 36, 'matched', None),
+                ('q', q, 15, 16, 'matched', None))):
+            row = (cid, project, 'repository-' + cid, '/git/' + cid, '/p/' + cid,
+                   100 + n, 200 + n, created, ended, reason, synced)
+            self.conn.execute('INSERT INTO checkout_routes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                              row).close()
+            values[cid] = row
+        self.conn.commit()
+        reader = store_layout.open_catalogue_readonly(self.root)
+        self.addCleanup(reader.close)
+        self.assertEqual([astuple(row) for row in store_layout.owed_ended_routes(reader, P)],
+                         [values[cid] for cid in ('i', 'j', 'k')])
+        self.assertFalse(reader.in_transaction)
+
+    def test_owed_ended_routes_empty(self):
+        # R2 includes an ended route whose ledger end is already settled.
+        self.assertEqual(store_layout.owed_ended_routes(self.conn, P), [])
+        self.insert('done', 10, 15, 'matched')
+        self.conn.execute("UPDATE checkout_routes SET ledger_synced_at=16 WHERE checkout_id='done'").close()
+        self.conn.commit()
+        self.assertEqual(store_layout.owed_ended_routes(self.conn, P), [])
+
+    def test_owed_ended_routes_keeps_caller_transaction(self):
+        # R6 commits the caller's pending route instead of leaving it owned.
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        pending = self.insert('pending', 10, 15, 'matched')
+        self.assertEqual(store_layout.owed_ended_routes(self.conn, P),
+                         [store_layout.CheckoutRoute(*pending)])
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(store_layout.owed_ended_routes(self.conn, P), [])
+        self.conn.execute('BEGIN IMMEDIATE').close()
+        self.insert('pending-error', 20, 25, 'matched')
+        self.conn.execute('DROP TABLE checkout_routes').close()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.owed_ended_routes(self.conn, P)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(store_layout.owed_ended_routes(self.conn, P), [])
+
+    def test_owed_ended_routes_cleans_up_its_own(self):
+        # R7 omits owned rollback; R8 swallows the unreadable catalogue.
+        self.assertEqual(store_layout.owed_ended_routes(self.conn, P), [])
+        self.assertFalse(self.conn.in_transaction)
+        self.conn.execute('DROP TABLE checkout_routes').close()
+        self.conn.commit()
+        with self.assertRaises(sqlite3.OperationalError):
+            store_layout.owed_ended_routes(self.conn, P)
+        self.assertFalse(self.conn.in_transaction)
+
     def test_checkout_reads_select_route_fields(self):
         # K1 drops a column; K2 swaps inode fields; K3 swaps end fields.
         import dataclasses

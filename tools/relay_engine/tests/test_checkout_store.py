@@ -266,6 +266,84 @@ class TestCheckoutSteps(CheckoutCase):
         self.assertEqual(self.routes(), before)
         self.assertTrue(self.cat.in_transaction)
 
+    def test_forget_ledger_row_inserts_ended(self):
+        # F1: end_ledger_row_step leaves a missing row free to reopen later.
+        repo = self.ensure().repository_id
+        self.register(self.new(repo))
+        route = self.read()[0]
+        self.assertEqual(
+            (jobs.forget_ledger_row_step(self.ledger, route, now_ms=30),
+             jobs.write_ledger_row_step(self.ledger, route, now_ms=31),
+             self.ledger_rows()),
+            ('ended', 'superseded', [(repo, '/work', 30, 'own', 10, 30)]))
+        self.assertTrue(self.ledger.in_transaction)
+
+    def test_forget_ledger_row_ends_own_open_row(self):
+        # F2: omitting the ended_at update leaves the route's row open.
+        repo = self.ensure().repository_id
+        self.register(self.new(repo))
+        route = self.read()[0]
+        jobs.write_ledger_row_step(self.ledger, route, now_ms=11)
+        self.assertEqual(jobs.forget_ledger_row_step(self.ledger, route, now_ms=30),
+                         'ended')
+        self.assertEqual(self.ledger_rows(), [(repo, '/work', 30, 'own', 10, 30)])
+
+    def test_forget_ledger_row_spares_newer_route(self):
+        # F3 removes the ownership guard; F5 rewrites an already-ended own row.
+        repo = self.ensure().repository_id
+        self.register(self.new(repo))
+        route = self.read()[0]
+        jobs.write_ledger_row_step(self.ledger, replace(route, checkout_id='new', created_at=20),
+                                   now_ms=21)
+        before = self.ledger_rows()
+        self.assertEqual(jobs.forget_ledger_row_step(self.ledger, route, now_ms=30),
+                         'unchanged')
+        self.assertEqual(self.ledger_rows(), before)
+        other = replace(route, checkout_id='other', worktree_path='/other', created_at=5)
+        self.assertEqual(jobs.forget_ledger_row_step(self.ledger, other, now_ms=7), 'ended')
+        before = self.ledger_rows()
+        self.assertEqual(jobs.forget_ledger_row_step(self.ledger, other, now_ms=40),
+                         'unchanged')
+        self.assertEqual(self.ledger_rows(), before)
+
+    def test_forget_ledger_row_replaces_older_route(self):
+        # F4 removes the newer-route term, leaving the older route's row.
+        repo = self.ensure().repository_id
+        self.register(self.new(repo))
+        route = self.read()[0]
+        jobs.write_ledger_row_step(self.ledger, route, now_ms=11)
+        newer = replace(route, checkout_id='new', created_at=20)
+        self.assertEqual(jobs.forget_ledger_row_step(self.ledger, newer, now_ms=30), 'ended')
+        self.assertEqual(self.ledger_rows(), [(repo, '/work', 30, 'new', 20, 30)])
+
+    def test_forget_route_ends_by_id(self):
+        # G1 ends the inode's newer owner; G2 omits the settled ledger marker.
+        self.register(self.new(checkout_id='A'), now=10)
+        jobs.unregister_route_step(self.cat, dev=1, ino=2, checkout_id='A', now_ms=11)
+        self.register(self.new(checkout_id='B'), now=20)
+        self.register(self.new(checkout_id='C', dev=3), now=30)
+        before = self.routes()
+        self.assertEqual(jobs.forget_route_step(self.cat, checkout_id='A', now_ms=40),
+                         jobs.NotRegistered())
+        self.assertEqual(self.routes(), before)
+        self.assertEqual(jobs.forget_route_step(self.cat, checkout_id='B', now_ms=50),
+                         jobs.Ended('B', 'unmatched'))
+        expected = [row[:-3] + (50, 'unmatched', 50) if row[0] == 'B' else row
+                    for row in before]
+        self.assertEqual(self.routes(), expected)
+        self.assertTrue(self.cat.in_transaction)
+
+    def test_forget_route_already_ended(self):
+        # G3 removes the open-state guard and rewrites the earlier end.
+        self.register(self.new(checkout_id='A'), now=10)
+        jobs.unregister_route_step(self.cat, dev=1, ino=2, checkout_id='A', now_ms=11)
+        before = self.routes()
+        self.assertEqual(jobs.forget_route_step(self.cat, checkout_id='A', now_ms=40),
+                         jobs.NotRegistered())
+        self.assertEqual(jobs.forget_route_step(self.cat, checkout_id='none', now_ms=41),
+                         jobs.NotRegistered())
+        self.assertEqual(self.routes(), before)
+
 
 class TestRegistrationSequence(CheckoutCase):
     def test_unlisted_writer_reason_writes_nothing(self):
