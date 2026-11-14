@@ -282,7 +282,13 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
     for op in definitions.operations:
         if op.name in operations:
             raise RegistryCompileError('duplicate_operation')
-        if not re.fullmatch(r'[a-z][a-z0-9.\-]{0,95}', op.name) or op.principal != 'unsigned' or op.effect not in {'connection_metadata', 'pure_observation'} or op.retry != 'read_repeat' or op.browser_get not in {'connect', 'schema'}:
+        if (not re.fullmatch(r'[a-z][a-z0-9.\-]{0,95}', op.name)
+                or op.principal not in {'unsigned', 'seat_key', 'seat_session'}
+                or op.effect not in {'connection_metadata', 'pure_observation',
+                                     'session_write', 'connection_binding'}
+                or op.retry not in {'read_repeat', 'operation_key'}
+                or op.browser_get not in {'connect', 'schema', 'none'}
+                or (op.browser_get != 'none' and op.principal != 'unsigned')):
             raise RegistryCompileError('invalid_definition')
         for ref in (op.request_ref, op.result_ref, op.error_ref):
             _ref(ref, types)

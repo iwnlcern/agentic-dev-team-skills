@@ -259,6 +259,59 @@ class TestCompile(unittest.TestCase):
                                        self.handlers if handlers is None else handlers,
                                        (catalog or self.catalog,))
 
+    def test_seat_operation_metadata_compiles(self):
+        from dataclasses import replace
+        from itertools import product
+        for principal, effect, retry in product(
+                ('unsigned', 'seat_key', 'seat_session'),
+                ('connection_metadata', 'pure_observation', 'session_write', 'connection_binding'),
+                ('read_repeat', 'operation_key')):
+            with self.subTest(principal=principal, effect=effect, retry=retry):
+                op = replace(self.graph.operations[1], name='test.seat',
+                             principal=principal, effect=effect, retry=retry,
+                             browser_get='none', rules=())
+                graph = replace(self.graph, operations=(op,))
+                handler = lambda args: None
+                registry = self.compile(graph=graph, handlers={op.name: handler})
+                self.assertEqual(registry.operation(op.name), op)
+                self.assertIs(registry.handlers[op.name], handler)
+                self.assertEqual(registry.capabilities(), ('test.seat',))
+        self.assertEqual(self.compile().capabilities(), ('protocol.connect', 'protocol.schema'))
+
+    def test_unknown_metadata_still_refuses(self):
+        from dataclasses import replace
+        for field in ('principal', 'effect', 'retry', 'browser_get'):
+            with self.subTest(field=field):
+                op = replace(self.graph.operations[1], **{field: 'unknown'})
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(graph=replace(self.graph, operations=(self.graph.operations[0], op)))
+                self.assertEqual(caught.exception.reason, 'invalid_definition')
+
+    def test_browser_route_requires_unsigned(self):
+        from dataclasses import replace
+        for principal in ('seat_key', 'seat_session'):
+            for route in ('connect', 'schema'):
+                with self.subTest(principal=principal, browser_get=route):
+                    op = replace(self.graph.operations[1], principal=principal, browser_get=route)
+                    with self.assertRaises(self.r.RegistryCompileError) as caught:
+                        self.compile(graph=replace(self.graph, operations=(self.graph.operations[0], op)))
+                    self.assertEqual(caught.exception.reason, 'invalid_definition')
+
+    def test_handler_coverage_unchanged(self):
+        cases = [
+            {'protocol.connect': self.handlers['protocol.connect']},
+            dict(self.handlers, extra=lambda args: None),
+            dict(self.handlers, **{'protocol.schema': None}),
+        ]
+        for handlers in cases:
+            with self.subTest(handlers=tuple(handlers)):
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(handlers=handlers)
+                self.assertEqual(caught.exception.reason, 'unbound_handler')
+        registry = self.compile()
+        self.assertEqual(registry.capabilities(), ('protocol.connect', 'protocol.schema'))
+        self.assertEqual(set(registry.handlers), set(self.handlers))
+
     def test_compile_refuses_graph_defects(self):
         from dataclasses import replace
         cases = [
