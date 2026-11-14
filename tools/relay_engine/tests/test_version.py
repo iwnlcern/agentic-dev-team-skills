@@ -34,6 +34,7 @@ EXPECTED_ROSTER = (
     "relay_engine/api_registry.py",
     "relay_engine/api_schema.py",
     "relay_engine/api_wire.py",
+    "relay_engine/api_writer.py",
     "relay_engine/authority.py",
     "relay_engine/catalogue.py",
     "relay_engine/checkout_store.py",
