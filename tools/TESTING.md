@@ -21,6 +21,16 @@ Run one engine module from the repository root, with the results environment the
 
 The summary must read `OK` with no `skipped=` count; the release check fails a module that skips a test or runs none.
 
+The engine suite's `test_api_schema` compiles the generated Rust and TypeScript bindings, so it needs three pinned toolchains: rustc, node, and TypeScript with its native package for the platform.
+It looks for them under `$ADT_TOOLCHAINS`, else `~/.local/share/adt-toolchains`, at `rust-1.99.1/bin/rustc`, `node-v26.13.0/bin/node` and `typescript-7.0.2/node_modules/typescript/bin/tsc`, with the native package at `typescript-7.0.2/node_modules/@typescript/typescript-<platform>`.
+It checks each version exactly: rustc and node by their whole banners, so a rustc build whose banner is not `rustc 1.99.1 (58cf8f9c3 2026-10-13)` fails, and tsc by its `Version` line.
+The test never names the native package, so a missing one shows as tsc failing, not as a missing file.
+`$ADT_TOOLCHAINS` replaces the default folder rather than adding to it, and an empty value resolves to the current directory.
+Without the toolchains `test_api_schema` fails or errors; no other test module needs them.
+The linux leg installs the same versions, with pinned digests, in its image (`tools/release-check.Dockerfile`), so only the mac leg and a contributor's machine need a local install.
+After any change to the API registry, its definitions or `tools/generate-api.py` itself, run `python3 tools/generate-api.py --write` first and `python3 tools/generate-plugins.py` second, because the plugin generator copies the four generated API files into `plugins/`; in the other order the plugin copies stay stale and `generate-plugins.py --check` fails.
+`python3 tools/generate-api.py --check` verifies the generated files without writing them.
+
 Run the release runner's own tests (they need Docker):
 
     python3 -m unittest discover -s tools/release_check_tests -v
@@ -57,18 +67,19 @@ Each line names changed paths whose dependent tests live elsewhere, so a run of 
 Every row uses one rule: a test module or check is listed when its own code reads the row's path, or when it imports a helper or loads a script whose code it uses does; modules the release check excludes are left out.
 The rows were measured on the tree against the v3 test audit's reverse map.
 
-- `skills/**`, `shared/**`, `vendor/**`, `LICENSE*`, `tools/generate-plugins.py` → `test_e2e_chain`, `test_cold_install`, `test_version`, `check-generate-plugins.py`, `generate-plugins.py`
-- `plugins/**` → `test_version`, `test_e2e_chain`, `check-generate-plugins.py`, `generate-plugins.py`
-- `tools/relay_engine/*.py` → `test_version`, `test_e2e_chain`, `test_cold_install`, `test_relay_monitor`, `test-adapter.sh`, `check-generate-plugins.py`, `generate-plugins.py`
-- `tools/relay` → `check-generate-plugins.py`, `test-adapter.sh`, `test_relay_monitor`
+- `skills/**`, `shared/**`, `vendor/**`, `LICENSE*`, `tools/generate-plugins.py` → `test_e2e_chain`, `test_cold_install`, `test_version`, `check-generate-plugins.py`, `generate-plugins.py`, `tools/kit_tests`
+- `plugins/**` → `test_version`, `test_e2e_chain`, `check-generate-plugins.py`, `generate-plugins.py`, `tools/kit_tests`
+- `tools/relay_engine/*.py` → `test_version`, `test_e2e_chain`, `test_cold_install`, `test_relay_monitor`, `test-adapter.sh`, `check-generate-plugins.py`, `generate-plugins.py`, `tools/kit_tests`
+- `tools/relay` → `check-generate-plugins.py`, `test-adapter.sh`, `test_relay_monitor`, `tools/kit_tests`
 - `tools/**` → `check-generate-plugins.py`, `test_identity_matrix`, `test_mtbattery_guard`, `test_version`
-- `tools/adapters/**` → `test-adapter.sh`, `check-generate-plugins.py`, `generate-plugins.py`
+- `tools/adapters/**` → `test-adapter.sh`, `check-generate-plugins.py`, `generate-plugins.py`, `tools/kit_tests`
 - `tools/relay_engine/errors.py`, `tools/relay_engine/strings.py` → `test_errors`, `test_strings_gate`, `test_api_registry`
 - `tools/relay-lint.py` → `check-fixture-readme-census.py`, `check-generate-plugins.py`, `check-relay-lint-fixtures.py`, `check-timestamp-drift.py`, `test-adapter.sh`, `test_authority`, `test_authority_fold`, `test_authority_fold10`, `test_authority_fold11`, `test_authority_fold12`, `test_authority_fold2`, `test_authority_fold3`, `test_authority_fold4`, `test_authority_fold6`, `test_authority_fold7`, `test_authority_fold8`, `test_authority_fold9`, `test_cold_install`, `test_draft_shape`, `test_draft_shape_lint`, `test_e2e_chain`, `test_finding_tags`, `test_fixture_seam_copy`, `test_fold_contract`, `test_gate_review`, `test_history_audit`, `test_judging`, `test_lint_relay_root_record`, `test_merge_claim`, `test_merge_claim_corrections`, `test_mtbattery_guard`, `test_parity`, `test_plan_shape_warnings`, `test_root_lint_corrections`, `test_routed_notice`, `test_show_diagnostics`, `test_version`
 - `tools/relay-lint-fixtures/**` → `check-fixture-readme-census.py`, `check-generate-plugins.py`, `check-relay-lint-fixtures.py`, `test-adapter.sh`, `test_authority_fold2`, `test_cold_install`, `test_draft_shape`, `test_draft_shape_lint`, `test_e2e_chain`, `test_finding_tags`, `test_fixture_seam_copy`, `test_fold_contract`, `test_gate_review`, `test_history_audit`, `test_human_gate`, `test_judging`, `test_judging_agreement`, `test_lint_relay_root_record`, `test_merge_claim`, `test_merge_claim_corrections`, `test_mtbattery_guard`, `test_parity`, `test_root_lint_corrections`, `test_routed_notice`, `test_show_diagnostics`, `test_version`
 - `tools/relay-engine-fixtures/**` → `test_authority_fold2`, `test_bootstrap_tools`, `test_draft_shape`, `test_draft_shape_admission`, `test_draft_shape_lint`, `test_finding_tags`, `test_fixture_seam_copy`, `test_fold_contract`, `test_gate_review`, `test_history_audit`, `test_human_gate`, `test_jcs`, `test_judging`, `test_judging_agreement`, `test_lint_relay_root_record`, `test_merge_claim`, `test_merge_claim_corrections`, `test_migrate`, `test_parity`, `test_plan_contract`, `test_plan_shape_warnings`, `test_projections`, `test_root_lint_corrections`, `test_routed_notice`, `test_show_diagnostics`
 - `tools/check-relay-lint-fixtures.py` → `check-fixture-readme-census.py`, `check-generate-plugins.py`, `test_fixture_seam_copy`, `test_mtbattery_guard`, `test_version`
 - `tools/measure-plan-shape.py` → `test_plan_shape_warnings`
+- `README.md`, `CHANGELOG.md`, `tools/TESTING.md`, `tools/check-generate-plugins.py` → `tools/kit_tests`
 
 Notes on the entries:
 
@@ -79,4 +90,4 @@ Notes on the entries:
 - The `tools/**` row names the modules that copy the whole `tools/` tree, so they are not repeated on the other rows.
 - `test_cold_install` reads `skills/` through `ruled_manifest`, which it imports from `test_e2e_chain`, and `test_version` reads `skills/`, `shared/`, `vendor/` and `LICENSE*` through the generator's `generate_tree`.
 - The `tools/relay-lint-fixtures/**` and `tools/relay-lint.py` entries last until those files are deleted (DD-v3-tests stage 4).
-- The kit pair adds the entry for `tools/kit_tests/` when that directory lands.
+- The `tools/kit_tests` target is the Kit tests' directory, run as one command: `python3 -m unittest discover -s tools/kit_tests`.

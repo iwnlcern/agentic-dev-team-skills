@@ -20,7 +20,7 @@ from relay_engine.tests.test_submit import Store as SubmitStore
 TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
-          "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history"}
+          "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts"}
 
 INDEXES = {
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
@@ -554,6 +554,8 @@ PLATFORM_COLUMNS = {
     "seat_occupants": ["id", "seat_id", "key_id", "key_verifier", "issued_at", "ended_at"],
     "seat_sessions": ["id", "seat_id", "occupant_id", "host", "host_session_id", "generation",
                       "signed_in_at", "last_seen_at", "ended_at"],
+    "mutation_receipts": ["principal_kind", "principal_id", "operation", "operation_key",
+                          "request_digest", "result", "committed_at"],
 }
 # Exclusive arcs (v3-engine/SITREP-pair-planner-20261104-074637.md Q1): column prefix, specials.
 ARCS = {"relays": ("sender_", {"operator", "system"}), "recipients": ("", {"operator"}),
@@ -702,6 +704,67 @@ class TestPlatform(Store):
                      ("c" * 40,))
 
 
+class TestMutationReceipts(Store):
+    """Slice A receipts stay scoped to an occupant and operation, without cascades."""
+
+    def test_mutation_receipts_constraints(self):
+        conn = self.connect()
+        self.assertIn("mutation_receipts", {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")})
+        sql = ("INSERT INTO mutation_receipts (principal_kind,principal_id,operation,"
+               "operation_key,request_digest,result,committed_at) VALUES (?,?,?,?,?,?,?)")
+        valid = ("occupant", "o1", "session.sign-in", "same-key", SHA, '{"ok":true}', 2)
+        conn.execute(sql, valid)
+        for name, index, value in (("wrong principal kind", 0, "operator"),
+                                    ("unknown occupant", 1, "missing"),
+                                    ("non-hex digest", 4, "g" * 64),
+                                    ("short digest", 4, "a" * 63),
+                                    ("uppercase digest", 4, "A" * 64),
+                                    ("duplicate scope", 5, '{"ok":false}')):
+            with self.subTest(name=name):
+                values = list(valid)
+                if name != "duplicate scope":
+                    values[3] = "refused-" + name
+                values[index] = value
+                self.refused(conn, sql, values)
+        for index in range(7):
+            with self.subTest(null_column=index):
+                values = list(valid)
+                values[3] = "null-column-%d" % index
+                values[index] = None
+                self.refused(conn, sql, values)
+        # Same key on another operation or occupant is a separate receipt.
+        values = list(valid)
+        values[2] = "session.end"
+        conn.execute(sql, values)
+        conn.execute("INSERT INTO seat_occupants (id,seat_id,key_id,key_verifier,issued_at)"
+                     " VALUES ('o2','s-b','k2',?,1)", (SHA,))
+        values = list(valid)
+        values[1] = "o2"
+        conn.execute(sql, values)
+        self.assertEqual(conn.execute("SELECT count(*) FROM mutation_receipts").fetchone(), (3,))
+        self.assertEqual(conn.execute(
+            "SELECT result,committed_at FROM mutation_receipts WHERE principal_id='o1'"
+            " AND operation='session.sign-in'").fetchone(), ('{"ok":true}', 2))
+
+    def test_mutation_receipts_has_no_trigger_or_cascade(self):
+        conn = self.connect()
+        self.assertIn("mutation_receipts", {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")})
+        self.assertEqual(conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='mutation_receipts'"
+        ).fetchall(), [])
+        keys = conn.execute("PRAGMA foreign_key_list(mutation_receipts)").fetchall()
+        self.assertEqual([(row[2], row[3], row[4], row[5], row[6]) for row in keys],
+                         [("seat_occupants", "principal_id", "id", "NO ACTION", "NO ACTION")])
+        indexes = conn.execute("PRAGMA index_list(mutation_receipts)").fetchall()
+        unique = [row[1] for row in indexes if row[2]]
+        self.assertEqual(len(unique), 1)
+        self.assertEqual([row[2] for row in conn.execute(
+            "SELECT * FROM pragma_index_info(?) ORDER BY seqno", (unique[0],))],
+            ["principal_kind", "principal_id", "operation", "operation_key"])
+
+
 class TestAdmissionReplaySchema(Store):
     """Breaks: unpaired receipt metadata, seat-only uniqueness and silent DDL drift."""
 
@@ -785,8 +848,8 @@ class TestTableOwners(Store):
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(set(schema.TABLE_OWNERS), actual)
         platform = {"projects", "repositories", "repository_checkouts", "team_instances",
-                    "seats", "seat_occupants", "seat_sessions"}
-        self.assertEqual(len(actual), 22)
+                    "seats", "seat_occupants", "seat_sessions", "mutation_receipts"}
+        self.assertEqual(len(actual), 23)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform)
         fixture = SubmitStore()

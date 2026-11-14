@@ -862,6 +862,17 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
         ("E_API_INTERNAL", "internal", "ApiInternalCause", (
             ("handler_fault", "report_nonsecret_failure"),
         )),
+        ("E_API_AUTH", "auth", "ApiAuthCause", (
+            ("key_rejected", "check_key_file"),
+            ("key_replaced", "obtain_current_key"),
+            ("seat_stood_down", "ask_top_seat"),
+            ("session_not_current", "sign_in_again"),
+            ("not_signed_in", "sign_in_first"),
+            ("already_bound", "open_new_connection"),
+        )),
+        ("E_API_CONFLICT", "conflict", "ApiConflictCause", (
+            ("operation_key_reused", "use_new_operation_key"),
+        )),
     )
     variants = []
     for code, api_class, cause_name, branches in rows:

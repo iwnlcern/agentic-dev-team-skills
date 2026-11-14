@@ -8,6 +8,12 @@ from urllib.parse import urlsplit
 from relay_engine import api_definitions as d, api_protocol as p, api_registry as r, api_wire as w, jcs
 
 
+STATUS_BY_CLASS = {
+    'wire': 400, 'auth': 401, 'version': 409, 'conflict': 409,
+    'internal': 500, 'unavailable': 503,
+}
+
+
 class BackendConnection(Protocol):
     def exchange(self, frame: bytes) -> bytes: ...
     def close(self) -> None: ...
@@ -118,8 +124,7 @@ def map_discovery_get(request: BridgeRequest, bridge_context: BridgeContext) -> 
 
     def answer(response):
         # Full error arms were checked above or assembled from the authoritative catalogue.
-        status = 200 if 'result' in response else {
-            'wire': 400, 'version': 409, 'unavailable': 503, 'internal': 500}[response['error']['class']]
+        status = 200 if 'result' in response else STATUS_BY_CLASS.get(response['error']['class'], 500)
         return CoreDiscoveryExchange(status, (('Content-Type', 'application/json; charset=utf-8'),
                                                ('Cache-Control', 'no-store')), jcs.jcs_encode(response))
 

@@ -104,13 +104,20 @@ class TestDefinitions(unittest.TestCase):
 
 
 class TestErrorCatalog(unittest.TestCase):
-    def test_catalog_has_exact_thirteen_pairs(self):
+    def test_catalog_has_exact_twenty_pairs(self):
         from relay_engine import errors
         catalog = errors.api_error_catalog()
         pairs = {(v.code, v.api_class, b.cause_kind, b.remedy)
                  for v in catalog.variants for b in v.branches}
-        self.assertEqual(len(catalog.variants), 5)
+        self.assertEqual(len(catalog.variants), 7)
         self.assertEqual(pairs, {
+            ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
+            ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
+            ('E_API_AUTH', 'auth', 'seat_stood_down', 'ask_top_seat'),
+            ('E_API_AUTH', 'auth', 'session_not_current', 'sign_in_again'),
+            ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
+            ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
+            ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
             ('E_API_PROTOCOL', 'wire', 'malformed_frame', 'resend_valid_request'),
             ('E_API_PROTOCOL', 'wire', 'malformed_json', 'resend_valid_request'),
             ('E_API_PROTOCOL', 'wire', 'invalid_envelope', 'resend_valid_request'),
@@ -125,6 +132,42 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_UNAVAILABLE', 'unavailable', 'schema_unavailable', 'restore_expected_runtime'),
             ('E_API_INTERNAL', 'internal', 'handler_fault', 'report_nonsecret_failure'),
         })
+
+    def test_auth_and_conflict_arms(self):
+        from relay_engine import api_protocol as p, api_registry as r, errors
+        registry = r.compile_registry(d.discovery_definitions(), p.discovery_handlers(),
+                                      (errors.api_error_catalog(),))
+        expected = {
+            ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
+            ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
+            ('E_API_AUTH', 'auth', 'seat_stood_down', 'ask_top_seat'),
+            ('E_API_AUTH', 'auth', 'session_not_current', 'sign_in_again'),
+            ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
+            ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
+            ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
+        }
+        observed = set()
+        for arm in registry.error_arms():
+            if arm.code not in ('E_API_AUTH', 'E_API_CONFLICT'):
+                continue
+            cause = registry.types[arm.cause_type.name].shape
+            self.assertEqual(tuple(f.name for f in cause.fields), ('kind',))
+            kind = registry.types[cause.fields[0].type_ref.name].shape.values[0]
+            observed.add((arm.code, arm.wire_class, kind, arm.remedy))
+            error = p.api_error(registry, kind)
+            self.assertIsInstance(r.validate_type(registry, d.TypeRef('ApiError'), error),
+                                  r.ValidatedValue)
+            wrong = dict(error, remedy='unknown_remedy')
+            self.assertIsInstance(r.validate_type(registry, d.TypeRef('ApiError'), wrong),
+                                  r.ValidationFailure)
+        self.assertEqual(observed, expected)
+
+    def test_capabilities_unchanged_by_error_arms(self):
+        from relay_engine import api_protocol as p, api_registry as r, errors
+        registry = r.compile_registry(d.discovery_definitions(), p.discovery_handlers(),
+                                      (errors.api_error_catalog(),))
+        self.assertEqual(registry.capabilities(), ('protocol.connect', 'protocol.schema'))
+        self.assertIsNone(registry.operation('seat.sign_in'))
 
     def test_catalog_cause_payloads_match_base(self):
         from relay_engine import errors
@@ -216,6 +259,59 @@ class TestCompile(unittest.TestCase):
                                        self.handlers if handlers is None else handlers,
                                        (catalog or self.catalog,))
 
+    def test_seat_operation_metadata_compiles(self):
+        from dataclasses import replace
+        from itertools import product
+        for principal, effect, retry in product(
+                ('unsigned', 'seat_key', 'seat_session'),
+                ('connection_metadata', 'pure_observation', 'session_write', 'connection_binding'),
+                ('read_repeat', 'operation_key')):
+            with self.subTest(principal=principal, effect=effect, retry=retry):
+                op = replace(self.graph.operations[1], name='test.seat',
+                             principal=principal, effect=effect, retry=retry,
+                             browser_get='none', rules=())
+                graph = replace(self.graph, operations=(op,))
+                handler = lambda args: None
+                registry = self.compile(graph=graph, handlers={op.name: handler})
+                self.assertEqual(registry.operation(op.name), op)
+                self.assertIs(registry.handlers[op.name], handler)
+                self.assertEqual(registry.capabilities(), ('test.seat',))
+        self.assertEqual(self.compile().capabilities(), ('protocol.connect', 'protocol.schema'))
+
+    def test_unknown_metadata_still_refuses(self):
+        from dataclasses import replace
+        for field in ('principal', 'effect', 'retry', 'browser_get'):
+            with self.subTest(field=field):
+                op = replace(self.graph.operations[1], **{field: 'unknown'})
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(graph=replace(self.graph, operations=(self.graph.operations[0], op)))
+                self.assertEqual(caught.exception.reason, 'invalid_definition')
+
+    def test_browser_route_requires_unsigned(self):
+        from dataclasses import replace
+        for principal in ('seat_key', 'seat_session'):
+            for route in ('connect', 'schema'):
+                with self.subTest(principal=principal, browser_get=route):
+                    op = replace(self.graph.operations[1], principal=principal, browser_get=route)
+                    with self.assertRaises(self.r.RegistryCompileError) as caught:
+                        self.compile(graph=replace(self.graph, operations=(self.graph.operations[0], op)))
+                    self.assertEqual(caught.exception.reason, 'invalid_definition')
+
+    def test_handler_coverage_unchanged(self):
+        cases = [
+            {'protocol.connect': self.handlers['protocol.connect']},
+            dict(self.handlers, extra=lambda args: None),
+            dict(self.handlers, **{'protocol.schema': None}),
+        ]
+        for handlers in cases:
+            with self.subTest(handlers=tuple(handlers)):
+                with self.assertRaises(self.r.RegistryCompileError) as caught:
+                    self.compile(handlers=handlers)
+                self.assertEqual(caught.exception.reason, 'unbound_handler')
+        registry = self.compile()
+        self.assertEqual(registry.capabilities(), ('protocol.connect', 'protocol.schema'))
+        self.assertEqual(set(registry.handlers), set(self.handlers))
+
     def test_compile_refuses_graph_defects(self):
         from dataclasses import replace
         cases = [
@@ -241,7 +337,7 @@ class TestCompile(unittest.TestCase):
                 with self.assertRaises(self.r.RegistryCompileError) as caught:
                     self.compile(graph)
                 self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
-        self.assertEqual(len(self.compile().error_arms()), 13)
+        self.assertEqual(len(self.compile().error_arms()), 20)
 
     def test_compile_refuses_branch_defects(self):
         from dataclasses import replace
@@ -293,7 +389,7 @@ class TestCompile(unittest.TestCase):
         from relay_engine import errors
         from dataclasses import replace
         from unittest.mock import patch
-        variant = self.catalog.variants[0]
+        variant = next(v for v in self.catalog.variants if v.code == 'E_API_INCOMPATIBLE')
         cause = next(t for t in self.catalog.types if t.name == variant.cause_ref.name)
         leaf_ref = cause.shape.arms[0]
         leaf = next(t for t in self.catalog.types if t.name == leaf_ref.name)
@@ -324,7 +420,7 @@ class TestCompile(unittest.TestCase):
 
     def test_error_arms_are_complete_records(self):
         registry = self.compile()
-        self.assertEqual(len(registry.error_arms()), 13)
+        self.assertEqual(len(registry.error_arms()), 20)
         for arm in registry.error_arms():
             leaf = registry.types[arm.cause_type.name].shape
             kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]

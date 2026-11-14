@@ -132,6 +132,16 @@ _PLATFORM_TABLES = (
     UNIQUE (seat_id, generation),
     FOREIGN KEY (occupant_id, seat_id) REFERENCES seat_occupants (id, seat_id)
 ) STRICT""" % _in("host", HOSTS),
+    """CREATE TABLE IF NOT EXISTS mutation_receipts (
+    principal_kind TEXT NOT NULL CHECK (principal_kind = 'occupant'),
+    principal_id TEXT NOT NULL REFERENCES seat_occupants (id),
+    operation TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    request_digest TEXT NOT NULL CHECK (%s),
+    result TEXT NOT NULL,
+    committed_at INTEGER NOT NULL,
+    UNIQUE (principal_kind, principal_id, operation, operation_key)
+) STRICT""" % _hex64("request_digest"),
 )
 
 TABLE_OWNERS: dict[str, str] = {
@@ -144,6 +154,7 @@ TABLE_OWNERS: dict[str, str] = {
     "seats": "platform",
     "seat_occupants": "platform",
     "seat_sessions": "platform",
+    "mutation_receipts": "platform",
     "git_states": "engine",
     "relays": "engine",
     "bodies": "engine",

@@ -14,11 +14,13 @@ from typing import Mapping
 import difflib
 import hashlib
 import io
+import itertools
 import os
 from pathlib import Path
 import secrets
 import stat
 import sqlite3
+import threading
 from typing import Callable, NamedTuple, Sequence
 
 from relay_engine import addresses
@@ -496,19 +498,39 @@ def record_token_counts(conn, seat_id, bundle_id, source, counts, *, at_ms):
     conn.commit()
 
 
+_STEP_SAVEPOINT_LOCK = threading.Lock()
+_STEP_SAVEPOINT_NUMBERS = itertools.count(1)
+
+
 def record_session_step(conn, session_id: str, host: str, seat_id: str, start_ms: int) -> str:
     """Record a session inside the caller's open transaction, without ending it.
 
     The closing UPDATE takes the write lock before reading the occupant, even
-    in a deferred transaction. A refusal rolls back only this step's writes.
-    It never begins, commits or rolls back the caller's transaction, and it
-    cannot run inside an admission hook, whose authorizer denies SAVEPOINT.
+    in a deferred transaction. It never begins, commits or rolls back the
+    caller's transaction, and it cannot run inside an admission hook, whose
+    authorizer denies SAVEPOINT. Its savepoint is named engine_step_<n>, with
+    n unique in the process; a caller creates no savepoint whose name begins
+    engine_.
+
+    A ValueError this step raises means it wrote nothing, and the caller may
+    continue its transaction, including committing it. After any other
+    exception the caller does not know what the step wrote: it rolls back the
+    transaction if one is still open and never commits it. The step rolls
+    back its own writes when its body raises, but a caller must not rely on
+    that. A ValueError that the caller's own signal handlers, finalizers or
+    other asynchronously run code raise during the step counts as any other
+    exception. Roll back the transaction on any exception the caller does not
+    know the step's cleanup handled; a ValueError the step itself raised alone
+    guarantees the step wrote nothing.
     """
     if host not in schema.HOSTS:
         raise ValueError("unknown host %r" % (host,))
     if not conn.in_transaction:
         raise ValueError("session step needs an open transaction")
-    conn.execute("SAVEPOINT engine_record_session")
+    with _STEP_SAVEPOINT_LOCK:
+        n = next(_STEP_SAVEPOINT_NUMBERS)
+    name = "engine_step_%d" % n
+    conn.execute("SAVEPOINT " + name)
     try:
         conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE seat_id = ? AND ended_at IS NULL",
                      (start_ms, seat_id))
@@ -526,21 +548,30 @@ def record_session_step(conn, session_id: str, host: str, seat_id: str, start_ms
              start_ms))
     except BaseException:
         if conn.in_transaction:
-            conn.execute("ROLLBACK TO engine_record_session")
-            conn.execute("RELEASE engine_record_session")
+            conn.execute("ROLLBACK TO " + name)
+            conn.execute("RELEASE " + name)
         raise
     try:
-        conn.execute("RELEASE engine_record_session")
+        conn.execute("RELEASE " + name)
     except sqlite3.Error:
         if conn.in_transaction:
-            conn.execute("ROLLBACK TO engine_record_session")
-            conn.execute("RELEASE engine_record_session")
+            conn.execute("ROLLBACK TO " + name)
+            conn.execute("RELEASE " + name)
         raise
     return internal_id
 
 
 def end_session_step(conn, session_id: str, end_ms: int) -> None:
-    """End an internal session in the caller's open transaction; never commit it."""
+    """End an internal session in the caller's open transaction; never commit it.
+
+    A ValueError this step raises means it wrote nothing, and the caller may
+    continue its transaction, including committing it. After any other
+    exception the caller does not know what the step wrote: it rolls back the
+    transaction if one is still open and never commits it. A ValueError that
+    the caller's own signal handlers, finalizers or other asynchronously run
+    code raise during the step counts as any other exception. Roll back the
+    transaction on any exception other than a ValueError this step raised.
+    """
     if not conn.in_transaction:
         raise ValueError("session step needs an open transaction")
     cursor = conn.execute("UPDATE seat_sessions SET ended_at = ? WHERE id = ?"

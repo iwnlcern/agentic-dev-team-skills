@@ -1,9 +1,10 @@
 """Pure discovery handlers and immutable per-connection protocol transitions."""
 import base64
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import cache
 from types import MappingProxyType
+from typing import Protocol
 
 from relay_engine import api_definitions as d, api_registry as r, api_schema, api_wire as w, errors, strings
 
@@ -25,11 +26,44 @@ class RuntimeContext:
 
 
 @dataclass(frozen=True, slots=True)
+class SeatBinding:
+    project_id: str
+    team_instance_id: str
+    seat_id: str
+    occupant_id: str
+    key_id: str
+    session_id: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRefusal:
+    code: str
+    cause_kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOutcome:
+    result: Mapping
+    binding_action: str
+    binding: SeatBinding | None
+
+
+class SessionPort(Protocol):
+    def run(self, operation: str, args: Mapping,
+            binding: SeatBinding | None) -> SessionOutcome | SessionRefusal: ...
+
+
+SessionHandler = Callable[[Mapping, SeatBinding | None, SessionPort], SessionOutcome | SessionRefusal]
+
+
+@dataclass(frozen=True, slots=True)
 class ConnectionState:
     phase: str
     last_request_id: int | None
     negotiated_protocol: str | None
     negotiated_schema_digest: str | None
+    binding: SeatBinding | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,3 +205,96 @@ def dispatch_discovery(state: ConnectionState, request: w.ApiRequest | w.Protoco
             pass
         return refuse('handler_fault', request.request_id, state.phase == 'awaiting_connect', current)
     return ResponseAndConnectionState(response, candidate, False)
+
+
+def _session_end(args, binding, port):
+    return port.run('session.end', args, binding)
+
+
+def _session_resume(args, binding, port):
+    return port.run('session.resume', args, binding)
+
+
+def _session_sign_in(args, binding, port):
+    return port.run('session.sign-in', args, binding)
+
+
+def session_handlers() -> Mapping[str, SessionHandler]:
+    """Stable handler objects shared by dispatch and registry generation."""
+    return {'session.end': _session_end, 'session.resume': _session_resume,
+            'session.sign-in': _session_sign_in}
+
+
+def dispatch_api(state: ConnectionState, request: w.ApiRequest | w.ProtocolRefusal,
+                 runtime: RuntimeContext, registry: r.FrozenApiRegistry,
+                 sessions: SessionPort) -> ResponseAndConnectionState:
+    if (not isinstance(request, w.ApiRequest)
+            or request.op in ('protocol.connect', 'protocol.schema')):
+        return dispatch_discovery(state, request, runtime, registry)
+    if state.phase == 'closed':
+        return ResponseAndConnectionState(None, state, True)
+
+    def refuse(kind, request_id, close=False, current=state):
+        response = {'request_id': request_id, 'error': api_error(registry, kind)}
+        w.encode_api_response(response, registry, None, None)
+        return ResponseAndConnectionState(response,
+            replace(current, phase='closed') if close else current, close)
+
+    for ref, value in [('RequestId', request.request_id), ('OperationName', request.op)]:
+        if isinstance(r.validate_type(registry, d.TypeRef(ref), value), r.ValidationFailure):
+            return refuse('invalid_envelope', None, True)
+    number = int(request.request_id)
+    if state.last_request_id is not None and number <= state.last_request_id:
+        return refuse('non_increasing_request_id', request.request_id, True)
+    current = replace(state, last_request_id=number)
+    if state.phase != 'connected':
+        return refuse('handshake_required', request.request_id, True, current)
+    op = registry.operation(request.op)
+    if op is None:
+        return refuse('unknown_operation', request.request_id, current=current)
+    if isinstance(r.validate_type(registry, op.request_ref, request.args), r.ValidationFailure):
+        return refuse('invalid_args', request.request_id, current=current)
+    artifact = runtime.schemas.get(current.negotiated_protocol)
+    if (not runtime.ready or artifact is None
+            or artifact.protocol != current.negotiated_protocol
+            or artifact.digest != current.negotiated_schema_digest):
+        return refuse('runtime_not_ready', request.request_id, True, current)
+    if op.principal == 'unsigned':
+        return dispatch_discovery(state, request, runtime, registry)
+    if op.principal == 'seat_session' and current.binding is None:
+        return refuse('not_signed_in', request.request_id, current=current)
+    if request.op == 'session.resume' and current.binding is not None:
+        return refuse('already_bound', request.request_id, current=current)
+    try:
+        outcome = registry.handlers[request.op](request.args, current.binding, sessions)
+        if isinstance(outcome, SessionRefusal):
+            error = api_error(registry, outcome.cause_kind)
+            if (error['code'] != outcome.code or
+                    isinstance(r.validate_type(registry, op.error_ref, error), r.ValidationFailure)):
+                raise ValueError('invalid_session_refusal')
+            candidate = replace(current, binding=None) if outcome.cause_kind in {
+                'key_replaced', 'seat_stood_down', 'session_not_current'} else current
+            response = {'request_id': request.request_id, 'error': error}
+            w.encode_api_response(response, registry, None, None)
+            return ResponseAndConnectionState(response, candidate, False)
+        if not isinstance(outcome, SessionOutcome) or isinstance(
+                r.validate_operation_result(registry, request.op, outcome.result, None),
+                r.ValidationFailure):
+            raise ValueError('invalid_session_result')
+        if outcome.binding_action == 'set' and isinstance(outcome.binding, SeatBinding):
+            candidate = replace(current, binding=outcome.binding)
+        elif outcome.binding_action == 'clear':
+            candidate = replace(current, binding=None)
+        elif outcome.binding_action == 'keep':
+            candidate = current
+        else:
+            raise ValueError('invalid_binding_action')
+        response = {'request_id': request.request_id, 'result': outcome.result}
+        w.encode_api_response(response, registry, request.op, None)
+        return ResponseAndConnectionState(response, candidate, False)
+    except Exception:
+        try:
+            strings.report_diagnostic(ValueError('E_API_INTERNAL'))
+        except Exception:
+            pass
+        return refuse('handler_fault', request.request_id, current=current)

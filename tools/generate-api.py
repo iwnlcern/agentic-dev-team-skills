@@ -7,14 +7,14 @@ import re
 from re import _parser as regex_parser
 from pathlib import Path
 
-from relay_engine import api_definitions, api_protocol, api_registry, api_schema, api_wire
+from relay_engine import api_definitions, api_platform, api_protocol, api_registry, api_schema, api_wire
 
 TOOLS_DIR = Path(__file__).resolve().parent
 GENERATED_PREFIX = 'tools/relay_engine/generated/api/'
 
 
 def build_registry():
-    return api_protocol.discovery_registry()
+    return api_platform.build_platform_registry()
 
 
 def generate(tools_dir: Path) -> dict[str, bytes]:

@@ -10,6 +10,30 @@ async function run(value: Json): Promise<unknown> {
     if (action === 'schema') return { valid: supportsSchema(str(v['schema'])) };
     if (action === 'validate') return { valid: await validateType(str(v['type']) as keyof Types, v['value']) };
     if (action === 'encode') { const bytes = await encodeRequest(str(v['operation']), str(v['id']), v['value']); return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') }; }
+    if (action === 'encode_checked') {
+        try { const bytes = await encodeRequest(str(v['operation']), str(v['id']), v['value']); return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') }; }
+        catch { return { invalid: true }; }
+    }
+    if (action === 'encode_result') {
+        if (!await validateType(str(v['type']) as keyof Types, v['value'])) return { invalid: true };
+        const body = new TextEncoder().encode(canonical({ request_id: str(v['id']), result: v['value'] }));
+        const bytes = new Uint8Array(body.length + 4); new DataView(bytes.buffer).setUint32(0, body.length, false); bytes.set(body, 4);
+        return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') };
+    }
+    if (action === 'decode_request') {
+        const bytes = unhex(str(v['frame']));
+        if (bytes.length < 4 || new DataView(bytes.buffer).getUint32(0, false) !== bytes.length - 4) return { unavailable: true };
+        const request = obj(parseStrictJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes.slice(4))));
+        if (request['op'] !== v['operation'] || request['request_id'] !== v['id'] || !await validateType(str(v['type']) as keyof Types, request['args'])) return { unavailable: true };
+        return { args: request['args'] };
+    }
+    if (action === 'encode_error') {
+        if (!await validateType('ApiError', v['value'])) return { invalid: true };
+        const body = new TextEncoder().encode(canonical({ request_id: str(v['id']), error: v['value'] }));
+        const bytes = new Uint8Array(body.length + 4);
+        new DataView(bytes.buffer).setUint32(0, body.length, false); bytes.set(body, 4);
+        return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') };
+    }
     if (action === 'decode') {
         let context: ValidatedConnect | undefined;
         if (v['connect'] !== '') { const result = await decodeResponse(unhex(str(v['connect'])), 'protocol.connect', '1'); if (result.kind === 'connect') context = result.context; }

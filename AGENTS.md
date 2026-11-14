@@ -14,10 +14,12 @@ Instructions for coding agents working on this repository.
 - Regenerate plugin trees: `python3 tools/generate-plugins.py`
 - Verify generated trees match canonical sources: `python3 tools/generate-plugins.py --check`
 - Self-tests: `python3 tools/check-relay-lint-fixtures.py`, `python3 tools/check-timestamp-drift.py`, `python3 tools/check-generate-plugins.py`, `python3 tools/check-fixture-readme-census.py`, and `bash tools/adapters/claude-code/test-adapter.sh`
-- Engine test suite, contributor entry point (assumes a POSIX shell and `python3` at 3.11 or newer on `PATH`): `PYTHONPATH=tools PYTHONWARNINGS=error::ResourceWarning RELAY_ENGINE_RESULTS_ROOT="$(python3 -c 'import tempfile; print(tempfile.mkdtemp())')" RELAY_ENGINE_MATRIX_RUN="$(python3 -c 'import uuid; print(uuid.uuid4())')" python3 -m unittest discover -s tools/relay_engine/tests -t tools`
+- Engine test suite, contributor entry point (assumes a POSIX shell and `python3` at 3.11 or newer on `PATH`, and for `test_api_schema` the pinned toolchains `tools/TESTING.md` names): `PYTHONPATH=tools PYTHONWARNINGS=error::ResourceWarning RELAY_ENGINE_RESULTS_ROOT="$(python3 -c 'import tempfile; print(tempfile.mkdtemp())')" RELAY_ENGINE_MATRIX_RUN="$(python3 -c 'import uuid; print(uuid.uuid4())')" python3 -m unittest discover -s tools/relay_engine/tests -t tools`
   Inspect the unittest result summary for `OK` with no skipped tests; diagnostic stdout may follow it.
   `TestCensus.test_census_artifact_schema` in `tools/relay_engine/tests/test_e2e_chain.py` checks the required results environment.
   The run leaves an unretained temporary directory under the system temp root; it does not produce the engine lane's persisted acceptance artifacts, whose retained-environment proof sequence lives in that lane's plan.
+- Regenerate the API schema and bindings after any change to the API registry, its definitions or `tools/generate-api.py`, before regenerating plugin trees: `python3 tools/generate-api.py --write`
+- Verify the generated API files match the registry: `python3 tools/generate-api.py --check`
 - Kit tests: `python3 -m unittest discover -s tools/kit_tests`
 - Lint one relay: `python3 tools/relay-lint.py <file>`
 
