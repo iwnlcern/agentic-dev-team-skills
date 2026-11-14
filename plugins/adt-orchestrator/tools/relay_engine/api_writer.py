@@ -105,9 +105,17 @@ class StoreWriter:
             finally:
                 request.ready.set()
             request.done.wait()
-            # Outside a worker-side except block, preserving the original context.
             if request.error is not None:
-                raise request.error
+                error = request.error
+                context, cause = error.__context__, error.__cause__
+                suppress_context = error.__suppress_context__
+                try:
+                    raise error
+                except BaseException:
+                    # Raising here can attach the caller's active exception.
+                    error.__context__, error.__cause__ = context, cause
+                    error.__suppress_context__ = suppress_context
+                    raise
             return request.result
         finally:
             self._local.active = False

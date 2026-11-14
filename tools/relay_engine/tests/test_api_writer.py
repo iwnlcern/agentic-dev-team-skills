@@ -162,6 +162,51 @@ class WriterTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_job_error_context_survives_a_caller_except_block(self):
+        # Break caught: handing a worker error back by an ordinary raise chains
+        # it to a caller's active exception instead of retaining the job's chain.
+        for arm in ('context', 'rollback_failed', 'no_context'):
+            with self.subTest(arm=arm):
+                writer = self.writer()
+                original = RuntimeError('job')
+                context = None if arm == 'no_context' else ValueError('worker')
+
+                def run(conn):
+                    conn.execute('INSERT INTO projects(id,name,created_at) VALUES (?,?,2)',
+                                 (Q, 'uncommitted')).close()
+                    if arm == 'rollback_failed':
+                        self.deny_rollback(conn)
+                    if context is not None:
+                        try:
+                            raise context
+                        except ValueError:
+                            raise original
+                    raise original
+
+                try:
+                    try:
+                        raise KeyError('caller')
+                    except KeyError:
+                        with self.assertRaises(RuntimeError) as caught:
+                            writer.submit(Job(run))
+                    self.assertIs(caught.exception, original)
+                    conn = sqlite3.connect(store_layout.ledger_path(self.root, P))
+                    try:
+                        self.assertEqual(conn.execute('SELECT id FROM projects WHERE id=?',
+                                                      (Q,)).fetchall(), [])
+                    finally:
+                        conn.close()
+                    self.assertIs(original.__context__, context)
+                    self.assertIsNone(original.__cause__)
+                    self.assertFalse(original.__suppress_context__)
+                    if arm == 'rollback_failed':
+                        self.assertEqual(original.__notes__, [
+                            'writer ROLLBACK failed: DatabaseError SQLITE_AUTH'])
+                    else:
+                        self.assertFalse(hasattr(original, '__notes__'))
+                finally:
+                    writer.close()
+
     def test_indeterminate_outcomes(self):
         writer = self.writer()
         trace = []
