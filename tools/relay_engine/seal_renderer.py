@@ -203,6 +203,7 @@ class SealRenderer:
         owner.ident = threading.get_ident()
         pending_stop = None
         failed_request = None
+        open_error = None
         try:
             reader = self.open_reader(self.store_root, owner.project)
             with owner.condition:
@@ -255,7 +256,7 @@ class SealRenderer:
                     break
         except BaseException as exc:
             if not opened.done.is_set():
-                opened.error = exc
+                open_error = exc
             else:
                 # A code fault ends this reader generation, never another one's.
                 with owner.condition:
@@ -274,9 +275,11 @@ class SealRenderer:
                         os.close(owner.ledger_fd)
                         owner.ledger_fd = None
             finally:
-                self._state(owner, 'closed')
-                opened.done.set()
                 with owner.condition:
+                    if open_error is not None:
+                        opened.error = open_error
+                    self._state(owner, 'closed')
+                    opened.done.set()
                     for queued in owner.queue:
                         queued.error = queued.error or RuntimeError('seal_pass_thread_closed')
                         queued.done.set()

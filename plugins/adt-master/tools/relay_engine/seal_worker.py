@@ -39,6 +39,7 @@ class _Fault:
     first: int
     item_id: str | None = None
     older: list = field(default_factory=list)
+    cleared: bool = False
 
     @property
     def key(self):
@@ -224,6 +225,9 @@ class SealWorker:
     def _raise(self, fault, generation):
         if fault.item_id is not None or not self._valid(generation):
             return
+        if fault.cleared:
+            fault.first = max(self.clock_ms(), fault.first + 1)
+            fault.cleared = False
         if fault.cause == 'pointer_unset' and self.clock_ms() - fault.first < 60000:
             return
         try:
@@ -257,7 +261,10 @@ class SealWorker:
             return
         result = self._call(fault.project,self.queue.clear_condition,self.principal,fault.item_id,
                             'notice','approval_seal_unusable',fault.project,fault.key)
-        if result is None and all(f.item_id != fault.item_id for f in self._clear_pending):
+        if result is not None:
+            fault.item_id = None
+            fault.cleared = True
+        elif all(f.item_id != fault.item_id for f in self._clear_pending):
             self._clear_pending.append(fault)
 
     def _end(self, fault, generation):

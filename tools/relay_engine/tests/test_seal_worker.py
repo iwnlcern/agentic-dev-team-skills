@@ -558,6 +558,54 @@ class TestSealWorker(unittest.TestCase):
         self.assertNotIn(P, worker._faults)
         self.assertEqual(diagnostics(), [('on_fault_ended', 'RuntimeError', P)])
 
+    def test_stale_end_then_new_outage_raises(self):
+        for elapsed in (1000, 0):
+            self.queue = st.QueueServiceStandIn(); self.clock.value = 0
+            receipts, keys = {}, []
+            run = self.queue.run
+            def receipt_run(operation, args, principal):
+                if operation != 'queue.raise':
+                    return run(operation, args, principal)
+                key = args['operation_key']; keys.append(key)
+                if key in receipts:
+                    previous, result = receipts[key]
+                    self.assertEqual(args, previous)
+                    return dict(result, replayed=True)
+                result = run(operation, args, principal)
+                receipts[key] = (dict(args), dict(result))
+                return result
+            with mock.patch.object(self.queue, 'run', side_effect=receipt_run):
+                worker = self.worker(); patch = self.folder_fault()
+                try:
+                    self.refuse()
+                finally:
+                    patch.stop()
+                first = self.assert_cause('folder_unusable', None)
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def before_clear(*args):
+                    entered.set(); await_event(release)
+                self.queue.before_clear = before_clear
+                tick = self.workers[-1][1]; prior = len(tick.calls)
+                tick.advance(); tick.until_calls(prior + 1); await_event(entered)
+                closing = threading.Thread(target=worker.catalogue_closing); closing.start()
+                with worker._condition:
+                    self.assertTrue(worker._condition.wait_for(lambda: not worker._leave, timeout=30))
+                release.set(); closing.join(30); self.assertFalse(closing.is_alive())
+                self.queue.before_clear = None; self.sync(worker)
+                self.assertIsNone(worker._faults[P].item_id, 'made clear still names its old item')
+                self.assertFalse(self.queue.items[first]['open'])
+                self.clock.advance(elapsed)
+                patch = self.folder_fault()
+                try:
+                    worker.catalogue_opened(); self.sync(worker); self.tick(worker)
+                    self.assertNotEqual(keys[-1], keys[0], 'new outage reused raise receipt key')
+                    current = self.assert_cause('folder_unusable', None)
+                    self.assertNotEqual(current, first)
+                    self.assertFalse(self.queue.items[first]['open'])
+                finally:
+                    patch.stop(); self.stop(worker)
+
     def test_fault_end_survives_stale_generation(self):
         worker = self.worker(); patch = self.folder_fault()
         try:
@@ -580,7 +628,12 @@ class TestSealWorker(unittest.TestCase):
         self.queue.before_clear = None; self.sync(worker)
         self.assertIn(P, worker._faults, 'fault forgotten before end callback')
         self.assertEqual(self.ended, [])
-        stale = worker._faults[P]
+        # Exercise a skipped clear on an occurrence whose clear was not made.
+        args = {k: v for k, v in next(iter(self.queue.items.values())).items()
+                if k not in ('item_id', 'open')}
+        args['operation_key'] += ':not-cleared'
+        item = self.queue.run('queue.raise', args, worker.principal)['item_id']
+        stale = self.m._Fault(P, None, 'folder_unusable', self.clock(), item)
         worker._clear(stale, worker._generation - 1)
         self.assertIn(stale, worker._clear_pending)
         worker.catalogue_opened(); self.sync(worker); self.tick(worker)
@@ -597,33 +650,53 @@ class TestSealWorker(unittest.TestCase):
         self.assert_cause('pointer_unset', None)
 
     def test_folder_then_pointer_cause_change(self):
-        worker = self.worker(); patch = self.folder_fault()
-        try:
-            self.refuse()
-        finally:
-            patch.stop()
-        old = self.assert_cause('folder_unusable', None)
-        self.damage('pointer')
-        entered, release = threading.Event(), threading.Event()
-        self.addCleanup(release.set)
-        def before_clear(*args):
-            entered.set(); await_event(release)
-        self.queue.before_clear = before_clear
-        tick = self.workers[-1][1]; prior = len(tick.calls)
-        tick.advance(); tick.until_calls(prior + 1); await_event(entered)
-        # The new notice must already be open before clearing the old one.
-        new_items = [i['item_id'] for i in self.items() if i['condition_key']['cause'] == 'pointer_damaged']
-        self.assertEqual(len(new_items), 1, 'new fault not raised before old clear')
-        new = new_items[0]
-        closing = threading.Thread(target=worker.catalogue_closing); closing.start()
-        with worker._condition:
-            self.assertTrue(worker._condition.wait_for(lambda: not worker._leave, timeout=30))
-        release.set(); closing.join(30); self.assertFalse(closing.is_alive())
-        self.queue.before_clear = None; self.sync(worker)
-        calls = self.queue.calls
-        self.assertLess(calls.index(('raise', new)), calls.index(('clear', old)))
-        self.assertTrue(self.queue.items[new]['open'])
-        self.assertEqual(self.ended, [])
+        for skipped in (True, False):
+            self.queue = st.QueueServiceStandIn(); self.ended.clear()
+            worker = self.worker(); patch = self.folder_fault()
+            try:
+                self.refuse()
+            finally:
+                patch.stop()
+            old = self.assert_cause('folder_unusable', None)
+            old_fault = worker._faults[P]
+            saved = self.damage('pointer')
+            entered, release = threading.Event(), threading.Event()
+            self.addCleanup(release.set)
+            real_clear = worker._clear
+            def before_clear(*args):
+                entered.set(); await_event(release)
+            def clear(fault, generation):
+                if fault is old_fault:
+                    before_clear()
+                return real_clear(fault, generation)
+            try:
+                with mock.patch.object(worker, '_clear', side_effect=clear) if skipped else ExitStack():
+                    if not skipped:
+                        self.queue.before_clear = before_clear
+                    tick = self.workers[-1][1]; prior = len(tick.calls)
+                    tick.advance(); tick.until_calls(prior + 1); await_event(entered)
+                    new_items = [i['item_id'] for i in self.items()
+                                 if i['condition_key']['cause'] == 'pointer_damaged']
+                    self.assertEqual(len(new_items), 1, 'new fault not raised before old clear')
+                    new = new_items[0]
+                    closing = threading.Thread(target=worker.catalogue_closing); closing.start()
+                    with worker._condition:
+                        self.assertTrue(worker._condition.wait_for(lambda: not worker._leave, timeout=30))
+                    release.set(); closing.join(30); self.assertFalse(closing.is_alive())
+                    self.queue.before_clear = None; self.sync(worker)
+                    self.assertTrue(self.queue.items[new]['open'])
+                    if skipped:
+                        self.assertTrue(self.queue.items[old]['open'])
+                        self.assertIn(old_fault, worker._clear_pending, 'skipped clear was not retained')
+                        self.assertNotIn(('clear', old), self.queue.calls)
+                    else:
+                        self.assertLess(self.queue.calls.index(('raise', new)),
+                                        self.queue.calls.index(('clear', old)))
+                        self.assertFalse(self.queue.items[old]['open'])
+                    self.assertEqual(self.ended, [])
+            finally:
+                release.set(); self.queue.before_clear = None
+                self.repair(saved); self.stop(worker)
 
     def test_pointer_damaged_then_folder_cause_change(self):
         self.worker();self.damage('pointer');self.refuse();self.assert_cause('pointer_damaged',None)
@@ -650,7 +723,7 @@ class TestSealWorker(unittest.TestCase):
         finally:
             patch.stop()
         self.tick(); self.assertEqual(self.ended, [(P, 'folder_unusable')])
-        for _ in range(3):
+        for _ in range(10):
             self.tick()
         self.assertEqual(len(self.ended), 1)
         patch = self.folder_fault()

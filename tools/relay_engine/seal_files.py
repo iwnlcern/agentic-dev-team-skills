@@ -296,6 +296,8 @@ class SealFolder:
             names = os.listdir(self._project(project_id) / 'records' / chain_id)
         except FileNotFoundError:
             return None
+        except OSError as exc:
+            raise RecordUnreadable(0, 'not_regular' if exc.errno in (errno.ELOOP, errno.ENOTDIR) else 'io') from None
         numbers = {int(name) for name in names if _decimal(name)}
         number = 0
         while number in numbers:

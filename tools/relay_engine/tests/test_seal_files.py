@@ -60,6 +60,20 @@ class SealFilesTests(unittest.TestCase):
         with self.folder.lock(project, exclusive=True):
             self.folder.write_mark(project, chain, data)
 
+    def test_record_head_unlistable_is_unreadable(self):
+        from relay_engine.seal_types import RecordUnreadable
+        records = self.directory() / 'records'
+        records.mkdir(exist_ok=True)
+        (records / C).write_bytes(b'not a directory')
+        with self.assertRaises(RecordUnreadable) as caught:
+            self.folder.record_head(P, C)
+        self.assertEqual(caught.exception.cause, 'not_regular')
+        with patch.object(self.f.os, 'listdir', side_effect=PermissionError('fixture')):
+            with self.assertRaises(RecordUnreadable) as caught:
+                self.folder.record_head(P, C)
+        self.assertEqual(caught.exception.cause, 'io')
+        self.assertIsNone(self.folder.record_head(P, D))
+
     def snapshot(self):
         if not self.root.exists():
             return None

@@ -231,6 +231,74 @@ class SealRendererTests(unittest.TestCase):
             if getattr(owner, 'ledger_fd', None) is not None:
                 os.close(owner.ledger_fd)
 
+    def test_unlistable_chain_skips_only_that_chain(self):
+        self.service.set_current(P, D, ledger_fd=self.fd, expected=C, bind='first')
+        renderer = self.renderer(); self.open(renderer, serving=True)
+        directory = self.root / 'projects' / P / 'records'
+        directory.mkdir(exist_ok=True)
+        broken = directory / C
+        if broken.exists():
+            broken.rmdir()
+        broken.write_bytes(b'not a directory')
+        self.rows(2, chain=C); self.rows(2, chain=D)
+        request = self.module._Request('pass', skip=frozenset())
+        owner = renderer._newest(P)
+        renderer._enqueue(owner, request)
+        self.assertTrue(request.done.wait(30))
+        self.assertEqual(owner.state, 'serving', 'unlistable chain ended generation')
+        self.assertIsNone(request.error)
+        self.assertEqual(self.service.read_record(P, D, 2).number, 2)
+        self.assertEqual(broken.read_bytes(), b'not a directory')
+        self.assertEqual(renderer.drain(P, D, through=0), 2)
+
+    def test_failed_open_never_left_closing_late(self):
+        manual = stand.ManualWait()
+        closed, release, attempted, finished = (threading.Event() for _ in range(4))
+        self.addCleanup(release.set)
+        errors, hook_ident, atomic = [], [], []
+        failure = RuntimeError('fixture open failed')
+        class Condition(threading.Condition):
+            def __enter__(condition):
+                if hook_ident and threading.get_ident() == hook_ident[0]:
+                    attempted.set()
+                return super().__enter__()
+        original_owner = self.module._Owner
+        def owner(*args):
+            return original_owner(*args, condition=Condition())
+        def reader(*args):
+            raise failure
+        renderer = self.renderer(reader=reader, wait=manual)
+        state = renderer._state
+        def changed(owner, value):
+            if value == 'closed':
+                atomic.append(owner.condition._is_owned())
+                state(owner, value); closed.set()
+                if not release.wait(30):
+                    raise AssertionError('failed-open owner barrier not released')
+            else:
+                state(owner, value)
+        def opened():
+            hook_ident.append(threading.get_ident())
+            try:
+                renderer.ledger_opened(P)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+        with mock.patch.object(self.module, '_Owner', side_effect=owner),                 mock.patch.object(renderer, '_state', side_effect=changed):
+            done = self.spawn(opened)
+            self.assertTrue(closed.wait(30)); manual.until_calls(1); manual.expire()
+            self.assertTrue(attempted.wait(30))
+            # The old split permits the hook to finish while the owner is held.
+            # The corrected atomic form needs its owner released independently.
+            if not atomic[0]:
+                self.assertTrue(finished.wait(30))
+            release.set(); self.assertTrue(done.wait(30))
+            renderer._newest(P).thread.join(30)
+            self.assertFalse(renderer._newest(P).thread.is_alive())
+        self.assertEqual(renderer._newest(P).state, 'closed')
+        self.assertEqual(errors, [failure])
+
     def test_record_walk_bounded(self):
         renderer = self.renderer(); self.open(renderer)
         self.rows(49); renderer.drain(P, C, through=0)
@@ -238,6 +306,7 @@ class SealRendererTests(unittest.TestCase):
         self.rows(50)
         real_listdir = os.listdir
         directory = self.root / 'projects' / P / 'records' / C
+        raw0, raw49 = (directory / '0').read_bytes(), (directory / '49').read_bytes()
         listings = []
         def listed(path):
             if Path(path) == directory:
@@ -245,7 +314,9 @@ class SealRendererTests(unittest.TestCase):
             return real_listdir(path)
         with mock.patch.object(self.service, 'open_record', wraps=self.service.open_record) as opened,                 mock.patch.object(os, 'listdir', side_effect=listed):
             renderer.drain(P, C, through=0)
-        self.assertEqual(opened.call_count, 3)
+        raw50 = (directory / '50').read_bytes()
+        self.assertEqual(opened.call_args_list,
+                         [mock.call(raw0), mock.call(raw49), mock.call(raw50)])
         self.assertEqual(len(listings), 1)
         self.assertEqual(self.service.read_record(P, C, 50).prev_mac, previous.mac)
 
@@ -559,13 +630,19 @@ class SealRendererTests(unittest.TestCase):
         self.assertEqual(order, ['interrupt-return', 'close'])
         self.assertEqual(self.errors, [])
         # A slot already cleared before the half-bound expires is never interrupted.
-        owner = original_owner(P, 2, reader=None)
+        order.clear()
+        cleared_reader = Reader(self.ledger, P)
+        owner = original_owner(P, 2, reader=cleared_reader)
         request = self.module._Request('stop')
         manual = stand.ManualWait(); renderer.wait = manual
         done = self.spawn(lambda: renderer._hook_wait(owner, request))
-        manual.until_calls(1); manual.expire(); manual.until_calls(2)
+        manual.until_calls(1)
+        with owner.condition:
+            owner.reader = None
+        cleared_reader.close()
+        manual.expire(); manual.until_calls(2)
         request.done.set(); self.assertTrue(done.wait(30))
-        self.assertEqual(order, ['interrupt-return', 'close'])
+        self.assertEqual(order, ['close'])
 
     def test_hook_opened_timed_out(self):
         # A bound-returning hook must leave the held open owned by its old thread.
