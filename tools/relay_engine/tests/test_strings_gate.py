@@ -190,7 +190,11 @@ def gate_violations(paths):
                 if call_name in {"render", "emit"}:
                     key_index = 1 if call_name == "emit" else 0
                     internal_dispatch = (module in {"strings", "errors"})
-                    if (not internal_dispatch and
+                    address_render = (isinstance(node.func, ast.Attribute) and
+                                      node.func.attr == "render" and
+                                      isinstance(node.func.value, ast.Name) and
+                                      node.func.value.id == "addresses")
+                    if (not internal_dispatch and not address_render and
                             (len(node.args) <= key_index or
                             not isinstance(node.args[key_index], ast.Constant) or
                             not isinstance(node.args[key_index].value, str) or
@@ -247,6 +251,21 @@ class TestGate(unittest.TestCase):
                     self.assertTrue(gate_violations([str(path)]))
             path.write_text('import selectors')
             self.assertEqual([], gate_violations([str(path)]))
+
+    def test_address_render_is_not_an_emission(self):
+        # Breaks: address tokens treated as inventory text, or unrelated sinks exempted.
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "probe.py"
+            path.write_text('addresses.render(addresses.Address(team="t", role="r"))')
+            self.assertEqual(gate_violations([str(path)]), [])
+            for source, line in (("strings.render(key)", 1),
+                                 ("other.render(a)", 1),
+                                 ("addresses.emit(None, a)", 1),
+                                 ("from relay_engine.addresses import render\nrender(a)", 2)):
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertEqual(gate_violations([str(path)]),
+                                     [("probe", line, "non-inventory emission key")])
 
     def test_production_tree_uses_only_keyed_output(self):
         self.assertEqual(gate_violations(self.production_paths()), [])
