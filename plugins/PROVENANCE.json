@@ -512,7 +512,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_seat_record.py",
-    "sha256": "b721ec4b36998a2fcc5d8748cc5f9039f15c331ca8755d6fcbbb7fa8bee19394",
+    "sha256": "e9304b537b665fc1cb17da489fdfdadaa8c7ee097b8016515aa6ba74eca3b630",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -11342,7 +11342,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_seat_record.py",
-    "sha256": "b721ec4b36998a2fcc5d8748cc5f9039f15c331ca8755d6fcbbb7fa8bee19394",
+    "sha256": "e9304b537b665fc1cb17da489fdfdadaa8c7ee097b8016515aa6ba74eca3b630",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -22088,7 +22088,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_seat_record.py",
-    "sha256": "b721ec4b36998a2fcc5d8748cc5f9039f15c331ca8755d6fcbbb7fa8bee19394",
+    "sha256": "e9304b537b665fc1cb17da489fdfdadaa8c7ee097b8016515aa6ba74eca3b630",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {

@@ -18,7 +18,18 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
-SIGN_IN_STANDINS = frozenset()
+# These test modules build requests on scratch ledgers or mock ports; neither
+# signs a host session in. Every call in either file is exempt, so a real client
+# added there would be invisible to the seat-record obligation check.
+SIGN_IN_STANDINS: frozenset[str] = frozenset({
+    "tools/relay_engine/tests/test_api_protocol.py",
+    "tools/relay_engine/tests/test_api_sessions.py",
+})
+# The API handler receives sign-in and forwards it to the session port: it is
+# the operation's callee. Only its own body is exempt, not nested functions.
+SIGN_IN_RECEIVERS: frozenset[tuple[str, str]] = frozenset({
+    ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
+})
 
 
 def sign_in_census(source):
@@ -29,6 +40,10 @@ def sign_in_census(source):
     other import aliases are not followed. A with-name.write or seat_record.write
     must occur earlier by line inside the with, not necessarily by execution.
     G-B1's base erratum pins the real sign-in client method when it first exists.
+    Counting includes the two named stand-in files and the receiving handler;
+    sign_in_misses filters their exceptions. Those files hide any future real
+    client added there; the handler's own body hides one if its role changes.
+    Other files and other or nested functions in the receiver file stay checked.
     """
     tree = ast.parse(source)
     imported_transaction = any(
@@ -73,6 +88,34 @@ def sign_in_census(source):
         if not valid:
             bad.append(call.lineno)
     return found, bad
+
+
+def sign_in_misses(rel: str, source: str) -> list[int]:
+    """Filter census misses by the named file and innermost-function exceptions.
+
+    Stand-in files hide every call, including a future real client there. The
+    receiver hides its own calls even if it later signs a host session in;
+    other files and other or nested functions remain checked. Counting itself
+    is unchanged, so SIGN_IN_CENSUS still reports every found call.
+    """
+    _, misses = sign_in_census(source)
+    if rel in SIGN_IN_STANDINS:
+        return []
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree)
+               for child in ast.iter_child_nodes(node)}
+    excused = set()
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or call.lineno not in misses:
+            continue
+        node = call
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if (rel, node.name) in SIGN_IN_RECEIVERS:
+                    excused.add(call.lineno)
+                break
+    return [line for line in misses if line not in excused]
 
 
 def removal_census(source, *, seat_module=False):
@@ -394,14 +437,66 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
             tx.restore()
         self.assertIsNone(self.sr.read("codex", "absent", home=self.home))
 
+    def test_sign_in_exceptions_are_exact(self):
+        self.assertEqual(SIGN_IN_STANDINS, frozenset({
+            "tools/relay_engine/tests/test_api_protocol.py",
+            "tools/relay_engine/tests/test_api_sessions.py",
+        }))
+        self.assertEqual(SIGN_IN_RECEIVERS, frozenset({
+            ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
+        }))
+        for rel in SIGN_IN_STANDINS:
+            with self.subTest(standin=rel):
+                path = REPO / rel
+                self.assertTrue(path.is_file())
+                self.assertTrue(sign_in_census(path.read_text(encoding="utf-8"))[0])
+        for rel, name in SIGN_IN_RECEIVERS:
+            with self.subTest(receiver=(rel, name)):
+                path = REPO / rel
+                self.assertTrue(path.is_file())
+                source = path.read_text(encoding="utf-8")
+                hits, _ = sign_in_census(source)
+                tree = ast.parse(source)
+                parents = {child: node for node in ast.walk(tree)
+                           for child in ast.iter_child_nodes(node)}
+                receiver_hits = []
+                for call in ast.walk(tree):
+                    if not isinstance(call, ast.Call) or call.lineno not in hits:
+                        continue
+                    node = call
+                    while node in parents:
+                        node = parents[node]
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if node.name == name:
+                                receiver_hits.append(call.lineno)
+                            break
+                self.assertTrue(receiver_hits)
+
     def test_every_sign_in_caller_writes_the_seat_record_first(self):
+        receiver = ('def _session_sign_in(args, binding, port):\n'
+                    '    return port.run("session.sign-in", args, binding)\n')
+        controls = [
+            ("client.call(\"session.sign-in\")\n", "tools/adapters/connect.py", [1]),
+            ('def client_sign_in(port):\n    port.run("session.sign-in")\n',
+             "tools/relay_engine/api_protocol.py", [2]),
+            (receiver, "tools/relay_engine/api_protocol.py", []),
+            (receiver, "tools/adapters/connect.py", [2]),
+            ('def _session_sign_in(args, binding, port):\n'
+             '    def inner():\n        port.run("session.sign-in")\n',
+             "tools/relay_engine/api_protocol.py", [3]),
+            ("client.call(\"session.sign-in\")\n",
+             "tools/relay_engine/tests/test_api_sessions.py", []),
+        ]
+        for source, rel, expected in controls:
+            with self.subTest(source=source, rel=rel):
+                self.assertEqual(sign_in_misses(rel, source), expected)
         found, bad = [], []
         for path in sorted((REPO / "tools").rglob("*.py")):
-            hits, misses = sign_in_census(path.read_text(encoding="utf-8"))
+            source = path.read_text(encoding="utf-8")
+            hits, _ = sign_in_census(source)
             rel = str(path.relative_to(REPO))
             found.extend((rel, line) for line in hits)
-            if rel not in SIGN_IN_STANDINS:
-                bad.extend((rel, line) for line in misses)
+            bad.extend((rel, line) for line in sign_in_misses(rel, source))
         print("SIGN_IN_CENSUS " + json.dumps(found))
         self.assertEqual(bad, [])
         self.assertTrue(sign_in_census('with seat_record.transaction("codex", "id") as tx:\n    client.call("session.sign-in")\n    tx.write("s", "a.planner", "p")\n')[1])
