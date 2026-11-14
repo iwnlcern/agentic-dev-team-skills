@@ -12,6 +12,7 @@ import json
 from types import MappingProxyType
 from typing import Mapping
 import difflib
+import errno
 import hashlib
 import io
 import itertools
@@ -25,6 +26,7 @@ from typing import Callable, NamedTuple, Sequence
 
 from relay_engine import addresses
 from relay_engine import errors
+from relay_engine import fileacl
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
@@ -816,30 +818,48 @@ def snapshot_diff(conn, a_handle, b_handle, store, directory=None, *, project_id
         fromfile="snapshot %d" % a_handle, tofile="snapshot %d" % b_handle))
 
 
+def _ownership_error(out, reason):
+    """E-OUTPUT-OWNERSHIP, with the path shown as E-OUTPUT-EXISTS shows it."""
+    shown = os.fspath(out)
+    return errors.error_for(
+        "E-OUTPUT-OWNERSHIP", reason=reason,
+        path=shown if strings._is_show_text(shown) and len(shown) <= 300
+        else errors._rejected_identity(shown))
+
+
 def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None, project_id):
     """Publish exact bytes through a private file beside the output.
 
     Creating a copy needs same-directory hard links; a filesystem that refuses
     them raises its OSError after staging cleanup. Overwrite uses os.replace
     and keeps an existing regular file's permission bits, else the umask mode.
+    Overwriting a regular file keeps its group and exact ACL too, through a
+    stage that never inherits a granting entry; a file another user owns, or
+    whose group the writer cannot give the copy, is refused
+    (DD-v3-engine-snapshot-acl D1 to D7).
     """
     snapshot = _snapshot(conn, handle, project_id)
     data = _snapshot_bytes(conn, snapshot, store, directory)
     mode = None
     if overwrite:
         try:
-            observed = os.lstat(out).st_mode
+            replaced = os.lstat(out)
         except FileNotFoundError:
             pass
         else:
+            observed = replaced.st_mode
             if stat.S_ISREG(observed):
                 mode = observed
-    open_mode = 0o600 if mode is not None else 0o644
+                if replaced.st_uid != os.geteuid():
+                    raise _ownership_error(out, "owner")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     for attempt in range(100):
         target = Path(out).parent / (".snapshot-" + secrets.token_hex(8))
         try:
-            fd = os.open(target, flags, open_mode)
+            if mode is not None:
+                fd = fileacl.create_private(target, flags)
+            else:
+                fd = os.open(target, flags, 0o644)
         except FileExistsError:
             if attempt == 99:
                 raise
@@ -847,6 +867,13 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
             break
     try:
         with io.FileIO(fd, mode="wb", closefd=True) as stream:
+            if mode is not None and os.fstat(stream.fileno()).st_gid != replaced.st_gid:
+                try:
+                    os.fchown(stream.fileno(), -1, replaced.st_gid)
+                except OSError as error:
+                    if error.errno != errno.EPERM:
+                        raise
+                    raise _ownership_error(out, "group") from None
             view = memoryview(data)
             while view:
                 written = os.write(stream.fileno(), view)
@@ -854,6 +881,7 @@ def write_snapshot(conn, handle, out, store, overwrite=False, *, directory=None,
                     raise OSError("snapshot write made no progress")
                 view = view[written:]
             if mode is not None:
+                fileacl.copy_access(out, stream.fileno())
                 os.fchmod(stream.fileno(), stat.S_IMODE(mode) & 0o777)
             os.fsync(stream.fileno())
         if overwrite:

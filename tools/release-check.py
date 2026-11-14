@@ -651,6 +651,7 @@ def docker_args(worktree, common_git_dir, out, image, expected_head, extra=(), p
     for key, value in (("ADT_EXPECTED_HEAD", expected_head),
                        ("ADT_SOURCE_MOUNTS", os.pathsep.join(str(s) for s in sources)),
                        ("TMPDIR", CONTAINER_SCRATCH), ("HOME", CONTAINER_SCRATCH),
+                       ("RELAY_ENGINE_ACL_DIR", "/var/tmp"),
                        ("ADT_IMAGE_ID", image_id or "")):
         args += ["-e", f"{key}={value}"]
     args += ["-w", str(worktree), image, "python3", "tools/release-check.py", "full", "--leg", "linux",
