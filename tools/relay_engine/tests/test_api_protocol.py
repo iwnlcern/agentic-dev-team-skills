@@ -193,5 +193,182 @@ class TestProtocol(unittest.TestCase):
             self.runtime.schemas['9.0'] = self.runtime.schemas['3.0']
 
 
+class TestSessionDispatch(unittest.TestCase):
+    def setUp(self):
+        import relay_engine.api_protocol as p
+        self.p = p
+        self.binding = p.SeatBinding('project', 'team', 'seat', 'occupant', 'key', 'session', 7)
+        self.other = replace(self.binding, session_id='other', generation=8)
+        self.calls = []
+        self.answer = p.SessionOutcome({}, 'keep', None)
+        owner = self
+        class Port:
+            def run(self, operation, args, binding):
+                owner.calls.append((operation, args, binding))
+                if isinstance(owner.answer, Exception):
+                    raise owner.answer
+                return owner.answer
+        self.port = Port()
+        graph = d.discovery_definitions()
+        template = graph.operations[1]
+        operations = tuple(replace(template, name=name, result_ref=d.TypeRef('SchemaArgs'),
+                                   principal=principal, effect='connection_binding',
+                                   browser_get='none', rules=()) for name, principal in (
+            ('session.end', 'seat_key'), ('session.resume', 'seat_key'),
+            ('session.sign-in', 'seat_key'), ('test.seat', 'seat_session')))
+        handlers = dict(p.discovery_handlers(), **p.session_handlers())
+        handlers['test.seat'] = lambda args, binding, port: port.run('test.seat', args, binding)
+        self.registry = r.compile_registry(replace(graph, operations=graph.operations + operations),
+                                           handlers, (errors.api_error_catalog(),))
+        self.runtime = make_runtime(self.registry)
+        self.connected = p.dispatch_discovery(p.initial_connection_state(), request(),
+                                               self.runtime, self.registry).state
+
+    def dispatch(self, op='session.sign-in', state=None, args=None, request_id='2', runtime=None,
+                 registry=None):
+        return self.p.dispatch_api(self.connected if state is None else state,
+                                   request(op, request_id, {} if args is None else args),
+                                   self.runtime if runtime is None else runtime,
+                                   self.registry if registry is None else registry, self.port)
+
+    def refusal(self, result, kind, close=False):
+        self.assertEqual(result.response['error']['cause']['kind'], kind)
+        self.assertEqual(result.close, close)
+        self.assertEqual(result.state.phase, 'closed' if close else 'connected')
+        w.encode_api_response(result.response, self.registry, None, None)
+
+    def test_discovery_operations_unchanged_through_dispatch_api(self):
+        state = self.p.initial_connection_state()
+        for req in (request(), request('protocol.schema', '3')):
+            old = self.p.dispatch_discovery(state, req, self.runtime, self.registry)
+            new = self.p.dispatch_api(state, req, self.runtime, self.registry, self.port)
+            self.assertEqual(new, old)
+            context = r.DiscoveryValidationContext('schema_reply', '3.0', old.state.negotiated_schema_digest)
+            self.assertEqual(w.encode_api_response(new.response, self.registry, req.op, context),
+                             w.encode_api_response(old.response, self.registry, req.op, context))
+            state = old.state
+        self.assertEqual(self.calls, [])
+
+    def test_session_routes_phase_and_id_ordering(self):
+        self.refusal(self.dispatch(state=self.p.initial_connection_state()), 'handshake_required', True)
+        for last, value in ((1, '1'), (9, '2')):
+            self.refusal(self.dispatch(state=replace(self.connected, last_request_id=last),
+                                      request_id=value, args=[]), 'non_increasing_request_id', True)
+        result = self.dispatch(request_id='9')
+        self.assertEqual(result.response, {'request_id': '9', 'result': {}})
+        self.assertEqual(result.state.last_request_id, 9)
+        closed = self.dispatch(state=result.state, request_id='3')
+        self.refusal(closed, 'non_increasing_request_id', True)
+        self.assertIsNone(self.dispatch(state=closed.state, request_id='10').response)
+        self.assertEqual(len(self.calls), 1)
+        # Codec refusals and an invalid envelope win before any principal routing.
+        for req, kind in ((w.ProtocolRefusal(None, 'malformed_json', True), 'malformed_json'),
+                          (object(), 'invalid_envelope'),
+                          (request('session.sign-in', '0'), 'invalid_envelope')):
+            result = self.p.dispatch_api(self.connected, req, self.runtime, self.registry, self.port)
+            self.refusal(result, kind, True)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_session_routes_refuse_when_runtime_not_ready(self):
+        bound = replace(self.connected, binding=self.binding)
+        unavailable = replace(self.runtime, ready=False)
+        result = self.dispatch(state=bound, runtime=unavailable)
+        self.refusal(result, 'runtime_not_ready', True)
+        self.assertEqual(result.state.binding, self.binding)
+        self.assertFalse(unavailable.ready)
+        self.assertEqual(self.calls, [])
+        self.assertIn('result', self.dispatch(state=bound).response)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_session_handlers_forward_to_injected_port(self):
+        handlers = self.p.session_handlers()
+        self.assertEqual(set(handlers), {'session.end', 'session.resume', 'session.sign-in'})
+        for name, handler in handlers.items():
+            args = {'probe': name}
+            self.assertIs(handler(args, self.binding, self.port), self.answer)
+            self.assertEqual(self.calls[-1], (name, args, self.binding))
+        self.assertEqual(len(self.calls), 3)
+
+    def test_unknown_operation_and_invalid_args_never_call_handler(self):
+        self.refusal(self.dispatch('test.missing', args=[]), 'unknown_operation')
+        self.refusal(self.dispatch(args={'extra': 'value'}), 'invalid_args')
+        self.assertEqual(self.calls, [])
+        self.assertIn('result', self.dispatch().response)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_seat_session_principal_refuses_unsigned_before_handler(self):
+        self.refusal(self.dispatch('test.seat'), 'not_signed_in')
+        self.assertEqual(self.calls, [])
+        self.assertIn('result', self.dispatch('test.seat', state=replace(
+            self.connected, binding=self.binding)).response)
+        self.assertEqual(self.calls, [('test.seat', {}, self.binding)])
+
+    def test_resume_on_bound_connection_is_already_bound(self):
+        result = self.dispatch('session.resume', state=replace(self.connected, binding=self.binding))
+        self.refusal(result, 'already_bound')
+        self.assertEqual(result.state.binding, self.binding)
+        self.assertEqual(self.calls, [])
+        self.assertIn('result', self.dispatch('session.resume').response)
+
+    def test_sign_in_on_bound_connection_reaches_handler(self):
+        result = self.dispatch(state=replace(self.connected, binding=self.binding))
+        self.assertIn('result', result.response)
+        self.assertEqual(self.calls, [('session.sign-in', {}, self.binding)])
+        self.assertEqual(result.state.binding, self.binding)
+
+    def test_raising_handler_is_fixed_handler_fault(self):
+        self.answer = RuntimeError('PRIVATE-handler-text')
+        result = self.dispatch(state=replace(self.connected, binding=self.binding))
+        self.refusal(result, 'handler_fault')
+        self.assertNotIn('PRIVATE-handler-text', json.dumps(result.response))
+        self.assertEqual(result.state.binding, self.binding)
+        self.assertTrue(self.runtime.ready)
+
+    def test_invalid_result_with_set_or_clear_changes_no_binding(self):
+        bound = replace(self.connected, binding=self.binding)
+        for action, binding in (('set', self.other), ('clear', None)):
+            with self.subTest(action=action):
+                self.answer = self.p.SessionOutcome({'bad': 'result'}, action, binding)
+                result = self.dispatch(state=bound)
+                self.refusal(result, 'handler_fault')
+                self.assertEqual(result.state.binding, self.binding)
+                self.answer = self.p.SessionOutcome({}, action, binding)
+                valid = self.dispatch(state=bound)
+                self.assertIn('result', valid.response)
+                self.assertEqual(valid.state.binding, binding)
+
+    def test_refusal_outside_operation_arms_is_handler_fault(self):
+        op = replace(self.registry.operations['session.sign-in'],
+                     error_ref=d.TypeRef('ApiErrorAuthNotSignedIn'))
+        restricted = replace(self.registry, operations=dict(self.registry.operations,
+                              **{'session.sign-in': op}))
+        for answer in (self.p.SessionRefusal('E_API_AUTH', 'key_rejected'),
+                       self.p.SessionRefusal('E_API_CONFLICT', 'key_rejected'),
+                       self.p.SessionRefusal('E_API_AUTH', 'unknown_cause')):
+            self.answer = answer
+            self.refusal(self.dispatch(registry=restricted), 'handler_fault')
+        self.answer = self.p.SessionRefusal('E_API_AUTH', 'not_signed_in')
+        self.refusal(self.dispatch(registry=restricted), 'not_signed_in')
+
+    def test_not_current_causes_clear_binding_others_keep_it(self):
+        clears = {'key_replaced', 'seat_stood_down', 'session_not_current'}
+        for kind in sorted(clears | {'key_rejected', 'not_signed_in', 'already_bound',
+                                    'operation_key_reused'}):
+            with self.subTest(kind=kind):
+                code = 'E_API_CONFLICT' if kind == 'operation_key_reused' else 'E_API_AUTH'
+                self.answer = self.p.SessionRefusal(code, kind)
+                result = self.dispatch(state=replace(self.connected, binding=self.binding))
+                self.refusal(result, kind)
+                self.assertEqual(result.state.binding, None if kind in clears else self.binding)
+
+    def test_binding_never_taken_from_request_args(self):
+        from dataclasses import asdict
+        result = self.dispatch(args={'binding': asdict(self.other)},
+                               state=replace(self.connected, binding=self.binding))
+        self.refusal(result, 'invalid_args')
+        self.assertEqual(result.state.binding, self.binding)
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()
