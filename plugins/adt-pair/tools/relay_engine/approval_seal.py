@@ -558,6 +558,29 @@ class SealService:
             data = dict(self.folder.read_entries(project, chain, after=after, through=head))
             return tuple(self._entry(data.get(n), project, chain, n) for n in range(after + 1, head + 1))
 
+    def mark_broken(self, project, chain, *, cause, number):
+        require_canonical_id(project); require_canonical_id(chain); _number(number)
+        if cause not in ('counter_behind', 'record_conflict'):
+            raise ValueError('unknown_broken_cause')
+        with self._locked(project, exclusive=True):
+            if self.folder.mark_exists(project, chain):
+                return
+            mark = {'format': 'adt-approval-broken-v1', 'project_id': project, 'chain_id': chain,
+                    'cause': cause, 'number': number, 'at_ms': self.clock_ms()}
+            self.folder.write_mark(project, chain, jcs_encode(
+                {'mark': mark, 'sha256': hashlib.sha256(jcs_encode(mark)).hexdigest()}))
+
+    def drain(self, project, chain, *, through):
+        require_canonical_id(project); require_canonical_id(chain); _number(through)
+        if self.renderer is None:
+            raise RuntimeError('seal_renderer_not_attached')
+        return self.renderer.drain(project, chain, through=through)
+
+    def committed(self, project, chain):
+        require_canonical_id(project); require_canonical_id(chain)
+        if self.renderer is not None:
+            self.renderer.committed(project, chain)
+
 
 def _expected(value, *, sentinel):
     if value is None or sentinel and value is POINTER_UNREADABLE:
@@ -629,3 +652,15 @@ def reserve(project_id, chain_id, *, kind, subject, payload, transaction, declar
 
 def reservations_above(project_id, chain_id, after):
     return _installed().reservations_above(project_id, chain_id, after)
+
+
+def mark_broken(project_id, chain_id, *, cause, number):
+    return _installed().mark_broken(project_id, chain_id, cause=cause, number=number)
+
+
+def drain(project_id, chain_id, *, through):
+    return _installed().drain(project_id, chain_id, through=through)
+
+
+def committed(project_id, chain_id):
+    return _installed().committed(project_id, chain_id)

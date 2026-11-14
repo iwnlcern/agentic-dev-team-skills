@@ -466,3 +466,78 @@ class SealReserveTests(unittest.TestCase):
         with mock.patch.object(self.service.folder, 'lock', side_effect=AssertionError('locked')):
             with self.assertRaises(ValueError):
                 self.reserve(payload=b'{"n":1.5}')
+
+    def test_mark_broken_first_wins(self):
+        self.a.mark_broken(P, C, cause='counter_behind', number=6)
+        path = self.project / (C + '.broken')
+        original, inode = path.read_bytes(), path.stat().st_ino
+        value = json.loads(original); mark = value['mark']
+        self.assertEqual(mark, {'format': 'adt-approval-broken-v1', 'project_id': P,
+                                'chain_id': C, 'cause': 'counter_behind', 'number': 6, 'at_ms': 50})
+        self.assertEqual(value['sha256'], hashlib.sha256(self.jcs(mark)).hexdigest())
+        self.a.mark_broken(P, C, cause='record_conflict', number=7)
+        self.assertEqual((path.read_bytes(), path.stat().st_ino), (original, inode))
+        self.assertTrue(self.a.is_broken(P, C))
+        path.write_bytes(b'bad-checksum')
+        self.assertTrue(self.a.is_broken(P, C))
+        self.a.mark_broken(P, C, cause='record_conflict', number=8)
+        self.assertEqual(path.read_bytes(), b'bad-checksum')
+
+    def test_drain_through_type_checks(self):
+        renderer = mock.Mock(); renderer.drain.return_value = 7
+        self.service.attach_renderer(renderer)
+        before = self.snapshot()
+        with mock.patch.object(self.service.folder, 'lock', side_effect=AssertionError('locked')):
+            for through in (-1, True, 6.0):
+                with self.assertRaises(ValueError):
+                    self.a.drain(P, C, through=through)
+            renderer.drain.assert_not_called()
+            self.assertEqual(self.a.drain(P, C, through=6), 7)
+        renderer.drain.assert_called_once_with(P, C, through=6)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_per_chain_names_never_unlinked(self):
+        seen = {}
+        def retained():
+            current = {p.relative_to(self.project): p.stat().st_ino
+                       for p in self.project.rglob('*') if not p.name.startswith('.creating-')}
+            self.assertTrue(seen.keys() <= current.keys())
+            self.assertTrue(all(current[p] == inode for p, inode in seen.items()))
+            seen.update(current)
+        retained(); self.reserve(); retained()
+        real = os.pwrite
+        def stopped(fd, data, offset):
+            if data[:8] == b'ADTSLOT1':
+                raise Stopped()
+            return real(fd, data, offset)
+        with mock.patch.object(os, 'pwrite', side_effect=stopped):
+            with self.assertRaises(Stopped):
+                self.reserve(tx=2)
+        retained(); self.reserve(tx=2, payload=b'{"x":2}'); retained()
+        self.publish(); retained()
+        with self.service.folder.lock(P, exclusive=True):
+            with self.service._open(P, C + '.high-water', write=True) as fd:
+                state = self.s.read_slots(fd, kind=self.s.ItemKind.HIGH_WATER,
+                                          binding=(P, C), ledger_identity=None)
+                self.s.write_next(fd, state, value=2)
+        retained()
+        self.a.mark_broken(P, C, cause='counter_behind', number=2); retained()
+        self.a.set_current(P, D, ledger_fd=self.ledger, expected=C, bind='first'); retained()
+        self.reserve(tx=3, chain=D); retained()
+
+    def test_committed_never_blocks(self):
+        before = self.snapshot()
+        with mock.patch.object(self.service.folder, 'lock', side_effect=AssertionError('locked')):
+            self.assertIsNone(self.a.committed(P, C))
+            renderer = mock.Mock()
+            self.service.attach_renderer(renderer)
+            self.assertIsNone(self.a.committed(P, C))
+        renderer.committed.assert_called_once_with(P, C)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_drain_without_renderer_raises(self):
+        before = self.snapshot()
+        with mock.patch.object(self.service.folder, 'lock', side_effect=AssertionError('locked')):
+            with self.assertRaises(RuntimeError):
+                self.a.drain(P, C, through=7)
+        self.assertEqual(self.snapshot(), before)
