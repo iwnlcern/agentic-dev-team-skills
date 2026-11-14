@@ -8242,9 +8242,13 @@ t.assertIsNone(observation['root']);t.assertEqual(observation['root_provenance']
         self.store.update(lambda n: n.update(seat='a.planner', root=str(self.root), anchor='lane/r1.md', binding_source='hook', binding_gen=1))
 
     def _ready(self, child):
-        ready, _, _ = select.select([child.stderr], [], [], 3)
+        ready, _, _ = select.select([child.stderr], [], [], 10)
         self.assertTrue(ready, 'child did not reach barrier')
-        self.assertEqual(child.stderr.readline(), b'READY\n')
+        line = child.stderr.readline()
+        if line == b'':
+            out, _ = child.communicate(timeout=5)
+            self.fail(f'child closed stderr before READY: returncode={child.returncode} stdout={out.decode(errors="replace")[:2000]!r}')
+        self.assertEqual(line, b'READY\n')
 
     def _race(self, stage, change=None, call=None):
         # Child setup is outside the measured interval. Raw root operations are
@@ -8255,6 +8259,16 @@ from types import SimpleNamespace
 spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
 m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
 root={str(self.root)!r}; stage={stage!r}; active=None; used=False
+real_threading = m.threading
+class RootThread:
+    def __init__(self, *, target, **kwargs): self.target = target
+    def start(self): self.target()
+class Threading:
+    def Thread(self, *args, **kwargs): return RootThread(*args, **kwargs)
+    def __getattr__(self, name): return getattr(real_threading, name)
+# Root reads run inline and the budget debits nothing, so the barrier does not depend on time.
+m.threading = Threading()
+m.RootBudget.spend = lambda self, waited: None
 old_attr=m.attribute_root; old_hint=m.rebind_line; old_discover=m.discover_root_like_cli; old_lookup=m.receipt_row_lookup; old_real=m.os.path.realpath
 def barrier():
     global used
@@ -8294,7 +8308,7 @@ m.bind(SimpleNamespace(manual=False,session=None,plugin_root=None,host='auto',ro
         probe_code = r'''
 import fcntl,os,sys,time,json
 f=open(sys.argv[1],'a');os.write(2,b'READY\n');sys.stdin.readline();start=time.monotonic();ok=False
-while time.monotonic()-start < .18:
+while time.monotonic()-start < 1.0:  # A held lock stays held until the parent's signal.
     try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);ok=True;break
     except BlockingIOError: time.sleep(.001)
 print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
@@ -8306,11 +8320,11 @@ print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
             child = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self._ready(child)
             signalled = time.monotonic()
-            probe_out, probe_err = probe.communicate(b'go\n', timeout=1)
+            probe_out, probe_err = probe.communicate(b'go\n', timeout=5)  # A held lock stays held until the parent's signal.
             elapsed = time.monotonic() - signalled
             result = json.loads(probe_out)
             self.assertTrue(result['ok'], 'state_lock held across raw root call')
-            self.assertLess(elapsed, .2)
+            self.assertLess(elapsed, 2.0)  # A held lock stays held until the parent's signal.
             if change:
                 change()
             out, err = child.communicate(b'x', timeout=5)

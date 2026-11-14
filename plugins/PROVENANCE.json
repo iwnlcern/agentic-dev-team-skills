@@ -500,7 +500,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "3078d9e00c284bf7afa3f3829cef71b9fcb717825c9340acf72a568cf46538e5",
+    "sha256": "8c9603d76e2ca4e92a95f295efaeac624e89baac960e3527e8a876a0651e3d99",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -11348,7 +11348,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "3078d9e00c284bf7afa3f3829cef71b9fcb717825c9340acf72a568cf46538e5",
+    "sha256": "8c9603d76e2ca4e92a95f295efaeac624e89baac960e3527e8a876a0651e3d99",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -22112,7 +22112,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "3078d9e00c284bf7afa3f3829cef71b9fcb717825c9340acf72a568cf46538e5",
+    "sha256": "8c9603d76e2ca4e92a95f295efaeac624e89baac960e3527e8a876a0651e3d99",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
