@@ -213,7 +213,7 @@ class TestCatalogue(unittest.TestCase):
         conn = self.opened()
         definitions = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, 'd7aeb1b1defe3cd3597ae13d859db43860f3cccc51e1b9f21ab1ade16bface2e')
+        self.assertEqual(digest, '8b281aee92741122483626d40fa15d5887eeb9a8e7c4477d799d1c840d0919a8')
 
     def test_constraints_hold(self):
         conn = self.opened()
@@ -466,6 +466,77 @@ class TestQueueCatalogue(unittest.TestCase):
         for digest in ('A'*64, 'a'*63, 'g'*64):
             with self.subTest(digest=digest), self.assertRaises(sqlite3.IntegrityError):
                 conn.execute(sql, ('bad','service','s','open',digest,digest,'{}',0)).close()
+
+    def test_required_columns_refuse_null(self):
+        conn = self.opened()
+        self.item(conn, 'parent')
+        rows = {
+            'queue_items': dict(item_id='control', kind='question', project_id=P,
+                                raiser='console_queue', revision=1, state='pending',
+                                texts='{}', pins='{}', condition_key='key',
+                                raised_position=1, raised_at_ms=0),
+            'queue_conditions': dict(item_id='parent', kind='question', project_id=P,
+                                     condition_key='key', raiser='console_queue', raised_at_ms=0),
+            'queue_events': dict(position=1, item_id='parent', revision=1, state='pending',
+                                 event_kind='raised', principal_kind='service',
+                                 principal_id='console_queue', at_ms=0),
+            'queue_answers': dict(item_id='parent', answer_id='answer', answer='yes',
+                                  answered_at_ms=0, apply_key='apply', project_id=P,
+                                  phase='recorded'),
+            'queue_receipts': dict(receipt_id='receipt', principal_kind='operator',
+                                   principal_id='operator', operation='dismiss',
+                                   operation_key='key', request_digest='a' * 64,
+                                   result='{}', committed_at_ms=0),
+            'queue_notifications': dict(item_id='parent', revision=1, state='pending',
+                                        next_attempt_at_ms=0),
+        }
+        required = {
+            'queue_items': ('kind', 'state'),
+            'queue_conditions': ('kind', 'condition_key', 'raiser', 'raised_at_ms'),
+            'queue_events': ('revision', 'state', 'event_kind', 'principal_kind',
+                             'principal_id', 'at_ms'),
+            'queue_answers': ('answer_id', 'phase'),
+            'queue_receipts': ('principal_kind', 'principal_id', 'operation',
+                               'operation_key', 'request_digest', 'committed_at_ms'),
+            'queue_notifications': ('state',),
+        }
+        self.assertEqual(sum(map(len, required.values())), 21)
+
+        def insert(table, values):
+            conn.execute(f"INSERT INTO {table} ({', '.join(values)}) "
+                         f"VALUES ({', '.join('?' for _ in values)})",
+                         tuple(values.values())).close()
+
+        for table, columns in required.items():
+            # Each NULL probe starts from a row proved valid against all other constraints.
+            conn.execute('SAVEPOINT control').close()
+            insert(table, rows[table])
+            conn.execute('ROLLBACK TO control').close()
+            conn.execute('RELEASE control').close()
+            for column in columns:
+                with self.subTest(table=table, column=column):
+                    conn.execute('SAVEPOINT probe').close()
+                    try:
+                        with self.assertRaises(sqlite3.IntegrityError) as caught:
+                            insert(table, dict(rows[table], **{column: None}))
+                        self.assertEqual(str(caught.exception),
+                                         f'NOT NULL constraint failed: {table}.{column}')
+                    finally:
+                        conn.execute('ROLLBACK TO probe').close()
+                        conn.execute('RELEASE probe').close()
+        with self.subTest(table='queue_notifications', column='pending due time'):
+            conn.execute('SAVEPOINT due').close()
+            try:
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
+                    insert('queue_notifications', dict(rows['queue_notifications'],
+                                                       next_attempt_at_ms=None))
+                self.assertEqual(str(caught.exception),
+                                 "CHECK constraint failed: state <> 'pending' OR next_attempt_at_ms IS NOT NULL")
+            finally:
+                conn.execute('ROLLBACK TO due').close()
+                conn.execute('RELEASE due').close()
+        insert('queue_notifications', dict(rows['queue_notifications'],
+                                           state='retired', next_attempt_at_ms=None))
 
     def test_older_catalogue_refuses(self):
         root = Path(self.tmp.name) / 'older'
