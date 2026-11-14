@@ -1,13 +1,14 @@
 """Bounded retention walks and counters on disposable project ledgers."""
 import importlib
 import hashlib
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from unittest import mock
 
-from relay_engine import queries, schema
+from relay_engine import queries, schema, store_layout
 from relay_engine.tests.test_store_evidence import PROJECT
 
 
@@ -183,6 +184,341 @@ class TestRetention(unittest.TestCase):
         # filtering or sorting is >50000. Count the association walk itself.
         self.assertLessEqual(len(steps), 8000)
         self.assertEqual(self.conn.execute('SELECT derive_cursor FROM evidence_retention').fetchone(), (500,))
+
+
+DAY = 86400000
+NOW = 40 * DAY
+
+
+class TestRetentionPasses(unittest.TestCase):
+    require = TestRetention.require
+    bundle = TestRetention.bundle
+    store = TestRetention.store
+    seed = TestRetention.seed
+
+    def setUp(self):
+        TestRetention.setUp(self)
+        for name in ('mark', 'sweep', 'unlink_swept', 'list_orphan_candidates', 'orphans'):
+            self.require(name)
+        self.e = self.evidence
+
+    def disk(self):
+        self.conn.close()
+        self.conn = store_layout.open_ledger(self.root, PROJECT, create=True)
+        self.addCleanup(self.conn.close)
+        self.conn.execute("INSERT INTO projects (id,name,created_at) VALUES (?, 'passes',1)", (PROJECT,))
+        self.conn.commit()
+
+    def old_put(self, data, bundle=None, at=1):
+        with mock.patch.object(self.e.time, 'time_ns', return_value=at * 1000000):
+            sha = self.store(bundle).put(data)
+        self.conn.commit()
+        return sha
+
+    def job(self, name, now=NOW, **kwargs):
+        self.conn.execute('BEGIN IMMEDIATE')
+        args = (self.conn, self.root, PROJECT)
+        report = getattr(self.e, name)(*args, **kwargs) if name == 'unlink_swept' else getattr(
+            self.e, name)(*args, now, **kwargs)
+        self.assertTrue(self.conn.in_transaction, name + ' committed its caller transaction')
+        self.conn.commit()
+        return report
+
+    def derived(self, now=NOW):
+        report = self.job('derive', now)
+        while not report.finished:
+            report = self.job('derive', now)
+        return report.run_id
+
+    def path(self, sha):
+        codec = self.conn.execute('SELECT codec FROM evidence_objects WHERE sha256=?', (sha,)).fetchone()[0]
+        return store_layout.evidence_dir(self.root, PROJECT) / 'objects' / sha[:2] / (sha + '.' + codec)
+
+    def point(self, sha, count=1):
+        self.conn.execute('INSERT OR IGNORE INTO relays '
+                          '(id,handle,project_id,kind,needs,subject,sender_special,created_at,'
+                          'body_sha256,meta_sha256,body_bytes,header_bytes) '
+                          "VALUES ('pointer',1,?,'SITREP','none','pointer','operator',1,?,?,0,0)",
+                          (PROJECT, '0' * 64, '0' * 64))
+        start = self.conn.execute('SELECT COALESCE(MAX(handle),0)+1 FROM snapshots').fetchone()[0]
+        for n in range(start, start + count):
+            self.conn.execute('INSERT INTO edges '
+                              '(id,from_relay_id,ordinal,kind,target_type,spelling,target_path) '
+                              "VALUES (?,'pointer',?,'ref','path','fixture','fixture')", ('edge' + str(n), n))
+            self.conn.execute('INSERT INTO snapshots '
+                              '(id,handle,relay_id,edge_id,artifact,content_sha256,bytes_len,has_bytes) '
+                              "VALUES (?,?,'pointer',?,'fixture',?,0,1)",
+                              ('snapshot' + str(n), n, 'edge' + str(n), sha))
+        self.conn.commit()
+
+    def test_mark_uses_derived_values(self):
+        self.bundle('closed', NOW - 15 * DAY)
+        self.bundle('open')
+        closed = self.old_put(b'lost decrement', 'closed')
+        opened = self.old_put(b'lost increment', 'open')
+        self.derived()
+        self.conn.execute('UPDATE evidence_objects SET open_bundle_count=1 WHERE sha256=?', (closed,))
+        self.conn.execute('UPDATE evidence_objects SET open_bundle_count=0 WHERE sha256=?', (opened,))
+        self.conn.commit()
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_prune_marks').fetchall(), [(closed,)])
+        counts = dict(self.conn.execute('SELECT sha256,open_bundle_count FROM evidence_objects'))
+        self.assertEqual((counts[closed], counts[opened]), (0, 1))
+
+    def test_pointed_never_marked(self):
+        self.seed(1200)
+        self.conn.execute("UPDATE bundles SET closed_at=? WHERE id='bulk'", (NOW - 15 * DAY,))
+        self.conn.commit()
+        pointed = format(1, '064x')
+        self.point(pointed, 10000)
+        self.bundle('recent', NOW - 13 * DAY)
+        recent = self.old_put(b'recent close', 'recent')
+        self.derived()
+        with mock.patch.object(queries, 'evidence_pointed', wraps=queries.evidence_pointed) as reader:
+            reports = [self.job('mark') for _ in range(3)]
+        self.assertEqual([r.visited for r in reports], [500, 500, 201])
+        self.assertTrue(all(len(call.args[2]) <= 500 for call in reader.call_args_list))
+        marked = {row[0] for row in self.conn.execute('SELECT sha256 FROM evidence_prune_marks')}
+        self.assertNotIn(pointed, marked)
+        self.assertNotIn(recent, marked)
+        self.assertEqual(len(marked), 1199)
+        self.assertEqual(self.conn.execute('SELECT locked_at FROM snapshots LIMIT 1').fetchone(), (None,))
+
+    def test_bundleless_clock(self):
+        sha = self.old_put(b'bundleless clock')
+        protected = self.old_put(b'bundleless pointed')
+        self.point(protected)
+        self.derived(13 * DAY)
+        self.job('mark', 13 * DAY)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_prune_marks').fetchone(), (0,))
+        self.derived(15 * DAY)
+        self.job('mark', 15 * DAY)
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_prune_marks').fetchall(), [(sha,)])
+
+    def test_sweep_rechecks(self):
+        pointed = self.old_put(b'new pointer')
+        changed = self.old_put(b'changed sequence')
+        stable = self.old_put(b'stable sweep')
+        self.derived()
+        self.job('mark')
+        self.point(pointed)
+        self.conn.execute('UPDATE evidence_objects SET state_seq=state_seq+100 WHERE sha256=?', (changed,))
+        self.conn.commit()
+        self.job('sweep', NOW + DAY + 1)
+        self.assertEqual({r[0] for r in self.conn.execute('SELECT sha256 FROM evidence_objects')},
+                         {pointed, changed})
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_pruned').fetchall(), [(stable,)])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_prune_marks').fetchone(), (0,))
+
+    def test_unlink_guarded(self):
+        data = b'writer outside queue'
+        sha = self.old_put(data)
+        other = self.old_put(b'crash orphan')
+        path, orphan = self.path(sha), self.path(other)
+        self.derived()
+        self.job('mark')
+        self.job('sweep', NOW + DAY + 1)
+        self.assertTrue(path.is_file())
+        self.assertTrue(orphan.is_file())
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_objects').fetchone(), (0,))
+        # An independently queued writer resurrects the same digest before unlink.
+        self.old_put(data, at=NOW + DAY + 1)
+        self.job('unlink_swept')
+        self.assertEqual(self.store(None).get(sha), data)
+        self.assertTrue(path.is_file())
+        self.assertFalse(orphan.exists())
+        # Also exercise orphan convergence rather than requiring a sweep replay.
+        self.conn.execute('BEGIN IMMEDIATE')
+        lost = self.store(None).put(b'rolled back orphan convergence')
+        loose = self.path(lost)
+        self.conn.rollback()
+        os.utime(loose, ((NOW - 2 * DAY) / 1000,) * 2)
+        candidates = self.e.list_orphan_candidates(self.root, PROJECT, NOW)
+        self.job('orphans', candidates=candidates)
+        self.assertFalse(loose.exists())
+        self.assertTrue(path.exists())
+
+    def test_captured_by_none_after_prune(self):
+        sha = self.old_put(b'pruned lookup')
+        self.derived()
+        self.job('mark')
+        self.job('sweep', NOW + DAY + 1)
+        self.job('unlink_swept')
+        self.assertIsNone(self.store(None).captured_by(sha))
+        with self.assertRaises(KeyError):
+            self.store(None).get(sha)
+
+    def test_stale_snapshot_reader_answers_no_record(self):
+        self.disk()
+        sha = self.old_put(b'unsigned reader race')
+        path = self.path(sha)
+        self.derived()
+        self.job('mark')
+        reader = sqlite3.connect(store_layout.ledger_path(self.root, PROJECT).as_uri() + '?mode=ro', uri=True)
+        self.addCleanup(reader.close)
+        store = self.e.LedgerEvidence(reader, self.root, PROJECT, self.e.Capture(
+            'upload', 'seat-supplied', None, 'operator', None))
+        original = Path.read_bytes
+        raced = []
+
+        def read(file):
+            if file == path and not raced:
+                raced.append(True)
+                self.job('sweep', NOW + DAY + 1)
+                self.job('unlink_swept')
+            return original(file)
+
+        with mock.patch.object(Path, 'read_bytes', read), self.assertRaises(KeyError):
+            store.get(sha)
+        self.assertEqual(raced, [True])
+        self.assertFalse(reader.in_transaction)
+
+    def test_orphan_pass_removes_stale_prepared_and_rolled_back_files(self):
+        self.disk()
+        self.conn.execute('BEGIN IMMEDIATE')
+        sha = self.store(None).put(b'rolled back object')
+        loose = self.path(sha)
+        self.conn.rollback()
+        data = b'abandoned prepared upload'
+        capture = self.e.Capture('upload', 'seat-supplied', None, 'operator', None)
+        upload = self.e.begin_upload(self.conn, self.root, PROJECT, capture,
+                                     hashlib.sha256(data).hexdigest(), len(data)).upload_id
+        self.conn.commit()
+        self.e.append_chunk(self.conn, self.root, PROJECT, upload, 0, data)
+        self.conn.commit()
+        prepared = self.e.prepare_upload(self.root, PROJECT, upload)
+        self.conn.execute("UPDATE evidence_uploads SET state='abandoned' WHERE upload_id=?", (upload,))
+        self.conn.commit()
+        with self.assertRaises(ValueError):
+            self.e.commit_upload(self.conn, self.root, PROJECT, prepared)
+        self.conn.rollback()
+        evidence = store_layout.evidence_dir(self.root, PROJECT)
+        files = [loose, evidence / 'tmp' / prepared.encoded_name, evidence / 'uploads' / (upload + '.part')]
+        for path in files:
+            os.utime(path, ((NOW - DAY + 1) / 1000,) * 2)
+        candidates = self.e.list_orphan_candidates(self.root, PROJECT, NOW)
+        self.job('orphans', candidates=candidates)
+        self.assertTrue(all(path.is_file() for path in files))
+        for path in files:
+            os.utime(path, ((NOW - DAY - 1) / 1000,) * 2)
+        self.job('orphans', candidates=candidates)
+        self.assertTrue(all(not path.exists() for path in files))
+        opened = self.e.begin_upload(self.conn, self.root, PROJECT, capture, '0' * 64, 0).upload_id
+        self.conn.commit()
+        path = evidence / 'uploads' / (opened + '.part')
+        os.utime(path, ((NOW - 2 * DAY) / 1000,) * 2)
+        self.job('orphans', candidates=self.e.list_orphan_candidates(self.root, PROJECT, NOW))
+        self.assertTrue(path.exists())
+        self.conn.execute('UPDATE evidence_uploads SET updated_at=? WHERE upload_id=?',
+                          (NOW - DAY - 1, opened))
+        self.conn.commit()
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT state FROM evidence_uploads WHERE upload_id=?',
+                                          (opened,)).fetchone(), ('abandoned',))
+        self.job('orphans', candidates=self.e.list_orphan_candidates(self.root, PROJECT, NOW))
+        self.assertFalse(path.exists())
+
+    def test_orphan_pass_bounded(self):
+        self.seed(10003)
+        self.conn.executemany('INSERT INTO evidence_captures '
+                              '(object_id,sha256,source,captured_by,party_special,captured_at) '
+                              "VALUES (?,?,'upload','seat-supplied','operator',1)",
+                              [(1, format(1, '064x'))] * 10003 + [(999999, '0' * 64)] * 501)
+        self.conn.executemany('INSERT INTO evidence_object_bundles '
+                              "(bundle_id,object_id,counted_open) VALUES ('bulk',?,0)",
+                              [(999999 + n,) for n in range(501)])
+        self.conn.executemany('INSERT INTO evidence_derive (run_id,object_id,open_count) VALUES (1,?,0)',
+                              [(n,) for n in range(1, 1101)])
+        self.conn.execute('UPDATE evidence_retention SET derive_run_id=2,derive_start_seq=2,derive_finished=1')
+        self.conn.commit()
+        directory = store_layout.evidence_dir(self.root, PROJECT) / 'tmp'
+        directory.mkdir(parents=True, mode=0o700)
+        for n in range(501):
+            path = directory / ('f%04d' % n)
+            path.write_bytes(b'x')
+            os.utime(path, ((NOW - 2 * DAY) / 1000,) * 2)
+        young = directory / 'z-young'
+        young.write_bytes(b'keep')
+        os.utime(young, ((NOW - 1) / 1000,) * 2)
+        original = os.scandir
+
+        def scan(*args, **kwargs):
+            self.assertFalse(self.conn.in_transaction, 'directory listing under the job lock')
+            return original(*args, **kwargs)
+
+        with mock.patch.object(os, 'scandir', side_effect=scan) as listing:
+            candidates = self.e.list_orphan_candidates(self.root, PROJECT, NOW)
+            calls = listing.call_count
+            first = self.job('orphans', candidates=candidates)
+            self.assertEqual(listing.call_count, calls)
+        self.assertEqual(first.visited, 500)
+        self.assertEqual(len(list(directory.iterdir())), 2)
+        self.assertEqual(self.conn.execute('SELECT orphan_capture_cursor,orphan_association_cursor '
+                                          'FROM evidence_retention').fetchone(), (500, 500))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_captures WHERE object_id=999999').fetchone(), (501,))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_object_bundles WHERE object_id>=999999').fetchone(), (501,))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_derive WHERE run_id=1').fetchone(), (600,))
+        self.job('orphans', candidates=candidates[500:])
+        self.assertEqual(list(directory.iterdir()), [young])
+
+    def test_passes_return_after_one_page(self):
+        self.seed(1200)
+        self.conn.execute("UPDATE bundles SET closed_at=? WHERE id='bulk'", (NOW - 15 * DAY,))
+        self.conn.commit()
+        self.derived()
+        other_project = '00000000-0000-7000-8000-000000000002'
+        other = store_layout.open_ledger(self.root, other_project, create=True)
+        self.addCleanup(other.close)
+        other.execute("INSERT INTO projects (id,name,created_at) VALUES (?, 'other',1)", (other_project,))
+        other.commit()
+        reports = []
+        for n in range(3):
+            reports.append(self.job('mark'))
+            other.execute('UPDATE projects SET created_at=? WHERE id=?', (n + 2, other_project))
+            other.commit()
+            self.assertEqual(other.execute('SELECT created_at FROM projects').fetchone(), (n + 2,))
+        self.assertEqual([r.visited for r in reports], [500, 500, 200])
+        self.assertEqual(self.conn.execute('SELECT mark_cursor FROM evidence_retention').fetchone(), (0,))
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_prune_marks').fetchone(), (1200,))
+
+    def test_store_touches_only_its_entries(self):
+        self.disk()
+        foreign = self.root / 'foreign-file'
+        foreign.write_bytes(b'foreign')
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        sentinel = Path(outside.name) / 'sentinel'
+        sentinel.write_bytes(b'outside')
+        sha = self.old_put(b'owned evidence')
+        capture = self.e.Capture('upload', 'seat-supplied', None, 'operator', None)
+        with mock.patch.object(self.e.time, 'time_ns', return_value=1000000):
+            upload = self.e.begin_upload(self.conn, self.root, PROJECT, capture, sha, len(b'owned evidence')).upload_id
+            self.conn.commit()
+            self.e.append_chunk(self.conn, self.root, PROJECT, upload, 0, b'owned evidence')
+            self.conn.commit()
+            prepared = self.e.prepare_upload(self.root, PROJECT, upload)
+            self.e.commit_upload(self.conn, self.root, PROJECT, prepared)
+            self.conn.commit()
+        self.assertTrue((self.root / 'projects' / PROJECT / 'evidence' / 'uploads' / (upload + '.part')).is_file())
+        self.derived()
+        self.job('mark')
+        self.job('sweep', NOW + DAY + 1)
+        self.job('unlink_swept')
+        candidates = self.e.list_orphan_candidates(self.root, PROJECT, NOW)
+        self.job('orphans', candidates=candidates)
+        for bad in (str(sentinel), '../foreign-file', 'uploads/../../foreign-file'):
+            with self.assertRaises(ValueError):
+                self.job('orphans', candidates=[bad])
+            self.conn.rollback()
+        self.assertEqual(foreign.read_bytes(), b'foreign')
+        self.assertEqual(sentinel.read_bytes(), b'outside')
+        base = self.root / 'projects' / PROJECT
+        for path in self.root.rglob('*'):
+            if path.is_file() and path != foreign:
+                relative = path.relative_to(base).as_posix()
+                self.assertTrue(relative.startswith(('ledger.sqlite3', 'evidence/objects/',
+                                                     'evidence/uploads/', 'evidence/tmp/')), relative)
+        self.assertFalse((base / 'evidence' / 'staging').exists())
 
 
 if __name__ == '__main__':

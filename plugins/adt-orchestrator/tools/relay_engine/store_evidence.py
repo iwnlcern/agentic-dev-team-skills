@@ -23,6 +23,8 @@ CODEC_WRITE = 'zstd' if _zstd is not None else 'zlib'
 MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
 RETENTION_PAGE_ROWS = 500
+UPLOAD_IDLE_MS = 24 * 60 * 60 * 1000
+RETENTION_AGE_MS = 14 * 24 * 60 * 60 * 1000
 _SHA = re.compile(r'[0-9a-f]{64}')
 
 
@@ -516,3 +518,236 @@ def derive(conn, root, project_id, now_ms) -> RetentionReport:
     _execute(conn, 'UPDATE evidence_retention SET derive_cursor=?,derive_finished=? WHERE project_id=?',
              (next_cursor, finished, project_id))
     return RetentionReport(len(associations), changed, finished=finished, run_id=run_id)
+
+
+def _prunable(open_count, latest_close, bundleless, latest_capture, now_ms):
+    clocks = [value for value in (latest_close, bundleless) if value is not None]
+    return (open_count == 0 and bool(clocks) and max(clocks) <= now_ms - RETENTION_AGE_MS
+            and latest_capture < now_ms - UPLOAD_IDLE_MS)
+
+
+def _abandon_uploads(conn, project_id, now_ms):
+    cursor = _one(conn, 'SELECT upload_cursor FROM evidence_retention WHERE project_id=?', (project_id,))[0]
+    uploads = _all(conn, 'SELECT upload_id,state,updated_at FROM evidence_uploads '
+                   'WHERE upload_id>? ORDER BY upload_id LIMIT ?', (cursor, RETENTION_PAGE_ROWS))
+    for upload_id, state, updated in uploads:
+        if state == 'open' and updated < now_ms - UPLOAD_IDLE_MS:
+            _execute(conn, "UPDATE evidence_uploads SET state='abandoned',updated_at=? WHERE upload_id=?",
+                     (now_ms, upload_id))
+    next_cursor = uploads[-1][0] if len(uploads) == RETENTION_PAGE_ROWS else ''
+    _execute(conn, 'UPDATE evidence_retention SET upload_cursor=? WHERE project_id=?',
+             (next_cursor, project_id))
+    return len(uploads)
+
+
+def mark(conn, root, project_id, now_ms) -> RetentionReport:
+    """Repair from a finished derivation and mark one object page."""
+    _retention(conn, root, project_id)
+    tracked = _abandon_uploads(conn, project_id, now_ms)
+    run_id, start_seq, finished, cursor = _one(conn, 'SELECT derive_run_id,derive_start_seq,'
+                                               'derive_finished,mark_cursor FROM evidence_retention '
+                                               'WHERE project_id=?', (project_id,))
+    if run_id is None or not finished:
+        return RetentionReport(tracked=tracked)
+    objects = _all(conn, 'SELECT object_id,sha256,state_seq,open_bundle_count,latest_bundle_close_at,'
+                   'bundleless_latest_at,latest_capture_at FROM evidence_objects '
+                   'WHERE object_id>? ORDER BY object_id LIMIT ?', (cursor, RETENTION_PAGE_ROWS))
+    pointed = queries.evidence_pointed(conn, project_id, [row[1] for row in objects])
+    changed = 0
+    for object_id, sha, seq, live_count, live_close, bundleless, captured in objects:
+        if sha in pointed:
+            _execute(conn, 'DELETE FROM evidence_prune_marks WHERE object_id=?', (object_id,))
+            continue
+        if seq >= start_seq:
+            _execute(conn, 'DELETE FROM evidence_prune_marks WHERE object_id=? AND state_seq!=?',
+                     (object_id, seq))
+            continue
+        derived = _one(conn, 'SELECT open_count,latest_close_at FROM evidence_derive '
+                       'WHERE run_id=? AND object_id=?', (run_id, object_id))
+        open_count, latest_close = derived if derived is not None else (0, None)
+        if (live_count, live_close) != (open_count, latest_close):
+            seq = _sequence(conn, project_id)
+            _execute(conn, 'UPDATE evidence_objects SET open_bundle_count=?,latest_bundle_close_at=?,'
+                     'state_seq=? WHERE object_id=?', (open_count, latest_close, seq, object_id))
+        if _prunable(open_count, latest_close, bundleless, captured, now_ms):
+            _execute(conn, 'INSERT INTO evidence_prune_marks (object_id,sha256,state_seq,marked_at) '
+                     'VALUES (?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET '
+                     'sha256=excluded.sha256,state_seq=excluded.state_seq,marked_at=excluded.marked_at '
+                     'WHERE evidence_prune_marks.state_seq!=excluded.state_seq',
+                     (object_id, sha, seq, now_ms))
+            changed += 1
+        else:
+            _execute(conn, 'DELETE FROM evidence_prune_marks WHERE object_id=?', (object_id,))
+    next_cursor = objects[-1][0] if len(objects) == RETENTION_PAGE_ROWS else 0
+    _execute(conn, 'UPDATE evidence_retention SET mark_cursor=? WHERE project_id=?',
+             (next_cursor, project_id))
+    return RetentionReport(len(objects), changed, finished=len(objects) < RETENTION_PAGE_ROWS,
+                           run_id=run_id, tracked=tracked)
+
+
+def sweep(conn, root, project_id, now_ms) -> RetentionReport:
+    """Recheck one mark page in the caller's write transaction; leave files."""
+    _retention(conn, root, project_id)
+    cursor = _one(conn, 'SELECT sweep_cursor FROM evidence_retention WHERE project_id=?', (project_id,))[0]
+    marks = _all(conn, 'SELECT object_id,sha256,state_seq,marked_at FROM evidence_prune_marks '
+                 'WHERE object_id>? ORDER BY object_id LIMIT ?', (cursor, RETENTION_PAGE_ROWS))
+    pointed = queries.evidence_pointed(conn, project_id, [row[1] for row in marks])
+    changed = 0
+    for object_id, sha, seq, marked_at in marks:
+        obj = _one(conn, 'SELECT sha256,bytes_len,state_seq,open_bundle_count,latest_bundle_close_at,'
+                   'bundleless_latest_at,latest_capture_at FROM evidence_objects WHERE object_id=?',
+                   (object_id,))
+        if obj is None or obj[2] != seq or sha in pointed:
+            _execute(conn, 'DELETE FROM evidence_prune_marks WHERE object_id=?', (object_id,))
+            continue
+        if not _prunable(obj[3], obj[4], obj[5], obj[6], now_ms):
+            _execute(conn, 'DELETE FROM evidence_prune_marks WHERE object_id=?', (object_id,))
+            continue
+        if marked_at > now_ms - UPLOAD_IDLE_MS:
+            continue
+        _execute(conn, 'DELETE FROM evidence_objects WHERE object_id=?', (object_id,))
+        _execute(conn, 'DELETE FROM evidence_prune_marks WHERE object_id=?', (object_id,))
+        _execute(conn, 'INSERT INTO evidence_pruned (sha256,bytes_len,pruned_at) VALUES (?,?,?)',
+                 (sha, obj[1], now_ms))
+        changed += 1
+    next_cursor = marks[-1][0] if len(marks) == RETENTION_PAGE_ROWS else 0
+    _execute(conn, 'UPDATE evidence_retention SET sweep_cursor=? WHERE project_id=?', (next_cursor, project_id))
+    return RetentionReport(len(marks), changed, finished=len(marks) < RETENTION_PAGE_ROWS)
+
+
+def _unlink(path):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return 0
+    _sync_dir(path.parent)
+    return 1
+
+
+def unlink_swept(conn, root, project_id) -> RetentionReport:
+    """Recheck every candidate file name under E-1's ledger write lock."""
+    _retention(conn, root, project_id)
+    cursor = _one(conn, 'SELECT unlink_cursor FROM evidence_retention WHERE project_id=?', (project_id,))[0]
+    pruned = _all(conn, 'SELECT pruned_id,sha256 FROM evidence_pruned '
+                  'WHERE pruned_id>? ORDER BY pruned_id LIMIT ?', (cursor, RETENTION_PAGE_ROWS))
+    changed = 0
+    for pruned_id, sha in pruned:
+        current = _one(conn, 'SELECT codec FROM evidence_objects WHERE sha256=?', (sha,))
+        for codec in ('raw', 'zlib', 'zstd'):
+            if current is not None and current[0] == codec:
+                continue
+            changed += _unlink(_object_path(root, project_id, sha, codec))
+    if pruned:
+        _execute(conn, 'UPDATE evidence_retention SET unlink_cursor=? WHERE project_id=?',
+                 (pruned[-1][0], project_id))
+    return RetentionReport(len(pruned), changed, finished=len(pruned) < RETENTION_PAGE_ROWS)
+
+
+def _candidate_path(root, project_id, name):
+    if not isinstance(name, str):
+        raise ValueError('orphan candidate must be a relative path')
+    relative = Path(name)
+    parts = relative.parts
+    if relative.is_absolute() or '..' in parts or relative.as_posix() != name:
+        raise ValueError('orphan candidate escapes evidence')
+    if len(parts) == 2 and parts[0] == 'tmp':
+        pass
+    elif len(parts) == 2 and parts[0] == 'uploads' and parts[1].endswith('.part'):
+        _upload_path(root, project_id, parts[1][:-5])
+    elif len(parts) == 3 and parts[0] == 'objects':
+        sha, separator, codec = parts[2].rpartition('.')
+        _digest(sha)
+        if not separator or codec not in ('raw', 'zlib', 'zstd') or parts[1] != sha[:2]:
+            raise ValueError('invalid object candidate')
+    else:
+        raise ValueError('orphan candidate is not a store entry')
+    evidence = store_layout.evidence_dir(root, project_id)
+    path = evidence / relative
+    if not path.resolve().is_relative_to(evidence.resolve()):
+        raise ValueError('orphan candidate escapes evidence')
+    return path
+
+
+def list_orphan_candidates(root, project_id, now_ms) -> list[str]:
+    """List owned file names outside the writer job; eligibility is rechecked."""
+    evidence = store_layout.evidence_dir(root, project_id)
+    candidates = []
+    directories = [evidence / 'tmp', evidence / 'uploads']
+    objects = evidence / 'objects'
+    if not objects.is_symlink() and objects.is_dir():
+        directories.extend(path for path in objects.iterdir()
+                           if not path.is_symlink() and path.is_dir()
+                           and re.fullmatch('[0-9a-f]{2}', path.name))
+    for directory in directories:
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.is_symlink() or not path.is_file():
+                continue
+            name = path.relative_to(evidence).as_posix()
+            try:
+                _candidate_path(root, project_id, name)
+            except ValueError:
+                continue
+            candidates.append(name)
+    return sorted(candidates)
+
+
+def _history_page(conn, project_id):
+    changed = tracked = 0
+    for table, key, column in (
+            ('evidence_captures', 'capture_id', 'orphan_capture_cursor'),
+            ('evidence_object_bundles', 'association_id', 'orphan_association_cursor')):
+        cursor = _one(conn, 'SELECT ' + column + ' FROM evidence_retention WHERE project_id=?', (project_id,))[0]
+        rows = _all(conn, 'SELECT ' + key + ',object_id FROM ' + table + ' WHERE ' + key + '>? '
+                    'ORDER BY ' + key + ' LIMIT ?', (cursor, RETENTION_PAGE_ROWS))
+        tracked += len(rows)
+        for row_id, object_id in rows:
+            if _one(conn, 'SELECT 1 FROM evidence_objects WHERE object_id=?', (object_id,)) is None:
+                changed += _execute(conn, 'DELETE FROM ' + table + ' WHERE ' + key + '=?', (row_id,))
+        next_cursor = rows[-1][0] if len(rows) == RETENTION_PAGE_ROWS else 0
+        _execute(conn, 'UPDATE evidence_retention SET ' + column + '=? WHERE project_id=?',
+                 (next_cursor, project_id))
+    run_id, cursor_run, cursor_object = _one(conn, 'SELECT derive_run_id,orphan_derive_run,'
+                                           'orphan_derive_object FROM evidence_retention WHERE project_id=?',
+                                           (project_id,))
+    rows = _all(conn, 'SELECT run_id,object_id FROM evidence_derive WHERE (run_id,object_id)>(?,?) '
+                'ORDER BY run_id,object_id LIMIT ?', (cursor_run, cursor_object, RETENTION_PAGE_ROWS))
+    tracked += len(rows)
+    for old_run, object_id in rows:
+        if run_id is not None and old_run < run_id:
+            changed += _execute(conn, 'DELETE FROM evidence_derive WHERE run_id=? AND object_id=?',
+                                (old_run, object_id))
+    cursor = rows[-1] if len(rows) == RETENTION_PAGE_ROWS else (0, 0)
+    _execute(conn, 'UPDATE evidence_retention SET orphan_derive_run=?,orphan_derive_object=? WHERE project_id=?',
+             (*cursor, project_id))
+    return changed, tracked
+
+
+def orphans(conn, root, project_id, now_ms, *, candidates=()) -> RetentionReport:
+    """Recheck one prelisted file page and one page of each history kind."""
+    _retention(conn, root, project_id)
+    page = list(candidates[:RETENTION_PAGE_ROWS])
+    paths = [_candidate_path(root, project_id, name) for name in page]
+    changed = 0
+    for name, path in zip(page, paths):
+        try:
+            old = path.stat().st_mtime_ns // 1000000 < now_ms - UPLOAD_IDLE_MS
+        except FileNotFoundError:
+            continue
+        if not old:
+            continue
+        parts = Path(name).parts
+        if parts[0] == 'objects':
+            sha, _, codec = parts[2].rpartition('.')
+            current = _one(conn, 'SELECT codec FROM evidence_objects WHERE sha256=?', (sha,))
+            if current is not None and current[0] == codec:
+                continue
+        elif parts[0] == 'uploads':
+            upload = _one(conn, 'SELECT state FROM evidence_uploads WHERE upload_id=?', (parts[1][:-5],))
+            if upload is not None and upload[0] == 'open':
+                continue
+        changed += _unlink(path)
+    history_changed, tracked = _history_page(conn, project_id)
+    return RetentionReport(len(page), changed + history_changed,
+                           finished=len(page) < RETENTION_PAGE_ROWS, tracked=tracked)
