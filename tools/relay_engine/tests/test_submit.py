@@ -1004,6 +1004,8 @@ class TestTableDirectory(Store):
 
 
 class TestParties(Store):
+    """Planner Q1: a party is a seat or a special, written to its exclusive arc."""
+
     def test_operator_answer_admission(self):
         # Breaks: operator answers fail admission, fail to end exemption, or lose replay.
         from relay_engine import queries
@@ -1024,8 +1026,6 @@ class TestParties(Store):
             self.submit(data+b'other',sender=operator,submission_key='operator-answer')
         self.assertEqual(caught.exception.code,'E-SUBMISSION-KEY-REUSED')
         self.assertIsNone(self.conn.execute("SELECT 1 FROM seat_activity WHERE seat_id='operator'").fetchone())
-
-    """Planner Q1: a party is a seat or a special, written to its exclusive arc."""
 
     def test_operator_and_system_as_parties(self):
         question = self.submit(draft(kind="QUESTION", to="operator", needs="answer"), sender=IMPL)

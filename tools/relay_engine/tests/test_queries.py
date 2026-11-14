@@ -1684,6 +1684,16 @@ class TestQueueReaders(Store):
         # Real admission and its derived mark are independently controlled.
         self.conn.commit()
         q = self.submit(draft(kind="QUESTION",to="operator",needs="answer"))
+        operator_before = [self.conn.execute("SELECT * FROM "+t).fetchall()
+                           for t in ('recipients','seat_activity')]
+        operator_changes = self.conn.total_changes
+        queries.operator_questions(self.conn,'p',0,500)
+        operator_after = [self.conn.execute("SELECT * FROM "+t).fetchall()
+                          for t in ('recipients','seat_activity')]
+        operator_changes_after = self.conn.total_changes
+        self.assertEqual(operator_after, operator_before, "operator question read changes no rows")
+        self.assertEqual(operator_changes_after, operator_changes,
+                         "operator question read changes no total_changes")
         self.submit(draft(parent="#%d"%q.handle,to=PLANNER.address),sender=OPERATOR)
         self.conn.execute("UPDATE recipients SET answered_by=NULL WHERE relay_id=?",(q.relay_id,))
         self.conn.commit()
@@ -1704,6 +1714,11 @@ class TestQueueReaders(Store):
         system = submit.SeatRef('system','system','system',PLANNER.team_instance_id,'p')
         self.queue_row(sender=system,kind="SITREP",parent=clean.relay_id)
         self.assertIs(answered(clean.relay_id), False)
+        # q1, q2 and the admitted operator question give three ordered questions.
+        self.assertEqual([r.relay_id for r in queries.operator_questions(self.conn,'p',0,1)],
+                         [q1.relay_id], "operator question page limit 1")
+        self.assertEqual([r.relay_id for r in queries.operator_questions(self.conn,'p',0,2)],
+                         [q1.relay_id,q2.relay_id], "operator question page limit 2")
 
     def test_operator_questions_sender_address(self):
         # Breaks: rendering closed/reopened or special senders as routable seat addresses.
