@@ -61,6 +61,8 @@ ROSTER = (
     "relay_engine/roster.py",
     "relay_engine/rules.py",
     "relay_engine/schema.py",
+    "relay_engine/seal_slots.py",
+    "relay_engine/seal_types.py",
     "relay_engine/seats.py",
     "relay_engine/slips.py",
     "relay_engine/store_evidence.py",

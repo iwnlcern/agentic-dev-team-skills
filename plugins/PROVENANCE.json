@@ -10957,6 +10957,18 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/seal_slots.py",
+    "sha256": "62939c737bd09edff2050d7f7f40ed40e24557ca59dbcec37a2c0afbca67ae84",
+    "source": "tools/relay_engine/seal_slots.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/seal_types.py",
+    "sha256": "a495f34c661b424cb5f7a128df24ff46c51ddb281c7f719ea3b694f35ad7198d",
+    "source": "tools/relay_engine/seal_types.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seats.py",
     "sha256": "15b06836e108f20df8902a239ac67b6bd26935f0a968ddd11257441ff4ba76a9",
     "source": "tools/relay_engine/seats.py"
@@ -11006,7 +11018,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "85910e83af6dfd9a75cd6707ad2500e6dbc55e6da7f6a5d4d36f039329aba10e",
+    "sha256": "a3e5ce91ec7148fee3b156ae9db8319505468ac8095a6004326cbe2332bc8d92",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21871,6 +21883,18 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/seal_slots.py",
+    "sha256": "62939c737bd09edff2050d7f7f40ed40e24557ca59dbcec37a2c0afbca67ae84",
+    "source": "tools/relay_engine/seal_slots.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/seal_types.py",
+    "sha256": "a495f34c661b424cb5f7a128df24ff46c51ddb281c7f719ea3b694f35ad7198d",
+    "source": "tools/relay_engine/seal_types.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seats.py",
     "sha256": "15b06836e108f20df8902a239ac67b6bd26935f0a968ddd11257441ff4ba76a9",
     "source": "tools/relay_engine/seats.py"
@@ -21920,7 +21944,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "85910e83af6dfd9a75cd6707ad2500e6dbc55e6da7f6a5d4d36f039329aba10e",
+    "sha256": "a3e5ce91ec7148fee3b156ae9db8319505468ac8095a6004326cbe2332bc8d92",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32701,6 +32725,18 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/seal_slots.py",
+    "sha256": "62939c737bd09edff2050d7f7f40ed40e24557ca59dbcec37a2c0afbca67ae84",
+    "source": "tools/relay_engine/seal_slots.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/seal_types.py",
+    "sha256": "a495f34c661b424cb5f7a128df24ff46c51ddb281c7f719ea3b694f35ad7198d",
+    "source": "tools/relay_engine/seal_types.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seats.py",
     "sha256": "15b06836e108f20df8902a239ac67b6bd26935f0a968ddd11257441ff4ba76a9",
     "source": "tools/relay_engine/seats.py"
@@ -32750,7 +32786,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "85910e83af6dfd9a75cd6707ad2500e6dbc55e6da7f6a5d4d36f039329aba10e",
+    "sha256": "a3e5ce91ec7148fee3b156ae9db8319505468ac8095a6004326cbe2332bc8d92",
     "source": "tools/relay_engine/version.py"
   },
   {
