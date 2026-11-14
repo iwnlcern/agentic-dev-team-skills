@@ -7,7 +7,7 @@ import unittest
 from relay_engine import header
 from relay_engine.api_principals import OperatorPrincipal, ServicePrincipal
 from relay_engine.operator_queue import ingest, kinds, operations, records, saga
-from relay_engine.tests.test_queue_ingest import QueueFixture, P
+from relay_engine.tests.test_queue_ingest import QueueFixture, Port, P
 
 
 class TestQueueRecordAnswer(unittest.TestCase):
@@ -159,3 +159,337 @@ class TestQueueRecordAnswer(unittest.TestCase):
         addressed = self.question(subject='Addressed', sender=self.f.other)
         self.assertEqual(addressed.answer_to, self.f.other.address)
         self.assertEqual(self.answer(addressed, key='addressed')['state'], 'applying')
+
+
+class ApplyPort:
+    """Fresh callee connections, with actual catalogue writer boundaries."""
+    def __init__(self, test):
+        self.test = test
+        self.f = test.f
+        self.jobs = []
+        self.active = None
+        self.unavailable = set()
+        self.sql = []
+
+    def read_catalogue(self, fn):
+        return fn(self.f.catalogue)
+
+    def catalogue(self, fn):
+        self.f.catalogue.commit()
+        self.f.catalogue.execute('BEGIN IMMEDIATE').close()
+        try:
+            value = fn(self.f.catalogue)
+            self.f.catalogue.commit()
+            return value
+        except BaseException:
+            self.f.catalogue.rollback()
+            raise
+
+    def read_ledger(self, project, fn):
+        if project in self.unavailable:
+            raise records.JobUnavailable('ledger_unavailable')
+        conn = sqlite3.connect(self.f.path, isolation_level=None, timeout=0.01)
+        conn.execute('PRAGMA foreign_keys=ON').close()
+        try:
+            return fn(conn)
+        finally:
+            conn.close()
+
+    def callee_ledger(self, project, fn):
+        if project in self.unavailable:
+            raise records.JobUnavailable('ledger_unavailable')
+        conn = sqlite3.connect(self.f.path, isolation_level=None, timeout=0.01)
+        conn.execute('PRAGMA foreign_keys=ON').close()
+        conn.set_trace_callback(lambda statement: self.sql.append(statement))
+        job = len(self.jobs)
+        self.jobs.append((project, conn))
+        self.active = job
+        try:
+            return fn(conn)
+        finally:
+            self.active = None
+            conn.close()
+
+
+class TestQueueApply(unittest.TestCase):
+    view = TestQueueRecordAnswer.view
+
+    def question(self, *, sender=None):
+        project = (sender or self.f.sender).project_id
+        q = self.f.admit(sender=sender)
+        ingest.question_ingest_pass(Port(self.f), [project], self.f.clock)
+        item_id = next(row[0] for row in self.f.items() if row[1] == q.relay_id)
+        return self.view(item_id)
+
+    def answer(self, item, *, key):
+        return saga.record_answer(self.c, self.page, item.item_id, item.revision,
+            {'text': 'Answer exactly'}, key, 25, frank_conformed=False,
+            top_seat_address='v3.orchestrator-planner')
+
+    def setUp(self):
+        TestQueueRecordAnswer.setUp(self)
+        self.port = ApplyPort(self)
+        self.runtime = saga.QueueRuntime(self.make_context)
+
+    def make_context(self, conn, project, sender, key):
+        from relay_engine import submit
+        from relay_engine.tests import test_submit as engine
+        directory = engine.FakeDirectory()
+        directory.resolve = lambda address, origin: replace(engine.SEATS[address], project_id=origin.project_id)
+        state = engine.GIT_STATE if project == P else replace(engine.GIT_STATE, repository_id='repo-q')
+        return submit.SubmitContext(sender, state, lambda: self.f.clock,
+                                     directory, submission_key=key)
+
+    def recorded(self, *, sender=None):
+        item = self.question(sender=sender)
+        self.answer(item, key='answer-'+item.item_id)
+        self.c.commit()
+        return item
+
+    def job(self, item):
+        return saga.load_apply_job(self.c, item.item_id)
+
+    def apply(self, item):
+        job = self.job(item)
+        return self.port.callee_ledger(job.project_id, lambda conn: saga.apply_question(conn, job, self.make_context))
+
+    def reconcile(self):
+        return saga.reconcile_pass(self.port, self.runtime, lambda: 500)
+
+    def relay_count(self):
+        return records._one(self.f.ledger, "SELECT COUNT(*) FROM relays WHERE sender_special='operator'")[0]
+
+    def outcome(self, item):
+        return records._one(self.c, 'SELECT state,revision FROM queue_items WHERE item_id=?', (item.item_id,))
+
+    def close_reopen(self):
+        team = self.f.sender.team_instance_id
+        row = operations._dicts(self.f.ledger, 'SELECT * FROM team_instances WHERE id=?', (team,))[0]
+        self.f.ledger.execute('UPDATE team_instances SET closed_at=2 WHERE id=?', (team,)).close()
+        row.update(id=team+'-successor', opened_at=3, closed_at=None)
+        self.f.ledger.execute('INSERT INTO team_instances ('+','.join(row)+') VALUES ('+','.join('?' for _ in row)+')', tuple(row.values())).close()
+        self.f.ledger.commit()
+
+    def change_draft(self, item, data):
+        self.c.execute('UPDATE queue_answers SET draft=? WHERE item_id=?', (data, item.item_id)).close()
+        self.c.commit()
+
+    def test_apply_admits_one_answer(self):
+        item = self.recorded()
+        result = self.apply(item)
+        self.assertEqual(result.status, 'applied')
+        self.assertEqual(records._one(self.f.ledger, 'SELECT parent_id,sender_special FROM relays WHERE id=?', (result.receipt,)), (item.source_relay_id, 'operator'))
+        from relay_engine import queries
+        self.assertTrue(queries.operator_questions(self.f.ledger, P, item.source_handle-1, 1)[0].answered)
+        self.assertEqual(records._one(self.f.ledger, "SELECT COUNT(*) FROM seat_activity WHERE seat_id='operator'"), (0,))
+        self.assertEqual(self.outcome(item), ('applying', 2))
+
+    def test_crash_after_record(self):
+        item = self.recorded()
+        draft = self.job(item).draft
+        self.assertFalse(self.runtime.ready)
+        from relay_engine import submit
+        from unittest import mock
+        with mock.patch.object(submit, 'submit', wraps=submit.submit) as actual:
+            self.reconcile()
+        self.assertTrue(self.runtime.ready)
+        self.assertEqual(self.outcome(item), ('resolved', 3))
+        self.assertEqual(self.relay_count(), 1)
+        self.assertEqual(actual.call_args.args[2], draft)
+
+    def test_crash_after_apply(self):
+        item = self.recorded()
+        first = self.apply(item)
+        self.assertEqual(self.outcome(item), ('applying', 2))
+        self.reconcile()
+        self.assertEqual(self.outcome(item), ('resolved', 3))
+        self.assertEqual(self.relay_count(), 1)
+        self.assertEqual(json.loads(records._one(self.c, 'SELECT outcome FROM queue_answers')[0])['receipt'], first.receipt)
+
+    def test_refused_admission_is_final(self):
+        from relay_engine import submit
+        from unittest import mock
+        item = self.recorded()
+        self.change_draft(item, b'KIND: SITREP\n')
+        self.reconcile()
+        self.assertEqual(self.outcome(item)[0], 'refused')
+        code = json.loads(records._one(self.c, "SELECT detail FROM queue_events WHERE event_kind='refused'")[0])['code']
+        self.assertEqual(code, 'E-FIELD-REQUIRED')
+        with mock.patch.object(submit, 'submit', side_effect=AssertionError('terminal job retried')):
+            changes = self.c.total_changes
+            self.reconcile()
+            self.assertEqual(self.c.total_changes, changes)
+        other = self.recorded(sender=self.f.other)
+        blocker = sqlite3.connect(self.f.path, timeout=0.01)
+        blocker.execute('BEGIN IMMEDIATE').close()
+        try:
+            self.reconcile()
+            self.assertEqual(self.outcome(other)[0], 'applying')
+            self.assertIn('locked', records._one(self.c, 'SELECT last_reason FROM queue_answers WHERE item_id=?', (other.item_id,))[0])
+        finally:
+            blocker.rollback();blocker.close()
+        self.reconcile()
+        self.assertEqual(self.outcome(other)[0], 'resolved')
+
+    def test_answer_to_successor_refused(self):
+        item = self.recorded()
+        self.close_reopen()
+        self.reconcile()
+        self.assertEqual(self.outcome(item)[0], 'refused')
+        self.assertEqual(self.relay_count(), 0)
+        self.assertEqual(json.loads(records._one(self.c, "SELECT detail FROM queue_events WHERE event_kind='refused'")[0])['code'], 'E_QUEUE_STATE answer_unroutable')
+        current = self.recorded(sender=self.f.other)
+        self.reconcile()
+        self.assertEqual(self.outcome(current)[0], 'resolved')
+        self.assertEqual(records._one(self.f.ledger, "SELECT seat_id FROM recipients JOIN relays ON relay_id=relays.id WHERE sender_special='operator' AND role='to'"), (self.f.other.seat_id,))
+
+    def test_admitted_answer_survives_close(self):
+        item = self.recorded()
+        first = self.apply(item)
+        self.close_reopen()
+        self.reconcile()
+        self.assertEqual(self.outcome(item)[0], 'resolved')
+        self.assertEqual(self.relay_count(), 1)
+        self.assertEqual(json.loads(records._one(self.c, 'SELECT outcome FROM queue_answers')[0])['receipt'], first.receipt)
+
+    def test_admission_with_other_bytes_is_faulted_once(self):
+        from relay_engine import queries, submit
+        from unittest import mock
+        item = self.recorded()
+        original = self.apply(item)
+        self.assertEqual(self.apply(item).receipt, original.receipt)
+        self.change_draft(item, self.job(item).draft+b'changed')
+        self.reconcile()
+        self.assertEqual(self.outcome(item), ('faulted', 3))
+        self.assertEqual(records._one(self.c, 'SELECT phase,last_reason FROM queue_answers'), ('faulted', 'E-SUBMISSION-KEY-REUSED'))
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_events WHERE event_kind='faulted'"), (1,))
+        self.assertEqual(self.relay_count(), 1)
+        changes = self.c.total_changes
+        with mock.patch.object(queries, 'operator_admission', side_effect=AssertionError('fault retried')), mock.patch.object(submit, 'submit', side_effect=AssertionError('fault resubmitted')):
+            self.reconcile();self.reconcile()
+        self.assertEqual(self.c.total_changes, changes)
+        other = self.recorded(sender=self.f.other)
+        self.port.unavailable.add(P)
+        self.reconcile()
+        self.assertEqual(records._one(self.c, 'SELECT phase FROM queue_answers WHERE item_id=?', (other.item_id,)), ('recorded',))
+        self.port.unavailable.clear();self.reconcile()
+        self.assertEqual(self.outcome(other)[0], 'resolved')
+
+    def test_undo_runs_past_faulted_item(self):
+        item = self.recorded()
+        notice = records.raise_item(self.c, records.InternalWriter(), records.RaiseRequest('notice', 'seat_registered', P, {'sentence': 'Registered'}, {}, 'seat', 'notice'), 100, enabled=frozenset({'pr3'}))
+        self.assertNotIsInstance(notice, records.QueueRefusal)
+        changes = self.c.total_changes
+        with self.assertRaises(records.UndoBlocked) as caught:
+            records.undo_step(self.c, P, 'blocked', now_ms=400)
+        self.assertIn(item.item_id, [row.item_id for row in caught.exception.items])
+        self.assertEqual(self.c.total_changes, changes)
+        saga.confirm(self.c, item.item_id, saga.ApplyResult('faulted', None, None, 'E-SUBMISSION-KEY-REUSED', None), 450)
+        records.undo_step(self.c, P, 'undo', now_ms=500)
+        self.assertEqual(self.outcome(notice)[0], 'retired')
+
+    def test_faulted_confirm_closes_flagged_condition(self):
+        for flagged in (True, False):
+            with self.subTest(flagged=flagged):
+                item = self.recorded()
+                if flagged:
+                    records.clear_condition(self.c, records.InternalWriter(), item.item_id, 'question', None, P,
+                        json.loads(item.condition_key), now_ms=400)
+                result = saga.ApplyResult('faulted', None, None, 'E-SUBMISSION-KEY-REUSED', None)
+                saga.confirm(self.c, item.item_id, result, 500)
+                self.assertEqual(self.outcome(item)[0], 'faulted')
+                self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_events WHERE item_id=? AND event_kind='condition_closed'", (item.item_id,)), (int(flagged),))
+                changes = self.c.total_changes;saga.confirm(self.c, item.item_id, result, 501)
+                self.assertEqual(self.c.total_changes, changes)
+
+    def test_reread_in_submit_job(self):
+        from relay_engine import queries, submit
+        from unittest import mock
+        item = self.recorded()
+        events = []
+        read, write = queries.operator_questions, submit.submit
+        def spy_read(conn, *args):
+            events.append(('read', conn, self.port.active, len(self.port.sql)))
+            return read(conn, *args)
+        def spy_submit(conn, *args):
+            events.append(('submit', conn, self.port.active, len(self.port.sql)))
+            return write(conn, *args)
+        with mock.patch.object(queries, 'operator_questions', spy_read), mock.patch.object(submit, 'submit', spy_submit):
+            self.reconcile()
+        self.assertEqual([e[0] for e in events], ['read', 'submit'])
+        self.assertIs(events[0][1], events[1][1])
+        self.assertIsNotNone(events[0][2])
+        self.assertEqual(events[0][2], events[1][2])
+        between = self.port.sql[events[0][3]:events[1][3]]
+        self.assertFalse(any(sql.strip().upper().startswith(('COMMIT', 'ROLLBACK')) for sql in between))
+        self.assertEqual(self.outcome(item)[0], 'resolved')
+
+    def test_reread_moved_question_refused(self):
+        self.f.admit('SITREP');low = self.f.backup('before-question.sqlite3')
+        item = self.recorded()
+        self.f.restore(low);self.f.admit('SITREP')
+        result = self.apply(item)
+        self.assertEqual((result.status, result.code), ('refused', 'E_QUEUE_STATE answer_unroutable'))
+        self.assertEqual(self.relay_count(), 0)
+        current = self.recorded()
+        self.assertEqual(self.apply(current).status, 'applied')
+        self.assertEqual(self.relay_count(), 1)
+
+    def test_refusal_lost_before_confirm(self):
+        for remove_cause in (False, True):
+            with self.subTest(remove_cause=remove_cause):
+                item = self.recorded()
+                valid = self.job(item).draft
+                self.change_draft(item, b'KIND: SITREP\n')
+                self.assertEqual(self.apply(item).status, 'refused')
+                self.assertEqual(records._one(self.c, 'SELECT phase FROM queue_answers WHERE item_id=?', (item.item_id,)), ('recorded',))
+                if remove_cause:
+                    self.change_draft(item, valid)
+                self.reconcile()
+                self.assertEqual(self.outcome(item)[0], 'resolved' if remove_cause else 'refused')
+                self.assertEqual(self.relay_count(), int(remove_cause))
+
+    def test_callee_owns_transaction(self):
+        item = self.recorded();job = self.job(item)
+        def call(conn):
+            self.assertFalse(conn.in_transaction)
+            result = saga.apply_question(conn, job, self.make_context)
+            self.assertFalse(conn.in_transaction)
+            return result
+        self.assertEqual(self.port.callee_ledger(P, call).status, 'applied')
+        def prohibited(conn):
+            conn.execute('BEGIN IMMEDIATE').close()
+            try:
+                with self.assertRaises((AssertionError, ValueError)):
+                    saga.apply_question(conn, job, self.make_context)
+            finally:
+                conn.rollback()
+        self.port.callee_ledger(P, prohibited)
+        self.assertEqual(self.relay_count(), 1)
+
+    def test_confirm_closes_flagged_condition_once(self):
+        item = self.recorded()
+        records.clear_condition(self.c, records.InternalWriter(), item.item_id, 'question', None, P,
+            json.loads(item.condition_key), now_ms=400)
+        result = self.apply(item);saga.confirm(self.c, item.item_id, result, 500)
+        self.assertEqual(self.outcome(item)[0], 'resolved')
+        self.assertIsNotNone(records._one(self.c, 'SELECT closed_at_ms FROM queue_conditions WHERE item_id=?', (item.item_id,))[0])
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_events WHERE item_id=? AND event_kind='condition_closed'", (item.item_id,)), (1,))
+        changes = self.c.total_changes;saga.confirm(self.c, item.item_id, result, 501)
+        self.assertEqual(self.c.total_changes, changes)
+
+    def test_reconciler_ready_despite_one_unavailable_ledger(self):
+        from relay_engine.tests.test_queue_ingest import Q
+        a = self.recorded()
+        b = self.recorded(sender=self.f.foreign)
+        self.port.unavailable.add(Q)
+        self.reconcile()
+        self.assertTrue(self.runtime.ready)
+        self.assertEqual(self.outcome(a)[0], 'resolved')
+        self.assertEqual(self.outcome(b)[0], 'applying')
+        self.assertEqual(records._one(self.c, 'SELECT last_reason FROM queue_answers WHERE item_id=?', (b.item_id,)), ('ledger_unavailable',))
+
+    def test_confirm_records_internal_writer(self):
+        item = self.recorded();self.reconcile()
+        self.assertEqual(records._one(self.c, "SELECT principal_kind,principal_id,at_ms FROM queue_events WHERE item_id=? AND event_kind='applied'", (item.item_id,)), ('service', 'console_queue', 500))
+        self.assertEqual(records._one(self.c, 'SELECT state,next_attempt_at_ms FROM queue_notifications WHERE item_id=? AND revision=3', (item.item_id,)), ('pending', 500))
