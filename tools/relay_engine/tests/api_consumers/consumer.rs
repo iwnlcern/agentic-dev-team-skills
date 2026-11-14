@@ -10,6 +10,20 @@ fn run(v:&Value)->Result<Value,()>{
   "schema"=>Ok(valid(api::supports_schema(string(v,"schema")?))),
   "validate"=>Ok(valid(api::validate_type(string(v,"type")?,v.get("value")?))),
   "encode"=>{let bytes=api::encode_request(string(v,"operation")?,string(v,"id")?,v.get("value")?)?;Ok(object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]))},
+  "encode_checked"=>Ok(match api::encode_request(string(v,"operation")?,string(v,"id")?,v.get("value")?){Ok(bytes)=>object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]),Err(())=>object(vec![("invalid",Value::Bool(true))])}),
+  "encode_result"=>{
+   if !api::validate_type(string(v,"type")?,v.get("value")?){return Ok(object(vec![("invalid",Value::Bool(true))]));}
+   let body=api::canonical(&object(vec![("request_id",text(string(v,"id")?)),("result",v.get("value")?.clone())])).into_bytes();
+   let mut bytes=(body.len() as u32).to_be_bytes().to_vec();bytes.extend(body);
+   Ok(object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]))
+  },
+  "decode_request"=>{
+   let bytes=unhex(string(v,"frame")?)?;
+   if bytes.len()<4 || u32::from_be_bytes(bytes[..4].try_into().map_err(|_|())?) as usize != bytes.len()-4{return Ok(object(vec![("unavailable",Value::Bool(true))]));}
+   let request=api::parse_strict_json(&bytes[4..])?;
+   if string(&request,"op")? != string(v,"operation")? || string(&request,"request_id")? != string(v,"id")? || !api::validate_type(string(v,"type")?,request.get("args")?){return Ok(object(vec![("unavailable",Value::Bool(true))]));}
+   Ok(object(vec![("args",request.get("args")?.clone())]))
+  },
   "encode_error"=>{
    let error=match api::ApiError::from_value(v.get("value")?){Ok(error)=>error,Err(())=>return Ok(object(vec![("invalid",Value::Bool(true))]))};
    let body=api::canonical(&object(vec![("request_id",text(string(v,"id")?)),("error",error.to_value())])).into_bytes();

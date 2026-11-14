@@ -185,10 +185,10 @@ class TestGenerator(unittest.TestCase):
         self.assertFalse(output.endswith(b'\n\n'))
 
     def test_committed_schema_equals_export(self):
-        from relay_engine import api_protocol, api_schema
+        from relay_engine import api_platform, api_schema
         generator = load_generator()
         compiled = generator.build_registry()
-        self.assertEqual(dict(compiled.handlers), api_protocol.discovery_handlers())
+        self.assertEqual(dict(compiled.handlers), api_platform.platform_handlers())
         expected = api_schema.export_schema(compiled, '3.0').canonical_bytes
         with patch('builtins.open', side_effect=AssertionError('generator opened a file')):
             generated = generator.generate(TOOLS)
@@ -211,7 +211,7 @@ class TestGenerator(unittest.TestCase):
             variants=(replace(variant, branches=variant.branches +
                       (d.ErrorBranchDef('aaa_earlier', variant.branches[0].remedy),)),) + catalogue.variants[1:])
         with patch.object(errors, 'api_error_catalog', return_value=updated):
-            grown = r.compile_registry(d.discovery_definitions(), original.handlers, (updated,))
+            grown = r.compile_registry(d.platform_definitions(), original.handlers, (updated,))
         old_names = {ref.name for ref in original.types['ApiError'].shape.arms}
         self.assertTrue(old_names <= {ref.name for ref in grown.types['ApiError'].shape.arms})
         self.assertIn('ApiErrorIncompatiblePinMismatch', old_names)
@@ -463,6 +463,62 @@ def consumer_scenarios():
 
 
 class TestGeneratedConsumers(unittest.TestCase):
+    def test_session_request_and_result_consumer_vectors(self):
+        from relay_engine import api_platform, api_protocol as p, api_schema, api_wire as w
+        compiled = api_platform.build_platform_registry()
+        artifact = api_schema.export_schema(compiled, '3.0')
+        runtime = p.RuntimeContext('store', 'isolated', 'runtime', '3.0.0', 'a' * 64,
+                                   True, {'3.0': artifact})
+        connected = p.dispatch_discovery(p.initial_connection_state(), w.ApiRequest('1',
+            'protocol.connect', {'supported': {'min': '3.0', 'max': '3.0'}}), runtime, compiled)
+        def frame(value):
+            raw = jcs.jcs_encode(value)
+            return (len(raw).to_bytes(4, 'big') + raw).hex()
+        key = {'key_id': '00000000-0000-7000-8000-000000000001', 'key_secret': 'A' * 43}
+        common = dict(project_id='p', team_instance_id='t', seat_id='s', occupant_id='o',
+                      session_id='session', generation='1', signed_in_at='2000')
+        rows = [
+            ('session.sign-in', 'SessionSignInArgs', 'SessionSignInResult',
+             dict(key, host='codex', host_session_id='host', operation_key='op'),
+             dict(common, receipt='original', session_state='open')),
+            ('session.resume', 'SessionResumeArgs', 'SessionResumeResult',
+             dict(key, session_id='session'), common),
+            ('session.end', 'SessionEndArgs', 'SessionEndResult',
+             dict(key, session_id='session', operation_key='op'),
+             dict(session_id='session', ended_at='2001', receipt='original')),
+        ]
+        cases = []
+        for operation, args_type, result_type, args, result in rows:
+            bad_args, bad_result = dict(args, extra='no'), dict(result, extra='no')
+            cases.extend([
+                ({'action': 'encode_checked', 'id': '2', 'operation': operation, 'value': args},
+                 {'hex': frame({'request_id': '2', 'op': operation, 'args': args})}),
+                ({'action': 'encode_checked', 'id': '2', 'operation': operation, 'value': bad_args},
+                 {'invalid': True}),
+                ({'action': 'decode_request', 'id': '2', 'operation': operation, 'type': args_type,
+                  'frame': frame({'request_id': '2', 'op': operation, 'args': args})}, {'args': args}),
+                ({'action': 'decode_request', 'id': '2', 'operation': operation, 'type': args_type,
+                  'frame': frame({'request_id': '2', 'op': operation, 'args': bad_args})}, {'unavailable': True}),
+                ({'action': 'encode_result', 'id': '2', 'type': result_type, 'value': result},
+                 {'hex': frame({'request_id': '2', 'result': result})}),
+                ({'action': 'encode_result', 'id': '2', 'type': result_type, 'value': bad_result},
+                 {'invalid': True}),
+                ({'action': 'decode', 'id': '2', 'operation': operation,
+                  'connect': frame(connected.response),
+                  'frame': frame({'request_id': '2', 'result': result})}, {'result': result}),
+                ({'action': 'decode', 'id': '2', 'operation': operation,
+                  'connect': frame(connected.response),
+                  'frame': frame({'request_id': '2', 'result': bad_result})}, {'unavailable': True}),
+            ])
+        for language in ('rs', 'ts'):
+            self.run_consumer(language, cases=cases, controls=False)
+            # Each vector is beside its negative; wrong correlation must discriminate.
+            for offset in (0, 8, 16):
+                control = [(cases[offset][0], {'hex': frame({'request_id': '3', 'op':
+                            rows[offset // 8][0], 'args': rows[offset // 8][3]})})]
+                with self.assertRaises(AssertionError):
+                    self.run_consumer(language, cases=control, controls=False)
+
     def test_auth_and_conflict_consumer_vectors(self):
         rows = [('key_rejected', 'check_key_file'), ('key_replaced', 'obtain_current_key'),
                 ('seat_stood_down', 'ask_top_seat'), ('session_not_current', 'sign_in_again'),
@@ -506,7 +562,8 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['schema_digest'], artifact.digest)
         self.assertEqual(manifest['schema_byte_count'], str(artifact.byte_count))
         self.assertEqual(manifest['protocol'], '3.0')
-        self.assertEqual(manifest['operations'], ['protocol.connect', 'protocol.schema'])
+        self.assertEqual(manifest['operations'], ['protocol.connect', 'protocol.schema',
+                                                   'session.end', 'session.resume', 'session.sign-in'])
         self.assertEqual(set(manifest['bindings']), {'api_3_0.rs', 'api_3_0.ts'})
         for name, digest in manifest['bindings'].items():
             self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)

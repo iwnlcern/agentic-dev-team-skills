@@ -245,3 +245,36 @@ def discovery_definitions() -> DefinitionGraph:
                      (NegotiatedSchemaV1(TypeRef("SchemaResult")),)),
     )
     return DefinitionGraph(types, operations, TypeRef("ApiError"))
+
+
+def platform_definitions() -> DefinitionGraph:
+    """Discovery plus the native session operations, without runtime imports."""
+    base = discovery_definitions()
+    def record(name, fields):
+        return TypeDef(name, Record(tuple(FieldDef(field, TypeRef(ref)) for field, ref in fields)))
+    credentials = (('key_id', 'KeyId'), ('key_secret', 'KeySecret'))
+    identity = tuple((key, 'OpaqueId') for key in
+                     ('project_id', 'team_instance_id', 'seat_id', 'occupant_id', 'session_id'))
+    identity += (('generation', 'UInt64'), ('signed_in_at', 'UInt64'))
+    types = (
+        TypeDef('KeyId', String(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 36, 36)),
+        TypeDef('KeySecret', String(r'[A-Za-z0-9_-]{43}', 43, 43)),
+        TypeDef('SessionHost', LiteralSet(('claude-code', 'codex', 'frank', 'other'))),
+        TypeDef('SessionReceipt', LiteralSet(('original', 'replayed'))),
+        TypeDef('SessionState', LiteralSet(('open', 'ended'))),
+        record('SessionSignInArgs', credentials + (('host', 'SessionHost'),
+               ('host_session_id', 'OpaqueId'), ('operation_key', 'OpaqueId'))),
+        record('SessionSignInResult', identity + (('receipt', 'SessionReceipt'),
+                                                ('session_state', 'SessionState'))),
+        record('SessionResumeArgs', credentials + (('session_id', 'OpaqueId'),)),
+        record('SessionResumeResult', identity),
+        record('SessionEndArgs', credentials + (('session_id', 'OpaqueId'), ('operation_key', 'OpaqueId'))),
+        record('SessionEndResult', (('session_id', 'OpaqueId'), ('ended_at', 'UInt64'),
+                                    ('receipt', 'SessionReceipt'))),
+    )
+    operations = tuple(OperationDef(name, TypeRef(args), TypeRef(result), TypeRef('ApiError'),
+        'seat_key', effect, retry, 'none') for name, args, result, effect, retry in (
+        ('session.sign-in', 'SessionSignInArgs', 'SessionSignInResult', 'session_write', 'operation_key'),
+        ('session.resume', 'SessionResumeArgs', 'SessionResumeResult', 'connection_binding', 'read_repeat'),
+        ('session.end', 'SessionEndArgs', 'SessionEndResult', 'session_write', 'operation_key')))
+    return DefinitionGraph(base.types + types, base.operations + operations, base.error_ref)
