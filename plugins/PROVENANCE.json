@@ -10880,7 +10880,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/operator_queue/notifier.py",
-    "sha256": "25cfc62b5104006bc20f7e61e6ee827087494f9af227e40a111c227211a4c759",
+    "sha256": "62498a3f9fdaec0d3f1edf52752b4f7cda2a93004c41cc2eb7dd4f34dcd91241",
     "source": "tools/relay_engine/operator_queue/notifier.py"
   },
   {
@@ -21788,7 +21788,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/operator_queue/notifier.py",
-    "sha256": "25cfc62b5104006bc20f7e61e6ee827087494f9af227e40a111c227211a4c759",
+    "sha256": "62498a3f9fdaec0d3f1edf52752b4f7cda2a93004c41cc2eb7dd4f34dcd91241",
     "source": "tools/relay_engine/operator_queue/notifier.py"
   },
   {
@@ -32612,7 +32612,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/operator_queue/notifier.py",
-    "sha256": "25cfc62b5104006bc20f7e61e6ee827087494f9af227e40a111c227211a4c759",
+    "sha256": "62498a3f9fdaec0d3f1edf52752b4f7cda2a93004c41cc2eb7dd4f34dcd91241",
     "source": "tools/relay_engine/operator_queue/notifier.py"
   },
   {

@@ -91,6 +91,58 @@ class TestQueueNotifier(unittest.TestCase):
         self.conn.close()
         self.conn = store_layout.open_catalogue(self.root)
 
+    def test_unhealthy_raised_at_exactly_five(self):
+        from relay_engine.api_principals import OperatorPrincipal
+        from relay_engine.operator_queue import operations
+        self.raise_it()
+        def receipt_count():
+            return records._one(self.conn, "SELECT COUNT(*) FROM queue_receipts "
+                "WHERE principal_kind='service' AND principal_id='console_queue' "
+                "AND operation='queue.raise' AND operation_key LIKE 'notifier-failure:%'")[0]
+        for n in range(5):
+            self.run_pass(self.delivery_failure, 1000 + n * 1000000)
+        first = self.unhealthy()[0][0]
+        revision = records._one(self.conn, 'SELECT revision FROM queue_items WHERE item_id=?', (first,))[0]
+        dismissed = operations.dismiss(self.conn, OperatorPrincipal('page'), first, revision,
+                                       'dismiss-unhealthy', 4002000)
+        self.assertNotIsInstance(dismissed, records.QueueRefusal)
+        self.conn.commit()
+        before = (receipt_count(), records._one(self.conn, 'SELECT COUNT(*) FROM queue_events')[0])
+        later = []
+        for n in (5, 6):
+            self.run_pass(self.delivery_failure, 1000 + n * 1000000)
+            later.append((receipt_count(), records._one(self.conn, 'SELECT COUNT(*) FROM queue_events')[0]))
+        self.assertEqual(receipt_count(), 1)
+        self.assertEqual(later, [before, before])
+        self.assertEqual(self.unhealthy(), [(first, 'dismissed', '"notifier"')])
+        self.assertEqual(self.health(), 7)
+        self.run_pass(lambda argv: None, 7001000)
+        self.assertEqual(self.health(), 0)
+        self.assertEqual(records.open_condition_items(self.conn, records.InternalWriter(), None), [])
+        self.assertIsNotNone(records._one(self.conn,
+            'SELECT closed_at_ms FROM queue_conditions WHERE item_id=?', (first,))[0])
+        self.raise_it()
+        for n in range(5):
+            self.run_pass(self.delivery_failure, 8001000 + n * 1000000)
+        rows = self.unhealthy()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], (first, 'dismissed', '"notifier"'))
+        self.assertNotEqual(rows[1][0], first)
+        self.assertEqual(rows[1][1:], ('pending', '"notifier"'))
+        self.assertEqual(receipt_count(), 2)
+
+
+    def test_unhealthy_sentence_from_table(self):
+        self.raise_it()
+        with mock.patch.object(records, 'raise_item', wraps=records.raise_item) as raising:
+            for n in range(5):
+                self.run_pass(self.delivery_failure, 1000 + n * 1000000)
+        self.assertEqual(raising.call_count, 1)
+        request = raising.call_args.args[2]
+        self.assertEqual(request.texts, {'sentence': kinds.fixed_text('notifier_unhealthy', 'notifier')})
+        self.assertFalse(hasattr(notifier, '_UNHEALTHY_TEXT'))
+
+
     def test_argv_stops_option_parsing(self):
         note = notifier.Notification('item', 1, '-e', '-e do shell script "x"')
         argv = notifier.notification_argv(note, 'osascript')

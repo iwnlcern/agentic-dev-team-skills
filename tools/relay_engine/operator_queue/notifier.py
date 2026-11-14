@@ -9,9 +9,6 @@ from relay_engine.operator_queue.records import JobPort
 
 
 _MARK = " … [cut: the whole message is on v3's page]"
-_UNHEALTHY_TEXT = ("v3 could not show its pop-ups five times in a row, so new questions "
-                   "and notices may not pop up. They are still listed on v3's page. "
-                   "Run adt engine status.")
 
 
 @dataclass(frozen=True)
@@ -108,9 +105,9 @@ def notify_failed(conn, note, error_class, now_ms):
                    'ON CONFLICT(id) DO UPDATE SET consecutive_failures=consecutive_failures+1,'
                    'updated_at_ms=excluded.updated_at_ms', (now_ms,))
     failures = records._one(conn, 'SELECT consecutive_failures FROM queue_notifier_health WHERE id=1')[0]
-    if failures >= 5:
+    if failures == 5:
         request = records.RaiseRequest('notice', 'notifier_unhealthy', None,
-                                      {'sentence': _UNHEALTHY_TEXT}, {}, 'notifier',
+                                      {'sentence': kinds.fixed_text('notifier_unhealthy', 'notifier')}, {}, 'notifier',
                                       f'notifier-failure:{note.item_id}:{note.revision}:{failures}:{now_ms}')
         result = records.raise_item(conn, records.InternalWriter(), request, now_ms, enabled=kinds.ENABLED_TAGS)
         if isinstance(result, records.QueueRefusal):

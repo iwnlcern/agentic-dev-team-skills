@@ -296,6 +296,38 @@ class TestQueueApply(unittest.TestCase):
         self.c.execute('UPDATE queue_answers SET draft=? WHERE item_id=?', (data, item.item_id)).close()
         self.c.commit()
 
+    def test_faulted_notice_refused_raise_rolls_back(self):
+        from unittest import mock
+        item = self.recorded()
+        self.apply(item)
+        self.change_draft(item, self.job(item).draft + b'changed')
+        with mock.patch.object(records, 'raise_item',
+                               return_value=records.QueueRefusal('E_QUEUE_STATE', 'project_not_active')):
+            with self.assertRaisesRegex(RuntimeError, 'project_not_active'):
+                self.reconcile()
+        self.assertEqual(records._one(self.c, 'SELECT phase FROM queue_answers WHERE item_id=?',
+                                     (item.item_id,)), ('recorded',))
+        self.assertEqual(self.outcome(item), ('applying', 2))
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_items WHERE subkind='answer_faulted'"), (0,))
+
+
+    def test_record_answer_refuses_faulted_notice(self):
+        item = self.recorded()
+        saga.confirm(self.c, item.item_id,
+            saga.ApplyResult('faulted', None, None, 'E-SUBMISSION-KEY-REUSED', None), 500)
+        notice_id = records._one(self.c,
+            "SELECT item_id FROM queue_items WHERE subkind='answer_faulted'")[0]
+        notice = self.view(notice_id)
+        self.assertEqual((notice.kind, notice.project_id, notice.state), ('notice', P, 'pending'))
+        changes, before = self.c.total_changes, self.f.snapshot()
+        result = saga.record_answer(self.c, OperatorPrincipal('page'), notice.item_id,
+            notice.revision, {'text': 'Answer exactly'}, 'answer-faulted-notice', 600,
+            frank_conformed=False, top_seat_address='v3.orchestrator-planner')
+        self.assertIsInstance(result, records.QueueRefusal)
+        self.assertEqual((result.code, result.cause_kind), ('E_QUEUE_INVALID', 'surface_not_allowed'))
+        self.assertEqual(self.c.total_changes, changes)
+        self.assertEqual(self.f.snapshot(), before)
+
     def test_apply_admits_one_answer(self):
         item = self.recorded()
         result = self.apply(item)
