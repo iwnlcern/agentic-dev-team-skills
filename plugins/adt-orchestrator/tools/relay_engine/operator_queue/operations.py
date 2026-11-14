@@ -254,3 +254,44 @@ def ingest_skips(catalogue_conn, *, limit: int) -> tuple[IngestSkip, ...]:
     return tuple(IngestSkip(*row) for row in records._rows(catalogue_conn,
                  'SELECT source,row_ref,reason,skipped_at_ms FROM queue_ingest_skips '
                  'ORDER BY skipped_at_ms DESC,source,row_ref LIMIT ?', (limit,)))
+
+
+def withdraw(catalogue_conn, ledger_conn, binding, item_id, expected_revision,
+             reason_text, operation_key, now_ms):
+    """Withdraw an asking seat's plain question inside the dispatcher's F-2 job."""
+    from relay_engine import api_sessions
+    from relay_engine.api_protocol import SeatBinding
+
+    if not isinstance(binding, SeatBinding):
+        return _refusal('not_asking_seat', code='E_API_AUTH')
+    try:
+        current = api_sessions.current_binding(ledger_conn, binding.session_id)
+    except api_sessions.BindingNotCurrent as exc:
+        return _refusal(exc.reason, code='E_API_AUTH')
+    except api_sessions.BindingUnavailable:
+        return _refusal('store_unavailable', code='E_API_UNAVAILABLE')
+    if current != binding:
+        return _refusal('session_not_current', code='E_API_AUTH')
+    conn = catalogue_conn
+    args = dict(item_id=item_id, expected_revision=expected_revision, reason_text=reason_text)
+    replay = _replay(conn, binding, 'queue.withdraw', operation_key, args)
+    if replay is not None:
+        return replay
+    rows = _dicts(conn, 'SELECT * FROM queue_items WHERE item_id=?', (item_id,))
+    if not rows:
+        return _refusal('item_not_found')
+    item = rows[0]
+    if (item['kind'] != 'question' or item['project_id'] != binding.project_id
+            or item['asking_seat_id'] != binding.seat_id):
+        return _refusal('not_asking_seat', code='E_API_AUTH')
+    if item['state'] != 'pending':
+        return _refusal('item_not_pending')
+    if item['revision'] != expected_revision:
+        return _refusal('revision_mismatch', payload={'current_revision':item['revision'],
+                                                    'current_state':item['state']})
+    revision = item['revision'] + 1
+    records._write(conn, "UPDATE queue_items SET state='withdrawn',revision=? WHERE item_id=?", (revision,item_id))
+    records.append_event(conn,item_id,revision,'withdrawn','withdrawn',binding,now_ms,
+                         detail={'reason_text':reason_text})
+    return _complete(conn,binding,'queue.withdraw',operation_key,args,
+                     dict(item_id=item_id,revision=revision,state='withdrawn'),now_ms)

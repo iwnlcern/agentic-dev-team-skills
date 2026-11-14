@@ -273,5 +273,58 @@ def replace_request(request, **changes):
     return replace(request, **changes)
 
 
+class TestQueueWithdrawal(unittest.TestCase):
+    def setUp(self):
+        from relay_engine.tests.test_queue_ingest import QueueFixture, Port
+        from relay_engine.operator_queue import ingest
+        self.f = QueueFixture(self)
+        self.conn = self.f.catalogue
+        self.q = self.f.admit()
+        ingest.question_ingest_pass(Port(self.f), [P], self.f.clock)
+        self.item = self.f.items()[0][0]
+
+    def withdraw(self, binding=None, revision=1, key='withdraw', reason='Changed my mind'):
+        return operations.withdraw(self.conn,self.f.ledger,binding or self.f.binding,
+                                   self.item,revision,reason,key,200)
+
+    def test_withdraw_own_plain_question(self):
+        # Breaks asking-seat/kind guards, event detail, receipt scope, or commits.
+        before=self.f.snapshot();changes=self.conn.total_changes
+        result=self.withdraw(self.f.other_binding)
+        self.assertEqual((result.code,result.cause_kind),('E_API_AUTH','not_asking_seat'))
+        self.assertEqual(self.f.snapshot(),before);self.assertEqual(self.conn.total_changes,changes)
+        first=self.withdraw()
+        self.assertEqual(first['state'],'withdrawn');self.assertTrue(self.conn.in_transaction)
+        event=self.conn.execute("SELECT detail FROM queue_events WHERE event_kind='withdrawn'").fetchone()
+        self.assertEqual(json.loads(event[0]),{'reason_text':'Changed my mind'})
+        changes=self.conn.total_changes
+        replay=self.withdraw()
+        self.assertEqual(replay['receipt'],first['receipt']);self.assertTrue(replay['replayed'])
+        self.assertEqual(self.conn.total_changes,changes)
+        self.assertEqual(self.withdraw(reason='Different').cause_kind,'operation_key_reused')
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute('SELECT state FROM queue_items WHERE item_id=?',(self.item,)).fetchone(),('pending',))
+        self.conn.execute("UPDATE queue_items SET kind='merge_go_ahead',answer_to=NULL,source_handle=NULL WHERE item_id=?",(self.item,)).close()
+        before=self.f.snapshot();result=self.withdraw(key='kind')
+        self.assertEqual((result.code,result.cause_kind),('E_API_AUTH','not_asking_seat'))
+        self.assertEqual(self.f.snapshot(),before)
+
+    def test_withdraw_after_answer_refuses(self):
+        # F9's explicit applying/recorded seed; no Task 6 function is called.
+        self.f.seed_answer(self.item,'applying')
+        before=self.f.snapshot();changes=self.conn.total_changes
+        result=self.withdraw(revision=2)
+        self.assertEqual(result.cause_kind,'item_not_pending')
+        self.assertEqual(self.f.snapshot(),before);self.assertEqual(self.conn.total_changes,changes)
+
+    def test_withdraw_with_ended_binding_refuses(self):
+        self.f.ledger.execute('UPDATE seat_sessions SET ended_at=3 WHERE id=?',(self.f.binding.session_id,)).close()
+        self.f.ledger.commit()
+        before=self.f.snapshot();changes=self.conn.total_changes
+        result=self.withdraw()
+        self.assertEqual((result.code,result.cause_kind),('E_API_AUTH','session_not_current'))
+        self.assertEqual(self.f.snapshot(),before);self.assertEqual(self.conn.total_changes,changes)
+
+
 if __name__ == '__main__':
     unittest.main()
