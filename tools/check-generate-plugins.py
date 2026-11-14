@@ -175,6 +175,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/roster.py",
     "relay_engine/rules.py",
     "relay_engine/schema.py",
+    "relay_engine/seal_files.py",
     "relay_engine/seal_slots.py",
     "relay_engine/seal_types.py",
     "relay_engine/seats.py",

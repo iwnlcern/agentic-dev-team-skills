@@ -10957,6 +10957,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/seal_files.py",
+    "sha256": "1c2cf60b73c0bb98ac1b55d5fb85a15f8ed23f639f3ff3ab18cf815c0ae6d348",
+    "source": "tools/relay_engine/seal_files.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seal_slots.py",
     "sha256": "62939c737bd09edff2050d7f7f40ed40e24557ca59dbcec37a2c0afbca67ae84",
     "source": "tools/relay_engine/seal_slots.py"
@@ -11018,7 +11024,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "a3e5ce91ec7148fee3b156ae9db8319505468ac8095a6004326cbe2332bc8d92",
+    "sha256": "164e2a665da5fe30e4cf38db98dcae39fac35e7cc79b7f75fc58cf9d6ec19763",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21883,6 +21889,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/seal_files.py",
+    "sha256": "1c2cf60b73c0bb98ac1b55d5fb85a15f8ed23f639f3ff3ab18cf815c0ae6d348",
+    "source": "tools/relay_engine/seal_files.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seal_slots.py",
     "sha256": "62939c737bd09edff2050d7f7f40ed40e24557ca59dbcec37a2c0afbca67ae84",
     "source": "tools/relay_engine/seal_slots.py"
@@ -21944,7 +21956,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "a3e5ce91ec7148fee3b156ae9db8319505468ac8095a6004326cbe2332bc8d92",
+    "sha256": "164e2a665da5fe30e4cf38db98dcae39fac35e7cc79b7f75fc58cf9d6ec19763",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32725,6 +32737,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/seal_files.py",
+    "sha256": "1c2cf60b73c0bb98ac1b55d5fb85a15f8ed23f639f3ff3ab18cf815c0ae6d348",
+    "source": "tools/relay_engine/seal_files.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seal_slots.py",
     "sha256": "62939c737bd09edff2050d7f7f40ed40e24557ca59dbcec37a2c0afbca67ae84",
     "source": "tools/relay_engine/seal_slots.py"
@@ -32786,7 +32804,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "a3e5ce91ec7148fee3b156ae9db8319505468ac8095a6004326cbe2332bc8d92",
+    "sha256": "164e2a665da5fe30e4cf38db98dcae39fac35e7cc79b7f75fc58cf9d6ec19763",
     "source": "tools/relay_engine/version.py"
   },
   {
