@@ -180,6 +180,98 @@ class SealRendererTests(unittest.TestCase):
         self.service.set_current(P, C, ledger_fd=store.fd, expected=C, bind='rebind')
         return store
 
+
+    def test_stop_drain_raises_unsignalled_commit(self):
+        renderer = self.renderer(); self.open(renderer, serving=True)
+        self.rows(4)
+        renderer.ledger_closing(P)
+        self.assertEqual(self.high(), 4)
+        self.assertIsNone(self.service.read_record(P, C, 0))
+        self.assertEqual(renderer.generations(P)[-1].state, 'closed')
+        self.assertEqual(self.ledger.trace[-1][0], 'close')
+
+    def test_record_publish_failure_reports_nothing(self):
+        renderer = self.renderer(); self.open(renderer)
+        self.rows(2); self.reports.clear()
+        with mock.patch.object(self.service.folder, 'publish_record',
+                               side_effect=OSError(errno.ENOSPC, 'full')):
+            renderer.drain(P, C, through=0)
+        self.assertEqual(self.reports, [])
+        self.assertEqual(self.high(), 2)
+        self.assertIsNone(self.service.read_record(P, C, 0))
+        renderer.drain(P, C, through=0)
+        self.assertEqual(self.service.read_record(P, C, 2).number, 2)
+
+    def test_damaged_chain_does_not_stop_later_chains(self):
+        self.service.set_current(P, D, ledger_fd=self.fd, expected=C, bind='first')
+        self.damage(self.path('counter'))
+        renderer = self.renderer()
+        reader = self.ledger.open_reader(self.base, P)
+        owner = self.module._Owner(P, 1, reader=reader, ident=threading.get_ident())
+        renderer._owners[P] = [owner]
+        observed = []
+        try:
+            for n, kind in enumerate(('start', 'backstop', 'stop'), 1):
+                self.rows(n, chain=D)
+                owner.closing = kind == 'stop'
+                try:
+                    if kind == 'start':
+                        renderer._start_drain(owner)
+                    elif kind == 'backstop':
+                        renderer._backstop_pass(owner, frozenset())
+                    else:
+                        renderer._stop_drain(owner)
+                except self.types.SealUnusable:
+                    pass
+                observed.append(self.high(chain=D))
+            self.assertEqual(observed, [1, 2, 3])
+        finally:
+            reader.close()
+            owner.state = 'closed'
+            if getattr(owner, 'ledger_fd', None) is not None:
+                os.close(owner.ledger_fd)
+
+    def test_record_walk_bounded(self):
+        renderer = self.renderer(); self.open(renderer)
+        self.rows(49); renderer.drain(P, C, through=0)
+        previous = self.service.read_record(P, C, 49)
+        self.rows(50)
+        real_listdir = os.listdir
+        directory = self.root / 'projects' / P / 'records' / C
+        listings = []
+        def listed(path):
+            if Path(path) == directory:
+                listings.append(path)
+            return real_listdir(path)
+        with mock.patch.object(self.service, 'open_record', wraps=self.service.open_record) as opened,                 mock.patch.object(os, 'listdir', side_effect=listed):
+            renderer.drain(P, C, through=0)
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(self.service.read_record(P, C, 50).prev_mac, previous.mac)
+
+    def test_passes_never_seal_out_of_a_replaced_ledger(self):
+        renderer = self.renderer(); self.open(renderer, serving=True)
+        other = os.open(self.base / 'replacement', os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            self.service.set_current(P, C, ledger_fd=other, expected=C, bind='rebind')
+        finally:
+            os.close(other)
+        self.rows(3)
+        renderer.committed(P, C)
+        # A queued explicit drain is a fence; its caller's contract has no gate.
+        # Do not use it here: queue a no-op through the existing owner lane.
+        owner = renderer._newest(P)
+        fence = self.module._Request('pass', skip=frozenset((C,)))
+        renderer._enqueue(owner, fence)
+        self.assertTrue(fence.done.wait(30))
+        renderer.start(); self.tick.until_calls(1)
+        self.tick.advance(); self.tick.until_calls(2)
+        fence = self.module._Request('pass', skip=frozenset((C,)))
+        renderer._enqueue(owner, fence); self.assertTrue(fence.done.wait(30))
+        renderer.ledger_closing(P)
+        self.assertEqual(self.high(), 0)
+        self.assertIsNone(self.service.read_record(P, C, 0))
+
     def test_drain_raises_to_through_first(self):
         self.rows(4)
         renderer = self.renderer(); self.open(renderer)
@@ -305,7 +397,7 @@ class SealRendererTests(unittest.TestCase):
         for path in root.rglob('*.py'):
             if 'tests' not in path.relative_to(root).parts:
                 found |= callers(path.read_text(), path.stem)
-        expected = {('seal_renderer', '_start_drain'), ('seal_renderer', '_stop_drain')}
+        expected = {('seal_renderer', '_start_drain')}
         if (root / 'approvals.py').exists():
             expected.add(('approvals', 'commit'))
         self.assertEqual(found, expected)

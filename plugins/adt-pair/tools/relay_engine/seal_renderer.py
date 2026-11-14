@@ -34,6 +34,7 @@ class _Owner:
     state: str = 'opened'
     reader: object = None
     ident: int | None = None
+    ledger_fd: int | None = None
     closing: bool = False
     queue: deque = field(default_factory=deque)
     passes: set = field(default_factory=set)
@@ -218,6 +219,9 @@ class SealRenderer:
                     elif request.kind == 'pass' and request.chain is None:
                         self._backstop_pass(owner, request.skip)
                     else:
+                        if request.kind == 'pass' and not self.service.ledger_matches(
+                                owner.project, request.chain, owner.ledger_fd):
+                            continue
                         request.result = self._drain(owner, request.chain, request.through)
                 except SealUnusable as exc:
                     if request.kind == 'drain':
@@ -250,6 +254,9 @@ class SealRenderer:
             try:
                 if owner.reader is not None:
                     owner.reader.close()
+                if owner.ledger_fd is not None:
+                    os.close(owner.ledger_fd)
+                    owner.ledger_fd = None
             finally:
                 self._state(owner, 'closed')
                 opened.done.set()
@@ -267,27 +274,60 @@ class SealRenderer:
         for chain in self.service.chains(owner.project):
             if owner.closing:
                 break
-            if chain not in skip:
-                self._drain(owner, chain, 0)
+            if chain in skip:
+                continue
+            try:
+                if self.service.ledger_matches(owner.project, chain, owner.ledger_fd):
+                    self._drain(owner, chain, 0)
+            except SealUnusable as exc:
+                if exc.chain_id is None:
+                    break
+            except (RecordInvalid, RecordUnreadable):
+                continue
 
     def _start_drain(self, owner):
         project = owner.project
-        descriptor = os.open(store_layout.ledger_path(self.store_root, project),
-                             os.O_RDONLY | os.O_CLOEXEC)
-        try:
-            for chain in self.service.chains(project):
-                if owner.closing:
-                    break
-                if self.service.ledger_matches(project, chain, descriptor):
-                    self.drain(project, chain, through=0)
-        finally:
-            os.close(descriptor)
-
-    def _stop_drain(self, owner):
-        for chain in self.service.chains(owner.project):
+        if owner.ledger_fd is None:
+            owner.ledger_fd = os.open(store_layout.ledger_path(self.store_root, project),
+                                      os.O_RDONLY | os.O_CLOEXEC)
+        for chain in self.service.chains(project):
             if owner.closing:
                 break
-            self.drain(owner.project, chain, through=0)
+            try:
+                if self.service.ledger_matches(project, chain, owner.ledger_fd):
+                    self.drain(project, chain, through=0)
+            except SealUnusable as exc:
+                if exc.chain_id is None:
+                    break
+            except (RecordInvalid, RecordUnreadable):
+                continue
+
+    def _stop_drain(self, owner):
+        project = owner.project
+        for chain in self.service.chains(project):
+            try:
+                if owner.ledger_fd is None or not self.service.ledger_matches(
+                        project, chain, owner.ledger_fd):
+                    continue
+                conn = owner.reader
+                conn.execute('BEGIN').close()
+                try:
+                    high = self.service.rendered_through(project, chain)
+                    rows = self.events_after(conn, project, chain, high)
+                    if rows:
+                        self._raise(project, chain, max(row.number for row in rows))
+                finally:
+                    if conn.in_transaction:
+                        conn.execute('ROLLBACK').close()
+            except SealUnusable as exc:
+                if exc.chain_id is None:
+                    break
+            except (RecordInvalid, RecordUnreadable):
+                continue
+            except sqlite3.OperationalError as exc:
+                if str(exc) == 'interrupted':
+                    return
+                raise
 
     def _high(self, project, chain):
         with self.service._locked(project, exclusive=False):
@@ -333,14 +373,13 @@ class SealRenderer:
         previous = None
         number = 0
         try:
-            while True:
-                record = self.service.read_record(project, chain, number)
-                if record is None:
-                    break
-                if record.prev_mac != (previous.mac if previous is not None else None):
+            head = self.service.folder.record_head(project, chain)
+            if head is not None:
+                first = self.service.read_record(project, chain, 0)
+                previous = first if head == 0 else self.service.read_record(project, chain, head)
+                if first is None or previous is None or first.key_id != previous.key_id:
                     return
-                previous = record
-                number += 1
+                number = head + 1
         except (RecordInvalid, RecordUnreadable):
             return
         if owner.closing:
@@ -356,7 +395,7 @@ class SealRenderer:
                 return
             conflict = False
             try:
-                with self.service._locked(project, exclusive=True):
+                with self.service._locked(project, exclusive=True, report=False):
                     if owner.closing:
                         return
                     if self.service.folder.mark_exists(project, chain):

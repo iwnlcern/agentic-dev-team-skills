@@ -256,13 +256,16 @@ class SealFilesTests(unittest.TestCase):
                  lambda p: self.folder.mark_exists(p, C),
                  lambda p: self.folder.publish_record(p, C, 0, b'x'),
                  lambda p: self.folder.open_record_file(p, C, 0),
+                 lambda p: self.folder.record_head(p, C),
                  lambda c: self.folder.write_entry(P, c, 1, b'x'),
                  lambda c: self.folder.read_entries(P, c),
                  lambda c: self.folder.write_mark(P, c, b'x'),
                  lambda c: self.folder.mark_exists(P, c),
                  lambda c: self.folder.publish_record(P, c, 0, b'x'),
-                 lambda c: self.folder.open_record_file(P, c, 0)]
-        with patch.object(self.f.os, 'open', side_effect=AssertionError('opened before validation')):
+                 lambda c: self.folder.open_record_file(P, c, 0),
+                 lambda c: self.folder.record_head(P, c)]
+        with patch.object(self.f.os, 'open', side_effect=AssertionError('opened before validation')), \
+                patch.object(self.f.os, 'listdir', side_effect=AssertionError('listed before validation')):
             for bad in (P.upper(), '{' + P + '}', ' ' + P + ' '):
                 for call in calls:
                     with self.subTest(value=bad, call=call), self.assertRaises(ValueError):

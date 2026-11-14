@@ -271,6 +271,19 @@ class SealFolder:
         directory.mkdir(mode=0o700, exist_ok=True)
         return _publish(directory / name, data, compare=True, keep_conflict=True)
 
+    def record_head(self, project_id, chain_id):
+        require_canonical_id(project_id)
+        require_canonical_id(chain_id)
+        try:
+            names = os.listdir(self._project(project_id) / 'records' / chain_id)
+        except FileNotFoundError:
+            return None
+        numbers = {int(name) for name in names if _decimal(name)}
+        number = 0
+        while number in numbers:
+            number += 1
+        return number - 1 if number else None
+
     def open_record_file(self, project_id, chain_id, number):
         require_canonical_id(project_id)
         require_canonical_id(chain_id)

@@ -108,7 +108,7 @@ class SealService:
         raise SealUnusable(cause, chain) from None
 
     @contextmanager
-    def _locked(self, project, *, exclusive, create=False):
+    def _locked(self, project, *, exclusive, create=False, report=True):
         path = self.folder._project(project)
         try:
             if not create and not path.is_dir():
@@ -119,7 +119,7 @@ class SealService:
             with self.folder.lock(project, exclusive=exclusive):
                 yield
         except OSError:
-            self._fail(project, 'folder_unusable')
+            self._fail(project, 'folder_unusable', report=report)
 
     @contextmanager
     def _open(self, project, name, *, write=False):
