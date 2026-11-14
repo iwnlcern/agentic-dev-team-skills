@@ -162,6 +162,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/operator_queue/ingest.py",
     "relay_engine/operator_queue/kinds.py",
     "relay_engine/operator_queue/liveness.py",
+    "relay_engine/operator_queue/notifier.py",
     "relay_engine/operator_queue/operations.py",
     "relay_engine/operator_queue/records.py",
     "relay_engine/operator_queue/saga.py",
