@@ -241,6 +241,8 @@ class SealService:
             os.fsync(directory)
             if sys.platform == 'darwin':
                 slots._sync(fd, changing_length=True)
+        except (slots.CannotRecord, OSError):
+            self._fail(project, 'folder_unusable')
         finally:
             if fd is not None:
                 os.close(fd)
@@ -261,22 +263,26 @@ class SealService:
                     os.ftruncate(fd, slots.SIZE)
                     slots._sync(fd, changing_length=True)
                 else:
-                    state = slots.read_slots(fd, kind=slots.ItemKind.POINTER,
-                                             binding=(project,), ledger_identity=None)
+                    try:
+                        state = slots.read_slots(fd, kind=slots.ItemKind.POINTER,
+                                                 binding=(project,), ledger_identity=None)
+                    except slots.CannotRecord:
+                        self._fail(project, 'pointer_damaged')
                     slots.write_next(fd, state, value=0,
                                      chain=chain.encode('ascii') if chain is not None else None)
         except FileNotFoundError:
             if not create:
                 self._fail(project, 'pointer_unset')
             self._new_pointer(project, chain)
-        except slots.CannotRecord:
-            self._fail(project, 'pointer_damaged')
+        except (slots.CannotRecord, OSError):
+            self._fail(project, 'folder_unusable')
 
     def set_current(self, project, chain, *, ledger_fd, expected, bind):
         require_canonical_id(project); require_canonical_id(chain)
         _expected(expected, sentinel=True)
         if bind not in ('first', 'rebind'):
             raise ValueError('invalid_bind')
+        os.fstat(ledger_fd)
         with self._locked(project, exclusive=True, create=expected is None):
             found = self._compare(project, expected)
             if found == chain:
@@ -352,10 +358,10 @@ class SealService:
         return self._head(project, chain, slots.ItemKind.HIGH_WATER)
 
     def ledger_matches(self, project, chain, ledger_fd):
-        require_canonical_id(chain)
+        require_canonical_id(project); require_canonical_id(chain)
+        current = slots.file_identity(ledger_fd)
         with self._locked(project, exclusive=False):
             recorded = self._item(project, chain, slots.ItemKind.COUNTER).ledger_identity
-            current = slots.file_identity(ledger_fd)
             key = (project, chain)
             if (recorded.uuid is None) != (current.uuid is None) and key not in self._identity_warned:
                 self._identity_warned.add(key)

@@ -351,6 +351,41 @@ class ApprovalSealTests(unittest.TestCase):
             self.assertEqual([(type(x).__name__, x.project_id, x.chain_id) for x in self.diags],
                              [('SealIdentityOneSided', P, C)])
 
+
+    def test_pointer_write_failure_is_folder_unusable(self):
+        self.set_chain()
+        for clear in (False, True):
+            before = self.pointer.read_bytes(); self.reports.clear()
+            with mock.patch.object(os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'full')):
+                self.fault(lambda: self.a.clear_current(P, expected=C) if clear
+                           else self.set_chain(expected=C), 'folder_unusable')
+            self.assertEqual(self.pointer.read_bytes(), before)
+            self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234)])
+        for failure in (OSError(errno.ENOSPC, 'full'), self.s.CannotRecord(7)):
+            self.root = self.base / str(uuid.uuid4()); self.service.folder.root = self.root
+            self.reports.clear()
+            original = self.service._new_pointer
+            def new(*args):
+                with mock.patch.object(self.s, '_write', side_effect=failure):
+                    return original(*args)
+            with mock.patch.object(self.service, '_new_pointer', side_effect=new):
+                self.fault(lambda: self.set_chain(), 'folder_unusable')
+            self.assertFalse(self.pointer.exists())
+            self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234)])
+
+    def test_bad_ledger_descriptor_is_callers_fault(self):
+        self.set_chain(); self.reports.clear()
+        fd = os.dup(self.ledger); os.close(fd)
+        for call in (lambda: self.a.ledger_matches(P, C, fd),
+                     lambda: self.a.set_current(P, C, ledger_fd=fd, expected=C, bind='rebind')):
+            try:
+                with self.assertRaises(OSError) as caught:
+                    call()
+            except self.t.SealUnusable:
+                self.fail('bad descriptor was mapped to folder_unusable')
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+            self.assertEqual(self.reports, [])
+
     def test_seal_root_never_from_environment(self):
         with mock.patch.dict(os.environ, {'HOME': '/wrong', 'XDG_DATA_HOME': '/wrong',
                                           'ADT_APPROVAL_SEAL_ROOT': '/wrong'}), \

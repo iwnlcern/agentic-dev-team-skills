@@ -3,6 +3,7 @@ import gc
 import hashlib
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,48 @@ class SealFilesTests(unittest.TestCase):
             return None
         return {str(p.relative_to(self.root)): (p.stat().st_ino, p.stat().st_size,
                 p.read_bytes() if p.is_file() else None) for p in self.root.rglob('*')}
+
+
+    def test_created_directories_synced(self):
+        parent = Path(self.temp.name) / 'missing-parent'
+        self.root = parent / 'seal'; self.folder.root = self.root
+        events = []
+        real_mkdir, real_sync = Path.mkdir, self.s._sync
+        emitted = set()
+        def mkdir(path, *args, **kwargs):
+            existed = path.exists()
+            result = real_mkdir(path, *args, **kwargs)
+            if not existed and path not in emitted:
+                emitted.add(path)
+                events.append(('mkdir', Path(path)))
+            return result
+        def sync(fd, **kwargs):
+            info = os.fstat(fd)
+            if stat.S_ISDIR(info.st_mode):
+                events.append(('sync', info.st_dev, info.st_ino, kwargs))
+            return real_sync(fd, **kwargs)
+        with patch.object(Path, 'mkdir', mkdir), patch.object(self.s, '_sync', side_effect=sync):
+            os.close(self.folder.project_dir(P))
+            self.folder.publish_record(P, C, 0, b'record')
+            self.folder.create_key()
+        created = [parent, self.root, self.root / 'projects',
+                   self.root / 'projects' / P,
+                   self.root / 'projects' / P / 'records',
+                   self.root / 'projects' / P / 'records' / C,
+                   self.root / 'keys']
+        self.assertEqual([x[1] for x in events if x[0] == 'mkdir'], created)
+        for directory in created:
+            index = events.index(('mkdir', directory))
+            info = directory.parent.stat()
+            self.assertEqual(events[index + 1],
+                             ('sync', info.st_dev, info.st_ino, {'changing_length': True}))
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(sum(x[0] == 'sync' for x in events), 7)
+        # Existing levels cause no directory durability work.
+        events.clear()
+        with patch.object(self.s, '_sync', side_effect=sync):
+            os.close(self.folder.project_dir(P))
+        self.assertEqual(events, [])
 
     def test_folder_state_absent(self):
         self.assertEqual(self.folder.folder_state(P), 'absent')

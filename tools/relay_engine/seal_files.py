@@ -84,12 +84,30 @@ def _publish(path, data, *, compare=False, keep_conflict=False):
         os.close(directory)
 
 
+def _make_dirs(path: Path) -> None:
+    missing = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        parent = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            seal_slots._sync(parent, changing_length=True)
+        finally:
+            os.close(parent)
+
+
 class SealFolder:
     def __init__(self, root: os.PathLike):
         self.root = Path(root)
 
     def _root(self):
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _make_dirs(self.root)
 
     def _project(self, project_id):
         require_canonical_id(project_id)
@@ -102,8 +120,8 @@ class SealFolder:
     def project_dir(self, project_id):
         path = self._project(project_id)
         self._root()
-        (self.root / 'projects').mkdir(mode=0o700, exist_ok=True)
-        path.mkdir(mode=0o700, exist_ok=True)
+        _make_dirs(self.root / 'projects')
+        _make_dirs(path)
         return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
 
     @contextmanager
@@ -249,7 +267,7 @@ class SealFolder:
     def create_key(self):
         self._root()
         directory = self.root / 'keys'
-        directory.mkdir(mode=0o700, exist_ok=True)
+        _make_dirs(directory)
         sequence = max((int(n) for n in os.listdir(directory) if _decimal(n, positive=True)), default=0) + 1
         data = secrets.token_bytes(32)
         if _publish(directory / str(sequence), data):
@@ -266,9 +284,9 @@ class SealFolder:
         require_canonical_id(chain_id)
         name = _number(number)
         directory = self._project(project_id) / 'records'
-        directory.mkdir(mode=0o700, exist_ok=True)
+        _make_dirs(directory)
         directory = directory / chain_id
-        directory.mkdir(mode=0o700, exist_ok=True)
+        _make_dirs(directory)
         return _publish(directory / name, data, compare=True, keep_conflict=True)
 
     def record_head(self, project_id, chain_id):
