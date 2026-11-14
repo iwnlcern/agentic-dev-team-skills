@@ -25,6 +25,30 @@ CENSUS = (
 )
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 def sha256_file(path):
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -85,7 +109,7 @@ class TestBootstrapTools(unittest.TestCase):
             return subprocess.run(
                 ["git", "-C", wt, "-c", "user.name=v29",
                  "-c", "user.email=v29@local"] + list(args),
-                capture_output=True, text=True)
+                capture_output=True, text=True, env=_git_child_env())
 
         self.assertEqual(g("init", "-q", "-b", "main").returncode, 0)
         with open(os.path.join(wt, "base.txt"), "w") as f:

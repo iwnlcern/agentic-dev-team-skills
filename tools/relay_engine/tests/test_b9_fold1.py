@@ -15,6 +15,35 @@ from relay_engine.tests.test_xroot import _standalone
 import xrootfixgen as xf
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
+def _init_backend(repo: Path, backend: str) -> subprocess.CompletedProcess:
+    return subprocess.run(['git', 'init', '-q', '--ref-format='+backend, str(repo)],
+                          capture_output=True, env=_git_child_env())
+
+
 def verify(module, consumer, declaration):
     # Standalone succeeds with None; native additionally returns selected relays.
     try:
@@ -37,8 +66,7 @@ class TestFoldReplacement(unittest.TestCase):
             xf._init_repo(consumer)
             for backend in ('files', 'reftable'):
                 repo = home/backend
-                probe = subprocess.run(['git', 'init', '-q', '--ref-format='+backend, str(repo)],
-                                       capture_output=True)
+                probe = _init_backend(repo, backend)
                 if probe.returncode:
                     self.assertEqual('reftable', backend)
                     self.assertIn(b'unknown option', probe.stderr)

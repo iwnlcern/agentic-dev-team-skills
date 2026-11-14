@@ -63,8 +63,32 @@ REVIEW_NAME = "DESIGN-REVIEW-reviewer-20260801-110000.md"
 XROOT_PREFIX = "declared design edge failed verification"
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 def _git(repo: Path, *args: str, text: bool = True) -> str | bytes:
-    env = os.environ.copy()
+    env = _git_child_env()
     env.update(GIT_ENV)
     completed = subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -107,7 +131,7 @@ def _init_repo(repo: Path) -> None:
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, **GIT_ENV},
+        env={**_git_child_env(), **GIT_ENV},
     )
 
 

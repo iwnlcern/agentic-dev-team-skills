@@ -110,6 +110,34 @@ ROLE_TO_ADDRESS_ROLE = {
 PAIR_ROLE_CANONICAL = {"pair-planner": "planner", "pair-implementer": "implementer"}
 
 
+_XROOT_READER_ENV_VARS = frozenset({
+    'GIT_CONFIG',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_NO_REPLACE_OBJECTS',
+})
+
+
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 def canonical_role(role: str | None) -> str | None:
     return PAIR_ROLE_CANONICAL.get(role, role) if role is not None else None
 
@@ -6153,7 +6181,7 @@ def _xroot_start_git(command: list[str], *, stdin, stdout, stderr) -> subprocess
     if not command or command[0] != 'git':
         raise ValueError('Git command required')
     return subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr,
-                            close_fds=True, bufsize=0, env=os.environ)
+                            close_fds=True, bufsize=0, env=_git_child_env())
 
 
 def _xroot_kill_and_reap(process: subprocess.Popen) -> None:
