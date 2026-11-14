@@ -30,6 +30,10 @@ SIGN_IN_STANDINS: frozenset[str] = frozenset({
 SIGN_IN_RECEIVERS: frozenset[tuple[str, str]] = frozenset({
     ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
 })
+# Client methods send sign-in for callers; their own bodies are excused.
+# G-B1 counts their callers; until then this census does not see those calls.
+# Slice B's Task 9 adds its one entry.
+SIGN_IN_CLIENT_METHODS: frozenset[tuple[str, str]] = frozenset()
 
 
 def sign_in_census(source):
@@ -90,6 +94,14 @@ def sign_in_census(source):
     return found, bad
 
 
+def innermost_def_name(parents: dict[ast.AST, ast.AST], node: ast.AST) -> str | None:
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return None
+
+
 def sign_in_misses(rel: str, source: str) -> list[int]:
     """Filter census misses by the named file and innermost-function exceptions.
 
@@ -97,6 +109,8 @@ def sign_in_misses(rel: str, source: str) -> list[int]:
     receiver hides its own calls even if it later signs a host session in;
     other files and other or nested functions remain checked. Counting itself
     is unchanged, so SIGN_IN_CENSUS still reports every found call.
+    A named client method's body is excused; calls of that method outside a
+    transaction are not seen until G-B1's Task 3 counts its callers.
     """
     _, misses = sign_in_census(source)
     if rel in SIGN_IN_STANDINS:
@@ -108,13 +122,8 @@ def sign_in_misses(rel: str, source: str) -> list[int]:
     for call in ast.walk(tree):
         if not isinstance(call, ast.Call) or call.lineno not in misses:
             continue
-        node = call
-        while node in parents:
-            node = parents[node]
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if (rel, node.name) in SIGN_IN_RECEIVERS:
-                    excused.add(call.lineno)
-                break
+        if (rel, innermost_def_name(parents, call)) in SIGN_IN_RECEIVERS | SIGN_IN_CLIENT_METHODS:
+            excused.add(call.lineno)
     return [line for line in misses if line not in excused]
 
 
@@ -445,12 +454,13 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
         self.assertEqual(SIGN_IN_RECEIVERS, frozenset({
             ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
         }))
+        self.assertEqual(SIGN_IN_CLIENT_METHODS, frozenset())
         for rel in SIGN_IN_STANDINS:
             with self.subTest(standin=rel):
                 path = REPO / rel
                 self.assertTrue(path.is_file())
                 self.assertTrue(sign_in_census(path.read_text(encoding="utf-8"))[0])
-        for rel, name in SIGN_IN_RECEIVERS:
+        for rel, name in SIGN_IN_RECEIVERS | SIGN_IN_CLIENT_METHODS:
             with self.subTest(receiver=(rel, name)):
                 path = REPO / rel
                 self.assertTrue(path.is_file())
@@ -463,13 +473,8 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
                 for call in ast.walk(tree):
                     if not isinstance(call, ast.Call) or call.lineno not in hits:
                         continue
-                    node = call
-                    while node in parents:
-                        node = parents[node]
-                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            if node.name == name:
-                                receiver_hits.append(call.lineno)
-                            break
+                    if innermost_def_name(parents, call) == name:
+                        receiver_hits.append(call.lineno)
                 self.assertTrue(receiver_hits)
 
     def test_every_sign_in_caller_writes_the_seat_record_first(self):
@@ -490,6 +495,22 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
         for source, rel, expected in controls:
             with self.subTest(source=source, rel=rel):
                 self.assertEqual(sign_in_misses(rel, source), expected)
+        client_method = 'def sign_in(self):\n    return self.call("session.sign-in")\n'
+        client_controls = [
+            ('b2', 'def other(client):\n    client.call("session.sign-in")\n',
+             "tools/relay_engine/api_client.py", [2]),
+            ('c2', client_method, "tools/relay_engine/api_client.py", []),
+            ('c3', client_method, "tools/adapters/connect.py", [2]),
+            ('d2', 'def sign_in(self):\n    def inner():\n        self.call("session.sign-in")\n',
+             "tools/relay_engine/api_client.py", [3]),
+        ]
+        for name, source, rel, expected in client_controls:
+            with self.subTest(control=name):
+                with mock.patch.object(sys.modules[__name__], 'SIGN_IN_CLIENT_METHODS',
+                                       frozenset({("tools/relay_engine/api_client.py", "sign_in")})):
+                    self.assertEqual(sign_in_misses(rel, source), expected)
+        with self.subTest(control='g'):
+            self.assertEqual(sign_in_misses("tools/relay_engine/api_client.py", client_method), [2])
         found, bad = [], []
         for path in sorted((REPO / "tools").rglob("*.py")):
             source = path.read_text(encoding="utf-8")
