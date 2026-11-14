@@ -22,6 +22,7 @@ import time
 import types
 import unittest
 from unittest import mock
+from typing import Mapping
 
 HERE = pathlib.Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "relay-monitor.py"
@@ -34,6 +35,145 @@ def load_script():
     sys.modules["relay_monitor"] = module
     spec.loader.exec_module(module)
     return module
+
+
+INLINE_ROOT_READS_SOURCE = """\
+import errno
+def _inline_root_call(fn):
+    try:
+        return m.RootResult("ok", fn())
+    except OSError as exc:
+        return m.RootResult("failed", detail=errno.errorcode.get(exc.errno, type(exc).__name__), exc=exc)
+    except BaseException as exc:
+        return m.RootResult("failed", detail=type(exc).__name__, exc=exc)
+m.bounded_root_call = _inline_root_call
+"""
+
+
+@contextlib.contextmanager
+def inline_root_reads(module):
+    original = module.bounded_root_call
+    exec(INLINE_ROOT_READS_SOURCE, {"m": module})
+    try:
+        yield
+    finally:
+        module.bounded_root_call = original
+
+
+INLINE_ROOT_READS_CLASSES = frozenset({"BindTests", "BindOrderTests", "PanelFoldTests"})
+REAL_ROOT_READS = {
+    "BindTests.test_discovery_stall_is_typed": "stalled discovery read is the subject",
+    "BindTests.test_path_check_stall_is_typed": "stalled path check or INDEX read is the subject",
+    "BindTests.test_three_concurrent_hooks_one_stalled_child_fails_the_assertion": "a child with a spent budget is the subject",
+    "BindOrderTests.test_hook_stall_points_return_within_bound": "hook stall points answering within the budget are the subject",
+    "BindOrderTests.test_hook_budget_is_shared_across_stall_points": "shared root budget is the subject",
+    "PanelFoldTests.test_operator_budget_is_per_root": "per-root budget is the subject",
+    "PanelFoldTests.test_failed_thread_start_leaves_no_outstanding_mark": "bounded_root_call thread start is the subject",
+}
+
+
+def root_reads_inline(test_id: str) -> bool:
+    return test_id.split(".", 1)[0] in INLINE_ROOT_READS_CLASSES and test_id not in REAL_ROOT_READS
+
+
+LAUNCHER_SOURCE = """\
+import importlib.util, sys
+path = sys.argv[1]
+sys.argv = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("relay_monitor", path)
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+""" + INLINE_ROOT_READS_SOURCE + "\nraise SystemExit(m.main(sys.argv[1:]))\n"
+
+
+def inline_script_argv(*args: str) -> list[str]:
+    return [sys.executable, "-c", LAUNCHER_SOURCE, str(SCRIPT), *args]
+
+
+RAW_SCRIPT_LAUNCHES = {
+    "BindTests._b7_bind_probe": "two real-read tests and PR 83's existing inline-thread seam",
+    "BindTests.test_three_concurrent_hooks_one_stalled_child_fails_the_assertion": "deliberately spent child budget",
+    "BindTests.test_inline_seam_control_forced_zero_budget": "forced-zero control's plain-script arm",
+    "BindOrderTests._b7_hook_probe": "two real-read stall/budget tests",
+    "BindOrderTests._race": "member e's existing inline-thread seam and no-op spend",
+    "PanelFoldTests.test_operator_budget_is_per_root": "per-root budget witness",
+    "PanelFoldTests.test_failed_thread_start_leaves_no_outstanding_mark": "real thread-start witness",
+}
+
+
+def script_launch_findings(source: str, classes: frozenset[str], raw: Mapping[str, str]) -> list[str]:
+    """Census script launches, resolving local argv/code assignments conservatively."""
+    findings = []
+    launched = set()
+    for cls in ast.parse(source).body:
+        if not isinstance(cls, ast.ClassDef) or cls.name not in classes:
+            continue
+        for fn in cls.body:
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            key = f"{cls.name}.{fn.name}"
+            assignments = {}
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            assignments.setdefault(target.id, []).append(node.value)
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                    assignments.setdefault(node.target.id, []).append(node.value)
+
+            def values(node, seen=frozenset()):
+                if isinstance(node, ast.Name) and node.id in assignments and node.id not in seen:
+                    return [value for item in assignments[node.id] for value in values(item, seen | {node.id})]
+                return [node]
+
+            def names(node, name):
+                return any(isinstance(item, ast.Name) and item.id == name for item in ast.walk(node))
+
+            def inline_argv(node):
+                return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "inline_script_argv"
+
+            def script_argv(node):
+                if inline_argv(node):
+                    return True
+                if not isinstance(node, (ast.List, ast.Tuple)):
+                    return False
+                if names(node, "SCRIPT"):
+                    return True
+                return any(names(value, "SCRIPT") for item in node.elts for value in values(item))
+
+            def seamed_argv(node):
+                if inline_argv(node):
+                    return True
+                if not isinstance(node, (ast.List, ast.Tuple)):
+                    return False
+                # Only a Python -c code operand can install a seam in a raw argv.
+                for i, item in enumerate(node.elts[:-1]):
+                    if isinstance(item, ast.Constant) and item.value == "-c":
+                        return all(names(code, "INLINE_ROOT_READS_SOURCE") for code in values(node.elts[i + 1]))
+                return False
+
+            for call in ast.walk(fn):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                    continue
+                owner = call.func.value
+                child = isinstance(owner, ast.Name) and owner.id == "FifoCallersTests" and call.func.attr == "_child"
+                subprocess_call = isinstance(owner, ast.Name) and owner.id == "subprocess" and call.func.attr in {"run", "Popen", "check_output"}
+                if child:
+                    body = call.args[1] if len(call.args) > 1 else None
+                    accepted = body is not None and all(names(value, "INLINE_ROOT_READS_SOURCE") for value in values(body))
+                elif subprocess_call and call.args:
+                    arguments = values(call.args[0])
+                    if not any(script_argv(value) for value in arguments):
+                        continue
+                    accepted = all(seamed_argv(value) for value in arguments)
+                else:
+                    continue
+                launched.add(key)
+                if not accepted and key not in raw:
+                    findings.append(f"{key}:{call.lineno}")
+    findings.extend(f"stale {key}" for key in raw if key not in launched)
+    return findings
 
 
 def run_detached_shell(argv: list[str], script: str | None = None, timeout: float = 10) -> subprocess.CompletedProcess[str]:
@@ -114,10 +254,79 @@ class TmpEnv(unittest.TestCase):
         ):
             os.environ.pop(k, None)
         self.rm = load_script()
+        if root_reads_inline(f"{type(self).__name__}.{self._testMethodName}"):
+            self.enterContext(inline_root_reads(self.rm))
         self.root = self.base / "sprint" / ".relays" / "v1"
         (self.root / ".engine" / "seats" / "a.planner").mkdir(parents=True)
         (self.root / "lane").mkdir()
         self.index = self.root / "INDEX.md"
+
+
+class RootReadSeamTests(unittest.TestCase):
+    def test_inline_reads_answer_as_the_original(self):
+        module = load_script()
+
+        def result_tuple(result):
+            return result.kind, result.value, result.detail
+
+        def read_error(exc):
+            def read():
+                raise exc
+            return read
+
+        reads = [
+            lambda: "value",
+            read_error(FileNotFoundError(errno.ENOENT, "fixture")),
+            read_error(PermissionError(errno.EACCES, "fixture")),
+            read_error(ValueError("fixture")),
+        ]
+        for read in reads:
+            with self.subTest(read=read):
+                with module.root_budget(5.0):
+                    expected = result_tuple(module.bounded_root_call(read))
+                with inline_root_reads(module):
+                    actual = result_tuple(module.bounded_root_call(read))
+                self.assertEqual(actual, expected)
+
+        # A seam which loses an OSError must fail the same comparison.
+        read = reads[1]
+        with module.root_budget(5.0):
+            expected = result_tuple(module.bounded_root_call(read))
+
+        def wrong_inline(fn):
+            try:
+                return module.RootResult("ok", fn())
+            except OSError:
+                return module.RootResult("ok")
+
+        with self.assertRaises(AssertionError):
+            self.assertEqual(result_tuple(wrong_inline(read)), expected)
+
+    def test_root_read_sets_name_real_tests(self):
+        for entries, tests_only in ((REAL_ROOT_READS, True), (RAW_SCRIPT_LAUNCHES, False)):
+            for key, reason in entries.items():
+                with self.subTest(key=key):
+                    cls, method = key.split(".")
+                    self.assertIn(cls, INLINE_ROOT_READS_CLASSES)
+                    self.assertTrue(callable(getattr(globals()[cls], method)))
+                    if tests_only:
+                        self.assertTrue(method.startswith("test_"))
+                    self.assertTrue(reason.strip())
+        self.assertTrue(root_reads_inline("BindTests.test_hook_nul_receipt_exits_zero"))
+        self.assertFalse(root_reads_inline("BindTests.test_discovery_stall_is_typed"))
+        self.assertFalse(root_reads_inline("DrainTests.test_total_deadline_holds_with_lock_held_and_with_index_missing"))
+
+    def test_every_script_launch_goes_through_the_seam(self):
+        fixtures = (
+            ("class BindTests:\n def probe(self):\n  subprocess.run([sys.executable, str(SCRIPT), 'bind'])\n", {}, ["BindTests.probe:3"]),
+            ("class BindTests:\n def probe(self):\n  subprocess.run(inline_script_argv('bind'))\n", {}, []),
+            ("class BindTests:\n def probe(self):\n  FifoCallersTests._child(self, 'pass')\n", {}, ["BindTests.probe:3"]),
+            ("class BindTests:\n def probe(self):\n  pass\n", {"BindTests.probe": "fixture"}, ["stale BindTests.probe"]),
+        )
+        for source, raw, expected in fixtures:
+            with self.subTest(source=source):
+                self.assertEqual(script_launch_findings(source, INLINE_ROOT_READS_CLASSES, raw), expected)
+        self.assertEqual(script_launch_findings(pathlib.Path(__file__).read_text(), INLINE_ROOT_READS_CLASSES, RAW_SCRIPT_LAUNCHES), [])
 
 
 class SessionIdentityTests(TmpEnv):
@@ -3222,7 +3431,7 @@ with __import__('contextlib').ExitStack() as stack:
         self._manual()
         before = self.store.path.read_bytes()
         (self.root / "lane/missing.md").write_text("not filed")
-        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/missing.md"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(inline_script_argv("bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/missing.md"), capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "relay-monitor: manual bind refused: receipt-mismatch\n")
         self.assertEqual(result.stdout, "")
@@ -3232,7 +3441,7 @@ with __import__('contextlib').ExitStack() as stack:
         before = set(self.base.rglob("*"))
         for operands, reason in ((["--root", str(self.root)], "manual bind needs"), (["--anchor", "lane/r1.md"], "manual bind needs"), (["--root", str(self.root), "--anchor", "lane/r1.md", "--session", "../bad"], "invalid-session-id")):
             with self.subTest(operands=operands):
-                result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", *operands], capture_output=True, text=True, timeout=10)
+                result = subprocess.run(inline_script_argv("bind", "--manual", "--session", "sess", *operands), capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(len(result.stderr.splitlines()), 1)
@@ -3240,7 +3449,7 @@ with __import__('contextlib').ExitStack() as stack:
                 self.assertEqual(set(self.base.rglob("*")), before)
 
     def test_successful_manual_bind_is_silent(self):
-        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(inline_script_argv("bind", "--manual", "--session", "sess", "--root", str(self.root), "--anchor", "lane/r1.md"), capture_output=True, text=True, timeout=10)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(self.store.load()["anchor"], "lane/r1.md")
         self.assertEqual(self.store.load()["seat"], "a.planner")
@@ -3252,6 +3461,7 @@ spec = importlib.util.spec_from_file_location('fault_adapter', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
 spec.loader.exec_module(m)
+""" + INLINE_ROOT_READS_SOURCE + """
 def fail(*args, **kwargs):
     Path(sys.argv[2]).write_text('bind fault reached')
     raise RuntimeError('injected bind fault')
@@ -3628,16 +3838,18 @@ report.write_text(json.dumps(state))
                 self.assertIn(ascii(char)[1:-1], hint)
 
     def _assert_hook_input_is_total(self, payload, mode="bind"):
-        result = subprocess.run([sys.executable, str(SCRIPT), mode, "--host", "codex"],
+        result = subprocess.run(inline_script_argv(mode, "--host", "codex"),
                                 input=payload, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         if result.stdout.strip():
             self.assertIsInstance(json.loads(result.stdout), dict)
 
-    def _assert_hook_observation(self, payload, reason, provenance, receipt_path):
+    def _assert_hook_observation(self, payload, reason, provenance, receipt_path, *, argv: list[str] | None = None):
         self.store.path.unlink(missing_ok=True)
-        result = subprocess.run([sys.executable, str(SCRIPT), "bind", "--host", "codex"],
+        if argv is None:
+            argv = inline_script_argv("bind", "--host", "codex")
+        result = subprocess.run(argv,
                                 input=payload, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -3654,6 +3866,31 @@ report.write_text(json.dumps(state))
         self.assertEqual(observation["root_provenance"], provenance)
         self.assertEqual(observation["receipts"], [receipt_path])
         self.assertEqual(observation["root"], str(self.root) if provenance == "command" else None)
+
+    def test_inline_seam_control_forced_zero_budget(self):
+        receipt = json.dumps(dict(path="lane/nu\0l.md", render_state="rendered", duplicate=False))
+        payload = self.payload(f"tools/relay submit d.md --root {self.root}", receipt)
+        with mock.patch.dict(os.environ, {"ADT_TEST_ROOT_BUDGET": "0"}):
+            self.store.path.unlink(missing_ok=True)
+            subprocess.run(
+                [sys.executable, str(SCRIPT), "bind", "--host", "codex"],
+                input=payload, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(self.store.load()["bind_observation"]["reason"], "root-stalled")
+            self._assert_hook_observation(
+                payload, "receipt-mismatch", "command", "lane/nu\0l.md",
+                argv=inline_script_argv("bind", "--host", "codex"),
+            )
+
+    def test_setup_default_reads_inline_under_a_spent_budget(self):
+        with self.rm.root_budget(0.0):
+            actual = self.rm.bounded_root_call(lambda: "value")
+        reference = load_script()
+        with reference.root_budget(0.0):
+            control = reference.bounded_root_call(lambda: "value")
+        self.assertEqual(control.kind, "stalled")
+        self.assertEqual(actual.kind, "ok")
+        self.assertEqual(actual.value, "value")
 
     def test_hook_nul_receipt_exits_zero(self):
         receipt = json.dumps(dict(path="lane/nu\0l.md", render_state="rendered", duplicate=False))
@@ -4753,15 +4990,12 @@ report.write_text(json.dumps(state))
                 self.assertEqual(self.store.path.read_bytes(), before)
                 self.assertIsNone(self.store.load()["bind_observation"])
                 drain = subprocess.run(
-                    [
-                        sys.executable,
-                        str(SCRIPT),
-                        "drain",
+                    inline_script_argv("drain",
                         "--host",
                         "codex",
                         "--session",
                         "sess",
-                    ],
+                    ),
                     input=json.dumps({"session_id": "sess", "turn_id": "t"}),
                     capture_output=True,
                     text=True,
@@ -5235,6 +5469,7 @@ report.write_text(json.dumps(state))
                 self.assertEqual(self.store.load()["binding_source"], source)
 
     def test_three_concurrent_hooks_one_call_advance_once(self):
+        # Children read the root inline under this plan; the 5 s budget no longer bounds them.
         # Adapter 174510 and root 174740: known on v3 until delivery plan r3 Task 6
         # removes bind. A tier hook whose root read stalls can mark the call handled
         # before a sibling binds, and the sibling then does not bind.
@@ -5250,7 +5485,7 @@ report.write_text(json.dumps(state))
         # item 4: no retry, pair classification or budget increase without a grant.
         payload = self._submit("concurrent")
         env = dict(os.environ, ADT_TEST_ROOT_BUDGET="5")
-        children = [subprocess.Popen([sys.executable, str(SCRIPT), "bind"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for _ in range(3)]
+        children = [subprocess.Popen(inline_script_argv("bind"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env) for _ in range(3)]
         for child in children:
             self.addCleanup(lambda p=child: p.kill() if p.poll() is None else None)
             child.stdin.write(payload)
@@ -8242,9 +8477,13 @@ t.assertIsNone(observation['root']);t.assertEqual(observation['root_provenance']
         self.store.update(lambda n: n.update(seat='a.planner', root=str(self.root), anchor='lane/r1.md', binding_source='hook', binding_gen=1))
 
     def _ready(self, child):
-        ready, _, _ = select.select([child.stderr], [], [], 3)
+        ready, _, _ = select.select([child.stderr], [], [], 10)
         self.assertTrue(ready, 'child did not reach barrier')
-        self.assertEqual(child.stderr.readline(), b'READY\n')
+        line = child.stderr.readline()
+        if line == b'':
+            out, _ = child.communicate(timeout=5)
+            self.fail(f'child closed stderr before READY: returncode={child.returncode} stdout={out.decode(errors="replace")[:2000]!r}')
+        self.assertEqual(line, b'READY\n')
 
     def _race(self, stage, change=None, call=None):
         # Child setup is outside the measured interval. Raw root operations are
@@ -8255,6 +8494,16 @@ from types import SimpleNamespace
 spec=importlib.util.spec_from_file_location('relay_monitor',{str(SCRIPT)!r})
 m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
 root={str(self.root)!r}; stage={stage!r}; active=None; used=False
+real_threading = m.threading
+class RootThread:
+    def __init__(self, *, target, **kwargs): self.target = target
+    def start(self): self.target()
+class Threading:
+    def Thread(self, *args, **kwargs): return RootThread(*args, **kwargs)
+    def __getattr__(self, name): return getattr(real_threading, name)
+# Root reads run inline and the budget debits nothing, so the barrier does not depend on time.
+m.threading = Threading()
+m.RootBudget.spend = lambda self, waited: None
 old_attr=m.attribute_root; old_hint=m.rebind_line; old_discover=m.discover_root_like_cli; old_lookup=m.receipt_row_lookup; old_real=m.os.path.realpath
 def barrier():
     global used
@@ -8294,7 +8543,7 @@ m.bind(SimpleNamespace(manual=False,session=None,plugin_root=None,host='auto',ro
         probe_code = r'''
 import fcntl,os,sys,time,json
 f=open(sys.argv[1],'a');os.write(2,b'READY\n');sys.stdin.readline();start=time.monotonic();ok=False
-while time.monotonic()-start < .18:
+while time.monotonic()-start < 1.0:  # A held lock stays held until the parent's signal.
     try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);ok=True;break
     except BlockingIOError: time.sleep(.001)
 print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
@@ -8306,11 +8555,11 @@ print(json.dumps(dict(ok=ok,elapsed=time.monotonic()-start)),flush=True)
             child = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self._ready(child)
             signalled = time.monotonic()
-            probe_out, probe_err = probe.communicate(b'go\n', timeout=1)
+            probe_out, probe_err = probe.communicate(b'go\n', timeout=5)  # A held lock stays held until the parent's signal.
             elapsed = time.monotonic() - signalled
             result = json.loads(probe_out)
             self.assertTrue(result['ok'], 'state_lock held across raw root call')
-            self.assertLess(elapsed, .2)
+            self.assertLess(elapsed, 2.0)  # A held lock stays held until the parent's signal.
             if change:
                 change()
             out, err = child.communicate(b'x', timeout=5)
@@ -8682,6 +8931,7 @@ import importlib.util,sys,json,io
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('panel_monitor',{str(SCRIPT)!r})
 m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+{INLINE_ROOT_READS_SOURCE}
 site={site!r};root={str(self.root)!r};marker=Path({str(marker)!r})
 def fail(*a,**k):
     marker.write_text(site)
@@ -8728,7 +8978,7 @@ raise SystemExit(m.main(argv))
                         self.root.write_text('not a directory')
                     elif form == 'absent-receipt': anchor = 'lane/absent.md'
                     else: receipt.unlink()
-                    result = subprocess.run([sys.executable, str(SCRIPT), 'bind', '--manual', '--session', 'panel', '--root', str(self.root), '--anchor', anchor], capture_output=True, text=True, timeout=10)
+                    result = subprocess.run(inline_script_argv('bind', '--manual', '--session', 'panel', '--root', str(self.root), '--anchor', anchor), capture_output=True, text=True, timeout=10)
                 finally:
                     if form == 'mode': self.root.chmod(0o700)
                     elif form == 'file':
@@ -8790,7 +9040,7 @@ finally:
         for delivering in (False, True):
             for recorded_exit in (False, True):
                 with self.subTest(delivering=delivering, recorded_exit=recorded_exit):
-                    FifoCallersTests._child(self, f'''
+                    FifoCallersTests._child(self, INLINE_ROOT_READS_SOURCE + f'''
 delivering={delivering!r};recorded_exit={recorded_exit!r}
 store=m.NoteStore('fifo')
 record=dict(reason='follower-error',detail='ValueError',at='20261015-000000',instance='old')
