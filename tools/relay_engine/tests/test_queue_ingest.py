@@ -241,8 +241,10 @@ class TestQueueIngest(unittest.TestCase):
         self.assertEqual(rows,[(a.relay_id,'["Yes","No"]',None),(b.relay_id,None,'empty_label')])
 
     def test_ingest_pass_skips_unavailable_ledger(self):
+        # Breaking instead of continuing must not skip the available later project.
         q=self.f.admit();self.f.unavailable.add(Q)
-        self.assertEqual(self.run_pass(),1);self.assertEqual(self.item(q)[2],'pending')
+        self.assertEqual(ingest.question_ingest_pass(self.port,[Q,P],self.f.clock),1)
+        self.assertEqual(self.item(q)[2],'pending')
         self.assertEqual(records.read_cursor(self.c,Q,'question'),records.Cursor(0,0,None))
 
     def test_highwater_advances_with_items(self):
