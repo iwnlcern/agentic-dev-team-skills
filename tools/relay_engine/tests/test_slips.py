@@ -517,7 +517,6 @@ class TestQueries(SlipStore):
         self.assertIn('repo-1:plan.md', self.code('plan-changed').reason)
         self.assertEqual(self.act(path=str(repo.path)).outcome, 'allow')
 
-
     def test_working_path_reads_open_checkouts_only(self):
         ended = Path(self.temp.name) / 'ended-checkout'
         opened = Path(self.temp.name) / 'open-checkout'

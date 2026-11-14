@@ -221,6 +221,8 @@ class TestReservedNames(Store):
         self.assertIn("1 table and no v3 version record", error.cause)
         self.assertEqual(self.catalogue(conn), before)
         self.assertFalse(conn.in_transaction)
+
+
 class TestTask4Waiver(ClaimStore):
     """E5's seat-principal refusal over a real claim, not a fabricated claim row.
 
