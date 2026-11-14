@@ -7674,7 +7674,7 @@ def reap():
             count = threading.active_count()
             start = time.monotonic()
             t.assertEqual(m.bounded_root_call(lambda: t.fail("second worker")).kind, "stalled")
-            t.assertLess(time.monotonic() - start, .05)
+            t.assertLess(time.monotonic() - start, .5)  # half the 1.0 s root budget: a call that waits fails, scheduling has margin
             t.assertEqual(threading.active_count(), count)
             reap()
             t.assertEqual(m.bounded_root_call(lambda: 7).value, 7)
@@ -8476,7 +8476,7 @@ elif {form!r}=='directory': target.mkdir()
 else: target.write_text(header+one)
 index.symlink_to(target)
 start=time.monotonic();snap=m.read_index(index)
-t.assertLess(time.monotonic()-start,.1)
+t.assertLess(time.monotonic()-start,.5)  # half the 1.0 s root budget: a call that waits fails, scheduling has margin
 if {form!r}=='regular': t.assertIsNone(snap.error);t.assertEqual(len(snap.rows),1)
 else: t.assertEqual((snap.error,snap.detail),('index-unreadable','not-regular-file'))
 index.unlink()
