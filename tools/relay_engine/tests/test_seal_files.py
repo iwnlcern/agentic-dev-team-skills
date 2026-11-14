@@ -60,6 +60,35 @@ class SealFilesTests(unittest.TestCase):
         with self.folder.lock(project, exclusive=True):
             self.folder.write_mark(project, chain, data)
 
+    def test_publish_closes_directory_when_temporary_open_fails(self):
+        import errno
+        directory = self.directory()
+        opened, closed = [], []
+        real_open, real_close = os.open, os.close
+        failure = OSError(errno.ENOSPC, 'fixture')
+        def opening(path, flags, *args, **kwargs):
+            if kwargs.get('dir_fd') is not None:
+                raise failure
+            fd = real_open(path, flags, *args, **kwargs)
+            opened.append(fd)
+            return fd
+        def closing(fd):
+            closed.append(fd)
+            return real_close(fd)
+        try:
+            with patch.object(self.f.os, 'open', side_effect=opening), \
+                    patch.object(self.f.os, 'close', side_effect=closing):
+                with self.assertRaises(OSError) as caught:
+                    self.f._publish(directory / 'final', b'complete')
+            self.assertIs(caught.exception, failure)
+            self.assertTrue(opened)
+            self.assertTrue(set(opened) <= set(closed), 'directory descriptor leaked')
+            self.assertFalse((directory / 'final').exists())
+            self.assertEqual(list(directory.glob('.creating-*')), [])
+        finally:
+            for fd in set(opened) - set(closed):
+                real_close(fd)
+
     def test_record_head_unlistable_is_unreadable(self):
         from relay_engine.seal_types import RecordUnreadable
         records = self.directory() / 'records'

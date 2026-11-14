@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from dataclasses import replace
 import errno
+import fcntl
 import hashlib
 import importlib
 import os
@@ -454,16 +455,39 @@ class ApprovalSealTests(unittest.TestCase):
     def test_creation_stop_between_link_and_unlink(self):
         self.stop_creation(between=True)
 
+    def blocked_flock(self):
+        from relay_engine import seal_files
+        fcntl = seal_files.fcntl
+        original = fcntl.flock
+        condition, blocked = threading.Condition(), []
+        def flock(fd, operation):
+            if operation & fcntl.LOCK_UN or operation & fcntl.LOCK_NB:
+                return original(fd, operation)
+            try:
+                return original(fd, operation | fcntl.LOCK_NB)
+            except BlockingIOError:
+                with condition:
+                    blocked.append((threading.get_ident(), operation))
+                    condition.notify_all()
+                return original(fd, operation)
+        def witnessed(thread, operation):
+            with condition:
+                self.assertTrue(condition.wait_for(
+                    lambda: (thread.ident, operation) in blocked, timeout=30),
+                    'no blocked flock witness')
+        return mock.patch.object(fcntl, 'flock', side_effect=flock), witnessed
+
     def concurrent(self, reader_first):
         self.root = self.base / str(uuid.uuid4()); self.service.folder.root = self.root
         self.set_chain()
         entered, release, attempted, finished = (threading.Event() for _ in range(4))
         errors = []
+        self.addCleanup(release.set)
         original = self.s.write_next
         def held(fd, state, **kw):
             if state.kind == self.s.ItemKind.POINTER:
                 entered.set()
-                if not release.wait(5):
+                if not release.wait(60):
                     raise AssertionError('release missing')
             return original(fd, state, **kw)
         def writer():
@@ -474,22 +498,27 @@ class ApprovalSealTests(unittest.TestCase):
                 errors.append(exc)
             finally:
                 finished.set()
-        with mock.patch.object(self.s, 'write_next', side_effect=held):
+        flock_patch, witnessed = self.blocked_flock()
+        with flock_patch, mock.patch.object(self.s, 'write_next', side_effect=held):
             if reader_first:
                 with self.service.folder.lock(P, exclusive=False):
                     t = threading.Thread(target=writer); t.start()
-                    self.assertTrue(attempted.wait(5))
-                    self.assertFalse(entered.wait(0.05))
-                self.assertTrue(entered.wait(5)); release.set(); t.join(5)
+                    self.addCleanup(t.join, 30); self.addCleanup(release.set)
+                    self.assertTrue(attempted.wait(30))
+                    witnessed(t, fcntl.LOCK_EX)
+                    self.assertFalse(entered.is_set())
+                self.assertTrue(entered.wait(30)); release.set(); t.join(30)
             else:
                 t = threading.Thread(target=writer); t.start()
-                self.assertTrue(entered.wait(5))
+                self.addCleanup(t.join, 30); self.addCleanup(release.set)
+                self.assertTrue(entered.wait(30))
                 result = []
                 def read():
                     result.append(self.a.current_chain(P))
                 r = threading.Thread(target=read); r.start()
-                self.assertTrue(r.is_alive())
-                release.set(); t.join(5); r.join(5)
+                self.addCleanup(r.join, 30); self.addCleanup(release.set)
+                witnessed(r, fcntl.LOCK_SH)
+                release.set(); t.join(30); r.join(30)
                 self.assertEqual(result, [D])
         self.assertTrue(finished.is_set()); self.assertFalse(t.is_alive())
         self.assertEqual(errors, [])
@@ -506,20 +535,25 @@ class ApprovalSealTests(unittest.TestCase):
             real_link(src, dst, **kw)
             if str(dst) == C + '.counter':
                 published.set()
-                if not release.wait(5):
+                if not release.wait(60):
                     raise AssertionError('no release')
         def creator():
             try:
                 self.set_chain()
             except BaseException as exc:
                 failures.append(exc)
-        with mock.patch.object(os, 'link', side_effect=link):
+        flock_patch, witnessed = self.blocked_flock()
+        self.addCleanup(release.set)
+        with flock_patch, mock.patch.object(os, 'link', side_effect=link):
             first = threading.Thread(target=creator); first.start()
-            self.assertTrue(published.wait(5))
+            self.addCleanup(first.join, 30); self.addCleanup(release.set)
+            self.assertTrue(published.wait(30))
             leftovers = list(self.project.glob('.creating-*'))
             second = threading.Thread(target=creator); second.start()
+            self.addCleanup(second.join, 30); self.addCleanup(release.set)
+            witnessed(second, fcntl.LOCK_EX)
             self.assertEqual(list(self.project.glob('.creating-*')), leftovers)
-            release.set(); first.join(5); second.join(5)
+            release.set(); first.join(30); second.join(30)
         self.assertFalse(first.is_alive() or second.is_alive())
         self.assertEqual(len(failures), 1)
         self.assertIsInstance(failures[0], self.t.PointerMoved)

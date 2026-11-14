@@ -114,7 +114,7 @@ class SealService:
             if not create and not path.is_dir():
                 raise OSError('missing_project')
             # The folder must support recording, even for a read-only call.
-            if path.exists() and not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            if path.exists() and not self.folder.project_usable(project):
                 raise OSError('unusable_project')
             with self.folder.lock(project, exclusive=exclusive):
                 yield

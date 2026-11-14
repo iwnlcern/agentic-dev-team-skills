@@ -61,9 +61,10 @@ def _publish(path, data, *, compare=False, keep_conflict=False):
     """Link complete bytes; return false on an existing, differing final name."""
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     temporary = '.creating-' + path.name + '.' + secrets.token_hex(8)
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW |
-                 os.O_CLOEXEC, 0o600, dir_fd=directory)
+    fd = None
     try:
+        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW |
+                     os.O_CLOEXEC, 0o600, dir_fd=directory)
         if os.pwrite(fd, data, 0) != len(data):
             raise OSError(errno.EIO, 'short_write')
         seal_slots._sync(fd, changing_length=True)
@@ -80,7 +81,8 @@ def _publish(path, data, *, compare=False, keep_conflict=False):
             seal_slots._sync(fd, changing_length=True)
         return published
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         os.close(directory)
 
 
@@ -116,6 +118,9 @@ class SealFolder:
     def _item(self, project_id, chain_id, suffix):
         require_canonical_id(chain_id)
         return self._project(project_id) / (chain_id + suffix)
+
+    def project_usable(self, project_id: str) -> bool:
+        return os.access(self._project(project_id), os.R_OK | os.W_OK | os.X_OK)
 
     def project_dir(self, project_id):
         path = self._project(project_id)

@@ -111,11 +111,12 @@ class SealWorker:
             self._leave = False
             self._generation += 1
             self._closing.append((generation, done))
-            reader = self._reader
         self._notify()
         if not self.wait(done, self.bound_s / 2):
-            if reader is not None:
-                reader.interrupt()
+            with self._condition:
+                reader = self._reader
+                if reader is not None:
+                    reader.interrupt()
             self.wait(done, self.bound_s / 2)
 
     def _ticks(self):
@@ -136,9 +137,10 @@ class SealWorker:
         with self._condition:
             stale = self._reader is not None and (not self._leave or self._reader_gen != self._generation)
         if stale:
-            self._reader.close()
             with self._condition:
+                reader = self._reader
                 self._reader, self._reader_gen = None, None
+            reader.close()
         with self._condition:
             # This executes on the owner, hence an in-flight open/read has ended.
             for generation, done in self._closing:
@@ -177,11 +179,9 @@ class SealWorker:
             project = args[0] if args else None
             strings.report_diagnostic(SealCalleeFailed('catalogue', type(exc).__name__, project))
             self._reader_failed = True
-            try:
-                reader.close()
-            finally:
-                with self._condition:
-                    self._reader, self._reader_gen = None, None
+            with self._condition:
+                self._reader, self._reader_gen = None, None
+            reader.close()
             return None
         finally:
             with self._condition:
@@ -370,6 +370,8 @@ class SealWorker:
             project = self.service.folder._project(fault.project)
             try:
                 os.listdir(project)
+                if not self.service.folder.project_usable(fault.project):
+                    raise OSError('unusable_project')
                 lock = os.open(project/'lock',os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
                 try:
                     fcntl.flock(lock,fcntl.LOCK_SH)
@@ -488,9 +490,11 @@ class SealWorker:
         except BaseException as exc:
             self._error = exc
         finally:
-            if self._reader is not None:
-                self._reader.close()
-                self._reader = None
+            with self._condition:
+                reader = self._reader
+                self._reader, self._reader_gen = None, None
+            if reader is not None:
+                reader.close()
             for _,done in self._closing:
                 done.set()
             self._stopped.set()

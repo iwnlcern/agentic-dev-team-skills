@@ -194,6 +194,148 @@ class TestSealWorker(unittest.TestCase):
         patch.start()
         return patch
 
+    def test_catalogue_interrupt_never_meets_a_closed_reader(self):
+        # The first wait lets the owner close before the hook resumes.
+        closed = threading.Event()
+        class Reader(CatalogueReader):
+            def close(reader):
+                super().close()
+                closed.set()
+        def opener(root):
+            reader = Reader(store_layout.open_catalogue_readonly(root))
+            self.readers.append(reader)
+            return reader
+        worker = self.worker(open_catalogue_reader=opener)
+        reader = self.readers[-1]
+        waits, errors = [], []
+        def wait(done, seconds):
+            waits.append(seconds)
+            if len(waits) == 1:
+                await_event(closed)
+                return False
+            return done.wait(30)
+        worker.wait = wait
+        try:
+            worker.catalogue_closing()
+        except BaseException as exc:
+            errors.append(exc)
+        self.assertEqual(errors, [], 'catalogue hook interrupted closed reader')
+        self.assertFalse(reader.interrupted.is_set(), 'closed reader was interrupted')
+        self.assertEqual(waits, [5, 5])
+        self.stop(worker)
+
+        # With an interrupt in flight, the owner must be excluded by the slot lock.
+        reading, release_read = threading.Event(), threading.Event()
+        interrupting, release_interrupt = threading.Event(), threading.Event()
+        owner_recorded, closed = threading.Event(), threading.Event()
+        measuring, armed = threading.Event(), threading.Event()
+        records, trace, coordinator_errors = [], [], []
+        class HeldReader(CatalogueReader):
+            def execute(reader, *args):
+                result = super().execute(*args)
+                if armed.is_set():
+                    armed.clear()
+                    reading.set()
+                    await_event(release_read)
+                return result
+            def interrupt(reader):
+                trace.append('interrupt-entry')
+                interrupting.set()
+                await_event(release_interrupt)
+                super().interrupt()
+                trace.append('interrupt-return')
+            def close(reader):
+                super().close()
+                trace.append('close')
+                closed.set()
+        def opener(root):
+            reader = HeldReader(store_layout.open_catalogue_readonly(root))
+            self.readers.append(reader)
+            return reader
+        worker = self.worker(open_catalogue_reader=opener)
+        class ObservedCondition(threading.Condition):
+            def __enter__(condition):
+                if measuring.is_set() and threading.get_ident() == worker._thread.ident:
+                    acquired = condition.acquire(False)
+                    records.append('owner-acquired' if acquired else 'owner-blocked')
+                    measuring.clear()
+                    owner_recorded.set()
+                    if not acquired:
+                        condition.acquire()
+                    return True
+                return super().__enter__()
+        armed.set()
+        self.channel.offer(seal_types.SealReport(P, C, 'counter_unusable', self.clock()))
+        await_event(reading)
+        worker._condition = ObservedCondition()
+        measuring.set()
+        waits, errors = [], []
+        def wait(done, seconds):
+            waits.append(seconds)
+            return False if len(waits) == 1 else done.wait(30)
+        worker.wait = wait
+        def coordinate():
+            try:
+                await_event(interrupting)
+                release_read.set()
+                await_event(owner_recorded)
+                if records[0] == 'owner-acquired':
+                    await_event(closed)
+            except BaseException as exc:
+                coordinator_errors.append(exc)
+            finally:
+                release_interrupt.set()
+        coordinator = threading.Thread(target=coordinate)
+        coordinator.start()
+        try:
+            try:
+                worker.catalogue_closing()
+            except BaseException as exc:
+                errors.append(exc)
+        finally:
+            release_read.set(); release_interrupt.set()
+            coordinator.join(30)
+        self.assertEqual(coordinator_errors, [])
+        self.assertFalse(coordinator.is_alive())
+        self.assertEqual(records, ['owner-blocked'], 'owner was not excluded during interrupt')
+        self.assertEqual(trace, ['interrupt-entry', 'interrupt-return', 'close'],
+                         'catalogue close preceded interrupt return')
+        self.assertEqual(errors, [], 'catalogue interrupt met closed connection')
+        self.assertEqual(waits, [5, 5])
+
+    def test_recheck_keeps_unwritable_folder(self):
+        self.worker()
+        project = self.root / 'projects' / P
+        clears = lambda: [call for call in self.queue.calls if call[0] == 'clear']
+        project.chmod(0o500)
+        try:
+            self.refuse()
+            item = self.assert_cause('folder_unusable', None)
+            before = len(clears())
+            self.tick()
+            self.assertEqual(self.assert_cause('folder_unusable', None), item,
+                             'unwritable folder item was cleared')
+            self.assertEqual(len(clears()), before)
+            self.refuse()
+            self.assertEqual(self.assert_cause('folder_unusable', None), item)
+        finally:
+            project.chmod(0o700)
+        self.tick()
+        self.assertEqual(self.items(), [])
+        self.assertIn(item, [call[1] for call in clears()])
+        before = self.queue.notifications
+        with mock.patch.object(type(self.service.folder), 'project_usable', return_value=False):
+            self.refuse()
+            item = self.assert_cause('folder_unusable', None)
+            before_clear = len(clears())
+            self.tick()
+            self.assertEqual(self.assert_cause('folder_unusable', None), item)
+            self.assertEqual(len(clears()), before_clear)
+        self.tick()
+        self.assertEqual(self.items(), [])
+        self.assertIn(item, [call[1] for call in clears()])
+        self.assertEqual(self.queue.notifications, before + 1)
+
     def test_raise_once_per_condition(self):
         self.worker(); self.damage()
         for _ in range(10): self.refuse()

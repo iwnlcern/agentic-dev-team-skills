@@ -655,7 +655,7 @@ class SealRendererTests(unittest.TestCase):
                     count[0] += 1
                     if count[0] == 1:
                         entered.set()
-                        if not release.wait(30):
+                        if not release.wait(60):
                             raise AssertionError('open not released')
                     value = self.ledger.open_reader(root, project)
                     readers.append(value); return value
@@ -671,13 +671,11 @@ class SealRendererTests(unittest.TestCase):
                 self.addCleanup(thread.join, 30); self.addCleanup(release.set)
                 self.assertTrue(entered.wait(30))
                 with wait.condition:
-                    registered = wait.condition.wait_for(lambda: wait.calls, timeout=0.1)
-                if registered:
-                    wait.expire()
-                returned_at_bound = done.wait(0.1)
-                if not returned_at_bound:
-                    release.set(); self.assertTrue(done.wait(30))
-                self.assertTrue(returned_at_bound, 'ledger_opened held the lane past the bound')
+                    registered = wait.condition.wait_for(lambda: wait.calls, timeout=30)
+                self.assertTrue(registered, 'bounded wait did not register')
+                wait.expire()
+                self.assertTrue(done.wait(30), 'ledger_opened held the lane past the bound')
+                self.assertFalse(release.is_set())
                 self.assertEqual(wait.calls, [10])
                 self.assertEqual([str(x) for x in errors], ['seal_ledger_open_timed_out'])
                 self.assertEqual(renderer.generations(P)[0].state, 'closing_late')
@@ -968,14 +966,33 @@ class SealRendererTests(unittest.TestCase):
 
     def test_raise_follows_commit_within_a_second(self):
         renderer = self.renderer(); self.rows(0); self.open(renderer, serving=True)
-        renderer.start(); self.tick.until_calls(1)
-        self.rows(1); self.service.committed(P, C)
-        renderer.drain(P, C, through=0); self.assertEqual(self.high(), 1)
-        self.rows(2)  # Dropped signal: only the next backstop can raise this row.
-        self.assertEqual(self.high(), 1); self.clock.advance(1000); self.tick.advance()
-        self.tick.until_calls(2); renderer.drain(P, C, through=0)
-        self.assertEqual(self.high(), 2); self.assertEqual(self.tick.calls, [1.0, 1.0])
-        self.assertEqual(self.clock(), 1000)
+        requests, condition = [], threading.Condition()
+        original = self.module._Request
+        class Request(original):
+            def __init__(request, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                with condition:
+                    requests.append(request)
+                    condition.notify_all()
+        def completed(chain):
+            with condition:
+                found = condition.wait_for(
+                    lambda: any(r.kind == 'pass' and r.chain == chain for r in requests),
+                    timeout=30)
+                self.assertTrue(found, 'missing pass request for ' + str(chain))
+                request = next(r for r in requests if r.kind == 'pass' and r.chain == chain)
+            self.assertTrue(request.done.wait(30), 'pass request did not complete')
+        with mock.patch.object(self.module, '_Request', Request):
+            renderer.start(); self.tick.until_calls(1)
+            self.rows(1); self.service.committed(P, C)
+            completed(C); self.assertEqual(self.high(), 1)
+            self.rows(2)  # Dropped signal: the next backstop must raise this row.
+            self.assertEqual(self.high(), 1); self.clock.advance(1000); self.tick.advance()
+            self.tick.until_calls(2); completed(None)
+            self.assertEqual(self.high(), 2); self.assertEqual(self.tick.calls, [1.0, 1.0])
+            self.assertEqual(self.clock(), 1000)
+            self.assertEqual([r.chain for r in requests if r.kind == 'pass'], [C, None])
+            self.assertFalse(any(r.kind == 'drain' for r in requests))
 
     def test_key_seq_race_two_processes(self):
         for rename_control in (False, True):
