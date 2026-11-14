@@ -10832,7 +10832,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/lifecycle_outbox.py",
-    "sha256": "c5e90fc8fbe96cadb624e5d78d232e5bcbf2cffa052c3d380b1abb8899f6dbd8",
+    "sha256": "d7e968592c376788968b6740a51153b393bfc2a0dde07e1d39bb0ed51968061b",
     "source": "tools/relay_engine/lifecycle_outbox.py"
   },
   {
@@ -21668,7 +21668,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/lifecycle_outbox.py",
-    "sha256": "c5e90fc8fbe96cadb624e5d78d232e5bcbf2cffa052c3d380b1abb8899f6dbd8",
+    "sha256": "d7e968592c376788968b6740a51153b393bfc2a0dde07e1d39bb0ed51968061b",
     "source": "tools/relay_engine/lifecycle_outbox.py"
   },
   {
@@ -32420,7 +32420,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/lifecycle_outbox.py",
-    "sha256": "c5e90fc8fbe96cadb624e5d78d232e5bcbf2cffa052c3d380b1abb8899f6dbd8",
+    "sha256": "d7e968592c376788968b6740a51153b393bfc2a0dde07e1d39bb0ed51968061b",
     "source": "tools/relay_engine/lifecycle_outbox.py"
   },
   {

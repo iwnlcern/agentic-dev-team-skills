@@ -1,7 +1,10 @@
 """Caller-owned lifecycle appends and a snapshot reader.
 
-Settlement occasions are start, running, stop and resolve. Running denotes
-"a void by the running writer of a number its owner had not yet voided".
+start is the start settlement, which finishes or undoes.
+running denotes "a void by the running writer of a number its owner had not yet voided".
+stop is the graceful stop's void of the same.
+resolve is Store's turn after the operator answers "no" at resolve-reservation;
+it discards and never finishes. running, stop and resolve rows are settlement_undone.
 The caller owns the transaction and rolls it back if any append raises.
 """
 import sqlite3

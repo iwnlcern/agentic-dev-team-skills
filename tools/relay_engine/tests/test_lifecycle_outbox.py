@@ -132,8 +132,9 @@ class TestOutboxDDL(unittest.TestCase):
                    dict(actor_occupant_id="o1"), dict(new_occupant_id="other"),
                    dict(subkind="seat_replaced", old_occupant_id="other"),
                    dict(subkind="not_a_subkind"), dict(position=0)]
-        invalid += [dict(subkind=s, seat_id=None) for s in
-                    ("seat_registered", "seat_replaced", "seat_stood_down")]
+        invalid += [dict(subkind="seat_registered", seat_id=None),
+                    dict(subkind="seat_replaced", old_occupant_id="o1", new_occupant_id="o2", seat_id=None),
+                    dict(subkind="seat_stood_down", new_occupant_id=None, seat_id=None)]
         for values in invalid:
             with self.subTest(values=values):
                 self.rejected_header(values)
@@ -567,6 +568,10 @@ class TestOutboxAPI(unittest.TestCase):
         for index, base in enumerate(headers):
             invalid = [dict(base, **{key: None}) for key in own[index]]
             invalid += [dict(base, actor_kind=k) for k in ('occupant', 'operator', 'program') if k != base.get('actor_kind', 'operator')]
+            if index == 0:
+                invalid.append(dict(base, actor_kind='operator', actor_occupant_id=None))
+            elif index == 1:
+                invalid.append(dict(base, actor_kind='occupant', actor_occupant_id='o1'))
             other_fields = {'chain_id': 'x', 'runtime_instance_id': 'r', 'transaction_ordinal': 0, 'occasion': 'start',
                             'act_kind': 'x', 'instruction_relay_id': 'r', 'event_number': 1, 'slip_id': 'x',
                             'pr': 1, 'merge_commit': 'a' * 40, 'allowed_target': 'a', 'landed_target': 'b'}
@@ -652,7 +657,7 @@ class TestOutboxAPI(unittest.TestCase):
                 row.position = 9
         self.assertEqual(self.count(self.conn, TABLES[1]), 0)
         base = dict(subkind='seat_unseated', new_occupant_id=None, generation=2, surface='terminal')
-        invalid = [dict(carrying_seat_id='s-b'), dict(surface=None),
+        invalid = [dict(carrying_seat_id='s-b', instruction_relay_id='relay'), dict(surface=None),
                    dict(surface=None, carrying_seat_id='s-b'), dict(generation=None), dict(generation=0),
                    dict(actor_kind='program'), dict(actor_kind='occupant', actor_occupant_id='o1'),
                    dict(surface='frank_panel')]
