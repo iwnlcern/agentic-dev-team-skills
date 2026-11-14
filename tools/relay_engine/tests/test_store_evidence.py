@@ -405,6 +405,69 @@ class TestEvidenceUploads(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.evidence.prepare_upload(self.root, PROJECT, bad)
 
+    def test_file_effects_follow_the_write_lock(self):
+        # B1: publication before the first ledger write lets this contender lock.
+        upload = self.begin(b'ab')
+        contender = sqlite3.connect(store_layout.ledger_path(self.root, PROJECT), timeout=0)
+        self.addCleanup(contender.close)
+        original_open, original_replace = Path.open, self.evidence.os.replace
+        original_sync = self.evidence._sync_file
+        calls = []
+
+        def locked():
+            calls.append(1)
+            try:
+                with self.assertRaises(sqlite3.OperationalError) as caught:
+                    contender.execute('BEGIN IMMEDIATE')
+                self.assertIn('database is locked', str(caught.exception))
+            finally:
+                contender.rollback()
+
+        def replace(source, destination):
+            locked()
+            return original_replace(source, destination)
+
+        def opened(path, *args, **kwargs):
+            if path.parent.name == 'uploads':
+                locked()
+            return original_open(path, *args, **kwargs)
+
+        def synced(file):
+            if Path(file.name).parent.name == 'uploads':
+                locked()
+            return original_sync(file)
+
+        actions = (
+            ('put', lambda: self.store.put(b'publication lock')),
+            ('begin', lambda: self.evidence.begin_upload(
+                self.conn, self.root, PROJECT, self.capture, '0' * 64, 0)),
+            ('append', lambda: self.append(upload, 0, b'ab')),
+        )
+        for name, action in actions:
+            with self.subTest(operation=name):
+                self.conn.execute('BEGIN')
+                calls.clear()
+                try:
+                    with mock.patch.object(self.evidence.os, 'replace', side_effect=replace), \
+                            mock.patch.object(Path, 'open', opened), \
+                            mock.patch.object(self.evidence, '_sync_file', side_effect=synced):
+                        action()
+                    self.assertGreater(len(calls), 0, name + ' publication probe did not fire')
+                finally:
+                    self.conn.rollback()
+
+    def test_prepare_upload_uses_the_ledger_reader(self):
+        # B4: a raw mode=ro open misses the mismatching project row.
+        upload = self.begin(b'wrong-project reader')
+        self.append(upload, 0, b'wrong-project reader')
+        self.conn.commit()
+        self.conn.execute('UPDATE projects SET id=? WHERE id=?',
+                          ('00000000-0000-7000-8000-000000000002', PROJECT))
+        self.conn.commit()
+        with self.assertRaises(store_layout.LayoutFault) as caught:
+            self.evidence.prepare_upload(self.root, PROJECT, upload)
+        self.assertEqual(caught.exception.cause, 'wrong-project')
+
     def test_rolled_back_append_is_truncated(self):
         upload = self.begin(b'abcd')
         self.append(upload, 0, b'abc')

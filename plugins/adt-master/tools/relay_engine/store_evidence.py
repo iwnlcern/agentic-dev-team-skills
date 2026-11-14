@@ -5,7 +5,6 @@ import hashlib
 import os
 from pathlib import Path
 import re
-import sqlite3
 import sys
 import tempfile
 import time
@@ -172,6 +171,8 @@ def _capture(conn, project_id, object_id, sha, capture, now_ms):
 def _record_object(conn, root, project_id, sha, bytes_len, codec, staged, stored_len, capture, now_ms):
     existing = _one(conn, 'SELECT object_id FROM evidence_objects WHERE sha256=?', (sha,))
     if existing is None:
+        # A deferred caller must hold the ledger's write lock before publication.
+        _execute(conn, 'UPDATE evidence_objects SET state_seq=state_seq WHERE 0')
         path = _object_path(root, project_id, sha, codec)
         _mkdir(path.parent)
         os.replace(staged, path)
@@ -316,6 +317,7 @@ def begin_upload(conn, root, project_id, capture, declared_sha256: str, declared
         raise UploadConflict('upload length exceeds bounds')
     upload_id = str(uuid.uuid4())
     path = _upload_path(root, project_id, upload_id)
+    _execute(conn, 'UPDATE evidence_objects SET state_seq=state_seq WHERE 0')
     _mkdir(path.parent)
     with path.open('xb') as file:
         _sync_file(file)
@@ -342,6 +344,7 @@ def append_chunk(conn, root, project_id, upload_id: str, offset: int, data: byte
         return _upload_state(upload_id, row)
     if offset != row[2] or end > row[1]:
         raise UploadConflict('chunk offset or length conflicts')
+    _execute(conn, 'UPDATE evidence_objects SET state_seq=state_seq WHERE 0')
     try:
         with path.open('r+b') as file:
             if file.seek(0, os.SEEK_END) < row[2]:
@@ -360,11 +363,7 @@ def append_chunk(conn, root, project_id, upload_id: str, offset: int, data: byte
 
 def prepare_upload(root, project_id, upload_id: str) -> PreparedUpload:
     path = _upload_path(root, project_id, upload_id)
-    ledger = store_layout.ledger_path(root, project_id).absolute()
-    try:
-        conn = sqlite3.connect(ledger.as_uri() + '?mode=ro', uri=True)
-    except sqlite3.OperationalError:
-        raise UploadConflict('ledger is unavailable') from None
+    conn = store_layout.open_ledger_readonly(root, project_id)
     try:
         row = _upload_row(conn, upload_id)
     finally:
@@ -615,12 +614,12 @@ def sweep(conn, root, project_id, now_ms) -> RetentionReport:
     return RetentionReport(len(marks), changed, finished=len(marks) < RETENTION_PAGE_ROWS)
 
 
-def _unlink(path):
+def _unlink(path, directories):
     try:
         path.unlink()
     except FileNotFoundError:
         return 0
-    _sync_dir(path.parent)
+    directories.add(path.parent)
     return 1
 
 
@@ -631,12 +630,15 @@ def unlink_swept(conn, root, project_id) -> RetentionReport:
     pruned = _all(conn, 'SELECT pruned_id,sha256 FROM evidence_pruned '
                   'WHERE pruned_id>? ORDER BY pruned_id LIMIT ?', (cursor, RETENTION_PAGE_ROWS))
     changed = 0
+    directories = set()
     for pruned_id, sha in pruned:
         current = _one(conn, 'SELECT codec FROM evidence_objects WHERE sha256=?', (sha,))
         for codec in ('raw', 'zlib', 'zstd'):
             if current is not None and current[0] == codec:
                 continue
-            changed += _unlink(_object_path(root, project_id, sha, codec))
+            changed += _unlink(_object_path(root, project_id, sha, codec), directories)
+    for directory in sorted(directories):
+        _sync_dir(directory)
     if pruned:
         _execute(conn, 'UPDATE evidence_retention SET unlink_cursor=? WHERE project_id=?',
                  (pruned[-1][0], project_id))
@@ -695,6 +697,7 @@ def list_orphan_candidates(root, project_id, now_ms) -> list[str]:
 
 def _history_page(conn, project_id):
     changed = tracked = 0
+    finished = True
     for table, key, column in (
             ('evidence_captures', 'capture_id', 'orphan_capture_cursor'),
             ('evidence_object_bundles', 'association_id', 'orphan_association_cursor')):
@@ -706,6 +709,7 @@ def _history_page(conn, project_id):
             if _one(conn, 'SELECT 1 FROM evidence_objects WHERE object_id=?', (object_id,)) is None:
                 changed += _execute(conn, 'DELETE FROM ' + table + ' WHERE ' + key + '=?', (row_id,))
         next_cursor = rows[-1][0] if len(rows) == RETENTION_PAGE_ROWS else 0
+        finished = finished and next_cursor == 0
         _execute(conn, 'UPDATE evidence_retention SET ' + column + '=? WHERE project_id=?',
                  (next_cursor, project_id))
     run_id, cursor_run, cursor_object = _one(conn, 'SELECT derive_run_id,orphan_derive_run,'
@@ -721,7 +725,7 @@ def _history_page(conn, project_id):
     cursor = rows[-1] if len(rows) == RETENTION_PAGE_ROWS else (0, 0)
     _execute(conn, 'UPDATE evidence_retention SET orphan_derive_run=?,orphan_derive_object=? WHERE project_id=?',
              (*cursor, project_id))
-    return changed, tracked
+    return changed, tracked, finished and cursor == (0, 0)
 
 
 def orphans(conn, root, project_id, now_ms, *, candidates=()) -> RetentionReport:
@@ -730,6 +734,7 @@ def orphans(conn, root, project_id, now_ms, *, candidates=()) -> RetentionReport
     page = list(candidates[:RETENTION_PAGE_ROWS])
     paths = [_candidate_path(root, project_id, name) for name in page]
     changed = 0
+    directories = set()
     for name, path in zip(page, paths):
         try:
             old = path.stat().st_mtime_ns // 1000000 < now_ms - UPLOAD_IDLE_MS
@@ -747,7 +752,9 @@ def orphans(conn, root, project_id, now_ms, *, candidates=()) -> RetentionReport
             upload = _one(conn, 'SELECT state FROM evidence_uploads WHERE upload_id=?', (parts[1][:-5],))
             if upload is not None and upload[0] == 'open':
                 continue
-        changed += _unlink(path)
-    history_changed, tracked = _history_page(conn, project_id)
+        changed += _unlink(path, directories)
+    for directory in sorted(directories):
+        _sync_dir(directory)
+    history_changed, tracked, history_finished = _history_page(conn, project_id)
     return RetentionReport(len(page), changed + history_changed,
-                           finished=len(page) < RETENTION_PAGE_ROWS, tracked=tracked)
+                           finished=len(page) < RETENTION_PAGE_ROWS and history_finished, tracked=tracked)

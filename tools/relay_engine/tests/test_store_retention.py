@@ -442,6 +442,41 @@ class TestRetentionPasses(unittest.TestCase):
                      evidence / 'tmp', evidence / 'uploads'):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700, str(path))
 
+    def test_unlink_pass_syncs_each_directory_once(self):
+        # B2: syncing after every unlink flushes 20 times instead of twice.
+        groups = {}
+        n = 0
+        while len(groups) < 2 or any(len(values) < 10 for values in groups.values()):
+            data = ('two-directory sync %d' % n).encode()
+            n += 1
+            prefix = hashlib.sha256(data).hexdigest()[:2]
+            if prefix not in groups and len(groups) < 2:
+                groups[prefix] = []
+            if prefix in groups and len(groups[prefix]) < 10:
+                groups[prefix].append(self.old_put(data))
+        self.derived()
+        self.job('mark')
+        self.job('sweep', NOW + DAY + 1)
+        with mock.patch.object(self.e, '_sync_dir', wraps=self.e._sync_dir) as sync:
+            self.job('unlink_swept')
+        self.assertEqual(sync.call_count, 2)
+        self.assertEqual({call.args[0] for call in sync.call_args_list},
+                         {store_layout.evidence_dir(self.root, PROJECT) / 'objects' / prefix
+                          for prefix in groups})
+
+    def test_orphans_finished_counts_history(self):
+        # B3: a short file page alone incorrectly reports finished on page one.
+        self.conn.executemany('INSERT INTO evidence_captures '
+                              '(object_id,sha256,source,captured_by,party_special,captured_at) '
+                              "VALUES (999999,?,'upload','seat-supplied','operator',1)",
+                              [('0' * 64,)] * 501)
+        self.conn.commit()
+        first = self.job('orphans', candidates=[])
+        self.assertFalse(first.finished)
+        second = self.job('orphans', candidates=[])
+        self.assertTrue(second.finished)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_captures').fetchone(), (0,))
+
     def test_captured_by_none_after_prune(self):
         sha = self.old_put(b'pruned lookup')
         self.derived()
