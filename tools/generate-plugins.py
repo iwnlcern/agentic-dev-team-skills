@@ -60,6 +60,7 @@ assert ENGINE_SET == (
     "relay_engine/lifecycle_outbox.py",
     "relay_engine/migrate.py",
     "relay_engine/operator_queue/__init__.py",
+    "relay_engine/operator_queue/kinds.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",
