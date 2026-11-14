@@ -783,6 +783,11 @@ class SealRendererTests(unittest.TestCase):
         renderer.start(); self.tick.until_calls(1)
         renderer.signal(P, C); self.tick.advance(); self.tick.until_calls(2)
         self.assertFalse(any(op == 'BEGIN' for op, _, _ in self.ledger.trace))
+        opened_owner = renderer._newest(P).reader.owner
+        self.assertEqual(renderer.drain(P, C, through=1), 1)
+        self.assertIsNotNone(self.service.read_record(P, C, 1))
+        self.assertEqual(sum(op == 'open' for op, _, _ in self.ledger.trace), 1)
+        self.assertTrue(all(tid == opened_owner for op, tid, _ in self.ledger.trace if op == 'events_after'))
         renderer.ledger_serving(P); renderer.ledger_closing(P)
         before = list(self.ledger.trace)
         renderer.signal(P, C); self.tick.advance(); self.tick.until_calls(3)

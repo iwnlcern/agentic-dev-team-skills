@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 import uuid
@@ -389,10 +390,12 @@ class ApprovalSealTests(unittest.TestCase):
     def test_seal_root_never_from_environment(self):
         with mock.patch.dict(os.environ, {'HOME': '/wrong', 'XDG_DATA_HOME': '/wrong',
                                           'ADT_APPROVAL_SEAL_ROOT': '/wrong'}), \
-                mock.patch.object(os, 'open', side_effect=AssertionError('opened')):
-            home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+                mock.patch.object(os, 'open', side_effect=AssertionError('opened')), \
+                mock.patch('pwd.getpwuid', return_value=SimpleNamespace(pw_dir='/password-home')) as passwd:
+            home = Path('/password-home')
             suffix = 'Library/Application Support/adt-approval-seal' if sys.platform == 'darwin' else '.local/share/adt-approval-seal'
             self.assertEqual(self.a.production_root(), home / suffix)
+            self.assertEqual(passwd.call_args_list, [mock.call(os.getuid())])
             self.assertEqual(self.a.runtime_instance_id(), R)
         self.assertFalse(self.root.exists())
         renderer = object()

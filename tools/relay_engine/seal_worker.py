@@ -68,6 +68,7 @@ class SealWorker:
         self._thread, self._ticker, self._error = None, None, None
         self._faults, self._clear_pending = {}, []
         self._listed_gen, self._recover = None, set()
+        self._reader_failed = False
         self._backup_read, self._backup_item = False, None
         self._backup_raised = False
         self.channel._notify = self._notify
@@ -129,6 +130,8 @@ class SealWorker:
             return self._leave and generation == self._generation
 
     def _reader_boundary(self):
+        if self._reader_failed:
+            return False
         with self._condition:
             stale = self._reader is not None and (not self._leave or self._reader_gen != self._generation)
         if stale:
@@ -144,16 +147,23 @@ class SealWorker:
             leave, generation = self._leave, self._generation
             missing = self._reader is None
         if leave and missing:
-            reader = self.open_catalogue_reader(self.store_root)
+            try:
+                reader = self.open_catalogue_reader(self.store_root)
+            except Exception as exc:
+                self._reader_failed = True
+                strings.report_diagnostic(SealCalleeFailed('catalogue', type(exc).__name__, None))
+                return False
             if not self._valid(generation):
                 reader.close()
                 return
             with self._condition:
                 self._reader, self._reader_gen = reader, generation
                 self._listed_gen = None
+        return True
 
     def _read(self, call, *args):
-        self._reader_boundary()
+        if not self._reader_boundary():
+            return None
         with self._condition:
             generation = self._reader_gen
             if self._reader is None or not self._leave or generation != self._generation:
@@ -162,8 +172,16 @@ class SealWorker:
             self._inflight = generation
         try:
             result = call(reader, *args)
-        except Exception:
-            result = None
+        except Exception as exc:
+            project = args[0] if args else None
+            strings.report_diagnostic(SealCalleeFailed('catalogue', type(exc).__name__, project))
+            self._reader_failed = True
+            try:
+                reader.close()
+            finally:
+                with self._condition:
+                    self._reader, self._reader_gen = None, None
+            return None
         finally:
             with self._condition:
                 self._inflight = None
@@ -208,13 +226,23 @@ class SealWorker:
             return
         if fault.cause == 'pointer_unset' and self.clock_ms() - fault.first < 60000:
             return
+        try:
+            texts = self.seal_texts(fault.cause, fault.chain or 'none')
+        except Exception as exc:
+            strings.report_diagnostic(SealCalleeFailed('texts', type(exc).__name__, fault.project))
+            return
         args = dict(kind='notice', subkind='approval_seal_unusable', project_id=fault.project,
                     condition_key=fault.key, pins=fault.key,
-                    texts=self.seal_texts(fault.cause,fault.chain or 'none'),
+                    texts=texts,
                     operation_key=':'.join((fault.project,fault.chain or 'none',fault.cause,str(fault.first))))
         result = self._call(fault.project,self.queue.run,'queue.raise',args,self.principal)
         if result is not None:
-            fault.item_id = result['item_id']
+            try:
+                item_id = result['item_id']
+            except Exception as exc:
+                strings.report_diagnostic(SealCalleeFailed('queue', type(exc).__name__, fault.project))
+                return
+            fault.item_id = item_id
         if fault.item_id is not None:
             older, fault.older = fault.older, []
             for old in older:
@@ -224,6 +252,8 @@ class SealWorker:
         if fault.item_id is None:
             return
         if generation is not None and not self._valid(generation):
+            if all(f.item_id != fault.item_id for f in self._clear_pending):
+                self._clear_pending.append(fault)
             return
         result = self._call(fault.project,self.queue.clear_condition,self.principal,fault.item_id,
                             'notice','approval_seal_unusable',fault.project,fault.key)
@@ -236,28 +266,34 @@ class SealWorker:
         for old in fault.older:
             self._clear(old, generation)
         self._clear(fault, generation)
-        self._faults.pop(fault.project, None)
-        self._publish()
         if generation is not None and not self._valid(generation):
             return
         try:
             self.on_fault_ended(fault.project, fault.cause)
         except Exception as exc:
             strings.report_diagnostic(SealCalleeFailed('on_fault_ended',type(exc).__name__,fault.project))
+        self._faults.pop(fault.project, None)
+        self._publish()
 
     def _recover_items(self):
         if not self._backup_read:
             rows = self._call(None,self.queue.open_condition_items,self.principal,None)
             if rows is not None:
-                self._backup_read = True
-                self._backup_item = next((r.item_id for r in rows if r.kind == 'notice' and
-                                          r.subkind == 'approval_seal_backup_included' and
-                                          r.condition_key == 'backup_exclusion'),None)
+                try:
+                    item = next((r.item_id for r in rows if r.kind == 'notice' and
+                                 r.subkind == 'approval_seal_backup_included' and
+                                 r.condition_key == 'backup_exclusion'), None)
+                except Exception as exc:
+                    strings.report_diagnostic(SealCalleeFailed('queue', type(exc).__name__, None))
+                else:
+                    self._backup_item = item
+                    self._backup_read = True
         if self._listed_gen != self._generation:
-            listed = self._read(self.project_routes)
+            listed = self._read(lambda reader: None if (routes := self.project_routes(reader)) is None
+                                else tuple(row.project_id for row in routes))
             if listed is not None and listed[0] is not None:
-                routes, generation = listed
-                self._recover.update(r.project_id for r in routes)
+                projects, generation = listed
+                self._recover.update(projects)
                 self._listed_gen = generation
         for project in sorted(self._recover):
             read = self._read(self.route_state, project)
@@ -269,12 +305,16 @@ class SealWorker:
             rows = self._call(project,self.queue.open_condition_items,self.principal,project)
             if rows is None or not self._valid(generation):
                 continue
+            try:
+                recovered = [(None if row.condition_key['chain_id'] == 'none' else row.condition_key['chain_id'],
+                              row.condition_key['cause'], row.item_id)
+                             for row in rows if row.kind == 'notice' and row.subkind == 'approval_seal_unusable']
+            except Exception as exc:
+                strings.report_diagnostic(SealCalleeFailed('queue', type(exc).__name__, project))
+                continue
             self._recover.discard(project)
-            for row in rows:
-                if row.kind == 'notice' and row.subkind == 'approval_seal_unusable':
-                    key = row.condition_key
-                    self._learn(project,None if key['chain_id']=='none' else key['chain_id'],
-                                key['cause'],self.clock_ms(),row.item_id,recovered=True)
+            for chain, cause, item in recovered:
+                self._learn(project,chain,cause,self.clock_ms(),item,recovered=True)
 
     def _backup(self):
         if self.backup_exclusion == 'excluded':
@@ -284,13 +324,24 @@ class SealWorker:
                 if result is not None:
                     self._backup_item = None
         elif not self._backup_raised:
+            try:
+                texts = self.backup_texts()
+                pins = self.backup_pins()
+            except Exception as exc:
+                strings.report_diagnostic(SealCalleeFailed('texts', type(exc).__name__, None))
+                return
             args = dict(kind='notice',subkind='approval_seal_backup_included',project_id=None,
-                        condition_key='backup_exclusion',texts=self.backup_texts(),pins=self.backup_pins(),
+                        condition_key='backup_exclusion',texts=texts,pins=pins,
                         operation_key='backup_exclusion:'+str(self.clock_ms()))
             result = self._call(None,self.queue.run,'queue.raise',args,self.principal)
             if result is not None:
+                try:
+                    item_id = result['item_id']
+                except Exception as exc:
+                    strings.report_diagnostic(SealCalleeFailed('queue', type(exc).__name__, None))
+                    return
                 self._backup_raised = True
-                self._backup_item = result['item_id']
+                self._backup_item = item_id
 
     def _observe(self, fault):
         read = self._read(self.route_state, fault.project)
@@ -383,7 +434,14 @@ class SealWorker:
                     self._wake = False
                     check, self._check = self._check, False
                     stopping = self._stopping
-                self._reader_boundary()
+                self._reader_failed = False
+                if not self._reader_boundary():
+                    with self._condition:
+                        if not self._wake:
+                            self._idle.set()
+                    if stopping:
+                        break
+                    continue
                 if stopping:
                     break
                 self._recover_items()
@@ -402,7 +460,8 @@ class SealWorker:
                     else:
                         fault = self._learn(report.project_id,report.chain_id,report.cause,report.at_ms)
                         route = self._read(self.route_state,report.project_id)
-                        if route is not None and route[0] is not None:
+                        if (route is not None and route[0] is not None and
+                                (report.cause != 'pointer_unset' or route[0] == 'active')):
                             self._raise(fault,route[1])
                 if check:
                     for fault in list(self._faults.values()):
