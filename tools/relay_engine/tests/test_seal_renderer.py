@@ -192,6 +192,39 @@ class SealRendererTests(unittest.TestCase):
         self.assertEqual(renderer2.drain(P, C, through=6), 6)
         self.assertTrue(observations); self.assertEqual(observations[0], 6)
 
+    def test_renderer_record_invalid_after_publish(self):
+        self.service.set_current(P, D, ledger_fd=self.fd, expected=C, bind='first')
+        renderer = self.renderer(); self.open(renderer, serving=True)
+        self.rows(2); self.rows(1, chain=D)
+        original = self.service.folder.publish_record
+        published = []
+        def marked(project, chain, number, data):
+            result = original(project, chain, number, data)
+            if (project, chain, number) == (P, C, 0):
+                self.service.folder.write_mark(P, C, b'another-holder-broke-chain')
+                published.append(number)
+            return result
+        with mock.patch.object(self.service.folder, 'publish_record', side_effect=marked):
+            try:
+                renderer.drain(P, C, through=2)
+            except self.types.RecordInvalid:
+                pass  # The later C2 drain is the generation-survival witness.
+        records = self.root / 'projects' / P / 'records' / C
+        self.assertEqual(published, [0])
+        self.assertTrue((records / '0').is_file())
+        self.assertFalse((records / '1').exists())
+        results, errors = [], []
+        def later():
+            try:
+                results.append(renderer.drain(P, D, through=1))
+            except BaseException as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=later); thread.start(); thread.join(30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [], 'later C2 drain must preserve the reader generation')
+        self.assertEqual(results, [1])
+        self.assertEqual(renderer.generations(P)[-1].state, 'serving')
+
     def test_drain_zero_skips_step_one(self):
         renderer = self.renderer(); self.open(renderer)
         self.damage(self.path())

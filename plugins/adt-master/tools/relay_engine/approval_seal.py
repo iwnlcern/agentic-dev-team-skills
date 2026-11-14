@@ -434,7 +434,11 @@ class SealService:
         if not _hex(digest, 64) or not hmac.compare_digest(
                 digest, _key_mac(key, _RECORD_CONTEXT, jcs_encode(record))):
             raise RecordInvalid('mac')
-        if self.folder.mark_exists(project, chain):
+        try:
+            broken = self.folder.mark_exists(project, chain)
+        except OSError:
+            raise RecordInvalid('mark_unreadable') from None
+        if broken:
             raise RecordInvalid('chain_broken')
         return SealedRecord(project, chain, record['number'], event,
                             record['prev_mac'], record['key_id'], digest)
@@ -457,7 +461,11 @@ class SealService:
                 if (record.project_id, record.chain_id, record.number) != (project, chain, 0):
                     return None
                 return self._key(record.key_id)
-        except (RecordInvalid, RecordUnreadable):
+        except RecordInvalid as exc:
+            if exc.cause == 'mark_unreadable':
+                self._fail(project, 'folder_unusable')
+            return None
+        except RecordUnreadable:
             return None
         keys = self._keys()
         return keys[-1] if keys else None

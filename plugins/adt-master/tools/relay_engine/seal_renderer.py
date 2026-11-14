@@ -367,6 +367,9 @@ class SealRenderer:
             if conflict:
                 self.service.mark_broken(project, chain, cause='record_conflict', number=number)
                 return
-            record = self.service.open_record(data)
+            try:
+                record = self.service.open_record(data)
+            except RecordInvalid:
+                return
             prev_mac, key_id = record.mac, record.key_id
             number += 1

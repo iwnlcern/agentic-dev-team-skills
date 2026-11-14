@@ -10718,7 +10718,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/approval_seal.py",
-    "sha256": "1c5b6f144a06d15744933ce4907e2ab6584fe4a6f75ff07bb9eeb8d7dbf2dda3",
+    "sha256": "3b6516d9158d774458c525faed7b645cd8a189a4c6d3f6098c5eb1a8a01d9eb7",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -10970,7 +10970,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seal_renderer.py",
-    "sha256": "294389dc78c1403df2105710109dcd28053440c2e4cf4200df301f5d3b434c81",
+    "sha256": "92c8c21b3c2e6ebb9bd5a341e8da0e48d1750b770df73e6ab5c79c8ed90db1d8",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -21668,7 +21668,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/approval_seal.py",
-    "sha256": "1c5b6f144a06d15744933ce4907e2ab6584fe4a6f75ff07bb9eeb8d7dbf2dda3",
+    "sha256": "3b6516d9158d774458c525faed7b645cd8a189a4c6d3f6098c5eb1a8a01d9eb7",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -21920,7 +21920,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seal_renderer.py",
-    "sha256": "294389dc78c1403df2105710109dcd28053440c2e4cf4200df301f5d3b434c81",
+    "sha256": "92c8c21b3c2e6ebb9bd5a341e8da0e48d1750b770df73e6ab5c79c8ed90db1d8",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -32534,7 +32534,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/approval_seal.py",
-    "sha256": "1c5b6f144a06d15744933ce4907e2ab6584fe4a6f75ff07bb9eeb8d7dbf2dda3",
+    "sha256": "3b6516d9158d774458c525faed7b645cd8a189a4c6d3f6098c5eb1a8a01d9eb7",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -32786,7 +32786,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seal_renderer.py",
-    "sha256": "294389dc78c1403df2105710109dcd28053440c2e4cf4200df301f5d3b434c81",
+    "sha256": "92c8c21b3c2e6ebb9bd5a341e8da0e48d1750b770df73e6ab5c79c8ed90db1d8",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {

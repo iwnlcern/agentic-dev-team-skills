@@ -106,6 +106,18 @@ class SealReserveTests(unittest.TestCase):
 
     def test_open_record_checks(self):
         good = self.record()
+        self.assertTrue(self.service.folder.publish_record(P, C, 0, good))
+        mark = self.project / (C + '.broken')
+        original = Path.lstat
+        def unreadable(path, *args, **kwargs):
+            if path == mark:
+                raise OSError(errno.EIO, 'injected_mark_read')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.f.Path, 'lstat', unreadable):
+            for read in (lambda: self.a.open_record(good), lambda: self.a.read_record(P, C, 0)):
+                with self.assertRaises(self.t.RecordInvalid) as caught:
+                    read()
+                self.assertEqual(caught.exception.cause, 'mark_unreadable')
         for cause in ('format', 'binding', 'key_unknown', 'mac', 'chain_broken'):
             value = json.loads(good)
             if cause == 'format':
@@ -121,6 +133,29 @@ class SealReserveTests(unittest.TestCase):
             with self.assertRaises(self.t.RecordInvalid) as caught:
                 self.a.open_record(self.jcs(value))
             self.assertEqual(caught.exception.cause, cause)
+
+    def test_reserve_mark_unreadable_refuses(self):
+        self.publish()
+        head = self.a.counter_head(P, C)
+        mark = self.project / (C + '.broken')
+        original = Path.lstat
+        reads = []
+        def unreadable(path, *args, **kwargs):
+            if path == mark:
+                reads.append(path)
+                if len(reads) == 2:
+                    raise OSError(errno.EIO, 'injected_mark_read')
+            return original(path, *args, **kwargs)
+        self.reports.clear()
+        with mock.patch.object(self.f.Path, 'lstat', unreadable):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.reserve()
+        self.assertEqual((caught.exception.cause, caught.exception.chain_id), ('folder_unusable', None))
+        self.assertEqual([(r.project_id, r.chain_id, r.cause) for r in self.reports],
+                         [(P, None, 'folder_unusable')])
+        self.assertEqual(len(reads), 2)
+        self.assertFalse(self.entry(head + 1).exists())
+        self.assertEqual(self.a.counter_head(P, C), head)
 
     def test_read_record_by_name(self):
         good = self.publish(5)
