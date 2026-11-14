@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -324,8 +325,8 @@ class TestRetentionPasses(unittest.TestCase):
         # An independently queued writer resurrects the same digest before unlink.
         self.old_put(data, at=NOW + DAY + 1)
         self.job('unlink_swept')
-        self.assertEqual(self.store(None).get(sha), data)
         self.assertTrue(path.is_file())
+        self.assertEqual(self.store(None).get(sha), data)
         self.assertFalse(orphan.exists())
         # Also exercise orphan convergence rather than requiring a sweep replay.
         self.conn.execute('BEGIN IMMEDIATE')
@@ -337,6 +338,109 @@ class TestRetentionPasses(unittest.TestCase):
         self.job('orphans', candidates=candidates)
         self.assertFalse(loose.exists())
         self.assertTrue(path.exists())
+
+    def test_orphan_pass_keeps_current_object_file(self):
+        # M17: removing the current-row check deletes an old, still-owned file.
+        data = b'current object, old file'
+        sha = self.old_put(data)
+        current = self.path(sha)
+        other_codec = 'zlib' if current.suffix == '.raw' else 'raw'
+        orphan = current.with_suffix('.' + other_codec)
+        orphan.write_bytes(b'unowned codec file')
+        for path in (current, orphan):
+            os.utime(path, ((NOW - 2 * DAY) / 1000,) * 2)
+        candidates = self.e.list_orphan_candidates(self.root, PROJECT, NOW)
+        self.job('orphans', candidates=candidates)
+        self.assertTrue(current.is_file())
+        self.assertEqual(self.store(None).get(sha), data)
+        self.assertFalse(orphan.exists())
+
+    def test_sweep_waits_a_day_after_mark(self):
+        # M18: removing the mark's 24-hour wait prunes at DAY - 1.
+        sha = self.old_put(b'wait after mark')
+        self.derived()
+        self.job('mark')
+        self.job('sweep', NOW + DAY - 1)
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_objects').fetchall(), [(sha,)])
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_prune_marks').fetchall(), [(sha,)])
+        self.job('sweep', NOW + DAY + 1)
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_pruned').fetchall(), [(sha,)])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_objects').fetchone(), (0,))
+
+    def test_fresh_capture_is_not_marked(self):
+        # M19: dropping the fresh-capture clause marks the under-a-day capture.
+        self.bundle('old-close', NOW - 15 * DAY)
+        sha = self.old_put(b'fresh capture', 'old-close', at=NOW - DAY + 1)
+        self.derived()
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_prune_marks').fetchone(), (0,))
+        self.conn.execute('UPDATE evidence_objects SET latest_capture_at=? WHERE sha256=?',
+                          (NOW - DAY - 1, sha))
+        self.conn.commit()
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_prune_marks').fetchall(), [(sha,)])
+
+    def test_object_under_501_bundles(self):
+        # M20: replacing rather than accumulating leaves the last closed count 0.
+        self.bundle('first-open')
+        data = b'one object, 501 bundles'
+        sha = self.old_put(data, 'first-open')
+        for n in range(500):
+            name = 'closed-%03d' % n
+            self.bundle(name, NOW - 15 * DAY)
+            self.old_put(data, name)
+
+        def finish(name):
+            for _ in range(10):
+                report = self.job(name)
+                self.assertLessEqual(report.visited, 500)
+                if report.finished:
+                    return report
+            self.fail(name + ' did not finish its 501-association walk')
+
+        finish('follow_up')
+        run = finish('derive').run_id
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_prune_marks').fetchone(), (0,))
+        self.assertEqual(self.conn.execute('SELECT open_count FROM evidence_derive WHERE run_id=?',
+                                          (run,)).fetchone(), (1,))
+        self.conn.execute("UPDATE bundles SET closed_at=? WHERE id='first-open'", (NOW - 15 * DAY,))
+        self.conn.commit()
+        finish('follow_up')
+        run = finish('derive').run_id
+        self.assertEqual(self.conn.execute('SELECT open_count FROM evidence_derive WHERE run_id=?',
+                                          (run,)).fetchone(), (0,))
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT sha256 FROM evidence_prune_marks').fetchall(), [(sha,)])
+
+    def test_idle_upload_under_a_day_stays_open(self):
+        # M21: removing abandonment's age clause changes this upload to abandoned.
+        self.disk()
+        capture = self.e.Capture('upload', 'seat-supplied', None, 'operator', None)
+        upload = self.e.begin_upload(self.conn, self.root, PROJECT, capture, '0' * 64, 0).upload_id
+        self.conn.execute('UPDATE evidence_uploads SET updated_at=? WHERE upload_id=?',
+                          (NOW - DAY + 1, upload))
+        self.conn.commit()
+        path = store_layout.evidence_dir(self.root, PROJECT) / 'uploads' / (upload + '.part')
+        os.utime(path, ((NOW - 2 * DAY) / 1000,) * 2)
+        self.job('mark')
+        self.assertEqual(self.conn.execute('SELECT state FROM evidence_uploads WHERE upload_id=?',
+                                          (upload,)).fetchone(), ('open',))
+        self.job('orphans', candidates=self.e.list_orphan_candidates(self.root, PROJECT, NOW))
+        self.assertTrue(path.is_file())
+
+    def test_evidence_directories_are_0700(self):
+        # M22: mkdir's default mode under umask 022 leaves these directories 0755.
+        old_umask = os.umask(0o022)
+        self.addCleanup(os.umask, old_umask)
+        sha = self.old_put(b'private evidence directories')
+        capture = self.e.Capture('upload', 'seat-supplied', None, 'operator', None)
+        self.e.begin_upload(self.conn, self.root, PROJECT, capture, '0' * 64, 0)
+        self.conn.commit()
+        evidence = self.root / 'projects' / PROJECT / 'evidence'
+        for path in (evidence, evidence / 'objects', evidence / 'objects' / sha[:2],
+                     evidence / 'tmp', evidence / 'uploads'):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700, str(path))
 
     def test_captured_by_none_after_prune(self):
         sha = self.old_put(b'pruned lookup')
@@ -440,17 +544,23 @@ class TestRetentionPasses(unittest.TestCase):
         young = directory / 'z-young'
         young.write_bytes(b'keep')
         os.utime(young, ((NOW - 1) / 1000,) * 2)
-        original = os.scandir
+        original_scan, original_list = os.scandir, os.listdir
 
         def scan(*args, **kwargs):
             self.assertFalse(self.conn.in_transaction, 'directory listing under the job lock')
-            return original(*args, **kwargs)
+            return original_scan(*args, **kwargs)
 
-        with mock.patch.object(os, 'scandir', side_effect=scan) as listing:
+        def listing_directory(*args, **kwargs):
+            self.assertFalse(self.conn.in_transaction, 'directory listing under the job lock')
+            return original_list(*args, **kwargs)
+
+        with mock.patch.object(os, 'scandir', side_effect=scan) as scanning, \
+                mock.patch.object(os, 'listdir', side_effect=listing_directory) as listing:
             candidates = self.e.list_orphan_candidates(self.root, PROJECT, NOW)
-            calls = listing.call_count
+            calls = scanning.call_count + listing.call_count
+            self.assertGreater(calls, 0)
             first = self.job('orphans', candidates=candidates)
-            self.assertEqual(listing.call_count, calls)
+            self.assertEqual(scanning.call_count + listing.call_count, calls)
         self.assertEqual(first.visited, 500)
         self.assertEqual(len(list(directory.iterdir())), 2)
         self.assertEqual(self.conn.execute('SELECT orphan_capture_cursor,orphan_association_cursor '

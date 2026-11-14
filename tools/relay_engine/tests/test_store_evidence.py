@@ -407,12 +407,13 @@ class TestEvidenceUploads(unittest.TestCase):
 
     def test_rolled_back_append_is_truncated(self):
         upload = self.begin(b'abcd')
-        self.append(upload, 0, b'ab')
+        self.append(upload, 0, b'abc')
         self.conn.rollback()
         self.assertEqual(self.conn.execute('SELECT received_len FROM evidence_uploads').fetchone(), (0,))
-        self.assertEqual(self.staging()[0].read_bytes(), b'ab')
+        self.assertEqual(self.staging()[0].read_bytes(), b'abc')
         self.append(upload, 0, b'ab')
         self.conn.commit()
+        self.assertEqual(self.staging()[0].read_bytes(), b'ab')
         self.append(upload, 2, b'cd')
         self.conn.commit()
         self.assertEqual(self.staging()[0].read_bytes(), b'abcd')
@@ -490,10 +491,12 @@ class TestEvidenceUploads(unittest.TestCase):
         self.conn.rollback()
 
     def measured_finalize(self, prepared):
+        self.assertEqual(prepared.codec, self.evidence.CODEC_WRITE)
+        codec_module = zlib if prepared.codec == 'zlib' else self.evidence._zstd
         start = time.monotonic()
         self.conn.execute('BEGIN IMMEDIATE')
         with mock.patch.object(hashlib, 'sha256', side_effect=AssertionError('hash inside job')) as hasher, \
-                mock.patch.object(zlib, 'decompress', side_effect=AssertionError('decode inside job')) as decoder:
+                mock.patch.object(codec_module, 'decompress', side_effect=AssertionError('decode inside job')) as decoder:
             result = self.finalize(prepared)
             self.conn.commit()
         duration = time.monotonic() - start
@@ -524,7 +527,10 @@ class TestEvidenceUploads(unittest.TestCase):
         second = self.evidence.prepare_upload(self.root, PROJECT, first.upload_id)
         original = self.finalize(first)
         self.conn.commit()
-        replay = self.finalize(second)
+        try:
+            replay = self.finalize(second)
+        except self.evidence.UploadConflict as refused:
+            self.fail('identical commit refused, not replayed: ' + str(refused))
         self.assertEqual(replace(replay, replayed=False), original)
         self.assertTrue(replay.replayed)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM evidence_captures').fetchone(), (1,))
