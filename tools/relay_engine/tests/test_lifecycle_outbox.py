@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -570,7 +571,9 @@ class TestOutboxAPI(unittest.TestCase):
         import re
         from relay_engine.tests import test_strings_gate
         expression = re.compile(r'\b(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO\s+lifecycle_outbox_events\b', re.IGNORECASE)
-        sources = {Path(p).name: Path(p).read_text() for p in test_strings_gate.TestGate.production_paths()}
+        sources = {os.path.relpath(p, Path(__file__).parents[1]): Path(p).read_text()
+                   for p in test_strings_gate.TestGate.production_paths()}
+        self.assertEqual(len(sources), len(test_strings_gate.TestGate.production_paths()))
         writers = lambda texts: {name for name, source in texts.items() if expression.search(source)}
         self.assertEqual(writers(sources), {'lifecycle_outbox.py'})
         self.assertNotIn('schema.py', writers(sources))
