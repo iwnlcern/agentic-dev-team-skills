@@ -10873,6 +10873,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/operator_queue/liveness.py",
+    "sha256": "00b47a2e62d70b38d0394807b6daddae2dd5c49eac301bdfb35b1228dc93dfbf",
+    "source": "tools/relay_engine/operator_queue/liveness.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/operator_queue/operations.py",
     "sha256": "8eceef5be88a54f8e78b3fc21d0c164c74e1168c77c4219dd35af1bc1bb4c194",
     "source": "tools/relay_engine/operator_queue/operations.py"
@@ -10982,7 +10988,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "2a4fccea8bb32c321855b8c0adeb2dc6817fcc0118ba5c2b49389abf75b8f487",
+    "sha256": "58d2f0422484b48da9bd7f28896bae0a37cd1a805be24a7119c43c10ef1d5117",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21763,6 +21769,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/operator_queue/liveness.py",
+    "sha256": "00b47a2e62d70b38d0394807b6daddae2dd5c49eac301bdfb35b1228dc93dfbf",
+    "source": "tools/relay_engine/operator_queue/liveness.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/operator_queue/operations.py",
     "sha256": "8eceef5be88a54f8e78b3fc21d0c164c74e1168c77c4219dd35af1bc1bb4c194",
     "source": "tools/relay_engine/operator_queue/operations.py"
@@ -21872,7 +21884,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "2a4fccea8bb32c321855b8c0adeb2dc6817fcc0118ba5c2b49389abf75b8f487",
+    "sha256": "58d2f0422484b48da9bd7f28896bae0a37cd1a805be24a7119c43c10ef1d5117",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32569,6 +32581,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/operator_queue/liveness.py",
+    "sha256": "00b47a2e62d70b38d0394807b6daddae2dd5c49eac301bdfb35b1228dc93dfbf",
+    "source": "tools/relay_engine/operator_queue/liveness.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/operator_queue/operations.py",
     "sha256": "8eceef5be88a54f8e78b3fc21d0c164c74e1168c77c4219dd35af1bc1bb4c194",
     "source": "tools/relay_engine/operator_queue/operations.py"
@@ -32678,7 +32696,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "2a4fccea8bb32c321855b8c0adeb2dc6817fcc0118ba5c2b49389abf75b8f487",
+    "sha256": "58d2f0422484b48da9bd7f28896bae0a37cd1a805be24a7119c43c10ef1d5117",
     "source": "tools/relay_engine/version.py"
   },
   {
