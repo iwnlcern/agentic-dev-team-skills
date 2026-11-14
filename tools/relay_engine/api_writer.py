@@ -4,6 +4,11 @@ A job that ends its own transaction produces an indeterminate outcome.
 In that case even KeyboardInterrupt or SystemExit is returned as its value,
 not propagated: ending the writer's transaction is a defect of the job.
 The caller must reconcile that outcome rather than assume failure.
+
+A queued hook that raises withdraws its job before the worker starts it.
+An asynchronous exception in the calling thread while it waits for an outcome
+leaves the job running to its own outcome without telling that caller.
+A same-key retry reconciles through the session receipt in that case.
 """
 
 from dataclasses import dataclass, field
@@ -49,6 +54,7 @@ class _Request:
     done: threading.Event = field(default_factory=threading.Event)
     result: object = None
     error: BaseException | None = None
+    withdrawn: bool = False
 
 
 def _unavailable(reason, cause):
@@ -102,6 +108,9 @@ class StoreWriter:
             try:
                 if request.kind == 'job':
                     self._phase('queued')
+            except BaseException:
+                request.withdrawn = True
+                raise
             finally:
                 request.ready.set()
             request.done.wait()
@@ -220,6 +229,8 @@ class StoreWriter:
             request = self._queue.get()
             request.ready.wait()
             try:
+                if request.withdrawn:
+                    continue
                 if request.kind == 'close':
                     if self._conn is not None:
                         self._conn.close()

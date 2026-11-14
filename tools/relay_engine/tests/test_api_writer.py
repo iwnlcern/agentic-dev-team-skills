@@ -207,6 +207,56 @@ class WriterTests(unittest.TestCase):
                 finally:
                     writer.close()
 
+    def test_queued_hook_exception_withdraws_the_job(self):
+        # Break caught: releasing a request after its queued hook raises lets
+        # the job commit even though submit has already raised to its caller.
+        for error_type in (RuntimeError, KeyboardInterrupt):
+            with self.subTest(error_type=error_type.__name__):
+                original = error_type('queued')
+                armed = True
+                called = []
+
+                def hook(phase):
+                    nonlocal armed
+                    if phase == 'queued' and armed:
+                        armed = False
+                        raise original
+
+                writer = self.writer(hook)
+
+                def run(conn):
+                    called.append(True)
+                    conn.execute('INSERT INTO projects(id,name,created_at) VALUES (?,?,2)',
+                                 (Q, 'withdrawn')).close()
+                    return api_writer.JobOutcome(True, 'withdrawn')
+
+                def following(conn):
+                    conn.execute('INSERT INTO projects(id,name,created_at) VALUES (?,?,3)',
+                                 ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'following')).close()
+                    return api_writer.JobOutcome(True, 'following')
+
+                try:
+                    with self.assertRaises(error_type) as caught:
+                        writer.submit(Job(run))
+                    self.assertIs(caught.exception, original)
+                    self.assertEqual(writer.submit(Job(following)),
+                                     api_writer.JobOutcome(True, 'following'))
+                    conn = sqlite3.connect(store_layout.ledger_path(self.root, P))
+                    try:
+                        rows = conn.execute('SELECT name FROM projects WHERE id != ?',
+                                            (P,)).fetchall()
+                    finally:
+                        conn.close()
+                    self.assertEqual((called, sorted(rows)), ([], [('following',)]))
+                finally:
+                    writer.close()
+                    conn = sqlite3.connect(store_layout.ledger_path(self.root, P))
+                    try:
+                        conn.execute('DELETE FROM projects WHERE id != ?', (P,)).close()
+                        conn.commit()
+                    finally:
+                        conn.close()
+
     def test_indeterminate_outcomes(self):
         writer = self.writer()
         trace = []
