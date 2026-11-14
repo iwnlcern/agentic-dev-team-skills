@@ -247,7 +247,8 @@ def _texts_valid(kind, texts):
     elif 'sentence' not in members or not members <= {'sentence', 'subject', 'caused_by', 'ring_text'}:
         return False
     for name, value in texts.items():
-        if not isinstance(value, str) or not value or '\x00' in value:
+        if (not isinstance(value, str)
+                or (kind != 'question' and (not value or '\x00' in value))):
             return False
         try:
             size = len(value.encode('utf-8'))

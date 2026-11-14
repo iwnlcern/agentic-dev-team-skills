@@ -221,6 +221,18 @@ class TestQueueIngest(unittest.TestCase):
         self.assertEqual(ingest.question_ingest_pass(self.port,[P],self.f.clock),0)
         self.assertEqual(self.f.items(),[])
 
+    def test_question_ingest_empty_and_nul_body(self):
+        # Rejecting empty/NUL question text loses admitted questions and stalls the cursor.
+        empty = self.f.admit(body='')
+        nul = self.f.admit(body='a\x00b')
+        self.assertEqual(self.run_pass(), 2)
+        rows = self.c.execute('SELECT source_relay_id,state,texts FROM queue_items '
+                              'ORDER BY raised_position').fetchall()
+        self.assertEqual([(row[0], row[1], json.loads(row[2])['body']) for row in rows],
+                         [(empty.relay_id, 'pending', ''), (nul.relay_id, 'pending', 'a\x00b')])
+        self.assertEqual(records.read_cursor(self.c, P, 'question'),
+                         records.Cursor(nul.handle, 0, nul.relay_id))
+
     def test_choices_from_body(self):
         a=self.f.admit(body='Choose\nChoices:\n- Yes\n- No\n')
         b=self.f.admit(body='Choose\nChoices:\n- \n')
