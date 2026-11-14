@@ -291,7 +291,7 @@ class UploadResult:
 def _upload_path(root, project_id, upload_id):
     if str(uuid.UUID(upload_id)) != upload_id:
         raise UploadConflict('invalid upload id')
-    return store_layout.evidence_dir(root, project_id) / 'staging' / upload_id
+    return store_layout.evidence_dir(root, project_id) / 'uploads' / (upload_id + '.part')
 
 
 def _upload_row(conn, upload_id):

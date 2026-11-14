@@ -368,13 +368,16 @@ class TestEvidenceUploads(unittest.TestCase):
         return self.evidence.commit_upload(self.conn, self.root, PROJECT, prepared)
 
     def staging(self):
-        return tuple((store_layout.evidence_dir(self.root, PROJECT) / 'staging').iterdir())
+        return tuple((store_layout.evidence_dir(self.root, PROJECT) / 'uploads').iterdir())
 
     def test_upload_bounds_and_conflicts(self):
         with self.assertRaises(ValueError):
             self.evidence.begin_upload(self.conn, self.root, PROJECT, self.capture,
                                        '0' * 64, 256 * 1024 * 1024 + 1)
         upload = self.begin(b'abcdef')
+        self.assertTrue((self.root / 'projects' / PROJECT / 'evidence' / 'uploads' /
+                         (upload + '.part')).is_file(),
+                        'design section 3 requires evidence/uploads/<upload_id>.part')
         for offset, data in ((0, b'x' * (1024 * 1024 + 1)), (1, b'a'), (0, b'abcdefg')):
             with self.subTest(offset=offset, size=len(data)), self.assertRaises(ValueError):
                 self.append(upload, offset, data)
