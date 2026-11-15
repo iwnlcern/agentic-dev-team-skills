@@ -365,6 +365,22 @@ def _open_delegation(conn, relay_id, principal, target):
                for row in queries.lineage(conn, relay_id))
 
 
+def _supersede(conn, sid: str, seat_id: str, bundle_id: str, repository_id: str,
+               at_ms: int, party: tuple) -> list[str]:
+    previous = conn.execute(
+        "SELECT id, revision FROM slips WHERE seat_id = ? AND bundle_id = ?"
+        " AND repository_id = ? AND kind = 'implement' AND state = 'live' AND id != ?"
+        ' ORDER BY issued_at, handle', (seat_id, bundle_id, repository_id, sid)).fetchall()
+    detail = json.dumps({'superseded_by': sid}, sort_keys=True, separators=(',', ':'))
+    for old_id, revision in previous:
+        conn.execute("UPDATE slips SET state = 'ended', end_reason = 'superseded', ended_at = ?,"
+                     ' revision = revision + 1 WHERE id = ?', (at_ms, old_id))
+        conn.execute('INSERT INTO slip_events (slip_id, revision, event, at, by_seat_id, by_special, detail)'
+                     " VALUES (?, ?, 'end', ?, ?, ?, ?)",
+                     (old_id, revision + 1, at_ms, *party, detail))
+    return [old_id for old_id, _ in previous]
+
+
 def on_admitted(conn, admitted, draft, ctx):
     claims.on_admitted_claims(conn, admitted, draft, ctx)
     if draft.kind != 'IMPL' or draft.needs != 'act':
@@ -402,6 +418,8 @@ def on_admitted(conn, admitted, draft, ctx):
     conn.execute('INSERT INTO slip_events (slip_id, revision, event, at, by_seat_id, by_special, detail)'
                  " VALUES (?, 1, 'issue', ?, ?, ?, ?)",
                  (sid, admitted.created_at_ms, *submit.party_columns(ctx.sender.seat_id), encoded))
+    _supersede(conn, sid, holder, bundle, repo, admitted.created_at_ms,
+               submit.party_columns(ctx.sender.seat_id))
 
 
 def working_path(conn, artifact, effect):

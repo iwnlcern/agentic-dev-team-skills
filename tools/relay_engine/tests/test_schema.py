@@ -974,6 +974,21 @@ class TestAdmissionReplaySchema(Store):
         schema.init_v3(control)
         self.assertEqual(self.objects(control), objects)
 
+    def test_pre_supersede_store_refused(self):
+        old_tables = tuple(sql.replace(", 'superseded'", "") if 'CREATE TABLE IF NOT EXISTS slips ' in sql
+                           else sql.replace(", 'end'", "") if 'CREATE TABLE IF NOT EXISTS slip_events ' in sql
+                           else sql for sql in schema._TABLES)
+        conn = self.connect(init=False)
+        with mock.patch.object(schema, '_TABLES', old_tables):
+            schema.init_v3(conn)
+        before = self.objects(conn)
+        digest = conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.objects(conn), before)
+        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(), digest)
+
 
 
 class TestTableOwners(Store):

@@ -231,7 +231,7 @@ _AUTHORITY_TABLES += (
     state TEXT NOT NULL CHECK (state IN ('live', 'revoked', 'consumed', 'ended')),
     issued_at INTEGER NOT NULL,
     ended_at INTEGER,
-    end_reason TEXT CHECK (end_reason IN ('revoked', 'bundle-closed', 'merged', 'pr-closed')),
+    end_reason TEXT CHECK (end_reason IN ('revoked', 'bundle-closed', 'merged', 'pr-closed', 'superseded')),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     UNIQUE (project_id, handle),
     UNIQUE (seat_id, kind, repository_id, issued_at, handle),
@@ -241,7 +241,7 @@ _AUTHORITY_TABLES += (
     """CREATE TABLE IF NOT EXISTS slip_events (
     slip_id TEXT NOT NULL REFERENCES slips (id),
     revision INTEGER NOT NULL CHECK (revision >= 1),
-    event TEXT NOT NULL CHECK (event IN ('issue', 'revoke')),
+    event TEXT NOT NULL CHECK (event IN ('issue', 'revoke', 'end')),
     at INTEGER NOT NULL,
     %s,
     detail TEXT NOT NULL,

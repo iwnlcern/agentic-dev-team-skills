@@ -1029,11 +1029,8 @@ class TestErratum3(SlipStore):
         self.verify(repeat)
         self.assertEqual(self.act().slip_id, self.issued(last))
 
-    def test_revoking_newest_slip_leaves_earlier_live(self):
-        # Erratum 8 Y2b (Orchestrator Reviewer 185143, root 185219): issuing a slip ends no earlier
-        # slip, so revoking the newest leaves the earlier one answering; only revoking every live
-        # slip of the bundle stops the seat.  Today's answers, the baseline for
-        # OB-SLIP-EARLIER-LIVE-AFTER-REVOKE-1.
+    def test_revoking_newest_slip_leaves_no_earlier_live(self):
+        # Supersession prevents a revoke from exposing the earlier go-ahead.
         _, dc = self.designed()
         approval = self.answer(self.ask('plan', dc, self.plan, self.design), 'approve', self.plan, self.design)
         self.verify(approval)
@@ -1043,16 +1040,21 @@ class TestErratum3(SlipStore):
         again = self.answer(self.ask('plan', approval, self.plan), 'approve', self.plan)
         self.verify(again)
         last = self.issue(again)
+        sid = self.issued(impl)
+        self.assertEqual(self.conn.execute('SELECT state, end_reason FROM slips WHERE id = ?',
+                                          (sid,)).fetchone(), ('ended', 'superseded'))
         self.assertEqual(self.act().slip_id, self.issued(last))
         self.assertEqual(slips.revoke(self.conn, self.issued(last), PLANNER.seat_id, 'stop', self.clock).outcome,
                          'allow')
-        held = self.code('plan-changed')
-        self.assertEqual(held.slip_id, self.issued(impl))
-        self.plan.write_bytes(b'plan X\n')
-        self.assertEqual(self.act().slip_id, self.issued(impl))
-        self.assertEqual(slips.revoke(self.conn, self.issued(impl), PLANNER.seat_id, 'stop', self.clock).outcome,
-                         'allow')
-        self.assertIn('revoked', self.code('slip-invalid').reason)
+        for data in (b'plan Y\n', b'plan X\n'):
+            self.plan.write_bytes(data)
+            answer = self.code('slip-invalid')
+            self.assertEqual(answer.outcome, 'deny')
+            self.assertEqual(answer.slip_id, self.issued(last))
+        refused = slips.revoke(self.conn, sid, PLANNER.seat_id, 'stop', self.clock)
+        self.assertEqual((refused.outcome, refused.code), ('deny', 'authority.slip-invalid'))
+        self.assertEqual(self.conn.execute('SELECT state, end_reason FROM slips WHERE id = ?',
+                                          (sid,)).fetchone(), ('ended', 'superseded'))
 
     def test_operator_objection_waived_still_binds_digest(self):
         # Erratum 4 r2 R2's control.
@@ -2582,3 +2584,91 @@ class TestRuleH(SlipStore):
         answer = self.act()
         self.assertEqual(answer.outcome, 'deny')
         self.assertEqual(answer.code, 'authority.slip-invalid')
+
+
+class TestSupersede(SlipStore):
+    """Issuance replaces only the holder's live implement slips of the same key."""
+
+    def state(self, sid):
+        return self.conn.execute('SELECT state, end_reason, ended_at, revision FROM slips WHERE id = ?',
+                                 (sid,)).fetchone()
+
+    def events(self, sid):
+        return self.conn.execute('SELECT revision, event, at, by_seat_id, by_special, detail'
+                                 ' FROM slip_events WHERE slip_id = ? ORDER BY revision', (sid,)).fetchall()
+
+    def test_issue_supersedes_same_bundle_and_repository(self):
+        _, claim, impl = self.build(design=False)
+        first = self.issued(impl)
+        self.assertEqual(self.act().slip_id, first)
+        self.plan.write_bytes(b'plan Y\n')
+        fresh = self.answer(self.ask('plan', claim, self.plan), 'approve', self.plan)
+        self.verify(fresh)
+        last = self.issue(fresh)
+        newest = self.issued(last)
+        at = self.conn.execute('SELECT issued_at FROM slips WHERE id = ?', (newest,)).fetchone()[0]
+        self.assertEqual(self.state(first), ('ended', 'superseded', at, 2))
+        rows = self.events(first)
+        self.assertEqual([(r[0], r[1]) for r in rows], [(1, 'issue'), (2, 'end')])
+        self.assertEqual(rows[1], (2, 'end', at, PLANNER.seat_id, None,
+                                  json.dumps({'superseded_by': newest}, sort_keys=True, separators=(',', ':'))))
+        self.assertEqual(self.state(newest), ('live', None, None, 1))
+        self.assertEqual([(r[0], r[1]) for r in self.events(newest)], [(1, 'issue')])
+        answer = self.act()
+        self.assertEqual((answer.outcome, answer.slip_id), ('allow', newest))
+        self.assertEqual(slips.revoke(self.conn, newest, PLANNER.seat_id, 'stop', self.clock).outcome, 'allow')
+        self.plan.write_bytes(b'plan X\n')
+        answer = self.code('slip-invalid')
+        self.assertEqual((answer.outcome, answer.slip_id), ('deny', newest))
+
+    def test_issue_keeps_other_bundle_and_repository_live(self):
+        _, _, other_bundle = self.build(bundle='other', design=False)
+        _, claim, _ = self.build(bundle='same', design=False, issue=False)
+        other_repo = self.issue(claim, git_state=replace(GIT_STATE, repository_id='repo-2'))
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        other_seat = self.submit(draft(kind='IMPL', needs='act', bundle='same',
+                                       to=SECOND.address), operator)
+        saved = [self.issued(r) for r in (other_bundle, other_repo, other_seat)]
+        last = self.issue(claim)
+        self.issued(last)
+        for sid in saved:
+            with self.subTest(sid=sid):
+                self.assertEqual(self.state(sid), ('live', None, None, 1))
+                self.assertEqual([(r[0], r[1]) for r in self.events(sid)], [(1, 'issue')])
+
+    def test_issue_leaves_revoked_slip_revoked(self):
+        _, claim, impl = self.build(design=False)
+        sid = self.issued(impl)
+        self.assertEqual(slips.revoke(self.conn, sid, PLANNER.seat_id, 'stop', self.clock).outcome, 'allow')
+        before = self.state(sid), self.events(sid)
+        last = self.issue(claim)
+        self.assertEqual(self.state(sid), before[0])
+        self.assertEqual(self.events(sid), before[1])
+        self.assertEqual(self.state(sid)[:2], ('revoked', 'revoked'))
+        self.assertEqual(self.state(sid)[3], 2)
+        self.assertEqual([(r[0], r[1]) for r in self.events(sid)], [(1, 'issue'), (2, 'revoke')])
+        self.assertEqual(self.state(self.issued(last)), ('live', None, None, 1))
+
+    def test_refused_issuance_supersedes_nothing(self):
+        for ordinal, case in enumerate(('evidence', 'repository', 'closed-issuer', 'closed-delegation')):
+            with self.subTest(case=case):
+                if ordinal:
+                    self.doCleanups()
+                    self.setUp()
+                issuer = ORCH if case == 'closed-issuer' else PLANNER
+                _, claim, impl = self.build(issuer=issuer, design=False)
+                sid = self.issued(impl)
+                if case == 'evidence':
+                    refusal = self.answer(self.ask('plan', claim, self.plan), 'must-revise', self.plan)
+                    refused = self.issue(refusal)
+                elif case == 'repository':
+                    refused = self.issue(claim, git_state=None)
+                else:
+                    self.conn.execute("UPDATE team_instances SET closed_at = 2 WHERE id = 't3'")
+                    self.conn.commit()
+                    refused = self.issue(claim, issuer)
+                self.assertIsNone(self.slip(refused))
+                self.assertEqual(self.state(sid), ('live', None, None, 1))
+                self.assertEqual([(r[0], r[1]) for r in self.events(sid)], [(1, 'issue')])
+                answer = self.act()
+                self.assertEqual((answer.outcome, answer.slip_id), ('allow', sid))
