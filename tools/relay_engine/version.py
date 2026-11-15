@@ -61,6 +61,7 @@ ROSTER = (
     "relay_engine/reconcile.py",
     "relay_engine/refs.py",
     "relay_engine/render.py",
+    "relay_engine/restore_cancel.py",
     "relay_engine/roster.py",
     "relay_engine/rules.py",
     "relay_engine/schema.py",

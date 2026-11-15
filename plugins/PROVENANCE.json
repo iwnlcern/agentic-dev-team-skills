@@ -10981,6 +10981,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/restore_cancel.py",
+    "sha256": "bdce122d6942e267f0ccb3656ed2ae4ac7f998d4ad18f1b81a72c191583c03d5",
+    "source": "tools/relay_engine/restore_cancel.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/roster.py",
     "sha256": "1393a35cc08d02829ae5d82eef66d2d657d8c104dccbae596c1f391189125e84",
     "source": "tools/relay_engine/roster.py"
@@ -10994,7 +11000,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/schema.py",
-    "sha256": "38d040f9aade3427b68a10e0a342199442a2be8147318f8c9d29d3b48cd6c666",
+    "sha256": "e3ed36acb083a31bc5cd9348bbf6904838ba51cd988681d98195819ffe270bab",
     "source": "tools/relay_engine/schema.py"
   },
   {
@@ -11090,7 +11096,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "ed0ac4c6fa29c9650c484375f30a518e3500560594c3bed6582797d89723d643",
+    "sha256": "4bd8b84469ebc29a49bbe14c680a5c07dec6059553b458d442f30b81a22dba7e",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21979,6 +21985,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/restore_cancel.py",
+    "sha256": "bdce122d6942e267f0ccb3656ed2ae4ac7f998d4ad18f1b81a72c191583c03d5",
+    "source": "tools/relay_engine/restore_cancel.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/roster.py",
     "sha256": "1393a35cc08d02829ae5d82eef66d2d657d8c104dccbae596c1f391189125e84",
     "source": "tools/relay_engine/roster.py"
@@ -21992,7 +22004,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/schema.py",
-    "sha256": "38d040f9aade3427b68a10e0a342199442a2be8147318f8c9d29d3b48cd6c666",
+    "sha256": "e3ed36acb083a31bc5cd9348bbf6904838ba51cd988681d98195819ffe270bab",
     "source": "tools/relay_engine/schema.py"
   },
   {
@@ -22088,7 +22100,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "ed0ac4c6fa29c9650c484375f30a518e3500560594c3bed6582797d89723d643",
+    "sha256": "4bd8b84469ebc29a49bbe14c680a5c07dec6059553b458d442f30b81a22dba7e",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32893,6 +32905,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/restore_cancel.py",
+    "sha256": "bdce122d6942e267f0ccb3656ed2ae4ac7f998d4ad18f1b81a72c191583c03d5",
+    "source": "tools/relay_engine/restore_cancel.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/roster.py",
     "sha256": "1393a35cc08d02829ae5d82eef66d2d657d8c104dccbae596c1f391189125e84",
     "source": "tools/relay_engine/roster.py"
@@ -32906,7 +32924,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/schema.py",
-    "sha256": "38d040f9aade3427b68a10e0a342199442a2be8147318f8c9d29d3b48cd6c666",
+    "sha256": "e3ed36acb083a31bc5cd9348bbf6904838ba51cd988681d98195819ffe270bab",
     "source": "tools/relay_engine/schema.py"
   },
   {
@@ -33002,7 +33020,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "ed0ac4c6fa29c9650c484375f30a518e3500560594c3bed6582797d89723d643",
+    "sha256": "4bd8b84469ebc29a49bbe14c680a5c07dec6059553b458d442f30b81a22dba7e",
     "source": "tools/relay_engine/version.py"
   },
   {

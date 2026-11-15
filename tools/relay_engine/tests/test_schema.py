@@ -19,7 +19,7 @@ from relay_engine.tests.test_claims import ClaimStore
 from relay_engine import claims
 
 
-TABLES = {"slips", "slip_events", "branch_bindings", "reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
+TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch_bindings", "reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
@@ -974,6 +974,22 @@ class TestAdmissionReplaySchema(Store):
         schema.init_v3(control)
         self.assertEqual(self.objects(control), objects)
 
+    def test_pre_change_store_refused(self):
+        old_tables = tuple(sql for sql in schema._TABLES
+                           if not any('CREATE TABLE IF NOT EXISTS ' + name + ' ' in sql
+                                      for name in ('restore_cancels', 'restore_refusals')))
+        conn = self.connect(init=False)
+        with mock.patch.object(schema, '_TABLES', old_tables):
+            schema.init_v3(conn)
+        before = self.objects(conn)
+        digest = conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.objects(conn), before)
+        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(), digest)
+
+
     def test_pre_supersede_store_refused(self):
         old_tables = tuple(sql.replace(", 'superseded'", "") if 'CREATE TABLE IF NOT EXISTS slips ' in sql
                            else sql.replace(", 'end'", "") if 'CREATE TABLE IF NOT EXISTS slip_events ' in sql
@@ -1017,9 +1033,9 @@ class TestTableOwners(Store):
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
-        self.assertEqual(len(actual), 41)
+        self.assertEqual(len(actual), 43)
         authority = {"reviewer_assignments", "verification_requests", "waivers",
-                     "slips", "slip_events", "branch_bindings"}
+                     "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "authority"}, authority)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)

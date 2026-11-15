@@ -258,6 +258,28 @@ _AUTHORITY_TABLES += (
 )
 TABLE_OWNERS.update({name: 'authority' for name in ('slips', 'slip_events', 'branch_bindings')})
 
+_AUTHORITY_TABLES += (
+    """CREATE TABLE IF NOT EXISTS restore_cancels (
+    project_id TEXT NOT NULL PRIMARY KEY REFERENCES projects (id),
+    job_id TEXT NOT NULL,
+    cut_handle INTEGER NOT NULL CHECK (cut_handle >= 0),
+    held_at INTEGER NOT NULL,
+    released_at INTEGER,
+    released_by TEXT CHECK (released_by IS NULL OR released_by = 'operator'),
+    CHECK ((released_at IS NULL) = (released_by IS NULL))
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS restore_refusals (
+    relay_id TEXT NOT NULL PRIMARY KEY REFERENCES relays (id),
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    job_id TEXT NOT NULL
+) STRICT""",
+)
+TABLE_OWNERS.update({name: 'authority' for name in ('restore_cancels', 'restore_refusals')})
+
+
 _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
     """CREATE TABLE IF NOT EXISTS imported_relays (
     relay_id TEXT NOT NULL REFERENCES relays(id),
