@@ -255,6 +255,13 @@ def _at(line, error):
     return error
 
 
+class _CommitRaised(Exception):
+    def __init__(self, error, admitted):
+        self.error = error
+        self.admitted = admitted
+        super().__init__()
+
+
 def submit(conn, ctx, data):
     """Admit one draft, or record one refusal and raise it."""
     if conn in _READ_GUARDS:
@@ -274,6 +281,28 @@ def submit(conn, ctx, data):
             if replay is not None:
                 return replay
         return _admit(conn, ctx, data, now)
+    except _CommitRaised as failed:
+        code = getattr(failed.error, "sqlite_errorcode", None)
+        busy = code is not None and code & 0xFF == 5
+        refusal = errors.error_for("E-ADMISSION-COMMIT")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            stored = conn.execute("SELECT 1 FROM relays WHERE id = ?",
+                                  (failed.admitted.relay_id,)).fetchone()
+            if stored is not None:
+                conn.execute("ROLLBACK")
+                return failed.admitted
+            answer = _run_after_rollback(conn, ctx)
+            _refusal_row(conn, ctx, data, now, refusal)
+            conn.execute("COMMIT")
+        except Exception:
+            _rollback_if_open(conn)
+            raise _unknown_admission(ctx, variant=None if busy else "commit-unconfirmed") from None
+        except BaseException:
+            _rollback_if_open(conn)
+            raise
+        _reservation_detail(refusal, answer, ctx)
+        raise refusal from None
     except sqlite3.ProgrammingError as error:
         if (ctx.after_rollback is not None
                 and getattr(error, "_admission_hook_failed", False)
@@ -614,8 +643,16 @@ def _admit(conn, ctx, data, now, *, _system=False):
                          " max(last_request_at, excluded.last_request_at)",
                          (sender.seat_id, created))
         if not _system:
-            _run_hook(conn, ctx, Admitted(relay_id, handle, created), draft)
-            conn.execute("COMMIT")
+            admitted = Admitted(relay_id, handle, created)
+            _run_hook(conn, ctx, admitted, draft)
+            try:
+                conn.execute("COMMIT")
+            except sqlite3.Error as error:
+                if ctx.after_rollback is not None:
+                    # The enclosing handler retains the original rollback before
+                    # submit receives this private commit-only signal.
+                    raise _CommitRaised(error, admitted) from None
+                raise
     except BaseException:
         if not _system:
             try:

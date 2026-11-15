@@ -3164,3 +3164,115 @@ class TestAdmissionOutcome(Store):
         self.assertEqual(self.state(conn), (0, 0))
         self.assertFalse(conn.in_transaction)
         self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+    def test_path_c_answers_commit(self):
+        # Breaks: exposing a raw commit error instead of a durable refusal.
+        for code in (5, 10, None):
+            with self.subTest(code=code):
+                conn, ctx, r, path = self.fixture(mode="ok",
+                    failures=[self.fault("COMMIT", 1, code=code)])
+                result = self.outcome(conn, ctx)
+                self.assertIsInstance(result, errors.EngineError, repr(result))
+                self.assertEqual(result.code, "E-ADMISSION-COMMIT")
+                self.assertEqual(self.state(conn), (0, 1))
+                self.assertEqual(r.open, {})
+                self.assertEqual(r.voids, 1)
+                self.assertFalse(conn.in_transaction)
+
+    def test_commit_then_raise_answers_receipt(self):
+        # Breaks: recording a refusal for a relay that actually committed.
+        conn, ctx, r, path = self.fixture(mode="ok",
+            failures=[self.fault("COMMIT", 1, after=True)])
+        result = self.outcome(conn, ctx)
+        self.assertIsInstance(result, submit.Admitted, repr(result))
+        self.assertEqual(result, r.hooks[0])
+        self.assertEqual(self.state(conn), (1, 0))
+        self.assertEqual(r.voids, 0)
+        self.assertEqual(len(r.hooks), 1)
+        self.assertFalse(conn.in_transaction)
+
+    def test_path_c_unknown_forms(self):
+        # Breaks: choosing unknown's variant by the recovery error, not commit's code.
+        for code in (5, 10):
+            for which in ("begin", "read", "callback", "commit"):
+                with self.subTest(code=code, which=which):
+                    failures = [self.fault("COMMIT", 1, code=code)]
+                    if which == "begin":
+                        failures.append(self.fault("BEGIN IMMEDIATE"))
+                    elif which == "read":
+                        failures.append(self.fault("SELECT 1 FROM RELAYS WHERE ID = ?", 1))
+                    elif which == "commit":
+                        failures.append(self.fault("COMMIT", 2))
+                    conn, ctx, r, path = self.fixture(mode="ok", failures=failures,
+                        void_mode="raise" if which == "callback" else "normal")
+                    self.assert_unknown(self.outcome(conn, ctx), variant=code != 5)
+                    self.assertEqual(self.state(conn), (0, 0))
+                    self.assertIn("reservation-1", r.open)
+                    self.assert_clean(conn, ctx, r, path)
+        for which in ("begin", "read"):
+            with self.subTest(committed=True, which=which):
+                failures = [self.fault("COMMIT", 1, after=True), self.fault(
+                    "BEGIN IMMEDIATE" if which == "begin" else "SELECT 1 FROM RELAYS WHERE ID = ?",
+                    2 if which == "begin" else 1)]
+                conn, ctx, r, path = self.fixture(mode="ok", failures=failures)
+                self.assert_unknown(self.outcome(conn, ctx), variant=True)
+                self.assertEqual(self.state(conn), (1, 0))
+                self.assertEqual(r.voids, 0)
+                self.assert_clean(conn, ctx, r, path)
+
+    def test_authority_guard_raise(self):
+        # Breaks: turning a failed authority void into a final admission answer.
+        for path_kind in ("H", "C"):
+            with self.subTest(path=path_kind):
+                failures = [self.fault("COMMIT", 1, code=5)] if path_kind == "C" else []
+                conn, ctx, r, path = self.fixture(
+                    mode="ok" if path_kind == "C" else "engine",
+                    void_mode="raise", failures=failures)
+                self.assert_unknown(self.outcome(conn, ctx))
+                self.assertEqual(self.state(conn), (0, 0))
+                self.assert_clean(conn, ctx, r, path)
+
+    def test_resubmission_after_unknown(self):
+        # Breaks: duplicating a committed relay or abandoning an earlier reservation.
+        for which in ("hook", "precommit", "stored", "void-committed"):
+            with self.subTest(which=which):
+                failures = []
+                if which == "precommit":
+                    failures = [self.fault("COMMIT", 1)]
+                elif which == "stored":
+                    failures = [self.fault("COMMIT", 1, after=True),
+                                self.fault("SELECT 1 FROM RELAYS WHERE ID = ?", 1)]
+                elif which == "void-committed":
+                    failures = [self.fault("COMMIT", 1, after=True)]
+                conn, ctx, r, path = self.fixture(
+                    mode="ok" if which in ("precommit", "stored") else "engine",
+                    void_mode="raise" if which in ("hook", "precommit") else "normal", failures=failures)
+                data = draft()
+                result = self.outcome(conn, ctx, data)
+                self.assert_unknown(result, variant=which in ("precommit", "stored"))
+                self.assertNotIn(conn, submit._HOOK_FRAMES)
+                self.assertFalse(conn.in_transaction)
+                self.assertLessEqual(r.voids, 1)
+                first = r.hooks[0]
+                if which == "void-committed":
+                    self.assertEqual(self.state(conn), (0, 1))
+                    self.assertNotIn("reservation-1", r.open)
+                elif which != "stored":
+                    self.assertIn("reservation-1", r.open)
+                if which == "stored":
+                    conn.close()
+                    conn = sqlite3.connect(path)
+                    self.addCleanup(conn.close)
+                    conn.execute("PRAGMA foreign_keys=ON")
+                r.mode, r.void_mode = "ok", "normal"
+                retried = self.outcome(conn, ctx, data)
+                self.assertIsInstance(retried, submit.Admitted, repr(retried))
+                self.assertEqual(conn.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+                if which == "stored":
+                    self.assertEqual((retried.relay_id, retried.handle), (first.relay_id, first.handle))
+                    self.assertEqual(len(r.hooks), 1)
+                else:
+                    self.assertEqual(len(r.hooks), 2)
+                    self.assertNotIn("reservation-1", r.open)
+                    self.assertEqual(r.open, {})
+                self.assertEqual(self.outcome(conn, ctx, data), retried)
