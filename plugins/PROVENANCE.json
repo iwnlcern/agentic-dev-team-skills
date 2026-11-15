@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "359de52870be5a25ef498d1c5df4321d04c5c1ca061fdfc6992b970d1f9b845d",
+    "sha256": "9bca37c1566972fb34993d85705170d5b4c5f2d288f28991270cb2922b128944",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -380,7 +380,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/relay-monitor.py",
-    "sha256": "91be723401b8a5e9a4c9f3805e83a546a9c5ae0a1a3f3ca1d4c0e9e0c1391e9c",
+    "sha256": "7b3f54162c750b95e8545a3d61060b5448844a510e8eed01d0ec01d3a3381ee9",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -500,7 +500,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "2ef256a90f752087c55e79965068198ebe7f83fc5859e1544713d80696ab2dd1",
+    "sha256": "c5a6afcd0c654e35bdb1669a06d0c9276c7c71ac5557b081d942c6fce4aa592d",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -529,9 +529,21 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_window_record.py",
+    "sha256": "d6ab059fad816a091b8e8d8efbbd75bac0745cdcdbb9c4047782ac21eeaf527d",
+    "source": "tools/adapters/tests/test_window_record.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/window.py",
     "sha256": "db41604a25894e468428a5ea4ace6e3989e8f7c7a206855c308ac3a24b0e6c29",
     "source": "tools/adapters/window.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/window_record.py",
+    "sha256": "546dace45e587e87d8f6728b68527cb73dc8aa69e98c9271eae0e9ccda6f61dd",
+    "source": "tools/adapters/window_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11300,7 +11312,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "359de52870be5a25ef498d1c5df4321d04c5c1ca061fdfc6992b970d1f9b845d",
+    "sha256": "9bca37c1566972fb34993d85705170d5b4c5f2d288f28991270cb2922b128944",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11336,7 +11348,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/relay-monitor.py",
-    "sha256": "91be723401b8a5e9a4c9f3805e83a546a9c5ae0a1a3f3ca1d4c0e9e0c1391e9c",
+    "sha256": "7b3f54162c750b95e8545a3d61060b5448844a510e8eed01d0ec01d3a3381ee9",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -11456,7 +11468,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "2ef256a90f752087c55e79965068198ebe7f83fc5859e1544713d80696ab2dd1",
+    "sha256": "c5a6afcd0c654e35bdb1669a06d0c9276c7c71ac5557b081d942c6fce4aa592d",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -11485,9 +11497,21 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_window_record.py",
+    "sha256": "d6ab059fad816a091b8e8d8efbbd75bac0745cdcdbb9c4047782ac21eeaf527d",
+    "source": "tools/adapters/tests/test_window_record.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/window.py",
     "sha256": "db41604a25894e468428a5ea4ace6e3989e8f7c7a206855c308ac3a24b0e6c29",
     "source": "tools/adapters/window.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/window_record.py",
+    "sha256": "546dace45e587e87d8f6728b68527cb73dc8aa69e98c9271eae0e9ccda6f61dd",
+    "source": "tools/adapters/window_record.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22172,7 +22196,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "359de52870be5a25ef498d1c5df4321d04c5c1ca061fdfc6992b970d1f9b845d",
+    "sha256": "9bca37c1566972fb34993d85705170d5b4c5f2d288f28991270cb2922b128944",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -22208,7 +22232,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/relay-monitor.py",
-    "sha256": "91be723401b8a5e9a4c9f3805e83a546a9c5ae0a1a3f3ca1d4c0e9e0c1391e9c",
+    "sha256": "7b3f54162c750b95e8545a3d61060b5448844a510e8eed01d0ec01d3a3381ee9",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -22328,7 +22352,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_relay_monitor.py",
-    "sha256": "2ef256a90f752087c55e79965068198ebe7f83fc5859e1544713d80696ab2dd1",
+    "sha256": "c5a6afcd0c654e35bdb1669a06d0c9276c7c71ac5557b081d942c6fce4aa592d",
     "source": "tools/adapters/tests/test_relay_monitor.py"
   },
   {
@@ -22357,9 +22381,21 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_window_record.py",
+    "sha256": "d6ab059fad816a091b8e8d8efbbd75bac0745cdcdbb9c4047782ac21eeaf527d",
+    "source": "tools/adapters/tests/test_window_record.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/window.py",
     "sha256": "db41604a25894e468428a5ea4ace6e3989e8f7c7a206855c308ac3a24b0e6c29",
     "source": "tools/adapters/window.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/window_record.py",
+    "sha256": "546dace45e587e87d8f6728b68527cb73dc8aa69e98c9271eae0e9ccda6f61dd",
+    "source": "tools/adapters/window_record.py"
   },
   {
     "kit_version": "2.9.7",

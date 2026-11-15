@@ -376,10 +376,19 @@ class WindowLock:
     Acquisition is non-blocking only; a copy that cannot take it exits, so no second doorbell waits.
     """
 
-    def __init__(self, window_key: str):
+    def __init__(self, window_key: str, *, home: Path | None = None):
         if not valid_window_key(window_key):
             raise ValueError("invalid-window-key")
-        self._path = note_dir() / f"window-{window_key}.lock"
+        folder = (Path.home() if home is None else Path(home)) / ".adt" / "windows"
+        folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(directory).st_uid != os.getuid():
+                raise PermissionError("window lock directory owner")
+            os.fchmod(directory, 0o700)
+        finally:
+            os.close(directory)
+        self._path = folder / f"{window_key}.lock"
         self._fd = None
 
     def acquire(self) -> bool:
