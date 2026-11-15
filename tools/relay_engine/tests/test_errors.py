@@ -14,6 +14,7 @@ from relay_engine.jcs import jcs_encode
 POLICY_CODES = {
     "E-SETTING-OPERATOR-ONLY",
     "E-JEV-ACT-NEEDS-RECORD",
+    "E-DELIVERY-INTERVAL-MARGIN",
     "E-KEY-MISMATCH",
     "E-ID-COLLISION",
     "E-SUPERSEDED",
@@ -103,7 +104,8 @@ ALL_CODES = POLICY_CODES | {
 class TestErrorRegistry(unittest.TestCase):
     def test_setting_codes(self):
         codes = {"E-SETTING-OPERATOR-ONLY": "policy", "E-JEV-ACT-NEEDS-RECORD": "policy",
-                 "E-SETTING-UNKNOWN": "command", "E-SETTING-VALUE": "command"}
+                 "E-SETTING-UNKNOWN": "command", "E-SETTING-VALUE": "command",
+                 "E-DELIVERY-INTERVAL-MARGIN": "policy"}
         self.assertTrue(set(codes) <= set(errors.ERRORS))
         from relay_engine import queries
         for code, kind in codes.items():
@@ -116,7 +118,7 @@ class TestErrorRegistry(unittest.TestCase):
                 if code in {"E-SETTING-UNKNOWN", "E-SETTING-VALUE"}:
                     for key in queries.SETTINGS:
                         self.assertIn(key, exc.remedy)
-                    for fixed in ("bool", "int", "1", "1440"):
+                    for fixed in ("bool", "int", "1", "1440", "0", "600"):
                         self.assertIn(fixed, exc.remedy)
 
 

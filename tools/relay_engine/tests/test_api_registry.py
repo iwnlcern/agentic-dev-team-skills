@@ -230,7 +230,7 @@ class TestErrorCatalog(unittest.TestCase):
         }
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        self.assertEqual(digest(value), '1209d523248fb833372ece96b809d290f2464bae069853110b57e220d3ae8863')
+        self.assertEqual(digest(value), '63b8ab166ee98ee4e116e680bccbfa253691e1c9bf967fb9fad0fadc90453902')
         self.assertFalse(any(k.startswith('E_API_') for k in errors.ERRORS))
         changed = dict(value, errors=dict(value['errors'], E_API_INTERNAL={}))
         self.assertNotEqual(digest(changed), digest(value))

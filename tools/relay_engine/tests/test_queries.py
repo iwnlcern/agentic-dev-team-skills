@@ -2575,10 +2575,166 @@ class TestProjectSettings(Store):
         return (self.conn.execute("SELECT * FROM project_settings ORDER BY project_id,key").fetchall(),
                 self.conn.execute("SELECT * FROM settings_history ORDER BY project_id,revision").fetchall())
 
+    def test_delivery_interval_default(self):
+        # Breaks M1: a missing or different default, or a reader clamping it.
+        outcome = self.setting_outcome(lambda: queries.project_settings(
+            self.conn, 'p').values['delivery_interval_seconds'])
+        self.assertEqual(outcome, ('ok', 300))
+        self.assertIs(type(outcome[1]), int)
+        self.assertEqual(self.setting_rows(), ([], []))
+
+    def test_delivery_interval_values(self):
+        # Breaks M2/M9: a widened range or the old three-key DDL.
+        self.conn.execute('BEGIN')
+        for revision, value in enumerate((0, 600, 120), 1):
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', 'delivery_interval_seconds', value,
+                principal='operator', now_ms=100 + revision))
+            self.assertEqual(outcome, ('ok', revision))
+            self.assertEqual(queries.project_settings(self.conn, 'p').values[
+                'delivery_interval_seconds'], value)
+            rows = queries.settings_history(self.conn, 'p', 500)
+            self.assertEqual(len(rows), revision)
+            self.assertEqual((rows[0].key, rows[0].new, rows[0].by_principal,
+                              rows[0].at_ms),
+                             ('delivery_interval_seconds', value, 'operator', 100 + revision))
+        for value in (601, -1, True, '300'):
+            before = self.setting_rows()
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', 'delivery_interval_seconds', value,
+                principal='operator', now_ms=200))
+            self.assertEqual(outcome[0], 'E-SETTING-VALUE', outcome)
+            self.assertEqual(self.setting_rows(), before)
+            self.assertEqual(queries.project_settings(self.conn, 'p').revision, 3)
+
+    def test_delivery_interval_margin(self):
+        # Breaks M3/M4/M5/M10: either direction, equality, or the minute margin.
+        self.conn.execute('BEGIN')
+        cases = [('delivery_interval_seconds', 601, 'E-SETTING-VALUE'),
+                 ('delivery_interval_seconds', 600, 'ok'),
+                 ('delivery_interval_seconds', 300, 'ok'),
+                 ('doorbell_off_minutes', 6, 'ok'),
+                 ('delivery_interval_seconds', 301, 'E-DELIVERY-INTERVAL-MARGIN'),
+                 ('delivery_interval_seconds', 300, 'ok'),
+                 ('doorbell_off_minutes', 5, 'E-DELIVERY-INTERVAL-MARGIN'),
+                 ('delivery_interval_seconds', 240, 'ok'),
+                 ('doorbell_off_minutes', 5, 'ok'),
+                 ('delivery_interval_seconds', 0, 'ok'),
+                 ('doorbell_off_minutes', 1, 'ok')]
+        for key, value, expected in cases:
+            before = self.setting_rows()
+            revision = queries.project_settings(self.conn, 'p').revision
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', key, value, principal='operator', now_ms=100))
+            self.assertEqual(outcome[0], expected, outcome)
+            if expected != 'ok':
+                self.assertEqual(self.setting_rows(), before)
+                self.assertEqual(queries.project_settings(self.conn, 'p').revision, revision)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'delivery_interval_seconds'], 0)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'doorbell_off_minutes'], 1)
+
+    def test_delivery_interval_one_transaction(self):
+        # Breaks M7: a fresh connection sees the committed threshold, not this write.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        conn = sqlite3.connect(os.path.join(directory.name, 'settings.sqlite3'))
+        self.addCleanup(conn.close)
+        self.conn.backup(conn)
+        conn.execute('PRAGMA journal_mode=WAL')
+        self.conn = conn
+        self.conn.execute('BEGIN')
+        self.assertEqual(self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'doorbell_off_minutes', 6, principal='operator', now_ms=100))[0], 'ok')
+        self.conn.commit()
+        before = self.setting_rows()
+        self.conn.execute('BEGIN')
+        for key, value in (('doorbell_off_minutes', 12), ('delivery_interval_seconds', 600)):
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', key, value, principal='operator', now_ms=101))
+            self.assertEqual(outcome[0], 'ok', outcome)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'delivery_interval_seconds'], 600)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self.setting_rows(), before)
+        self.conn.execute('BEGIN')
+        outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'delivery_interval_seconds', 600, principal='operator', now_ms=102))
+        self.assertEqual(outcome[0], 'E-DELIVERY-INTERVAL-MARGIN', outcome)
+        self.conn.rollback()
+        self.assertEqual(self.setting_rows(), before)
+        settings = queries.project_settings(self.conn, 'p')
+        self.assertEqual((settings.values['doorbell_off_minutes'], settings.values[
+            'delivery_interval_seconds'], settings.revision), (6, 300, 1))
+
+    def test_delivery_interval_equal_and_isolated(self):
+        # Breaks M6: checking only after the equal-value return accepts an invalid pair.
+        self.conn.execute('BEGIN')
+        before = self.setting_rows()
+        outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'delivery_interval_seconds', 300, principal='operator', now_ms=100))
+        self.assertEqual(outcome, ('ok', 0))
+        self.assertEqual(self.setting_rows(), before)
+        self.conn.execute("INSERT INTO project_settings VALUES ('p', 'doorbell_off_minutes', '5')")
+        seeded = self.setting_rows()
+        for key, value in (('delivery_interval_seconds', 300), ('doorbell_off_minutes', 5)):
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', key, value, principal='operator', now_ms=101))
+            self.assertEqual(outcome[0], 'E-DELIVERY-INTERVAL-MARGIN', outcome)
+            self.assertEqual(self.setting_rows(), seeded)
+            settings = queries.project_settings(self.conn, 'p')
+            self.assertEqual((settings.values['doorbell_off_minutes'], settings.values[
+                'delivery_interval_seconds'], settings.revision), (5, 300, 0))
+        self.assertEqual(self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'doorbell_off_minutes', 6, principal='operator', now_ms=102))[0], 'ok')
+        for project, expected in (('p', 'E-DELIVERY-INTERVAL-MARGIN'), ('q', 'ok')):
+            before = self.setting_rows()
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, project, 'delivery_interval_seconds', 600,
+                principal='operator', now_ms=103))
+            self.assertEqual(outcome[0], expected, outcome)
+            if expected != 'ok':
+                self.assertEqual(self.setting_rows(), before)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'delivery_interval_seconds'], 300)
+        self.assertEqual(queries.project_settings(self.conn, 'q').values[
+            'delivery_interval_seconds'], 600)
+
+    def test_delivery_interval_operator_only(self):
+        # Preservation/M8: the margin and range may not precede authorization.
+        self.conn.execute('BEGIN')
+        self.assertEqual(self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'doorbell_off_minutes', 6, principal='operator', now_ms=100))[0], 'ok')
+        for value in (301, 601):
+            before = self.setting_rows()
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', 'delivery_interval_seconds', value,
+                principal=PLANNER.address, now_ms=101))
+            self.assertEqual(outcome[0], 'E-SETTING-OPERATOR-ONLY', outcome)
+            self.assertEqual(self.setting_rows(), before)
+            self.assertEqual(queries.project_settings(self.conn, 'p').revision, 1)
+
+    def test_delivery_interval_ddl(self):
+        # Breaks: keeping the old CHECK/digest or accepting an old ledger.
+        old_keys = "'jev_record', 'jev_act', 'doorbell_off_minutes'"
+        new_keys = old_keys + ", 'delivery_interval_seconds'"
+        earlier = tuple(statement.replace(new_keys, old_keys) for statement in schema._TABLES)
+        digest = hashlib.sha256('\n'.join(earlier + schema._INDEXES + schema._TRIGGERS).encode()).hexdigest()
+        self.assertNotEqual(schema.ddl_digest(), digest)
+        self.conn.execute('UPDATE schema_version SET ddl_sha256=?', (digest,))
+        self.conn.commit()
+        before = self.setting_rows()
+        outcome = self.setting_outcome(lambda: schema.init_v3(self.conn))
+        self.assertEqual(outcome[0], 'E-SCHEMA-MISMATCH', outcome)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.setting_rows(), before)
+
     def test_settings_defaults(self):
         settings = queries.project_settings(self.conn, PLANNER.project_id)
         self.assertEqual(settings.values, {"jev_record": False, "jev_act": False,
-                                           "doorbell_off_minutes": 15})
+                                           "doorbell_off_minutes": 15, "delivery_interval_seconds": 300})
         self.assertIs(type(settings.values["jev_record"]), bool)
         self.assertIs(type(settings.values["doorbell_off_minutes"]), int)
         self.assertEqual(settings.revision, 0)
@@ -2608,7 +2764,8 @@ class TestProjectSettings(Store):
         self.assertEqual(change("jev_act", True, 104), ("ok", 3))
         settings = queries.project_settings(self.conn, PLANNER.project_id)
         self.assertEqual((settings.values, settings.revision),
-                         ({"jev_record": True, "jev_act": True, "doorbell_off_minutes": 30}, 3))
+                         ({"jev_record": True, "jev_act": True, "doorbell_off_minutes": 30,
+                           "delivery_interval_seconds": 300}, 3))
         history = queries.settings_history(self.conn, PLANNER.project_id, 500)
         self.assertEqual([(h.revision, h.key, h.old, h.new, h.by_principal, h.at_ms) for h in history],
                          [(3, "jev_act", None, True, "operator", 104),

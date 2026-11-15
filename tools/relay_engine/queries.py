@@ -1135,6 +1135,7 @@ SETTINGS: Mapping[str, SettingSpec] = MappingProxyType({
     "jev_record": SettingSpec(bool, False),
     "jev_act": SettingSpec(bool, False),
     "doorbell_off_minutes": SettingSpec(int, 15, 1, 1440),
+    "delivery_interval_seconds": SettingSpec(int, 300, 0, 600),
 })
 
 
@@ -1198,6 +1199,11 @@ def set_project_setting_step(conn, project_id: str, key: str, value: bool | int,
     if ((key == "jev_act" and value is True and not current.values["jev_record"]) or
             (key == "jev_record" and value is False and current.values["jev_act"])):
         raise errors.error_for("E-JEV-ACT-NEEDS-RECORD")
+    if ((key == "delivery_interval_seconds" and
+            value > current.values["doorbell_off_minutes"] * 60 - 60) or
+            (key == "doorbell_off_minutes" and
+             current.values["delivery_interval_seconds"] > value * 60 - 60)):
+        raise errors.error_for("E-DELIVERY-INTERVAL-MARGIN")
     if value == current.values[key]:
         return current.revision
     stored = conn.execute("SELECT value FROM project_settings WHERE project_id = ? AND key = ?",
