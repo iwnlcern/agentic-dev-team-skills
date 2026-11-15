@@ -2177,7 +2177,7 @@ class TestRuleH(SlipStore):
     requested = TestErratum6.requested
     reviewed = TestErratum6.reviewed
 
-    def digest_objection_fixture(self, case):
+    def digest_objection_fixture(self, case, *, pending_holder=False):
         """An off-lineage claim and a real slip binding its bytes by digest."""
         claims.assign_reviewer(self.conn, SECOND.team_instance_id, REVIEWER.seat_id,
                                'operator', self.clock)
@@ -2197,10 +2197,13 @@ class TestRuleH(SlipStore):
             q = self.file('q.md', b'q X\n')
             own = self.reviewed(self.requested('P', self.go(), q), 'approve', q)
             issued = self.issue(own, refs=references)
+            self.assertEqual(self.digest_artifacts(issued)['repo-1:p.md'],
+                             git(repo.path, 'rev-parse', 'main:p.md'))
             options, artifact = {'path': str(repo.path)}, 'repo-1:p.md'
         else:
             p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
-            own = self.reviewed(self.requested('P', self.go(), q), 'approve', q)
+            review = self.answer if pending_holder else self.reviewed
+            own = review(self.requested('P', self.go(), q), 'approve', q)
             if case == 'pin':
                 claim = self.reviewed(self.requested('D2', own, p), 'approve', p,
                                       kind='design', sender=SECOND)
@@ -2213,6 +2216,55 @@ class TestRuleH(SlipStore):
         self.assertNotIn(artifact, [lock for locks in self.claim_artifacts(issued).values()
                                     for lock in locks])
         return p, claim, options
+
+    def test_digest_bound_human_decision_unblocks_operator(self):
+        # D-UNBLOCK: an off-lineage human decision names the operator.
+        _, claim, options = self.digest_objection_fixture('pin')
+        objection = self.verify(claim, 'human-decision-required')
+        answer = self.act(**options)
+        self.assertEqual(answer.outcome, 'held')
+        self.assertEqual(answer.code, 'authority.verification-objected')
+        self.assertIn(objection.relay_id, answer.reason)
+        self.assertEqual(answer.unblocker, 'operator')
+
+    def test_digest_objection_named_before_pending_claim(self):
+        # D-AFTER: the digest objection precedes a bound claim's pending state.
+        _, claim, options = self.digest_objection_fixture('pin', pending_holder=True)
+        objection = self.verify(claim, 'must-revise')
+        answer = self.act(**options)
+        self.assertEqual(answer.outcome, 'held')
+        self.assertEqual(answer.code, 'authority.verification-objected')
+        self.assertIn(objection.relay_id, answer.reason)
+
+    def test_act_entry_traces_one_question_per_digest_path(self):
+        # D-TWICE: the real reader and entry ask each H statement once per path.
+        from collections import Counter
+        from relay_engine import authority
+        p, _, _ = self.digest_objection_fixture('pin')
+        q = p.with_name('q.md')
+        def traced(call):
+            statements = []
+            self.conn.set_trace_callback(statements.append)
+            try:
+                return call(), statements
+            finally:
+                self.conn.set_trace_callback(None)
+        expected = []
+        for path in (q, p):
+            _, statements = traced(lambda: claims.standing_objection(
+                self.conn, 'p', str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
+            self.assertEqual(len(statements), 2, statements)
+            expected.extend(statements)
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            answer, statements = traced(lambda: authority.act_entry(
+                self.conn, IMPL.seat_id, slips.Effect('commit', 'repo-1', 'work'), self.clock))
+            self.assertEqual(answer.outcome, 'allow', statements)
+            actual = Counter(statements)
+            for sql, count in Counter(expected).items():
+                self.assertEqual(actual[sql], count, statements)
+        finally:
+            self.conn.rollback()
 
     def test_objection_reaches_digest_bound_path(self):
         # D-SKIP / D-GIT: the set must reach pins and Git-spelled digest bindings.

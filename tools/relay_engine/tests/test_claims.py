@@ -503,6 +503,24 @@ class TestRuleHClaims(ClaimStore):
             self.conn.set_trace_callback(None)
         self.assertEqual(len(statements), 2, statements)
 
+    def test_standing_objection_executes_the_constants(self):
+        # SQL-INLINE: explain and execute must refer to the same statement text.
+        statements = []
+        class RecordingConnection:
+            def __init__(self, conn):
+                self.conn = conn
+            @property
+            def in_transaction(self):
+                return self.conn.in_transaction
+            def set_authorizer(self, callback):
+                self.conn.set_authorizer(callback)
+            def execute(self, sql, parameters=()):
+                statements.append(sql)
+                return self.conn.execute(sql, parameters)
+        claims.standing_objection(RecordingConnection(self.conn), 'p', str(self.plan),
+                                  hashlib.sha256(self.plan.read_bytes()).hexdigest())
+        self.assertEqual(statements, [claims.STANDING_VERDICTS_SQL, claims.STANDING_WAIVERS_SQL])
+
     def test_rule_h_statements_use_bytes_index(self):
         # IDX-DROP: both actual statements have the artifact/content access path.
         for statement in (claims.STANDING_VERDICTS_SQL, claims.STANDING_WAIVERS_SQL):
