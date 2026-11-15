@@ -24,7 +24,7 @@ TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "lifecycle_outbox", "lifecycle_outbox_events",
           "evidence_objects", "evidence_object_bundles", "evidence_bundles",
           "evidence_captures", "evidence_uploads", "evidence_retention",
-          "evidence_derive", "evidence_prune_marks", "evidence_pruned"}
+          "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
 
 INDEXES = {
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
@@ -852,6 +852,17 @@ class TestAdmissionReplaySchema(Store):
 class TestTableOwners(Store):
     """Breaks: incomplete or permissive production ownership declarations."""
 
+    def test_imported_relays_not_hook_writable(self):
+        # Store provenance must never be admitted as an Authority hook write.
+        self.assertEqual(schema.TABLE_OWNERS.get('imported_relays'), 'store')
+        fixture = SubmitStore()
+        fixture.setUp()
+        try:
+            with self.assertRaises(ValueError):
+                replace(fixture.ctx(), after_admit_writes=frozenset({'imported_relays'}))
+        finally:
+            fixture.doCleanups()
+
     def test_table_owners_complete(self):
         self.assertTrue(hasattr(schema, "TABLE_OWNERS"),
                         "the hook needs the complete production table-owner registry")
@@ -863,8 +874,8 @@ class TestTableOwners(Store):
                     "seats", "seat_occupants", "seat_sessions", "mutation_receipts"}
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
-                 "evidence_derive", "evidence_prune_marks", "evidence_pruned"}
-        self.assertEqual(len(actual), 34)
+                 "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
+        self.assertEqual(len(actual), 35)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)
         console = {"lifecycle_outbox", "lifecycle_outbox_events"}

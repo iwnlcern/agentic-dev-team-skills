@@ -44,7 +44,7 @@ class TestEvidenceSchema(unittest.TestCase):
         conn = self.connect()
         self.require_evidence(conn)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items()
-                          if owner == 'store'}, EVIDENCE_TABLES)
+                          if owner == 'store'}, EVIDENCE_TABLES | {'imported_relays'})
         strict = {r[1]: r[5] for r in conn.execute('PRAGMA table_list')}
         for table in sorted(EVIDENCE_TABLES):
             with self.subTest(table=table):

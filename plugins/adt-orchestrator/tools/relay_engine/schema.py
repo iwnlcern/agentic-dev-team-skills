@@ -179,9 +179,26 @@ TABLE_OWNERS: dict[str, str] = {
     "evidence_derive": "store",
     "evidence_prune_marks": "store",
     "evidence_pruned": "store",
+    "imported_relays": "store",
 }
 
 _TABLES = _PLATFORM_TABLES + (
+    """CREATE TABLE IF NOT EXISTS imported_relays (
+    relay_id TEXT NOT NULL REFERENCES relays(id),
+    root_uuid TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    stamp TEXT NOT NULL,
+    zone TEXT NOT NULL,
+    utc_offset_s INTEGER NOT NULL,
+    rendered_path TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    headers_json TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    original_phase TEXT,
+    foreign_to_json TEXT,
+    delivery_marked_at INTEGER NOT NULL,
+    PRIMARY KEY (relay_id, root_uuid, seq)
+) STRICT""",
     """CREATE TABLE IF NOT EXISTS project_settings (
     project_id TEXT NOT NULL REFERENCES projects (id),
     key TEXT NOT NULL CHECK (key IN ('jev_record', 'jev_act', 'doorbell_off_minutes')),
