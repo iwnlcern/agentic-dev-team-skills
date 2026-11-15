@@ -192,7 +192,8 @@ def read(conn, relay_id, seat_id, at_ms, meta=False, *, foreign_release: Foreign
 def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
     row = conn.execute(
         "SELECT r.handle, r.kind, " + party_sql("r.sender_") + ", r.subject, p.handle, r.verdict, r.needs,"
-        " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id, r.project_id, r.id"
+        " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id, r.project_id, r.id,"
+        " r.submission_key, r.sender_special"
         " FROM relays r JOIN bodies b ON b.relay_id = r.id"
         " LEFT JOIN relays p ON p.id = r.parent_id WHERE r.id = ?", (relay_id,)).fetchone()
     if row is None:
@@ -223,6 +224,7 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
         "cc": [seat for seat, role in seats if role == "cc"],
         "subject": row[3], "parent": row[4], "verdict": row[5], "needs": row[6],
         "created_at": row[7],
+        "imported": row[14] is None and row[15] != "system",
     }
     unopened = (unopened_in_lineage(conn, relay_id, seat_id)
                 if row[6] == "review" and (seat_id, "to") in seats else [])

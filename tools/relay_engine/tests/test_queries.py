@@ -32,7 +32,7 @@ from relay_engine.tests.test_submit import (FOREIGN, IMPL, ORCH, OTHER, PLANNER,
 OPERATOR = SEATS["operator"]
 
 ENVELOPE = {"handle", "kind", "sender", "to", "cc", "subject", "parent", "verdict", "needs",
-            "created_at"}
+            "created_at", "imported"}
 
 
 def retain_query_evidence(name, states):
@@ -63,7 +63,7 @@ class TestReads(Store):
             "handle": 2, "kind": "SITREP", "sender": PLANNER.seat_id,
             "to": [IMPL.seat_id, OTHER.seat_id], "cc": [ORCH.seat_id],
             "subject": "please act", "parent": 1, "verdict": None, "needs": "act",
-            "created_at": child.created_at_ms})
+            "created_at": child.created_at_ms, "imported": False})
         self.assertIsNone(result.meta)
         opened = lambda: self.conn.execute(
             "SELECT opened_at FROM recipients WHERE relay_id = ? AND seat_id = ?",
@@ -745,6 +745,35 @@ class TestEdges(GitStore):
 
 
 class TestRecords(Store):
+    def test_read_marks_imported(self):
+        # A missing or wrong imported flag must fail before importing the absent module on B.
+        native = self.submit(draft(to="v3-engine.implementer"))
+        before = queries.read(self.conn, native.relay_id, IMPL.seat_id, self.clock + 1).envelope
+        self.assertIn("imported", before)
+        self.assertIs(before["imported"], False)
+        import relay_engine.imports as imports
+        relay = imports.ImportedRelay(self.clock + 1, "SITREP", None, "s", PLANNER.seat_id,
+                                      "planner", "t1", (IMPL.seat_id,), (), None, None,
+                                      b"body\n", 12, "a" * 64)
+        self.conn.execute("BEGIN IMMEDIATE")
+        caught = None
+        try:
+            relay_id = imports.import_relay_step(self.conn, "p", relay,
+                                                 marked_at_ms=self.clock + 2)
+        except Exception as error:
+            caught = error
+        self.assertIsNone(caught, repr(caught))
+        self.conn.commit()
+        after = queries.read(self.conn, relay_id, IMPL.seat_id, self.clock + 3).envelope
+        self.assertEqual(after, {"handle": 2, "kind": "SITREP", "sender": PLANNER.seat_id,
+                                "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None,
+                                "verdict": None, "needs": "none", "created_at": self.clock + 1,
+                                "imported": True})
+        self.assertEqual(before, {"handle": 1, "kind": "SITREP", "sender": PLANNER.seat_id,
+                                 "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None,
+                                 "verdict": None, "needs": "none", "created_at": native.created_at_ms,
+                                 "imported": False})
+
     def test_session_dirty_transaction_is_preserved(self):
         """Neither session helper may dispose of a caller-owned transaction."""
         current = queries.record_session(self.conn, "host", "codex", IMPL.seat_id, 10)
