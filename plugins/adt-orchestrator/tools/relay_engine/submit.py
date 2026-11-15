@@ -583,6 +583,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
     # lock (PR-3 fold S2); relays and recipients rows are append-only.
     recipients = _recipients(ctx, draft, lines)
     parent = _parent(conn, sender, draft, lines)
+    answers = _answers(conn, sender, draft, lines, parent)
     targets = _references(conn, ctx, draft, lines)
     transitions = _transitions(draft, lines)
     snapshot_plan = _snapshot_plan(draft, lines, targets)
@@ -613,7 +614,8 @@ def _admit(conn, ctx, data, now, *, _system=False):
              draft.kind, draft.verdict, draft.needs, draft.subject,
              None if parent is None else parent[0], *party_columns(sender.seat_id),
              sender.role, created, hashlib.sha256(draft.body).hexdigest(),
-             meta_digest(draft, None if parent is None else parent[0], targets), len(draft.body),
+             meta_digest(draft, None if parent is None else parent[0], targets, answers),
+             len(draft.body),
              draft.header_bytes, git_state_id, None if _system else ctx.submission_key,
              None if _system else hashlib.sha256(data).hexdigest()))
         conn.execute("INSERT INTO bodies (relay_id, body) VALUES (?, ?)",
@@ -635,6 +637,8 @@ def _admit(conn, ctx, data, now, *, _system=False):
         _write_transitions(conn, sender, transitions, relay_id, created)
         if parent is not None:
             _write_answered_by(conn, parent[0], sender.seat_id, relay_id)
+        for answered_id in answers:
+            _write_answered_by(conn, answered_id, sender.seat_id, relay_id)
         # an admission is the sender's activity (PR-3 fold R6), committed with it;
         # a special (operator, system) is not a seat and records none, as in note_activity
         if sender.seat_id not in schema.SPECIALS:
@@ -670,7 +674,7 @@ _DIGEST_TARGET = {"relay": ("target_relay_id",), "path": ("target_path",),
                           "target_line_start", "target_line_end")}
 
 
-def meta_digest(draft, parent_id=None, targets=()):
+def meta_digest(draft, parent_id=None, targets=(), answers=()):
     """sha256 of the parsed fields in JCS form (DD § 5, erratum E1): list
     whitespace is gone after parsing, and addresses are never case-folded.
     PARENT and each REF enter as their resolved targets, so equivalent
@@ -688,6 +692,8 @@ def meta_digest(draft, parent_id=None, targets=()):
         "fixes": [list(fix) for fix in draft.fixes],
         "resolves": [list(resolve) for resolve in draft.resolves],
     }
+    if answers:
+        fields["answers"] = list(answers)
     return hashlib.sha256(jcs.jcs_encode(fields)).hexdigest()
 
 
@@ -720,6 +726,27 @@ def _find_relay(conn, project_id, spelling):
         row = conn.execute("SELECT id, bundle_id FROM relays WHERE project_id = ? AND id = ?",
                            (project_id, spelling)).fetchone()
     return row
+
+
+def _answers(conn, sender, draft, lines, parent) -> tuple[str, ...]:
+    """Resolve addressed, opened and distinct answers before taking the write lock."""
+    resolved = []
+    for index, spelling in enumerate(draft.answers):
+        params = {"line": lines.of("ANSWERS", index), "value": header._display(spelling)}
+        row = _find_relay(conn, sender.project_id, spelling)
+        if row is None:
+            raise errors.error_for("E-ANSWERS-UNKNOWN", **params)
+        recipient = conn.execute(
+            "SELECT opened_at FROM recipients WHERE relay_id = ? AND " + party_sql() + " = ?",
+            (row[0], sender.seat_id)).fetchone()
+        if recipient is None:
+            raise errors.error_for("E-ANSWERS-NOT-ADDRESSED", **params)
+        if recipient[0] is None and sender.seat_id != OPERATOR_SEAT_ID:
+            raise errors.error_for("E-ANSWERS-UNOPENED", **params)
+        if (parent is not None and row[0] == parent[0]) or row[0] in resolved:
+            raise errors.error_for("E-ANSWERS-REPEATED", **params)
+        resolved.append(row[0])
+    return tuple(resolved)
 
 
 def _parent(conn, sender, draft, lines):

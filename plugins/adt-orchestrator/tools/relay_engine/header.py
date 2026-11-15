@@ -38,6 +38,7 @@ class Draft:
     to: tuple
     cc: tuple
     parent: str | None
+    answers: tuple[str, ...]
     bundle: str | None
     verdict: str | None
     needs: str
@@ -77,6 +78,7 @@ FIELDS = (
     FieldSpec("CC", "0-1", None, "submit.submit -> recipients (role cc)"),
     FieldSpec("PARENT", "0-1", None,
               "submit.submit -> relays.parent_id and the parent edge"),
+    FieldSpec("ANSWERS", "0-n", None, "submit.submit -> recipients.answered_by"),
     FieldSpec("BUNDLE", "0-1", None, "submit.submit -> bundles"),
     FieldSpec("VERDICT", "0-1", frozenset(VERDICTS),
               "submit.submit -> relays.verdict"),
@@ -343,7 +345,7 @@ def _shape(number, field, value, form):
 
 def _validate(values, seen, body, header_bytes, validate_address):
     first = {}
-    lists = {"REF": [], "FINDING": [], "FIXES": [], "RESOLVE": []}
+    lists = {"REF": [], "FINDING": [], "FIXES": [], "RESOLVE": [], "ANSWERS": []}
     for number, key, value in values:
         if key in lists:
             lists[key].append((number, value))
@@ -377,6 +379,9 @@ def _validate(values, seen, body, header_bytes, validate_address):
         number, parent = first["PARENT"]
         if _HANDLE.fullmatch(parent) is None and _UUID.fullmatch(parent) is None:
             _shape(number, "PARENT", parent, "#<n> or a lowercase UUID")
+    for number, answer in lists["ANSWERS"]:
+        if _HANDLE.fullmatch(answer) is None and _UUID.fullmatch(answer) is None:
+            _shape(number, "ANSWERS", answer, "#<n> or a lowercase UUID")
     if "BUNDLE" in first:
         number, bundle = first["BUNDLE"]
         if parent is not None:
@@ -394,7 +399,8 @@ def _validate(values, seen, body, header_bytes, validate_address):
     findings = _findings(kind, needs, lists["FINDING"], refs)
     fixes = _fixes(kind, lists["FIXES"])
     resolves = _resolves(lists["RESOLVE"])
-    return Draft(kind=kind, to=to, cc=cc, parent=parent, bundle=bundle,
+    return Draft(kind=kind, to=to, cc=cc, parent=parent,
+                 answers=tuple(value for _, value in lists["ANSWERS"]), bundle=bundle,
                  verdict=verdict, needs=needs, subject=subject, refs=refs,
                  findings=findings, fixes=fixes, resolves=resolves,
                  body=body, header_bytes=header_bytes)

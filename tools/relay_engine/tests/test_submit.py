@@ -83,7 +83,7 @@ class FakeDirectory:
 
 def draft(kind="SITREP", to="v3-engine.planner", needs="none", subject="s", bundle="b1",
           parent=None, cc=None, verdict=None, refs=(), findings=(), fixes=(), resolves=(),
-          body="body\n"):
+          body="body\n", answers=()):
     lines = ["KIND: " + kind, "TO: " + to]
     if cc:
         lines.append("CC: " + cc)
@@ -91,6 +91,7 @@ def draft(kind="SITREP", to="v3-engine.planner", needs="none", subject="s", bund
         lines.append("PARENT: " + parent)
     elif bundle:
         lines.append("BUNDLE: " + bundle)
+    lines += ["ANSWERS: " + answer for answer in answers]
     if verdict:
         lines.append("VERDICT: " + verdict)
     lines += ["NEEDS: " + needs, "SUBJECT: " + subject]
@@ -3655,6 +3656,128 @@ class TestImportStep(Store):
         self.assertEqual(self.conn.execute(
             "SELECT id FROM relays WHERE submission_key IS NULL"
             " AND coalesce(sender_special, '') != 'system'").fetchall(), [(imported,)])
+
+
+class TestAnswers(Store):
+    def _draft(self, answers, **kwargs):
+        # Keep the existing draft helper untouched until C1 has run.
+        data = draft(**kwargs)
+        entries = b"".join(("ANSWERS: " + item + "\n").encode() for item in answers)
+        return data.replace(b"NEEDS: ", entries + b"NEEDS: ", 1)
+
+    def _admit(self, data, sender=IMPL, **kwargs):
+        try:
+            return self.submit(data, sender=sender, **kwargs), None
+        except errors.EngineError as error:
+            return None, error.code
+
+    def _open(self, relay, sender=IMPL):
+        from relay_engine import queries
+        queries.read(self.conn, relay.relay_id, sender.seat_id, self.clock)
+
+    def _marks(self, ids):
+        return self.conn.execute("SELECT relay_id, coalesce(seat_id, special), answered_by"
+                                 " FROM recipients WHERE relay_id IN (" +
+                                 ",".join("?" for _ in ids) + ") ORDER BY relay_id, rowid",
+                                 ids).fetchall()
+
+    def test_answers_marks_each(self):
+        # Breaks: CC excluded or a listed relay never marked (N1/N8).
+        first = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        second = self.submit(draft(to=OTHER.address, cc=IMPL.address))
+        parent = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        for relay in (first, second, parent):
+            self._open(relay)
+        ids = [r.relay_id for r in (first, second, parent)]
+        before = self._marks(ids)
+        reply, code = self._admit(self._draft(("#1", second.relay_id),
+                                             to=PLANNER.address, parent=parent.relay_id))
+        self.assertIsNone(code, code)
+        self.assertEqual(self._marks(ids), [(rid, seat, reply.relay_id if seat == IMPL.seat_id
+                                            else mark) for rid, seat, mark in before])
+
+    def test_answers_refusals(self):
+        # Breaks: opened/membership/parent/resolved-id duplicate checks removed (N2/N5/N6/N7).
+        sent = self.submit(draft(to=IMPL.address))
+        other = self.submit(draft(to=OTHER.address))
+        authored = self.submit(draft(to=PLANNER.address), sender=IMPL)
+        unopened = self.submit(draft(to=IMPL.address))
+        foreign = self.submit(draft(to=FOREIGN.address), sender=FOREIGN)
+        self._open(sent)
+        cases = [(("#999",), None, "E-ANSWERS-UNKNOWN", 0),
+                 ((foreign.relay_id,), None, "E-ANSWERS-UNKNOWN", 0),
+                 ((other.relay_id,), None, "E-ANSWERS-NOT-ADDRESSED", 0),
+                 ((authored.relay_id,), None, "E-ANSWERS-NOT-ADDRESSED", 0),
+                 ((unopened.relay_id,), None, "E-ANSWERS-UNOPENED", 0),
+                 ((sent.relay_id,), sent.relay_id, "E-ANSWERS-REPEATED", 0),
+                 ((sent.relay_id, sent.relay_id), None, "E-ANSWERS-REPEATED", 1),
+                 (("#1", sent.relay_id), None, "E-ANSWERS-REPEATED", 1)]
+        for answers, parent, code, index in cases:
+            data = self._draft(answers, to=PLANNER.address, parent=parent)
+            line = [i for i, text in enumerate(data.splitlines(), 1)
+                    if text.startswith(b"ANSWERS:")][index]
+            self.refused(code, data, sender=IMPL, line=line)
+            self.assertIsNone(self.conn.execute("SELECT id FROM relays WHERE draft_sha256=?",
+                                               (hashlib.sha256(data).hexdigest(),)).fetchone())
+
+    def test_answers_already_answered(self):
+        # Breaks: an existing answered_by is overwritten (N11).
+        target = self.submit(draft(to=IMPL.address))
+        self._open(target)
+        first = self.submit(draft(to=PLANNER.address, parent=target.relay_id), sender=IMPL)
+        second, code = self._admit(self._draft((target.relay_id,), to=PLANNER.address))
+        self.assertIsNone(code, code)
+        self.assertNotEqual(first.relay_id, second.relay_id)
+        self.assertEqual(self._marks([target.relay_id]),
+                         [(target.relay_id, IMPL.seat_id, first.relay_id)])
+
+    def test_answers_meta_digest(self):
+        # Breaks: answers always or never enter the digest (N9/N10).
+        from relay_engine import jcs
+        target = self.submit(draft(to=IMPL.address))
+        self._open(target)
+        plain = draft(to=PLANNER.address)
+        old = self.submit(plain, sender=IMPL)
+        fields = dict(kind="SITREP", to=[PLANNER.address], cc=[], parent=None,
+                      bundle="b1", verdict=None, needs="none", subject="s", refs=[],
+                      findings=[], fixes=[], resolves=[])
+        digest = hashlib.sha256(jcs.jcs_encode(fields)).hexdigest()
+        self.assertEqual(self.relay(old.relay_id)["meta_sha256"], digest)
+        reply, code = self._admit(self._draft(("#1",), to=PLANNER.address))
+        self.assertIsNone(code, code)
+        expected = hashlib.sha256(jcs.jcs_encode(dict(fields, answers=[target.relay_id]))).hexdigest()
+        self.assertEqual(self.relay(reply.relay_id)["meta_sha256"], expected)
+        self.assertNotEqual(expected, digest)
+
+    def test_answers_operator(self):
+        # Breaks: opened exemption is universal or absent (N3/N4).
+        operator = SEATS["operator"]
+        first = self.submit(draft(kind="QUESTION", to="operator", needs="answer"))
+        second = self.submit(draft(kind="QUESTION", to="operator", needs="answer"))
+        reply, code = self._admit(self._draft((second.relay_id,), parent=first.relay_id,
+                                             to=PLANNER.address), sender=operator)
+        self.assertIsNone(code, code)
+        self.assertEqual(self._marks([first.relay_id, second.relay_id]),
+                         [(rid, "operator", reply.relay_id) for rid in sorted(
+                             [first.relay_id, second.relay_id])])
+        unopened = self.submit(draft(to=IMPL.address))
+        self.refused("E-ANSWERS-UNOPENED", self._draft((unopened.relay_id,),
+                     to=PLANNER.address), sender=IMPL)
+        self.refused("E-ANSWERS-NOT-ADDRESSED", self._draft((unopened.relay_id,),
+                     to=PLANNER.address), sender=operator)
+
+    def test_answers_replay(self):
+        # Breaks: a replay re-admits or writes instead of returning the receipt.
+        target = self.submit(draft(to=IMPL.address))
+        self._open(target)
+        data = self._draft((target.relay_id,), to=PLANNER.address)
+        first, code = self._admit(data, submission_key="answers-replay")
+        self.assertIsNone(code, code)
+        before = self.conn.total_changes
+        second, code = self._admit(data, submission_key="answers-replay")
+        self.assertIsNone(code, code)
+        self.assertEqual(second, first)
+        self.assertEqual(self.conn.total_changes, before)
 
 
 if __name__ == "__main__":
