@@ -25,7 +25,7 @@ class QueueFixture:
         self.catalogue = store_layout.open_catalogue(self.root / 'store')
         test.addCleanup(self.catalogue.close)
         for project, name in ((P, 'p'), (Q, 'q')):
-            self.catalogue.execute('INSERT INTO project_routes VALUES (?,?,?,0)',
+            self.catalogue.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?,?,?,0)',
                                    (project, name, 'active')).close()
         self.catalogue.commit()
         self.path = self.root / 'ledger.sqlite3'

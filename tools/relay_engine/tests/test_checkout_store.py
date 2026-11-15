@@ -20,9 +20,9 @@ class CheckoutCase(unittest.TestCase):
         self.root = Path(tmp.name)
         self.cat = store_layout.open_catalogue(self.root)
         self.addCleanup(self.cat.close)
-        self.cat.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.cat.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                          (P, 'active', 'active', 1)).close()
-        self.cat.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.cat.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                          (Q, 'creating', 'creating', 1)).close()
         self.cat.commit()
         self.ledger = sqlite3.connect(':memory:')
@@ -85,7 +85,7 @@ class TestCheckoutSteps(CheckoutCase):
 
     def test_register_refuses_other_project_elsewhere(self):
         # Catches comparing only the repository id of the open inode owner.
-        self.cat.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.cat.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                          (R, 'second', 'active', 1)).close()
         self.register(self.new())
         before = self.routes()

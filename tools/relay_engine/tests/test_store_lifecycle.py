@@ -16,7 +16,7 @@ class TestLifecycleTables(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.conn = store_layout.open_catalogue(Path(tmp.name))
         self.addCleanup(self.conn.close)
-        self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.conn.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                           (P, 'example', 'active', 1)).close()
         self.conn.commit()
         self.assertEqual(self.rows('PRAGMA foreign_keys'), [(1,)])
@@ -178,7 +178,7 @@ class TestCheckoutRoutes(unittest.TestCase):
         self.root = Path(tmp.name)
         self.conn = store_layout.open_catalogue(self.root)
         self.addCleanup(self.conn.close)
-        self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.conn.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                           (P, 'example', 'active', 1)).close()
         self.conn.commit()
 
@@ -282,7 +282,7 @@ class TestCheckoutRoutes(unittest.TestCase):
         # O1 includes ended routes; O2 loses the final tie-break; O3 uses time.
         from dataclasses import astuple
         q = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-        self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.conn.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                           (q, 'other', 'active', 1)).close()
         self.conn.commit()
         self.conn.execute('BEGIN IMMEDIATE').close()
@@ -345,7 +345,7 @@ class TestCheckoutRoutes(unittest.TestCase):
         # R1/R2/R3 lose filters; R4/R5 lose the full order or its tie-break.
         from dataclasses import astuple
         q = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-        self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+        self.conn.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                           (q, 'other', 'active', 1)).close()
         self.conn.commit()
         self.conn.execute('BEGIN IMMEDIATE').close()
