@@ -1,7 +1,11 @@
 """Backups preserve saga order, pin evidence and refuse unsafe snapshots."""
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
+import shutil
+import stat
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -137,7 +141,8 @@ class TestBackups(unittest.TestCase):
         with self.assertRaises(store_backup.BackupRefused) as caught:
             store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
         self.assertEqual(caught.exception.detail, R)
-        self.assertEqual(len(list((self.root/'backups').iterdir())), 1)
+        self.assertEqual(len(self._published()), 1)
+        self.assertEqual(self._partial_entries(), [])
         self._absent_creating_case()
         self._active_missing_case()
 
@@ -249,6 +254,7 @@ class TestBackups(unittest.TestCase):
             store_backup.backup(self.turns,self.root,'before-move',NOW+2,
                                 then_hold=(JOB,'cutover',scopes),before=refuse)
         self.assertEqual(len(list((self.root/'backups').iterdir())),count)
+        self._ordinary_hold_failure_case()
 
     def test_prune(self):
         # Break: pruning without a newer complete backup or using one policy for all reasons.
@@ -281,6 +287,9 @@ class TestBackups(unittest.TestCase):
         for removal_fails in (False, True):
             with self.subTest(removal_fails=removal_fails):
                 self._copy_cleanup_case(removal_fails)
+        for boundary in ('rename', 'backups', 'partial'):
+            with self.subTest(publication=boundary):
+                self._publication_failure_case(boundary)
 
     def _new_store(self, name):
         self.root = Path(self.tmp.name) / name
@@ -311,7 +320,8 @@ class TestBackups(unittest.TestCase):
             store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
         self.assertEqual((caught.exception.reason, caught.exception.detail),
                          ('active-ledger-missing', P))
-        self.assertEqual(list((self.root/'backups').iterdir()), [first.path])
+        self.assertEqual(self._published(), [first.path])
+        self.assertEqual(self._partial_entries(), [])
         self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
 
     def _manifest_sync_case(self, boundary):
@@ -344,7 +354,7 @@ class TestBackups(unittest.TestCase):
         self._new_store('cleanup-' + str(removal_fails))
         first = store_backup.backup(self.turns, self.root, 'daily', NOW)
         stamp = datetime.fromtimestamp((NOW + 1) / 1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-        target = first.path.parent / (stamp + '-daily')
+        target = first.path.parent / '.partial' / (stamp + '-daily')
         failure = OSError('injected copy failure after payload')
         cleanup = OSError('injected directory removal failure')
         real_copy, real_remove = store_backup._copy, store_backup.shutil.rmtree
@@ -352,7 +362,7 @@ class TestBackups(unittest.TestCase):
             real_copy(source, destination)
             raise failure
         def remove(path, *args, **kwargs):
-            if removal_fails and Path(path) == target:
+            if removal_fails and Path(path).name == target.name:
                 raise cleanup
             return real_remove(path, *args, **kwargs)
         with mock.patch.object(store_backup, '_copy', side_effect=fail_copy), mock.patch.object(store_backup.shutil, 'rmtree', side_effect=remove):
@@ -364,12 +374,14 @@ class TestBackups(unittest.TestCase):
             self.assertIn(str(cleanup), '\n'.join(getattr(failure, '__notes__', ())))
             self.assertTrue(target.is_dir())
         else:
-            self.assertEqual(list(first.path.parent.iterdir()), [first.path])
+            self.assertEqual(self._published(), [first.path])
+            self.assertEqual(self._partial_entries(), [])
         self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
         self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path])
 
     def _abandoned(self, first, name='20000101T000000.000000Z-daily'):
-        path = first.path.parent / name
+        path = first.path.parent / '.partial' / name
+        path.parent.mkdir(exist_ok=True)
         path.mkdir()
         (path/'machine.sqlite3').write_bytes((first.path/'machine.sqlite3').read_bytes())
         (path/'manifest.tmp').write_bytes(b'killed before publication')
@@ -379,42 +391,198 @@ class TestBackups(unittest.TestCase):
         return {p.relative_to(path).as_posix(): p.read_bytes()
                 for p in path.rglob('*') if p.is_file()}
 
+    def _published(self):
+        return sorted(p for p in (self.root/'backups').iterdir() if p.name != '.partial')
+
+    def _partial_entries(self):
+        partial = self.root/'backups'/'.partial'
+        return sorted(partial.iterdir()) if partial.exists() else []
+
+    def _caught_backup(self, *args, **kwargs):
+        caught, result = None, None
+        try:
+            result = store_backup.backup(self.turns, self.root, *args, **kwargs)
+        except Exception as exc:
+            caught = exc
+        return caught, result
+
+    def _ordinary_hold_failure_case(self):
+        # Break: wrapping a post-publication hold fault or deleting its backup.
+        self._new_store('ordinary-hold')
+        failure = OSError('injected ordinary hold failure')
+        real_hold = store_layout.take_holds
+        def fail_after_insert(*args, **kwargs):
+            real_hold(*args, **kwargs)
+            raise failure
+        with mock.patch.object(store_layout, 'take_holds', side_effect=fail_after_insert):
+            caught, _ = self._caught_backup('before-move', NOW,
+                then_hold=(JOB, 'cutover', [store_layout.project_scope(P)]))
+        self.assertIs(caught, failure)
+        self.assertEqual(len(store_backup._complete(self.root)), 1)
+        self.assertEqual(store_backup.last_complete(self.root, 'before-move'), NOW)
+        self.assertEqual(self.turns.run(store_steps.Declared('read', {}), lambda c:
+            store_layout.holds_of(c['catalogue'], JOB)), frozenset())
+
+    def _publication_failure_case(self, boundary):
+        # Break: retaining failed staging or deleting a published backup.
+        self._new_store('publication-' + boundary)
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        stamp = datetime.fromtimestamp((NOW + 1)/1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+        published = first.path.parent/(stamp + '-daily')
+        staging = first.path.parent/'.partial'/published.name
+        failure = OSError('injected publication ' + boundary)
+        real_rename, real_sync = os.rename, store_evidence._sync_dir
+        fired = False
+        def rename(src, dst, *args, **kwargs):
+            if boundary == 'rename' and Path(src) == staging:
+                raise failure
+            return real_rename(src, dst, *args, **kwargs)
+        def sync(path):
+            nonlocal fired
+            folder = first.path.parent if boundary == 'backups' else first.path.parent/'.partial'
+            if boundary != 'rename' and not fired and Path(path) == folder and published.is_dir():
+                fired = True
+                raise failure
+            return real_sync(path)
+        with mock.patch.object(os, 'rename', side_effect=rename), mock.patch.object(store_evidence, '_sync_dir', side_effect=sync):
+            caught, _ = self._caught_backup('daily', NOW + 1)
+        self.assertIsInstance(caught, store_backup.BackupRefused)
+        self.assertEqual(caught.reason, 'copy-failed')
+        self.assertIs(caught.__cause__, failure)
+        if boundary == 'rename':
+            self.assertEqual(self._partial_entries(), [])
+            self.assertEqual(self._published(), [first.path])
+        else:
+            self.assertIn(published, [row[3] for row in store_backup._complete(self.root)])
+            self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW + 1)
+
     def test_abandoned_remains_removed(self):
-        # S2-M12: deleting every incomplete directory destroys a damaged backup.
+        # S2-M13: sweeping the published root destroys damaged complete backups.
         first = store_backup.backup(self.turns, self.root, 'daily', NOW)
         abandoned = self._abandoned(first)
-        damaged = self._abandoned(first, '20000101T000000.000001Z-before-move')
-        (damaged/'manifest.json').write_bytes(b'{damaged complete manifest')
-        unrelated = self._abandoned(first, 'operator-notes')
+        with_manifest = self._abandoned(first, 'staged-with-manifest')
+        (with_manifest/'manifest.json').write_bytes((first.path/'manifest.json').read_bytes())
+        stray = abandoned.parent/'stray-file'; stray.write_bytes(b'stray')
         outside = self.root/'link-target'
         outside.mkdir(); (outside/'keep').write_bytes(b'outside target')
+        partial_link = abandoned.parent/'stray-link'
+        partial_link.symlink_to(outside, target_is_directory=True)
+        damaged = first.path.parent/'20000101T000000.000001Z-before-move'
+        damaged.mkdir(); (damaged/'manifest.json').write_bytes(b'{damaged complete manifest')
+        unrelated = first.path.parent/'operator-notes'
+        unrelated.mkdir(); (unrelated/'note').write_bytes(b'keep')
         link = first.path.parent/'20000101T000000.000002Z-daily'
         link.symlink_to(outside, target_is_directory=True)
         saved_damaged, saved_unrelated = self._tree_bytes(damaged), self._tree_bytes(unrelated)
         saved_link, saved_target = link.readlink(), self._tree_bytes(outside)
         result = store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
-        self.assertFalse(abandoned.exists())
         self.assertTrue(damaged.is_dir())
         self.assertEqual(self._tree_bytes(damaged), saved_damaged)
         self.assertTrue(unrelated.is_dir())
         self.assertEqual(self._tree_bytes(unrelated), saved_unrelated)
         self.assertTrue(link.is_symlink())
         self.assertEqual(link.readlink(), saved_link)
+        for path in (abandoned, with_manifest, stray, partial_link):
+            self.assertFalse(os.path.lexists(path))
         self.assertEqual(self._tree_bytes(outside), saved_target)
         self.assertEqual(result.remains, ())
-        self.assertIn(first.path, [row[3] for row in store_backup._complete(self.root)])
+        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path, result.path])
 
     def test_unremovable_leftover_named(self):
-        # Break: refusing a good backup or silently dropping a cleanup failure.
+        # Break: any per-entry filesystem error refusing or hiding a leftover.
+        functions = [(os, name) for name in ('lstat', 'stat', 'scandir', 'listdir', 'unlink', 'remove', 'rmdir')]
+        functions.append((shutil, 'rmtree'))
+        originals = [(module, name, getattr(module, name)) for module, name in functions]
+        def run_case(index):
+            self._new_store('recording-' + str(index))
+            first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+            abandoned = self._abandoned(first)
+            recorded = []
+            def wrap(name, real):
+                def call(path, *args, **kwargs):
+                    if isinstance(path, (str, bytes, os.PathLike)):
+                        absolute = Path(os.path.abspath(os.fsdecode(path)))
+                        if absolute == abandoned or abandoned in absolute.parents:
+                            position = len(recorded)
+                            recorded.append((name, str(absolute.relative_to(abandoned))))
+                            if position == index:
+                                raise PermissionError('injected entry call ' + str(index))
+                    return real(path, *args, **kwargs)
+                return call
+            with ExitStack() as stack:
+                for module, name, real in originals:
+                    stack.enter_context(mock.patch.object(module, name, side_effect=wrap(name, real)))
+                caught, result = self._caught_backup('daily', NOW + 1)
+            return first, abandoned, recorded, caught, result
+        first, abandoned, recorded, caught, result = run_case(None)
+        self.assertFalse(abandoned.exists())
+        self.assertTrue(recorded)
+        self.assertIsNone(caught)
+        print('ABANDONED_CALLS ' + json.dumps(recorded))
+        for index, call in enumerate(recorded):
+            with self.subTest(index=index, call=call):
+                first, abandoned, actual, caught, result = run_case(index)
+                self.assertIsNone(caught)
+                self.assertTrue(abandoned.is_dir())
+                self.assertEqual(result.remains, (abandoned.name,))
+                self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path, result.path])
+
+    def test_partial_made_when_absent(self):
+        # Break: missing staging bootstrap or following a staging-root symlink.
+        store_backup.backup(self.turns, self.root, 'daily', NOW)
+        partial = self.root/'backups'/'.partial'
+        self.assertTrue(partial.is_dir())
+        self.assertFalse(partial.is_symlink())
+        self.assertEqual(list(partial.iterdir()), [])
+        self.assertEqual(stat.S_IMODE(partial.stat().st_mode), 0o700)
+        self._partial_symlink_case()
+
+    def _partial_symlink_case(self):
+        self._new_store('partial-symlink')
+        outside = self.root/'outside'; outside.mkdir()
+        (outside/'keep').write_bytes(b'keep outside')
+        backups = self.root/'backups'; backups.mkdir()
+        (backups/'.partial').symlink_to(outside, target_is_directory=True)
+        saved = self._tree_bytes(outside)
+        caught, _ = self._caught_backup('daily', NOW)
+        self.assertIsInstance(caught, store_backup.BackupRefused)
+        self.assertEqual(caught.reason, 'copy-failed')
+        self.assertEqual(self._tree_bytes(outside), saved)
+        self.assertEqual(self._published(), [])
+
+    def test_name_taken_never_replaced(self):
+        # S2-M15: a bare rename replaces a pre-existing empty destination.
         first = store_backup.backup(self.turns, self.root, 'daily', NOW)
-        abandoned = self._abandoned(first)
-        real_remove = store_backup.shutil.rmtree
-        def remove(path, *args, **kwargs):
-            if Path(path) == abandoned:
-                raise OSError('injected abandoned removal failure')
-            return real_remove(path, *args, **kwargs)
-        with mock.patch.object(store_backup.shutil, 'rmtree', side_effect=remove):
-            result = store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
-        self.assertEqual(getattr(result, 'remains', None), (abandoned.name,))
-        self.assertTrue(abandoned.is_dir())
-        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path, result.path])
+        saved = self._tree_bytes(first.path)
+        caught, _ = self._caught_backup('daily', NOW)
+        self.assertIsInstance(caught, store_backup.BackupRefused)
+        self.assertEqual(caught.reason, 'copy-failed')
+        self.assertEqual(self._tree_bytes(first.path), saved)
+        self.assertEqual(self._partial_entries(), [])
+        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path])
+        stamp = datetime.fromtimestamp((NOW + 1)/1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+        empty = first.path.parent/(stamp + '-daily'); empty.mkdir()
+        caught, _ = self._caught_backup('daily', NOW + 1)
+        self.assertIsInstance(caught, store_backup.BackupRefused)
+        self.assertEqual(caught.reason, 'copy-failed')
+        self.assertTrue(empty.is_dir())
+        self.assertEqual(list(empty.iterdir()), [])
+        self.assertEqual(self._partial_entries(), [])
+
+    def test_partial_read_by_no_reader(self):
+        # Break: recursively treating staged manifests as published backups.
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        partial = first.path.parent/'.partial'; partial.mkdir(exist_ok=True)
+        staged = partial/'20000101T000000.000000Z-daily'
+        shutil.copytree(first.path, staged)
+        document = json.loads((staged/'manifest.json').read_text())
+        document['now_ms'] = NOW - 31*DAY
+        encoded = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        (staged/'manifest.json').write_bytes(encoded)
+        (staged/'manifest.sha256').write_text(hashlib.sha256(encoded).hexdigest() + '\n')
+        saved = self._tree_bytes(staged)
+        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path])
+        self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
+        self.assertEqual(store_backup.prune(self.root, store_backup.BackupSettings(), NOW), [])
+        self.assertTrue(staged.is_dir())
+        self.assertEqual(self._tree_bytes(staged), saved)

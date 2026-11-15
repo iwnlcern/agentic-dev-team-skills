@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import re
+import os
+import stat
 import shutil
 import sqlite3
 import time
@@ -15,7 +16,6 @@ from relay_engine import store_evidence, store_layout, store_steps, version
 
 _REASONS = ('daily', 'before-move', 'before-update')
 _DAY_MS = 86400000
-_BACKUP_NAME = re.compile(r'^[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-(daily|before-move|before-update)$')
 
 
 class BackupRefused(Exception):
@@ -134,16 +134,15 @@ def _copy(source, destination):
     return record
 
 
-def _remove_abandoned(directory, current):
+def _remove_abandoned(directory):
     remains = []
     for path in sorted(directory.iterdir()):
-        if path == current or path.is_symlink() or not path.is_dir():
-            continue
-        manifest = path / 'manifest.json'
-        if not _BACKUP_NAME.fullmatch(path.name) or manifest.exists() or manifest.is_symlink():
-            continue
         try:
-            shutil.rmtree(path)
+            mode = os.lstat(path).st_mode
+            if stat.S_ISDIR(mode):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
         except OSError:
             remains.append(path.name)
     store_evidence._sync_dir(directory)
@@ -174,12 +173,22 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
         raise ValueError('invalid backup reason or time')
     if then_hold is not None and not cat.in_transaction:
         raise ValueError('backup holds require the caller transaction')
-    created = False
+    created = published = False
     try:
         stamp = datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-        directory = root / 'backups' / (stamp + '-' + reason)
-        store_evidence._mkdir(directory.parent)
-        remains = _remove_abandoned(directory.parent, directory)
+        destination = root / 'backups' / (stamp + '-' + reason)
+        store_evidence._mkdir(destination.parent)
+        partial = destination.parent / '.partial'
+        try:
+            partial.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            store_evidence._sync_dir(partial.parent)
+        if not stat.S_ISDIR(os.lstat(partial).st_mode):
+            raise OSError('backup staging path is not a directory')
+        remains = _remove_abandoned(partial)
+        directory = partial / destination.name
         directory.mkdir(mode=0o700)
         created = True
         store_evidence._sync_dir(directory.parent)
@@ -221,23 +230,28 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
         _write_synced(temporary, encoded)
         temporary.rename(directory / 'manifest.json')
         store_evidence._sync_dir(directory)
-        if then_hold is not None:
-            job, kind, scopes = then_hold
-            store_layout.take_holds(cat, job, kind, scopes, now_ms)
+        try:
+            os.lstat(destination)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError('backup destination already exists')
+        os.rename(directory, destination)
+        published = True
+        store_evidence._sync_dir(destination.parent)
+        store_evidence._sync_dir(partial)
     except Exception as exc:
-        if created:
-            for name in ('manifest.json', 'manifest.sha256'):
-                try:
-                    (directory / name).unlink(missing_ok=True)
-                except OSError as cleanup:
-                    exc.add_note(f'manifest cleanup failed: {cleanup}')
+        if created and not published:
             try:
                 shutil.rmtree(directory)
                 store_evidence._sync_dir(directory.parent)
             except OSError as cleanup:
                 exc.add_note(f'backup directory cleanup failed: {cleanup}')
         raise BackupRefused('copy-failed', str(exc)) from exc
-    return BackupManifest(directory, store_id, reason, now_ms, files, held_seconds, remains)
+    if then_hold is not None:
+        job, kind, scopes = then_hold
+        store_layout.take_holds(cat, job, kind, scopes, now_ms)
+    return BackupManifest(destination, store_id, reason, now_ms, files, held_seconds, remains)
 
 
 def _complete(root):
