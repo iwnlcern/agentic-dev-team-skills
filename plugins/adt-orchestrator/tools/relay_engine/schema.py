@@ -80,7 +80,7 @@ _PLATFORM_TABLES = (
     """CREATE TABLE IF NOT EXISTS repositories (
     id TEXT NOT NULL PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects (id),
-    name TEXT NOT NULL,
+    name TEXT NOT NULL CHECK (instr(name, char(0)) = 0 AND length(name) BETWEEN 1 AND 32 AND name NOT GLOB '*[^a-z0-9-]*' AND name NOT GLOB '-*'),
     UNIQUE (project_id, name)
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS repository_checkouts (
@@ -341,9 +341,11 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
     body_bytes INTEGER NOT NULL CHECK (body_bytes >= 0),
     header_bytes INTEGER NOT NULL CHECK (header_bytes >= 0),
     git_state_id TEXT REFERENCES git_states (id),
+    repository_id TEXT REFERENCES repositories (id),
     submission_key TEXT CHECK (submission_key IS NULL OR length(submission_key) > 0),
     draft_sha256 TEXT %s,
     CHECK ((submission_key IS NULL) = (draft_sha256 IS NULL)),
+    CHECK (repository_id IS NULL OR (kind = 'IMPL' AND needs = 'act')),
     UNIQUE (project_id, handle),
     UNIQUE (project_id, created_at),
     %s,

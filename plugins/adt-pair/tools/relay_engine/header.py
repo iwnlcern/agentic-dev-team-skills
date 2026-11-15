@@ -42,6 +42,7 @@ class Draft:
     bundle: str | None
     verdict: str | None
     needs: str
+    repo: str | None
     subject: str
     refs: tuple
     findings: tuple
@@ -83,6 +84,7 @@ FIELDS = (
     FieldSpec("VERDICT", "0-1", frozenset(VERDICTS),
               "submit.submit -> relays.verdict"),
     FieldSpec("NEEDS", "1", None, "submit.submit -> relays.needs"),
+    FieldSpec("REPO", "0-1", None, "submit.submit -> relays.repository_id"),
     FieldSpec("SUBJECT", "1", None, "submit.submit -> relays.subject"),
     FieldSpec("REF", "0-n", None, "refs.parse_ref via submit.submit -> edges"),
     FieldSpec("FINDING", "0-n", FINDING_KINDS,
@@ -96,6 +98,7 @@ _SPECS = {spec.name: spec for spec in FIELDS}
 
 _LINE = re.compile(r"([A-Z][A-Z_]*): (\S(?:.*\S)?)", re.DOTALL)
 _EMPTY = re.compile(r"[A-Z][A-Z_]*:[ \t]*")
+_REPO = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 _BUNDLE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
 _HANDLE = re.compile(r"#[1-9][0-9]{0,17}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -394,6 +397,14 @@ def _validate(values, seen, body, header_bytes, validate_address):
         raise _refuse("E-FIELD-REQUIRED", field="PARENT",
                       rule="a draft names its PARENT, or opens a lineage with BUNDLE")
 
+    repo = None
+    if "REPO" in first:
+        number, repo = first["REPO"]
+        if kind != "IMPL" or needs != "act":
+            raise _refuse("E-FIELD-FORBIDDEN", line=number, field="REPO",
+                          rule="REPO sits only on an IMPL with NEEDS: act")
+        if _REPO.fullmatch(repo) is None:
+            _shape(number, "REPO", repo, "[a-z0-9][a-z0-9-]{0,31}")
     verdict = _verdict(kind, needs, first.get("VERDICT"))
     refs = tuple(value for _, value in lists["REF"])
     findings = _findings(kind, needs, lists["FINDING"], refs)
@@ -401,7 +412,7 @@ def _validate(values, seen, body, header_bytes, validate_address):
     resolves = _resolves(lists["RESOLVE"])
     return Draft(kind=kind, to=to, cc=cc, parent=parent,
                  answers=tuple(value for _, value in lists["ANSWERS"]), bundle=bundle,
-                 verdict=verdict, needs=needs, subject=subject, refs=refs,
+                 verdict=verdict, needs=needs, repo=repo, subject=subject, refs=refs,
                  findings=findings, fixes=fixes, resolves=resolves,
                  body=body, header_bytes=header_bytes)
 

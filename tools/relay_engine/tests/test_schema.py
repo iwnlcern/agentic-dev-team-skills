@@ -1175,3 +1175,43 @@ class TestRuleHSchema(ClaimStore):
             self.conn.execute('RELEASE null_pair')
         self.assertFalse(accepted, 'a request with no reviewer must be refused')
         self.assertIsNone(self.request(empty))
+
+
+class TestRepositoryField(Store):
+    """Breaks: missing repository constraints or acceptance of the previous digest."""
+    def test_relays_repository_check(self):
+        conn = self.connect()
+        try:
+            for handle, (kind, needs) in enumerate((("SITREP", "none"), ("IMPL", "none"), ("IMPL", "act")), 1):
+                sql = ("INSERT INTO relays (id, handle, project_id, kind, needs, subject,"
+                       " sender_seat_id, created_at, body_sha256, meta_sha256, body_bytes,"
+                       " header_bytes, repository_id)"
+                       " VALUES (?, ?, 'p', ?, ?, 's', 's-a', ?, ?, ?, 0, 10, 'repo-1')")
+                params = ("repo-relay-" + str(handle), handle, kind, needs, handle, SHA, SHA)
+                if kind == "IMPL" and needs == "act":
+                    conn.execute(sql, params)
+                    self.assertEqual(conn.execute("SELECT repository_id FROM relays WHERE handle = ?", (handle,)).fetchone(), ("repo-1",))
+                else:
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute(sql, params)
+        except sqlite3.OperationalError as exc:
+            self.fail("repository column missing: " + str(exc))
+
+    def test_repositories_name_check(self):
+        conn = self.connect()
+        for index, name in enumerate(("Repo", "-x", "a_b", "a b", "", "a" * 33, "a\0b")):
+            with self.subTest(name=name):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute("INSERT INTO repositories (id, project_id, name) VALUES (?, 'p', ?)", ("bad-repo-" + str(index), name))
+        for index, name in enumerate(("a", "0", "agentic-dev-team-skills")):
+            conn.execute("INSERT INTO repositories (id, project_id, name) VALUES (?, 'p', ?)", ("good-repo-" + str(index), name))
+
+    def test_old_ledger_refused_at_open(self):
+        old = "5b8e0fb408762de241120b1850a8b3082b08bd7d4ce72dc30fada31e9c77686b"
+        self.assertNotEqual(schema.ddl_digest(), old)
+        conn = self.connect()
+        conn.execute("UPDATE schema_version SET ddl_sha256 = ?", (old,))
+        conn.commit()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")
