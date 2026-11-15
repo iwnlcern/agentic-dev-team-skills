@@ -1,6 +1,7 @@
 """Checkout jobs for caller-owned catalogue and ledger transactions."""
 from collections.abc import Mapping
 from dataclasses import dataclass
+import re
 from typing import Literal
 
 from relay_engine import submit
@@ -73,6 +74,9 @@ def _changed(conn, sql, parameters):
 
 def ensure_repository_step(conn, project_id: str, name: str, *, now_ms: int) -> RepositoryEnsured:
     """Find or insert the repository and read the ledger's global order floor."""
+    if type(name) is not str or re.fullmatch(r'[a-z0-9][a-z0-9-]{0,31}', name) is None:
+        raise CheckoutRefused('repository_name_invalid',
+                              {'name': name if type(name) is str else repr(name)})
     row = _one(conn, 'SELECT id FROM repositories WHERE project_id=? AND name=?',
                (project_id, name))
     inserted = row is None
