@@ -1853,15 +1853,6 @@ class TestTask4PlainReview(SlipStore):
         self.verify(claim, 'must-revise')
         self.assertEqual(self.code('verification-objected').unblocker, PLANNER.address)
 
-    def test_complete_lineage_without_slip_names_cause(self):
-        # SF-M3: successful evidence with absent Git state is not incomplete lineage.
-        _, claim, _ = self.build(design=False, issue=False)
-        issued = self.issue(claim, git_state=None)
-        self.assertIsNone(self.slip(issued))
-        answer = self.act()
-        self.assertEqual(answer.code, 'authority.slip-missing')
-        self.assertEqual(answer.outcome, 'deny')
-        self.assertIn('Git', answer.reason)
 
 
 class TestErratum6(SlipStore):
@@ -2661,7 +2652,7 @@ class TestSupersede(SlipStore):
         self.assertEqual(self.state(self.issued(last)), ('live', None, None, 1))
 
     def test_refused_issuance_supersedes_nothing(self):
-        for ordinal, case in enumerate(('evidence', 'repository', 'closed-issuer', 'closed-delegation')):
+        for ordinal, case in enumerate(('evidence', 'closed-issuer', 'closed-delegation')):
             with self.subTest(case=case):
                 if ordinal:
                     self.doCleanups()
@@ -2672,8 +2663,6 @@ class TestSupersede(SlipStore):
                 if case == 'evidence':
                     refusal = self.answer(self.ask('plan', claim, self.plan), 'must-revise', self.plan)
                     refused = self.issue(refusal)
-                elif case == 'repository':
-                    refused = self.issue(claim, git_state=None)
                 else:
                     self.conn.execute("UPDATE team_instances SET closed_at = 2 WHERE id = 't3'")
                     self.conn.commit()
@@ -2683,3 +2672,78 @@ class TestSupersede(SlipStore):
                 self.assertEqual([(r[0], r[1]) for r in self.events(sid)], [(1, 'issue')])
                 answer = self.act()
                 self.assertEqual((answer.outcome, answer.slip_id), ('allow', sid))
+
+
+class TestRepositoryRule(SlipStore):
+    def test_issue_binds_named_repository(self):
+        # RR-M1: submit's ambient git state cannot choose the slip repository.
+        for state in (GIT_STATE, None):
+            with self.subTest(git_state=state):
+                self.doCleanups()
+                self.setUp()
+                _, claim, _ = self.build(issue=False, design=False)
+                issued = self.issue(claim, repo='other', git_state=state)
+                row = self.conn.execute('SELECT id, repository_id FROM slips WHERE issued_in = ?',
+                                        (issued.relay_id,)).fetchone()
+                repository = row[1] if row else None
+                self.assertEqual(repository, 'repo-2')
+                sid = row[0]
+                answer = self.act(repo='repo-2')
+                self.assertEqual((answer.outcome, answer.slip_id), ('allow', sid))
+                wrong = self.act(repo='repo-1')
+                self.assertEqual((wrong.outcome, wrong.code), ('deny', 'authority.slip-invalid'))
+                self.assertIn('repo-2', wrong.reason)
+
+    def test_issue_ignores_git_state(self):
+        _, claim, _ = self.build(issue=False, design=False)
+        issued = self.issue(claim, git_state=replace(GIT_STATE, repository_id='repo-2'))
+        sid = self.issued(issued)
+        repository = self.conn.execute('SELECT repository_id FROM slips WHERE id = ?',
+                                       (sid,)).fetchone()[0]
+        self.assertEqual(repository, 'repo-1')
+
+    def test_imported_impl_issues_no_slip(self):
+        # RR-M2/3 select an imported IMPL and name its missing repository;
+        # RR-M4 must leave an imported REVIEW outside that diagnostic.
+        from relay_engine import imports
+        for kind in ('REVIEW', 'native-none', 'IMPL'):
+            with self.subTest(kind=kind):
+                self.doCleanups()
+                self.setUp()
+                _, claim, _ = self.build(issue=False, design=False)
+                if kind == 'native-none':
+                    rid = self.submit(draft(kind='IMPL', needs='none', parent=claim.relay_id,
+                                            to=IMPL.address)).relay_id
+                else:
+                    self.clock = self.conn.execute("SELECT max(created_at) + 1 FROM relays WHERE project_id='p'").fetchone()[0]
+                    relay = imports.ImportedRelay(
+                        created_at=self.clock, kind=kind, verdict=None, subject='Imported go-ahead',
+                        sender=PLANNER.seat_id, sender_role=PLANNER.role,
+                        team_instance_id=PLANNER.team_instance_id, to=(IMPL.seat_id,), cc=(),
+                        parent_id=claim.relay_id, parent_spelling=claim.relay_id,
+                        body=b'imported go-ahead', header_bytes=0,
+                        header_sha256=hashlib.sha256(b'').hexdigest())
+                    self.conn.execute('BEGIN IMMEDIATE')
+                    try:
+                        rid = imports.import_relay_step(self.conn, 'p', relay, marked_at_ms=self.clock)
+                        self.conn.execute('INSERT INTO imported_relays (relay_id, root_uuid, seq, stamp, zone,'
+                                          ' utc_offset_s, rendered_path, origin, headers_json, source_sha256,'
+                                          ' delivery_marked_at) VALUES (?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)',
+                                          (rid, rid, '20261115-000000', 'UTC', 'old/go-ahead.md', '2.9.7',
+                                           '{}', hashlib.sha256(relay.body).hexdigest(), self.clock))
+                        self.conn.commit()
+                    except BaseException:
+                        self.conn.rollback()
+                        raise
+                row = self.conn.execute('SELECT needs, repository_id FROM relays WHERE id = ?',
+                                        (rid,)).fetchone()
+                self.assertEqual(row, ('none', None))
+                self.assertIsNone(self.conn.execute('SELECT id FROM slips WHERE issued_in = ?',
+                                                   (rid,)).fetchone())
+                answer = self.act()
+                self.assertEqual((answer.outcome, answer.code, answer.unblocker),
+                                 ('deny', 'authority.slip-missing', PLANNER.address))
+                if kind == 'IMPL':
+                    self.assertEqual(answer.reason, 'no implement slip was issued because the IMPL names no repository; an IMPL imported from 2.9.7 never issues one')
+                else:
+                    self.assertEqual(answer.reason, 'no implement slip exists for this seat')

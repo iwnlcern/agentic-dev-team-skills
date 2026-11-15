@@ -59,7 +59,7 @@ INVENTORY = {
 
 INVENTORY.update({
     "authority-missing": "no implement slip exists for this seat",
-    "authority-missing-git": "no implement slip was issued because the IMPL had no Git state at submit",
+    "authority-missing-repo": "no implement slip was issued because the IMPL names no repository; an IMPL imported from 2.9.7 never issues one",
     "authority-missing-repository": "no implement slip was issued because the IMPL's repository is outside this project",
     "authority-missing-target": "no implement slip was issued because TO did not name exactly one implementer",
     "authority-missing-issuer": "no implement slip was issued because the issuer's team instance is closed",

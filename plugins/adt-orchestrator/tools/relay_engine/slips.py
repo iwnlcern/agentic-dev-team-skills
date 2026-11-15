@@ -406,7 +406,8 @@ def on_admitted(conn, admitted, draft, ctx):
     if (_issuer(conn, ctx.sender.seat_id, target) == 'pair'
             and not _open_delegation(conn, admitted.relay_id, ctx.sender.seat_id, target)):
         return
-    repo = ctx.git_state.repository_id if ctx.git_state else None
+    repo = conn.execute('SELECT repository_id FROM relays WHERE id = ?',
+                        (admitted.relay_id,)).fetchone()[0]
     if repo is None or conn.execute('SELECT 1 FROM repositories WHERE id = ? AND project_id = ?',
                                     (repo, ctx.sender.project_id)).fetchone() is None:
         return
@@ -593,7 +594,9 @@ def _diagnostic(conn, seat, seat_id):
     planner = _planner(conn, seat_id)
     row = conn.execute("SELECT r.id, coalesce(r.sender_seat_id, r.sender_special) FROM relays r"
                        " JOIN recipients c ON c.relay_id = r.id WHERE r.project_id = ?"
-                       " AND r.kind = 'IMPL' AND r.needs = 'act' AND c.role = 'to' AND c.seat_id = ?"
+                       " AND r.kind = 'IMPL' AND c.role = 'to' AND c.seat_id = ?"
+                       " AND (r.needs = 'act' OR EXISTS"
+                       ' (SELECT 1 FROM imported_relays i WHERE i.relay_id = r.id))'
                        ' ORDER BY r.created_at DESC LIMIT 1', (seat[1], seat_id)).fetchone()
     if row:
         failed, _, objected = _evidence(conn, row[0], row[1], seat_id)
@@ -601,15 +604,14 @@ def _diagnostic(conn, seat, seat_id):
             return _lineage_answer(failed, objected, row[0], planner)
         targets = conn.execute("SELECT seat_id FROM recipients WHERE relay_id = ? AND role = 'to'",
                                (row[0],)).fetchall()
-        git = conn.execute('SELECT r.git_state_id, g.repository_id FROM relays r'
-                           ' LEFT JOIN git_states g ON g.id = r.git_state_id WHERE r.id = ?',
-                           (row[0],)).fetchone()
+        repository = conn.execute('SELECT repository_id FROM relays WHERE id = ?',
+                                  (row[0],)).fetchone()[0]
         if len(targets) != 1 or targets[0][0] != seat_id:
             reason = strings.render('authority-missing-target')
-        elif git[0] is None:
-            reason = strings.render('authority-missing-git')
+        elif repository is None:
+            reason = strings.render('authority-missing-repo')
         elif conn.execute('SELECT 1 FROM repositories WHERE id = ? AND project_id = ?',
-                          (git[1], seat[1])).fetchone() is None:
+                          (repository, seat[1])).fetchone() is None:
             reason = strings.render('authority-missing-repository')
         elif not _open_principal(conn, row[1]):
             reason = strings.render('authority-missing-issuer')
