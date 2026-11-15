@@ -201,7 +201,7 @@ _TABLES = _PLATFORM_TABLES + (
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS project_settings (
     project_id TEXT NOT NULL REFERENCES projects (id),
-    key TEXT NOT NULL CHECK (key IN ('jev_record', 'jev_act', 'doorbell_off_minutes')),
+    key TEXT NOT NULL CHECK (key IN ('jev_record', 'jev_act', 'doorbell_off_minutes', 'delivery_interval_seconds')),
     value TEXT NOT NULL,
     PRIMARY KEY (project_id, key)
 ) STRICT""",

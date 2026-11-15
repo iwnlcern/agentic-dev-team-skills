@@ -84,6 +84,7 @@ assert ENGINE_SET == (
     "relay_engine/seal_worker.py",
     "relay_engine/seats.py",
     "relay_engine/slips.py",
+    "relay_engine/store_create.py",
     "relay_engine/store_evidence.py",
     "relay_engine/store_layout.py",
     "relay_engine/store_steps.py",

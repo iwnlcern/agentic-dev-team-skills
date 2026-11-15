@@ -49,7 +49,7 @@ class TestRegistry(unittest.TestCase):
     def test_fields_registry_names_reader(self):
         names = [spec.name for spec in header.FIELDS]
         self.assertEqual(sorted(names), sorted({
-            "KIND", "TO", "CC", "PARENT", "BUNDLE", "VERDICT", "NEEDS",
+            "KIND", "TO", "CC", "PARENT", "ANSWERS", "BUNDLE", "VERDICT", "NEEDS",
             "SUBJECT", "REF", "FINDING", "FIXES", "RESOLVE"}))
         self.assertEqual(len(names), len(set(names)))
         for spec in header.FIELDS:
@@ -75,6 +75,31 @@ class TestRegistry(unittest.TestCase):
 
 
 class TestParse(Refused):
+    def test_answers_field(self):
+        # Breaks: ANSWERS loses multiplicity, order, shape checks or kind independence.
+        uuid = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
+        for kind in ("SITREP", "REVIEW"):
+            for parent in (False, True):
+                lines = replace("KIND", kind)
+                if kind == "REVIEW":
+                    lines += ["VERDICT: approve"]
+                if parent:
+                    lines = replace("BUNDLE", None, lines) + ["PARENT: #1"]
+                data = draft(lines + ["ANSWERS: #3", "ANSWERS: " + uuid])
+                try:
+                    parsed = header.parse(data)
+                except errors.EngineError as error:
+                    self.fail(str(error.code))
+                try:
+                    answers = parsed.answers
+                except AttributeError as error:
+                    self.fail(str(error))
+                self.assertEqual(answers, ("#3", uuid))
+        for spelling in ("#0", "3", uuid.upper(), "#3 #4"):
+            error = self.refused(draft(BASE + ["ANSWERS: " + spelling]),
+                                 "E-FIELD-SHAPE", line=6)
+            self.assertIn("ANSWERS", error.cause)
+
     def test_valid_minimal_draft(self):
         parsed = header.parse(draft())
         self.assertEqual(parsed.kind, "SITREP")

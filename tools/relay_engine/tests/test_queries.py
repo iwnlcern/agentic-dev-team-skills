@@ -32,7 +32,7 @@ from relay_engine.tests.test_submit import (FOREIGN, IMPL, ORCH, OTHER, PLANNER,
 OPERATOR = SEATS["operator"]
 
 ENVELOPE = {"handle", "kind", "sender", "to", "cc", "subject", "parent", "verdict", "needs",
-            "created_at", "imported"}
+            "created_at", "imported", "parent_id"}
 
 
 def retain_query_evidence(name, states):
@@ -45,6 +45,70 @@ def retain_query_evidence(name, states):
 
 
 class TestReads(Store):
+    def test_read_parent_id(self):
+        """R1/R2: pointer ids and key order are the read-by-id wire contract."""
+        root = self.submit(draft(to=IMPL.address))
+        child = self.submit(draft(to=IMPL.address, parent="#1"))
+        result = queries.read(self.conn, child.relay_id, IMPL.seat_id, 5000)
+        self.assertEqual(list(result.envelope), [
+            "handle", "kind", "sender", "to", "cc", "subject", "parent", "parent_id",
+            "verdict", "needs", "created_at", "imported"])
+        self.assertEqual((result.envelope["parent_id"], result.envelope["parent"]),
+                         (root.relay_id, root.handle))
+        result = queries.read(self.conn, root.relay_id, IMPL.seat_id, 6000)
+        self.assertIsNone(result.envelope["parent_id"])
+        self.assertIsNone(result.envelope["parent"])
+
+    def test_review_pointers_open_by_id(self):
+        """R5: every unopened lineage pointer can be passed directly to read."""
+        first = self.submit(draft(to=IMPL.address))
+        second = self.submit(draft(to=IMPL.address, parent="#1"))
+        review = self.submit(draft(kind="REVIEW", needs="review", to=IMPL.address,
+                                   parent="#2"))
+        result = queries.read(self.conn, review.relay_id, IMPL.seat_id, 5000)
+        self.assertEqual(result.unopened, [(first.relay_id, first.handle),
+                                           (second.relay_id, second.handle)])
+        self.assertEqual(result.envelope["parent_id"], second.relay_id)
+        for relay_id, handle in result.unopened:
+            self.assertEqual(queries.read(self.conn, relay_id, IMPL.seat_id,
+                                          6000).envelope["handle"], handle)
+        self.assertEqual(queries.read(self.conn, review.relay_id, IMPL.seat_id,
+                                      7000).unopened, [])
+
+    def test_read_opens_only_own_row(self):
+        """R3/R4: neither another party nor a parent is opened as a side effect."""
+        self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        child = self.submit(draft(to=IMPL.address, cc=OTHER.address, parent="#1"))
+        writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
+        for seat, at in ((IMPL, 5000), (OTHER, 6000), (ORCH, 7000)):
+            with self.subTest(seat=seat.seat_id):
+                before = self.conn.execute(
+                    "SELECT relay_id, seat_id, opened_at, delivered_at, answered_by"
+                    " FROM recipients ORDER BY rowid").fetchall()
+                expected = [(rid, sid, at if rid == child.relay_id and sid == seat.seat_id
+                             and opened is None else opened, delivered, answered)
+                            for rid, sid, opened, delivered, answered in before]
+                seen = []
+                def authorizer(action, table, column, database, trigger):
+                    if action in writes:
+                        seen.append((action, table, column))
+                    return sqlite3.SQLITE_OK
+                self.conn.set_authorizer(authorizer)
+                try:
+                    queries.read(self.conn, child.relay_id, seat.seat_id, at)
+                finally:
+                    self.conn.set_authorizer(None)
+                self.assertEqual(self.conn.execute(
+                    "SELECT relay_id, seat_id, opened_at, delivered_at, answered_by"
+                    " FROM recipients ORDER BY rowid").fetchall(), expected)
+                self.assertTrue(seen)
+                self.assertLessEqual({table for _, table, _ in seen},
+                                     {"recipients", "seat_activity"})
+                self.assertEqual(self.conn.execute(
+                    "SELECT last_request_at FROM seat_activity WHERE seat_id = ?",
+                    (seat.seat_id,)).fetchone(), (at,))
+
+
     def actor_state(self):
         return {"activity": self.conn.execute(
                     "SELECT * FROM seat_activity ORDER BY seat_id").fetchall(),
@@ -62,7 +126,8 @@ class TestReads(Store):
         self.assertEqual(result.envelope, {
             "handle": 2, "kind": "SITREP", "sender": PLANNER.seat_id,
             "to": [IMPL.seat_id, OTHER.seat_id], "cc": [ORCH.seat_id],
-            "subject": "please act", "parent": 1, "verdict": None, "needs": "act",
+            "subject": "please act", "parent": 1, "parent_id": root.relay_id,
+            "verdict": None, "needs": "act",
             "created_at": child.created_at_ms, "imported": False})
         self.assertIsNone(result.meta)
         opened = lambda: self.conn.execute(
@@ -450,9 +515,9 @@ class TestLineage(Store):
                                    to="v3-engine.implementer"), sender=OTHER)
         queries.mark_opened(self.conn, first.relay_id, IMPL.seat_id, 1)
         self.assertEqual(queries.unopened_in_lineage(self.conn, review.relay_id, IMPL.seat_id),
-                         [second.handle])
+                         [(second.relay_id, second.handle)])
         result = queries.read(self.conn, review.relay_id, IMPL.seat_id, 2)
-        self.assertEqual(result.unopened, [second.handle])
+        self.assertEqual(result.unopened, [(second.relay_id, second.handle)])
         plain = self.submit(draft(parent="#3", to="v3-engine.implementer"), sender=OTHER)
         self.assertEqual(queries.read(self.conn, plain.relay_id, IMPL.seat_id, 3).unopened, [])
         self.assertIsNotNone(third)
@@ -593,6 +658,51 @@ class TestFindings(GitStore):
         bundle = self.relay(review.relay_id)["bundle_id"]
         rows = queries.blocking_findings(self.conn, bundle)
         self.assertEqual([(r.handle, r.status) for r in rows], [(1, "open"), (2, "fixed")])
+
+
+    def test_read_refs_and_findings(self):
+        # Breaks: REF order, edge ordinal, fixed visibility, relay scope or meta-only fields (F1-F5).
+        check = self.directory_file(b"FAILED\n")
+        review = self.review_with(("blocking 2 a", "advisory b"),
+                                  refs_=("#1", "file:" + check))
+        result = queries.read(self.conn, review.relay_id, IMPL.seat_id, self.now())
+        try:
+            refs_found = result.refs
+        except AttributeError as error:
+            self.fail(str(error))
+        self.assertEqual(refs_found, (queries.RefLine(1, "#1"),
+                                      queries.RefLine(2, "file:" + check)))
+        expected = (queries.RaisedFinding(1, "blocking", "open", "a", 2),
+                    queries.RaisedFinding(2, "advisory", "open", "b", None))
+        self.assertEqual(result.findings, expected)
+        self.review_with(("advisory c",), parent=review.relay_id)
+        self.submit(draft(kind="REVIEW-FOLD", to=PLANNER.address, parent=review.relay_id,
+                          fixes=("F1 " + "c" * 40,)), sender=IMPL)
+        expected = (queries.RaisedFinding(1, "blocking", "fixed", "a", 2),
+                    queries.RaisedFinding(2, "advisory", "open", "b", None))
+        pairs = []
+        for meta in (False, True):
+            writes = []
+            def authorize(action, table, column, database, trigger):
+                if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE,
+                              sqlite3.SQLITE_DELETE):
+                    writes.append(table)
+                return sqlite3.SQLITE_OK
+            self.conn.set_authorizer(authorize)
+            try:
+                read = queries.read(self.conn, review.relay_id, IMPL.seat_id,
+                                    self.now(), meta=meta)
+            finally:
+                self.conn.set_authorizer(None)
+            self.assertTrue(writes)
+            self.assertLessEqual(set(writes), {"recipients", "seat_activity"})
+            self.assertEqual(read.refs, refs_found)
+            self.assertEqual(read.findings, expected)
+            pairs.append((read.refs, read.findings))
+        self.assertEqual(pairs[0], pairs[1])
+        empty = self.submit(draft(to=IMPL.address))
+        read = queries.read(self.conn, empty.relay_id, IMPL.seat_id, self.now())
+        self.assertEqual((read.refs, read.findings), ((), ()))
 
     def directory_file(self, data):
         import tempfile
@@ -766,11 +876,11 @@ class TestRecords(Store):
         self.conn.commit()
         after = queries.read(self.conn, relay_id, IMPL.seat_id, self.clock + 3).envelope
         self.assertEqual(after, {"handle": 2, "kind": "SITREP", "sender": PLANNER.seat_id,
-                                "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None,
+                                "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None, "parent_id": None,
                                 "verdict": None, "needs": "none", "created_at": self.clock + 1,
                                 "imported": True})
         self.assertEqual(before, {"handle": 1, "kind": "SITREP", "sender": PLANNER.seat_id,
-                                 "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None,
+                                 "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None, "parent_id": None,
                                  "verdict": None, "needs": "none", "created_at": native.created_at_ms,
                                  "imported": False})
 
@@ -1016,6 +1126,397 @@ class TestRecords(Store):
                 selected.set()
                 worker.join(3)
                 first.close()
+
+
+class TestAddressedTo(Store):
+    def _import(self, conn=None, *, sender=PLANNER, to=IMPL, parent=None):
+        from relay_engine import imports
+        conn = self.conn if conn is None else conn
+        created = max(self.clock, conn.execute(
+            "SELECT coalesce(max(created_at), 0) + 1 FROM relays").fetchone()[0])
+        relay = imports.ImportedRelay(
+            created, "SITREP", None, "imported", sender.seat_id, sender.role,
+            sender.team_instance_id, (to.seat_id,), (), parent,
+            parent if parent else None, b"body\n", 0, "0" * 64)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rid = imports.import_relay_step(conn, "p", relay, marked_at_ms=created + 1)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return rid
+
+    def _writes(self, seen):
+        def authorize(action, table, column, database, trigger):
+            if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
+                seen.append((action, table, column))
+            return sqlite3.SQLITE_OK
+        return authorize
+
+    def test_addressed_lists_to_only(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        own = self.submit(draft(to=IMPL.address, subject="own", needs="act"))
+        self.submit(draft(to=OTHER.address, cc=IMPL.address))
+        self.submit(draft(to=OTHER.address))
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual(page, queries.AddressedPage(1, 0, 1, 0, False, (
+            queries.AddressedRow(own.relay_id, own.handle, own.created_at_ms,
+                                 PLANNER.seat_id, "own", "act", "unanswered"),)))
+        with self.assertRaises(FrozenInstanceError):
+            page.total = 2
+        with self.assertRaises(FrozenInstanceError):
+            page.rows[0].state = "answered"
+
+    def test_addressed_answered_rule(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        yes = self.submit(draft(to=IMPL.address))
+        other = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        no = self.submit(draft(to=IMPL.address))
+        self.submit(draft(to=PLANNER.address, parent=yes.relay_id), sender=IMPL)
+        self.submit(draft(to=PLANNER.address, parent=other.relay_id), sender=OTHER)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual({r.relay_id: r.state for r in page.rows},
+                         {yes.relay_id: "answered", other.relay_id: "unanswered",
+                          no.relay_id: "unanswered"})
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (3, 1, 2, 0))
+
+    def test_addressed_matches_answered_by(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        yes = self.submit(draft(to=IMPL.address))
+        no = self.submit(draft(to=IMPL.address))
+        self.submit(draft(to=PLANNER.address, parent=yes.relay_id), sender=IMPL)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        marks = dict(self.conn.execute("SELECT relay_id, answered_by FROM recipients"
+                                      " WHERE seat_id=? AND role='to'", (IMPL.seat_id,)))
+        self.assertEqual({r.relay_id: r.state == "answered" for r in page.rows},
+                         {rid: mark is not None for rid, mark in marks.items()})
+        imported_reply_parent = self.submit(draft(to=IMPL.address))
+        self._import(sender=IMPL, to=PLANNER, parent=imported_reply_parent.relay_id)
+        mark = self.conn.execute("SELECT answered_by FROM recipients WHERE relay_id=?"
+                                 " AND seat_id=?", (imported_reply_parent.relay_id,
+                                                    IMPL.seat_id)).fetchone()
+        self.assertEqual(mark, (None,))
+        states = {r.relay_id: r.state for r in addressed(
+            self.conn, "p", IMPL.seat_id, limit=10).rows}
+        self.assertEqual(states, {yes.relay_id: "answered", no.relay_id: "unanswered",
+                                 imported_reply_parent.relay_id: "answered"})
+
+    def test_addressed_imported_state(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        answered = self._import()
+        self._import(sender=IMPL, to=PLANNER, parent=answered)
+        untouched = self._import()
+        live = self._import()
+        self.submit(draft(to=PLANNER.address, parent=live), sender=IMPL)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual({r.relay_id: r.state for r in page.rows},
+                         {answered: "answered", untouched: "imported", live: "answered"})
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (3, 2, 0, 1))
+
+    def test_addressed_bound_and_counts(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        relays = [self.submit(draft(to=IMPL.address)) for _ in range(7)]
+        self.submit(draft(to=PLANNER.address, parent=relays[0].relay_id), sender=IMPL)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=3)
+        self.assertEqual([r.handle for r in page.rows], [r.handle for r in relays[-3:]][::-1])
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (7, 1, 6, 0))
+        self.assertTrue(page.truncated)
+        full = addressed(self.conn, "p", IMPL.seat_id, limit=7)
+        self.assertFalse(full.truncated)
+        self.assertEqual(len(full.rows), 7)
+
+    def test_addressed_writes_nothing(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        seen = []
+        self.conn.set_authorizer(self._writes(seen))
+        try:
+            page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        finally:
+            self.conn.set_authorizer(None)
+        self.assertEqual(seen, [])
+        self.assertFalse(self.conn.in_transaction)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.db"
+            with contextlib.closing(sqlite3.connect(path)) as copy:
+                self.conn.backup(copy)
+            with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                                    isolation_level=None)) as reader:
+                reader.execute("PRAGMA query_only=ON")
+                result = addressed(reader, "p", IMPL.seat_id, limit=10)
+                self.assertEqual(result, page)
+                self.assertFalse(reader.in_transaction)
+
+    def test_addressed_refusals(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        cases = [("missing", IMPL.seat_id, 3), ("p", FOREIGN.seat_id, 3),
+                 ("p", "missing", 3), ("p", OPERATOR.seat_id, 3)]
+        cases += [("p", IMPL.seat_id, bound) for bound in (0, 501, True, "3")]
+        for project, seat, bound in cases:
+            seen = []
+            self.conn.set_authorizer(self._writes(seen))
+            try:
+                try:
+                    addressed(self.conn, project, seat, limit=bound)
+                except Exception as error:
+                    outcome = type(error).__name__
+                else:
+                    outcome = None
+            finally:
+                self.conn.set_authorizer(None)
+            self.assertEqual(outcome, "ValueError", (project, seat, bound))
+            self.assertEqual(seen, [])
+            self.assertFalse(self.conn.in_transaction)
+        self.conn.execute("BEGIN")
+        self.conn.execute("UPDATE seat_activity SET last_request_at=123 WHERE seat_id=?",
+                          (PLANNER.seat_id,))
+        try:
+            try:
+                addressed(self.conn, "p", IMPL.seat_id, limit=3)
+            except Exception as error:
+                outcome = type(error).__name__
+            else:
+                outcome = None
+            self.assertEqual(outcome, "ValueError")
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity"
+                                              " WHERE seat_id=?", (PLANNER.seat_id,)).fetchone(),
+                             (123,))
+        finally:
+            self.conn.rollback()
+
+    def test_addressed_ends_own_transaction(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        seen = []
+        record = self._writes(seen)
+        def deny_relays(action, table, column, database, trigger):
+            record(action, table, column, database, trigger)
+            return (sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "relays"
+                    else sqlite3.SQLITE_OK)
+        self.conn.set_authorizer(deny_relays)
+        try:
+            try:
+                addressed(self.conn, "p", IMPL.seat_id, limit=3)
+            except Exception as error:
+                outcome = error
+            else:
+                outcome = None
+        finally:
+            self.conn.set_authorizer(None)
+        self.assertIsInstance(outcome, sqlite3.DatabaseError)
+        self.assertEqual(getattr(outcome, "sqlite_errorname", None), "SQLITE_AUTH")
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(seen, [])
+
+    def test_addressed_one_snapshot(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.db"
+            with contextlib.closing(sqlite3.connect(path)) as writer:
+                self.conn.backup(writer)
+                writer.execute("PRAGMA foreign_keys=ON")
+                self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+                before = [r[0] for r in writer.execute(
+                    "SELECT r.handle FROM relays r JOIN recipients p ON p.relay_id=r.id"
+                    " WHERE p.seat_id=? AND p.role='to'", (IMPL.seat_id,))]
+                outcomes = []
+                with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                                        isolation_level=None)) as reader:
+                    reader.execute("PRAGMA query_only=ON")
+                    def trace(sql):
+                        if sql.lstrip().upper().startswith("SELECT"):
+                            try:
+                                rid = self._import(writer)
+                                outcomes.append(writer.execute("SELECT handle FROM relays"
+                                                               " WHERE id=?", (rid,)).fetchone()[0])
+                            except BaseException as error:
+                                outcomes.append(type(error).__name__)
+                    reader.set_trace_callback(trace)
+                    try:
+                        page = addressed(reader, "p", IMPL.seat_id, limit=500)
+                    finally:
+                        reader.set_trace_callback(None)
+                    self.assertTrue(all(type(x) is int for x in outcomes), outcomes)
+                    self.assertGreaterEqual(len(outcomes), 2)
+                    self.assertEqual([r.handle for r in page.rows],
+                                     sorted(before + outcomes[:1], reverse=True))
+                    self.assertTrue(set(outcomes[1:]).isdisjoint(r.handle for r in page.rows))
+                    self.assertEqual(page.total, len(page.rows))
+                    self.assertEqual(page.answered + page.unanswered + page.imported, page.total)
+                    later = addressed(reader, "p", IMPL.seat_id, limit=500)
+                    self.assertEqual([r.handle for r in later.rows],
+                                     sorted(before + outcomes, reverse=True))
+
+    def test_addressed_empty(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=3)
+        self.assertEqual(page, queries.AddressedPage(0, 0, 0, 0, False, ()))
+
+    def test_addressed_since(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        old = self.submit(draft(to=IMPL.address + ", " + OTHER.address))
+        self.clock += 100
+        later = self.submit(draft(to=IMPL.address))
+        since = old.created_at_ms + 1
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10, since_ms=since)
+        self.assertEqual([r.relay_id for r in page.rows], [later.relay_id])
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported), (1, 0, 1, 0))
+        self.assertEqual(addressed(self.conn, "p", OTHER.seat_id, limit=10, since_ms=since),
+                         queries.AddressedPage(0, 0, 0, 0, False, ()))
+        for bad in (-1, 2**48, True, 1.5):
+            with self.assertRaises(ValueError):
+                addressed(self.conn, "p", IMPL.seat_id, limit=10, since_ms=bad)
+
+
+    def test_addressed_windows(self):
+        # Breaks: counts ignore the bound, or <= repeats a boundary relay (W1/W2).
+        own = []
+        for i in range(7):
+            self.submit(draft(to=OTHER.address))
+            own.append(self.submit(draft(to=IMPL.address)))
+        before = None
+        seen = []
+        for expected, total, truncated in (([14, 12, 10], 7, True),
+                                            ([8, 6, 4], 4, True), ([2], 1, False)):
+            try:
+                page = queries.addressed_to(self.conn, "p", IMPL.seat_id,
+                                            limit=3, before_handle=before)
+            except TypeError as error:
+                self.fail(str(error))
+            handles = [row.handle for row in page.rows]
+            self.assertEqual(handles, expected)
+            self.assertEqual(page.total, total)
+            self.assertEqual(page.answered + page.unanswered + page.imported, total)
+            self.assertEqual(page.truncated, truncated)
+            seen.extend(handles)
+            before = handles[-1]
+        self.assertEqual(sorted(seen), [relay.handle for relay in own])
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_addressed_window_refusals(self):
+        # Breaks: bool or out-of-range windows are accepted (W3/W4).
+        self.submit(draft(to=IMPL.address))
+        for before in (0, -1, 2**63, True, "3"):
+            seen = []
+            self.conn.set_authorizer(self._writes(seen))
+            try:
+                try:
+                    queries.addressed_to(self.conn, "p", IMPL.seat_id,
+                                         limit=3, before_handle=before)
+                except Exception as error:
+                    outcome = type(error).__name__
+                else:
+                    outcome = None
+            finally:
+                self.conn.set_authorizer(None)
+            self.assertEqual(outcome, "ValueError", before)
+            self.assertEqual(seen, [])
+            self.assertFalse(self.conn.in_transaction)
+
+    def test_addressed_window_empty(self):
+        # Breaks: a boundary is inclusive, or since and before are not combined.
+        self.submit(draft(to=OTHER.address))
+        own = self.submit(draft(to=IMPL.address))
+        for before, since in ((own.handle, None), (own.handle - 1, None),
+                              (own.handle + 1, own.created_at_ms + 1)):
+            try:
+                page = queries.addressed_to(self.conn, "p", IMPL.seat_id,
+                                            limit=3, since_ms=since,
+                                            before_handle=before)
+            except TypeError as error:
+                self.fail(str(error))
+            self.assertEqual(page, queries.AddressedPage(0, 0, 0, 0, False, ()))
+
+    def test_addressed_answers_rule(self):
+        # Breaks: ignore own marker, count twice or accept another seat's marker (L1/L2).
+        first = self.submit(draft(to=IMPL.address))
+        double = self.submit(draft(to=IMPL.address))
+        other = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        parent = self.submit(draft(to=IMPL.address))
+        for relay in (first, double):
+            queries.read(self.conn, relay.relay_id, IMPL.seat_id, self.clock)
+        self.submit(draft(to=PLANNER.address, parent=double.relay_id), sender=IMPL)
+        queries.read(self.conn, other.relay_id, OTHER.seat_id, self.clock)
+        self.submit(draft(to=PLANNER.address, answers=(other.relay_id,)), sender=OTHER)
+        self.submit(draft(to=PLANNER.address, parent=parent.relay_id,
+                          answers=(first.relay_id, double.relay_id)), sender=IMPL)
+        page = queries.addressed_to(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual({r.relay_id: r.state for r in page.rows},
+                         {first.relay_id: "answered", double.relay_id: "answered",
+                          other.relay_id: "unanswered", parent.relay_id: "answered"})
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (4, 3, 1, 0))
+        acts = [self.submit(draft(to=IMPL.address, needs="act")) for _ in range(2)]
+        read_at = acts[-1].created_at_ms + 5
+        for relay in acts:
+            queries.read(self.conn, relay.relay_id, IMPL.seat_id, read_at)
+        before = queries.unopened_flags(self.conn, "p", read_at + queries.IDLE_MS + 1)
+        self.assertEqual([flag.relay_id for flag in before
+                          if flag.rule == "idle" and flag.seat_id == IMPL.seat_id],
+                         [acts[1].relay_id])
+        self.submit(draft(to=PLANNER.address, parent=parent.relay_id,
+                          answers=tuple(r.relay_id for r in acts)), sender=IMPL)
+        after = queries.unopened_flags(self.conn, "p", read_at + queries.IDLE_MS + 1)
+        self.assertEqual([flag for flag in after if flag.seat_id == IMPL.seat_id], [])
+
+    def test_addressed_imported_answers(self):
+        # Breaks: an import's answer is unmarked or imported takes precedence (L3).
+        from relay_engine import imports
+        target = self._import()
+        created = self.conn.execute("SELECT max(created_at)+1 FROM relays"
+                                    " WHERE project_id='p'").fetchone()[0]
+        try:
+            reply = imports.ImportedRelay(created, "SITREP", None, "reply", IMPL.seat_id,
+                IMPL.role, IMPL.team_instance_id, (PLANNER.seat_id,), (), None, None,
+                b"body\n", 0, "a"*64, answers=(target,))
+        except TypeError as error:
+            self.fail(str(error))
+        self.conn.execute("BEGIN IMMEDIATE")
+        imports.import_relay_step(self.conn, "p", reply, marked_at_ms=created+1)
+        self.conn.commit()
+        page = queries.addressed_to(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual([(r.relay_id, r.state) for r in page.rows], [(target, "answered")])
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported), (1, 1, 0, 0))
 
 
 class TestSessionSteps(Store):
@@ -2046,6 +2547,20 @@ class TestQueueReaders(Store):
                 else:self.assertIsNone(queries.doorbell_off(c,'p',10000000,1)[0].seat_address)
             w.close();c.close()
 
+    def test_operator_questions_answers(self):
+        # Breaks: ignore operator marker or accept a CC seat's answer (L4/L5).
+        first = self.submit(draft(kind="QUESTION", to="operator", needs="answer"))
+        second = self.submit(draft(kind="QUESTION", to="operator", needs="answer"))
+        third = self.submit(draft(kind="QUESTION", to="operator", needs="answer",
+                                  cc=IMPL.address))
+        self.submit(draft(to=PLANNER.address, parent=first.relay_id,
+                          answers=(second.relay_id,)), sender=OPERATOR)
+        queries.read(self.conn, third.relay_id, IMPL.seat_id, self.clock)
+        self.submit(draft(to=PLANNER.address, answers=(third.relay_id,)), sender=IMPL)
+        page = queries.operator_questions(self.conn, "p", 0, 500)
+        self.assertEqual({r.relay_id: r.answered for r in page},
+                         {first.relay_id: True, second.relay_id: True, third.relay_id: False})
+
 
 class TestProjectSettings(Store):
     def setting_outcome(self, action):
@@ -2060,10 +2575,166 @@ class TestProjectSettings(Store):
         return (self.conn.execute("SELECT * FROM project_settings ORDER BY project_id,key").fetchall(),
                 self.conn.execute("SELECT * FROM settings_history ORDER BY project_id,revision").fetchall())
 
+    def test_delivery_interval_default(self):
+        # Breaks M1: a missing or different default, or a reader clamping it.
+        outcome = self.setting_outcome(lambda: queries.project_settings(
+            self.conn, 'p').values['delivery_interval_seconds'])
+        self.assertEqual(outcome, ('ok', 300))
+        self.assertIs(type(outcome[1]), int)
+        self.assertEqual(self.setting_rows(), ([], []))
+
+    def test_delivery_interval_values(self):
+        # Breaks M2/M9: a widened range or the old three-key DDL.
+        self.conn.execute('BEGIN')
+        for revision, value in enumerate((0, 600, 120), 1):
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', 'delivery_interval_seconds', value,
+                principal='operator', now_ms=100 + revision))
+            self.assertEqual(outcome, ('ok', revision))
+            self.assertEqual(queries.project_settings(self.conn, 'p').values[
+                'delivery_interval_seconds'], value)
+            rows = queries.settings_history(self.conn, 'p', 500)
+            self.assertEqual(len(rows), revision)
+            self.assertEqual((rows[0].key, rows[0].new, rows[0].by_principal,
+                              rows[0].at_ms),
+                             ('delivery_interval_seconds', value, 'operator', 100 + revision))
+        for value in (601, -1, True, '300'):
+            before = self.setting_rows()
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', 'delivery_interval_seconds', value,
+                principal='operator', now_ms=200))
+            self.assertEqual(outcome[0], 'E-SETTING-VALUE', outcome)
+            self.assertEqual(self.setting_rows(), before)
+            self.assertEqual(queries.project_settings(self.conn, 'p').revision, 3)
+
+    def test_delivery_interval_margin(self):
+        # Breaks M3/M4/M5/M10: either direction, equality, or the minute margin.
+        self.conn.execute('BEGIN')
+        cases = [('delivery_interval_seconds', 601, 'E-SETTING-VALUE'),
+                 ('delivery_interval_seconds', 600, 'ok'),
+                 ('delivery_interval_seconds', 300, 'ok'),
+                 ('doorbell_off_minutes', 6, 'ok'),
+                 ('delivery_interval_seconds', 301, 'E-DELIVERY-INTERVAL-MARGIN'),
+                 ('delivery_interval_seconds', 300, 'ok'),
+                 ('doorbell_off_minutes', 5, 'E-DELIVERY-INTERVAL-MARGIN'),
+                 ('delivery_interval_seconds', 240, 'ok'),
+                 ('doorbell_off_minutes', 5, 'ok'),
+                 ('delivery_interval_seconds', 0, 'ok'),
+                 ('doorbell_off_minutes', 1, 'ok')]
+        for key, value, expected in cases:
+            before = self.setting_rows()
+            revision = queries.project_settings(self.conn, 'p').revision
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', key, value, principal='operator', now_ms=100))
+            self.assertEqual(outcome[0], expected, outcome)
+            if expected != 'ok':
+                self.assertEqual(self.setting_rows(), before)
+                self.assertEqual(queries.project_settings(self.conn, 'p').revision, revision)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'delivery_interval_seconds'], 0)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'doorbell_off_minutes'], 1)
+
+    def test_delivery_interval_one_transaction(self):
+        # Breaks M7: a fresh connection sees the committed threshold, not this write.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        conn = sqlite3.connect(os.path.join(directory.name, 'settings.sqlite3'))
+        self.addCleanup(conn.close)
+        self.conn.backup(conn)
+        conn.execute('PRAGMA journal_mode=WAL')
+        self.conn = conn
+        self.conn.execute('BEGIN')
+        self.assertEqual(self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'doorbell_off_minutes', 6, principal='operator', now_ms=100))[0], 'ok')
+        self.conn.commit()
+        before = self.setting_rows()
+        self.conn.execute('BEGIN')
+        for key, value in (('doorbell_off_minutes', 12), ('delivery_interval_seconds', 600)):
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', key, value, principal='operator', now_ms=101))
+            self.assertEqual(outcome[0], 'ok', outcome)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'delivery_interval_seconds'], 600)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self.setting_rows(), before)
+        self.conn.execute('BEGIN')
+        outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'delivery_interval_seconds', 600, principal='operator', now_ms=102))
+        self.assertEqual(outcome[0], 'E-DELIVERY-INTERVAL-MARGIN', outcome)
+        self.conn.rollback()
+        self.assertEqual(self.setting_rows(), before)
+        settings = queries.project_settings(self.conn, 'p')
+        self.assertEqual((settings.values['doorbell_off_minutes'], settings.values[
+            'delivery_interval_seconds'], settings.revision), (6, 300, 1))
+
+    def test_delivery_interval_equal_and_isolated(self):
+        # Breaks M6: checking only after the equal-value return accepts an invalid pair.
+        self.conn.execute('BEGIN')
+        before = self.setting_rows()
+        outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'delivery_interval_seconds', 300, principal='operator', now_ms=100))
+        self.assertEqual(outcome, ('ok', 0))
+        self.assertEqual(self.setting_rows(), before)
+        self.conn.execute("INSERT INTO project_settings VALUES ('p', 'doorbell_off_minutes', '5')")
+        seeded = self.setting_rows()
+        for key, value in (('delivery_interval_seconds', 300), ('doorbell_off_minutes', 5)):
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', key, value, principal='operator', now_ms=101))
+            self.assertEqual(outcome[0], 'E-DELIVERY-INTERVAL-MARGIN', outcome)
+            self.assertEqual(self.setting_rows(), seeded)
+            settings = queries.project_settings(self.conn, 'p')
+            self.assertEqual((settings.values['doorbell_off_minutes'], settings.values[
+                'delivery_interval_seconds'], settings.revision), (5, 300, 0))
+        self.assertEqual(self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'doorbell_off_minutes', 6, principal='operator', now_ms=102))[0], 'ok')
+        for project, expected in (('p', 'E-DELIVERY-INTERVAL-MARGIN'), ('q', 'ok')):
+            before = self.setting_rows()
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, project, 'delivery_interval_seconds', 600,
+                principal='operator', now_ms=103))
+            self.assertEqual(outcome[0], expected, outcome)
+            if expected != 'ok':
+                self.assertEqual(self.setting_rows(), before)
+        self.assertEqual(queries.project_settings(self.conn, 'p').values[
+            'delivery_interval_seconds'], 300)
+        self.assertEqual(queries.project_settings(self.conn, 'q').values[
+            'delivery_interval_seconds'], 600)
+
+    def test_delivery_interval_operator_only(self):
+        # Preservation/M8: the margin and range may not precede authorization.
+        self.conn.execute('BEGIN')
+        self.assertEqual(self.setting_outcome(lambda: queries.set_project_setting_step(
+            self.conn, 'p', 'doorbell_off_minutes', 6, principal='operator', now_ms=100))[0], 'ok')
+        for value in (301, 601):
+            before = self.setting_rows()
+            outcome = self.setting_outcome(lambda: queries.set_project_setting_step(
+                self.conn, 'p', 'delivery_interval_seconds', value,
+                principal=PLANNER.address, now_ms=101))
+            self.assertEqual(outcome[0], 'E-SETTING-OPERATOR-ONLY', outcome)
+            self.assertEqual(self.setting_rows(), before)
+            self.assertEqual(queries.project_settings(self.conn, 'p').revision, 1)
+
+    def test_delivery_interval_ddl(self):
+        # Breaks: keeping the old CHECK/digest or accepting an old ledger.
+        old_keys = "'jev_record', 'jev_act', 'doorbell_off_minutes'"
+        new_keys = old_keys + ", 'delivery_interval_seconds'"
+        earlier = tuple(statement.replace(new_keys, old_keys) for statement in schema._TABLES)
+        digest = hashlib.sha256('\n'.join(earlier + schema._INDEXES + schema._TRIGGERS).encode()).hexdigest()
+        self.assertNotEqual(schema.ddl_digest(), digest)
+        self.conn.execute('UPDATE schema_version SET ddl_sha256=?', (digest,))
+        self.conn.commit()
+        before = self.setting_rows()
+        outcome = self.setting_outcome(lambda: schema.init_v3(self.conn))
+        self.assertEqual(outcome[0], 'E-SCHEMA-MISMATCH', outcome)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.setting_rows(), before)
+
     def test_settings_defaults(self):
         settings = queries.project_settings(self.conn, PLANNER.project_id)
         self.assertEqual(settings.values, {"jev_record": False, "jev_act": False,
-                                           "doorbell_off_minutes": 15})
+                                           "doorbell_off_minutes": 15, "delivery_interval_seconds": 300})
         self.assertIs(type(settings.values["jev_record"]), bool)
         self.assertIs(type(settings.values["doorbell_off_minutes"]), int)
         self.assertEqual(settings.revision, 0)
@@ -2093,7 +2764,8 @@ class TestProjectSettings(Store):
         self.assertEqual(change("jev_act", True, 104), ("ok", 3))
         settings = queries.project_settings(self.conn, PLANNER.project_id)
         self.assertEqual((settings.values, settings.revision),
-                         ({"jev_record": True, "jev_act": True, "doorbell_off_minutes": 30}, 3))
+                         ({"jev_record": True, "jev_act": True, "doorbell_off_minutes": 30,
+                           "delivery_interval_seconds": 300}, 3))
         history = queries.settings_history(self.conn, PLANNER.project_id, 500)
         self.assertEqual([(h.revision, h.key, h.old, h.new, h.by_principal, h.at_ms) for h in history],
                          [(3, "jev_act", None, True, "operator", 104),

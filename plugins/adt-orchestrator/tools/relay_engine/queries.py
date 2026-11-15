@@ -54,6 +54,81 @@ class RelayRow:
 
 
 @dataclass(frozen=True)
+class AddressedRow:
+    relay_id: str
+    handle: int
+    created_at: int
+    sender: str
+    subject: str
+    needs: str
+    state: str
+
+
+@dataclass(frozen=True)
+class AddressedPage:
+    total: int
+    answered: int
+    unanswered: int
+    imported: int
+    truncated: bool
+    rows: tuple[AddressedRow, ...]
+
+
+def addressed_to(conn, project_id: str, seat_id: str, *, limit: int,
+                 since_ms: int | None = None,
+                 before_handle: int | None = None) -> AddressedPage:
+    """List a seat's TO relays and parent-rule answers in one read-only snapshot."""
+    if conn.in_transaction:
+        raise ValueError("addressed_to needs a connection with no open transaction")
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit must be an int from 1 to 500")
+    if since_ms is not None and (type(since_ms) is not int or not 0 <= since_ms < 2**48):
+        raise ValueError("since_ms must be None or an int from 0 to 2**48 - 1")
+    if before_handle is not None and (type(before_handle) is not int
+                                      or not 1 <= before_handle <= 2**63 - 1):
+        raise ValueError("before_handle must be None or an int from 1 to 2**63 - 1")
+    conn.execute("BEGIN")
+    try:
+        if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise ValueError("the addressed project does not exist")
+        if conn.execute("SELECT 1 FROM seats s JOIN team_instances t ON t.id=s.team_instance_id"
+                        " WHERE s.id=? AND t.project_id=?", (seat_id, project_id)).fetchone() is None:
+            raise ValueError("the addressed seat does not belong to the project")
+        selected = (
+            "SELECT r.id, r.handle, r.created_at, " + party_sql("r.sender_") +
+            " AS sender, r.subject, r.needs, CASE WHEN EXISTS ("
+            " SELECT 1 FROM relays child WHERE child.parent_id=r.id"
+            " AND child.project_id=r.project_id AND child.sender_seat_id=?)"
+            " OR recipient.answered_by IS NOT NULL THEN 'answered'"
+            " WHEN r.submission_key IS NULL AND coalesce(r.sender_special, '') != 'system'"
+            " THEN 'imported' ELSE 'unanswered' END AS state"
+            " FROM recipients recipient JOIN relays r ON r.id=recipient.relay_id"
+            " WHERE recipient.role='to' AND recipient.seat_id=? AND r.project_id=?")
+        parameters = (seat_id, seat_id, project_id)
+        if since_ms is not None:
+            selected += " AND r.created_at>=?"
+            parameters += (since_ms,)
+        if before_handle is not None:
+            selected += " AND r.handle<?"
+            parameters += (before_handle,)
+        total, answered, unanswered, imported = conn.execute(
+            "SELECT count(*), coalesce(sum(state='answered'), 0),"
+            " coalesce(sum(state='unanswered'), 0), coalesce(sum(state='imported'), 0)"
+            " FROM (" + selected + ")", parameters).fetchone()
+        rows = tuple(AddressedRow(*row) for row in conn.execute(
+            selected + " ORDER BY r.handle DESC LIMIT ?", parameters + (limit,)))
+        conn.execute("COMMIT")
+        return AddressedPage(total, answered, unanswered, imported, total > len(rows), rows)
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except BaseException:
+                pass  # Keep the original query error, even if cleanup itself fails.
+        raise
+
+
+@dataclass(frozen=True)
 class FindingRow:
     id: str
     handle: int
@@ -122,11 +197,28 @@ class SnapshotRow:
 
 
 @dataclass(frozen=True)
+class RefLine:
+    ordinal: int
+    spelling: str
+
+
+@dataclass(frozen=True)
+class RaisedFinding:
+    handle: int
+    severity: str
+    status: str
+    summary: str
+    check: int | None
+
+
+@dataclass(frozen=True)
 class ReadResult:
     body: bytes
     envelope: dict
     meta: dict | None
-    unopened: list
+    unopened: list[tuple[str, int]]
+    refs: tuple[RefLine, ...]
+    findings: tuple[RaisedFinding, ...]
 
 
 @dataclass(frozen=True)
@@ -193,7 +285,7 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
     row = conn.execute(
         "SELECT r.handle, r.kind, " + party_sql("r.sender_") + ", r.subject, p.handle, r.verdict, r.needs,"
         " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id, r.project_id, r.id,"
-        " r.submission_key, r.sender_special"
+        " r.submission_key, r.sender_special, r.parent_id"
         " FROM relays r JOIN bodies b ON b.relay_id = r.id"
         " LEFT JOIN relays p ON p.id = r.parent_id WHERE r.id = ?", (relay_id,)).fetchone()
     if row is None:
@@ -222,12 +314,20 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
         "handle": row[0], "kind": row[1], "sender": row[2],
         "to": [seat for seat, role in seats if role == "to"],
         "cc": [seat for seat, role in seats if role == "cc"],
-        "subject": row[3], "parent": row[4], "verdict": row[5], "needs": row[6],
+        "subject": row[3], "parent": row[4], "parent_id": row[16],
+        "verdict": row[5], "needs": row[6],
         "created_at": row[7],
         "imported": row[14] is None and row[15] != "system",
     }
     unopened = (unopened_in_lineage(conn, relay_id, seat_id)
                 if row[6] == "review" and (seat_id, "to") in seats else [])
+    ref_lines = tuple(RefLine(*item) for item in conn.execute(
+        "SELECT ordinal, spelling FROM edges WHERE from_relay_id = ? AND kind = 'ref'"
+        " ORDER BY ordinal", (relay_id,)))
+    raised_findings = tuple(RaisedFinding(*item) for item in conn.execute(
+        "SELECT f.handle, f.severity, f.status, f.summary, e.ordinal"
+        " FROM findings f LEFT JOIN edges e ON e.id = f.check_edge_id"
+        " WHERE f.raised_in = ? ORDER BY f.handle", (relay_id,)))
     extra = None
     if meta:
         extra = {
@@ -242,7 +342,7 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
                     " WHERE relay_id = ? ORDER BY rowid", (relay_id,))],
             "git_state": _git_state(conn, row[11]),
         }
-    return ReadResult(bytes(row[8]), envelope, extra, unopened)
+    return ReadResult(bytes(row[8]), envelope, extra, unopened, ref_lines, raised_findings)
 
 
 def _check_foreign_release(conn, target, foreign_release):
@@ -310,8 +410,8 @@ def blocking_findings(conn, bundle_id):
     return [FindingRow(*row) for row in conn.execute(_BLOCKING_SQL, (bundle_id,))]
 
 
-def unopened_in_lineage(conn, relay_id, seat_id):
-    """Handles of the other relays up this relay's lineage that were
+def unopened_in_lineage(conn, relay_id, seat_id) -> list[tuple[str, int]]:
+    """Ids and handles of the other relays up this relay's lineage that were
     addressed to the seat (TO or CC) and that it has not opened."""
     walk = [row.id for row in lineage(conn, relay_id)[1:]]
     if not walk:
@@ -321,7 +421,7 @@ def unopened_in_lineage(conn, relay_id, seat_id):
         "SELECT r.id, r.handle FROM relays r JOIN recipients c ON c.relay_id = r.id"
         " WHERE " + party_sql("c.") + " = ? AND c.opened_at IS NULL AND r.id IN (%s)" % marks,
         [seat_id, *walk]).fetchall())
-    return [rows[rid] for rid in reversed(walk) if rid in rows]
+    return [(rid, rows[rid]) for rid in reversed(walk) if rid in rows]
 
 
 def mark_delivered(conn, relay_id, seat_id, at_ms):
@@ -941,7 +1041,10 @@ def operator_questions(conn, project_id: str, after_handle: int, limit: int) -> 
         "SELECT r.id, r.handle, r.created_at, r.sender_seat_id, r.parent_id, r.needs,"
         " r.subject, b.body, EXISTS (SELECT 1 FROM relays child"
         " WHERE child.parent_id = r.id AND child.project_id = r.project_id"
-        " AND child.sender_special = 'operator'),"
+        " AND child.sender_special = 'operator') OR EXISTS ("
+        " SELECT 1 FROM recipients recipient WHERE recipient.relay_id = r.id"
+        " AND recipient.special = 'operator' AND recipient.role = 'to'"
+        " AND recipient.answered_by IS NOT NULL),"
         " ti.name, r.sender_role, ti.closed_at, r.sender_special"
         " FROM relays r JOIN bodies b ON b.relay_id = r.id"
         " LEFT JOIN team_instances ti ON ti.id = r.team_instance_id"
@@ -1032,6 +1135,7 @@ SETTINGS: Mapping[str, SettingSpec] = MappingProxyType({
     "jev_record": SettingSpec(bool, False),
     "jev_act": SettingSpec(bool, False),
     "doorbell_off_minutes": SettingSpec(int, 15, 1, 1440),
+    "delivery_interval_seconds": SettingSpec(int, 300, 0, 600),
 })
 
 
@@ -1095,6 +1199,11 @@ def set_project_setting_step(conn, project_id: str, key: str, value: bool | int,
     if ((key == "jev_act" and value is True and not current.values["jev_record"]) or
             (key == "jev_record" and value is False and current.values["jev_act"])):
         raise errors.error_for("E-JEV-ACT-NEEDS-RECORD")
+    if ((key == "delivery_interval_seconds" and
+            value > current.values["doorbell_off_minutes"] * 60 - 60) or
+            (key == "doorbell_off_minutes" and
+             current.values["delivery_interval_seconds"] > value * 60 - 60)):
+        raise errors.error_for("E-DELIVERY-INTERVAL-MARGIN")
     if value == current.values[key]:
         return current.revision
     stored = conn.execute("SELECT value FROM project_settings WHERE project_id = ? AND key = ?",

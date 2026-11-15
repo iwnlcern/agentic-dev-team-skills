@@ -14,6 +14,7 @@ from relay_engine.jcs import jcs_encode
 POLICY_CODES = {
     "E-SETTING-OPERATOR-ONLY",
     "E-JEV-ACT-NEEDS-RECORD",
+    "E-DELIVERY-INTERVAL-MARGIN",
     "E-KEY-MISMATCH",
     "E-ID-COLLISION",
     "E-SUPERSEDED",
@@ -37,6 +38,7 @@ ALL_CODES = POLICY_CODES | {
     "E-ADMISSION-HOOK",
     "E-ADMISSION-COMMIT",
     "E-ADMISSION-UNKNOWN",
+    "E-STORE-BUSY",
     "no-top-seat",
     "E-HEADER",
     "E-DRAFT-SHAPE",
@@ -80,6 +82,10 @@ ALL_CODES = POLICY_CODES | {
     "E-SCHEMA-MISMATCH",
     "E-PARENT-UNKNOWN",
     "E-PARENT-NOT-MEMBER",
+    "E-ANSWERS-UNKNOWN",
+    "E-ANSWERS-NOT-ADDRESSED",
+    "E-ANSWERS-UNOPENED",
+    "E-ANSWERS-REPEATED",
     "E-FINDING-UNKNOWN",
     "E-RESOLVE-NOT-RAISER",
     "E-RESOLVE-STATE",
@@ -97,9 +103,33 @@ ALL_CODES = POLICY_CODES | {
 
 
 class TestErrorRegistry(unittest.TestCase):
+    def test_setting_value_explain_names_every_range(self):
+        # Breaks: incomplete setting advice, including a setting registered later.
+        from relay_engine import queries
+        text = errors.explain_for("E-SETTING-VALUE")[0]
+        self.assertEqual(text, (
+            "jev_record and jev_act require booleans, doorbell_off_minutes requires an integer from 1 to 1440, "
+            "and delivery_interval_seconds requires an integer from 0 to 600"))
+        for key, spec in queries.SETTINGS.items():
+            self.assertIn(key, text)
+            if spec.minimum is not None:
+                self.assertIn("from %s to %s" % (spec.minimum, spec.maximum), text)
+
+    def test_store_busy_code(self):
+        # Breaks: an unregistered/misclassified busy answer or unsafe resend advice.
+        self.assertIn("E-STORE-BUSY", errors.ERRORS)
+        error = errors.error_for("E-STORE-BUSY")
+        self.assertEqual(error.cls, "integrity")
+        self.assertEqual(error.cause, "the store was busy and this attempt could not finish; this attempt committed nothing")
+        self.assertEqual(error.remedy, "send the same draft again with the same submission key")
+        self.assertEqual(errors.explain_for("E-STORE-BUSY"), (
+            "a busy store stops an attempt before it commits, and an earlier attempt under the same key is answered by its receipt, so sending the same draft again is safe",
+            "send the same draft again with the same submission key"))
+
     def test_setting_codes(self):
         codes = {"E-SETTING-OPERATOR-ONLY": "policy", "E-JEV-ACT-NEEDS-RECORD": "policy",
-                 "E-SETTING-UNKNOWN": "command", "E-SETTING-VALUE": "command"}
+                 "E-SETTING-UNKNOWN": "command", "E-SETTING-VALUE": "command",
+                 "E-DELIVERY-INTERVAL-MARGIN": "policy"}
         self.assertTrue(set(codes) <= set(errors.ERRORS))
         from relay_engine import queries
         for code, kind in codes.items():
@@ -112,7 +142,7 @@ class TestErrorRegistry(unittest.TestCase):
                 if code in {"E-SETTING-UNKNOWN", "E-SETTING-VALUE"}:
                     for key in queries.SETTINGS:
                         self.assertIn(key, exc.remedy)
-                    for fixed in ("bool", "int", "1", "1440"):
+                    for fixed in ("bool", "int", "1", "1440", "0", "600"):
                         self.assertIn(fixed, exc.remedy)
 
 

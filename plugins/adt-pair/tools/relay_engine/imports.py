@@ -24,6 +24,7 @@ class ImportedRelay:
     body: bytes
     header_bytes: int
     header_sha256: str
+    answers: tuple[str, ...] = ()
 
 
 def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_ms: int) -> str:
@@ -51,9 +52,11 @@ def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_
                                    (project_id,)).fetchone()[0]
         handle = (last_handle or 0) + 1
         relay_id = submit.new_uuid7(relay.created_at, last_id)
-        meta_sha256 = hashlib.sha256(jcs.jcs_encode({
-            "import": "2.9.7", "header_sha256": relay.header_sha256,
-            "parent": relay.parent_id})).hexdigest()
+        meta_form = {"import": "2.9.7", "header_sha256": relay.header_sha256,
+                     "parent": relay.parent_id}
+        if relay.answers:
+            meta_form["answers"] = list(relay.answers)
+        meta_sha256 = hashlib.sha256(jcs.jcs_encode(meta_form)).hexdigest()
         conn.execute(
             "INSERT INTO relays (id, handle, project_id, team_instance_id, kind, verdict, needs,"
             " subject, parent_id, sender_seat_id, sender_special, sender_role, created_at,"
@@ -76,6 +79,8 @@ def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_
                 " target_relay_id) VALUES (?, ?, 1, 'parent', 'relay', ?, ?)",
                 (submit.new_uuid7(relay.created_at), relay_id, relay.parent_spelling,
                  relay.parent_id))
+        for answered_id in relay.answers:
+            submit._write_answered_by(conn, answered_id, relay.sender, relay_id)
         conn.execute("RELEASE engine_import")
         return relay_id
     except BaseException:
@@ -131,3 +136,22 @@ def _validate(conn, project_id, relay, marked_at_ms):
             or re.fullmatch(r"[0-9a-f]{64}", relay.header_sha256) is None
             or not isinstance(relay.body, bytes) or not isinstance(relay.subject, str)):
         raise ValueError("the import header, body or subject is invalid")
+    message = ("the import answers must name earlier relays of this project that the sender "
+               "holds and has opened, each once and none its parent")
+    if not isinstance(relay.answers, tuple) or any(
+            not isinstance(answer, str) for answer in relay.answers):
+        raise ValueError(message)
+    seen = set()
+    for answer in relay.answers:
+        target = conn.execute("SELECT project_id FROM relays WHERE id = ?",
+                              (answer,)).fetchone()
+        if target is None or target[0] != project_id:
+            raise ValueError(message)
+        if answer == relay.parent_id or answer in seen:
+            raise ValueError(message)
+        recipient = conn.execute(
+            "SELECT opened_at FROM recipients WHERE relay_id = ? AND " + submit.party_sql() + " = ?",
+            (answer, relay.sender)).fetchone()
+        if recipient is None or recipient[0] is None:
+            raise ValueError(message)
+        seen.add(answer)

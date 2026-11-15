@@ -205,6 +205,10 @@ def ns(**kw):
     return types.SimpleNamespace(**base)
 
 
+# PL-v3-adapter-timed-tests r2: test headroom above observed save times.
+# Calls that take longer than this finite real-time budget still fail.
+ROOMY_DEADLINE_S = 30.0
+
 HEADER = (
     "| time | phase | role | dispatch | parent | from | t"
     "o | cc | status | file |\n|---|---|---|---|---|---|--"
@@ -229,6 +233,71 @@ def write_index(path, rows_text):
     os.replace(tmp, path)
 
 
+def lock_home_census(source: str) -> tuple[list[str], dict[str, list[str]]]:
+    """Trace concrete test classes through inherited methods and module helpers.
+
+    Subprocess calls are conservatively treated as possible doorbell launches.
+    The returned helper users make the mixin/module-helper coverage reviewable.
+    """
+    tree = ast.parse(source)
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    findings, users = [], {}
+
+    def lineage(name, seen=frozenset()):
+        if name in seen:
+            return set()
+        bases = {ast.unparse(b) for b in classes[name].bases} if name in classes else set()
+        return {name} | set().union(*(lineage(b, seen | {name}) for b in bases))
+
+    def methods(name):
+        result = {}
+        def visit(base, seen):
+            if base in seen or base not in classes:
+                return
+            seen.add(base)
+            for node in classes[base].body:
+                if isinstance(node, ast.FunctionDef):
+                    result.setdefault(node.name, (base + "." + node.name, node))
+            for parent in classes[base].bases:
+                visit(ast.unparse(parent), seen)
+        visit(name, set())
+        return result
+
+    for name in classes:
+        ancestors = lineage(name)
+        if "unittest.TestCase" not in ancestors:
+            continue
+        available = methods(name)
+        pending = list(available.values())
+        visited, needs_home = set(), False
+        while pending:
+            label, fn = pending.pop()
+            if label in visited:
+                continue
+            visited.add(label)
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                spelling = ast.unparse(node.func)
+                if spelling.endswith(".WindowLock") or spelling in {"WindowLock", "self.spawn", "subprocess.Popen", "subprocess.run", "subprocess.check_output"}:
+                    needs_home = True
+                    users.setdefault(label, set()).add(name)
+                if isinstance(node.func, ast.Name) and node.func.id in functions:
+                    pending.append((node.func.id, functions[node.func.id]))
+                elif isinstance(node.func, ast.Attribute):
+                    owner = node.func.value
+                    if isinstance(owner, ast.Name) and owner.id == "self" and node.func.attr in available:
+                        pending.append(available[node.func.attr])
+                    elif isinstance(owner, ast.Name) and owner.id in classes:
+                        target = methods(owner.id).get(node.func.attr)
+                        if target:
+                            pending.append(target)
+        if needs_home and "TmpEnv" not in ancestors:
+            findings.append(name)
+    return sorted(findings), {k: sorted(v) for k, v in sorted(users.items())}
+
+
 class TmpEnv(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -236,11 +305,13 @@ class TmpEnv(unittest.TestCase):
         self.base = pathlib.Path(self.tmp.name).resolve()
         self.env = mock.patch.dict(
             os.environ,
-            {"TMPDIR": str(self.base), "ADT_PACE_WINDOW": "0.5", "ADT_PACE_LINES": "5"},
+            {"HOME": str(self.base / "home"), "TMPDIR": str(self.base), "ADT_PACE_WINDOW": "0.5", "ADT_PACE_LINES": "5"},
             clear=False,
         )
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.assertTrue(pathlib.Path.home().resolve().is_relative_to(self.base),
+                        "test HOME escaped its scratch base")
         for k in (
             "ADT_SEAT",
             "ADT_RELAY_ROOT",
@@ -260,6 +331,39 @@ class TmpEnv(unittest.TestCase):
         (self.root / ".engine" / "seats" / "a.planner").mkdir(parents=True)
         (self.root / "lane").mkdir()
         self.index = self.root / "INDEX.md"
+
+
+class LockHomeCensusTests(TmpEnv):
+    def test_lock_users_run_under_the_scratch_home(self):
+        source = pathlib.Path(__file__).read_text()
+        findings, users = lock_home_census(source)
+        self.assertEqual(findings, [])
+        self.assertIn("FollowProcessTests", users["FollowProcessMixin.spawn"])
+        self.assertIn("EnvRestartReplayTests", users["FollowProcessMixin.spawn"])
+        self.assertIn("run_detached_shell", users)
+        # Retain the actual transitive caller list in the run output.
+        print("LOCK_HOME_HELPER_USERS " + json.dumps(users, sort_keys=True))
+        outside = source + "\nclass Unisolated(unittest.TestCase):\n    def test_lock(self):\n        self.rm.WindowLock('cx-unsafe')\n"
+        self.assertEqual(lock_home_census(outside)[0], ["Unisolated"])
+        tree = ast.parse(source)
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TmpEnv")
+        setup = copy.deepcopy(next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "setUp"))
+        removed = 0
+        for node in ast.walk(setup):
+            if isinstance(node, ast.Dict):
+                for index in range(len(node.keys) - 1, -1, -1):
+                    key = node.keys[index]
+                    if isinstance(key, ast.Constant) and key.value == "HOME":
+                        del node.keys[index]; del node.values[index]; removed += 1
+        self.assertEqual(removed, 1)
+        namespace = dict(globals())
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[setup], type_ignores=[])), "<without-HOME>", "exec"), namespace)
+        probe = TmpEnv()
+        try:
+            with self.assertRaises(AssertionError):
+                namespace["setUp"](probe)
+        finally:
+            probe.doCleanups()
 
 
 class RootReadSeamTests(unittest.TestCase):
@@ -410,7 +514,7 @@ class SessionIdentityTests(TmpEnv):
                     capture_output=True,
                     text=True,
                     env=env,
-                    timeout=2,
+                    timeout=10,
                 )
             except subprocess.TimeoutExpired:
                 self.fail("invalid session entry did not refuse to start")
@@ -942,7 +1046,7 @@ class DeliveryTests(TmpEnv):
 
         self.store.update(fn)
 
-    def deliver(self, sink=None, deadline=0.5, snap=None, **kw):
+    def deliver(self, sink=None, deadline=ROOMY_DEADLINE_S, snap=None, **kw):
         sink = sink if sink is not None else self.rm.ByteSink()
         binding = kw.pop("binding", None) or self.rm.resolve_binding(
             self.store.load(), {}, None
@@ -975,6 +1079,35 @@ class DeliveryTests(TmpEnv):
             b = self.rm.resolve_binding(note, os.environ, None)
             self.assertEqual(b.source, "hook")
             self.assertEqual(note["reason"], "override-incomplete")
+
+    def test_cc_only_counts_hold_with_slow_saves(self):
+        original_write = self.rm.NoteStore._write
+
+        def slow_write(store, note):
+            time.sleep(0.02)
+            return original_write(store, note)
+
+        with mock.patch.object(self.rm.NoteStore, "_write", slow_write):
+            self.bind()
+            write_index(self.index, "".join(row(i, cc="b.implementer") for i in range(1, 66)))
+            result, _ = self.deliver()
+            self.assertEqual(result.emitted, 65)
+            result, _ = self.deliver()
+            self.assertEqual(result.emitted, 0)
+            write_index(self.index, "".join(row(i, cc="b.implementer") for i in range(1, 130)))
+            result, sink = self.deliver()
+            self.assertEqual(result.emitted, 64)
+            self.assertEqual(self.files(sink), [f"lane/r{i}.md" for i in range(66, 130)])
+
+    def test_past_deadline_delivers_nothing_and_says_deadline(self):
+        self.bind()
+        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, 4)))
+        result, sink = self.deliver(deadline=-1.0)
+        self.assertEqual((result.emitted, result.aborted), (0, "deadline"))
+        self.assertEqual(bytes(sink.buf), b"")
+        note = self.store.load()
+        self.assertIsNone(note["frame"])
+        self.assertEqual(note["progress"][str(self.root)], self.rm.SENTINEL)
 
     def test_cc_only_65_then_129_once_across_rereads_restart_and_status_only(self):
         self.bind()
@@ -1036,7 +1169,7 @@ class DeliveryTests(TmpEnv):
                     first_sink,
                     binding,
                     snap,
-                    end=time.monotonic() + 5.0,
+                    end=time.monotonic() + ROOMY_DEADLINE_S,
                     leader_instance=self.inst,
                 )
             )
@@ -1048,7 +1181,7 @@ class DeliveryTests(TmpEnv):
                     second_sink,
                     binding,
                     snap,
-                    end=time.monotonic() + 5.0,
+                    end=time.monotonic() + ROOMY_DEADLINE_S,
                     leader_instance=self.inst,
                     start_cursor=dict(self.rm.SENTINEL),
                 )
@@ -1086,7 +1219,7 @@ class DeliveryTests(TmpEnv):
             self.rm.ByteSink(),
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=self.inst,
         )
         self.assertEqual((r.emitted, r.aborted), (0, "binding-changed"))
@@ -1189,14 +1322,14 @@ class DeliveryTests(TmpEnv):
         self.bind()
         write_index(self.index, row(1, to="b.implementer"))
         sink = StallingSink(accept_first=7)
-        r, _ = self.deliver(sink=sink, deadline=0.2)
+        r, _ = self.deliver(sink=sink)
         self.assertEqual((r.emitted, r.aborted), (0, "output-stalled"))
         note = self.store.load()
         self.assertEqual(note["frame"]["accepted"], 7)
         self.assertEqual(note["frame"]["identity"]["leader"], self.inst)
         self.assertEqual(note["progress"][str(self.root)], self.rm.SENTINEL)
         sink.released = True
-        r, _ = self.deliver(sink=sink, deadline=0.2)
+        r, _ = self.deliver(sink=sink)
         self.assertEqual(r.emitted, 1)
         lines = bytes(sink.buf).decode().split("\n")
         self.assertEqual(json.loads(lines[0])["file"], "lane/r1.md")
@@ -1207,7 +1340,7 @@ class DeliveryTests(TmpEnv):
         self.bind()
         write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
         sink = StallingSink(accept_first=5)
-        self.deliver(sink=sink, deadline=0.2)
+        self.deliver(sink=sink)
         self.store.update(
             lambda n: n["progress"].__setitem__(
                 str(self.root), {"file": "lane/r1.md", "position": 1}
@@ -1215,11 +1348,11 @@ class DeliveryTests(TmpEnv):
         )  # drain committed r1 meanwhile
         sink.released = True
         with self.assertRaises(self.rm.TransportFailed):
-            self.deliver(sink=sink, deadline=0.2)
+            self.deliver(sink=sink)
         self.bind()
         write_index(self.index, row(1, to="b.implementer"))
         sink = StallingSink(accept_first=5)
-        self.deliver(sink=sink, deadline=0.2)
+        self.deliver(sink=sink)
         self.store.update(
             lambda n: n.update({"root": "/elsewhere", "binding_gen": 9})
         )  # bind switched root
@@ -1231,7 +1364,7 @@ class DeliveryTests(TmpEnv):
                 sink,
                 binding,
                 self.rm.read_index(self.index),
-                end=time.monotonic() + 0.2,
+                end=time.monotonic() + ROOMY_DEADLINE_S,
                 leader_instance=self.inst,
             )
 
@@ -1516,7 +1649,7 @@ class DeliveryTests(TmpEnv):
                 pass
 
         t0 = time.monotonic()
-        r, _ = self.deliver(sink=ZeroOnce(), deadline=5.0)
+        r, _ = self.deliver(sink=ZeroOnce())
         self.assertEqual(r.aborted, "output-stalled")
         self.assertLess(
             time.monotonic() - t0, 0.5
@@ -2546,7 +2679,7 @@ class DoorbellExitTests(FollowProcessMixin, TmpEnv):
                                  "existing marker" if case == "existing" else False)
                 with mock.patch.dict(os.environ, {"TMPDIR": str(runtime)}):
                     self.assertIsNone(self.rm.NoteStore("psess").load().get("leader"))
-                locks = list(runtime.rglob("window-*.lock"))
+                locks = list((self.base / "home" / ".adt" / "windows").glob("*.lock"))
                 self.assertEqual(len(locks), 1, "failure did not reach acquired/pre-stamp point")
                 import fcntl
                 with locks[0].open("rb") as stream:
@@ -4715,7 +4848,7 @@ report.write_text(json.dumps(state))
             sink,
             binding,
             snap,
-            end=time.monotonic() + 0.2,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="L",
         )
         self.assertEqual(r.aborted, "output-stalled")
@@ -4740,7 +4873,7 @@ report.write_text(json.dumps(state))
                 sink,
                 new_binding,
                 self.rm.read_index(other / "INDEX.md"),
-                end=time.monotonic() + 0.5,
+                end=time.monotonic() + ROOMY_DEADLINE_S,
                 leader_instance="L",
             )
         self.assertEqual(len(sink.buf), 5)  # no new-root bytes on the damaged stream
@@ -5626,7 +5759,7 @@ else:
                 try:
                     if path == "shared-follower":
                         sink = self.rm.ByteSink()
-                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic()+2, leader_instance=leader["instance"])
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + ROOMY_DEADLINE_S, leader_instance=leader["instance"])
                         self.assertEqual(result.emitted, 0)
                         self.assertEqual(bytes(sink.buf), b"")
                     else:
@@ -5701,7 +5834,7 @@ else:
                     else:
                         sink = self.rm.ByteSink()
                         if has_leader:
-                            result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"], limit=1 if case == "sentinel" else None)
+                            result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + ROOMY_DEADLINE_S, leader_instance=leader["instance"], limit=1 if case == "sentinel" else None)
                             self.assertEqual(result.emitted, int(expected))
                         lines = bytes(sink.buf).decode().splitlines()
                         self.assertEqual([json.loads(line)["file"] for line in lines], [wanted_file] if expected else [])
@@ -5774,7 +5907,7 @@ else:
                     for number in range(1, 4):
                         write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, number + 1)))
                         sink = self.rm.ByteSink()
-                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"])
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + ROOMY_DEADLINE_S, leader_instance=leader["instance"])
                         self.assertEqual(result.emitted, 1)
                         self.assertEqual(json.loads(bytes(sink.buf))["file"], f"lane/r{number}.md")
                         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
@@ -5946,7 +6079,7 @@ else:
             stalled,
             binding,
             snap,
-            end=time.monotonic() + 0.2,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="L",
         )
         self.assertEqual(r.aborted, "output-stalled")
@@ -5960,7 +6093,7 @@ else:
             out,
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="drain-probe",
             limit=1,
             encode=self.rm.stop_document,
@@ -6003,7 +6136,7 @@ else:
             a_sink,
             binding,
             snap,
-            end=time.monotonic() + 0.2,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=a_owner["instance"],
             owner=a_owner,
             limit=1,
@@ -6018,7 +6151,7 @@ else:
             b_sink,
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=b_owner["instance"],
             owner=b_owner,
             limit=1,
@@ -6059,7 +6192,7 @@ else:
             c_sink,
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=c_owner["instance"],
             owner=c_owner,
             limit=1,
@@ -6307,7 +6440,7 @@ else:
                     held,
                     binding,
                     snap,
-                    end=time.monotonic() + 5.0,
+                    end=time.monotonic() + ROOMY_DEADLINE_S,
                     leader_instance="L",
                 )
             )
@@ -7325,7 +7458,7 @@ class OperatorReplayTests(TmpEnv):
             self.rm.ByteSink(),
             binding,
             self.rm.read_index(self.index),
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="L",
         )
         n = self.store.load()

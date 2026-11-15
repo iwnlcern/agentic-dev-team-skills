@@ -376,10 +376,19 @@ class WindowLock:
     Acquisition is non-blocking only; a copy that cannot take it exits, so no second doorbell waits.
     """
 
-    def __init__(self, window_key: str):
+    def __init__(self, window_key: str, *, home: Path | None = None):
         if not valid_window_key(window_key):
             raise ValueError("invalid-window-key")
-        self._path = note_dir() / f"window-{window_key}.lock"
+        folder = (Path.home() if home is None else Path(home)) / ".adt" / "windows"
+        folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(directory).st_uid != os.getuid():
+                raise PermissionError("window lock directory owner")
+            os.fchmod(directory, 0o700)
+        finally:
+            os.close(directory)
+        self._path = folder / f"{window_key}.lock"
         self._fd = None
 
     def acquire(self) -> bool:
@@ -2635,6 +2644,15 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
     observed = record.get("reason")
     miss = "submit-near-miss" if observed == "submit-near-miss" else note.get("submit_miss")
     last_bind = observed if observed and observed != "submit-near-miss" else (note.get("binding_degraded") or {}).get("reason")
+    import pending_ends
+    try:
+        pending, malformed = pending_ends._scan(home=Path.home(), deadline=end)
+    except TimeoutError:
+        pending_cells = " pending-ends=- credential-failed=-"
+        malformed = []
+    else:
+        pending_cells = f" pending-ends={len(pending)} credential-failed={sum(pe.credential_failed for pe in pending)}"
+    pending_lines = ["pending-end unreadable: " + json.dumps(str(path), ensure_ascii=False) for path in malformed]
     line = (
         f"relay-monitor: {state}{suffix} "
         f"seat={note.get('seat') or '-'} "
@@ -2642,7 +2660,7 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
         f"binding={binding} window={note.get('window') or '-'} doorbell={doorbell_txt} client={fp(client_id)} "
         f"daemon={daemon_txt} "
         f"{'engine=no-answer ' if ident == 'no-answer' else ''}"
-        f"updated={note.get('updated') or '-'}"
+        f"updated={note.get('updated') or '-'}{pending_cells}"
         f"{' miss=' + miss if miss else ''}"
         f"{' last-bind=' + last_bind if last_bind else ''}"
         f"{' identity=mismatch' if ident == 'version-mismatch' else ''}"
@@ -2660,7 +2678,7 @@ def status_line(store: NoteStore, plugin_root: str | None, *, end: float | None 
             " to see the daemon's state"
         )
     hint = rebind_line(note, store.session)
-    return "\n".join(printable_text(text) for text in (line, remedy, hint) if text)
+    return "\n".join(printable_text(text) for text in (line, *pending_lines, remedy, hint) if text)
 
 
 def status(args) -> int:

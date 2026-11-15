@@ -104,6 +104,14 @@ def key_path(root, project_id: str, seat_id: str, key_id: str):
             / _canonical_id(seat_id) / (_canonical_id(key_id) + '.key'))
 
 
+def boot_path(root, project_id: str, seat_id: str, key_id: str) -> Path:
+    """Delta 8's boot file beside the occupant's key, with canonical ids."""
+    project_id = _canonical_id(project_id)
+    seat_id = _canonical_id(seat_id)
+    key_id = _canonical_id(key_id)
+    return Path(root) / 'projects' / project_id / 'keys' / seat_id / (key_id + '.boot')
+
+
 def jev_key_path(root):
     return Path(root) / 'jev' / 'key'
 
