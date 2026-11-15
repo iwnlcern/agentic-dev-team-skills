@@ -308,7 +308,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/README.md",
-    "sha256": "1f90b562150cfb93764b41d7e3046ea0fb1ece22d788f62a2dc8219c0e68719e",
+    "sha256": "c0456471b75d0819d650b0a5e18287ba3e7582e535d2f687c4545a7ac8fe79fc",
     "source": "tools/adapters/README.md"
   },
   {
@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9bca37c1566972fb34993d85705170d5b4c5f2d288f28991270cb2922b128944",
+    "sha256": "8df1e795648cd6efb316b011a79acbced2e7f54ec5d1524f46c9c6e400588726",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -367,6 +367,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/pending_ends.py",
+    "sha256": "fdd870066b5baf121c1cb5c145c5bce623dda02f9e8ac399933b6c12f1471b5a",
+    "source": "tools/adapters/pending_ends.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/plugin-hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -380,7 +386,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/relay-monitor.py",
-    "sha256": "7b3f54162c750b95e8545a3d61060b5448844a510e8eed01d0ec01d3a3381ee9",
+    "sha256": "02a7b1bd35995eaa8e43ecfa55011e0b287d56f06913e7206bce1fcf447c711d",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -496,6 +502,12 @@
     "path": "adt-master/tools/adapters/tests/test_hostlogs.py",
     "sha256": "824acb3114a3b424aed5207c1a984cf4ed880e3be510b02f81949c9671ea9868",
     "source": "tools/adapters/tests/test_hostlogs.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_pending_ends.py",
+    "sha256": "209111a7b0bb14b64343b0cbddc25be447fbc7158ad9cb236b39ee35ffe6446e",
+    "source": "tools/adapters/tests/test_pending_ends.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11276,7 +11288,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/README.md",
-    "sha256": "1f90b562150cfb93764b41d7e3046ea0fb1ece22d788f62a2dc8219c0e68719e",
+    "sha256": "c0456471b75d0819d650b0a5e18287ba3e7582e535d2f687c4545a7ac8fe79fc",
     "source": "tools/adapters/README.md"
   },
   {
@@ -11312,7 +11324,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9bca37c1566972fb34993d85705170d5b4c5f2d288f28991270cb2922b128944",
+    "sha256": "8df1e795648cd6efb316b011a79acbced2e7f54ec5d1524f46c9c6e400588726",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11335,6 +11347,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/pending_ends.py",
+    "sha256": "fdd870066b5baf121c1cb5c145c5bce623dda02f9e8ac399933b6c12f1471b5a",
+    "source": "tools/adapters/pending_ends.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/plugin-hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -11348,7 +11366,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/relay-monitor.py",
-    "sha256": "7b3f54162c750b95e8545a3d61060b5448844a510e8eed01d0ec01d3a3381ee9",
+    "sha256": "02a7b1bd35995eaa8e43ecfa55011e0b287d56f06913e7206bce1fcf447c711d",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -11464,6 +11482,12 @@
     "path": "adt-orchestrator/tools/adapters/tests/test_hostlogs.py",
     "sha256": "824acb3114a3b424aed5207c1a984cf4ed880e3be510b02f81949c9671ea9868",
     "source": "tools/adapters/tests/test_hostlogs.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_pending_ends.py",
+    "sha256": "209111a7b0bb14b64343b0cbddc25be447fbc7158ad9cb236b39ee35ffe6446e",
+    "source": "tools/adapters/tests/test_pending_ends.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22160,7 +22184,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/README.md",
-    "sha256": "1f90b562150cfb93764b41d7e3046ea0fb1ece22d788f62a2dc8219c0e68719e",
+    "sha256": "c0456471b75d0819d650b0a5e18287ba3e7582e535d2f687c4545a7ac8fe79fc",
     "source": "tools/adapters/README.md"
   },
   {
@@ -22196,7 +22220,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "9bca37c1566972fb34993d85705170d5b4c5f2d288f28991270cb2922b128944",
+    "sha256": "8df1e795648cd6efb316b011a79acbced2e7f54ec5d1524f46c9c6e400588726",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -22219,6 +22243,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/pending_ends.py",
+    "sha256": "fdd870066b5baf121c1cb5c145c5bce623dda02f9e8ac399933b6c12f1471b5a",
+    "source": "tools/adapters/pending_ends.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/plugin-hooks.json",
     "sha256": "3ff4f7221dcebf2c3f6e7893831b102029e2b0987643efcb9f7bc1e6daddefa2",
     "source": "tools/adapters/plugin-hooks.json"
@@ -22232,7 +22262,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/relay-monitor.py",
-    "sha256": "7b3f54162c750b95e8545a3d61060b5448844a510e8eed01d0ec01d3a3381ee9",
+    "sha256": "02a7b1bd35995eaa8e43ecfa55011e0b287d56f06913e7206bce1fcf447c711d",
     "source": "tools/adapters/relay-monitor.py"
   },
   {
@@ -22348,6 +22378,12 @@
     "path": "adt-pair/tools/adapters/tests/test_hostlogs.py",
     "sha256": "824acb3114a3b424aed5207c1a984cf4ed880e3be510b02f81949c9671ea9868",
     "source": "tools/adapters/tests/test_hostlogs.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_pending_ends.py",
+    "sha256": "209111a7b0bb14b64343b0cbddc25be447fbc7158ad9cb236b39ee35ffe6446e",
+    "source": "tools/adapters/tests/test_pending_ends.py"
   },
   {
     "kit_version": "2.9.7",

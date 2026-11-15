@@ -178,11 +178,13 @@ Override: `ADT_SEAT` and `ADT_RELAY_ROOT` (both required; `ADT_RELAY_ANCHOR` opt
 The status grammar separates follower readiness from binding observations and install identity:
 
 ```text
-relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> window=<key> doorbell=<kit>@<sha> client=<id> daemon=<id>[ engine=no-answer] updated=<stamp>[ miss=submit-near-miss][ last-bind=<reason>][ identity=mismatch]
+relay-monitor: <word>[: <reason>] seat=<s> root=<r> cursor=<c> binding=<hook|manual|env|none> window=<key> doorbell=<kit>@<sha> client=<id> daemon=<id>[ engine=no-answer] updated=<stamp> pending-ends=<n|-> credential-failed=<n|->[ miss=submit-near-miss][ last-bind=<reason>][ identity=mismatch]
+[pending-end unreadable: <path as a JSON string>] (one per unreadable record)
 [remedy: <one line>]
 [rebind: <one line>]
 ```
 
+A `-` pending-end or credential-failed count means the status budget ended before the count.
 The five readiness words are `not-started` (no doorbell holds the window lock and no follower exit is recorded), `starting` (the lock holder and leader record do not yet agree), `waiting-for-binding` (a live leader without initialized binding progress), `armed` (a live leader following initialized progress), and `unavailable` (a recorded delivery fault or follower exit, with exit reason `transport-failed`, `follower-error`, `window-gone` or `terminated`).
 A binding observation changes neither readiness nor delivery eligibility.
 Delivery requires a binding, a usable index and cursor or fallback anchor, an addressed row beyond that position, and an available output path; the Codex drain can deliver without a follower.
