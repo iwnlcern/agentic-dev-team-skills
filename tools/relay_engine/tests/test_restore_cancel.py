@@ -28,6 +28,50 @@ class RestoreStore(SlipStore):
 
 
 class TestCancel(RestoreStore):
+    def test_cancel_rolls_back_on_failure_after_first_write(self):
+        # RC-M16: without rollback, the earlier revocations and events remain.
+        import sqlite3
+        self.build()
+        self.cancel('job-0')
+        self.release()
+        _, _, first = self.build(bundle='b1')
+        _, _, second = self.build(bundle='b2')
+        ids = (self.issued(first), self.issued(second))
+        before = self.saved()
+        for event in ('INSERT', 'UPDATE'):
+            name = 'fail_cancel_' + event.lower()
+            self.conn.execute('CREATE TEMP TRIGGER ' + name + ' BEFORE ' + event
+                              + " ON restore_cancels BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            self.addCleanup(self.conn.execute, 'DROP TRIGGER IF EXISTS ' + name)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'injected'):
+            self.rc().cancel_all(self.conn, 'p', 'job-b', self.clock)
+        self.assertEqual(self.saved(), before)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertIsNone(self.rc().held(self.conn, 'p'))
+        for event in ('insert', 'update'):
+            self.conn.execute('DROP TRIGGER fail_cancel_' + event)
+        result = self.cancel('job-b')
+        self.assertIsInstance(result, self.rc().Cancelled)
+        self.assertEqual(set(result.revoked), set(ids))
+        self.assertFalse(result.already)
+
+    def test_release_rolls_back_on_failure_after_its_write(self):
+        # RC-M17: ABORT undoes the UPDATE, but only rollback ends its transaction.
+        import sqlite3
+        self.cancel('job-a')
+        before = self.saved()
+        self.conn.execute("CREATE TEMP TRIGGER fail_release AFTER UPDATE ON restore_cancels"
+                          " BEGIN SELECT RAISE(ABORT, 'injected'); END")
+        self.addCleanup(self.conn.execute, 'DROP TRIGGER IF EXISTS fail_release')
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'injected'):
+            self.rc().release(self.conn, 'p', 'operator', self.clock)
+        self.assertEqual(self.saved(), before)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.rc().held(self.conn, 'p').job_id, 'job-a')
+        self.conn.execute('DROP TRIGGER fail_release')
+        self.release()
+        self.assertIsNone(self.rc().held(self.conn, 'p'))
+
     def test_cancel_all_revokes_every_live_slip(self):
         # RC-M3: a consumed slip must not be revoked again.
         _, _, consumed = self.build(bundle='b1')
