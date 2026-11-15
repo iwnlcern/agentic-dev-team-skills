@@ -609,7 +609,7 @@ _SETTINGS_TEXT = {
     "error-setting-unknown-explain": "project settings accept only the four registered keys",
     "error-setting-value-cause": "the setting value has the wrong type or is outside its range",
     "error-setting-value-remedy": "use jev_record (bool), jev_act (bool), doorbell_off_minutes (int from 1 to 1440), or delivery_interval_seconds (int from 0 to 600); bool is not an int for this setting",
-    "error-setting-value-explain": "boolean settings require booleans and the doorbell threshold requires an integer from 1 to 1440",
+    "error-setting-value-explain": "jev_record and jev_act require booleans, doorbell_off_minutes requires an integer from 1 to 1440, and delivery_interval_seconds requires an integer from 0 to 600",
     "error-jev-act-needs-record-cause": "Jev act requires Jev record",
     "error-jev-act-needs-record-remedy": "enable jev_record before jev_act, and disable jev_act before disabling jev_record",
     "error-jev-act-needs-record-explain": "the setting step refuses either change that would leave Jev act enabled without Jev record",

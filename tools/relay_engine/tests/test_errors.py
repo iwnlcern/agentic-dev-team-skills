@@ -103,6 +103,18 @@ ALL_CODES = POLICY_CODES | {
 
 
 class TestErrorRegistry(unittest.TestCase):
+    def test_setting_value_explain_names_every_range(self):
+        # Breaks: incomplete setting advice, including a setting registered later.
+        from relay_engine import queries
+        text = errors.explain_for("E-SETTING-VALUE")[0]
+        self.assertEqual(text, (
+            "jev_record and jev_act require booleans, doorbell_off_minutes requires an integer from 1 to 1440, "
+            "and delivery_interval_seconds requires an integer from 0 to 600"))
+        for key, spec in queries.SETTINGS.items():
+            self.assertIn(key, text)
+            if spec.minimum is not None:
+                self.assertIn("from %s to %s" % (spec.minimum, spec.maximum), text)
+
     def test_store_busy_code(self):
         # Breaks: an unregistered/misclassified busy answer or unsafe resend advice.
         self.assertIn("E-STORE-BUSY", errors.ERRORS)
