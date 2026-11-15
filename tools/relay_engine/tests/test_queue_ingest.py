@@ -410,3 +410,528 @@ class TestQueueIngest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# PR 3a lifecycle cases use the same real ledger/catalogue and writer-job port.
+from relay_engine import lifecycle_outbox as outbox
+from relay_engine.operator_queue import notice_text, notifier
+
+
+class TestLifecycleIngest(unittest.TestCase):
+    def setUp(self):
+        self.f = QueueFixture(self)
+        self.c = self.f.catalogue
+        self.port = Port(self.f)
+        self.assertTrue(callable(getattr(ingest, 'ingest_lifecycle', None)),
+                        'lifecycle catalogue ingest is absent')
+        self.assertTrue(callable(getattr(ingest, 'lifecycle_ingest_pass', None)),
+                        'three-stage lifecycle pass is absent')
+
+    def append(self, form='seat', *, project=P, commit=True, **changes):
+        ledger = self.f.ledger
+        ledger.execute('BEGIN').close()
+        common = dict(project_id=project, committed_at_ms=self.f.clock)
+        sender = self.f.foreign if project == Q else self.f.sender
+        if form == 'seat':
+            args = dict(subkind='seat_registered', seat_id=sender.seat_id,
+                        old_occupant_id=None, new_occupant_id='o-'+sender.seat_id,
+                        actor_kind='occupant', actor_occupant_id='o-'+sender.seat_id)
+            fn = outbox.append_seat_row
+        elif form == 'settlement':
+            args = dict(outcome='finished', occasion='start', chain_id='chain',
+                        runtime_instance_id='runtime', transaction_ordinal=1,
+                        events=(outbox.SettledEvent(1, 'slip-issued', 'slip'),))
+            fn = outbox.append_settlement_row
+        elif form == 'restart':
+            args = dict(seat_id=sender.seat_id, actor_occupant_id='o-'+sender.seat_id)
+            fn = outbox.append_restart_row
+        elif form == 'merge':
+            args = dict(holder_seat_id=sender.seat_id, slip_id='slip', pr=123,
+                        merge_commit='a'*40, allowed_target='v3', landed_target='main')
+            fn = outbox.append_merge_alarm_row
+        elif form == 'instruction':
+            args = dict(act_kind='slip-issued', carrying_seat_id=sender.seat_id,
+                        instruction_relay_id='instruction', chain_id='chain', event_number=1)
+            fn = outbox.append_instructed_act_row
+        elif form == 'unseat':
+            args = dict(seat_id=sender.seat_id, generation=1, surface='page',
+                        carrying_seat_id=None, instruction_relay_id=None)
+            fn = outbox.append_unseat_row
+        else:
+            raise AssertionError(form)
+        args.update(changes)
+        if form == 'seat':
+            if args['subkind'] == 'seat_replaced' and args['old_occupant_id'] is None:
+                args['old_occupant_id'] = 'old-'+sender.seat_id
+            if args['subkind'] == 'seat_stood_down':
+                args['new_occupant_id'] = None
+            for occupant in (args['old_occupant_id'], args['new_occupant_id']):
+                if occupant is not None:
+                    ledger.execute('INSERT OR IGNORE INTO seat_occupants '
+                        '(id,seat_id,key_id,key_verifier,issued_at,ended_at) VALUES (?,?,?, ?,1,2)',
+                        (occupant, sender.seat_id, 'key-'+occupant, 'v')).close()
+        try:
+            fn(ledger, **common, **args)
+            row = outbox.read_after(ledger, project, 0, limit=10000)[-1]
+            if commit:
+                ledger.commit()
+            else:
+                ledger.rollback()
+            return row
+        except BaseException:
+            ledger.rollback()
+            raise
+
+    def run_pass(self, projects=(P, Q), limit=100):
+        return ingest.lifecycle_ingest_pass(self.port, projects, self.f.clock, limit=limit)
+
+    def cursor(self, project=P):
+        return records.read_cursor(self.c, project, 'lifecycle')
+
+    def items(self):
+        return operations._dicts(self.c, 'SELECT * FROM queue_items ORDER BY raised_position')
+
+    def item(self, row):
+        for item in self.items():
+            if json.loads(item['pins'])['row_id'] == row.row_id:
+                return item
+        self.fail('missing item for '+row.row_id)
+
+    def notify_count(self):
+        return self.c.execute('SELECT COUNT(*) FROM queue_notifications').fetchone()[0]
+
+    def reset_project(self, backup):
+        records.undo_step(self.c, P, 'undo', now_ms=self.f.clock)
+        self.c.commit()
+        self.f.restore(backup)
+        self.c.execute("UPDATE project_routes SET state='active' WHERE project_id=?", (P,)).close()
+        self.c.commit()
+
+    def catalogue_copy(self, name):
+        self.c.commit()
+        path = self.f.root / name
+        target = sqlite3.connect(path)
+        try:
+            self.c.backup(target)
+        finally:
+            target.close()
+        return path
+
+    def restore_catalogue(self, path):
+        self.c.commit()
+        source = sqlite3.connect(path)
+        try:
+            source.backup(self.c)
+        finally:
+            source.close()
+
+    def test_one_notice_per_outbox_row(self):
+        row = self.append(subkind='seat_replaced', old_occupant_id='old', new_occupant_id='new')
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.run_pass(), 1)
+        item = self.item(row)
+        self.assertEqual(item['subkind'], 'seat_replaced')
+        self.assertEqual(item['actor_address'], self.f.sender.address)
+        self.assertEqual(json.loads(item['pins'])['old_occupant_id'], 'old')
+        self.assertEqual(json.loads(item['pins'])['new_occupant_id'], 'new')
+        self.assertEqual(json.loads(item['condition_key']), dict(project_id=P, row_id=row.row_id))
+        self.assertEqual(self.cursor(), records.Cursor(1, 0, row.row_id))
+        self.assertEqual(self.run_pass(), 0)
+        self.assertEqual(len(self.items()), 1)
+
+    def committed_settlement(self, outcome, occasion):
+        row = self.append('settlement', outcome=outcome, occasion=occasion)
+        # Dropping the source connection models loss of process-local work after commit.
+        saved = self.f.backup('after-commit.sqlite3')
+        self.f.restore(saved)
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(row)['subkind'], 'settlement_'+outcome)
+        # Control: the old two-transaction writer stops after its ledger-only commit.
+        control = QueueFixture(self)
+        control.ledger.execute("UPDATE projects SET name='settled' WHERE id=?", (P,)).close()
+        control.ledger.commit()
+        # A stop here prevents the separate catalogue-raise transaction from running.
+        self.assertEqual(ingest.lifecycle_ingest_pass(Port(control), [P], self.f.clock), 0)
+        self.assertEqual(control.items(), [])
+
+    def test_settlement_notice_survives_stop_after_commit(self):
+        self.committed_settlement('finished', 'start')
+
+    def test_running_void_notice_survives_stop_after_commit(self):
+        self.committed_settlement('undone', 'running')
+
+    def test_rolled_back_settlement_raises_nothing(self):
+        self.append('settlement', commit=False)
+        self.assertEqual(self.run_pass(), 0)
+        self.assertEqual(self.items(), [])
+        row = self.append('settlement')
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(row)['state'], 'pending')
+
+    def test_reread_over_dismissed_notice_raises_nothing(self):
+        one = self.append('settlement')
+        low = self.f.backup('one.sqlite3')
+        self.append()
+        self.run_pass()
+        item = self.item(one)
+        result = operations.dismiss(self.c, self.f.operator, item['item_id'], 1, 'dismiss', self.f.clock)
+        self.assertEqual(result['state'], 'dismissed')
+        self.c.commit()
+        dismissed = self.catalogue_copy('dismissed.sqlite3')
+        self.f.restore(low)
+        fresh = self.append()
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual((self.item(one)['state'], self.item(one)['revision']), ('dismissed', 2))
+        self.assertEqual(self.item(fresh)['state'], 'pending')
+        self.assertEqual(self.notify_count(), 0)
+        self.restore_catalogue(dismissed)
+        self.c.execute('UPDATE queue_conditions SET closed_at_ms=? WHERE item_id=?',
+                       (self.f.clock, item['item_id'])).close()
+        self.c.commit()
+        self.assertEqual(self.run_pass(), 2)
+        self.assertEqual(sum(json.loads(i['pins'])['row_id'] == one.row_id for i in self.items()), 2)
+
+    def test_settlement_notice_text(self):
+        rows = [self.append('settlement', outcome='undone', occasion=occasion)
+                for occasion in ('start', 'running', 'stop', 'resolve')]
+        rows.append(self.append('settlement'))
+        self.assertEqual(self.run_pass(), 5)
+        for row in rows:
+            item = self.item(row)
+            self.assertEqual(json.loads(item['texts']), notice_text.settlement_texts(row))
+            self.assertEqual(json.loads(item['pins']), notice_text.settlement_pins(row))
+            self.assertIsNone(item['actor_address'])
+        self.assertEqual(json.loads(self.item(rows[3])['texts'])['caused_by'], 'your answer')
+
+    def test_settlement_notice_lifetime(self):
+        rows = [self.append('settlement') for _ in range(3)] + [self.append()]
+        self.assertEqual(self.run_pass(), 4)
+        reopened = self.catalogue_copy('reopen.sqlite3')
+        self.restore_catalogue(reopened)
+        self.assertEqual(self.run_pass(), 0)
+        self.assertTrue(all(i['state'] == 'pending' for i in self.items()))
+        for row, action in zip(rows[:2], (operations.open_notice, operations.dismiss)):
+            result = action(self.c, self.f.operator, self.item(row)['item_id'], 1,
+                            'act-'+row.row_id, self.f.clock)
+            self.assertEqual(result['state'], 'dismissed')
+        high = self.c.execute('SELECT MAX(position) FROM queue_events').fetchone()[0]
+        result = operations.dismiss_all(self.c, self.f.operator, 'machine', high, 'all', self.f.clock)
+        self.assertEqual(result['count'], 2)
+        self.assertTrue(all(i['state'] == 'dismissed' for i in self.items()))
+
+    def test_ledger_rewind_raises_reused_position(self):
+        self.append(); self.append()
+        low = self.f.backup('two.sqlite3')
+        self.append(); self.run_pass()
+        before = self.catalogue_copy('three.sqlite3')
+        self.f.restore(low)
+        fresh = self.append('settlement')
+        original = ingest.ingest_lifecycle
+        def unchecked(conn, rows, project, cursor, **kwargs):
+            return original(conn, [r for r in rows if r.position > cursor.position], project,
+                            cursor, check_rewind=False, now_ms=kwargs['now_ms'])
+        with mock.patch.object(ingest, 'ingest_lifecycle', unchecked):
+            self.assertEqual(self.run_pass(), 0)
+        self.assertFalse(any(json.loads(i['pins'])['row_id'] == fresh.row_id for i in self.items()))
+        self.restore_catalogue(before)
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.cursor().anchor_id, fresh.row_id)
+
+    def test_catalogue_restore_reraises_lost_notices(self):
+        one = self.append('settlement'); self.run_pass()
+        operations.dismiss(self.c, self.f.operator, self.item(one)['item_id'], 1, 'dismiss', self.f.clock)
+        saved = self.catalogue_copy('catalogue-one.sqlite3')
+        two = self.append(); three = self.append('settlement'); self.run_pass()
+        self.restore_catalogue(saved)
+        external = records.Cursor(3, 0, three.row_id)
+        original = ingest.ingest_lifecycle
+        def external_without_rewind(c, rs, p, cur, **kw):
+            new = [row for row in rs if row.position > cur.position]
+            return original(c, new, p, cur, check_rewind=False, now_ms=kw['now_ms']) if new else 0
+        with mock.patch.object(records, 'read_cursor', return_value=external), mock.patch.object(
+                ingest, 'ingest_lifecycle', external_without_rewind):
+            self.assertEqual(self.run_pass(), 0)
+        self.restore_catalogue(saved)
+        self.assertEqual(self.run_pass(), 2)
+        self.assertEqual(self.item(one)['state'], 'dismissed')
+        self.assertEqual(self.item(two)['state'], 'pending')
+        self.assertEqual(self.run_pass(), 0)
+
+    def test_undo_retires_settlement_notice(self):
+        empty = self.f.backup('empty.sqlite3')
+        row = self.append('settlement'); self.run_pass()
+        saved = self.catalogue_copy('pending.sqlite3')
+        original = records._rows
+        def omit_settlement(conn, sql, params=()):
+            rows = original(conn, sql, params)
+            if sql.startswith('SELECT item_id,kind,state,project_id,condition_key,revision'):
+                return [r for r in rows if r[0] != self.item(row)['item_id']]
+            return rows
+        with mock.patch.object(records, '_rows', omit_settlement):
+            records.undo_step(self.c, P, 'bad-undo', now_ms=self.f.clock)
+        self.assertEqual(self.item(row)['state'], 'pending')
+        self.restore_catalogue(saved)
+        self.reset_project(empty)
+        self.assertEqual(self.item(row)['state'], 'retired')
+        fresh = self.append('settlement')
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(fresh)['state'], 'pending')
+
+    def test_fresh_ledger_raises_again(self):
+        empty = self.f.backup('empty.sqlite3')
+        old = self.append(); self.run_pass()
+        saved = self.catalogue_copy('old.sqlite3')
+        self.reset_project(empty)
+        fresh = self.append()
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(fresh)['subkind'], 'seat_registered')
+        self.restore_catalogue(saved)
+        original = ingest.ingest_lifecycle
+        def without_reset_or_rewind(c, rs, p, cur, **kw):
+            new = [row for row in rs if row.position > cur.position]
+            return original(c, new, p, cur, check_rewind=False, now_ms=kw['now_ms']) if new else 0
+        with mock.patch.object(ingest, 'ingest_lifecycle', without_reset_or_rewind):
+            self.assertEqual(self.run_pass(), 0)
+        self.assertEqual(self.cursor().anchor_id, old.row_id)
+
+    def test_old_lifecycle_batch_across_reactivation(self):
+        empty = self.f.backup('empty.sqlite3')
+        old = self.append(); old_rows = outbox.read_after(self.f.ledger, P, 0, limit=101)
+        old_cursor = self.cursor()
+        self.reset_project(empty)
+        fresh = self.append()
+        before = self.f.snapshot()
+        result = self.port.catalogue(lambda c: ingest.ingest_lifecycle(
+            c, old_rows, P, old_cursor, check_rewind=True, now_ms=self.f.clock))
+        self.assertIsInstance(result, records.Stale)
+        self.assertEqual(self.f.snapshot(), before)
+        saved = self.catalogue_copy('before-wrong-epoch.sqlite3')
+        current = self.cursor()
+        result = self.port.catalogue(lambda c: ingest.ingest_lifecycle(
+            c, old_rows, P, current, check_rewind=True, now_ms=self.f.clock))
+        self.assertEqual(result, 1)  # Removing the epoch comparison admits the old batch.
+        self.assertEqual(self.cursor().anchor_id, old.row_id)
+        self.restore_catalogue(saved)
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(fresh)['state'], 'pending')
+        self.assertEqual(self.run_pass(), 0)
+
+    def test_mixed_batch_in_position_order(self):
+        rows = [self.append(), self.append('settlement'), self.append()]
+        self.assertEqual(self.run_pass(), 3)
+        self.assertEqual([json.loads(i['pins'])['row_id'] for i in self.items()], [r.row_id for r in rows])
+
+    def test_lifecycle_notices_do_not_ring(self):
+        for subkind in ('seat_registered', 'seat_replaced', 'seat_stood_down'):
+            self.append(subkind=subkind)
+        self.append('settlement'); self.append('settlement', outcome='undone', occasion='running')
+        self.assertEqual(self.run_pass(), 5)
+        self.assertEqual(self.notify_count(), 0)
+
+    def test_reread_twice_moves_on(self):
+        self.append(); other = self.append(project=Q)
+        original = ingest.ingest_lifecycle
+        def twice(conn, rows, project, cursor, **kw):
+            return records.Reread() if project == P else original(conn, rows, project, cursor, **kw)
+        with mock.patch.object(ingest, 'ingest_lifecycle', twice):
+            self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(len(self.items()), 1)
+        self.assertEqual(self.item(other)['project_id'], Q)
+        self.assertEqual(self.cursor(), records.Cursor(0, 0, None))
+
+    def test_restart_notice_from_outbox(self):
+        rows = [self.append('restart'), self.append('restart')]
+        self.assertEqual(self.run_pass(), 2)
+        self.assertNotEqual(self.item(rows[0])['condition_key'], self.item(rows[1])['condition_key'])
+        for row in rows:
+            item = self.item(row)
+            self.assertEqual(item['actor_address'], self.f.sender.address)
+            self.assertEqual(json.loads(item['pins']), notice_text.restart_pins(row))
+            self.assertEqual(json.loads(item['texts']), notice_text.restart_texts(row))
+        self.assertEqual(self.notify_count(), 0)
+
+    def test_merge_alarm_rings(self):
+        alarm = self.append('merge'); seat = self.append()
+        self.assertEqual(self.run_pass(), 2)
+        self.assertEqual(json.loads(self.item(alarm)['condition_key']), dict(project_id=P, slip_id='slip'))
+        self.assertEqual(json.loads(self.item(alarm)['texts']), notice_text.merge_alarm_texts(alarm))
+        self.assertEqual(self.item(alarm)['actor_address'], self.f.sender.address)
+        self.assertEqual(self.notify_count(), 1)
+        self.assertNotEqual(self.item(alarm)['item_id'], self.item(seat)['item_id'])
+
+    def test_merge_replay_rings_nothing(self):
+        empty = self.f.backup('empty.sqlite3')
+        first = self.append('merge'); self.run_pass(); item = self.item(first)
+        operations.dismiss(self.c, self.f.operator, item['item_id'], 1, 'dismiss', self.f.clock)
+        self.append('merge')
+        self.assertEqual(self.run_pass(), 0)
+        self.assertEqual(len(self.items()), 1)
+        self.assertEqual(self.notify_count(), 1)
+        self.reset_project(empty)
+        fresh = self.append('merge')
+        self.assertEqual(self.run_pass(), 1)
+        self.assertNotEqual(self.item(fresh)['item_id'], item['item_id'])
+        self.assertEqual(self.notify_count(), 2)
+
+    def test_merge_text_and_cut(self):
+        rows = [self.append('merge', slip_id='slip-'+str(n), merge_commit='a'*n) for n in (40, 64)]
+        self.run_pass()
+        notes = notifier.due_notifications(self.c, self.f.clock, 10)
+        self.assertEqual([len(n.text.encode()) for n in notes], [184, 208])
+        delivered = [notifier.notification_argv(n, 'notify-send')[-1] for n in notes]
+        mark = " … [cut: the whole message is on v3's page]"
+        self.assertEqual(delivered[0], notes[0].text)
+        self.assertEqual(delivered[1], notes[1].text[:155] + mark)
+        self.assertTrue(delivered[1].endswith('a'*11+mark))
+        for row, note in zip(rows, notes):
+            whole = operations.get_item(self.c, self.item(row)['item_id'], 100, None)['item']
+            whole['texts'] = json.loads(whole['texts'])
+            self.assertEqual(whole['texts']['sentence'], note.text)
+
+    def test_cursor_anchor_at_batch_end(self):
+        self.append(); self.append(); self.append('merge')
+        self.assertEqual(self.run_pass(limit=3), 3)
+        saved = self.catalogue_copy('at-three.sqlite3')
+        fourth = self.append(); fifth = self.append('merge')
+        self.assertEqual(self.run_pass(limit=3), 1)
+        self.assertEqual(self.cursor(), records.Cursor(5, 0, fifth.row_id))
+        self.assertEqual(self.run_pass(limit=3), 0)
+        self.assertEqual(self.notify_count(), 1)
+        self.restore_catalogue(saved)
+        original = ingest.ingest_lifecycle
+        def item_anchor(conn, rows, project, cursor, **kw):
+            if cursor.position and not any(json.loads(i['condition_key']).get('row_id') == cursor.anchor_id
+                                          for i in self.items()):
+                return records.Reread()
+            return original(conn, rows, project, cursor, **kw)
+        with mock.patch.object(ingest, 'ingest_lifecycle', item_anchor):
+            self.assertEqual(self.run_pass(limit=3), 0)
+            self.assertEqual(self.run_pass(limit=3), 0)
+        self.assertFalse(any(json.loads(i['pins'])['row_id'] == fourth.row_id for i in self.items()))
+
+    def hold_batch(self, form, **changes):
+        one = self.append(); self.append(form, **changes); self.append()
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.cursor(), records.Cursor(1, 0, one.row_id))
+        self.assertEqual(len(self.items()), 1)
+
+    def test_instructed_act_waits_for_pr3c(self):
+        self.hold_batch('instruction')
+        control = QueueFixture(self)
+        other = type(self)('test_mixed_batch_in_position_order')
+        other.f, other.c, other.port = control, control.catalogue, Port(control)
+        rows = [other.append() for _ in range(3)]
+        self.assertEqual(other.run_pass(), 3)
+        self.assertEqual(other.cursor(), records.Cursor(3, 0, rows[-1].row_id))
+
+    def test_unseat_notice_and_instructed_hold(self):
+        surface = self.append('unseat'); self.assertEqual(self.run_pass(), 1)
+        item = self.item(surface)
+        self.assertIsNone(item['fields'])
+        self.assertEqual(item['actor_address'], self.f.sender.address)
+        self.assertEqual(json.loads(item['texts']), notice_text.unseat_texts(surface))
+        self.assertEqual(self.notify_count(), 0)
+        control = QueueFixture(self)
+        other = type(self)('test_mixed_batch_in_position_order')
+        other.f, other.c, other.port = control, control.catalogue, Port(control)
+        other.hold_batch('unseat', surface=None, carrying_seat_id=control.sender.seat_id,
+                         instruction_relay_id='instruction')
+        third = QueueFixture(self)
+        ordinary = type(self)('test_mixed_batch_in_position_order')
+        ordinary.f, ordinary.c, ordinary.port = third, third.catalogue, Port(third)
+        ordinary.append(); page = ordinary.append('unseat'); last = ordinary.append()
+        self.assertEqual(ordinary.run_pass(), 3)
+        self.assertEqual(ordinary.item(page)['subkind'], 'seat_unseated')
+        self.assertEqual(json.loads(ordinary.item(page)['texts']), notice_text.unseat_texts(page))
+        self.assertEqual(ordinary.cursor(), records.Cursor(3, 0, last.row_id))
+
+    def test_lifecycle_free_values_fit(self):
+        alarm = self.append('merge', pr=10**18, merge_commit='a'*64,
+                            allowed_target='v'*3000, landed_target='m'*3000)
+        last = self.append()
+        saved = self.catalogue_copy('before-fit.sqlite3')
+        self.assertEqual(self.run_pass(), 2)
+        item = self.item(alarm)
+        text = json.loads(item['texts'])['sentence']
+        self.assertIn('v'*509+'…', text); self.assertIn('m'*509+'…', text)
+        self.assertLessEqual(len(text.encode()), 4096)
+        self.assertEqual(json.loads(item['pins'])['allowed_target'], alarm.allowed_target)
+        self.assertEqual(json.loads(item['pins'])['pr'], str(10**18))
+        self.assertEqual(self.cursor().anchor_id, last.row_id)
+        self.restore_catalogue(saved)
+        original = notice_text.merge_alarm_texts
+        def unfit(row):
+            with mock.patch.object(notice_text, 'fit_value', lambda value: value):
+                return original(row)
+        with mock.patch.object(notice_text, 'merge_alarm_texts', unfit):
+            with self.assertRaises(ingest.LifecycleRowRefused):
+                self.port.catalogue(lambda c: ingest.ingest_lifecycle(c, (alarm, last), P,
+                    self.cursor(), check_rewind=True, now_ms=self.f.clock))
+        self.assertEqual(self.items(), [])
+
+    def test_lifecycle_pin_integer_boundary(self):
+        rows = [self.append('merge', pr=2**53-1, slip_id='in'),
+                self.append('merge', pr=2**53, slip_id='out'),
+                self.append('settlement', transaction_ordinal=2**53,
+                            events=(outbox.SettledEvent(2**53, 'slip-issued', 'slip'),)),
+                self.append('unseat', generation=2**53)]
+        final = self.append()
+        saved = self.catalogue_copy('before-integers.sqlite3')
+        self.assertEqual(self.run_pass(), 5)
+        values = [json.loads(operations.get_item(self.c, self.item(r)['item_id'], 100, None)['item']['pins']) for r in rows]
+        self.assertEqual(values[0]['pr'], 2**53-1)
+        self.assertEqual(values[1]['pr'], str(2**53))
+        self.assertEqual(values[2]['transaction_ordinal'], str(2**53))
+        self.assertEqual(values[2]['events'][0]['number'], str(2**53))
+        self.assertEqual(values[3]['generation'], str(2**53))
+        self.assertEqual(self.cursor().anchor_id, final.row_id)
+        for row in rows:
+            self.restore_catalogue(saved)
+            with mock.patch.object(notice_text, 'fit_integers', lambda value: value):
+                if row is rows[0]:
+                    self.assertEqual(self.port.catalogue(lambda c: ingest.ingest_lifecycle(
+                        c, (row,), P, self.cursor(), check_rewind=True, now_ms=self.f.clock)), 1)
+                else:
+                    with self.assertRaises(ingest.LifecycleRowRefused) as caught:
+                        self.port.catalogue(lambda c: ingest.ingest_lifecycle(
+                            c, (row, final), P, self.cursor(), check_rewind=True, now_ms=self.f.clock))
+                    self.assertEqual(caught.exception.refusal.cause_kind, 'subject_unresolved')
+                    self.assertEqual(self.items(), [])
+
+    def refused(self, target):
+        original = records.raise_item
+        def refusal(conn, principal, request, *args, **kw):
+            if request.pins['row_id'] == target.row_id:
+                return records.QueueRefusal('E_QUEUE_INVALID', 'subject_unresolved')
+            return original(conn, principal, request, *args, **kw)
+        return mock.patch.object(records, 'raise_item', refusal)
+
+    def test_refused_row_rolls_back_and_prefix_commits(self):
+        one = self.append(); two = self.append(subkind='seat_replaced')
+        other = self.append(project=Q)
+        with self.refused(two):
+            self.assertEqual(self.run_pass(), 2)
+        self.assertEqual(self.cursor(), records.Cursor(1, 0, one.row_id))
+        self.assertEqual({i['item_id'] for i in self.items()},
+                         {self.item(one)['item_id'], self.item(other)['item_id']})
+        self.assertEqual(self.c.execute('SELECT COUNT(*) FROM queue_events').fetchone()[0], 2)
+        self.assertEqual(self.notify_count(), 0)
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.item(two)['state'], 'pending')
+
+    def test_refused_row_after_rewind(self):
+        one = self.append(); two = self.append(subkind='seat_replaced'); bad = self.append()
+        self.append(project=Q)
+        records.advance_cursor(self.c, P, 'lifecycle', self.cursor(), 100, anchor_id='lost')
+        self.c.commit()
+        saved = self.catalogue_copy('ahead.sqlite3')
+        with self.refused(bad):
+            self.assertEqual(self.run_pass(), 3)
+        self.assertEqual(self.cursor(), records.Cursor(2, 0, two.row_id))
+        self.assertEqual(self.item(one)['state'], 'pending')
+        self.restore_catalogue(saved)
+        with self.refused(one):
+            self.assertEqual(self.run_pass(), 1)
+        self.assertEqual(self.cursor(), records.Cursor(0, 0, None))
+        self.assertEqual(len(self.items()), 1)

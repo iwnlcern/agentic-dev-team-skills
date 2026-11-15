@@ -345,6 +345,40 @@ class TestCheckoutSteps(CheckoutCase):
         self.assertEqual(self.routes(), before)
 
 
+    def test_ensure_repository_refuses_names_outside_form(self):
+        # D10-M1 removes validation; D10-M2 accepts only the valid prefix.
+        query = 'SELECT id, project_id, name FROM repositories ORDER BY id'
+        for name in ('Repo', '-x', 'a_b', 'a b', '', 'a' * 33, 'a\x00b', 'a\n'):
+            before = self.rows(self.ledger, query)
+            with self.assertRaises(jobs.CheckoutRefused) as caught:
+                jobs.ensure_repository_step(self.ledger, P, name, now_ms=10)
+            self.assertEqual(caught.exception.reason, 'repository_name_invalid')
+            self.assertEqual(caught.exception.detail, {'name': name})
+            self.assertEqual(self.rows(self.ledger, query), before)
+        for name in ('a', '0', 'agentic-dev-team-skills'):
+            first = jobs.ensure_repository_step(self.ledger, P, name, now_ms=11)
+            self.assertTrue(first.inserted)
+            again = jobs.ensure_repository_step(self.ledger, P, name, now_ms=12)
+            self.assertFalse(again.inserted)
+            self.assertEqual(again.repository_id, first.repository_id)
+        self.assertTrue(self.ledger.in_transaction)
+
+    def test_ensure_repository_refuses_non_str_name(self):
+        # D10-M3 removes the type guard and leaks re's TypeError.
+        query = 'SELECT id, project_id, name FROM repositories ORDER BY id'
+        before = self.rows(self.ledger, query)
+        try:
+            jobs.ensure_repository_step(self.ledger, P, None, now_ms=10)
+        except Exception as caught:
+            self.assertIsInstance(caught, jobs.CheckoutRefused)
+            self.assertEqual(caught.reason, 'repository_name_invalid')
+            self.assertEqual(caught.detail, {'name': 'None'})
+        else:
+            self.fail('non-str name was accepted')
+        self.assertEqual(self.rows(self.ledger, query), before)
+        self.assertTrue(self.ledger.in_transaction)
+
+
 class TestRegistrationSequence(CheckoutCase):
     def test_unlisted_writer_reason_writes_nothing(self):
         # Test-only port double: production WriterUnavailable seam remains unqualified.

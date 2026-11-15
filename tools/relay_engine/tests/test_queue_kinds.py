@@ -26,12 +26,25 @@ EXPECTED_MATRIX = (
     ('notice', 'operator_act_carried', 'internal', 'console_queue', 'pr3c', None),
     ('notice', 'answer_faulted', 'internal', 'console_queue', 'pr1', None),
     ('notice', 'backup_missed', 'queue.raise', 'supervision', 'pr1', frozenset({'daily'})),
+    ('notice', 'settlement_finished', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'settlement_undone', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'engine_stopped', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'engine_started', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'project_stopped', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'project_started', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'engine_was_down', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'merge_target_changed', 'internal', 'console_queue', 'pr3', None),
+    ('notice', 'seat_unseated', 'internal', 'console_queue', 'pr3', None),
+
 )
 ALL_TAGS = frozenset({'pr1','pr2','pr3','pr3c','pr4','pr5','pr6'})
 NOTICE_NAMES = frozenset({'seat_registered','seat_replaced','seat_stood_down','seat_unseated',
     'engine_restart_requested','engine_updated','engine_update_failed','doorbell_off',
     'notifier_unhealthy','operator_act_carried','worker_stalled','bridge_refused',
-    'panel_key_enrolled','answer_faulted','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed'})
+    'panel_key_enrolled','answer_faulted','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed',
+    'settlement_finished','settlement_undone','engine_stopped','engine_started',
+    'project_stopped','project_started','engine_was_down','merge_target_changed',
+    'approval_seal_unusable','approval_seal_backup_included'})
 
 
 class TestQueueKinds(unittest.TestCase):
@@ -53,8 +66,8 @@ class TestQueueKinds(unittest.TestCase):
             'EVENT_KINDS': {'raised','answered','applied','superseded','refused','faulted','withdrawn','opened','dismissed','dismissed_all','cleared','clear_requested','condition_closed','retired'},
             'NOTIFICATION_STATES': {'pending','delivered','retired'},
             'RETIRE_REASONS': {'project_undone'},
-            'NO_PROJECT_SUBKINDS': {'notifier_unhealthy','worker_stalled','bridge_refused','panel_key_enrolled','engine_updated','engine_update_failed','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed'},
-            'NO_CLEAR_SUBKINDS': {'bridge_refused','panel_key_enrolled','instruction_carried','seat_record_missing','seat_ambiguous'},
+            'NO_PROJECT_SUBKINDS': {'notifier_unhealthy','worker_stalled','bridge_refused','panel_key_enrolled','engine_updated','engine_update_failed','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed','engine_stopped','engine_started','engine_was_down','approval_seal_backup_included'},
+            'NO_CLEAR_SUBKINDS': {'bridge_refused','panel_key_enrolled','instruction_carried','seat_record_missing','seat_ambiguous','merge_target_changed'},
             'OPERATOR_CLOSED_SUBKINDS': {'instruction_carried'},
         }
         for name, expected_set in domains.items():
@@ -63,7 +76,7 @@ class TestQueueKinds(unittest.TestCase):
         self.assertEqual(kinds.STALL_WORKERS,WORKERS)
 
     def test_rows_enabled_by_pr(self):
-        self.assertEqual(kinds.ENABLED_TAGS, frozenset({'pr1'}))
+        self.assertEqual(kinds.ENABLED_TAGS, frozenset({'pr1','pr3'}))
         for expected in EXPECTED_MATRIX:
             row = kinds.raiser_row(expected[0],expected[1],expected[3],enabled=frozenset({'pr1'}))
             self.assertEqual(row is not None,expected[4]=='pr1')
@@ -73,7 +86,7 @@ class TestQueueKinds(unittest.TestCase):
 
     def test_ring_set(self):
         expected = frozenset({'question','cross_project_permission','merge_go_ahead','verification_held',
-                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed'})
+                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed','notice/merge_target_changed'})
         self.assertEqual(kinds.RING_SET,expected)
         for member in expected:
             parts=member.split('/')
