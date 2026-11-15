@@ -61,7 +61,7 @@ class QueueFixture:
         return SeatBinding(sender.project_id, sender.team_instance_id, sender.seat_id,
                            'o-'+sender.seat_id, 'k-'+sender.seat_id, name, 1)
 
-    def admit(self, kind='QUESTION', *, sender=None, parent=None, body='Question body\n', subject='Question'):
+    def admit(self, kind='QUESTION', *, sender=None, parent=None, body='Question body\n', subject='Question', answers=()):
         sender = sender or self.sender
         self.sequence += 1
         directory = engine.FakeDirectory()
@@ -70,7 +70,8 @@ class QueueFixture:
             if address == 'operator' else replace(engine.SEATS[address], project_id=origin.project_id))
         data = engine.draft(kind=kind, to='operator' if parent is None else self.sender.address,
                             needs='answer' if kind == 'QUESTION' else 'none', parent=parent,
-                            bundle='fixture-'+str(self.sequence) if parent is None else None, body=body, subject=subject)
+                            bundle='fixture-'+str(self.sequence) if parent is None else None, body=body, subject=subject,
+                            answers=answers)
         state = replace(engine.GIT_STATE, repository_id='repo-q') if sender.project_id == Q else engine.GIT_STATE
         context = submit.SubmitContext(sender, state, lambda: self.clock, directory,
                                        submission_key='fixture-'+str(self.sequence))
@@ -281,6 +282,56 @@ class TestQueueIngest(unittest.TestCase):
         self.assertEqual([r.relay_id for r in self.f.rows(a.handle-1)],[a.relay_id])
         changes=self.c.total_changes;self.assertEqual(self.run_pass(),0);self.assertEqual(self.c.total_changes,changes)
         self.assertEqual([r[1] for r in self.f.items()],[b.relay_id])
+
+    def test_answers_line_answers_without_item(self):
+        # An ANSWERS target B must be skipped independently of the parent A.
+        a = self.f.admit(subject='Question A')
+        b = self.f.admit(subject='Question B')
+        control = QueueFixture(self)
+        self.f.ledger.backup(control.ledger)
+        self.assertEqual(self.f.ledger.execute(
+            "SELECT opened_at FROM recipients WHERE special='operator' ORDER BY relay_id"
+        ).fetchall(), [(None,), (None,)])
+        self.f.admit('SITREP', sender=replace(engine.SEATS['operator'], project_id=P),
+                     parent=a.relay_id, answers=(b.relay_id,), body='Answer A and B\n')
+        self.run_pass()
+        self.assertIsNone(self.c.execute(
+            'SELECT item_id FROM queue_items WHERE source_relay_id=?', (b.relay_id,)
+        ).fetchone())
+        self.assertIsNone(self.c.execute(
+            'SELECT item_id FROM queue_items WHERE source_relay_id=?', (a.relay_id,)
+        ).fetchone())
+        higher = max((a, b), key=lambda question: question.handle)
+        self.assertEqual(records.read_cursor(self.c, P, 'question'),
+                         records.Cursor(higher.handle, 0, higher.relay_id))
+        self.assertEqual(ingest.question_ingest_pass(Port(control), [P], control.clock), 2)
+        self.assertEqual([(row[1], row[2]) for row in control.items()],
+                         [(a.relay_id, 'pending'), (b.relay_id, 'pending')])
+
+    def test_answers_after_raise_keeps_item_pending(self):
+        # Outside answers do not revisit the items already raised by this cursor.
+        c = self.f.admit(subject='Question C')
+        d = self.f.admit(subject='Question D')
+        self.assertEqual(self.run_pass(), 2)
+        items = self.f.items()
+        self.assertEqual([(row[1], row[2]) for row in items],
+                         [(c.relay_id, 'pending'), (d.relay_id, 'pending')])
+        before = self.f.snapshot()
+        changes = self.c.total_changes
+        self.f.admit('SITREP', sender=replace(engine.SEATS['operator'], project_id=P),
+                     parent=d.relay_id, answers=(c.relay_id,), body='Answer D and C\n')
+        self.f.reads.clear()
+        self.assertEqual(self.run_pass(), 0)
+        self.assertEqual(self.f.items(), items)
+        self.assertEqual(self.f.snapshot(), before)
+        self.assertEqual(self.c.total_changes, changes)
+        self.assertEqual(self.f.reads, [(d.handle - 1, 101)])
+        fresh = QueueFixture(self)
+        self.f.ledger.backup(fresh.ledger)
+        self.assertEqual(ingest.question_ingest_pass(Port(fresh), [P], fresh.clock), 0)
+        self.assertEqual(fresh.items(), [])
+        self.assertEqual(records.read_cursor(fresh.catalogue, P, 'question'),
+                         records.Cursor(d.handle, 0, d.relay_id))
 
     def test_unrendered_answer_reopens_question(self):
         a=self.f.admit();self.assertEqual(self.run_pass(),1);self.assertEqual(self.run_pass(),0)
