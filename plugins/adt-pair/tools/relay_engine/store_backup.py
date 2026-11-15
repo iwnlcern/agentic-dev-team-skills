@@ -53,9 +53,14 @@ def _rows(conn, sql, args=()):
 
 def present_ledgers(catalogue_conn, root) -> tuple[str, ...]:
     """Presence includes creations whose effect committed before activation."""
-    return tuple(sorted(route.project_id
-                        for route in store_layout.project_routes(catalogue_conn)
-                        if store_layout.ledger_path(root, route.project_id).exists()))
+    return _present_routes(catalogue_conn, root)[1]
+
+
+def _present_routes(catalogue_conn, root):
+    routes = store_layout.project_routes(catalogue_conn)
+    present = tuple(sorted(route.project_id for route in routes
+                           if store_layout.ledger_path(root, route.project_id).exists()))
+    return routes, present
 
 
 def _route_states(conn):
@@ -132,13 +137,16 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
     started = time.monotonic()
     root = Path(root)
     cat = conns['catalogue']
-    present = present_ledgers(cat, root)
+    routes, present = _present_routes(cat, root)
     declared = tuple(sorted(key for key in conns if key != 'catalogue'))
     if present != declared:
         raise BackupRefused('present-set-changed', {'present': present, 'declared': declared})
     hold = store_layout.any_hold(cat)
     if hold is not None:
         raise BackupRefused('maintenance-held', hold)
+    for route in routes:
+        if route.state == 'active' and route.project_id not in present:
+            raise BackupRefused('active-ledger-missing', route.project_id)
     states = _route_states(cat)
     for project in present:
         if states[project][0] == 'creating' and states[project][1] is not None:
@@ -147,11 +155,13 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
         raise ValueError('invalid backup reason or time')
     if then_hold is not None and not cat.in_transaction:
         raise ValueError('backup holds require the caller transaction')
+    created = False
     try:
         stamp = datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         directory = root / 'backups' / (stamp + '-' + reason)
         store_evidence._mkdir(directory.parent)
         directory.mkdir(mode=0o700)
+        created = True
         store_evidence._sync_dir(directory.parent)
         files = {}
         source = store_layout.open_catalogue_readonly(root)
@@ -187,8 +197,17 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
         encoded = (json.dumps(document, sort_keys=True, separators=(',', ':')) + '\n').encode()
         _write_synced(directory / 'manifest.sha256',
                       (hashlib.sha256(encoded).hexdigest() + '\n').encode())
-        _write_synced(directory / 'manifest.json', encoded)
+        temporary = directory / 'manifest.tmp'
+        _write_synced(temporary, encoded)
+        temporary.rename(directory / 'manifest.json')
+        store_evidence._sync_dir(directory)
     except Exception as exc:
+        if created:
+            for name in ('manifest.json', 'manifest.sha256'):
+                try:
+                    (directory / name).unlink(missing_ok=True)
+                except OSError as cleanup:
+                    exc.add_note(f'manifest cleanup failed: {cleanup}')
         raise BackupRefused('copy-failed', str(exc)) from exc
     if then_hold is not None:
         job, kind, scopes = then_hold

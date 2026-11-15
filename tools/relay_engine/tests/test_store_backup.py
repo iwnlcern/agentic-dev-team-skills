@@ -124,7 +124,12 @@ class TestBackups(unittest.TestCase):
         self.reserve(); self.create()
         self.reserve(Q, JOB); self.create(Q); self.activate(Q)
         self.reserve(R, JOB)  # completed undo: no file, inert reservation
-        result = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        caught, result = None, None
+        try:
+            result = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        except Exception as exc:
+            caught = exc
+        self.assertIsNone(caught)
         self.assertEqual({x for x in result.files if x.endswith('ledger.sqlite3')},
                          {f'projects/{P}/ledger.sqlite3', f'projects/{Q}/ledger.sqlite3'})
         self.create(R)
@@ -132,6 +137,8 @@ class TestBackups(unittest.TestCase):
             store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
         self.assertEqual(caught.exception.detail, R)
         self.assertEqual(len(list((self.root/'backups').iterdir())), 1)
+        self._absent_creating_case()
+        self._active_missing_case()
 
     def test_backup_refuses_creation_pending(self):
         # Break: mapping in take (unreachable), classifying active corruption as pending.
@@ -267,3 +274,63 @@ class TestBackups(unittest.TestCase):
         self.assertIs(caught.exception.__cause__,failure)
         self.assertEqual(store_backup.last_complete(self.root,'daily'),NOW)
         self.assertEqual(list((self.root/'backups').glob('*/manifest.json')), [first.path/'manifest.json'])
+        for boundary in ('file', 'directory'):
+            with self.subTest(boundary=boundary):
+                self._manifest_sync_case(boundary)
+
+    def _new_store(self, name):
+        self.root = Path(self.tmp.name) / name
+        store_layout.open_catalogue(self.root).close()
+        self.turns = store_steps.DirectTurns(self.root)
+
+    def _absent_creating_case(self):
+        # Preservation: absent base-creation payload must remain admitted.
+        self._new_store('base-pending')
+        self.reserve()
+        caught, result = None, None
+        try:
+            result = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        except Exception as exc:
+            caught = exc
+        self.assertIsNone(caught)
+        self.assertEqual(set(result.files), {'machine.sqlite3'})
+        self.assertEqual(self.read(result, 'machine.sqlite3',
+            'SELECT state,held_by_job FROM project_routes'), [('creating', None)])
+
+    def _active_missing_case(self):
+        # I2: presence-only enumeration falsely completes a catalogue-only copy.
+        self._new_store('active-missing')
+        self.reserve(); self.create(); self.activate()
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        store_layout.ledger_path(self.root, P).unlink()
+        with self.assertRaises(store_backup.BackupRefused) as caught:
+            store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
+        self.assertEqual((caught.exception.reason, caught.exception.detail),
+                         ('active-ledger-missing', P))
+        self.assertEqual(list((self.root/'backups').iterdir()), [first.path])
+        self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
+
+    def _manifest_sync_case(self, boundary):
+        # I1: a final-name manifest must not be accepted after publication fails.
+        self._new_store('manifest-' + boundary)
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        failure = OSError('injected manifest ' + boundary + ' sync failure')
+        real_file, real_dir = store_evidence._sync_file, store_evidence._sync_dir
+        def file_sync(file):
+            name = Path(file.name).name
+            if boundary == 'file' and name.startswith('manifest') and name != 'manifest.sha256':
+                file.flush()
+                raise failure
+            return real_file(file)
+        def directory_sync(path):
+            path = Path(path)
+            if boundary == 'directory' and path != first.path and (path/'manifest.json').is_file():
+                raise failure
+            return real_dir(path)
+        with mock.patch.object(store_evidence, '_sync_file', side_effect=file_sync), mock.patch.object(store_evidence, '_sync_dir', side_effect=directory_sync):
+            with self.assertRaises(store_backup.BackupRefused) as caught:
+                store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
+        self.assertEqual(caught.exception.reason, 'copy-failed')
+        self.assertIs(caught.exception.__cause__, failure)
+        self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
+        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path])
