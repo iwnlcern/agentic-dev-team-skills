@@ -293,3 +293,141 @@ class TestCut(RestoreStore):
         self.assertEqual(sum('LEFT JOIN restore_cancels' in q for q in traced), 1)
         plan = self.conn.execute('EXPLAIN QUERY PLAN ' + self.rc().CUT_SQL, ('p',)).fetchall()
         self.assertTrue(any('SEARCH restore_cancels' in row[3] and 'INDEX' in row[3] for row in plan), plan)
+
+
+class TestHold(RestoreStore):
+    def operator_issue(self, seat=None, bundle='operator'):
+        from relay_engine import submit
+        from relay_engine.tests.test_submit import IMPL
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        return self.submit(draft(kind='IMPL', needs='act', to=(seat or IMPL).address,
+                                 bundle=bundle), operator)
+
+    def refusal_rows(self):
+        return self.conn.execute('SELECT relay_id, job_id FROM restore_refusals ORDER BY rowid').fetchall()
+
+    def test_hold_refuses_planner_issue(self):
+        # RC-M10: a recorded refusal must return before creating a slip.
+        from relay_engine.tests.test_submit import ORCH
+        _, pc, _ = self.build(issue=False, design=False)
+        self.cancel()
+        for issuer in (PLANNER, ORCH):
+            refused = self.issue(pc, issuer)
+            self.assertIsNone(self.slip(refused))
+            self.assertIn((refused.relay_id, 'job-a'), self.refusal_rows())
+            answer = self.act()
+            self.assertEqual((answer.outcome, answer.code, answer.unblocker),
+                             ('held', 'authority.restore-held', 'operator'))
+            self.assertIn('job-a', answer.reason)
+            self.assertIn(refused.relay_id, answer.reason)
+        self.assertEqual(len(self.refusal_rows()), 2)
+
+    def test_hold_answer_over_revoked_slip(self):
+        # RC-M14: a selected revoked slip must not hide a newer hold refusal.
+        _, pc, old = self.build(design=False)
+        self.cancel()
+        refused = self.issue(pc)
+        for branch in ('work', 'bound'):
+            if branch == 'bound':
+                # Bind through a live operator slip, then cancel it under a new job.
+                self.release()
+                live = self.operator_issue(bundle='b1')
+                self.assertEqual(self.act(branch=branch).outcome, 'allow')
+                self.cancel('job-b')
+                refused = self.issue(pc)
+            answer = self.act(branch=branch)
+            self.assertEqual(answer.code, 'authority.restore-held')
+            self.assertEqual(answer.unblocker, 'operator')
+            self.assertIn(refused.relay_id, answer.reason)
+            self.assertIsNotNone(answer.slip_id)
+
+    def test_hold_keeps_independent_answers(self):
+        # RC-M11: a hold cannot record an IMPL already refused for evidence.
+        from relay_engine.tests.test_submit import IMPL
+        from relay_engine.tests.test_claims import SECOND
+        _, pc, _ = self.build(design=False)
+        self.operator_issue(SECOND, 'other')
+        self.assertEqual(self.act().outcome, 'allow')
+        self.cancel()
+        refusal = self.answer(self.ask('plan', pc, self.plan), 'must-revise', self.plan)
+        invalid = self.issue(refusal)
+        self.assertEqual(self.refusal_rows(), [])
+        self.assertIsNone(self.slip(invalid))
+        self.assertNotEqual(self.act().code, 'authority.restore-held')
+        other = self.act(seat=SECOND)
+        self.assertEqual(other.code, 'authority.slip-invalid')
+        self.assertIn(IMPL.seat_id, other.reason)
+        self.assertEqual(self.act(seat=PLANNER).outcome, 'allow')
+        self.assertEqual(self.act(kind='pr-merge').code, 'authority.slip-missing')
+        self.assertEqual(self.act(kind='key-file-read').code, 'authority.check-unavailable')
+
+    def test_hold_admits_operator_issue(self):
+        # RC-M12: the operator's IMPL is checked normally while the project is held.
+        self.cancel()
+        issued = self.operator_issue()
+        self.assertIsNotNone(self.slip(issued))
+        self.assertEqual(self.act().outcome, 'allow')
+        self.assertEqual(self.act().slip_id, self.issued(issued))
+        self.assertEqual(self.refusal_rows(), [])
+
+    def test_release_ends_hold_answers(self):
+        _, pc, _ = self.build(design=False)
+        self.cancel()
+        self.issue(pc)
+        self.assertEqual(self.act().code, 'authority.restore-held')
+        self.release()
+        self.assertEqual(self.act().code, 'authority.slip-invalid')
+        fresh = self.approved('plan', parent=pc.relay_id)
+        self.verify(fresh)
+        self.assertIsNotNone(self.slip(self.issue(fresh)))
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_bound_branch_after_cancel(self):
+        from relay_engine.tests.test_claims import SECOND
+        _, pc, _ = self.build(design=False)
+        self.operator_issue(SECOND, 'other')
+        self.assertEqual(self.act().outcome, 'allow')
+        self.cancel()
+        self.release()
+        fresh = self.approved('plan', parent=pc.relay_id)
+        self.verify(fresh)
+        self.issue(fresh)
+        self.assertEqual(self.act().outcome, 'allow')
+        self.assertEqual(self.act(seat=SECOND).code, 'authority.slip-invalid')
+
+    def test_refusal_answers_only_its_own_hold(self):
+        # RC-M13: backup-carried refusal A cannot answer hold B.
+        for ordinal, bound in enumerate((False, True)):
+            with self.subTest(bound=bound):
+                if ordinal:
+                    self.doCleanups()
+                    self.setUp()
+                _, pc, _ = self.build(issue=bound, design=False)
+                if bound:
+                    self.assertEqual(self.act().outcome, 'allow')
+                self.cancel()
+                first = self.issue(pc)
+                self.assertEqual(self.act().code, 'authority.restore-held')
+                self.release()
+                self.assertNotEqual(self.act().code, 'authority.restore-held')
+                self.cancel('job-b')
+                self.assertNotEqual(self.act().code, 'authority.restore-held')
+                second = self.issue(pc)
+                answer = self.act()
+                self.assertEqual(answer.code, 'authority.restore-held')
+                self.assertIn('job-b', answer.reason)
+                self.assertIn(second.relay_id, answer.reason)
+                self.assertNotIn(first.relay_id, answer.reason)
+                self.release()
+                self.assertNotEqual(self.act().code, 'authority.restore-held')
+                self.assertEqual(self.refusal_rows(), [(first.relay_id, 'job-a'), (second.relay_id, 'job-b')])
+
+    def test_restore_held_catalogue(self):
+        from relay_engine import errors, strings
+        error = errors.error_for('E-AUTHORITY-RESTORE-HELD')
+        self.assertEqual(error.cause, "a restore holds this project, so no planner's go-ahead is issued")
+        self.assertEqual(error.remedy, 'ask the operator to end the restore hold at their terminal, then ask your planner for a new go-ahead')
+        self.assertEqual(errors.explain_for('E-AUTHORITY-RESTORE-HELD')[0],
+                         'a restore cancels every go-ahead and approval, and only the operator ends its hold')
+        self.assertEqual(errors.ERRORS['E-AUTHORITY-RESTORE-HELD'].cls, 'command')
+        self.assertIn('E-AUTHORITY-RESTORE-HELD', strings._CODE_VALUES)

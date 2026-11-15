@@ -81,9 +81,9 @@ def git_digest_algorithm(object_id):
 ANSWER_CODES = {
     'authority.' + code: ('deny' if code in ('slip-missing', 'slip-invalid', 'lineage-incomplete', 'not-issuer') else 'held')
     for code in ('slip-missing', 'slip-invalid', 'lineage-incomplete', 'not-issuer',
-                 'plan-changed', 'design-changed', 'verification-pending', 'verification-objected', 'check-unavailable')
+                 'plan-changed', 'design-changed', 'verification-pending', 'verification-objected', 'check-unavailable', 'restore-held')
 }
-AFTER_ADMIT_WRITES = frozenset({'slips', 'slip_events', 'verification_requests'})
+AFTER_ADMIT_WRITES = frozenset({'slips', 'slip_events', 'verification_requests', 'restore_refusals'})
 AFTER_ADMIT_READS_DENIED = frozenset({'bodies'})
 _SLIP_FIELDS = ('id', 'handle', 'project_id', 'seat_id', 'bundle_id', 'repository_id',
                 'issued_in', 'binds', 'state', 'revision', 'issuer_seat_id', 'issuer_special')
@@ -411,6 +411,11 @@ def on_admitted(conn, admitted, draft, ctx):
                                     (repo, ctx.sender.project_id)).fetchone() is None:
         return
     bundle = conn.execute('SELECT bundle_id FROM relays WHERE id = ?', (admitted.relay_id,)).fetchone()[0]
+    hold = restore_cancel.held(conn, ctx.sender.project_id)
+    if hold is not None and _issuer(conn, ctx.sender.seat_id, target) != 'operator':
+        restore_cancel.record_refusal(conn, admitted.relay_id, ctx.sender.project_id,
+                                      holder, bundle, repo, hold.job_id)
+        return
     handle = conn.execute('SELECT coalesce(max(handle), 0) + 1 FROM slips WHERE project_id = ?',
                           (ctx.sender.project_id,)).fetchone()[0]
     sid = submit.new_uuid7(admitted.created_at_ms)
@@ -538,6 +543,10 @@ def _act(conn, seat_id, effect, now_ms, digest):
     # S1: only a seat that holds a slip of the kind is answered from slips.
     if conn.execute("SELECT 1 FROM slips WHERE seat_id = ? AND kind = 'implement' LIMIT 1",
                     (seat_id,)).fetchone() is None:
+        refused = restore_cancel.held_refusal(conn, seat_id, None, effect.repository_id, 0)
+        if refused:
+            return _answer('restore-held', strings.render('authority-restore-held',
+                           job=refused.job_id, relay=refused.relay_id), 'operator')
         return _diagnostic(conn, seat, seat_id)
     if not effect.repository_id or not effect.ref:
         return _answer('slip-invalid', strings.render('authority-context'), _planner(conn, seat_id))
@@ -560,6 +569,14 @@ def _act(conn, seat_id, effect, now_ms, digest):
     if binding:
         sql += " ORDER BY (state = 'live') DESC, issued_at DESC, handle DESC LIMIT 1"
     slip = _slip(conn.execute(sql, params).fetchone())
+    if slip is None or slip['state'] != 'live':
+        after = conn.execute('SELECT handle FROM relays WHERE id = ?',
+                             (slip['issued_in'],)).fetchone()[0] if slip else 0
+        refused = restore_cancel.held_refusal(conn, seat_id, binding[1] if binding else None,
+                                              effect.repository_id, after)
+        if refused:
+            return _answer('restore-held', strings.render('authority-restore-held',
+                           job=refused.job_id, relay=refused.relay_id), 'operator', slip)
     if slip:
         answer = _checked_slip(conn, slip, effect, digest)
         if answer.outcome == 'allow' and binding is None:

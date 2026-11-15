@@ -10814,7 +10814,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/errors.py",
-    "sha256": "ce4af346a5926b8d5d9989aa8f4ee1739cbb65e536d7644ccd65daf72e272f96",
+    "sha256": "348bd1fc00c80e9c0b70876a63445382eab4a675dc197a45a568f788d7a743e0",
     "source": "tools/relay_engine/errors.py"
   },
   {
@@ -10982,7 +10982,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/restore_cancel.py",
-    "sha256": "42fae38a3469e51f9a805b9d286ee3d2641f1455a0f15d29b6e6d84d25ccb976",
+    "sha256": "7b96de38e9c86bd2c1890c6503329159d976e8f5e178f2349e507e2c0141626d",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -11042,7 +11042,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/slips.py",
-    "sha256": "ba57cf3d249e37e1342cc6d429123dd705c3de336b5de4074ac65fd9b1f7e7f6",
+    "sha256": "4d71f4fa5e982fb5b56edcf29a50040a74a57448c0aa0781aff5a211ef273b78",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -11078,7 +11078,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/strings.py",
-    "sha256": "e43f05998ebfdb5e785add5d0d1c7f82c38323d6bf2755d294bd4d54ecbf225c",
+    "sha256": "e1abaea8f7880a355d5e686cbf16db2de5b63475c734570748525c928fd25805",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -21818,7 +21818,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/errors.py",
-    "sha256": "ce4af346a5926b8d5d9989aa8f4ee1739cbb65e536d7644ccd65daf72e272f96",
+    "sha256": "348bd1fc00c80e9c0b70876a63445382eab4a675dc197a45a568f788d7a743e0",
     "source": "tools/relay_engine/errors.py"
   },
   {
@@ -21986,7 +21986,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/restore_cancel.py",
-    "sha256": "42fae38a3469e51f9a805b9d286ee3d2641f1455a0f15d29b6e6d84d25ccb976",
+    "sha256": "7b96de38e9c86bd2c1890c6503329159d976e8f5e178f2349e507e2c0141626d",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -22046,7 +22046,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/slips.py",
-    "sha256": "ba57cf3d249e37e1342cc6d429123dd705c3de336b5de4074ac65fd9b1f7e7f6",
+    "sha256": "4d71f4fa5e982fb5b56edcf29a50040a74a57448c0aa0781aff5a211ef273b78",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -22082,7 +22082,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/strings.py",
-    "sha256": "e43f05998ebfdb5e785add5d0d1c7f82c38323d6bf2755d294bd4d54ecbf225c",
+    "sha256": "e1abaea8f7880a355d5e686cbf16db2de5b63475c734570748525c928fd25805",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -32738,7 +32738,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/errors.py",
-    "sha256": "ce4af346a5926b8d5d9989aa8f4ee1739cbb65e536d7644ccd65daf72e272f96",
+    "sha256": "348bd1fc00c80e9c0b70876a63445382eab4a675dc197a45a568f788d7a743e0",
     "source": "tools/relay_engine/errors.py"
   },
   {
@@ -32906,7 +32906,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/restore_cancel.py",
-    "sha256": "42fae38a3469e51f9a805b9d286ee3d2641f1455a0f15d29b6e6d84d25ccb976",
+    "sha256": "7b96de38e9c86bd2c1890c6503329159d976e8f5e178f2349e507e2c0141626d",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -32966,7 +32966,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/slips.py",
-    "sha256": "ba57cf3d249e37e1342cc6d429123dd705c3de336b5de4074ac65fd9b1f7e7f6",
+    "sha256": "4d71f4fa5e982fb5b56edcf29a50040a74a57448c0aa0781aff5a211ef273b78",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -33002,7 +33002,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/strings.py",
-    "sha256": "e43f05998ebfdb5e785add5d0d1c7f82c38323d6bf2755d294bd4d54ecbf225c",
+    "sha256": "e1abaea8f7880a355d5e686cbf16db2de5b63475c734570748525c928fd25805",
     "source": "tools/relay_engine/strings.py"
   },
   {

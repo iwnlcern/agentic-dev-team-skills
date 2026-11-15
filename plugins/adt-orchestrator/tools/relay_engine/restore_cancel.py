@@ -121,3 +121,31 @@ def marks(conn, claim_ids, review_ids) -> tuple[dict[str, int], frozenset[str]]:
     reviews = set(review_ids)
     return ({rid: handle for rid, handle, _ in rows if rid in claims},
             frozenset(rid for rid, _, imported in rows if rid in reviews and imported))
+
+
+@dataclass(frozen=True)
+class Refusal:
+    relay_id: str
+    job_id: str
+
+
+def record_refusal(conn, relay_id: str, project_id: str, seat_id: str, bundle_id: str,
+                   repository_id: str, job_id: str) -> None:
+    conn.execute('INSERT INTO restore_refusals'
+                 ' (relay_id, project_id, seat_id, bundle_id, repository_id, job_id)'
+                 ' VALUES (?, ?, ?, ?, ?, ?)',
+                 (relay_id, project_id, seat_id, bundle_id, repository_id, job_id))
+
+
+def held_refusal(conn, seat_id: str, bundle_id: str | None, repository_id: str,
+                 after_handle: int) -> Refusal | None:
+    with submit.read_guard(conn):
+        row = conn.execute(
+            'SELECT f.relay_id, f.job_id FROM seats s JOIN team_instances t ON t.id=s.team_instance_id'
+            ' JOIN restore_cancels c ON c.project_id=t.project_id AND c.released_at IS NULL'
+            ' JOIN restore_refusals f ON f.project_id=c.project_id AND f.job_id=c.job_id'
+            ' JOIN relays r ON r.id=f.relay_id WHERE s.id=? AND f.seat_id=s.id'
+            ' AND f.repository_id=? AND (? IS NULL OR f.bundle_id=?) AND r.handle>?'
+            ' ORDER BY r.handle DESC LIMIT 1',
+            (seat_id, repository_id, bundle_id, bundle_id, after_handle)).fetchone()
+    return Refusal(*row) if row else None

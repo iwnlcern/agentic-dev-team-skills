@@ -621,6 +621,10 @@ strings.register_inventory(_SETTINGS_TEXT, {})
 
 
 _AUTHORITY_TEXT = {
+    'error-authority-restore-held-cause': "a restore holds this project, so no planner's go-ahead is issued",
+    'error-authority-restore-held-remedy': 'ask the operator to end the restore hold at their terminal, then ask your planner for a new go-ahead',
+    'error-authority-restore-held-explain': 'a restore cancels every go-ahead and approval, and only the operator ends its hold',
+
     'error-authority-slip-missing-cause': 'this seat has no implement slip for the requested effect',
     'error-authority-slip-missing-remedy': 'ask the pair Planner for an IMPL naming this implementer and its approved lineage',
     'error-authority-slip-missing-explain': 'a complete lineage alone does not record a slip; the act answer names the missing issuance condition',
@@ -666,6 +670,7 @@ ERRORS = {
     "E-AUTHORITY-VERIFICATION-PENDING": _spec("authority-verification-pending", "command"),
     "E-AUTHORITY-VERIFICATION-OBJECTED": _spec("authority-verification-objected", "command"),
     "E-AUTHORITY-CHECK-UNAVAILABLE": _spec("authority-check-unavailable", "command"),
+    "E-AUTHORITY-RESTORE-HELD": _spec("authority-restore-held", "command"),
 
     "E-SNAPSHOT-STALE": _spec("snapshot-stale", "integrity"),
     "E-SNAPSHOT-NOT-TO": _spec("snapshot-not-to", "integrity"),

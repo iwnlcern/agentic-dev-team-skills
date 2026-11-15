@@ -65,6 +65,7 @@ INVENTORY.update({
     "authority-missing-issuer": "no implement slip was issued because the issuer's team instance is closed",
     "authority-missing-delegation": "no implement slip was issued because no delegation has an open issuing team instance",
     "authority-missing-admission": "the lineage is complete but admission recorded no implement slip; report the missing slip to the operator",
+    "authority-restore-held": "a restore (job {job}) holds this project, and go-ahead {relay} was refused",
     "authority-state": "the slip is {state}",
     "authority-repository": "the slip covers another repository: {repository}",
     "authority-seat": "the branch belongs to another seat: {seat}",
@@ -105,6 +106,7 @@ _CODE_VALUES = {
     "E-AUTHORITY-VERIFICATION-PENDING",
     "E-AUTHORITY-VERIFICATION-OBJECTED",
     "E-AUTHORITY-CHECK-UNAVAILABLE",
+    "E-AUTHORITY-RESTORE-HELD",
 
     "E-KEY-MISMATCH", "E-ID-COLLISION", "E-SUPERSEDED",
     "E-PATH-ESCAPE", "E-HEADER", "E-ENVELOPE", "E-DRAFT-SHAPE",
