@@ -196,11 +196,28 @@ class SnapshotRow:
 
 
 @dataclass(frozen=True)
+class RefLine:
+    ordinal: int
+    spelling: str
+
+
+@dataclass(frozen=True)
+class RaisedFinding:
+    handle: int
+    severity: str
+    status: str
+    summary: str
+    check: int | None
+
+
+@dataclass(frozen=True)
 class ReadResult:
     body: bytes
     envelope: dict
     meta: dict | None
     unopened: list[tuple[str, int]]
+    refs: tuple[RefLine, ...]
+    findings: tuple[RaisedFinding, ...]
 
 
 @dataclass(frozen=True)
@@ -303,6 +320,13 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
     }
     unopened = (unopened_in_lineage(conn, relay_id, seat_id)
                 if row[6] == "review" and (seat_id, "to") in seats else [])
+    ref_lines = tuple(RefLine(*item) for item in conn.execute(
+        "SELECT ordinal, spelling FROM edges WHERE from_relay_id = ? AND kind = 'ref'"
+        " ORDER BY ordinal", (relay_id,)))
+    raised_findings = tuple(RaisedFinding(*item) for item in conn.execute(
+        "SELECT f.handle, f.severity, f.status, f.summary, e.ordinal"
+        " FROM findings f LEFT JOIN edges e ON e.id = f.check_edge_id"
+        " WHERE f.raised_in = ? ORDER BY f.handle", (relay_id,)))
     extra = None
     if meta:
         extra = {
@@ -317,7 +341,7 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
                     " WHERE relay_id = ? ORDER BY rowid", (relay_id,))],
             "git_state": _git_state(conn, row[11]),
         }
-    return ReadResult(bytes(row[8]), envelope, extra, unopened)
+    return ReadResult(bytes(row[8]), envelope, extra, unopened, ref_lines, raised_findings)
 
 
 def _check_foreign_release(conn, target, foreign_release):

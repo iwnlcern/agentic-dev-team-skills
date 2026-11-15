@@ -659,6 +659,51 @@ class TestFindings(GitStore):
         rows = queries.blocking_findings(self.conn, bundle)
         self.assertEqual([(r.handle, r.status) for r in rows], [(1, "open"), (2, "fixed")])
 
+
+    def test_read_refs_and_findings(self):
+        # Breaks: REF order, edge ordinal, fixed visibility, relay scope or meta-only fields (F1-F5).
+        check = self.directory_file(b"FAILED\n")
+        review = self.review_with(("blocking 2 a", "advisory b"),
+                                  refs_=("#1", "file:" + check))
+        result = queries.read(self.conn, review.relay_id, IMPL.seat_id, self.now())
+        try:
+            refs_found = result.refs
+        except AttributeError as error:
+            self.fail(str(error))
+        self.assertEqual(refs_found, (queries.RefLine(1, "#1"),
+                                      queries.RefLine(2, "file:" + check)))
+        expected = (queries.RaisedFinding(1, "blocking", "open", "a", 2),
+                    queries.RaisedFinding(2, "advisory", "open", "b", None))
+        self.assertEqual(result.findings, expected)
+        self.review_with(("advisory c",), parent=review.relay_id)
+        self.submit(draft(kind="REVIEW-FOLD", to=PLANNER.address, parent=review.relay_id,
+                          fixes=("F1 " + "c" * 40,)), sender=IMPL)
+        expected = (queries.RaisedFinding(1, "blocking", "fixed", "a", 2),
+                    queries.RaisedFinding(2, "advisory", "open", "b", None))
+        pairs = []
+        for meta in (False, True):
+            writes = []
+            def authorize(action, table, column, database, trigger):
+                if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE,
+                              sqlite3.SQLITE_DELETE):
+                    writes.append(table)
+                return sqlite3.SQLITE_OK
+            self.conn.set_authorizer(authorize)
+            try:
+                read = queries.read(self.conn, review.relay_id, IMPL.seat_id,
+                                    self.now(), meta=meta)
+            finally:
+                self.conn.set_authorizer(None)
+            self.assertTrue(writes)
+            self.assertLessEqual(set(writes), {"recipients", "seat_activity"})
+            self.assertEqual(read.refs, refs_found)
+            self.assertEqual(read.findings, expected)
+            pairs.append((read.refs, read.findings))
+        self.assertEqual(pairs[0], pairs[1])
+        empty = self.submit(draft(to=IMPL.address))
+        read = queries.read(self.conn, empty.relay_id, IMPL.seat_id, self.now())
+        self.assertEqual((read.refs, read.findings), ((), ()))
+
     def directory_file(self, data):
         import tempfile
         folder = tempfile.mkdtemp()
