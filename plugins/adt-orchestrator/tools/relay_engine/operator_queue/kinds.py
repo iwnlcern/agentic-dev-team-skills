@@ -59,11 +59,36 @@ RAISER_MATRIX = (
     RaiserRow('notice', 'notifier_unhealthy', 'queue.raise', 'supervision', 'pr1', frozenset({'notify_worker'})),
     RaiserRow('notice', 'worker_stalled', 'queue.raise', 'supervision', 'pr1', frozenset(STALL_WORKERS)),
     RaiserRow('notice', 'operator_act_carried', 'internal', 'console_queue', 'pr3c', None),
+    RaiserRow('notice', 'answer_faulted', 'internal', 'console_queue', 'pr1', None),
 )
 
 RING_SET = frozenset({'question', 'cross_project_permission', 'merge_go_ahead', 'verification_held',
-    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused'})
-FIXED_TEXTS: Mapping[tuple[str, str], str] = MappingProxyType({})
+    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted'})
+FIXED_TEXTS: Mapping[tuple[str, str], str] = MappingProxyType({('worker_stalled', 'queue_question_ingest'): "v3 has stopped turning agents' questions into "
+                                              'items, so new questions are not shown. Run adt '
+                                              'engine status.',
+ ('worker_stalled', 'queue_lifecycle_ingest'): 'v3 has stopped reading notices from projects, so '
+                                               'new notices are not shown. Run adt engine status.',
+ ('worker_stalled', 'queue_reconcile'): 'v3 has stopped finishing your answers, so an answer you '
+                                        'gave may not have reached its agent. Run adt engine '
+                                        'status.',
+ ('worker_stalled', 'engine_liveness'): 'v3 has stopped checking whether agents get the relays '
+                                        'sent to them, so an agent that does not is not shown. Run '
+                                        'adt engine status.',
+ ('bridge_refused', '*'): 'v3 refused a request to act as you that did not come from its own page '
+                          'address; nothing was changed. If you did not just use a v3 page at '
+                          'another address, another site may have tried.',
+ ('notifier_unhealthy', 'notifier'): 'v3 could not show its pop-ups five times in a row, so new '
+                                     'questions and notices may not pop up. They are still listed '
+                                     "on v3's page. Run adt engine status.",
+ ('notifier_unhealthy', 'notify_worker'): 'v3 has stopped showing pop-ups, so new questions and '
+                                          "notices do not pop up. They are still listed on v3's "
+                                          'page. Run adt engine status.'})
+ALARM_TITLE = 'v3'
+ALARM_TEXT = 'v3 notifications have stopped. Run adt engine status.'
+ANSWER_FAULTED_TEXTS: Mapping[str, str] = MappingProxyType({
+    'question': "v3 stopped an answer you gave: a different version had already been sent to this agent, which only a fault in v3 can cause. Open the question on v3's page to check it.",
+})
 PIN_TOKENS: Mapping[str, tuple[str, str]] = MappingProxyType({})
 
 

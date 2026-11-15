@@ -88,7 +88,7 @@ class TestQueueRecords(unittest.TestCase):
         self.conn = store_layout.open_catalogue(self.root)
         self.addCleanup(self.conn.close)
         for project, name in ((P, 'p'), (Q, 'q')):
-            self.conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
+            self.conn.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, ?, ?, ?)',
                               (project, name, 'active', 0)).close()
         self.conn.commit()
         self.internal = records.InternalWriter()

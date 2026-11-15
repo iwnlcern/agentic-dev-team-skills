@@ -35,6 +35,8 @@ ALL_CODES = POLICY_CODES | {
 
     "E-SUBMISSION-KEY-REUSED",
     "E-ADMISSION-HOOK",
+    "E-ADMISSION-COMMIT",
+    "E-ADMISSION-UNKNOWN",
     "no-top-seat",
     "E-HEADER",
     "E-DRAFT-SHAPE",
@@ -520,6 +522,58 @@ class TestExplainCLI(unittest.TestCase):
 
 class TestAdmissionErrors(unittest.TestCase):
     """Breaks: unregistered replay refusal or changed legacy error envelope."""
+
+    def test_admission_outcome_codes(self):
+        self.assertTrue({"E-ADMISSION-COMMIT", "E-ADMISSION-UNKNOWN"} <= set(errors.ERRORS))
+        texts = {'error-admission-reservation-undone': 'what the admission hook {hook} reserved was undone by another writer, and the operator was told', 'error-admission-commit-cause': "the store did not complete this admission's commit; nothing from this draft was stored", 'error-admission-commit-remedy': 'submit this draft again', 'error-admission-commit-explain': 'a commit the store did not complete is rolled back, and the refusal written after it makes that rollback permanent, so the draft is refused as a whole', 'error-admission-unknown-cause': 'this draft was not stored, and whether what the admission hook {hook} reserved was released is not yet known', 'error-admission-unknown-commit-unconfirmed-cause': 'whether this draft was stored is not yet known: the store did not confirm its commit', 'error-admission-unknown-remedy': "resubmit this draft unchanged, under its original submission key, and not as a new draft or under a new key: if it was stored you receive its original receipt, and otherwise it is admitted once; if that is refused with authority.reservation-unresolved, the engine start's settlement has not committed yet, so resubmit once that refusal clears", 'error-admission-unknown-explain': "a draft resubmitted unchanged under its key returns a stored relay's receipt before anything is recorded again, or is admitted once; a reservation not released now is released by that admission or settled at the next engine start, which tells the operator"}
+        hook = "fixture.module.hook"
+        for code, stem in (("E-ADMISSION-COMMIT", "commit"),
+                           ("E-ADMISSION-UNKNOWN", "unknown")):
+            with self.subTest(code=code):
+                error = errors.error_for(code, hook=hook)
+                self.assertEqual(error.cls, "integrity")
+                self.assertEqual(error.cause, texts["error-admission-" + stem + "-cause"].format(hook=hook))
+                self.assertEqual(error.remedy, texts["error-admission-" + stem + "-remedy"])
+                self.assertEqual(errors.explain_for(code),
+                                 (texts["error-admission-" + stem + "-explain"], error.remedy))
+                self.assertIn(code, strings._CODE_VALUES)
+                self.assertNotIn(code, errors.POLICY_CODES)
+        variant = errors.error_for("E-ADMISSION-UNKNOWN", variant="commit-unconfirmed", hook=hook)
+        self.assertEqual(variant.cause, texts["error-admission-unknown-commit-unconfirmed-cause"])
+        self.assertEqual(variant.remedy, errors.error_for("E-ADMISSION-UNKNOWN", hook=hook).remedy)
+        self.assertEqual(errors.ERROR_VARIANTS[("E-ADMISSION-UNKNOWN", "commit-unconfirmed")].explain_key,
+                         errors.ERRORS["E-ADMISSION-UNKNOWN"].explain_key)
+        rejected = errors.error_for("E-ADMISSION-UNKNOWN", hook="not a hook:PRIVATE")
+        self.assertIn("unrecognized-input (sha256:", rejected.cause)
+        self.assertNotIn("PRIVATE", rejected.cause)
+
+    def test_admission_outcome_texts_avoid_banned_words(self):
+        # 7a60242 test_header.py:625-627,633 supplies the seven pattern groups.
+        import re
+        texts = [strings.INVENTORY[key] for key in ['error-admission-reservation-undone', 'error-admission-commit-cause', 'error-admission-commit-remedy', 'error-admission-commit-explain', 'error-admission-unknown-cause', 'error-admission-unknown-commit-unconfirmed-cause', 'error-admission-unknown-remedy', 'error-admission-unknown-explain']]
+        texts += ["E-ADMISSION-COMMIT", "E-ADMISSION-UNKNOWN"]
+        patterns = (r"sqlite", r"database", r"ledger", r"\bauth\b|\btoken\b",
+                    r"fallback|authoring mode", r"credential|tamper-proof|prevents|guarantees exclusivity",
+                    r"hand-relay")
+        for text in texts:
+            for pattern in patterns:
+                with self.subTest(text=text, pattern=pattern):
+                    self.assertIsNone(re.search(pattern, text, re.I))
+
+    def test_reservation_detail(self):
+        error = errors.error_for("E-ADMISSION-HOOK", hook="fixture.module.hook", kind="RuntimeError")
+        self.assertIsNone(error.reservation)
+        original = error.as_dict()
+        self.assertEqual(set(original), {"code", "cause", "remedy", "cls"})
+        error.reservation = "undone-with-notice"
+        self.assertEqual(error.as_dict(), dict(original, reservation="undone-with-notice",
+                         reservation_note="what the admission hook fixture.module.hook reserved was undone by another writer, and the operator was told"))
+        for value in ("voided", "", 1, object()):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(ValueError):
+                    error.reservation = value
+        error.reservation = None
+        self.assertEqual(error.as_dict(), original)
 
     def test_replay_error_catalog(self):
         self.assertIn("E-SUBMISSION-KEY-REUSED", errors.ERRORS,

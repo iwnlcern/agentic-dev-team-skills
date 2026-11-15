@@ -8,6 +8,7 @@ from relay_engine import errors, schema
 TABLE_OWNERS: dict[str, str] = {
     'catalogue_identity': 'store',
     'project_routes': 'store',
+    'maintenance_holds': 'store',
     'key_routes': 'store',
     'schema_version': 'store',
     'engine_stops': 'store',
@@ -36,7 +37,14 @@ _TABLES = (
     project_id TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     state TEXT NOT NULL CHECK (state IN ('creating', 'active')),
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    held_by_job TEXT NULL
+) STRICT""",
+    """CREATE TABLE maintenance_holds (
+    scope TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('cutover','undo','unmark')),
+    since INTEGER NOT NULL
 ) STRICT""",
     """CREATE TABLE key_routes (
     key_id TEXT NOT NULL PRIMARY KEY,

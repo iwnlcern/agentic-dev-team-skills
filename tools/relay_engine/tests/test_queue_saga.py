@@ -296,6 +296,37 @@ class TestQueueApply(unittest.TestCase):
         self.c.execute('UPDATE queue_answers SET draft=? WHERE item_id=?', (data, item.item_id)).close()
         self.c.commit()
 
+    def test_faulted_notice_refused_raise_rolls_back(self):
+        from unittest import mock
+        item = self.recorded()
+        self.apply(item)
+        self.change_draft(item, self.job(item).draft + b'changed')
+        with mock.patch.object(records, 'raise_item',
+                               return_value=records.QueueRefusal('E_QUEUE_STATE', 'project_not_active')):
+            with self.assertRaisesRegex(RuntimeError, 'project_not_active'):
+                self.reconcile()
+        self.assertEqual(records._one(self.c, 'SELECT phase FROM queue_answers WHERE item_id=?',
+                                     (item.item_id,)), ('recorded',))
+        self.assertEqual(self.outcome(item), ('applying', 2))
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_items WHERE subkind='answer_faulted'"), (0,))
+
+    def test_record_answer_refuses_faulted_notice(self):
+        item = self.recorded()
+        saga.confirm(self.c, item.item_id,
+            saga.ApplyResult('faulted', None, None, 'E-SUBMISSION-KEY-REUSED', None), 500)
+        notice_id = records._one(self.c,
+            "SELECT item_id FROM queue_items WHERE subkind='answer_faulted'")[0]
+        notice = self.view(notice_id)
+        self.assertEqual((notice.kind, notice.project_id, notice.state), ('notice', P, 'pending'))
+        changes, before = self.c.total_changes, self.f.snapshot()
+        result = saga.record_answer(self.c, OperatorPrincipal('page'), notice.item_id,
+            notice.revision, {'text': 'Answer exactly'}, 'answer-faulted-notice', 600,
+            frank_conformed=False, top_seat_address='v3.orchestrator-planner')
+        self.assertIsInstance(result, records.QueueRefusal)
+        self.assertEqual((result.code, result.cause_kind), ('E_QUEUE_INVALID', 'surface_not_allowed'))
+        self.assertEqual(self.c.total_changes, changes)
+        self.assertEqual(self.f.snapshot(), before)
+
     def test_apply_admits_one_answer(self):
         item = self.recorded()
         result = self.apply(item)
@@ -373,6 +404,88 @@ class TestQueueApply(unittest.TestCase):
         self.assertEqual(self.outcome(item)[0], 'resolved')
         self.assertEqual(self.relay_count(), 1)
         self.assertEqual(json.loads(records._one(self.c, 'SELECT outcome FROM queue_answers')[0])['receipt'], first.receipt)
+
+    def test_faulted_answer_raises_one_notice(self):
+        from unittest import mock
+        from relay_engine.operator_queue import notifier
+        item = self.recorded()
+        # The question's own outbox row exists; deliver it before the stopped-answer notice.
+        notifier.notify_pass(self.port, lambda argv: None, self.f.clock + 1, notifier='notify-send')
+        self.apply(item)
+        self.change_draft(item, self.job(item).draft + b'changed')
+        self.reconcile()
+        rows = operations._dicts(self.c, "SELECT * FROM queue_items WHERE subkind='answer_faulted'")
+        self.assertEqual(len(rows), 1)
+        notice = rows[0]
+        self.assertEqual(self.outcome(item)[0], 'faulted')
+        self.assertEqual(notice['project_id'], P)
+        self.assertEqual(notice['actor_address'], item.actor_address)
+        key = {'project_id': P, 'item_id': item.item_id}
+        self.assertEqual(notice['condition_key'], kinds.condition_key('notice', 'answer_faulted', key))
+        self.assertEqual(json.loads(notice['condition_key']), key)
+        self.assertEqual(json.loads(notice['texts']), {'sentence': kinds.ANSWER_FAULTED_TEXTS['question']})
+        self.assertEqual(records._one(self.c, 'SELECT COUNT(*) FROM queue_notifications WHERE item_id=?',
+                                     (notice['item_id'],)), (1,))
+        calls = []
+        notifier.notify_pass(self.port, calls.append, self.f.clock + 2, notifier='notify-send')
+        self.assertEqual(calls, [['notify-send', '--', 'p: ' + item.actor_address,
+                                kinds.ANSWER_FAULTED_TEXTS['question']]])
+        changes = self.c.total_changes
+        self.reconcile()
+        notifier.notify_pass(self.port, calls.append, self.f.clock + 3, notifier='notify-send')
+        self.assertEqual(self.c.total_changes, changes)
+        self.assertEqual(len(calls), 1)
+        control = self.recorded()
+        self.apply(control)
+        self.change_draft(control, self.job(control).draft + b'changed')
+        with mock.patch.object(kinds, 'RING_SET', kinds.RING_SET - {'notice/answer_faulted'}):
+            self.reconcile()
+        key = kinds.condition_key('notice', 'answer_faulted', {'project_id': P, 'item_id': control.item_id})
+        control_rows = records._rows(self.c, 'SELECT item_id FROM queue_items WHERE condition_key=?', (key,))
+        self.assertEqual(len(control_rows), 1)
+        count = records._one(self.c, 'SELECT COUNT(*) FROM queue_notifications WHERE item_id=?', control_rows[0])[0]
+        self.assertEqual(count, 0)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(count, 1)
+
+    def test_faulted_notice_shares_confirm_transaction(self):
+        from unittest import mock
+        item = self.recorded()
+        self.apply(item)
+        self.change_draft(item, self.job(item).draft + b'changed')
+        with mock.patch.object(records, 'raise_item', side_effect=RuntimeError('notice write failed')):
+            with self.assertRaisesRegex(RuntimeError, 'notice write failed'):
+                self.reconcile()
+        self.assertEqual(records._one(self.c, 'SELECT phase FROM queue_answers WHERE item_id=?',
+                                     (item.item_id,)), ('recorded',))
+        self.assertEqual(self.outcome(item), ('applying', 2))
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_items WHERE subkind='answer_faulted'"), (0,))
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_events WHERE item_id=? AND event_kind='faulted'",
+                                     (item.item_id,)), (0,))
+        self.reconcile()
+        self.assertEqual(self.outcome(item), ('faulted', 3))
+        self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_items WHERE subkind='answer_faulted'"), (1,))
+        changes = self.c.total_changes
+        self.reconcile()
+        self.assertEqual(self.c.total_changes, changes)
+
+    def test_faulted_notice_without_address(self):
+        from relay_engine.operator_queue import notifier
+        item = self.recorded()
+        # E6 keeps the answer route and recorded job intact while removing only the display address.
+        self.c.execute('UPDATE queue_items SET actor_address=NULL WHERE item_id=?', (item.item_id,)).close()
+        self.c.commit()
+        self.assertEqual(self.view(item.item_id).answer_to, item.answer_to)
+        notifier.notify_pass(self.port, lambda argv: None, self.f.clock + 1, notifier='notify-send')
+        self.apply(item)
+        self.change_draft(item, self.job(item).draft + b'changed')
+        self.reconcile()
+        rows = operations._dicts(self.c, "SELECT * FROM queue_items WHERE subkind='answer_faulted'")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]['actor_address'])
+        calls = []
+        notifier.notify_pass(self.port, calls.append, self.f.clock + 2, notifier='notify-send')
+        self.assertEqual(calls, [['notify-send', '--', 'p: console_queue', kinds.ANSWER_FAULTED_TEXTS['question']]])
 
     def test_admission_with_other_bytes_is_faulted_once(self):
         from relay_engine import queries, submit

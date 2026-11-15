@@ -213,12 +213,12 @@ class TestCatalogue(unittest.TestCase):
         conn = self.opened()
         definitions = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, '8b281aee92741122483626d40fa15d5887eeb9a8e7c4477d799d1c840d0919a8')
+        self.assertEqual(digest, 'a845cd9ee5129ca4c29b84759e443bb463f0470fcae9c9f6640012823a5721b9')
 
     def test_constraints_hold(self):
         conn = self.opened()
         statements = [
-            ("INSERT INTO project_routes VALUES (?, 'invalid', 'other', 1)", (P,)),
+            ("INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, 'invalid', 'other', 1)", (P,)),
             ("INSERT INTO catalogue_identity VALUES (2, 'other', 'isolated', 1)", ()),
             ("INSERT INTO key_routes VALUES (?, ?, 1)", (Q, P)),
         ]
@@ -248,9 +248,9 @@ class TestCatalogue(unittest.TestCase):
 
     def test_name_is_unique(self):
         conn = self.opened()
-        conn.execute("INSERT INTO project_routes VALUES (?, 'same', 'creating', 1)", (P,))
+        conn.execute("INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, 'same', 'creating', 1)", (P,))
         with self.assertRaises(sqlite3.IntegrityError):
-            conn.execute("INSERT INTO project_routes VALUES (?, 'same', 'creating', 1)", (Q,))
+            conn.execute("INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?, 'same', 'creating', 1)", (Q,))
         conn.execute('ROLLBACK')
 
     def test_catalogue_opens_wal(self):
@@ -308,7 +308,7 @@ class TestQueueCatalogue(unittest.TestCase):
         self.assertTrue(QUEUE_TABLES <= tables)
         self.assertEqual({n for n, owner in catalogue.TABLE_OWNERS.items() if owner == 'console'},
                          QUEUE_TABLES)
-        self.assertEqual(len(catalogue.TABLE_OWNERS), 17)
+        self.assertEqual(len(catalogue.TABLE_OWNERS), 18)
         for name in QUEUE_TABLES:
             self.assertEqual(conn.execute('SELECT strict FROM pragma_table_list WHERE name=?',
                                           (name,)).fetchone(), (1,))
@@ -559,6 +559,41 @@ class TestQueueCatalogue(unittest.TestCase):
 # Historical DDL copied from committed d689b0a, not from the current schema.
 D689B0A_TABLES = ("CREATE TABLE catalogue_identity (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    store_id TEXT NOT NULL UNIQUE,\n    kind TEXT NOT NULL CHECK (kind IN ('production', 'isolated')),\n    created_at INTEGER NOT NULL\n) STRICT", "CREATE TABLE project_routes (\n    project_id TEXT NOT NULL PRIMARY KEY,\n    name TEXT NOT NULL UNIQUE,\n    state TEXT NOT NULL CHECK (state IN ('creating', 'active')),\n    created_at INTEGER NOT NULL\n) STRICT", 'CREATE TABLE key_routes (\n    key_id TEXT NOT NULL PRIMARY KEY,\n    project_id TEXT NOT NULL REFERENCES project_routes (project_id),\n    created_at INTEGER NOT NULL\n) STRICT', 'CREATE TABLE schema_version (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    version TEXT NOT NULL,\n    ddl_sha256 TEXT NOT NULL\n) STRICT')
 
+
+
+
+class TestPreMaintenanceCatalogue(unittest.TestCase):
+    def test_digest_changes_refuse_old_catalogue(self):
+        # Historical H_C definitions: opening must refuse without converting old files.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            conn = sqlite3.connect(root / 'machine.sqlite3')
+            try:
+                for statement in H_C_TABLES:
+                    conn.execute(statement).close()
+                conn.execute('INSERT INTO schema_version VALUES (1,?,?)',
+                             ('1', hashlib.sha256('\n'.join(H_C_TABLES).encode()).hexdigest())).close()
+                conn.execute('INSERT INTO catalogue_identity VALUES (1,?,?,0)', (P, 'isolated')).close()
+                conn.commit()
+            finally:
+                conn.close()
+            before = (root / 'machine.sqlite3').read_bytes()
+            opened = None
+            caught = None
+            try:
+                opened = store_layout.open_catalogue(root)
+            except errors.EngineError as error:
+                caught = error
+            finally:
+                if opened is not None:
+                    opened.close()
+            self.assertIsNotNone(caught)
+            self.assertEqual(caught.code, 'E-SCHEMA-MISMATCH')
+            self.assertEqual((root / 'machine.sqlite3').read_bytes(), before)
+
+
+# Historical DDL copied from committed H_C=38501b22, independent of current entries.
+H_C_TABLES = ("CREATE TABLE catalogue_identity (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    store_id TEXT NOT NULL UNIQUE,\n    kind TEXT NOT NULL CHECK (kind IN ('production', 'isolated')),\n    created_at INTEGER NOT NULL\n) STRICT", "CREATE TABLE project_routes (\n    project_id TEXT NOT NULL PRIMARY KEY,\n    name TEXT NOT NULL UNIQUE,\n    state TEXT NOT NULL CHECK (state IN ('creating', 'active')),\n    created_at INTEGER NOT NULL\n) STRICT", 'CREATE TABLE key_routes (\n    key_id TEXT NOT NULL PRIMARY KEY,\n    project_id TEXT NOT NULL REFERENCES project_routes (project_id),\n    created_at INTEGER NOT NULL\n) STRICT', 'CREATE TABLE schema_version (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    version TEXT NOT NULL,\n    ddl_sha256 TEXT NOT NULL\n) STRICT', "CREATE TABLE engine_stops (\n    row_id INTEGER PRIMARY KEY,\n    scope TEXT NOT NULL CHECK (scope IN ('store', 'project')),\n    project_id TEXT REFERENCES project_routes (project_id),\n    stopped_at TEXT NOT NULL,\n    stopped_by TEXT NOT NULL,\n    ended_at TEXT,\n    ended_by TEXT,\n    CHECK ((scope = 'store') = (project_id IS NULL)),\n    CHECK ((ended_at IS NULL) = (ended_by IS NULL))\n) STRICT", "CREATE UNIQUE INDEX engine_stops_one_open\nON engine_stops (scope, ifnull(project_id, '')) WHERE ended_at IS NULL", "CREATE TABLE engine_stop_events (\n    event_id INTEGER PRIMARY KEY AUTOINCREMENT,\n    row_id INTEGER NOT NULL REFERENCES engine_stops (row_id),\n    kind TEXT NOT NULL CHECK (kind IN ('stop', 'start')),\n    at TEXT NOT NULL,\n    by TEXT NOT NULL\n) STRICT", "CREATE TRIGGER engine_stops_guard_update BEFORE UPDATE ON engine_stops\nWHEN NOT (OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL AND NEW.ended_by IS NOT NULL\n          AND NEW.row_id IS OLD.row_id AND NEW.scope IS OLD.scope\n          AND NEW.project_id IS OLD.project_id AND NEW.stopped_at IS OLD.stopped_at\n          AND NEW.stopped_by IS OLD.stopped_by)\nBEGIN SELECT RAISE(ABORT, 'engine_stops is immutable except its first end'); END", "CREATE TRIGGER engine_stops_guard_delete BEFORE DELETE ON engine_stops\nBEGIN SELECT RAISE(ABORT, 'engine_stops cannot be deleted'); END", "CREATE TRIGGER engine_stop_events_guard_update BEFORE UPDATE ON engine_stop_events\nBEGIN SELECT RAISE(ABORT, 'engine_stop_events cannot be updated'); END", "CREATE TRIGGER engine_stop_events_guard_delete BEFORE DELETE ON engine_stop_events\nBEGIN SELECT RAISE(ABORT, 'engine_stop_events cannot be deleted'); END", "CREATE TABLE checkout_routes (\n    checkout_id TEXT PRIMARY KEY,\n    project_id TEXT NOT NULL REFERENCES project_routes (project_id),\n    repository_id TEXT NOT NULL,\n    git_common_dir TEXT NOT NULL,\n    worktree_path TEXT NOT NULL,\n    dev INTEGER NOT NULL,\n    ino INTEGER NOT NULL,\n    created_at INTEGER NOT NULL,\n    ended_at INTEGER,\n    end_reason TEXT,\n    ledger_synced_at INTEGER,\n    CHECK ((ended_at IS NULL) = (end_reason IS NULL)),\n    CHECK (end_reason IN ('matched', 'unmatched'))\n) STRICT", 'CREATE UNIQUE INDEX checkout_routes_one_open\nON checkout_routes (dev, ino) WHERE ended_at IS NULL', "CREATE TABLE queue_items (\n    item_id TEXT PRIMARY KEY,\n    kind TEXT NOT NULL CHECK (kind IN ('question', 'cross_project_permission', 'merge_go_ahead', 'verification_held', 'notice')),\n    subkind TEXT CHECK ((subkind IS NULL) = (kind <> 'notice') AND (subkind IS NULL OR subkind IN (\n        'seat_registered', 'seat_replaced', 'seat_stood_down', 'seat_unseated',\n        'engine_restart_requested', 'engine_updated', 'engine_update_failed',\n        'doorbell_off', 'notifier_unhealthy', 'operator_act_carried', 'worker_stalled',\n        'bridge_refused', 'panel_key_enrolled', 'answer_faulted', 'instruction_carried',\n        'seat_record_missing', 'seat_ambiguous'))),\n    project_id TEXT CHECK ((project_id IS NULL) = (\n        subkind IS 'notifier_unhealthy' OR subkind IS 'worker_stalled' OR\n        subkind IS 'bridge_refused' OR subkind IS 'panel_key_enrolled' OR\n        subkind IS 'engine_updated' OR subkind IS 'engine_update_failed' OR\n        subkind IS 'instruction_carried' OR subkind IS 'seat_record_missing' OR\n        subkind IS 'seat_ambiguous')),\n    raiser TEXT NOT NULL,\n    asking_seat_id TEXT,\n    actor_address TEXT,\n    fields TEXT,\n    answer_to TEXT CHECK (answer_to IS NULL OR kind = 'question'),\n    source_handle INTEGER CHECK (source_handle IS NULL OR kind = 'question'),\n    source_relay_id TEXT UNIQUE,\n    revision INTEGER NOT NULL CHECK (revision >= 1),\n    state TEXT NOT NULL CHECK (state IN ('pending', 'applying', 'resolved', 'superseded', 'refused', 'faulted', 'dismissed', 'withdrawn', 'cleared', 'retired')),\n    texts TEXT NOT NULL,\n    popup_text TEXT,\n    choices TEXT,\n    choices_reason TEXT,\n    pins TEXT NOT NULL,\n    condition_key TEXT NOT NULL,\n    raised_position INTEGER NOT NULL,\n    raised_at_ms INTEGER NOT NULL\n) STRICT", 'CREATE TABLE queue_conditions (\n    item_id TEXT PRIMARY KEY REFERENCES queue_items (item_id),\n    kind TEXT NOT NULL,\n    subkind TEXT,\n    project_id TEXT,\n    condition_key TEXT NOT NULL,\n    raiser TEXT NOT NULL,\n    raised_at_ms INTEGER NOT NULL,\n    clear_requested INTEGER NOT NULL DEFAULT 0 CHECK (clear_requested IN (0, 1)),\n    closed_at_ms INTEGER,\n    closed_position INTEGER\n) STRICT', "CREATE UNIQUE INDEX queue_conditions_open_key\nON queue_conditions (kind, COALESCE(subkind, ''), COALESCE(project_id, ''), condition_key)\nWHERE closed_at_ms IS NULL", "CREATE TABLE queue_events (\n    position INTEGER PRIMARY KEY,\n    item_id TEXT NOT NULL REFERENCES queue_items (item_id),\n    revision INTEGER NOT NULL,\n    state TEXT NOT NULL CHECK (state IN ('pending', 'applying', 'resolved', 'superseded', 'refused', 'faulted', 'dismissed', 'withdrawn', 'cleared', 'retired')),\n    event_kind TEXT NOT NULL CHECK (event_kind IN ('raised', 'answered', 'applied', 'superseded', 'refused', 'faulted', 'withdrawn', 'opened', 'dismissed', 'dismissed_all', 'cleared', 'clear_requested', 'condition_closed', 'retired')),\n    principal_kind TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    receipt_id TEXT,\n    detail TEXT,\n    at_ms INTEGER NOT NULL\n) STRICT", "CREATE TABLE queue_answers (\n    item_id TEXT PRIMARY KEY REFERENCES queue_items (item_id),\n    answer_id TEXT NOT NULL UNIQUE,\n    answer TEXT NOT NULL,\n    answered_at_ms INTEGER NOT NULL CHECK (answered_at_ms >= 0),\n    apply_key TEXT UNIQUE NOT NULL,\n    draft BLOB,\n    call_args TEXT,\n    project_id TEXT NOT NULL,\n    phase TEXT NOT NULL CHECK (phase IN ('recorded', 'applied', 'confirmed', 'faulted')),\n    last_reason TEXT,\n    outcome TEXT\n) STRICT", "CREATE TABLE queue_receipts (\n    receipt_id TEXT PRIMARY KEY,\n    principal_kind TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    operation TEXT NOT NULL,\n    operation_key TEXT NOT NULL,\n    request_digest TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),\n    result TEXT NOT NULL,\n    committed_at_ms INTEGER NOT NULL,\n    UNIQUE (principal_kind, principal_id, operation, operation_key)\n) STRICT", "CREATE TABLE queue_notifications (\n    item_id TEXT REFERENCES queue_items (item_id),\n    revision INTEGER,\n    state TEXT NOT NULL CHECK (state IN ('pending', 'delivered', 'retired')),\n    attempts INTEGER NOT NULL DEFAULT 0,\n    last_error_class TEXT,\n    next_attempt_at_ms INTEGER,\n    PRIMARY KEY (item_id, revision),\n    CHECK (state <> 'pending' OR next_attempt_at_ms IS NOT NULL)\n) STRICT", "CREATE TABLE queue_highwaters (\n    project_id TEXT,\n    source TEXT NOT NULL CHECK (source IN ('question', 'lifecycle', 'lifecycle_log', 'stop_events', 'store_items')),\n    position INTEGER NOT NULL,\n    epoch INTEGER NOT NULL DEFAULT 0 CHECK (epoch >= 0),\n    anchor_id TEXT,\n    CHECK ((project_id IS NULL) = (source IN ('lifecycle_log', 'stop_events', 'store_items'))),\n    CHECK (source NOT IN ('question', 'lifecycle', 'lifecycle_log') OR (position = 0) = (anchor_id IS NULL)),\n    CHECK (source IN ('question', 'lifecycle', 'lifecycle_log') OR anchor_id IS NULL)\n) STRICT", "CREATE UNIQUE INDEX queue_highwaters_key\nON queue_highwaters (COALESCE(project_id, ''), source)", 'CREATE TABLE queue_notifier_health (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),\n    updated_at_ms INTEGER NOT NULL\n) STRICT', 'CREATE TABLE queue_store_item_sources (\n    raise_row_id INTEGER PRIMARY KEY,\n    item_id TEXT NOT NULL REFERENCES queue_items (item_id)\n) STRICT', "CREATE TABLE queue_ingest_skips (\n    source TEXT NOT NULL CHECK (source IN ('store_items', 'lifecycle_log')),\n    row_ref TEXT NOT NULL CHECK (length(row_ref) >= 1),\n    reason TEXT NOT NULL CHECK (length(reason) >= 1),\n    skipped_at_ms INTEGER NOT NULL CHECK (skipped_at_ms >= 0),\n    UNIQUE (source, row_ref)\n) STRICT")
 
 if __name__ == '__main__':
     unittest.main()

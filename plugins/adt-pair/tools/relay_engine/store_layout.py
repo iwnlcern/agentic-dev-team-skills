@@ -2,7 +2,7 @@
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from typing import Literal
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 import os
 import sqlite3
@@ -27,6 +27,34 @@ class RouteUnavailable(Exception):
     def __init__(self, cause):
         self.cause = cause
         super().__init__(cause)
+
+
+class RouteConflict(sqlite3.IntegrityError):
+    """A permanent route identity or name is already reserved."""
+
+
+class NameTaken(RouteConflict):
+    def __init__(self, name, holder_project_id):
+        self.name = name
+        self.holder_project_id = holder_project_id
+        super().__init__(f'name {name} is reserved by project {holder_project_id}')
+
+
+class ProjectExists(RouteConflict):
+    def __init__(self, project_id):
+        self.project_id = project_id
+        super().__init__(f'project {project_id} already has a route')
+
+
+class HoldConflict(Exception):
+    def __init__(self, holder_job_id, scope):
+        self.holder_job_id = holder_job_id
+        self.scope = scope
+        super().__init__(f'{scope} is held by job {holder_job_id}')
+
+
+class ReservationChanged(Exception):
+    """The route is no longer in the state its job expected."""
 
 
 @dataclass(frozen=True)
@@ -333,10 +361,117 @@ def project_routes(catalogue_conn) -> list[ProjectRoute]:
     return [ProjectRoute(*row, ledger_path(root, row[0])) for row in rows]
 
 
-def reserve_project(catalogue_conn, project_id: str, name: str, now_ms: int) -> None:
+def _canonical_job(value):
+    value = _canonical_id(value)
+    if UUID(value).version != 7:
+        raise ValueError('job id must be a canonical UUIDv7')
+    return value
+
+
+def project_scope(project_id: str) -> str:
+    return 'project:' + _canonical_id(project_id)
+
+
+def root_scope(root_uuid: str) -> str:
+    return 'root:' + _canonical_id(root_uuid)
+
+
+def take_holds(catalogue_conn, job_id: str, kind: str,
+               scopes: Sequence[str], now_ms: int) -> None:
+    """Check the whole span before inserting, inside the caller's transaction."""
+    job_id = _canonical_job(job_id)
+    if kind not in ('cutover', 'undo', 'unmark'):
+        raise ValueError('unknown hold kind')
+    scopes = tuple(dict.fromkeys(scopes))
+    for scope in scopes:
+        prefix, separator, value = scope.partition(':')
+        if not separator or prefix not in ('project', 'root'):
+            raise ValueError('unknown hold scope')
+        _canonical_id(value)
+    for scope in scopes:
+        held = _row(catalogue_conn, 'SELECT job_id FROM maintenance_holds WHERE scope=?',
+                    (scope,))
+        if held is not None:
+            raise HoldConflict(held[0], scope)
+    for scope in scopes:
+        catalogue_conn.execute('INSERT INTO maintenance_holds VALUES (?, ?, ?, ?)',
+                               (scope, job_id, kind, now_ms)).close()
+
+
+def release_holds(catalogue_conn, job_id: str) -> int:
+    cursor = catalogue_conn.execute('DELETE FROM maintenance_holds WHERE job_id=?',
+                                    (_canonical_job(job_id),))
+    try:
+        return cursor.rowcount
+    finally:
+        cursor.close()
+
+
+def holds_of(catalogue_conn, job_id: str) -> frozenset[str]:
+    cursor = catalogue_conn.execute('SELECT scope FROM maintenance_holds WHERE job_id=?',
+                                    (_canonical_job(job_id),))
+    try:
+        return frozenset(scope for (scope,) in cursor)
+    finally:
+        cursor.close()
+
+
+def any_hold(catalogue_conn) -> tuple[str, str] | None:
+    return _row(catalogue_conn,
+                'SELECT scope, job_id FROM maintenance_holds ORDER BY scope LIMIT 1')
+
+
+def _reservation_conflict(conn, project_id, name):
+    if _row(conn, 'SELECT 1 FROM project_routes WHERE project_id=?', (project_id,)):
+        raise ProjectExists(project_id)
+    holder = _row(conn, 'SELECT project_id FROM project_routes WHERE name=?', (name,))
+    if holder is not None:
+        raise NameTaken(name, holder[0])
+
+
+def reserve_project(catalogue_conn, project_id: str, name: str, now_ms: int,
+                    *, held_by_job: str | None = None) -> None:
     """Creation step 1, in the caller's catalogue transaction."""
-    catalogue_conn.execute('INSERT INTO project_routes VALUES (?, ?, ?, ?)',
-                           (_canonical_id(project_id), name, 'creating', now_ms)).close()
+    project_id = _canonical_id(project_id)
+    if held_by_job is not None:
+        held_by_job = _canonical_job(held_by_job)
+    _reservation_conflict(catalogue_conn, project_id, name)
+    try:
+        catalogue_conn.execute(
+            'INSERT INTO project_routes (project_id, name, state, created_at, held_by_job) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (project_id, name, 'creating', now_ms, held_by_job)).close()
+    except sqlite3.IntegrityError:
+        _reservation_conflict(catalogue_conn, project_id, name)
+        raise
+
+
+def take_over_reservation(catalogue_conn, project_id: str, expected_job: str,
+                          new_job: str, ledger_present: bool) -> None:
+    project_id = _canonical_id(project_id)
+    expected_job, new_job = _canonical_job(expected_job), _canonical_job(new_job)
+    if ledger_present:
+        raise ReservationChanged('a present file prevents takeover')
+    cursor = catalogue_conn.execute(
+        "UPDATE project_routes SET held_by_job=? WHERE project_id=? "
+        "AND state='creating' AND held_by_job=?", (new_job, project_id, expected_job))
+    try:
+        if cursor.rowcount != 1:
+            raise ReservationChanged('reservation owner or state changed')
+    finally:
+        cursor.close()
+
+
+def return_to_creating(catalogue_conn, project_id: str, job_id: str) -> None:
+    cursor = catalogue_conn.execute(
+        "UPDATE project_routes SET state='creating' WHERE project_id=? "
+        "AND state='active' AND held_by_job=?",
+        (_canonical_id(project_id), _canonical_job(job_id)))
+    try:
+        if cursor.rowcount != 1:
+            raise ReservationChanged('active reservation owner or state changed')
+    finally:
+        cursor.close()
 
 
 def activate_project(catalogue_conn, project_id: str) -> None:

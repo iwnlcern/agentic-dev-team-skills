@@ -155,7 +155,7 @@ def apply_question(ledger_conn, job: ApplyJob, make_context) -> ApplyResult:
 
 def confirm(catalogue_conn, item_id, result: ApplyResult, now_ms) -> None:
     conn = catalogue_conn
-    answer = records._one(conn, 'SELECT phase FROM queue_answers WHERE item_id=?', (item_id,))
+    answer = records._one(conn, 'SELECT phase,apply_key FROM queue_answers WHERE item_id=?', (item_id,))
     if answer is None or answer[0] != 'recorded':
         return
     if result.status == 'transient':
@@ -177,6 +177,14 @@ def confirm(catalogue_conn, item_id, result: ApplyResult, now_ms) -> None:
     condition = records._one(conn, 'SELECT clear_requested,closed_at_ms FROM queue_conditions WHERE item_id=?', (item_id,))
     if condition is not None and condition[0] and condition[1] is None:
         records._close_condition(conn, item_id, revision, state, principal, now_ms)
+    if result.status == 'faulted':
+        request = records.RaiseRequest('notice', 'answer_faulted', item['project_id'],
+            {'sentence': kinds.ANSWER_FAULTED_TEXTS[item['kind']]}, {},
+            {'project_id': item['project_id'], 'item_id': item_id}, answer[1],
+            actor_address=item['actor_address'])
+        notice = records.raise_item(conn, principal, request, now_ms, enabled=kinds.ENABLED_TAGS)
+        if isinstance(notice, records.QueueRefusal):
+            raise RuntimeError('stopped-answer notice refused: ' + notice.cause_kind)
     if result.status != 'faulted' and kinds.rings(item['kind'], item['subkind']):
         records._write(conn, 'INSERT INTO queue_notifications '
             '(item_id,revision,state,next_attempt_at_ms) VALUES (?,?,?,?)',

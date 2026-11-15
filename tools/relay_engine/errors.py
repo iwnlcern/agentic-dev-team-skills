@@ -442,13 +442,23 @@ def _is_hook_kind(value):
 
 
 _HOOK_TEXT = {
+    'error-admission-reservation-undone': 'what the admission hook {hook} reserved was undone by another writer, and the operator was told',
+    'error-admission-commit-cause': "the store did not complete this admission's commit; nothing from this draft was stored",
+    'error-admission-commit-remedy': 'submit this draft again',
+    'error-admission-commit-explain': 'a commit the store did not complete is rolled back, and the refusal written after it makes that rollback permanent, so the draft is refused as a whole',
+    'error-admission-unknown-cause': 'this draft was not stored, and whether what the admission hook {hook} reserved was released is not yet known',
+    'error-admission-unknown-commit-unconfirmed-cause': 'whether this draft was stored is not yet known: the store did not confirm its commit',
+    'error-admission-unknown-remedy': "resubmit this draft unchanged, under its original submission key, and not as a new draft or under a new key: if it was stored you receive its original receipt, and otherwise it is admitted once; if that is refused with authority.reservation-unresolved, the engine start's settlement has not committed yet, so resubmit once that refusal clears",
+    'error-admission-unknown-explain': "a draft resubmitted unchanged under its key returns a stored relay's receipt before anything is recorded again, or is admitted once; a reservation not released now is released by that admission or settled at the next engine start, which tells the operator",
     "error-admission-hook-cause": "the admission hook {hook} failed with {kind}; nothing from this draft was stored",
     "error-admission-hook-ended-transaction-cause": "the admission hook {hook} ended the transaction; nothing from this draft was stored",
     "error-admission-hook-remedy": "report it to the orchestrator; the draft can be submitted again once the hook is fixed",
     "error-admission-hook-explain": "admission and the hook's records commit together, so a failed hook refuses the whole draft rather than storing a relay without them",
 }
 strings.register_inventory(_HOOK_TEXT, {
-    (key, field): {"hook": _is_hook_name, "kind": _is_hook_kind}[field]
+    (key, field): ({"hook": _is_hook_name, "kind": _is_hook_kind}[field]
+                   if key.startswith("error-admission-hook-") else
+                   lambda value: _is_hook_name(value) or isinstance(value, strings.RejectedValue))
     for key, template in _HOOK_TEXT.items()
     for field in strings._placeholders(template)
 })
@@ -605,6 +615,8 @@ ERRORS = {
     "E-OUTPUT-EXISTS": _spec("output-exists", "command"),
     "E-OUTPUT-OWNERSHIP": _spec("output-ownership", "command"),
     "E-ADMISSION-HOOK": _spec("admission-hook", "integrity"),
+    "E-ADMISSION-COMMIT": _spec("admission-commit", "integrity"),
+    "E-ADMISSION-UNKNOWN": _spec("admission-unknown", "integrity"),
     "E-SUBMISSION-KEY-REUSED": _spec("submission-key-reused", "integrity"),
     "E-SENDER-NOT-CURRENT": _spec("sender-not-current", "policy"),
     "E-DRAFT-SHAPE": _spec("draft-shape", "integrity"),
@@ -671,6 +683,9 @@ ERRORS = {
 }
 
 ERROR_VARIANTS = {
+    ("E-ADMISSION-UNKNOWN", "commit-unconfirmed"): ErrorSpec(
+        "error-admission-unknown-commit-unconfirmed-cause", "error-admission-unknown-remedy",
+        "error-admission-unknown-explain", "integrity"),
     ("E-ADMISSION-HOOK", "ended-transaction"): ErrorSpec(
         "error-admission-hook-ended-transaction-cause", "error-admission-hook-remedy",
         "error-admission-hook-explain", "integrity"),
@@ -789,13 +804,29 @@ class EngineError(Exception):
         self.remedy_key = remedy_key
         self.cls = cls
         self.params = dict(params)
+        self._reservation = None
         self.cause = _render_for(cause_key, self.params)
         self.remedy = _render_for(remedy_key, self.params)
         super().__init__(code)
 
+    @property
+    def reservation(self):
+        return self._reservation
+
+    @reservation.setter
+    def reservation(self, value):
+        if value not in (None, "undone-with-notice"):
+            raise ValueError("invalid reservation detail")
+        self._reservation = value
+
     def as_dict(self):
-        return {"code": self.code, "cause": self.cause,
-                "remedy": self.remedy, "cls": self.cls}
+        value = {"code": self.code, "cause": self.cause,
+                 "remedy": self.remedy, "cls": self.cls}
+        if self.reservation is not None:
+            value["reservation"] = self.reservation
+            value["reservation_note"] = _render_for(
+                "error-admission-reservation-undone", self.params)
+        return value
 
 
 def error_for(code, *, variant=None, **params):
@@ -833,6 +864,10 @@ def error_for(code, *, variant=None, **params):
                 ("daemon_fp", strings.valid_fp)):
             params[field] = _identity_value(params.get(field), validator)
         params["remedy"] = _version_mismatch_remedy(params)
+    if code in {"E-ADMISSION-COMMIT", "E-ADMISSION-UNKNOWN"}:
+        hook = params.get("hook")
+        if not _is_hook_name(hook) and not isinstance(hook, strings.RejectedValue):
+            params["hook"] = _rejected(hook)
     return EngineError(code, spec.cause_key, spec.remedy_key, spec.cls,
                        **params)
 

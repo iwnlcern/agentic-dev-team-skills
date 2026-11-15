@@ -1532,5 +1532,135 @@ class TestReadonlyOpeners(unittest.TestCase):
                 conn.execute('SELECT 1')
 
 
+
+
+class TestMaintenanceHolds(unittest.TestCase):
+    A = '019a7850-0000-7000-8000-000000000001'
+    B = '019a7850-0000-7000-8000-000000000002'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = store_layout.open_catalogue(Path(self.tmp.name) / 'store')
+        self.addCleanup(self.conn.close)
+        self.conn.execute('BEGIN IMMEDIATE').close()
+
+    def rows(self):
+        return self.conn.execute('SELECT * FROM project_routes ORDER BY project_id').fetchall()
+
+    def test_holds_all_or_none(self):
+        # S2-M1: a conflicting span must not leave its earlier free scope held.
+        held = store_layout.project_scope(P)
+        free = store_layout.root_scope(Q)
+        self.assertEqual(held, 'project:' + P)
+        self.assertEqual(free, 'root:' + Q)
+        store_layout.take_holds(self.conn, self.A, 'cutover', [held], 1)
+        caught = None
+        try:
+            store_layout.take_holds(self.conn, self.B, 'undo', [free, held], 2)
+        except Exception as error:
+            caught = error
+        self.assertIsInstance(caught, store_layout.HoldConflict)
+        self.assertEqual((caught.holder_job_id, caught.scope), (self.A, held))
+        self.assertEqual(self.conn.execute('SELECT scope FROM maintenance_holds ORDER BY scope').fetchall(), [(held,)])
+        store_layout.take_holds(self.conn, self.B, 'unmark', [free, 'project:' + Q], 3)
+        self.assertEqual(store_layout.holds_of(self.conn, self.B), frozenset((free, 'project:' + Q)))
+        self.assertIn(store_layout.any_hold(self.conn), [(held, self.A), (free, self.B), ('project:' + Q, self.B)])
+        self.assertTrue(self.conn.in_transaction)
+
+    def test_scope_pairings(self):
+        # All nine ordered kind pairs exclude either shared scope, not disjoint spans.
+        for first in ('cutover', 'undo', 'unmark'):
+            for second in ('cutover', 'undo', 'unmark'):
+                for shared in ('project', 'root', None):
+                    with self.subTest(first=first, second=second, shared=shared):
+                        self.conn.execute('DELETE FROM maintenance_holds').close()
+                        scopes = ['project:' + P, 'root:' + P]
+                        other = ['project:' + Q, 'root:' + Q]
+                        if shared:
+                            other[0 if shared == 'project' else 1] = shared + ':' + P
+                        store_layout.take_holds(self.conn, self.A, first, scopes, 1)
+                        if shared:
+                            with self.assertRaises(store_layout.HoldConflict):
+                                store_layout.take_holds(self.conn, self.B, second, other, 2)
+                            self.assertEqual(store_layout.holds_of(self.conn, self.B), frozenset())
+                        else:
+                            store_layout.take_holds(self.conn, self.B, second, other, 2)
+                            self.assertEqual(store_layout.holds_of(self.conn, self.B), frozenset(other))
+
+    def test_release_only_own(self):
+        store_layout.take_holds(self.conn, self.A, 'undo', ['project:' + P, 'root:' + P], 1)
+        store_layout.take_holds(self.conn, self.B, 'unmark', ['root:' + Q], 2)
+        self.assertEqual(store_layout.release_holds(self.conn, self.A), 2)
+        self.assertEqual(store_layout.holds_of(self.conn, self.A), frozenset())
+        self.assertEqual(store_layout.any_hold(self.conn), ('root:' + Q, self.B))
+        self.assertEqual(store_layout.release_holds(self.conn, self.A), 0)
+        self.assertEqual(store_layout.release_holds(self.conn, self.B), 1)
+        self.assertIsNone(store_layout.any_hold(self.conn))
+
+    def test_reserve_owned_and_base(self):
+        store_layout.reserve_project(self.conn, P, 'base', 10)
+        store_layout.reserve_project(self.conn, Q, 'owned', 11, held_by_job=self.A)
+        self.assertEqual(self.rows(), [(P, 'base', 'creating', 10, None), (Q, 'owned', 'creating', 11, self.A)])
+        for invalid in (self.A.upper(), P, '../job'):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    store_layout.reserve_project(self.conn, K, 'invalid', 12, held_by_job=invalid)
+        self.assertEqual(len(self.rows()), 2)
+        self.assertTrue(self.conn.in_transaction)
+
+    def test_take_over_cas(self):
+        store_layout.reserve_project(self.conn, P, 'owned', 10, held_by_job=self.A)
+        for owner, state, present in ((self.B, 'creating', False), (self.A, 'active', False), (self.A, 'creating', True), (None, 'creating', False)):
+            with self.subTest(owner=owner, state=state, present=present):
+                self.conn.execute('UPDATE project_routes SET held_by_job=?,state=?', (owner, state)).close()
+                before = self.rows()
+                with self.assertRaises(store_layout.ReservationChanged):
+                    store_layout.take_over_reservation(self.conn, P, self.A, self.B, present)
+                self.assertEqual(self.rows(), before)
+        self.conn.execute("UPDATE project_routes SET held_by_job=?,state='creating'", (self.A,)).close()
+        store_layout.take_over_reservation(self.conn, P, self.A, self.B, False)
+        self.assertEqual(self.rows(), [(P, 'owned', 'creating', 10, self.B)])
+        with self.assertRaises(store_layout.ReservationChanged):
+            store_layout.take_over_reservation(self.conn, Q, self.A, self.B, False)
+        self.assertTrue(self.conn.in_transaction)
+
+    def test_return_to_creating(self):
+        store_layout.reserve_project(self.conn, P, 'owned', 10, held_by_job=self.A)
+        for owner, state in ((self.A, 'creating'), (self.B, 'active'), (None, 'active')):
+            self.conn.execute('UPDATE project_routes SET held_by_job=?,state=?', (owner, state)).close()
+            before = self.rows()
+            with self.assertRaises(store_layout.ReservationChanged):
+                store_layout.return_to_creating(self.conn, P, self.A)
+            self.assertEqual(self.rows(), before)
+        with self.assertRaises(store_layout.ReservationChanged):
+            store_layout.return_to_creating(self.conn, Q, self.A)
+        self.conn.execute("UPDATE project_routes SET held_by_job=?,state='active'", (self.A,)).close()
+        store_layout.return_to_creating(self.conn, P, self.A)
+        self.assertEqual(self.rows(), [(P, 'owned', 'creating', 10, self.A)])
+
+    def test_reserve_conflicts_typed(self):
+        # Both-key collisions prioritize id, preserve rows and keep the caller's turn open.
+        store_layout.reserve_project(self.conn, P, 'one', 1)
+        store_layout.reserve_project(self.conn, Q, 'two', 2)
+        before = self.rows()
+        for project, name, expected in ((K, 'one', 'NameTaken'), (P, 'free', 'ProjectExists'), (P, 'two', 'ProjectExists')):
+            with self.subTest(project=project, name=name):
+                caught = None
+                try:
+                    store_layout.reserve_project(self.conn, project, name, 3)
+                except Exception as error:
+                    caught = error
+                self.assertIsInstance(caught, getattr(store_layout, expected))
+                self.assertIsInstance(caught, store_layout.RouteConflict)
+                self.assertIsInstance(caught, sqlite3.IntegrityError)
+                if expected == 'NameTaken':
+                    self.assertEqual((caught.name, caught.holder_project_id), ('one', P))
+                else:
+                    self.assertEqual(caught.project_id, P)
+                self.assertEqual(self.rows(), before)
+                self.assertTrue(self.conn.in_transaction)
+
+
 if __name__ == '__main__':
     unittest.main()
