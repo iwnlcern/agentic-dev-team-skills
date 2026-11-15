@@ -13,7 +13,7 @@ NOTICE_SUBKINDS = frozenset({
     'engine_restart_requested', 'engine_updated', 'engine_update_failed', 'doorbell_off',
     'notifier_unhealthy', 'operator_act_carried', 'worker_stalled', 'bridge_refused',
     'panel_key_enrolled', 'answer_faulted', 'instruction_carried', 'seat_record_missing',
-    'seat_ambiguous',
+    'seat_ambiguous', 'backup_missed',
 })
 STATES = frozenset({'pending', 'applying', 'resolved', 'superseded', 'refused', 'faulted',
                     'dismissed', 'withdrawn', 'cleared', 'retired'})
@@ -24,11 +24,11 @@ NOTIFICATION_STATES = frozenset({'pending', 'delivered', 'retired'})
 RETIRE_REASONS = frozenset({'project_undone'})
 NO_PROJECT_SUBKINDS = frozenset({'notifier_unhealthy', 'worker_stalled', 'bridge_refused',
     'panel_key_enrolled', 'engine_updated', 'engine_update_failed', 'instruction_carried',
-    'seat_record_missing', 'seat_ambiguous'})
+    'seat_record_missing', 'seat_ambiguous', 'backup_missed'})
 NO_CLEAR_SUBKINDS = frozenset({'bridge_refused', 'panel_key_enrolled', 'instruction_carried',
                              'seat_record_missing', 'seat_ambiguous'})
 OPERATOR_CLOSED_SUBKINDS = frozenset({'instruction_carried'})
-STALL_WORKERS = ('queue_reconcile', 'queue_question_ingest', 'queue_lifecycle_ingest', 'engine_liveness')
+STALL_WORKERS = ('queue_reconcile', 'queue_question_ingest', 'queue_lifecycle_ingest', 'engine_liveness', 'store_backup_daily')
 SURFACES = frozenset({'page', 'frank_panel'})
 ENABLED_TAGS = frozenset({'pr1'})
 
@@ -60,10 +60,11 @@ RAISER_MATRIX = (
     RaiserRow('notice', 'worker_stalled', 'queue.raise', 'supervision', 'pr1', frozenset(STALL_WORKERS)),
     RaiserRow('notice', 'operator_act_carried', 'internal', 'console_queue', 'pr3c', None),
     RaiserRow('notice', 'answer_faulted', 'internal', 'console_queue', 'pr1', None),
+    RaiserRow('notice', 'backup_missed', 'queue.raise', 'supervision', 'pr1', frozenset({'daily'})),
 )
 
 RING_SET = frozenset({'question', 'cross_project_permission', 'merge_go_ahead', 'verification_held',
-    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted'})
+    'notice/doorbell_off', 'notice/instruction_carried', 'notice/worker_stalled', 'notice/bridge_refused', 'notice/answer_faulted', 'notice/backup_missed'})
 FIXED_TEXTS: Mapping[tuple[str, str], str] = MappingProxyType({('worker_stalled', 'queue_question_ingest'): "v3 has stopped turning agents' questions into "
                                               'items, so new questions are not shown. Run adt '
                                               'engine status.',
@@ -83,7 +84,12 @@ FIXED_TEXTS: Mapping[tuple[str, str], str] = MappingProxyType({('worker_stalled'
                                      "on v3's page. Run adt engine status.",
  ('notifier_unhealthy', 'notify_worker'): 'v3 has stopped showing pop-ups, so new questions and '
                                           "notices do not pop up. They are still listed on v3's "
-                                          'page. Run adt engine status.'})
+                                          'page. Run adt engine status.',
+ ('backup_missed', 'daily'): 'v3 has made no complete daily backup of its store yesterday or today, '
+                              'so putting the store back from a backup could lose more than a day of work. '
+                              'Run adt engine status.',
+ ('worker_stalled', 'store_backup_daily'): 'v3 has stopped making its daily backup, so your store may go without one. '
+                                          'Run adt engine status.'})
 ALARM_TITLE = 'v3'
 ALARM_TEXT = 'v3 notifications have stopped. Run adt engine status.'
 ANSWER_FAULTED_TEXTS: Mapping[str, str] = MappingProxyType({

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 OPERATOR_SURFACES: tuple[str, ...] = ("frank_panel", "page", "terminal")
 SERVICE_NAMES: tuple[str, ...] = (
+    "approval_seal",
     "authority_service",
     "console_queue",
     "engine_liveness",

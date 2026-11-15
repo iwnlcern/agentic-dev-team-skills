@@ -3283,5 +3283,379 @@ class TestAdmissionOutcome(Store):
                 self.assertEqual(self.outcome(conn, ctx, data), retried)
 
 
+class TestImportStep(Store):
+    """Import contract: wrong writes, markers, guards, order and rollback fail here."""
+
+    def imported(self, module, **changes):
+        values = dict(created_at=100, kind="SITREP", verdict=None, subject="old relay",
+                      sender=PLANNER.seat_id, sender_role="planner", team_instance_id="t1",
+                      to=(IMPL.seat_id,), cc=(OTHER.seat_id,), parent_id=None,
+                      parent_spelling=None, body=b"old body\n", header_bytes=77,
+                      header_sha256="a" * 64)
+        values.update(changes)
+        return module.ImportedRelay(**values)
+
+    def attempt(self, operation):
+        try:
+            return operation(), None
+        except Exception as error:
+            return None, error
+
+    def tables(self):
+        names = [row[0] for row in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
+        return {name: self.conn.execute('SELECT * FROM "' + name + '" ORDER BY rowid').fetchall()
+                for name in names}
+
+    def test_import_writes_native_rows(self):
+        # I1/I2/I20: wrong needs, CC delivery or parent digest must change a real row.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        from relay_engine import jcs
+        parent = self.submit(draft(to="v3-engine.implementer"))
+        relay = self.imported(imports, created_at=self.clock + 1,
+                              parent_id=parent.relay_id, parent_spelling="#1",
+                              kind="PLAN-REVIEW", verdict="approve")
+        self.conn.execute("BEGIN IMMEDIATE")
+        relay_id, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, relay, marked_at_ms=self.clock + 20))
+        self.assertIsNone(error, repr(error))
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.commit()
+        row = self.relay(relay_id)
+        self.assertEqual({key: row[key] for key in (
+            "handle", "project_id", "team_instance_id", "kind", "verdict", "needs", "subject",
+            "parent_id", "sender_seat_id", "sender_special", "sender_role", "created_at",
+            "body_bytes", "header_bytes", "bundle_id", "git_state_id", "submission_key",
+            "draft_sha256")}, dict(handle=2, project_id=PROJECT, team_instance_id="t1",
+            kind="PLAN-REVIEW", verdict="approve", needs="none", subject="old relay",
+            parent_id=parent.relay_id, sender_seat_id=PLANNER.seat_id, sender_special=None,
+            sender_role="planner", created_at=self.clock + 1, body_bytes=9, header_bytes=77,
+            bundle_id=None, git_state_id=None, submission_key=None, draft_sha256=None))
+        self.assertGreater(relay_id, parent.relay_id)
+        self.assertEqual(row["body_sha256"], hashlib.sha256(b"old body\n").hexdigest())
+        expected_meta = hashlib.sha256(jcs.jcs_encode({
+            "import": "2.9.7", "header_sha256": "a" * 64, "parent": parent.relay_id})).hexdigest()
+        self.assertEqual(row["meta_sha256"], expected_meta)
+        self.assertEqual(self.conn.execute("SELECT body FROM bodies WHERE relay_id = ?",
+                                          (relay_id,)).fetchone(), (b"old body\n",))
+        self.assertEqual(self.conn.execute(
+            "SELECT coalesce(seat_id, special), role, delivered_at, opened_at, answered_by"
+            " FROM recipients WHERE relay_id = ? ORDER BY rowid", (relay_id,)).fetchall(),
+            [(IMPL.seat_id, "to", self.clock + 20, self.clock + 20, None),
+             (OTHER.seat_id, "cc", None, self.clock + 20, None)])
+        self.assertEqual(self.conn.execute(
+            "SELECT ordinal, kind, target_type, spelling, target_relay_id FROM edges"
+            " WHERE from_relay_id = ?", (relay_id,)).fetchall(),
+            [(1, "parent", "relay", "#1", parent.relay_id)])
+
+    def test_import_writes_only_its_rows(self):
+        # I4: answering a parent's recipient or any other table write is forbidden.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        from relay_engine import queries
+        parent = self.submit(draft(to="v3-engine.planner"))
+        before = self.tables()
+        writes = []
+        def authorize(action, table, column, database, trigger):
+            if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
+                writes.append((action, table, database))
+            return sqlite3.SQLITE_OK
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.set_authorizer(authorize)
+        try:
+            relay_id, error = self.attempt(lambda: imports.import_relay_step(
+                self.conn, PROJECT, self.imported(imports, created_at=self.clock + 1,
+                    parent_id=parent.relay_id, parent_spelling="#1"),
+                marked_at_ms=self.clock + 2))
+        finally:
+            self.conn.set_authorizer(None)
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
+        self.assertTrue(writes)
+        self.assertEqual({table for _, table, _ in writes},
+                         {"relays", "bodies", "recipients", "edges"})
+        self.assertTrue(all(action == sqlite3.SQLITE_INSERT and database == "main"
+                            for action, _, database in writes), writes)
+        after = self.tables()
+        for table in before:
+            if table not in {"relays", "bodies", "recipients", "edges"}:
+                self.assertEqual(after[table], before[table], table)
+        for table in ("relays", "bodies", "recipients", "edges"):
+            self.assertEqual(after[table][:len(before[table])], before[table], table)
+        flags = queries.unopened_flags(self.conn, PROJECT, self.clock + 10)
+        self.assertFalse(any(flag.relay_id == relay_id for flag in flags), flags)
+
+    def test_import_contract_refusals(self):
+        # I6-I13: each removed contract stage must return the wrong captured outcome.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        parent = self.submit(draft())
+        foreign = self.submit(draft(to=FOREIGN.address), sender=FOREIGN)
+        good = self.imported(imports, created_at=self.clock + 1)
+        cases = [
+            ("project", "absent", replace(good, sender="operator", sender_role=None,
+                team_instance_id=None, to=(), cc=()), self.clock + 10),
+            ("kind", PROJECT, replace(good, kind="BOOT"), self.clock + 10),
+            ("verdict", PROJECT, replace(good, verdict="approve"), self.clock + 10),
+            ("system", PROJECT, replace(good, sender="system", sender_role=None,
+                                        team_instance_id=None), self.clock + 10),
+            ("foreign sender", PROJECT, replace(good, sender=FOREIGN.seat_id,
+                sender_role=FOREIGN.role, team_instance_id=FOREIGN.team_instance_id),
+                self.clock + 10),
+            ("sender role", PROJECT, replace(good, sender_role="implementer"), self.clock + 10),
+            ("sender team", PROJECT, replace(good, team_instance_id="t2"), self.clock + 10),
+            ("operator role", PROJECT, replace(good, sender="operator", sender_role="planner",
+                                               team_instance_id=None), self.clock + 10),
+            ("foreign party", PROJECT, replace(good, to=(FOREIGN.seat_id,)), self.clock + 10),
+            ("duplicate party", PROJECT, replace(good, cc=good.to), self.clock + 10),
+            ("foreign parent", PROJECT, replace(good, parent_id=foreign.relay_id,
+                                                 parent_spelling="#1"), self.clock + 10),
+            ("parent spelling", PROJECT, replace(good, parent_id=parent.relay_id), self.clock + 10),
+            ("time", PROJECT, replace(good, created_at=-1), self.clock + 10),
+            ("marker", PROJECT, good, self.clock),
+            ("digest", PROJECT, replace(good, header_sha256="bad"), self.clock + 10),
+            ("header size", PROJECT, replace(good, header_bytes=-1), self.clock + 10),
+            ("body", PROJECT, replace(good, body="not bytes"), self.clock + 10),
+            ("subject", PROJECT, replace(good, subject=None), self.clock + 10),
+        ]
+        self.conn.execute("BEGIN IMMEDIATE")
+        before = self.tables()
+        for name, project, relay, marker in cases:
+            with self.subTest(case=name):
+                _, error = self.attempt(lambda: imports.import_relay_step(
+                    self.conn, project, relay, marked_at_ms=marker))
+                self.assertIsInstance(error, ValueError, repr(error))
+                self.assertTrue(self.conn.in_transaction)
+                self.assertEqual(self.tables(), before)
+        self.conn.rollback()
+
+    def test_import_order_refusals(self):
+        # I15: accepting equal timestamps must fail by an outcome assertion.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        self.conn.execute("BEGIN IMMEDIATE")
+        first, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports), marked_at_ms=200))
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
+        live, error = self.attempt(lambda: self.submit(draft()))
+        self.assertIsNone(error, repr(error))
+        self.assertGreater(live.relay_id, first)
+        self.conn.execute("BEGIN IMMEDIATE")
+        before = self.tables()
+        for at in (100, live.created_at_ms - 1, live.created_at_ms):
+            with self.subTest(at=at):
+                _, error = self.attempt(lambda: imports.import_relay_step(
+                    self.conn, PROJECT, self.imported(imports, created_at=at),
+                    marked_at_ms=self.clock + 1))
+                self.assertIsInstance(error, ValueError, repr(error))
+                self.assertEqual(self.tables(), before)
+        self.conn.rollback()
+
+    def test_import_needs_a_transaction(self):
+        # I17/I21: missing transaction or sender frame guard yields a wrong message/outcome.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        relay = self.imported(imports, created_at=self.clock + 10)
+        call = lambda: imports.import_relay_step(self.conn, PROJECT, relay,
+                                                 marked_at_ms=self.clock + 20)
+        _, error = self.attempt(call)
+        self.assertIsInstance(error, ValueError, repr(error))
+        self.assertFalse(self.conn.in_transaction)
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        self.conn.execute("BEGIN")
+        _, error = self.attempt(call)
+        self.assertIsInstance(error, ValueError, repr(error))
+        self.conn.rollback()
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("BEGIN")
+        before = self.tables()
+        submit._READ_GUARDS[self.conn] = True
+        try:
+            _, error = self.attempt(call)
+        finally:
+            submit._READ_GUARDS.pop(self.conn)
+        self.assertIsInstance(error, sqlite3.DatabaseError, repr(error))
+        self.assertEqual(str(error), "import is not allowed during a read guard")
+        with submit._hook_frame(self.conn, self.ctx(), "fixture.hook"):
+            _, error = self.attempt(call)
+        self.assertIsInstance(error, sqlite3.DatabaseError, repr(error))
+        self.assertEqual(str(error), "import is not allowed during a hook")
+        self.assertEqual(self.tables(), before)
+        self.conn.rollback()
+        captured = []
+        def sender_check(conn):
+            captured.append(self.attempt(call)[1])
+        ctx = replace(self.ctx(), sender_check=sender_check)
+        _, outer_error = self.attempt(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertIsNone(outer_error, repr(outer_error))
+        self.assertEqual(len(captured), 2)
+        for error in captured:
+            self.assertIsInstance(error, sqlite3.DatabaseError, repr(error))
+            self.assertEqual(str(error), "import is not allowed during a sender check")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+
+    def test_import_refusal_keeps_caller_writes(self):
+        # I16: skipped rollback leaves relay/body rows after the caller commits the late fault.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        for mode in ("early", "late", "caller rollback"):
+            with self.subTest(mode=mode):
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.conn.execute("UPDATE projects SET name = 'caller' WHERE id = 'p'")
+                relay = self.imported(imports, kind="BOOT" if mode == "early" else "SITREP")
+                trace = []
+                if mode == "late":
+                    self.conn.execute("CREATE TEMP TRIGGER import_fault BEFORE INSERT ON main.recipients"
+                                      " BEGIN SELECT RAISE(ABORT, 'fixture late fault'); END")
+                    self.conn.set_trace_callback(trace.append)
+                try:
+                    _, error = self.attempt(lambda: imports.import_relay_step(
+                        self.conn, PROJECT, relay, marked_at_ms=200))
+                finally:
+                    self.conn.set_trace_callback(None)
+                if mode == "early":
+                    self.assertIsInstance(error, ValueError, repr(error))
+                elif mode == "late":
+                    self.assertIsInstance(error, sqlite3.IntegrityError, repr(error))
+                    self.assertEqual(str(error), "fixture late fault")
+                    statements = [line.upper() for line in trace]
+                    relay_at = next(i for i, line in enumerate(statements) if "INSERT INTO RELAYS" in line)
+                    recipient_at = next(i for i, line in enumerate(statements) if "INSERT INTO RECIPIENTS" in line)
+                    self.assertLess(relay_at, recipient_at)
+                    self.conn.execute("DROP TRIGGER import_fault")
+                else:
+                    self.assertIsNone(error, repr(error))
+                self.assertTrue(self.conn.in_transaction)
+                self.assertEqual(self.conn.execute("SELECT name FROM projects WHERE id = 'p'")
+                                 .fetchone(), ("caller",))
+                if mode == "caller rollback":
+                    self.conn.rollback()
+                else:
+                    self.conn.commit()
+                for table in ("relays", "bodies", "recipients", "edges"):
+                    self.assertEqual(self.conn.execute("SELECT count(*) FROM " + table).fetchone(),
+                                     (0,), table)
+                if mode != "caller rollback":
+                    self.assertEqual(self.conn.execute("SELECT name FROM projects WHERE id = 'p'")
+                                     .fetchone(), ("caller",))
+
+    def test_import_handles_increase(self):
+        # I23: a global max handle gives 4 instead of this project's next handle 3.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        self.submit(draft())
+        self.submit(draft())
+        for _ in range(3):
+            self.submit(draft(to=FOREIGN.address), sender=FOREIGN)
+        self.clock += 3  # Both projects' setup admissions are earlier than this import.
+        self.conn.execute("BEGIN IMMEDIATE")
+        first, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports, created_at=self.clock),
+            marked_at_ms=self.clock + 20))
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
+        live, error = self.attempt(lambda: self.submit(draft()))
+        self.assertIsNone(error, repr(error))
+        self.conn.execute("BEGIN IMMEDIATE")
+        second, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports, created_at=live.created_at_ms + 1),
+            marked_at_ms=self.clock + 20))
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
+        rows = self.conn.execute("SELECT id, handle FROM relays WHERE project_id = ?"
+                                 " ORDER BY created_at", (PROJECT,)).fetchall()
+        self.assertEqual(rows[-3:], [(first, 3), (live.relay_id, 4), (second, 5)])
+        self.assertTrue(all(a[1] < b[1] for a, b in zip(rows, rows[1:])))
+
+    def test_import_takes_no_identity(self):
+        # I24: an ignored identity keyword must still violate the public interface.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        import inspect
+        parameters = inspect.signature(imports.import_relay_step).parameters
+        self.assertEqual(tuple(parameters), ("conn", "project_id", "relay", "marked_at_ms"))
+        self.assertIs(parameters["marked_at_ms"].kind, inspect.Parameter.KEYWORD_ONLY)
+        relay = self.imported(imports)
+        self.conn.execute("BEGIN IMMEDIATE")
+        before = self.tables()
+        _, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, relay, marked_at_ms=200,
+            identity=(submit.new_uuid7(relay.created_at), 10)))
+        self.assertIsInstance(error, TypeError, repr(error))
+        self.assertEqual(self.tables(), before)
+        self.conn.rollback()
+
+    def test_imported_lineage_is_not_unopened(self):
+        # I3: an unmarked imported TO ancestor would appear as an unopened warning.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        from relay_engine import queries
+        self.conn.execute("BEGIN IMMEDIATE")
+        first, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports, to=(IMPL.seat_id,), cc=()), marked_at_ms=200))
+        self.assertIsNone(error, repr(error))
+        second, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports, created_at=101, to=(), cc=(IMPL.seat_id,),
+                parent_id=first, parent_spelling="#1"), marked_at_ms=200))
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
+        live = self.submit(draft(kind="PLAN", needs="review", to="v3-engine.implementer", parent="#2"))
+        result = queries.read(self.conn, live.relay_id, IMPL.seat_id, self.clock + 1)
+        self.assertEqual(result.unopened, [])
+        self.assertEqual(self.conn.execute("SELECT opened_at FROM recipients WHERE relay_id IN (?, ?)"
+                                           " ORDER BY rowid", (first, second)).fetchall(), [(200,), (200,)])
+
+    def test_relay_writers_census(self):
+        # I5/I19: keyed imports or system relays called imported break the writer partition.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        from relay_engine import queries
+        self.conn.execute("BEGIN IMMEDIATE")
+        imported, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports), marked_at_ms=200))
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
+        seat = self.submit(draft())
+        operator = self.submit(draft(), sender=SEATS["operator"])
+        system_ids = []
+        def hook(conn, admitted, parsed, ctx):
+            system_ids.append(submit.file_system_relay(conn, ctx, draft()))
+        ctx = replace(self.ctx(), after_admit=hook)
+        _, error = self.attempt(lambda: submit.submit(self.conn, ctx, draft()))
+        self.assertIsNone(error, repr(error))
+        self.assertEqual(len(system_ids), 1)
+        system = system_ids[0].relay_id
+        for relay_id, expected in ((seat.relay_id, False), (operator.relay_id, False),
+                                   (system, False), (imported, True)):
+            with self.subTest(relay_id=relay_id):
+                self.assertIs(queries.read(self.conn, relay_id, IMPL.seat_id, self.clock + 10)
+                              .envelope["imported"], expected)
+        self.assertEqual(self.conn.execute(
+            "SELECT id FROM relays WHERE submission_key IS NULL"
+            " AND coalesce(sender_special, '') != 'system'").fetchall(), [(imported,)])
+
+
 if __name__ == "__main__":
     unittest.main()

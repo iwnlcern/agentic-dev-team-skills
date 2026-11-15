@@ -24,6 +24,8 @@ EXPECTED = {('worker_stalled', 'queue_question_ingest'): "v3 has stopped turning
  ('notifier_unhealthy', 'notify_worker'): 'v3 has stopped showing pop-ups, so new questions and '
                                           "notices do not pop up. They are still listed on v3's "
                                           'page. Run adt engine status.'}
+EXPECTED[('backup_missed', 'daily')] = 'v3 has made no complete daily backup of its store yesterday or today, so putting the store back from a backup could lose more than a day of work. Run adt engine status.'
+EXPECTED[('worker_stalled', 'store_backup_daily')] = 'v3 has stopped making its daily backup, so your store may go without one. Run adt engine status.'
 LENGTHS = {('worker_stalled', 'queue_question_ingest'): 107,
  ('worker_stalled', 'queue_lifecycle_ingest'): 98,
  ('worker_stalled', 'queue_reconcile'): 115,
@@ -31,6 +33,8 @@ LENGTHS = {('worker_stalled', 'queue_question_ingest'): 107,
  ('bridge_refused', '*'): 183,
  ('notifier_unhealthy', 'notifier'): 154,
  ('notifier_unhealthy', 'notify_worker'): 134}
+LENGTHS[('backup_missed', 'daily')] = 168
+LENGTHS[('worker_stalled', 'store_backup_daily')] = 96
 ALARM_TITLE = 'v3'
 ALARM_TEXT = 'v3 notifications have stopped. Run adt engine status.'
 
@@ -43,7 +47,7 @@ class TestQueueTexts(unittest.TestCase):
             self.assertEqual(len(kinds.FIXED_TEXTS[key].encode('utf-8')), LENGTHS[key])
             self.assertEqual(kinds.fixed_text(key[0], key[1]), text)
         self.assertEqual(set(kinds.FIXED_TEXTS), set(EXPECTED))
-        self.assertEqual(len(kinds.FIXED_TEXTS), 7)
+        self.assertEqual(len(kinds.FIXED_TEXTS), 9)
         self.assertIsNone(kinds.fixed_text('doorbell_off', 'anything'))
         self.assertEqual(kinds.fixed_text('bridge_refused', 'another-key'), EXPECTED[('bridge_refused', '*')])
         self.assertEqual(kinds.ALARM_TITLE, ALARM_TITLE)
