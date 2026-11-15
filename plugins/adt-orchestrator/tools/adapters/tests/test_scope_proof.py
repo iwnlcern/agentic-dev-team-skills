@@ -6,9 +6,34 @@ import unittest
 SCRIPT = pathlib.Path(__file__).resolve().parent / "scope_proof.sh"
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 def git(repo, *args):
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+        env=_git_child_env()
     ).stdout.strip()
 
 
@@ -87,3 +112,91 @@ class ScopeProofTests(unittest.TestCase):
         rc, out = self.run_proof(base="0000000000000000000000000000000000000000")
         self.assertNotEqual(rc, 0)
         self.assertNotIn("scope ok", out)
+
+
+import hashlib
+import os
+from pathlib import Path
+from unittest import mock
+
+def clean_env() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    return env
+
+
+def make_caller(base: Path) -> tuple[Path, Path, str]:
+    main, linked = base / "caller", base / "caller-wt"
+    main.mkdir()
+    for args in (["init", "-q", "-b", "main"],
+                 ["config", "user.name", "environment fixture"],
+                 ["config", "user.email", "environment@example.invalid"]):
+        subprocess.run(["git", "-C", str(main), *args], check=True,
+                       capture_output=True, env=clean_env())
+    (main / "caller.txt").write_text("caller\n")
+    for args in (["add", "-A"], ["commit", "-qm", "caller"],
+                 ["worktree", "add", "-q", "--detach", str(linked), "HEAD"]):
+        subprocess.run(["git", "-C", str(main), *args], check=True,
+                       capture_output=True, env=clean_env())
+    folder = subprocess.run(
+        ["git", "-C", str(linked), "rev-parse", "--absolute-git-dir"],
+        check=True, capture_output=True, text=True, env=clean_env()).stdout.strip()
+    return main, linked, folder
+
+
+def caller_state(main: Path, linked: Path) -> tuple:
+    answers = []
+    for repo, args in (
+            (linked, ["rev-parse", "HEAD"]), (main, ["rev-parse", "HEAD"]),
+            (linked, ["write-tree"]), (main, ["worktree", "list", "--porcelain"]),
+            (main, ["for-each-ref"])):
+        answers.append(subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True,
+            text=True, env=clean_env()).stdout.strip())
+    return (*answers[:3], hashlib.sha256((main / ".git/config").read_bytes()).hexdigest(),
+            *answers[3:])
+
+
+def make_target(base: Path) -> Path:
+    target = base / "target"
+    target.mkdir()
+    for args in (["init", "-q", "-b", "main"],
+                 ["config", "user.name", "environment fixture"],
+                 ["config", "user.email", "environment@example.invalid"]):
+        subprocess.run(["git", "-C", str(target), *args], check=True,
+                       capture_output=True, env=clean_env())
+    (target / "target.txt").write_text("target\n")
+    for args in (["add", "-A"], ["commit", "-qm", "target"]):
+        subprocess.run(["git", "-C", str(target), *args], check=True,
+                       capture_output=True, env=clean_env())
+    return target
+
+
+class GitChildEnvTests(unittest.TestCase):
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="git-child-env-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.main, self.linked, self.git_dir = make_caller(self.base)
+
+    def checked_site(self, call, postcondition, error_type=subprocess.CalledProcessError):
+        before = caller_state(self.main, self.linked)
+        result, caught = None, None
+        with mock.patch.dict(os.environ, dict(clean_env(), GIT_DIR=self.git_dir), clear=True):
+            try:
+                result = call()
+            except error_type as error:
+                caught = error
+        self.assertEqual(caller_state(self.main, self.linked), before,
+                         "site changed caller state")
+        postcondition(result)
+        self.assertIsNone(caught, str(caught))
+        return result
+
+    def test_git_helper_keeps_caller(self):
+        # Breaks: the adapter fixture helper's child retains GIT_DIR.
+        target = make_target(self.base)
+        old = caller_state(target, target)[0]
+        self.checked_site(lambda: git(target, "commit", "--allow-empty", "-q", "-m", "w"),
+                          lambda _: self.assertNotEqual(caller_state(target, target)[0], old))

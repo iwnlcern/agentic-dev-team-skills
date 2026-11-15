@@ -235,6 +235,8 @@ class TestGate(unittest.TestCase):
         package = os.path.dirname(os.path.dirname(__file__))
         paths = [os.path.join(package, name) for name in os.listdir(package)
                  if name.endswith(".py")]
+        queue = Path(package) / "operator_queue"
+        paths.extend(str(path) for path in sorted(queue.glob("*.py")))
         paths.append(os.path.join(os.path.dirname(package), "relay"))
         return paths
 

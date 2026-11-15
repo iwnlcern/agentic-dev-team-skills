@@ -43,9 +43,33 @@ DESIGN_REVIEW_VERDICT: approve
 '''
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 class TestAuthorityFold10(TestAuthorityFold5):
     def git(self, repo, *args):
-        env = dict(os.environ, GIT_AUTHOR_NAME='fixture', GIT_AUTHOR_EMAIL='f@example.invalid',
+        env = dict(_git_child_env(), GIT_AUTHOR_NAME='fixture', GIT_AUTHOR_EMAIL='f@example.invalid',
                    GIT_COMMITTER_NAME='fixture', GIT_COMMITTER_EMAIL='f@example.invalid',
                    GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null')
         return subprocess.check_output(['git', '-C', str(repo), *args], env=env,

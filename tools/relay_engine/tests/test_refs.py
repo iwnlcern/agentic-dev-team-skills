@@ -22,11 +22,40 @@ _GIT_ENV = {
 }
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 def git(repo, *args):
-    env = dict(os.environ, **_GIT_ENV)
+    env = dict(_git_child_env(), **_GIT_ENV)
     return subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
                           stdin=subprocess.DEVNULL, capture_output=True,
                           text=True).stdout.strip()
+
+
+def git_input(repo, *args, data: bytes) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], input=data, check=True,
+                   capture_output=True, env=dict(_git_child_env(), **_GIT_ENV))
 
 
 class Repo:
@@ -266,10 +295,8 @@ class TestPanelFold(Refused):
         latin = self.repo.path / "latin.txt"
         latin.write_text("x\n")
         git(self.repo.path, "add", "latin.txt")
-        env = dict(os.environ, **_GIT_ENV)
-        subprocess.run(["git", "-C", str(self.repo.path), "-c", "i18n.commitEncoding=latin1",
-                        "commit", "-q", "-F", "-"], input=b"caf\xe9\n", env=env, check=True,
-                       capture_output=True)
+        git_input(self.repo.path, "-c", "i18n.commitEncoding=latin1",
+                  "commit", "-q", "-F", "-", data=b"caf\xe9\n")
         self.assertEqual(self.resolve("bivpak@main:latin.txt").line_count, 1)
         for text in ("bivpak@ma\x00in:p", "bivpak@ma\x01in:p", "file:/a\x00b",
                      "bivpak@main:a\ud800b", "bivpak@main:" + "\x01" * 150, "#1\x85"):

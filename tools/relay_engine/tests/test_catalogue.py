@@ -213,7 +213,7 @@ class TestCatalogue(unittest.TestCase):
         conn = self.opened()
         definitions = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, 'bf9db302287fc2ebc7813ff0a0c56bc11bbdf3210ddd7838aad2c6827f618441')
+        self.assertEqual(digest, '8b281aee92741122483626d40fa15d5887eeb9a8e7c4477d799d1c840d0919a8')
 
     def test_constraints_hold(self):
         conn = self.opened()
@@ -242,7 +242,7 @@ class TestCatalogue(unittest.TestCase):
         names = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(set(catalogue.TABLE_OWNERS), names)
-        self.assertEqual(set(catalogue.TABLE_OWNERS.values()), {'store'})
+        self.assertEqual(set(catalogue.TABLE_OWNERS.values()), {'store', 'console'})
         self.assertEqual(conn.execute('SELECT version, ddl_sha256 FROM schema_version').fetchone(),
                          ('1', catalogue.ddl_digest()))
 
@@ -265,6 +265,299 @@ class TestCatalogue(unittest.TestCase):
             with self.assertRaises(store_layout.LayoutFault) as caught:
                 self.opened()
         self.assertEqual(caught.exception.cause, 'not-wal')
+
+
+QUEUE_TABLES = frozenset({
+    'queue_items', 'queue_conditions', 'queue_events', 'queue_answers',
+    'queue_receipts', 'queue_notifications', 'queue_highwaters',
+    'queue_notifier_health', 'queue_store_item_sources', 'queue_ingest_skips',
+})
+NO_PROJECT_NOTICES = (
+    'notifier_unhealthy', 'worker_stalled', 'bridge_refused', 'panel_key_enrolled',
+    'engine_updated', 'engine_update_failed', 'instruction_carried',
+    'seat_record_missing', 'seat_ambiguous',
+)
+OTHER_NOTICES = (
+    'seat_registered', 'seat_replaced', 'seat_stood_down', 'seat_unseated',
+    'engine_restart_requested', 'doorbell_off', 'operator_act_carried', 'answer_faulted',
+)
+
+
+class TestQueueCatalogue(unittest.TestCase):
+    setUp = TestCatalogue.setUp
+    opened = TestCatalogue.opened
+    def item(self, conn, item_id, **changes):
+        values = dict(item_id=item_id, kind='question', subkind=None, project_id=P,
+                      raiser='console_queue', revision=1, state='pending', texts='{}',
+                      pins='{}', condition_key=item_id, raised_position=1, raised_at_ms=0)
+        values.update(changes)
+        columns = ', '.join(values)
+        conn.execute(f"INSERT INTO queue_items ({columns}) VALUES ({', '.join('?' for _ in values)})",
+                     tuple(values.values())).close()
+
+    def condition(self, conn, item_id, *, kind='question', subkind=None, project=P, key='key'):
+        self.item(conn, item_id, kind=kind, subkind=subkind, project_id=project)
+        conn.execute('INSERT INTO queue_conditions '
+                     '(item_id,kind,subkind,project_id,condition_key,raiser,raised_at_ms) '
+                     'VALUES (?,?,?,?,?,?,?)',
+                     (item_id, kind, subkind, project, key, 'console_queue', 0)).close()
+
+    def test_console_tables_and_owners(self):
+        conn = self.opened()
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertTrue(QUEUE_TABLES <= tables)
+        self.assertEqual({n for n, owner in catalogue.TABLE_OWNERS.items() if owner == 'console'},
+                         QUEUE_TABLES)
+        self.assertEqual(len(catalogue.TABLE_OWNERS), 17)
+        for name in QUEUE_TABLES:
+            self.assertEqual(conn.execute('SELECT strict FROM pragma_table_list WHERE name=?',
+                                          (name,)).fetchone(), (1,))
+
+    def test_open_condition_unique_with_null_subkind(self):
+        conn = self.opened()
+        self.condition(conn, 'a')
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.condition(conn, 'b')
+        conn.execute("UPDATE queue_conditions SET closed_at_ms=1 WHERE item_id='a'").close()
+        conn.execute("INSERT INTO queue_conditions (item_id,kind,project_id,condition_key,raiser,raised_at_ms) "
+                     "VALUES ('b','question',?,'key','console_queue',0)", (P,)).close()
+
+    def test_one_open_condition_per_key(self):
+        conn = self.opened()
+        self.condition(conn, 'a', kind='notice', subkind='worker_stalled', project=None)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.condition(conn, 'b', kind='notice', subkind='worker_stalled', project=None)
+        self.condition(conn, 'c', kind='notice', subkind='worker_stalled', project=None, key='other')
+
+    def test_item_constraints(self):
+        conn = self.opened()
+        invalid = [dict(kind='other'), dict(state='other'), dict(kind='notice', subkind='other'),
+                   dict(kind='notice'), dict(subkind='doorbell_off'), dict(revision=0),
+                   dict(project_id=None)]
+        invalid.extend(dict(kind='notice', subkind=s, project_id=P) for s in NO_PROJECT_NOTICES)
+        invalid.extend(dict(kind='notice', subkind=s, project_id=None) for s in OTHER_NOTICES)
+        invalid.extend(dict(kind=k, project_id=None) for k in
+                       ('cross_project_permission', 'merge_go_ahead', 'verification_held'))
+        for i, changes in enumerate(invalid):
+            with self.subTest(changes=changes), self.assertRaises(sqlite3.IntegrityError):
+                self.item(conn, 'invalid-' + str(i), **changes)
+        self.item(conn, 'source', source_relay_id='relay')
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.item(conn, 'duplicate', source_relay_id='relay')
+        self.item(conn, 'retired', state='retired')
+        self.item(conn, 'faulted', state='faulted')
+        for s in NO_PROJECT_NOTICES:
+            self.item(conn, 'valid-' + s, kind='notice', subkind=s, project_id=None)
+        for s in OTHER_NOTICES:
+            self.item(conn, 'valid-' + s, kind='notice', subkind=s)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.item(conn, 'wrong-answer-to', kind='notice', subkind='doorbell_off', answer_to='a.planner')
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.item(conn, 'wrong-source', kind='notice', subkind='doorbell_off', source_handle=1)
+
+    def test_answer_row_has_answered_at(self):
+        conn = self.opened()
+        self.item(conn, 'a')
+        for value in (None, -1):
+            with self.subTest(value=value), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute('INSERT INTO queue_answers '
+                             '(item_id,answer_id,answer,answered_at_ms,apply_key,project_id,phase) '
+                             "VALUES ('a','answer','yes',?,'apply',?,'recorded')", (value, P)).close()
+        conn.execute('INSERT INTO queue_answers '
+                     '(item_id,answer_id,answer,answered_at_ms,apply_key,project_id,phase) '
+                     "VALUES ('a','answer','yes',0,'apply',?,'recorded')", (P,)).close()
+
+    def test_open_condition_unique_with_null_project(self):
+        conn = self.opened()
+        self.condition(conn, 'a', kind='notice', subkind='notifier_unhealthy', project=None, key='notifier')
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.condition(conn, 'b', kind='notice', subkind='notifier_unhealthy', project=None, key='notifier')
+        conn.execute("UPDATE queue_conditions SET closed_at_ms=1 WHERE item_id='a'").close()
+        conn.execute("INSERT INTO queue_conditions (item_id,kind,subkind,condition_key,raiser,raised_at_ms) "
+                     "VALUES ('b','notice','notifier_unhealthy','notifier','console_queue',0)").close()
+        self.condition(conn, 'c', kind='notice', subkind='notifier_unhealthy', project=None, key='notify_worker')
+
+    def test_notifier_health_one_row(self):
+        conn = self.opened()
+        conn.execute('INSERT INTO queue_notifier_health VALUES (1,0,0)').close()
+        for row in [(2,0,0), (1,-1,0)]:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute('INSERT OR REPLACE INTO queue_notifier_health VALUES (?,?,?)', row).close()
+
+    def test_declared_entries(self):
+        conn = self.opened()
+        names = QUEUE_TABLES | {'queue_conditions_open_key', 'queue_highwaters_key'}
+        entries = {r[0]: r[1] for r in conn.execute('SELECT name,sql FROM sqlite_master')}
+        for name in names:
+            self.assertIn(name, entries)
+            self.assertIn(entries[name], catalogue._TABLES)
+        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(),
+                         (hashlib.sha256('\n'.join(catalogue._TABLES).encode()).hexdigest(),))
+
+    def test_anchor_check_constraints(self):
+        conn = self.opened()
+        bad = [(P,s,0,'anchor') for s in ('question','lifecycle')]
+        bad += [(P,s,3,None) for s in ('question','lifecycle')]
+        bad += [(None,s,3,'anchor') for s in ('stop_events','store_items')]
+        bad += [(None,'lifecycle_log',3,None)]
+        for row in bad:
+            with self.subTest(row=row), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute('INSERT INTO queue_highwaters (project_id,source,position,anchor_id) VALUES (?,?,?,?)', row).close()
+        good = [(P,'question',0,None),(Q,'question',3,'question-id'),
+                (P,'lifecycle',0,None),(Q,'lifecycle',3,'a'*32),
+                (None,'stop_events',3,None),(None,'store_items',3,None),
+                (None,'lifecycle_log',3,'line-id')]
+        for row in good:
+            conn.execute('INSERT INTO queue_highwaters (project_id,source,position,anchor_id) VALUES (?,?,?,?)', row).close()
+
+    def test_store_level_cursor_unique(self):
+        conn = self.opened()
+        sql = 'INSERT INTO queue_highwaters (project_id,source,position) VALUES (?,?,0)'
+        conn.execute(sql, (None,'lifecycle_log')).close()
+        for row in [(None,'lifecycle_log'), (P,'lifecycle_log'), (None,'question')]:
+            with self.subTest(row=row), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(sql, row).close()
+        for source in ('stop_events','store_items'):
+            conn.execute(sql, (None,source)).close()
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(sql, (None,'store_items')).close()
+        # r14's composite primary key permits two NULL-project rows.
+        mutant = sqlite3.connect(':memory:')
+        self.addCleanup(mutant.close)
+        mutant.execute('CREATE TABLE queue_highwaters '
+                       '(project_id TEXT, source TEXT, position INTEGER, PRIMARY KEY(project_id,source))')
+        mutant.execute(sql, (None,'lifecycle_log'))
+        mutant.execute(sql, (None,'lifecycle_log'))
+        self.assertEqual(mutant.execute('SELECT count(*) FROM queue_highwaters').fetchone(), (2,))
+
+    def test_store_item_sources_and_ingest_skips(self):
+        from relay_engine.tests.test_queue_package import immutable_record_violations
+        conn = self.opened()
+        self.item(conn, 'a')
+        conn.execute("INSERT INTO queue_store_item_sources VALUES (1,'a')").close()
+        conn.execute("INSERT INTO queue_store_item_sources VALUES (2,'a')").close()
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO queue_store_item_sources VALUES (1,'a')").close()
+        sql = 'INSERT INTO queue_ingest_skips VALUES (?,?,?,?)'
+        for row in [('bad','1','reason',0),('store_items','','reason',0),
+                    ('store_items','1','',0),('store_items','1','reason',-1)]:
+            with self.subTest(row=row), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(sql, row).close()
+        for source in ('store_items','lifecycle_log'):
+            conn.execute(sql, (source,'1','reason',0)).close()
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(sql, ('store_items','1','again',1)).close()
+        package = Path(__file__).parents[1] / 'operator_queue'
+        self.assertEqual(immutable_record_violations(package), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / 'probe.py'
+            for table in ('queue_store_item_sources','queue_ingest_skips'):
+                for operation in ('UPDATE', 'DELETE FROM'):
+                    probe.write_text(f'conn.execute("{operation} {table} SET x=1")')
+                    self.assertTrue(immutable_record_violations(Path(tmp)))
+
+    def test_receipt_scope_unique(self):
+        conn = self.opened()
+        sql = 'INSERT INTO queue_receipts VALUES (?,?,?,?,?,?,?,?)'
+        conn.execute(sql, ('a','operator','operator','dismiss','key','a'*64,'{}',0)).close()
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(sql, ('b','operator','operator','dismiss','key','a'*64,'{}',0)).close()
+        conn.execute(sql, ('b','operator','operator','open','key','a'*64,'{}',0)).close()
+        for digest in ('A'*64, 'a'*63, 'g'*64):
+            with self.subTest(digest=digest), self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(sql, ('bad','service','s','open',digest,digest,'{}',0)).close()
+
+    def test_required_columns_refuse_null(self):
+        conn = self.opened()
+        self.item(conn, 'parent')
+        rows = {
+            'queue_items': dict(item_id='control', kind='question', project_id=P,
+                                raiser='console_queue', revision=1, state='pending',
+                                texts='{}', pins='{}', condition_key='key',
+                                raised_position=1, raised_at_ms=0),
+            'queue_conditions': dict(item_id='parent', kind='question', project_id=P,
+                                     condition_key='key', raiser='console_queue', raised_at_ms=0),
+            'queue_events': dict(position=1, item_id='parent', revision=1, state='pending',
+                                 event_kind='raised', principal_kind='service',
+                                 principal_id='console_queue', at_ms=0),
+            'queue_answers': dict(item_id='parent', answer_id='answer', answer='yes',
+                                  answered_at_ms=0, apply_key='apply', project_id=P,
+                                  phase='recorded'),
+            'queue_receipts': dict(receipt_id='receipt', principal_kind='operator',
+                                   principal_id='operator', operation='dismiss',
+                                   operation_key='key', request_digest='a' * 64,
+                                   result='{}', committed_at_ms=0),
+            'queue_notifications': dict(item_id='parent', revision=1, state='pending',
+                                        next_attempt_at_ms=0),
+        }
+        required = {
+            'queue_items': ('kind', 'state'),
+            'queue_conditions': ('kind', 'condition_key', 'raiser', 'raised_at_ms'),
+            'queue_events': ('revision', 'state', 'event_kind', 'principal_kind',
+                             'principal_id', 'at_ms'),
+            'queue_answers': ('answer_id', 'phase'),
+            'queue_receipts': ('principal_kind', 'principal_id', 'operation',
+                               'operation_key', 'request_digest', 'committed_at_ms'),
+            'queue_notifications': ('state',),
+        }
+        self.assertEqual(sum(map(len, required.values())), 21)
+
+        def insert(table, values):
+            conn.execute(f"INSERT INTO {table} ({', '.join(values)}) "
+                         f"VALUES ({', '.join('?' for _ in values)})",
+                         tuple(values.values())).close()
+
+        for table, columns in required.items():
+            # Each NULL probe starts from a row proved valid against all other constraints.
+            conn.execute('SAVEPOINT control').close()
+            insert(table, rows[table])
+            conn.execute('ROLLBACK TO control').close()
+            conn.execute('RELEASE control').close()
+            for column in columns:
+                with self.subTest(table=table, column=column):
+                    conn.execute('SAVEPOINT probe').close()
+                    try:
+                        with self.assertRaises(sqlite3.IntegrityError) as caught:
+                            insert(table, dict(rows[table], **{column: None}))
+                        self.assertEqual(str(caught.exception),
+                                         f'NOT NULL constraint failed: {table}.{column}')
+                    finally:
+                        conn.execute('ROLLBACK TO probe').close()
+                        conn.execute('RELEASE probe').close()
+        with self.subTest(table='queue_notifications', column='pending due time'):
+            conn.execute('SAVEPOINT due').close()
+            try:
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
+                    insert('queue_notifications', dict(rows['queue_notifications'],
+                                                       next_attempt_at_ms=None))
+                self.assertEqual(str(caught.exception),
+                                 "CHECK constraint failed: state <> 'pending' OR next_attempt_at_ms IS NOT NULL")
+            finally:
+                conn.execute('ROLLBACK TO due').close()
+                conn.execute('RELEASE due').close()
+        insert('queue_notifications', dict(rows['queue_notifications'],
+                                           state='retired', next_attempt_at_ms=None))
+
+    def test_older_catalogue_refuses(self):
+        root = Path(self.tmp.name) / 'older'
+        root.mkdir()
+        conn = sqlite3.connect(root / 'machine.sqlite3')
+        try:
+            for statement in D689B0A_TABLES:
+                conn.execute(statement).close()
+            conn.execute('INSERT INTO schema_version VALUES (1,?,?)',
+                         ('1',hashlib.sha256('\n'.join(D689B0A_TABLES).encode()).hexdigest())).close()
+            conn.execute('INSERT INTO catalogue_identity VALUES (1,?,?,0)', (P,'isolated')).close()
+            conn.commit()
+        finally:
+            conn.close()
+        with self.assertRaises(errors.EngineError) as caught:
+            self.opened(root)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+
+
+# Historical DDL copied from committed d689b0a, not from the current schema.
+D689B0A_TABLES = ("CREATE TABLE catalogue_identity (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    store_id TEXT NOT NULL UNIQUE,\n    kind TEXT NOT NULL CHECK (kind IN ('production', 'isolated')),\n    created_at INTEGER NOT NULL\n) STRICT", "CREATE TABLE project_routes (\n    project_id TEXT NOT NULL PRIMARY KEY,\n    name TEXT NOT NULL UNIQUE,\n    state TEXT NOT NULL CHECK (state IN ('creating', 'active')),\n    created_at INTEGER NOT NULL\n) STRICT", 'CREATE TABLE key_routes (\n    key_id TEXT NOT NULL PRIMARY KEY,\n    project_id TEXT NOT NULL REFERENCES project_routes (project_id),\n    created_at INTEGER NOT NULL\n) STRICT', 'CREATE TABLE schema_version (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    version TEXT NOT NULL,\n    ddl_sha256 TEXT NOT NULL\n) STRICT')
 
 
 if __name__ == '__main__':

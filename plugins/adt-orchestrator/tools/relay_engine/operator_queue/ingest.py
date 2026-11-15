@@ -1,0 +1,82 @@
+"""Question reads and anchored catalogue ingests within caller-owned jobs."""
+import hashlib
+from collections.abc import Sequence
+from sqlite3 import Connection
+
+from relay_engine import queries
+from relay_engine.operator_queue import kinds, records
+
+
+def read_questions(ledger_conn: Connection, project_id: str, after_handle: int, limit: int):
+    return queries.operator_questions(ledger_conn, project_id, after_handle, limit)
+
+
+def _has_item(conn, relay_id):
+    return records._one(conn, 'SELECT item_id FROM queue_items WHERE source_relay_id=?',
+                        (relay_id,)) is not None
+
+
+def ingest_questions(catalogue_conn: Connection, rows: Sequence[queries.QuestionRow],
+                     project_id: str, cursor: records.Cursor, *, check_rewind: bool, now_ms: int):
+    conn = catalogue_conn
+    if (not records.route_active(conn, project_id)
+            or records.read_cursor(conn, project_id, 'question') != cursor):
+        return records.Stale()
+    if check_rewind and cursor.position >= 1:
+        if (not rows or rows[0].handle != cursor.position
+                or rows[0].relay_id != cursor.anchor_id
+                or not (_has_item(conn, rows[0].relay_id) or rows[0].answered)):
+            return records.Reread()
+    raised = 0
+    principal = records.InternalWriter()
+    for row in rows:
+        if (check_rewind and row.handle <= cursor.position) or row.answered:
+            continue
+        existed = _has_item(conn, row.relay_id)
+        pins = dict(project_id=project_id, relay_id=row.relay_id,
+                    body_sha256=hashlib.sha256(row.body).hexdigest())
+        # A reread has a distinct receipt scope but shares the original occurrence.
+        operation_key = records._json([project_id, cursor.position, cursor.epoch,
+                                       cursor.anchor_id, row.relay_id])
+        request = records.RaiseRequest('question', None, project_id,
+                  {'subject': row.subject, 'body': row.body.decode('utf-8')}, pins,
+                  {'project_id': project_id, 'relay_id': row.relay_id}, operation_key,
+                  actor_address=row.sender_address)
+        result = records.raise_item(conn, principal, request, now_ms, enabled=kinds.ENABLED_TAGS)
+        if isinstance(result, records.QueueRefusal):
+            raise ValueError('native question could not be raised: ' + result.cause_kind)
+        if not existed:
+            choices, reason = kinds.parse_choices(row.body)
+            records._write(conn, 'UPDATE queue_items SET asking_seat_id=?,answer_to=?,source_handle=?,'
+                           'source_relay_id=?,choices=?,choices_reason=? WHERE item_id=?',
+                           (row.sender_seat_id, row.sender_address, row.handle, row.relay_id,
+                            records._json(list(choices)) if choices else None, reason, result.item_id))
+            raised += 1
+    position, anchor = ((rows[-1].handle, rows[-1].relay_id) if rows else (0, None))
+    if raised or (position, anchor) != (cursor.position, cursor.anchor_id):
+        # This job holds the catalogue writer; the preflight cursor cannot move meanwhile.
+        if not records.advance_cursor(conn, project_id, 'question', cursor, position, anchor_id=anchor):
+            raise RuntimeError('question cursor changed inside its catalogue job')
+    return raised
+
+
+def question_ingest_pass(port: records.JobPort, project_ids: Sequence[str], now_ms: int, *, limit: int = 100) -> int:
+    if type(limit) is not int or not 1 <= limit < 500:
+        raise ValueError('question pass limit is an integer from 1 to 499')
+    raised = 0
+    for project_id in project_ids:
+        try:
+            cursor = port.read_catalogue(lambda conn: records.read_cursor(conn, project_id, 'question'))
+            rows = port.read_ledger(project_id, lambda conn: read_questions(
+                conn, project_id, max(cursor.position - 1, 0), limit + 1))
+            result = port.catalogue(lambda conn: ingest_questions(
+                conn, rows, project_id, cursor, check_rewind=True, now_ms=now_ms))
+            if isinstance(result, records.Reread):
+                rows = port.read_ledger(project_id, lambda conn: read_questions(conn, project_id, 0, limit + 1))
+                result = port.catalogue(lambda conn: ingest_questions(
+                    conn, rows, project_id, cursor, check_rewind=False, now_ms=now_ms))
+            if isinstance(result, int):
+                raised += result
+        except records.JobUnavailable:
+            continue
+    return raised

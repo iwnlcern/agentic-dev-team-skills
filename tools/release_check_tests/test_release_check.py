@@ -23,6 +23,30 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "tools" / "release-check.py"
 
 
+_GIT_LOCAL_ENV_VARS = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE',
+    'GIT_GRAFT_FILE',
+    'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_PREFIX',
+    'GIT_SHALLOW_FILE',
+    'GIT_COMMON_DIR',
+})
+
+
+def _git_child_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _GIT_LOCAL_ENV_VARS}
+
+
 def load_runner():
     spec = importlib.util.spec_from_file_location("release_check", SCRIPT)
     module = importlib.util.module_from_spec(spec)
@@ -110,11 +134,11 @@ class FixtureRepo:
 
     def commit(self):
         git = ["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@t"]
-        subprocess.run(git[:3] + ["init", "-q"], check=True)
-        subprocess.run(git + ["add", "-A"], check=True)
-        subprocess.run(git + ["commit", "-qm", "fixture"], check=True)
+        subprocess.run(git[:3] + ["init", "-q"], check=True, env=_git_child_env())
+        subprocess.run(git + ["add", "-A"], check=True, env=_git_child_env())
+        subprocess.run(git + ["commit", "-qm", "fixture"], check=True, env=_git_child_env())
         return subprocess.run(git[:3] + ["rev-parse", "HEAD"], check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, env=_git_child_env()).stdout.strip()
 
     def run(self, *args, environ=None, exclusions=()):
         argv = ["full", "--leg", "mac", "--out", str(self.out)] + list(args)
@@ -842,7 +866,7 @@ class LinuxFixture(FixtureRepo):
         self.head = self.commit()
         if linked:
             subprocess.run(["git", "-C", str(self.root), "worktree", "add", "-q", "--detach",
-                            str(self.linked_dir), "HEAD"], check=True)
+                            str(self.linked_dir), "HEAD"], check=True, env=_git_child_env())
             self.repo = self.linked_dir
         return self
 
