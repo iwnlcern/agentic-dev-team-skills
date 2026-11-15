@@ -579,6 +579,61 @@ class TestStoreLayout(unittest.TestCase):
         self.assertEqual(conn.execute('SELECT count(*) FROM project_routes').fetchone(), (0,))
 
 
+    def test_boot_path_beside_key_path(self):
+        # C7: omitting any canonical-id guard admits an invalid path component.
+        self.assertEqual(store_layout.boot_path(self.root, P, Q, K),
+                         store_layout.key_path(self.root, P, Q, K).with_suffix('.boot'))
+        for index in range(3):
+            with self.subTest(index=index):
+                ids = [P, Q, K]
+                ids[index] = 'NOT-A-UUID'
+                with self.assertRaisesRegex(ValueError, '^id must be canonical lowercase UUID text$'):
+                    store_layout.boot_path(self.root, *ids)
+                with self.assertRaisesRegex(ValueError, '^id must be canonical lowercase UUID text$'):
+                    store_layout.key_path(self.root, *ids)
+
+    def test_project_routes_writer_census(self):
+        # C6: any additional literal-SQL writer voids delta 8 D2's safety proof.
+        import ast
+        import re
+        matcher = re.compile(
+            r'(?i)(insert(\s+or\s+\w+)?\s+into|update|delete\s+from|replace\s+into)'
+            r'\s+project_routes\b')
+        for sql in ['update project_routes set', 'DELETE FROM project_routes',
+                    'INSERT OR REPLACE INTO project_routes']:
+            self.assertIsNotNone(matcher.search(sql))
+        self.assertIsNone(matcher.search('SELECT state FROM project_routes'))
+        found = set()
+
+        class Writers(ast.NodeVisitor):
+            def __init__(self, filename):
+                self.filename, self.function = filename, None
+
+            def visit_FunctionDef(self, node):
+                previous = self.function
+                self.function = node.name
+                self.generic_visit(node)
+                self.function = previous
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Constant(self, node):
+                if isinstance(node.value, str) and matcher.search(node.value):
+                    found.add((self.filename, self.function))
+
+        engine = Path(store_layout.__file__).parent
+        for path in sorted(engine.rglob('*.py')):
+            if 'tests' not in path.relative_to(engine).parts:
+                Writers(path.name).visit(ast.parse(path.read_text()))
+        self.assertEqual(found, {
+            ('store_layout.py', 'reserve_project'),
+            ('store_layout.py', 'take_over_reservation'),
+            ('store_layout.py', 'return_to_creating'),
+            ('store_layout.py', 'activate_project'),
+        }, 'A new writer voids delta 8 D2 until the Store Planner re-reads it; '
+           'change this set only with the writer and that review.')
+
+
 class TestDeclaredLocks(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
