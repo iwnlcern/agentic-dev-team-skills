@@ -2872,3 +2872,295 @@ class TestReadGuard(Store):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutcomeConnection(sqlite3.Connection):
+    """Real transactions, with one-shot failures at the engine's SQL boundary."""
+
+    def configure(self, failures=()):
+        self.failures = list(failures)
+        self.operations = {}
+        self.reservations = None
+        self.events = []
+
+    def execute(self, sql, parameters=()):
+        key = sql.strip().upper()
+        self.operations[key] = self.operations.get(key, 0) + 1
+        self.events.append(key)
+        failure = next((f for f in self.failures
+                        if f[0] == key and f[1] == self.operations[key]), None)
+        if failure is not None and not failure[2]:
+            raise failure[3]
+        result = super().execute(sql, parameters)
+        if key == "COMMIT" and self.reservations is not None:
+            self.reservations.publish(self)
+        if failure is not None:
+            raise failure[3]
+        return result
+
+
+class OutcomeReservations:
+    """External reservations released only by durable rows in the owned table."""
+
+    def __init__(self):
+        self.open = {}
+        self.hooks = []
+        self.voids = 0
+        self.answer = "voided"
+        self.mode = "engine"
+        self.void_mode = "normal"
+        self.interrupt = KeyboardInterrupt("fixture interrupt")
+
+    def publish(self, conn):
+        for number, in conn.execute("SELECT number FROM outcome_owned WHERE state='void'"):
+            self.open.pop(number, None)
+
+    def release(self, conn):
+        for number in self.open:
+            conn.execute("INSERT OR REPLACE INTO outcome_owned VALUES (?, 'void')", (number,))
+
+    def hook(self, conn, admitted, data, ctx):
+        # A resubmission closes the previous attempt's reservation by name.
+        self.release(conn)
+        number = "reservation-%d" % (len(self.hooks) + 1)
+        self.open[number] = admitted.relay_id
+        self.hooks.append(admitted)
+        conn.execute("INSERT INTO outcome_owned VALUES (?, 'open')", (number,))
+        if self.mode == "engine":
+            raise errors.error_for("E-ADMISSION-HOOK", hook="fixture.hook", kind="RuntimeError")
+        if self.mode == "plain":
+            raise RuntimeError("fixture")
+        if self.mode == "ended":
+            try:
+                conn.execute("INSERT OR ROLLBACK INTO outcome_owned VALUES ('duplicate','open')")
+            except sqlite3.Error:
+                pass
+        elif self.mode == "closed":
+            conn.close()
+        elif self.mode == "ok":
+            self.release(conn)
+
+    def void(self, conn, ctx):
+        self.voids += 1
+        if self.void_mode == "raise":
+            raise RuntimeError("void failed")
+        if self.void_mode == "interrupt":
+            raise self.interrupt
+        if self.void_mode == "outside":
+            conn.execute("INSERT INTO outcome_other VALUES (1)")
+        if self.void_mode == "ended":
+            try:
+                conn.execute("INSERT OR ROLLBACK INTO outcome_owned VALUES ('duplicate','open')")
+            except sqlite3.Error:
+                pass
+        elif self.void_mode == "closed":
+            conn.close()
+        elif self.void_mode == "nested":
+            submit.submit(conn, ctx, draft())
+        elif self.void_mode == "bad":
+            return "done"
+        else:
+            self.release(conn)
+        return self.answer
+
+
+class TestAdmissionOutcome(Store):
+    """Breaks: final answers before a durable void, and leaked recovery state."""
+
+    def setUp(self):
+        super().setUp()
+        # Construct the new interface once, before any case's subtests.
+        self.outcome_context = replace(self.ctx(), after_admit=lambda *a: None,
+                                       after_rollback=None)
+
+    def fixture(self, *, mode="engine", void_mode="normal", failures=(), answer="voided",
+                callback=True):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "outcome.db"
+        conn = sqlite3.connect(path, factory=OutcomeConnection)
+        self.addCleanup(conn.close)
+        conn.configure()
+        conn.execute("PRAGMA foreign_keys=ON")
+        schema.init_v3(conn)
+        platform_rows(conn)
+        conn.executescript("CREATE TABLE outcome_owned (number TEXT PRIMARY KEY, state TEXT);"
+                           "INSERT INTO outcome_owned VALUES ('duplicate','open');"
+                           "CREATE TABLE outcome_other (id INTEGER);")
+        conn.configure(failures)
+        reservations = OutcomeReservations()
+        reservations.mode, reservations.void_mode = mode, void_mode
+        reservations.answer = answer
+        conn.reservations = reservations
+        patch = mock.patch.dict(schema.TABLE_OWNERS, {"outcome_owned": "authority"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        ctx = replace(self.outcome_context, after_admit=reservations.hook,
+                      after_rollback=reservations.void if callback else None,
+                      after_admit_writes=frozenset({"outcome_owned"}))
+        return conn, ctx, reservations, path
+
+    def outcome(self, conn, ctx, data=None):
+        try:
+            return submit.submit(conn, ctx, draft() if data is None else data)
+        except Exception as error:
+            return error
+
+    def state(self, conn):
+        return tuple(conn.execute("SELECT count(*) FROM " + table).fetchone()[0]
+                     for table in ("relays", "refusals"))
+
+    def fault(self, key, nth=2, *, after=False, code=10):
+        error = sqlite3.OperationalError("fixture failure")
+        if code is not None:
+            error.sqlite_errorcode = code
+        return key, nth, after, error
+
+    def assert_unknown(self, outcome, *, variant=False):
+        self.assertIsInstance(outcome, errors.EngineError, repr(outcome))
+        self.assertEqual(outcome.code, "E-ADMISSION-UNKNOWN")
+        self.assertEqual(outcome.cause, (
+            "whether this draft was stored is not yet known: the store did not confirm its commit"
+            if variant else "this draft was not stored, and whether what the admission hook "
+            "relay_engine.tests.test_submit.OutcomeReservations.hook reserved was released is not yet known"))
+        self.assertIsNone(outcome.__cause__)
+
+    def assert_clean(self, conn, ctx, reservations, path, *, closed=False):
+        self.assertNotIn(conn, submit._HOOK_FRAMES)
+        self.assertLessEqual(reservations.voids, 1)
+        if closed:
+            fresh = sqlite3.connect(path)
+            self.addCleanup(fresh.close)
+            fresh.execute("PRAGMA foreign_keys=ON")
+            self.assertEqual(self.state(fresh), (0, 0))
+            self.assertIsInstance(submit.submit(fresh, self.ctx(), draft()), submit.Admitted)
+        else:
+            self.assertFalse(conn.in_transaction)
+            self.assertIsInstance(submit.submit(conn, self.ctx(), draft()), submit.Admitted)
+
+    def test_after_rollback_context(self):
+        # Breaks: accepting an unusable callback or calling it before the hook.
+        with self.assertRaises(ValueError):
+            replace(self.ctx(), after_admit=lambda *a: None, after_rollback=3)
+        with self.assertRaises(ValueError):
+            replace(self.ctx(), after_rollback=lambda *a: None)
+        for which in ("sender", "header", "snapshot"):
+            with self.subTest(which=which):
+                conn, ctx, reservations, path = self.fixture()
+                data = draft()
+                if which == "sender":
+                    def refuse(c):
+                        raise errors.error_for("E-ADMISSION-HOOK", hook="fixture.check", kind="RuntimeError")
+                    ctx = replace(ctx, sender_check=refuse)
+                    want = "E-ADMISSION-HOOK"
+                elif which == "header":
+                    data = b"invalid\n"
+                    want = "E-HEADER"
+                else:
+                    artifact = path.parent / "design.md"
+                    artifact.write_bytes(b"first")
+                    ref = "file:" + str(artifact)
+                    request = submit.submit(conn, self.ctx(), draft(kind="DESIGN", needs="review",
+                        to="v3-engine.implementer", refs=(ref,)))
+                    artifact.write_bytes(b"changed")
+                    ctx = replace(ctx, sender=IMPL)
+                    data = draft(kind="DESIGN-REVIEW", verdict="approve",
+                        parent="#%d" % request.handle, refs=(ref,))
+                    want = "E-SNAPSHOT-STALE"
+                result = self.outcome(conn, ctx, data)
+                self.assertIsInstance(result, errors.EngineError, repr(result))
+                if which == "header":
+                    self.assertTrue(result.code.startswith("E-"))
+                else:
+                    self.assertEqual(result.code, want)
+                self.assertEqual(reservations.voids, 0)
+                self.assertEqual(reservations.hooks, [])
+
+    def test_path_h_answers_after_void(self):
+        # Breaks: raising before the void commits, or refusing after a failed void.
+        for mode in ("engine", "plain", "ended"):
+            with self.subTest(mode=mode):
+                conn, ctx, r, path = self.fixture(mode=mode)
+                result = self.outcome(conn, ctx)
+                self.assertIsInstance(result, errors.EngineError, repr(result))
+                self.assertEqual(result.code, "E-ADMISSION-HOOK")
+                self.assertEqual(self.state(conn), (0, 1))
+                self.assertEqual(r.open, {})
+                self.assertEqual(r.voids, 1)
+                self.assertEqual(conn.events.count("COMMIT"), 1)
+        for which in ("begin", "callback", "commit"):
+            with self.subTest(which=which):
+                failures = [self.fault("BEGIN IMMEDIATE")] if which == "begin" else (
+                    [self.fault("COMMIT", 1)] if which == "commit" else [])
+                conn, ctx, r, path = self.fixture(failures=failures,
+                    void_mode="raise" if which == "callback" else "normal")
+                self.assert_unknown(self.outcome(conn, ctx))
+                self.assertEqual(self.state(conn), (0, 0))
+                self.assertIn("reservation-1", r.open)
+
+    def test_path_x_closed_connection(self):
+        # Breaks: attempting a void or an ordinary refusal on a closed connection.
+        for callback in (True, False):
+            with self.subTest(callback=callback):
+                conn, ctx, r, path = self.fixture(mode="closed", callback=callback)
+                result = self.outcome(conn, ctx)
+                if callback:
+                    self.assert_unknown(result)
+                else:
+                    self.assertIsInstance(result, sqlite3.ProgrammingError)
+                self.assertEqual(r.voids, 0)
+                self.assertNotIn(conn, submit._HOOK_FRAMES)
+                fresh = sqlite3.connect(path)
+                self.addCleanup(fresh.close)
+                self.assertEqual(self.state(fresh), (0, 0))
+
+    def test_already_voided_detail(self):
+        # Breaks: omitting the notice detail, or adding it for an ordinary void.
+        for answer, detail in (("already-voided", "undone-with-notice"), (None, None),
+                               ("voided", None)):
+            with self.subTest(answer=answer):
+                conn, ctx, r, path = self.fixture(answer=answer)
+                result = self.outcome(conn, ctx)
+                self.assertIsInstance(result, errors.EngineError, repr(result))
+                self.assertEqual(result.code, "E-ADMISSION-HOOK")
+                self.assertEqual(result.reservation, detail)
+                if detail:
+                    self.assertIn("was undone by another writer", result.as_dict()["reservation_note"])
+                else:
+                    self.assertEqual(set(result.as_dict()), {"code", "cls", "cause", "remedy"})
+
+    def test_after_rollback_frame(self):
+        # Breaks: an unguarded recovery callback or accepting its ended transaction.
+        for mode in ("outside", "ended", "closed", "nested", "bad"):
+            with self.subTest(mode=mode):
+                conn, ctx, r, path = self.fixture(void_mode=mode)
+                self.assert_unknown(self.outcome(conn, ctx))
+                fresh = sqlite3.connect(path)
+                self.addCleanup(fresh.close)
+                self.assertEqual(self.state(fresh), (0, 0))
+                self.assertIn("reservation-1", r.open)
+                self.assertNotIn(conn, submit._HOOK_FRAMES)
+
+    def test_unknown_leaves_connection_clean(self):
+        # Breaks: recovery retries, leaked frames, or a transaction left open.
+        cases = [("engine", "normal", "begin"), ("engine", "raise", None),
+                 ("engine", "normal", "commit"), ("closed", "normal", None)]
+        cases += [("engine", mode, None) for mode in
+                  ("outside", "ended", "closed", "nested", "bad")]
+        for mode, void_mode, fault in cases:
+            with self.subTest(mode=mode, void_mode=void_mode, fault=fault):
+                failures = [self.fault("BEGIN IMMEDIATE")] if fault == "begin" else (
+                    [self.fault("COMMIT", 1)] if fault == "commit" else [])
+                conn, ctx, r, path = self.fixture(mode=mode, void_mode=void_mode, failures=failures)
+                self.assert_unknown(self.outcome(conn, ctx))
+                self.assert_clean(conn, ctx, r, path, closed=mode == "closed" or void_mode == "closed")
+
+    def test_keyboard_interrupt_from_after_rollback(self):
+        # Breaks: converting a control-flow exception to a wire refusal.
+        conn, ctx, r, path = self.fixture(void_mode="interrupt")
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            submit.submit(conn, ctx, draft())
+        self.assertIs(caught.exception, r.interrupt)
+        self.assertEqual(self.state(conn), (0, 0))
+        self.assertFalse(conn.in_transaction)
+        self.assertNotIn(conn, submit._HOOK_FRAMES)

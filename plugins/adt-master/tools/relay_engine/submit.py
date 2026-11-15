@@ -157,6 +157,7 @@ class SubmitContext:
     store: EvidenceStore | None = None
     after_admit_reads_denied: frozenset[str] = frozenset({"bodies"})
     sender_check: Callable[[sqlite3.Connection], None] | None = None
+    after_rollback: Callable[[sqlite3.Connection, "SubmitContext"], str | None] | None = None
 
     def __post_init__(self):
         _check_git_state(self.git_state)
@@ -172,6 +173,9 @@ class SubmitContext:
             raise ValueError("submission_key is at most 256 UTF-8 bytes")
         if self.after_admit is not None and not callable(self.after_admit):
             raise ValueError("after_admit is callable or None")
+        if self.after_rollback is not None:
+            if not callable(self.after_rollback) or self.after_admit is None:
+                raise ValueError("after_rollback is callable and requires after_admit")
         if not isinstance(self.after_admit_writes, frozenset):
             raise ValueError("after_admit_writes is a frozenset of owned table names")
         for table in self.after_admit_writes:
@@ -270,8 +274,29 @@ def submit(conn, ctx, data):
             if replay is not None:
                 return replay
         return _admit(conn, ctx, data, now)
+    except sqlite3.ProgrammingError as error:
+        if (ctx.after_rollback is not None
+                and getattr(error, "_admission_hook_failed", False)
+                and _transaction_state(conn) == "closed"):
+            raise _unknown_admission(ctx) from None
+        raise
     except errors.EngineError as error:
-        _record_refusal(conn, ctx, data, now, error)
+        if (ctx.after_rollback is not None
+                and getattr(error, "_admission_hook_failed", False)):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                answer = _run_after_rollback(conn, ctx)
+                _refusal_row(conn, ctx, data, now, error)
+                conn.execute("COMMIT")
+            except Exception:
+                _rollback_if_open(conn)
+                raise _unknown_admission(ctx) from None
+            except BaseException:
+                _rollback_if_open(conn)
+                raise
+            _reservation_detail(error, answer, ctx)
+        else:
+            _record_refusal(conn, ctx, data, now, error)
         raise
 
 
@@ -303,9 +328,8 @@ def _transaction_state(conn):
         return "closed"
 
 
-def _run_hook(conn, ctx, admitted, draft):
-    if ctx.after_admit is None:
-        return
+@contextmanager
+def _hook_frame(conn, ctx, name):
     reads = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT,
              sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
     writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
@@ -317,43 +341,12 @@ def _run_hook(conn, ctx, admitted, draft):
         if action in writes and database == "main" and table in ctx.after_admit_writes:
             return sqlite3.SQLITE_OK
         return sqlite3.SQLITE_DENY
-    name = _hook_name(ctx.after_admit)
     _HOOK_FRAMES[conn] = (ctx, authorize)
     try:
         conn.set_authorizer(authorize)
         # Prepared VMs are not re-authorized; stop them after any conflict rollback.
         conn.set_progress_handler(lambda: 0 if conn.in_transaction else 1, 1)
-        failure = None
-        try:
-            ctx.after_admit(conn, admitted, draft, ctx)
-        except errors.EngineError as exc:
-            if _transaction_state(conn) == "closed":
-                failure = sqlite3.ProgrammingError(
-                    "the admission hook closed the store connection")
-            else:
-                failure = exc
-        except Exception as exc:
-            state = _transaction_state(conn)
-            if state == "closed":
-                failure = sqlite3.ProgrammingError(
-                    "the admission hook closed the store connection")
-            elif state == "ended":
-                failure = errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
-                                           hook=name)
-            else:
-                kind = type(exc).__name__
-                if not errors._is_hook_kind(kind):
-                    kind = "Exception"
-                failure = errors.error_for("E-ADMISSION-HOOK", hook=name, kind=kind)
-        if failure is not None:
-            raise failure
-        state = _transaction_state(conn)
-        if state == "closed":
-            raise sqlite3.ProgrammingError(
-                "the admission hook closed the store connection")
-        if state == "ended":
-            raise errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
-                                   hook=name) from None
+        yield
     finally:
         _HOOK_FRAMES.pop(conn, None)
         try:
@@ -364,6 +357,81 @@ def _run_hook(conn, ctx, admitted, draft):
             conn.set_authorizer(None)
         except sqlite3.Error:
             pass
+
+
+
+def _run_hook(conn, ctx, admitted, draft):
+    if ctx.after_admit is None:
+        return
+    name = _hook_name(ctx.after_admit)
+    try:
+        with _hook_frame(conn, ctx, name):
+            failure = None
+            try:
+                ctx.after_admit(conn, admitted, draft, ctx)
+            except errors.EngineError as exc:
+                if _transaction_state(conn) == "closed":
+                    failure = sqlite3.ProgrammingError(
+                        "the admission hook closed the store connection")
+                else:
+                    failure = exc
+            except Exception as exc:
+                state = _transaction_state(conn)
+                if state == "closed":
+                    failure = sqlite3.ProgrammingError(
+                        "the admission hook closed the store connection")
+                elif state == "ended":
+                    failure = errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
+                                               hook=name)
+                else:
+                    kind = type(exc).__name__
+                    if not errors._is_hook_kind(kind):
+                        kind = "Exception"
+                    failure = errors.error_for("E-ADMISSION-HOOK", hook=name, kind=kind)
+            if failure is not None:
+                raise failure
+            state = _transaction_state(conn)
+            if state == "closed":
+                raise sqlite3.ProgrammingError(
+                    "the admission hook closed the store connection")
+            if state == "ended":
+                raise errors.error_for("E-ADMISSION-HOOK", variant="ended-transaction",
+                                       hook=name) from None
+    except (errors.EngineError, sqlite3.ProgrammingError) as error:
+        if ctx.after_rollback is not None:
+            # Only an error from this call is eligible for recovery, never a
+            # parser, snapshot or sender-check refusal before the hook ran.
+            error._admission_hook_failed = True
+        raise
+
+
+def _run_after_rollback(conn, ctx):
+    with _hook_frame(conn, ctx, _hook_name(ctx.after_rollback)):
+        answer = ctx.after_rollback(conn, ctx)
+        if _transaction_state(conn) != "active":
+            raise RuntimeError("the recovery hook ended its transaction")
+        if answer not in (None, "voided", "already-voided"):
+            raise ValueError("the recovery hook returned an invalid result")
+        return answer
+
+
+def _rollback_if_open(conn):
+    try:
+        if _transaction_state(conn) == "active":
+            conn.execute("ROLLBACK")
+    except sqlite3.Error:
+        pass
+
+
+def _unknown_admission(ctx, *, variant=None):
+    return errors.error_for("E-ADMISSION-UNKNOWN", variant=variant,
+                            hook=_hook_name(ctx.after_admit))
+
+
+def _reservation_detail(error, answer, ctx):
+    if answer == "already-voided":
+        error.params.setdefault("hook", _hook_name(ctx.after_admit))
+        error.reservation = "undone-with-notice"
 
 
 def _run_sender_check(conn, ctx):
@@ -419,7 +487,7 @@ def file_system_relay(conn, ctx, data):
         raise RuntimeError("system filing requires this connection's active admission hook")
     system = SeatRef(SYSTEM, SYSTEM, SYSTEM, ctx.sender.team_instance_id,
                      ctx.sender.project_id)
-    internal = replace(ctx, sender=system, after_admit=None,
+    internal = replace(ctx, sender=system, after_admit=None, after_rollback=None,
                        after_admit_writes=frozenset(), sender_check=None)
     # Each real authorizer transition expires cached prepared statements.
     # A boolean privilege flag would let cached engine INSERTs escape later.
@@ -439,16 +507,20 @@ def file_system_relay(conn, ctx, data):
         conn.set_authorizer(frame[1])
 
 
-def _record_refusal(conn, ctx, data, now, error):
+def _refusal_row(conn, ctx, data, now, error):
     line = error.params.get("line", getattr(error, "refusal_line", None))
+    conn.execute(
+        "INSERT INTO refusals (project_id, seat_id, special, code, line, at, draft_sha256)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (ctx.sender.project_id, *party_columns(ctx.sender.seat_id), error.code,
+         line if isinstance(line, int) else None, now,
+         hashlib.sha256(data).hexdigest()))
+
+
+def _record_refusal(conn, ctx, data, now, error):
     conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute(
-            "INSERT INTO refusals (project_id, seat_id, special, code, line, at, draft_sha256)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ctx.sender.project_id, *party_columns(ctx.sender.seat_id), error.code,
-             line if isinstance(line, int) else None, now,
-             hashlib.sha256(data).hexdigest()))
+        _refusal_row(conn, ctx, data, now, error)
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
