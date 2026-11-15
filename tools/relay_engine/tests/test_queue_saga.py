@@ -1,4 +1,5 @@
 """Durable operator answers before any owning-ledger apply."""
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 import sqlite3
@@ -359,6 +360,102 @@ class TestQueueApply(unittest.TestCase):
         self.assertEqual(self.relay_count(), 1)
         self.assertEqual(json.loads(records._one(self.c, 'SELECT outcome FROM queue_answers')[0])['receipt'], first.receipt)
 
+    @contextmanager
+    def raised_engine_error(self, code):
+        from relay_engine import errors
+        from unittest import mock
+        source = 'registered' if code in errors.ERRORS else 'placeholder'
+        spec = (errors.ERRORS[code] if source == 'registered' else
+                replace(errors.ERRORS['E-ADMISSION-HOOK'], cls='integrity'))
+        error = errors.EngineError.__new__(errors.EngineError)
+        error.code = code
+        error.cause_key = spec.cause_key
+        error.remedy_key = spec.remedy_key
+        error.cls = spec.cls
+        error.params = {}
+        with mock.patch.dict(errors.ERRORS, {code: spec}):
+            yield error, source
+
+    def test_store_busy_answer_stays_applying(self):
+        from relay_engine import submit
+        from unittest import mock
+        with self.raised_engine_error('E-STORE-BUSY') as (error, source):
+            with self.subTest(source=source):
+                item = self.recorded()
+                actual_submit = submit.submit
+                calls = []
+                def busy_once(*args, **kwargs):
+                    calls.append(args)
+                    if len(calls) == 1:
+                        raise error
+                    return actual_submit(*args, **kwargs)
+                with mock.patch.object(submit, 'submit', side_effect=busy_once):
+                    self.reconcile()
+                    self.assertEqual(self.outcome(item)[0], 'applying')
+                    self.assertEqual(records._one(self.c,
+                        'SELECT phase,last_reason FROM queue_answers WHERE item_id=?',
+                        (item.item_id,)), ('recorded', 'E-STORE-BUSY'))
+                    self.assertEqual(self.relay_count(), 0)
+                    self.assertEqual(records._one(self.c,
+                        "SELECT COUNT(*) FROM queue_events WHERE item_id=? AND event_kind='refused'",
+                        (item.item_id,)), (0,))
+                    self.reconcile()
+                self.assertEqual(self.outcome(item)[0], 'resolved')
+                self.assertEqual(self.relay_count(), 1)
+                self.assertEqual(len(calls), 2)
+
+    def test_store_busy_retry_settles_by_key(self):
+        from relay_engine import queries, submit
+        from unittest import mock
+        with self.raised_engine_error('E-STORE-BUSY') as (error, source):
+            for resend in (False, True):
+                with self.subTest(source=source, resend=resend):
+                    item = self.recorded()
+                    job = self.job(item)
+                    before = self.relay_count()
+                    with mock.patch.object(submit, 'submit', side_effect=error):
+                        self.reconcile()
+                    self.assertEqual(self.outcome(item)[0], 'applying')
+                    admitted = self.port.callee_ledger(job.project_id, lambda conn:
+                        submit.submit(conn, self.make_context(conn, job.project_id,
+                            submit.SeatRef('operator', 'operator', 'operator', None, job.project_id),
+                            job.apply_key), job.draft))
+                    with mock.patch.object(queries, 'operator_admission',
+                            **({'return_value': None} if resend else
+                               {'wraps': queries.operator_admission})), \
+                         mock.patch.object(submit, 'submit', wraps=submit.submit) as actual:
+                        self.reconcile()
+                    self.assertEqual(actual.call_count, int(resend))
+                    self.assertEqual(self.outcome(item)[0], 'resolved')
+                    outcome = json.loads(records._one(self.c,
+                        'SELECT outcome FROM queue_answers WHERE item_id=?', (item.item_id,))[0])
+                    self.assertEqual(outcome['receipt'], admitted.relay_id)
+                    self.assertEqual(self.relay_count(), before + 1)
+                    self.assertEqual(records._one(self.f.ledger,
+                        "SELECT COUNT(*) FROM relays WHERE sender_special='operator' AND submission_key=?",
+                        (job.apply_key,)), (1,))
+
+    def test_other_engine_code_still_refused(self):
+        from relay_engine import submit
+        from unittest import mock
+        for code, expected in (('E-ADMISSION-UNKNOWN', 'refused'),
+                               ('E-SUBMISSION-KEY-REUSED', 'faulted')):
+            with self.raised_engine_error(code) as (error, source):
+                with self.subTest(code=code, source=source):
+                    item = self.recorded()
+                    with mock.patch.object(submit, 'submit', side_effect=error):
+                        self.reconcile()
+                    self.assertEqual(self.outcome(item)[0], expected)
+                    detail = json.loads(records._one(self.c,
+                        'SELECT detail FROM queue_events WHERE item_id=? AND event_kind=?',
+                        (item.item_id, expected))[0])
+                    self.assertEqual(detail['code'], code)
+                    with mock.patch.object(submit, 'submit',
+                            side_effect=AssertionError('terminal job retried')):
+                        changes = self.c.total_changes
+                        self.reconcile()
+                        self.assertEqual(self.c.total_changes, changes)
+
     def test_refused_admission_is_final(self):
         from relay_engine import submit
         from unittest import mock
@@ -378,7 +475,12 @@ class TestQueueApply(unittest.TestCase):
         try:
             self.reconcile()
             self.assertEqual(self.outcome(other)[0], 'applying')
-            self.assertIn('locked', records._one(self.c, 'SELECT last_reason FROM queue_answers WHERE item_id=?', (other.item_id,))[0])
+            from relay_engine import errors
+            reason = records._one(self.c, 'SELECT last_reason FROM queue_answers WHERE item_id=?', (other.item_id,))[0]
+            if 'E-STORE-BUSY' in errors.ERRORS:
+                self.assertEqual(reason, 'E-STORE-BUSY')
+            else:
+                self.assertIn('locked', reason)
         finally:
             blocker.rollback();blocker.close()
         self.reconcile()

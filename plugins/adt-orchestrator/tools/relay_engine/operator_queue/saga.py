@@ -145,6 +145,8 @@ def apply_question(ledger_conn, job: ApplyJob, make_context) -> ApplyResult:
         admitted = submit.submit(ledger_conn, context, job.draft)
         return ApplyResult('applied', admitted.relay_id, None, None, None)
     except errors.EngineError as exc:
+        if exc.code == 'E-STORE-BUSY':
+            return ApplyResult('transient', None, None, None, 'E-STORE-BUSY')
         status = 'faulted' if exc.code == 'E-SUBMISSION-KEY-REUSED' else 'refused'
         return ApplyResult(status, None, None, exc.code, None)
     except sqlite3.OperationalError as exc:
