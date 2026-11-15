@@ -29,6 +29,7 @@ TABLES = {"slips", "slip_events", "branch_bindings", "reviewer_assignments", "ve
           "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
 
 INDEXES = {
+    "verification_requests": {("artifact", "content_sha256")},
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
                ("sender_seat_id", "kind"), ("project_id", "id")},
@@ -395,7 +396,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 29)
+        self.assertEqual(len(named), 30)
 
 
 class TestChecks(Store):
@@ -1091,6 +1092,32 @@ if __name__ == "__main__":
 
 class TestRuleHSchema(ClaimStore):
     """Savepoint-only malformed-row refusal; no direct Authority row survives."""
+
+    def test_reviewer_without_request_refused(self):
+        # E2-M2: the reverse implication of the existing NULL-pair witness.
+        _, source = self.claim()
+        row = self.conn.execute('SELECT artifact, kind, snapshot_handle, snapshot_request_relay_id,'
+                                ' content_sha256, reviewer_seat_id, created_at'
+                                ' FROM verification_requests WHERE claim_relay_id = ?',
+                                (source.relay_id,)).fetchone()
+        _, empty = self.claim(paths=())
+        self.assertIsNone(self.request(empty))
+        accepted = False
+        self.conn.execute('SAVEPOINT reviewer_without_request')
+        try:
+            self.conn.execute('INSERT INTO verification_requests (claim_relay_id, artifact, kind,'
+                              ' snapshot_handle, snapshot_request_relay_id, content_sha256,'
+                              ' request_relay_id, reviewer_seat_id, created_at)'
+                              ' VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)',
+                              (empty.relay_id, *row))
+            accepted = True
+        except sqlite3.Error:
+            pass
+        finally:
+            self.conn.execute('ROLLBACK TO reviewer_without_request')
+            self.conn.execute('RELEASE reviewer_without_request')
+        self.assertFalse(accepted, 'a reviewer with no request must be refused')
+        self.assertIsNone(self.request(empty))
 
     def test_request_and_reviewer_null_together(self):
         # E2-M1: remove the pairing CHECK and this otherwise valid insert succeeds.

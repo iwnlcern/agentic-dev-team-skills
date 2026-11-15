@@ -631,6 +631,7 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
 )
 
 _INDEXES = (
+    "CREATE INDEX IF NOT EXISTS verification_requests_bytes ON verification_requests (artifact, content_sha256)",
     "CREATE UNIQUE INDEX IF NOT EXISTS relays_submission_party ON relays"
     " (coalesce(sender_seat_id, sender_special), submission_key)"
     " WHERE submission_key IS NOT NULL",

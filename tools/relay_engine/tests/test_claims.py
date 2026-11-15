@@ -476,6 +476,52 @@ class TestClaims(ClaimStore):
 class TestRuleHClaims(ClaimStore):
     """Waiver frontier and two-query H reads, with real claim admissions."""
 
+    def test_waive_frontier_reads_own_project(self):
+        # W-PROJ: another project's higher handles do not set this frontier.
+        from relay_engine.tests.test_submit import FOREIGN
+        _, claim = self.claim()
+        for _ in range(12):
+            self.submit(draft(to=FOREIGN.address), FOREIGN)
+        highest = {project: value for project, value in self.conn.execute(
+            'SELECT project_id, max(handle) FROM relays GROUP BY project_id')}
+        self.assertGreater(highest['q'], highest['p'])
+        claims.waive(self.conn, claim.relay_id, 'plan', 'operator', 'own frontier', self.clock)
+        recorded = self.conn.execute('SELECT after_handle FROM waivers WHERE claim_relay_id = ?',
+                                     (claim.relay_id,)).fetchone()[0]
+        self.assertEqual(recorded, highest['p'])
+
+    def test_standing_objection_statement_count_many_claims(self):
+        # H-PER-CLAIM: one lookup pair, even with several matching claims.
+        admitted = [self.claim()[1] for _ in range(3)]
+        claims.waive(self.conn, admitted[0].relay_id, 'plan', 'operator', 'waive one', self.clock)
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            claims.standing_objection(self.conn, 'p', str(self.plan),
+                                      hashlib.sha256(self.plan.read_bytes()).hexdigest())
+        finally:
+            self.conn.set_trace_callback(None)
+        self.assertEqual(len(statements), 2, statements)
+
+    def test_rule_h_statements_use_bytes_index(self):
+        # IDX-DROP: both actual statements have the artifact/content access path.
+        for statement in (claims.STANDING_VERDICTS_SQL, claims.STANDING_WAIVERS_SQL):
+            with self.subTest(statement=statement):
+                plan = self.conn.execute('EXPLAIN QUERY PLAN ' + statement,
+                                         ('p', 'a', 's')).fetchall()
+                import re
+                self.assertEqual(len(plan), 3, plan)
+                rows = []
+                for row in plan:
+                    self.assertTrue(row[3].startswith('SEARCH '), plan)
+                    found = re.match(r'^(?:SEARCH|SCAN) (?:TABLE )?(\w+) .*?INDEX (\w+)', row[3])
+                    self.assertIsNotNone(found, plan)
+                    rows.append(found.groups())
+                self.assertEqual(rows[0], ('v', 'verification_requests_bytes'), plan)
+                if statement == claims.STANDING_VERDICTS_SQL:
+                    self.assertEqual([alias for alias, _ in rows], ['v', 'c', 'r'], plan)
+                    self.assertEqual(rows[2], ('r', 'relays_parent'), plan)
+
     def test_waive_records_after_handle(self):
         # An older wall-clock value must not replace the relay frontier.
         _, claim = self.claim()

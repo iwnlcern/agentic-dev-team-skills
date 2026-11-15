@@ -446,18 +446,29 @@ def _checked_slip(conn, slip, effect, digest):
             if path is None or digest(path) != lock['content_sha256']:
                 return _answer(claim['kind'] + '-changed',
                                strings.render('authority-artifact', artifact=lock['artifact']), planner, slip)
+    checked_digests = []
     for bound in binds['digests']:
         path = working_path(conn, bound['artifact'], effect)
         recorded = bound['digest']
         if path is None or recorded is None:
-            now = None
+            now = content = None
         elif bound['reference'] == 'git':
-            now = digest(path, git_digest_algorithm(recorded))
+            observed = digest(path, (git_digest_algorithm(recorded), 'sha256'))
+            now, content = (None, None) if observed is None else observed
         else:
-            now = digest(path)
-        if now is None or now != recorded:
+            now = content = digest(path)
+        if now is None or now != recorded or content is None:
             return _answer(bound['kind'] + '-changed',
                            strings.render('authority-artifact', artifact=bound['artifact']), planner, slip)
+        checked_digests.append((bound, content))
+    for bound, content in checked_digests:
+        objection = claims.standing_objection(conn, slip['project_id'], bound['artifact'], content)
+        if objection is not None:
+            unblocker = 'operator' if objection.verdict == 'human-decision-required' else planner
+            return _answer('verification-objected',
+                           strings.render('authority-verification', kind=bound['kind'],
+                                          state='objected', relay=objection.review_relay_id),
+                           unblocker, slip)
     for claim in binds['claims']:
         for lock in claim['locks']:
             objection = claims.standing_objection(

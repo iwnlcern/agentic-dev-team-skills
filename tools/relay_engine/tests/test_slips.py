@@ -262,10 +262,12 @@ class SlipStore(ClaimStore):
                 data = Path(file).read_bytes()
             except OSError:
                 return None
-            if algorithm == 'sha256':
-                return hashlib.sha256(data).hexdigest()
-            blob = b'blob %d\0' % len(data) + data
-            return {'git-sha1': hashlib.sha1, 'git-sha256': hashlib.sha256}[algorithm](blob).hexdigest()
+            def hashed(name):
+                if name == 'sha256':
+                    return hashlib.sha256(data).hexdigest()
+                blob = b'blob %d\0' % len(data) + data
+                return {'git-sha1': hashlib.sha1, 'git-sha256': hashlib.sha256}[name](blob).hexdigest()
+            return tuple(hashed(name) for name in algorithm) if isinstance(algorithm, tuple) else hashed(algorithm)
         self.conn.execute('BEGIN IMMEDIATE')
         try:
             with submit.read_guard(self.conn):
@@ -2174,6 +2176,182 @@ class TestRuleH(SlipStore):
     refs = TestErratum6.refs
     requested = TestErratum6.requested
     reviewed = TestErratum6.reviewed
+
+    def digest_objection_fixture(self, case):
+        """An off-lineage claim and a real slip binding its bytes by digest."""
+        claims.assign_reviewer(self.conn, SECOND.team_instance_id, REVIEWER.seat_id,
+                               'operator', self.clock)
+        if case == 'git':
+            clean_git_environment(self)
+            repo = Repo({'p.md': 'p X\n'})
+            self.addCleanup(repo.close)
+            self.directory.checkouts['bivpak'] = repo.path
+            p = Path(repo.path) / 'p.md'
+            references = ('bivpak@main:p.md',)
+            request = self.submit(draft(kind='PLAN', needs='review', to=SECOND.address,
+                                        refs=references, bundle='other-git'))
+            claim = self.submit(draft(kind='PLAN-REVIEW', verdict='approve',
+                                      parent=request.relay_id, to=PLANNER.address,
+                                      cc=self.issuers, refs=references), SECOND)
+            self.verify(claim)
+            q = self.file('q.md', b'q X\n')
+            own = self.reviewed(self.requested('P', self.go(), q), 'approve', q)
+            issued = self.issue(own, refs=references)
+            options, artifact = {'path': str(repo.path)}, 'repo-1:p.md'
+        else:
+            p, q = self.file('p.md', b'p X\n'), self.file('q.md', b'q X\n')
+            own = self.reviewed(self.requested('P', self.go(), q), 'approve', q)
+            if case == 'pin':
+                claim = self.reviewed(self.requested('D2', own, p), 'approve', p,
+                                      kind='design', sender=SECOND)
+                issued = self.issue(claim)
+            else:
+                claim = None
+                issued = self.issue(own, refs=self.refs(p))
+            options, artifact = {}, str(p)
+        self.assertIn(artifact, self.digest_artifacts(issued))
+        self.assertNotIn(artifact, [lock for locks in self.claim_artifacts(issued).values()
+                                    for lock in locks])
+        return p, claim, options
+
+    def test_objection_reaches_digest_bound_path(self):
+        # D-SKIP / D-GIT: the set must reach pins and Git-spelled digest bindings.
+        for ordinal, case in enumerate(('pin', 'git', 'no-claim')):
+            with self.subTest(case=case):
+                if ordinal:
+                    self.doCleanups(); self.setUp()
+                p, claim, options = self.digest_objection_fixture(case)
+                if claim is None:
+                    self.assertEqual(self.act(**options).outcome, 'allow')
+                    continue
+                objection = self.verify(claim, 'must-revise')
+                answer = self.act(**options)
+                self.assertEqual(answer.outcome, 'held')
+                self.assertEqual(answer.code, 'authority.verification-objected')
+                self.assertIn(objection.relay_id, answer.reason)
+                self.assertEqual(answer.unblocker, PLANNER.address)
+                self.verify(claim)
+                self.assertEqual(self.act(**options).outcome, 'allow')
+                if case == 'git':
+                    p.unlink()
+                    self.assertIn('repo-1:p.md', self.code('plan-changed', **options).reason)
+
+    def test_rule_h_reads_one_observation(self):
+        # D-SPLIT: X passes the check; a later observation Y cannot choose H's set.
+        for ordinal, case in enumerate(('pin', 'git')):
+            with self.subTest(case=case):
+                if ordinal:
+                    self.doCleanups(); self.setUp()
+                p, claim, options = self.digest_objection_fixture(case)
+                self.verify(claim, 'must-revise')
+                calls = []
+                def read(path, algorithm='sha256'):
+                    if Path(path) == p:
+                        calls.append(algorithm)
+                        data = b'p X\n' if len(calls) == 1 else b'p Y\n'
+                    else:
+                        data = Path(path).read_bytes()
+                    def hashed(name):
+                        if name == 'sha256':
+                            return hashlib.sha256(data).hexdigest()
+                        blob = b'blob %d\0' % len(data) + data
+                        return {'git-sha1': hashlib.sha1, 'git-sha256': hashlib.sha256}[name](blob).hexdigest()
+                    return tuple(hashed(name) for name in algorithm) if isinstance(algorithm, tuple) else hashed(algorithm)
+                answer = self.act(digest=read, **options)
+                self.assertEqual(answer.outcome, 'held')
+                self.assertEqual(answer.code, 'authority.verification-objected')
+                self.assertEqual(len(calls), 1)
+
+    def test_rule_h_stays_in_its_project(self):
+        # S-PROJ-W / S-PROJ-V: foreign frontiers cannot lift, nor verdicts hold.
+        for ordinal, case in enumerate(('waiver', 'verdict')):
+            with self.subTest(case=case):
+                if ordinal:
+                    self.doCleanups(); self.setUp()
+                _, own, _ = self.build(design=False)
+                if case == 'waiver':
+                    self.verify(own, 'must-revise')
+                references = self.refs(self.plan)
+                request = self.submit(draft(kind='PLAN', needs='review', to=QIMPL.address,
+                                            refs=references), FOREIGN)
+                foreign = self.submit(draft(kind='PLAN-REVIEW', verdict='approve',
+                                            parent=request.relay_id, to=FOREIGN.address,
+                                            refs=references), QIMPL)
+                if case == 'waiver':
+                    for _ in range(20):
+                        self.submit(draft(to=FOREIGN.address), FOREIGN)
+                    highest = {project: handle for project, handle in self.conn.execute(
+                        'SELECT project_id, max(handle) FROM relays GROUP BY project_id')}
+                    self.assertGreater(highest['q'], highest['p'])
+                    claims.waive(self.conn, foreign.relay_id, 'plan', 'operator', 'foreign', self.clock)
+                    self.assertEqual(self.act().outcome, 'held')
+                else:
+                    self.verify(foreign, 'must-revise', sender=QREVIEWER)
+                    self.assertEqual(self.act().outcome, 'allow')
+
+    def test_unblocker_follows_the_objecting_claim(self):
+        # H-UNBLOCK-BOUND: the approved bound claim supplies no objection verdict.
+        for ordinal, verdict in enumerate(('human-decision-required', 'must-revise')):
+            with self.subTest(verdict=verdict):
+                if ordinal:
+                    self.doCleanups(); self.setUp()
+                _, own, _ = self.build(design=False)
+                newer = self.answer(self.requested('P', own, self.plan), 'approve', self.plan)
+                self.verify(newer, verdict)
+                answer = self.code('verification-objected')
+                self.assertEqual(answer.unblocker, 'operator' if ordinal == 0 else PLANNER.address)
+
+    def test_waiver_of_older_claim_after_newer_objection_lifts(self):
+        # H-ORDER-CLAIM / H-GE: the waiver's frontier equals the objection handle.
+        _, first, _ = self.build(design=False)
+        newer = self.answer(self.requested('P', first, self.plan), 'approve', self.plan)
+        self.verify(newer, 'must-revise')
+        claims.waive(self.conn, first.relay_id, 'plan', 'operator', 'later waiver', self.clock)
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_newest_waiver_sets_the_frontier(self):
+        # H-MIN-FRONTIER: the later of two waivers lifts the intervening objection.
+        _, first, _ = self.build(design=False)
+        claims.waive(self.conn, first.relay_id, 'plan', 'operator', 'first waiver', self.clock)
+        second = self.answer(self.requested('P', first, self.plan), 'approve', self.plan)
+        self.verify(second, 'must-revise')
+        third = self.answer(self.requested('P', second, self.plan), 'approve', self.plan)
+        claims.waive(self.conn, third.relay_id, 'plan', 'operator', 'last waiver', self.clock)
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_newest_of_two_standing_objections_is_named(self):
+        # H-OLDEST: name the newest standing review across two different seats.
+        _, first, _ = self.build(design=False)
+        self.verify(first, 'must-revise')
+        claims.assign_reviewer(self.conn, IMPL.team_instance_id, SECOND.seat_id, 'operator', self.clock)
+        second = self.answer(self.requested('P', first, self.plan), 'approve', self.plan)
+        newest = self.verify(second, 'human-decision-required', sender=SECOND)
+        answer = self.code('verification-objected')
+        self.assertIn(newest.relay_id, answer.reason)
+        self.assertEqual(answer.unblocker, 'operator')
+
+    def test_no_reviewer_reason_names_its_claim(self):
+        # NR-REQUEST: a non-answering recorded reviewer leaves the claim to name.
+        _, claim, _ = self.build(design=False, verified=False)
+        request = self.request(claim)[0]
+        self.assertIsNotNone(request)
+        self.assertNotEqual(request, claim.relay_id)
+        self.conn.execute("UPDATE seats SET state = 'stood-down' WHERE id = ?", (REVIEWER.seat_id,))
+        self.conn.commit()
+        answer = self.code('verification-pending')
+        self.assertIn(claim.relay_id, answer.reason)
+
+    def test_non_reviewer_verdict_does_not_lift(self):
+        # H-SENDER: membership allows admission, but only the reviewer decides H.
+        file_system = submit.file_system_relay
+        def with_member(conn, ctx, data):
+            return file_system(conn, ctx, data.replace(b'NEEDS: review\n',
+                               ('CC: ' + OTHER.address + '\nNEEDS: review\n').encode()))
+        with mock.patch.object(submit, 'file_system_relay', side_effect=with_member):
+            _, claim, _ = self.build(design=False)
+        self.verify(claim, 'must-revise')
+        self.verify(claim, sender=OTHER)
+        self.assertEqual(self.act().outcome, 'held')
 
     def test_reviewer_approve_after_own_objection_lifts(self):
         # M1: newest effective verdict is per reviewer across same-byte claims.

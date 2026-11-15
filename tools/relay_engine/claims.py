@@ -11,6 +11,18 @@ CLAIM_CHECKS = {
              'independent completeness search with a known-positive control'),
 }
 CLAIM_WRITES = frozenset({'verification_requests'})
+STANDING_VERDICTS_SQL = (
+    'SELECT v.claim_relay_id, v.reviewer_seat_id, r.id, r.verdict, r.handle'
+    ' FROM verification_requests v CROSS JOIN relays c ON c.id = v.claim_relay_id'
+    ' LEFT JOIN relays r ON r.parent_id = v.request_relay_id'
+    " AND +r.sender_seat_id = v.reviewer_seat_id AND r.kind = 'REVIEW'"
+    ' AND r.verdict IS NOT NULL'
+    ' WHERE c.project_id = ? AND v.artifact = ? AND v.content_sha256 = ?')
+STANDING_WAIVERS_SQL = (
+    'SELECT w.claim_relay_id, w.after_handle FROM waivers w'
+    ' JOIN verification_requests v ON v.claim_relay_id = w.claim_relay_id'
+    ' AND v.kind = w.kind JOIN relays c ON c.id = v.claim_relay_id'
+    ' WHERE c.project_id = ? AND v.artifact = ? AND v.content_sha256 = ?')
 
 
 class AuthorityFilingFault(Exception):
@@ -143,18 +155,10 @@ def standing_objection(conn, project_id: str, artifact: str,
     """Newest standing reviewer objection over the project's same locked bytes."""
     with submit.read_guard(conn):
         verdicts = conn.execute(
-            'SELECT v.claim_relay_id, v.reviewer_seat_id, r.id, r.verdict, r.handle'
-            ' FROM verification_requests v JOIN relays c ON c.id = v.claim_relay_id'
-            ' LEFT JOIN relays r ON r.parent_id = v.request_relay_id'
-            " AND r.sender_seat_id = v.reviewer_seat_id AND r.kind = 'REVIEW'"
-            ' AND r.verdict IS NOT NULL'
-            ' WHERE c.project_id = ? AND v.artifact = ? AND v.content_sha256 = ?',
+            STANDING_VERDICTS_SQL,
             (project_id, artifact, content_sha256)).fetchall()
         waivers = conn.execute(
-            'SELECT w.claim_relay_id, w.after_handle FROM waivers w'
-            ' JOIN verification_requests v ON v.claim_relay_id = w.claim_relay_id'
-            ' AND v.kind = w.kind JOIN relays c ON c.id = v.claim_relay_id'
-            ' WHERE c.project_id = ? AND v.artifact = ? AND v.content_sha256 = ?',
+            STANDING_WAIVERS_SQL,
             (project_id, artifact, content_sha256)).fetchall()
     waived = {claim for claim, _ in waivers}
     frontier = max((after_handle for _, after_handle in waivers), default=0)

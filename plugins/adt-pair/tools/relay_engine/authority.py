@@ -680,9 +680,11 @@ def working_copy_digest(path, algorithm='sha256'):
     followed as a symbolic link, and a directory, FIFO or device answers None
     without being read, since the caller holds the store's write lock.
     `algorithm` is `sha256`, or `git-sha1` or `git-sha256` for a Git blob id of the
-    bytes (erratum 4 r2 R3); any other value raises ValueError.
+    bytes (erratum 4 r2 R3). A tuple of those names returns their digests in
+    order from the same read; an unknown name raises ValueError before reading.
     """
-    if algorithm != 'sha256' and algorithm not in _GIT_BLOB_HASHES:
+    algorithms = algorithm if isinstance(algorithm, tuple) else (algorithm,)
+    if any(name != 'sha256' and name not in _GIT_BLOB_HASHES for name in algorithms):
         raise ValueError('unknown working-copy digest algorithm')
     try:
         parent = os.open(os.path.dirname(path) or '.', os.O_RDONLY | os.O_DIRECTORY)
@@ -692,9 +694,12 @@ def working_copy_digest(path, algorithm='sha256'):
             os.close(parent)
     except OSError:
         return None
-    if algorithm == 'sha256':
-        return hashlib.sha256(data).hexdigest()
-    return _GIT_BLOB_HASHES[algorithm](b'blob %d\0' % len(data) + data).hexdigest()
+    def hashed(name):
+        if name == 'sha256':
+            return hashlib.sha256(data).hexdigest()
+        return _GIT_BLOB_HASHES[name](b'blob %d\0' % len(data) + data).hexdigest()
+    values = tuple(hashed(name) for name in algorithms)
+    return values if isinstance(algorithm, tuple) else values[0]
 
 
 def act_entry(conn, seat_id, effect, now_ms):

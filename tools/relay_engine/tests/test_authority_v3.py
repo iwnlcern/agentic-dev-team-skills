@@ -86,6 +86,20 @@ class TestAuthorityV3(SlipStore):
         for algorithm in ('md5', 'git-sha512', '', None):
             with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):
                 digest(str(self.plan), algorithm)
+        # WCD-TWICE: both digests must describe one regular-file observation.
+        with mock.patch.object(authority, '_read_regular_at', wraps=authority._read_regular_at) as reader:
+            try:
+                paired = digest(str(self.plan), ('git-sha1', 'sha256'))
+            except ValueError as error:
+                self.fail('working_copy_digest takes no algorithm tuple: %s' % error)
+            self.assertEqual(paired, (expected[(str(self.plan), 'git-sha1')],
+                                      expected[(str(self.plan), 'sha256')]))
+            self.assertEqual(reader.call_count, 1)
+        self.assertIsNone(digest(str(link), ('git-sha1', 'sha256')))
+        with mock.patch.object(authority, '_read_regular_at') as reader:
+            with self.assertRaises(ValueError):
+                digest(str(self.plan), ('sha256', 'md5'))
+            self.assertEqual(reader.call_count, 0)
 
     def test_act_entry_callee_ends_transaction(self):
         # F4: a callee that ends the caller's transaction leaves no savepoint; the entry answers held.
