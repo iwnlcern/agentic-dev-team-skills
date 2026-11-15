@@ -1363,6 +1363,66 @@ class TestAddressedTo(Store):
                 addressed(self.conn, "p", IMPL.seat_id, limit=10, since_ms=bad)
 
 
+    def test_addressed_windows(self):
+        # Breaks: counts ignore the bound, or <= repeats a boundary relay (W1/W2).
+        own = []
+        for i in range(7):
+            self.submit(draft(to=OTHER.address))
+            own.append(self.submit(draft(to=IMPL.address)))
+        before = None
+        seen = []
+        for expected, total, truncated in (([14, 12, 10], 7, True),
+                                            ([8, 6, 4], 4, True), ([2], 1, False)):
+            try:
+                page = queries.addressed_to(self.conn, "p", IMPL.seat_id,
+                                            limit=3, before_handle=before)
+            except TypeError as error:
+                self.fail(str(error))
+            handles = [row.handle for row in page.rows]
+            self.assertEqual(handles, expected)
+            self.assertEqual(page.total, total)
+            self.assertEqual(page.answered + page.unanswered + page.imported, total)
+            self.assertEqual(page.truncated, truncated)
+            seen.extend(handles)
+            before = handles[-1]
+        self.assertEqual(sorted(seen), [relay.handle for relay in own])
+        self.assertEqual(len(seen), len(set(seen)))
+
+    def test_addressed_window_refusals(self):
+        # Breaks: bool or out-of-range windows are accepted (W3/W4).
+        self.submit(draft(to=IMPL.address))
+        for before in (0, -1, 2**63, True, "3"):
+            seen = []
+            self.conn.set_authorizer(self._writes(seen))
+            try:
+                try:
+                    queries.addressed_to(self.conn, "p", IMPL.seat_id,
+                                         limit=3, before_handle=before)
+                except Exception as error:
+                    outcome = type(error).__name__
+                else:
+                    outcome = None
+            finally:
+                self.conn.set_authorizer(None)
+            self.assertEqual(outcome, "ValueError", before)
+            self.assertEqual(seen, [])
+            self.assertFalse(self.conn.in_transaction)
+
+    def test_addressed_window_empty(self):
+        # Breaks: a boundary is inclusive, or since and before are not combined.
+        self.submit(draft(to=OTHER.address))
+        own = self.submit(draft(to=IMPL.address))
+        for before, since in ((own.handle, None), (own.handle - 1, None),
+                              (own.handle + 1, own.created_at_ms + 1)):
+            try:
+                page = queries.addressed_to(self.conn, "p", IMPL.seat_id,
+                                            limit=3, since_ms=since,
+                                            before_handle=before)
+            except TypeError as error:
+                self.fail(str(error))
+            self.assertEqual(page, queries.AddressedPage(0, 0, 0, 0, False, ()))
+
+
 class TestSessionSteps(Store):
     SESSION = ("SELECT host_session_id, host, seat_id, occupant_id, generation, signed_in_at,"
                " last_seen_at, ended_at FROM seat_sessions ORDER BY generation")

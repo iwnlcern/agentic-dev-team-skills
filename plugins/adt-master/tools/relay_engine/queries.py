@@ -75,7 +75,8 @@ class AddressedPage:
 
 
 def addressed_to(conn, project_id: str, seat_id: str, *, limit: int,
-                 since_ms: int | None = None) -> AddressedPage:
+                 since_ms: int | None = None,
+                 before_handle: int | None = None) -> AddressedPage:
     """List a seat's TO relays and parent-rule answers in one read-only snapshot."""
     if conn.in_transaction:
         raise ValueError("addressed_to needs a connection with no open transaction")
@@ -83,6 +84,9 @@ def addressed_to(conn, project_id: str, seat_id: str, *, limit: int,
         raise ValueError("limit must be an int from 1 to 500")
     if since_ms is not None and (type(since_ms) is not int or not 0 <= since_ms < 2**48):
         raise ValueError("since_ms must be None or an int from 0 to 2**48 - 1")
+    if before_handle is not None and (type(before_handle) is not int
+                                      or not 1 <= before_handle <= 2**63 - 1):
+        raise ValueError("before_handle must be None or an int from 1 to 2**63 - 1")
     conn.execute("BEGIN")
     try:
         if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
@@ -103,6 +107,9 @@ def addressed_to(conn, project_id: str, seat_id: str, *, limit: int,
         if since_ms is not None:
             selected += " AND r.created_at>=?"
             parameters += (since_ms,)
+        if before_handle is not None:
+            selected += " AND r.handle<?"
+            parameters += (before_handle,)
         total, answered, unanswered, imported = conn.execute(
             "SELECT count(*), coalesce(sum(state='answered'), 0),"
             " coalesce(sum(state='unanswered'), 0), coalesce(sum(state='imported'), 0)"
