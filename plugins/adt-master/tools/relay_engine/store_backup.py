@@ -61,9 +61,17 @@ def present_ledgers(catalogue_conn, root) -> tuple[str, ...]:
 
 def _present_routes(catalogue_conn, root):
     routes = store_layout.project_routes(catalogue_conn)
-    present = tuple(sorted(route.project_id for route in routes
-                           if store_layout.ledger_path(root, route.project_id).exists()))
-    return routes, present
+    present = []
+    for route in routes:
+        try:
+            os.stat(store_layout.ledger_path(root, route.project_id))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BackupRefused('copy-failed', route.project_id) from exc
+        else:
+            present.append(route.project_id)
+    return routes, tuple(sorted(present))
 
 
 def _route_states(conn):

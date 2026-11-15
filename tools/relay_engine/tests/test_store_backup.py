@@ -146,6 +146,45 @@ class TestBackups(unittest.TestCase):
         self._absent_creating_case()
         self._active_missing_case()
 
+    def test_present_ledgers_stat_failure(self):
+        # Break: suppressing unreadable ledgers or leaking their raw stat error.
+        self.reserve(); self.create(); self.activate()
+        self.reserve(Q); self.create(Q)
+        store_backup.backup(self.turns, self.root, 'daily', NOW)
+        partial = self.root / 'backups' / '.partial'
+        marker = partial / 'retained'
+        marker.write_bytes(b'untouched on refusal')
+        before = self._tree_bytes(self.root / 'backups')
+        published = self._published()
+        real_stat = os.stat
+        for project in (P, Q):
+            with self.subTest(project=project):
+                target = store_layout.ledger_path(self.root, project)
+                injected = PermissionError('injected unreadable ledger')
+                def checked_stat(path, *args, **kwargs):
+                    if path == target:
+                        raise injected
+                    return real_stat(path, *args, **kwargs)
+                with mock.patch.object(os, 'stat', side_effect=checked_stat):
+                    caught, result = self._caught_backup('daily', NOW + 1)
+                self.assertIsInstance(caught, store_backup.BackupRefused)
+                self.assertIs(caught.__cause__, injected)
+                self.assertEqual((caught.reason, caught.detail), ('copy-failed', project))
+                self.assertIsNone(result)
+                self.assertEqual(self._published(), published)
+                self.assertEqual(self._tree_bytes(self.root / 'backups'), before)
+        target = store_layout.ledger_path(self.root, Q)
+        def absent_stat(path, *args, **kwargs):
+            if path == target:
+                raise FileNotFoundError(2, 'injected absent creating ledger')
+            return real_stat(path, *args, **kwargs)
+        with mock.patch.object(os, 'stat', side_effect=absent_stat):
+            result = store_backup.backup(self.turns, self.root, 'daily', NOW + 2)
+        self.assertIn(f'projects/{P}/ledger.sqlite3', result.files)
+        self.assertNotIn(f'projects/{Q}/ledger.sqlite3', result.files)
+        self.assertEqual(self.read(result, 'machine.sqlite3',
+            'SELECT state FROM project_routes WHERE project_id="' + Q + '"'), [('creating',)])
+
     def test_backup_refuses_creation_pending(self):
         # Break: mapping in take (unreachable), classifying active corruption as pending.
         self.reserve()
