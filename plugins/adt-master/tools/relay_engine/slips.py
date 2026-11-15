@@ -50,7 +50,7 @@ import json
 from pathlib import Path
 from types import MappingProxyType
 
-from . import claims, header, queries, strings, submit
+from . import claims, header, queries, restore_cancel, strings, submit
 
 # Erratum 3 r2 B3: a commit's answer by the committing seat's role word; a role absent
 # from the table answers slip-missing and never allow.
@@ -217,9 +217,14 @@ def _decide(conn, walk, holder):
                         reviewer = conn.execute(
                             'SELECT reviewer_seat_id FROM verification_requests'
                             ' WHERE claim_relay_id = ? LIMIT 1', (current[1],)).fetchone()
-                        recoverable = (claims.verification_state(conn, current[1]) == 'pending'
+                        verification = claims.verification_state(conn, current[1])
+                        recoverable = (verification == 'pending'
                                        and not claims.reviewer_can_answer(conn, reviewer[0] if reviewer else None))
-                        if not recoverable:
+                        old_handle, cut = conn.execute(restore_cancel.CLAIM_CUT_SQL, (current[1],)).fetchone()
+                        restored = (restore_cancel.claim_is_cut(cut, old_handle)
+                                    and not restore_cancel.claim_is_cut(cut, row.handle)
+                                    and verification != 'waived')
+                        if not (recoverable or restored):
                             continue  # keep recorded verdicts/waivers and answerable pending claims
                     state[lock.artifact] = ('locked', row.id, source, lock)
                 if decided:

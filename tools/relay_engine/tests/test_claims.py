@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 from unittest import mock
 
-from relay_engine import claims, errors, header, queries, submit
+from relay_engine import claims, errors, header, queries, restore_cancel, submit
 from relay_engine.tests.test_submit import Store, PLANNER, IMPL, ORCH, OTHER, SEATS, draft
 from relay_engine.tests.test_refs import Repo, clean_git_environment, git
 
@@ -501,7 +501,7 @@ class TestRuleHClaims(ClaimStore):
                                       hashlib.sha256(self.plan.read_bytes()).hexdigest())
         finally:
             self.conn.set_trace_callback(None)
-        self.assertEqual(len(statements), 2, statements)
+        self.assertEqual(len(statements), 3, statements)
 
     def test_standing_objection_executes_the_constants(self):
         # SQL-INLINE: explain and execute must refer to the same statement text.
@@ -519,7 +519,7 @@ class TestRuleHClaims(ClaimStore):
                 return self.conn.execute(sql, parameters)
         claims.standing_objection(RecordingConnection(self.conn), 'p', str(self.plan),
                                   hashlib.sha256(self.plan.read_bytes()).hexdigest())
-        self.assertEqual(statements, [claims.STANDING_VERDICTS_SQL, claims.STANDING_WAIVERS_SQL])
+        self.assertEqual(statements, [claims.STANDING_VERDICTS_SQL, claims.STANDING_WAIVERS_SQL, restore_cancel.CUT_SQL])
 
     def test_rule_h_statements_use_bytes_index(self):
         # IDX-DROP: both actual statements have the artifact/content access path.
@@ -561,7 +561,7 @@ class TestRuleHClaims(ClaimStore):
                                       hashlib.sha256(self.plan.read_bytes()).hexdigest())
         finally:
             self.conn.set_trace_callback(None)
-        self.assertEqual(len(trace), 2, trace)
+        self.assertEqual(len(trace), 3, trace)
         self.assertIn('verification_requests', trace[0])
         self.assertIn('waivers', trace[1])
         trace = []

@@ -2255,7 +2255,7 @@ class TestRuleH(SlipStore):
         for path in (q, p):
             _, statements = traced(lambda: claims.standing_objection(
                 self.conn, 'p', str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
-            self.assertEqual(len(statements), 2, statements)
+            self.assertEqual(len(statements), 3, statements)
             expected.extend(statements)
         self.conn.execute('BEGIN IMMEDIATE')
         try:
@@ -2553,7 +2553,7 @@ class TestRuleH(SlipStore):
                 for path in paths:
                     _, statements = traced(lambda: claims.standing_objection(
                         self.conn, 'p', str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
-                    self.assertEqual(len(statements), 2, statements)
+                    self.assertEqual(len(statements), 3, statements)
                     expected_h.extend(statements)
                 _, expected_state = traced(lambda: claims.verification_state(self.conn, claim.relay_id))
                 self.conn.execute('BEGIN IMMEDIATE')

@@ -10766,7 +10766,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/claims.py",
-    "sha256": "ed465c53c873922674addbbb8d8a2ab2687169a36b7f8ed1b1051166d24ce260",
+    "sha256": "53c721a65e0a00dd9bc20c76ea46980e5276b9929d4d37364b32f31affcce98d",
     "source": "tools/relay_engine/claims.py"
   },
   {
@@ -10982,7 +10982,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/restore_cancel.py",
-    "sha256": "bdce122d6942e267f0ccb3656ed2ae4ac7f998d4ad18f1b81a72c191583c03d5",
+    "sha256": "42fae38a3469e51f9a805b9d286ee3d2641f1455a0f15d29b6e6d84d25ccb976",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -11042,7 +11042,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/slips.py",
-    "sha256": "4e09672ac2186a1084513e96bb38fa5b8e0264d5b5f24196095be381ee32c3b4",
+    "sha256": "ba57cf3d249e37e1342cc6d429123dd705c3de336b5de4074ac65fd9b1f7e7f6",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -21770,7 +21770,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/claims.py",
-    "sha256": "ed465c53c873922674addbbb8d8a2ab2687169a36b7f8ed1b1051166d24ce260",
+    "sha256": "53c721a65e0a00dd9bc20c76ea46980e5276b9929d4d37364b32f31affcce98d",
     "source": "tools/relay_engine/claims.py"
   },
   {
@@ -21986,7 +21986,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/restore_cancel.py",
-    "sha256": "bdce122d6942e267f0ccb3656ed2ae4ac7f998d4ad18f1b81a72c191583c03d5",
+    "sha256": "42fae38a3469e51f9a805b9d286ee3d2641f1455a0f15d29b6e6d84d25ccb976",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -22046,7 +22046,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/slips.py",
-    "sha256": "4e09672ac2186a1084513e96bb38fa5b8e0264d5b5f24196095be381ee32c3b4",
+    "sha256": "ba57cf3d249e37e1342cc6d429123dd705c3de336b5de4074ac65fd9b1f7e7f6",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -32690,7 +32690,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/claims.py",
-    "sha256": "ed465c53c873922674addbbb8d8a2ab2687169a36b7f8ed1b1051166d24ce260",
+    "sha256": "53c721a65e0a00dd9bc20c76ea46980e5276b9929d4d37364b32f31affcce98d",
     "source": "tools/relay_engine/claims.py"
   },
   {
@@ -32906,7 +32906,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/restore_cancel.py",
-    "sha256": "bdce122d6942e267f0ccb3656ed2ae4ac7f998d4ad18f1b81a72c191583c03d5",
+    "sha256": "42fae38a3469e51f9a805b9d286ee3d2641f1455a0f15d29b6e6d84d25ccb976",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -32966,7 +32966,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/slips.py",
-    "sha256": "4e09672ac2186a1084513e96bb38fa5b8e0264d5b5f24196095be381ee32c3b4",
+    "sha256": "ba57cf3d249e37e1342cc6d429123dd705c3de336b5de4074ac65fd9b1f7e7f6",
     "source": "tools/relay_engine/slips.py"
   },
   {

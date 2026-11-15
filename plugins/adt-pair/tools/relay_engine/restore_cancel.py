@@ -89,3 +89,35 @@ def release(conn, project_id: str, by_principal: str, now_ms: int) -> None:
         if conn.in_transaction:
             conn.execute('ROLLBACK')
         raise
+
+
+CLAIM_CUT_SQL = (
+    'SELECT r.handle, c.cut_handle FROM relays r LEFT JOIN restore_cancels c'
+    ' ON c.project_id = r.project_id WHERE r.id = ?')
+CUT_VERDICTS_SQL = (
+    'SELECT r.verdict, r.handle, EXISTS(SELECT 1 FROM imported_relays i WHERE i.relay_id = r.id)'
+    ' FROM relays r WHERE r.parent_id = ? AND r.sender_seat_id = ?'
+    " AND r.kind = 'REVIEW' AND r.verdict IS NOT NULL ORDER BY r.created_at DESC")
+
+
+def claim_is_cut(cut: int | None, claim_handle: int) -> bool:
+    return cut is not None and claim_handle <= cut
+
+
+def approve_counts(cut: int | None, claim_handle: int, verdict_handle: int, imported: bool) -> bool:
+    return cut is None or (not claim_is_cut(cut, claim_handle)
+                           and not (imported and verdict_handle > cut))
+
+
+def marks(conn, claim_ids, review_ids) -> tuple[dict[str, int], frozenset[str]]:
+    ids = tuple(sorted(set(claim_ids) | set(review_ids)))
+    if not ids:
+        return {}, frozenset()
+    with submit.read_guard(conn):
+        rows = conn.execute('SELECT r.id, r.handle, EXISTS(SELECT 1 FROM imported_relays i'
+                            ' WHERE i.relay_id = r.id) FROM relays r WHERE r.id IN ('
+                            + ','.join('?' for _ in ids) + ')', ids).fetchall()
+    claims = set(claim_ids)
+    reviews = set(review_ids)
+    return ({rid: handle for rid, handle, _ in rows if rid in claims},
+            frozenset(rid for rid, _, imported in rows if rid in reviews and imported))

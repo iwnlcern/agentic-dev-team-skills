@@ -1,7 +1,7 @@
 """Approval claims and reviewer verification, using admission metadata only."""
 from dataclasses import dataclass, replace
 
-from . import errors, header, queries, refs, strings, submit
+from . import errors, header, queries, refs, restore_cancel, strings, submit
 
 CLAIM_KINDS = ('design', 'plan')
 CLAIM_CHECKS = {
@@ -134,6 +134,14 @@ def verification_state(conn, claim_relay_id):
             return 'waived'
         if request is None or reviewer is None:
             return 'pending'
+        claim_handle, cut = conn.execute(restore_cancel.CLAIM_CUT_SQL, (claim_relay_id,)).fetchone()
+        if cut is not None:
+            verdicts = conn.execute(restore_cancel.CUT_VERDICTS_SQL, (request, reviewer)).fetchall()
+            for verdict, handle, imported in verdicts:
+                if verdict == 'approve' and not restore_cancel.approve_counts(cut, claim_handle, handle, imported):
+                    continue
+                return 'approved' if verdict == 'approve' else 'objected'
+            return 'pending'
         verdict = conn.execute("SELECT verdict FROM relays WHERE parent_id = ?"
                                " AND sender_seat_id = ? AND kind = 'REVIEW'"
                                " AND verdict IS NOT NULL ORDER BY created_at DESC LIMIT 1",
@@ -160,6 +168,12 @@ def standing_objection(conn, project_id: str, artifact: str,
         waivers = conn.execute(
             STANDING_WAIVERS_SQL,
             (project_id, artifact, content_sha256)).fetchall()
+        cut = restore_cancel.cut_of(conn, project_id)
+        if cut is not None:
+            handles, imported = restore_cancel.marks(
+                conn, [row[0] for row in verdicts], [row[2] for row in verdicts if row[2] is not None])
+            verdicts = [row for row in verdicts if row[3] != 'approve' or
+                        restore_cancel.approve_counts(cut, handles[row[0]], row[4], row[2] in imported)]
     waived = {claim for claim, _ in waivers}
     frontier = max((after_handle for _, after_handle in waivers), default=0)
     newest = {}
