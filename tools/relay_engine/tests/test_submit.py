@@ -3657,6 +3657,109 @@ class TestImportStep(Store):
             "SELECT id FROM relays WHERE submission_key IS NULL"
             " AND coalesce(sender_special, '') != 'system'").fetchall(), [(imported,)])
 
+    def _answer_import(self, module, answers, **changes):
+        created = self.conn.execute("SELECT coalesce(max(created_at), 0)+1"
+                                    " FROM relays WHERE project_id='p'").fetchone()[0]
+        values = dict(created_at=created, sender=IMPL.seat_id, sender_role=IMPL.role,
+                      team_instance_id=IMPL.team_instance_id, to=(PLANNER.seat_id,), cc=())
+        values.update(changes)
+        try:
+            return self.imported(module, answers=answers, **values)
+        except TypeError as error:
+            self.fail(str(error))
+
+    def _answer_targets(self, module):
+        ids = []
+        self.conn.execute("BEGIN IMMEDIATE")
+        for i, (to, cc) in enumerate(((IMPL, OTHER), (OTHER, IMPL), (IMPL, OTHER))):
+            relay = self.imported(module, created_at=100+i, to=(to.seat_id,), cc=(cc.seat_id,))
+            ids.append(module.import_relay_step(self.conn, "p", relay,
+                                                marked_at_ms=self.clock+100))
+        self.conn.commit()
+        return ids
+
+    def test_import_answers_marks(self):
+        # Breaks: no marker or markers for other recipients (IA1/IA2).
+        from relay_engine import imports, jcs
+        first, second, parent = self._answer_targets(imports)
+        relay = self._answer_import(imports, (first, second),
+                                    parent_id=parent, parent_spelling="#3")
+        before = self.tables()
+        self.conn.execute("BEGIN IMMEDIATE")
+        rid = imports.import_relay_step(self.conn, "p", relay, marked_at_ms=self.clock+100)
+        self.conn.commit()
+        after = self.tables()
+        for table, rows in before.items():
+            expected = rows
+            if table == "recipients":
+                columns = [r[1] for r in self.conn.execute("PRAGMA table_info(recipients)")]
+                expected = []
+                for row in rows:
+                    values = dict(zip(columns, row))
+                    if values["relay_id"] in (first, second) and values["seat_id"] == IMPL.seat_id:
+                        values["answered_by"] = rid
+                    expected.append(tuple(values[c] for c in columns))
+            self.assertEqual(after[table][:len(rows)], expected, table)
+        expected_digest = hashlib.sha256(jcs.jcs_encode(
+            {"import": "2.9.7", "header_sha256": "a"*64, "parent": parent,
+             "answers": [first, second]})).hexdigest()
+        self.assertEqual(self.relay(rid)["meta_sha256"], expected_digest)
+
+    def test_import_answers_refusals(self):
+        # Breaks: parent, opened or project guard removed (IA3/IA4/IA5).
+        from relay_engine import imports, queries
+        first, second, parent = self._answer_targets(imports)
+        absent = self.submit(draft(to=OTHER.address))
+        unopened = self.submit(draft(to=IMPL.address))
+        foreign = self.submit(draft(to=IMPL.address), sender=FOREIGN)
+        queries.read(self.conn, foreign.relay_id, IMPL.seat_id, self.clock+100,
+                     foreign_release=lambda conn, target: True)
+        # The foreign target has an opened sender row; only project can refuse it.
+        self.assertIsNotNone(self.conn.execute("SELECT opened_at FROM recipients"
+            " WHERE relay_id=? AND seat_id=?", (foreign.relay_id, IMPL.seat_id)).fetchone()[0])
+        cases = [((foreign.relay_id,), {}), ((parent,), {"parent_id": parent,
+                 "parent_spelling": "#3"}), ((first, first), {}), ((absent.relay_id,), {}),
+                 ((unopened.relay_id,), {}), ([first], {}), ((7,), {})]
+        message = ("the import answers must name earlier relays of this project that the sender "
+                   "holds and has opened, each once and none its parent")
+        for i, (answers, changes) in enumerate(cases):
+            relay = self._answer_import(imports, answers, **changes)
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute("UPDATE projects SET name=? WHERE id='p'", ("caller-"+str(i),))
+            before = self.tables()
+            _, error = self.attempt(lambda: imports.import_relay_step(
+                self.conn, "p", relay, marked_at_ms=self.clock+100))
+            self.assertIsInstance(error, ValueError, repr(error))
+            self.assertEqual(str(error), message)
+            self.assertEqual(self.tables(), before)
+            self.assertTrue(self.conn.in_transaction)
+            self.conn.rollback()
+
+    def test_import_answers_rollback(self):
+        # Breaks: swallow second marker fault or leave the first update behind (IA6).
+        from relay_engine import imports
+        first, second, _ = self._answer_targets(imports)
+        relay = self._answer_import(imports, (first, second))
+        original = submit._write_answered_by
+        calls = []
+        def fail_second(conn, target, sender, reply):
+            calls.append(target)
+            if len(calls) == 2:
+                raise RuntimeError("fixture answer fault")
+            return original(conn, target, sender, reply)
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("UPDATE projects SET name='caller' WHERE id='p'")
+        before = self.tables()
+        with mock.patch.object(submit, "_write_answered_by", side_effect=fail_second):
+            _, error = self.attempt(lambda: imports.import_relay_step(
+                self.conn, "p", relay, marked_at_ms=self.clock+100))
+        self.assertIsInstance(error, RuntimeError, repr(error))
+        self.assertEqual(str(error), "fixture answer fault")
+        self.assertEqual(calls, [first, second])
+        self.assertEqual(self.tables(), before)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+
 
 class TestAnswers(Store):
     def _draft(self, answers, **kwargs):

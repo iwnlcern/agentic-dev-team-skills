@@ -1499,6 +1499,25 @@ class TestAddressedTo(Store):
         after = queries.unopened_flags(self.conn, "p", read_at + queries.IDLE_MS + 1)
         self.assertEqual([flag for flag in after if flag.seat_id == IMPL.seat_id], [])
 
+    def test_addressed_imported_answers(self):
+        # Breaks: an import's answer is unmarked or imported takes precedence (L3).
+        from relay_engine import imports
+        target = self._import()
+        created = self.conn.execute("SELECT max(created_at)+1 FROM relays"
+                                    " WHERE project_id='p'").fetchone()[0]
+        try:
+            reply = imports.ImportedRelay(created, "SITREP", None, "reply", IMPL.seat_id,
+                IMPL.role, IMPL.team_instance_id, (PLANNER.seat_id,), (), None, None,
+                b"body\n", 0, "a"*64, answers=(target,))
+        except TypeError as error:
+            self.fail(str(error))
+        self.conn.execute("BEGIN IMMEDIATE")
+        imports.import_relay_step(self.conn, "p", reply, marked_at_ms=created+1)
+        self.conn.commit()
+        page = queries.addressed_to(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual([(r.relay_id, r.state) for r in page.rows], [(target, "answered")])
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported), (1, 1, 0, 0))
+
 
 class TestSessionSteps(Store):
     SESSION = ("SELECT host_session_id, host, seat_id, occupant_id, generation, signed_in_at,"
