@@ -1,4 +1,5 @@
 """Backups preserve saga order, pin evidence and refuse unsafe snapshots."""
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -277,6 +278,9 @@ class TestBackups(unittest.TestCase):
         for boundary in ('file', 'directory'):
             with self.subTest(boundary=boundary):
                 self._manifest_sync_case(boundary)
+        for removal_fails in (False, True):
+            with self.subTest(removal_fails=removal_fails):
+                self._copy_cleanup_case(removal_fails)
 
     def _new_store(self, name):
         self.root = Path(self.tmp.name) / name
@@ -334,3 +338,83 @@ class TestBackups(unittest.TestCase):
         self.assertIs(caught.exception.__cause__, failure)
         self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
         self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path])
+
+    def _copy_cleanup_case(self, removal_fails):
+        # Break: retaining full copied databases, or replacing the copy cause.
+        self._new_store('cleanup-' + str(removal_fails))
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        stamp = datetime.fromtimestamp((NOW + 1) / 1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+        target = first.path.parent / (stamp + '-daily')
+        failure = OSError('injected copy failure after payload')
+        cleanup = OSError('injected directory removal failure')
+        real_copy, real_remove = store_backup._copy, store_backup.shutil.rmtree
+        def fail_copy(source, destination):
+            real_copy(source, destination)
+            raise failure
+        def remove(path, *args, **kwargs):
+            if removal_fails and Path(path) == target:
+                raise cleanup
+            return real_remove(path, *args, **kwargs)
+        with mock.patch.object(store_backup, '_copy', side_effect=fail_copy), mock.patch.object(store_backup.shutil, 'rmtree', side_effect=remove):
+            with self.assertRaises(store_backup.BackupRefused) as caught:
+                store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
+        self.assertEqual(caught.exception.reason, 'copy-failed')
+        self.assertIs(caught.exception.__cause__, failure)
+        if removal_fails:
+            self.assertIn(str(cleanup), '\n'.join(getattr(failure, '__notes__', ())))
+            self.assertTrue(target.is_dir())
+        else:
+            self.assertEqual(list(first.path.parent.iterdir()), [first.path])
+        self.assertEqual(store_backup.last_complete(self.root, 'daily'), NOW)
+        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path])
+
+    def _abandoned(self, first, name='20000101T000000.000000Z-daily'):
+        path = first.path.parent / name
+        path.mkdir()
+        (path/'machine.sqlite3').write_bytes((first.path/'machine.sqlite3').read_bytes())
+        (path/'manifest.tmp').write_bytes(b'killed before publication')
+        return path
+
+    def _tree_bytes(self, path):
+        return {p.relative_to(path).as_posix(): p.read_bytes()
+                for p in path.rglob('*') if p.is_file()}
+
+    def test_abandoned_remains_removed(self):
+        # S2-M12: deleting every incomplete directory destroys a damaged backup.
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        abandoned = self._abandoned(first)
+        damaged = self._abandoned(first, '20000101T000000.000001Z-before-move')
+        (damaged/'manifest.json').write_bytes(b'{damaged complete manifest')
+        unrelated = self._abandoned(first, 'operator-notes')
+        outside = self.root/'link-target'
+        outside.mkdir(); (outside/'keep').write_bytes(b'outside target')
+        link = first.path.parent/'20000101T000000.000002Z-daily'
+        link.symlink_to(outside, target_is_directory=True)
+        saved_damaged, saved_unrelated = self._tree_bytes(damaged), self._tree_bytes(unrelated)
+        saved_link, saved_target = link.readlink(), self._tree_bytes(outside)
+        result = store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
+        self.assertFalse(abandoned.exists())
+        self.assertTrue(damaged.is_dir())
+        self.assertEqual(self._tree_bytes(damaged), saved_damaged)
+        self.assertTrue(unrelated.is_dir())
+        self.assertEqual(self._tree_bytes(unrelated), saved_unrelated)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.readlink(), saved_link)
+        self.assertEqual(self._tree_bytes(outside), saved_target)
+        self.assertEqual(result.remains, ())
+        self.assertIn(first.path, [row[3] for row in store_backup._complete(self.root)])
+
+    def test_unremovable_leftover_named(self):
+        # Break: refusing a good backup or silently dropping a cleanup failure.
+        first = store_backup.backup(self.turns, self.root, 'daily', NOW)
+        abandoned = self._abandoned(first)
+        real_remove = store_backup.shutil.rmtree
+        def remove(path, *args, **kwargs):
+            if Path(path) == abandoned:
+                raise OSError('injected abandoned removal failure')
+            return real_remove(path, *args, **kwargs)
+        with mock.patch.object(store_backup.shutil, 'rmtree', side_effect=remove):
+            result = store_backup.backup(self.turns, self.root, 'daily', NOW + 1)
+        self.assertEqual(getattr(result, 'remains', None), (abandoned.name,))
+        self.assertTrue(abandoned.is_dir())
+        self.assertEqual([row[3] for row in store_backup._complete(self.root)], [first.path, result.path])

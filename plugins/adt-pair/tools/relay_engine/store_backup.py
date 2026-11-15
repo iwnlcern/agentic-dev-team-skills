@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import time
@@ -14,6 +15,7 @@ from relay_engine import store_evidence, store_layout, store_steps, version
 
 _REASONS = ('daily', 'before-move', 'before-update')
 _DAY_MS = 86400000
+_BACKUP_NAME = re.compile(r'^[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-(daily|before-move|before-update)$')
 
 
 class BackupRefused(Exception):
@@ -41,6 +43,7 @@ class BackupManifest:
     now_ms: int
     files: Mapping[str, dict]
     held_seconds: float
+    remains: tuple[str, ...]
 
 
 def _rows(conn, sql, args=()):
@@ -131,6 +134,22 @@ def _copy(source, destination):
     return record
 
 
+def _remove_abandoned(directory, current):
+    remains = []
+    for path in sorted(directory.iterdir()):
+        if path == current or path.is_symlink() or not path.is_dir():
+            continue
+        manifest = path / 'manifest.json'
+        if not _BACKUP_NAME.fullmatch(path.name) or manifest.exists() or manifest.is_symlink():
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            remains.append(path.name)
+    store_evidence._sync_dir(directory)
+    return tuple(remains)
+
+
 def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int, *,
          then_hold: tuple[str, str, Sequence[str]] | None = None) -> BackupManifest:
     """Copy while every declared source is locked; publish before taking holds."""
@@ -160,6 +179,7 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
         stamp = datetime.fromtimestamp(now_ms / 1000, timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         directory = root / 'backups' / (stamp + '-' + reason)
         store_evidence._mkdir(directory.parent)
+        remains = _remove_abandoned(directory.parent, directory)
         directory.mkdir(mode=0o700)
         created = True
         store_evidence._sync_dir(directory.parent)
@@ -201,6 +221,9 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
         _write_synced(temporary, encoded)
         temporary.rename(directory / 'manifest.json')
         store_evidence._sync_dir(directory)
+        if then_hold is not None:
+            job, kind, scopes = then_hold
+            store_layout.take_holds(cat, job, kind, scopes, now_ms)
     except Exception as exc:
         if created:
             for name in ('manifest.json', 'manifest.sha256'):
@@ -208,11 +231,13 @@ def take(conns: Mapping[str, sqlite3.Connection], root, reason: str, now_ms: int
                     (directory / name).unlink(missing_ok=True)
                 except OSError as cleanup:
                     exc.add_note(f'manifest cleanup failed: {cleanup}')
+            try:
+                shutil.rmtree(directory)
+                store_evidence._sync_dir(directory.parent)
+            except OSError as cleanup:
+                exc.add_note(f'backup directory cleanup failed: {cleanup}')
         raise BackupRefused('copy-failed', str(exc)) from exc
-    if then_hold is not None:
-        job, kind, scopes = then_hold
-        store_layout.take_holds(cat, job, kind, scopes, now_ms)
-    return BackupManifest(directory, store_id, reason, now_ms, files, held_seconds)
+    return BackupManifest(directory, store_id, reason, now_ms, files, held_seconds, remains)
 
 
 def _complete(root):
