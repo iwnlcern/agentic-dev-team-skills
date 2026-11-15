@@ -666,6 +666,9 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
             seeded = submit.open_store(path)
             platform_rows(seeded)
             seeded.commit()
+            # Production opens WAL. Durability pragmas are per connection;
+            # synchronous=FULL and fullfsync lengthen commits, not lock contention.
+            self.assertEqual(seeded.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
             seeded.close()
             barrier, queue = spawn.Barrier(2), spawn.Queue()
             workers = [spawn.Process(target=_hammer, args=(path, address, 300, barrier, queue))
