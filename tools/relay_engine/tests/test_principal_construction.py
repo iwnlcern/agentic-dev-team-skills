@@ -10,6 +10,38 @@ CONSTRUCTION_SITES = {'ServicePrincipal': {'approval_seal': 'seal_worker.py'},
                       'OperatorPrincipal': {}}
 
 
+def _resolved_kinds(node, names):
+    if isinstance(node, ast.Name):
+        return names.get(node.id, frozenset())
+    if isinstance(node, ast.Attribute) and node.attr in CONSTRUCTION_SITES:
+        return frozenset({node.attr})
+    return frozenset()
+
+
+def alias_kinds(tree, *, max_passes: int) -> dict[str, frozenset[str]]:
+    names = {kind: {kind} for kind in CONSTRUCTION_SITES}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in CONSTRUCTION_SITES:
+                    names.setdefault(alias.asname or alias.name, set()).add(alias.name)
+    for _ in range(max_passes):
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                value = _resolved_kinds(node.value, names)
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if value and isinstance(target, ast.Name):
+                        kinds = names.setdefault(target.id, set())
+                        if value - kinds:
+                            kinds.update(value)
+                            changed = True
+        if not changed:
+            return {name: frozenset(kinds) for name, kinds in names.items()}
+    raise RuntimeError('construction_scan_did_not_end')
+
+
 def constructions(root):
     found = []
     for path in sorted(Path(root).rglob('*.py')):
@@ -17,31 +49,14 @@ def constructions(root):
         if 'tests' in relative.parts or path.name == 'api_principals.py':
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
-        names = {'ServicePrincipal': 'ServicePrincipal', 'OperatorPrincipal': 'OperatorPrincipal'}
+        assignments = sum(isinstance(node, (ast.Assign, ast.AnnAssign)) for node in ast.walk(tree))
+        names = alias_kinds(tree, max_passes=2 * assignments + 2)
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    if alias.name in names:
-                        names[alias.asname or alias.name] = alias.name
-        def resolve(node):
-            if isinstance(node, ast.Name): return names.get(node.id)
-            if isinstance(node, ast.Attribute) and node.attr in CONSTRUCTION_SITES: return node.attr
-            return None
-        changed = True
-        while changed:
-            changed = False
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    value = resolve(node.value)
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    for target in targets:
-                        if value and isinstance(target, ast.Name) and names.get(target.id) != value:
-                            names[target.id] = value; changed = True
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and (kind := resolve(node.func)):
+            if isinstance(node, ast.Call):
                 value = node.args[0] if len(node.args) == 1 and not node.keywords else None
                 literal = value.value if isinstance(value, ast.Constant) and type(value.value) is str else None
-                found.append((relative.as_posix(), node.lineno, kind, literal))
+                for kind in sorted(_resolved_kinds(node.func, names)):
+                    found.append((relative.as_posix(), node.lineno, kind, literal))
     return found
 
 
@@ -80,5 +95,48 @@ class TestPrincipalConstruction(unittest.TestCase):
         self.assertEqual(violations(PACKAGE),[])
         self.assertEqual(len(constructions(PACKAGE)),1)
 
+
+    def test_construction_scan_ends_on_rebinding(self):
+        from relay_engine.tests.test_principal_construction import alias_kinds
+        def overwriting_alias_kinds(tree, *, max_passes):
+            names = {'ServicePrincipal': 'ServicePrincipal', 'OperatorPrincipal': 'OperatorPrincipal'}
+            def resolve(node):
+                if isinstance(node, ast.Name):
+                    return names.get(node.id)
+                if isinstance(node, ast.Attribute) and node.attr in CONSTRUCTION_SITES:
+                    return node.attr
+                return None
+            for _ in range(max_passes):
+                changed = False
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        value = resolve(node.value)
+                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                        for target in targets:
+                            if value and isinstance(target, ast.Name) and names.get(target.id) != value:
+                                names[target.id] = value
+                                changed = True
+                if not changed:
+                    return names
+            raise RuntimeError('construction_scan_did_not_end')
+        fixtures = {
+            'rebinding.py': "ctor = ServicePrincipal\nctor = OperatorPrincipal\nctor('page')\n",
+            'scopes.py': "def first():\n    ctor = ServicePrincipal\n    ctor('approval_seal')\ndef second():\n    ctor = OperatorPrincipal\n    ctor('approval_seal')\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, source in fixtures.items():
+                (root / name).write_text(source)
+                tree = ast.parse(source)
+                assignments = sum(isinstance(n, (ast.Assign, ast.AnnAssign)) for n in ast.walk(tree))
+                bound = 2 * assignments + 2
+                self.assertEqual(alias_kinds(tree, max_passes=bound)['ctor'],
+                                 frozenset({'ServicePrincipal', 'OperatorPrincipal'}))
+                with self.assertRaisesRegex(RuntimeError, '^construction_scan_did_not_end$'):
+                    overwriting_alias_kinds(tree, max_passes=bound)
+            rows = constructions(root)
+            self.assertEqual(len(rows), 6)
+            operator_rows = [row for row in violations(root) if row[2] == 'OperatorPrincipal']
+            self.assertEqual({row[0] for row in operator_rows}, set(fixtures))
+            self.assertEqual(len(operator_rows), 3)
 
 if __name__ == '__main__':unittest.main()
