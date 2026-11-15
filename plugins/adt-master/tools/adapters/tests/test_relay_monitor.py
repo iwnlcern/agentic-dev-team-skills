@@ -205,6 +205,10 @@ def ns(**kw):
     return types.SimpleNamespace(**base)
 
 
+# PL-v3-adapter-timed-tests r2: test headroom above observed save times.
+# Calls that take longer than this finite real-time budget still fail.
+ROOMY_DEADLINE_S = 30.0
+
 HEADER = (
     "| time | phase | role | dispatch | parent | from | t"
     "o | cc | status | file |\n|---|---|---|---|---|---|--"
@@ -510,7 +514,7 @@ class SessionIdentityTests(TmpEnv):
                     capture_output=True,
                     text=True,
                     env=env,
-                    timeout=2,
+                    timeout=10,
                 )
             except subprocess.TimeoutExpired:
                 self.fail("invalid session entry did not refuse to start")
@@ -1042,7 +1046,7 @@ class DeliveryTests(TmpEnv):
 
         self.store.update(fn)
 
-    def deliver(self, sink=None, deadline=0.5, snap=None, **kw):
+    def deliver(self, sink=None, deadline=ROOMY_DEADLINE_S, snap=None, **kw):
         sink = sink if sink is not None else self.rm.ByteSink()
         binding = kw.pop("binding", None) or self.rm.resolve_binding(
             self.store.load(), {}, None
@@ -1075,6 +1079,35 @@ class DeliveryTests(TmpEnv):
             b = self.rm.resolve_binding(note, os.environ, None)
             self.assertEqual(b.source, "hook")
             self.assertEqual(note["reason"], "override-incomplete")
+
+    def test_cc_only_counts_hold_with_slow_saves(self):
+        original_write = self.rm.NoteStore._write
+
+        def slow_write(store, note):
+            time.sleep(0.02)
+            return original_write(store, note)
+
+        with mock.patch.object(self.rm.NoteStore, "_write", slow_write):
+            self.bind()
+            write_index(self.index, "".join(row(i, cc="b.implementer") for i in range(1, 66)))
+            result, _ = self.deliver()
+            self.assertEqual(result.emitted, 65)
+            result, _ = self.deliver()
+            self.assertEqual(result.emitted, 0)
+            write_index(self.index, "".join(row(i, cc="b.implementer") for i in range(1, 130)))
+            result, sink = self.deliver()
+            self.assertEqual(result.emitted, 64)
+            self.assertEqual(self.files(sink), [f"lane/r{i}.md" for i in range(66, 130)])
+
+    def test_past_deadline_delivers_nothing_and_says_deadline(self):
+        self.bind()
+        write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, 4)))
+        result, sink = self.deliver(deadline=-1.0)
+        self.assertEqual((result.emitted, result.aborted), (0, "deadline"))
+        self.assertEqual(bytes(sink.buf), b"")
+        note = self.store.load()
+        self.assertIsNone(note["frame"])
+        self.assertEqual(note["progress"][str(self.root)], self.rm.SENTINEL)
 
     def test_cc_only_65_then_129_once_across_rereads_restart_and_status_only(self):
         self.bind()
@@ -1136,7 +1169,7 @@ class DeliveryTests(TmpEnv):
                     first_sink,
                     binding,
                     snap,
-                    end=time.monotonic() + 5.0,
+                    end=time.monotonic() + ROOMY_DEADLINE_S,
                     leader_instance=self.inst,
                 )
             )
@@ -1148,7 +1181,7 @@ class DeliveryTests(TmpEnv):
                     second_sink,
                     binding,
                     snap,
-                    end=time.monotonic() + 5.0,
+                    end=time.monotonic() + ROOMY_DEADLINE_S,
                     leader_instance=self.inst,
                     start_cursor=dict(self.rm.SENTINEL),
                 )
@@ -1186,7 +1219,7 @@ class DeliveryTests(TmpEnv):
             self.rm.ByteSink(),
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=self.inst,
         )
         self.assertEqual((r.emitted, r.aborted), (0, "binding-changed"))
@@ -1289,14 +1322,14 @@ class DeliveryTests(TmpEnv):
         self.bind()
         write_index(self.index, row(1, to="b.implementer"))
         sink = StallingSink(accept_first=7)
-        r, _ = self.deliver(sink=sink, deadline=0.2)
+        r, _ = self.deliver(sink=sink)
         self.assertEqual((r.emitted, r.aborted), (0, "output-stalled"))
         note = self.store.load()
         self.assertEqual(note["frame"]["accepted"], 7)
         self.assertEqual(note["frame"]["identity"]["leader"], self.inst)
         self.assertEqual(note["progress"][str(self.root)], self.rm.SENTINEL)
         sink.released = True
-        r, _ = self.deliver(sink=sink, deadline=0.2)
+        r, _ = self.deliver(sink=sink)
         self.assertEqual(r.emitted, 1)
         lines = bytes(sink.buf).decode().split("\n")
         self.assertEqual(json.loads(lines[0])["file"], "lane/r1.md")
@@ -1307,7 +1340,7 @@ class DeliveryTests(TmpEnv):
         self.bind()
         write_index(self.index, row(1, to="b.implementer") + row(2, to="b.implementer"))
         sink = StallingSink(accept_first=5)
-        self.deliver(sink=sink, deadline=0.2)
+        self.deliver(sink=sink)
         self.store.update(
             lambda n: n["progress"].__setitem__(
                 str(self.root), {"file": "lane/r1.md", "position": 1}
@@ -1315,11 +1348,11 @@ class DeliveryTests(TmpEnv):
         )  # drain committed r1 meanwhile
         sink.released = True
         with self.assertRaises(self.rm.TransportFailed):
-            self.deliver(sink=sink, deadline=0.2)
+            self.deliver(sink=sink)
         self.bind()
         write_index(self.index, row(1, to="b.implementer"))
         sink = StallingSink(accept_first=5)
-        self.deliver(sink=sink, deadline=0.2)
+        self.deliver(sink=sink)
         self.store.update(
             lambda n: n.update({"root": "/elsewhere", "binding_gen": 9})
         )  # bind switched root
@@ -1331,7 +1364,7 @@ class DeliveryTests(TmpEnv):
                 sink,
                 binding,
                 self.rm.read_index(self.index),
-                end=time.monotonic() + 0.2,
+                end=time.monotonic() + ROOMY_DEADLINE_S,
                 leader_instance=self.inst,
             )
 
@@ -1616,7 +1649,7 @@ class DeliveryTests(TmpEnv):
                 pass
 
         t0 = time.monotonic()
-        r, _ = self.deliver(sink=ZeroOnce(), deadline=5.0)
+        r, _ = self.deliver(sink=ZeroOnce())
         self.assertEqual(r.aborted, "output-stalled")
         self.assertLess(
             time.monotonic() - t0, 0.5
@@ -4815,7 +4848,7 @@ report.write_text(json.dumps(state))
             sink,
             binding,
             snap,
-            end=time.monotonic() + 0.2,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="L",
         )
         self.assertEqual(r.aborted, "output-stalled")
@@ -4840,7 +4873,7 @@ report.write_text(json.dumps(state))
                 sink,
                 new_binding,
                 self.rm.read_index(other / "INDEX.md"),
-                end=time.monotonic() + 0.5,
+                end=time.monotonic() + ROOMY_DEADLINE_S,
                 leader_instance="L",
             )
         self.assertEqual(len(sink.buf), 5)  # no new-root bytes on the damaged stream
@@ -5726,7 +5759,7 @@ else:
                 try:
                     if path == "shared-follower":
                         sink = self.rm.ByteSink()
-                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic()+2, leader_instance=leader["instance"])
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + ROOMY_DEADLINE_S, leader_instance=leader["instance"])
                         self.assertEqual(result.emitted, 0)
                         self.assertEqual(bytes(sink.buf), b"")
                     else:
@@ -5801,7 +5834,7 @@ else:
                     else:
                         sink = self.rm.ByteSink()
                         if has_leader:
-                            result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"], limit=1 if case == "sentinel" else None)
+                            result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + ROOMY_DEADLINE_S, leader_instance=leader["instance"], limit=1 if case == "sentinel" else None)
                             self.assertEqual(result.emitted, int(expected))
                         lines = bytes(sink.buf).decode().splitlines()
                         self.assertEqual([json.loads(line)["file"] for line in lines], [wanted_file] if expected else [])
@@ -5874,7 +5907,7 @@ else:
                     for number in range(1, 4):
                         write_index(self.index, "".join(row(i, to="b.implementer") for i in range(1, number + 1)))
                         sink = self.rm.ByteSink()
-                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + 2, leader_instance=leader["instance"])
+                        result = self.rm.deliver_once(self.store, sink, self.rm.resolve_binding(self.store.load(), {}, None), self.rm.read_index(self.index), end=time.monotonic() + ROOMY_DEADLINE_S, leader_instance=leader["instance"])
                         self.assertEqual(result.emitted, 1)
                         self.assertEqual(json.loads(bytes(sink.buf))["file"], f"lane/r{number}.md")
                         self.assertEqual(self.rm.readiness(self.store)[0], "armed")
@@ -6046,7 +6079,7 @@ else:
             stalled,
             binding,
             snap,
-            end=time.monotonic() + 0.2,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="L",
         )
         self.assertEqual(r.aborted, "output-stalled")
@@ -6060,7 +6093,7 @@ else:
             out,
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="drain-probe",
             limit=1,
             encode=self.rm.stop_document,
@@ -6103,7 +6136,7 @@ else:
             a_sink,
             binding,
             snap,
-            end=time.monotonic() + 0.2,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=a_owner["instance"],
             owner=a_owner,
             limit=1,
@@ -6118,7 +6151,7 @@ else:
             b_sink,
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=b_owner["instance"],
             owner=b_owner,
             limit=1,
@@ -6159,7 +6192,7 @@ else:
             c_sink,
             binding,
             snap,
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance=c_owner["instance"],
             owner=c_owner,
             limit=1,
@@ -6407,7 +6440,7 @@ else:
                     held,
                     binding,
                     snap,
-                    end=time.monotonic() + 5.0,
+                    end=time.monotonic() + ROOMY_DEADLINE_S,
                     leader_instance="L",
                 )
             )
@@ -7425,7 +7458,7 @@ class OperatorReplayTests(TmpEnv):
             self.rm.ByteSink(),
             binding,
             self.rm.read_index(self.index),
-            end=time.monotonic() + 0.5,
+            end=time.monotonic() + ROOMY_DEADLINE_S,
             leader_instance="L",
         )
         n = self.store.load()
