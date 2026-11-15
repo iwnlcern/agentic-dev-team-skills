@@ -3391,7 +3391,7 @@ class TestImportStep(Store):
         self.assertFalse(any(flag.relay_id == relay_id for flag in flags), flags)
 
     def test_import_contract_refusals(self):
-        # I6-I14: each removed contract stage must return the wrong captured outcome.
+        # I6-I13: each removed contract stage must return the wrong captured outcome.
         try:
             import relay_engine.imports as imports
         except ModuleNotFoundError as error:
@@ -3401,38 +3401,36 @@ class TestImportStep(Store):
         good = self.imported(imports, created_at=self.clock + 1)
         cases = [
             ("project", "absent", replace(good, sender="operator", sender_role=None,
-                team_instance_id=None, to=(), cc=()), self.clock + 10, None),
-            ("kind", PROJECT, replace(good, kind="BOOT"), self.clock + 10, None),
-            ("verdict", PROJECT, replace(good, verdict="approve"), self.clock + 10, None),
+                team_instance_id=None, to=(), cc=()), self.clock + 10),
+            ("kind", PROJECT, replace(good, kind="BOOT"), self.clock + 10),
+            ("verdict", PROJECT, replace(good, verdict="approve"), self.clock + 10),
             ("system", PROJECT, replace(good, sender="system", sender_role=None,
-                                        team_instance_id=None), self.clock + 10, None),
+                                        team_instance_id=None), self.clock + 10),
             ("foreign sender", PROJECT, replace(good, sender=FOREIGN.seat_id,
                 sender_role=FOREIGN.role, team_instance_id=FOREIGN.team_instance_id),
-                self.clock + 10, None),
-            ("sender role", PROJECT, replace(good, sender_role="implementer"), self.clock + 10, None),
-            ("sender team", PROJECT, replace(good, team_instance_id="t2"), self.clock + 10, None),
+                self.clock + 10),
+            ("sender role", PROJECT, replace(good, sender_role="implementer"), self.clock + 10),
+            ("sender team", PROJECT, replace(good, team_instance_id="t2"), self.clock + 10),
             ("operator role", PROJECT, replace(good, sender="operator", sender_role="planner",
-                                               team_instance_id=None), self.clock + 10, None),
-            ("foreign party", PROJECT, replace(good, to=(FOREIGN.seat_id,)), self.clock + 10, None),
-            ("duplicate party", PROJECT, replace(good, cc=good.to), self.clock + 10, None),
+                                               team_instance_id=None), self.clock + 10),
+            ("foreign party", PROJECT, replace(good, to=(FOREIGN.seat_id,)), self.clock + 10),
+            ("duplicate party", PROJECT, replace(good, cc=good.to), self.clock + 10),
             ("foreign parent", PROJECT, replace(good, parent_id=foreign.relay_id,
-                                                 parent_spelling="#1"), self.clock + 10, None),
-            ("parent spelling", PROJECT, replace(good, parent_id=parent.relay_id), self.clock + 10, None),
-            ("time", PROJECT, replace(good, created_at=-1), self.clock + 10, None),
-            ("marker", PROJECT, good, self.clock, None),
-            ("digest", PROJECT, replace(good, header_sha256="bad"), self.clock + 10, None),
-            ("header size", PROJECT, replace(good, header_bytes=-1), self.clock + 10, None),
-            ("body", PROJECT, replace(good, body="not bytes"), self.clock + 10, None),
-            ("subject", PROJECT, replace(good, subject=None), self.clock + 10, None),
-            ("identity handle", PROJECT, good, self.clock + 10,
-                (submit.new_uuid7(self.clock + 1), 1)),
+                                                 parent_spelling="#1"), self.clock + 10),
+            ("parent spelling", PROJECT, replace(good, parent_id=parent.relay_id), self.clock + 10),
+            ("time", PROJECT, replace(good, created_at=-1), self.clock + 10),
+            ("marker", PROJECT, good, self.clock),
+            ("digest", PROJECT, replace(good, header_sha256="bad"), self.clock + 10),
+            ("header size", PROJECT, replace(good, header_bytes=-1), self.clock + 10),
+            ("body", PROJECT, replace(good, body="not bytes"), self.clock + 10),
+            ("subject", PROJECT, replace(good, subject=None), self.clock + 10),
         ]
         self.conn.execute("BEGIN IMMEDIATE")
         before = self.tables()
-        for name, project, relay, marker, identity in cases:
+        for name, project, relay, marker in cases:
             with self.subTest(case=name):
                 _, error = self.attempt(lambda: imports.import_relay_step(
-                    self.conn, project, relay, marked_at_ms=marker, identity=identity))
+                    self.conn, project, relay, marked_at_ms=marker))
                 self.assertIsInstance(error, ValueError, repr(error))
                 self.assertTrue(self.conn.in_transaction)
                 self.assertEqual(self.tables(), before)
@@ -3555,67 +3553,55 @@ class TestImportStep(Store):
                     self.assertEqual(self.conn.execute("SELECT name FROM projects WHERE id = 'p'")
                                      .fetchone(), ("caller",))
 
-    def test_import_identity(self):
-        # I18: a supplied id held by another project must be refused before the INSERT.
-        try:
-            import relay_engine.imports as imports
-        except ModuleNotFoundError as error:
-            self.fail(str(error))
-        local = self.submit(draft())
-        self.clock += 1  # The foreign id is above the local max, isolating the cross-project check.
-        foreign = self.submit(draft(to=FOREIGN.address), sender=FOREIGN)
-        self.conn.execute("BEGIN IMMEDIATE")
-        relay = self.imported(imports, created_at=self.clock + 1)
-        before = self.tables()
-        for identity in ((local.relay_id, 10), (foreign.relay_id, 10),
-                         (submit.new_uuid7(self.clock + 1), 1), ("not-a-uuid", 10)):
-            with self.subTest(identity=identity):
-                _, error = self.attempt(lambda: imports.import_relay_step(
-                    self.conn, PROJECT, relay, marked_at_ms=self.clock + 10, identity=identity))
-                self.assertIsInstance(error, ValueError, repr(error))
-                self.assertEqual(self.tables(), before)
-        wanted_id = submit.new_uuid7(self.clock + 1)
-        actual, error = self.attempt(lambda: imports.import_relay_step(
-            self.conn, PROJECT, relay, marked_at_ms=self.clock + 10, identity=(wanted_id, 10)))
-        self.assertIsNone(error, repr(error))
-        self.assertEqual(actual, wanted_id)
-        self.assertEqual(self.conn.execute("SELECT id, handle FROM relays WHERE id = ?",
-                                          (actual,)).fetchone(), (wanted_id, 10))
-        self.conn.rollback()
-        self.conn.execute("BEGIN IMMEDIATE")
-        actual, error = self.attempt(lambda: imports.import_relay_step(
-            self.conn, PROJECT, relay, marked_at_ms=self.clock + 10, identity=(wanted_id, 10)))
-        self.assertIsNone(error, repr(error))
-        self.conn.commit()
-        from relay_engine import queries
-        self.assertIs(queries.read(self.conn, actual, IMPL.seat_id, self.clock + 20)
-                      .envelope["imported"], True)
-
     def test_import_handles_increase(self):
-        # I22: count+1 gives 4 instead of 11 after a deliberately sparse handle 10.
+        # I23: a global max handle gives 4 instead of this project's next handle 3.
         try:
             import relay_engine.imports as imports
         except ModuleNotFoundError as error:
             self.fail(str(error))
         self.submit(draft())
         self.submit(draft())
-        self.clock += 2  # Admission already advanced the second relay's created_at by one.
+        for _ in range(3):
+            self.submit(draft(to=FOREIGN.address), sender=FOREIGN)
+        self.clock += 3  # Both projects' setup admissions are earlier than this import.
         self.conn.execute("BEGIN IMMEDIATE")
         first, error = self.attempt(lambda: imports.import_relay_step(
-            self.conn, PROJECT, self.imported(imports, created_at=self.clock + 1),
-            marked_at_ms=self.clock + 10, identity=(submit.new_uuid7(self.clock + 1), 10)))
-        self.assertIsNone(error, repr(error))
-        second, error = self.attempt(lambda: imports.import_relay_step(
-            self.conn, PROJECT, self.imported(imports, created_at=self.clock + 2),
-            marked_at_ms=self.clock + 10))
+            self.conn, PROJECT, self.imported(imports, created_at=self.clock),
+            marked_at_ms=self.clock + 20))
         self.assertIsNone(error, repr(error))
         self.conn.commit()
         live, error = self.attempt(lambda: self.submit(draft()))
         self.assertIsNone(error, repr(error))
+        self.conn.execute("BEGIN IMMEDIATE")
+        second, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, self.imported(imports, created_at=live.created_at_ms + 1),
+            marked_at_ms=self.clock + 20))
+        self.assertIsNone(error, repr(error))
+        self.conn.commit()
         rows = self.conn.execute("SELECT id, handle FROM relays WHERE project_id = ?"
                                  " ORDER BY created_at", (PROJECT,)).fetchall()
-        self.assertEqual(rows[-3:], [(first, 10), (second, 11), (live.relay_id, 12)])
+        self.assertEqual(rows[-3:], [(first, 3), (live.relay_id, 4), (second, 5)])
         self.assertTrue(all(a[1] < b[1] for a, b in zip(rows, rows[1:])))
+
+    def test_import_takes_no_identity(self):
+        # I24: an ignored identity keyword must still violate the public interface.
+        try:
+            import relay_engine.imports as imports
+        except ModuleNotFoundError as error:
+            self.fail(str(error))
+        import inspect
+        parameters = inspect.signature(imports.import_relay_step).parameters
+        self.assertEqual(tuple(parameters), ("conn", "project_id", "relay", "marked_at_ms"))
+        self.assertIs(parameters["marked_at_ms"].kind, inspect.Parameter.KEYWORD_ONLY)
+        relay = self.imported(imports)
+        self.conn.execute("BEGIN IMMEDIATE")
+        before = self.tables()
+        _, error = self.attempt(lambda: imports.import_relay_step(
+            self.conn, PROJECT, relay, marked_at_ms=200,
+            identity=(submit.new_uuid7(relay.created_at), 10)))
+        self.assertIsInstance(error, TypeError, repr(error))
+        self.assertEqual(self.tables(), before)
+        self.conn.rollback()
 
     def test_imported_lineage_is_not_unopened(self):
         # I3: an unmarked imported TO ancestor would appear as an unopened warning.

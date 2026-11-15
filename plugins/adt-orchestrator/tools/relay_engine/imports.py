@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import hashlib
 import re
 import sqlite3
-import uuid
 
 from relay_engine import header, jcs, submit
 
@@ -27,8 +26,7 @@ class ImportedRelay:
     header_sha256: str
 
 
-def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_ms: int,
-                      identity: tuple[str, int] | None = None) -> str:
+def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_ms: int) -> str:
     """Write one imported relay inside the caller's transaction, without admission."""
     if conn in submit._READ_GUARDS:
         raise sqlite3.DatabaseError("import is not allowed during a read guard")
@@ -46,16 +44,13 @@ def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_
         raise ValueError("marked_at_ms must be an int")
     conn.execute("SAVEPOINT engine_import")
     try:
-        _validate(conn, project_id, relay, marked_at_ms, identity)
+        _validate(conn, project_id, relay, marked_at_ms)
         last_id = conn.execute("SELECT max(id) FROM relays WHERE project_id = ?",
                                (project_id,)).fetchone()[0]
-        if identity is None:
-            last_handle = conn.execute("SELECT max(handle) FROM relays WHERE project_id = ?",
-                                       (project_id,)).fetchone()[0]
-            handle = (last_handle or 0) + 1
-            relay_id = submit.new_uuid7(relay.created_at, last_id)
-        else:
-            relay_id, handle = identity
+        last_handle = conn.execute("SELECT max(handle) FROM relays WHERE project_id = ?",
+                                   (project_id,)).fetchone()[0]
+        handle = (last_handle or 0) + 1
+        relay_id = submit.new_uuid7(relay.created_at, last_id)
         meta_sha256 = hashlib.sha256(jcs.jcs_encode({
             "import": "2.9.7", "header_sha256": relay.header_sha256,
             "parent": relay.parent_id})).hexdigest()
@@ -90,7 +85,7 @@ def import_relay_step(conn, project_id: str, relay: ImportedRelay, *, marked_at_
         raise
 
 
-def _validate(conn, project_id, relay, marked_at_ms, identity):
+def _validate(conn, project_id, relay, marked_at_ms):
     """D2's ordered contract checks, before the first write."""
     if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
         raise ValueError("the import project does not exist")
@@ -136,20 +131,3 @@ def _validate(conn, project_id, relay, marked_at_ms, identity):
             or re.fullmatch(r"[0-9a-f]{64}", relay.header_sha256) is None
             or not isinstance(relay.body, bytes) or not isinstance(relay.subject, str)):
         raise ValueError("the import header, body or subject is invalid")
-    if identity is not None:
-        if not isinstance(identity, tuple) or len(identity) != 2:
-            raise ValueError("the import identity must be an id and handle")
-        relay_id, handle = identity
-        try:
-            parsed = uuid.UUID(relay_id) if isinstance(relay_id, str) else None
-        except ValueError:
-            parsed = None
-        last_id = conn.execute("SELECT max(id) FROM relays WHERE project_id = ?",
-                               (project_id,)).fetchone()[0]
-        last_handle = conn.execute("SELECT max(handle) FROM relays WHERE project_id = ?",
-                                   (project_id,)).fetchone()[0]
-        if (parsed is None or parsed.version != 7 or str(parsed) != relay_id
-                or (last_id is not None and relay_id <= last_id)
-                or conn.execute("SELECT 1 FROM relays WHERE id = ?", (relay_id,)).fetchone() is not None
-                or not isinstance(handle, int) or handle <= (last_handle or 0)):
-            raise ValueError("the import identity must be new and above this project's ids and handles")
