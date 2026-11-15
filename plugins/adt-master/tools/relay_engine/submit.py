@@ -10,7 +10,7 @@ A refused submit writes exactly one ``refusals`` row and nothing else; an
 engine fault writes nothing.  No rule reads the body.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 import hashlib
 import os
@@ -195,7 +195,7 @@ class Admitted:
 
 def open_store(path):
     """A store connection with foreign keys on (O5) and the v3 schema."""
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=5.0)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         schema.init_v3(conn)
@@ -310,6 +310,8 @@ def submit(conn, ctx, data):
             raise _unknown_admission(ctx) from None
         raise
     except errors.EngineError as error:
+        if error.code == "E-STORE-BUSY":
+            raise
         if (ctx.after_rollback is not None
                 and getattr(error, "_admission_hook_failed", False)):
             try:
@@ -503,7 +505,7 @@ def _checked_replay(conn, ctx, data):
     conn.execute("BEGIN")
     try:
         _run_sender_check(conn, ctx)
-        return _replay(conn, ctx, data)
+        return _replay(conn, ctx, data, before_lock=True)
     finally:
         if _transaction_state(conn) == "active":
             conn.execute("ROLLBACK")
@@ -547,22 +549,37 @@ def _refusal_row(conn, ctx, data, now, error):
 
 
 def _record_refusal(conn, ctx, data, now, error):
-    conn.execute("BEGIN IMMEDIATE")
+    with _busy_answer():
+        conn.execute("BEGIN IMMEDIATE")
     try:
         _refusal_row(conn, ctx, data, now, error)
-        conn.execute("COMMIT")
+        with _busy_answer():
+            conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
 
 
-def _replay(conn, ctx, data):
+@contextmanager
+def _busy_answer():
+    """Only the enclosed engine statement owns this busy answer."""
+    try:
+        yield
+    except sqlite3.OperationalError as error:
+        code = getattr(error, "sqlite_errorcode", None)
+        if code is not None and code & 0xFF == 5:
+            raise errors.error_for("E-STORE-BUSY") from None
+        raise
+
+
+def _replay(conn, ctx, data, *, before_lock: bool):
     """The persisted receipt belongs to one party and the exact input bytes."""
-    row = conn.execute(
-        "SELECT id, handle, created_at, draft_sha256 FROM relays"
-        " WHERE coalesce(sender_seat_id, sender_special) = ? AND submission_key = ?",
-        (ctx.sender.seat_id, ctx.submission_key)).fetchone()
+    with _busy_answer() if before_lock else nullcontext():
+        row = conn.execute(
+            "SELECT id, handle, created_at, draft_sha256 FROM relays"
+            " WHERE coalesce(sender_seat_id, sender_special) = ? AND submission_key = ?",
+            (ctx.sender.seat_id, ctx.submission_key)).fetchone()
     if row is None:
         return None
     if row[3] != hashlib.sha256(data).hexdigest():
@@ -573,7 +590,7 @@ def _replay(conn, ctx, data):
 def _admit(conn, ctx, data, now, *, _system=False):
     # With a sender check, submit has already run the checked replay lookup (D6 step 1).
     checked = not _system and ctx.sender_check is not None
-    replay = None if _system or checked else _replay(conn, ctx, data)
+    replay = None if _system or checked else _replay(conn, ctx, data, before_lock=not _system)
     if replay is not None:
         return replay
     draft = header.parse(data)
@@ -582,19 +599,20 @@ def _admit(conn, ctx, data, now, *, _system=False):
     # Before the write lock: a slow checkout or a large file digest holds no
     # lock (PR-3 fold S2); relays and recipients rows are append-only.
     recipients = _recipients(ctx, draft, lines)
-    parent = _parent(conn, sender, draft, lines)
-    answers = _answers(conn, sender, draft, lines, parent)
-    targets = _references(conn, ctx, draft, lines)
+    parent = _parent(conn, sender, draft, lines, before_lock=not _system)
+    answers = _answers(conn, sender, draft, lines, parent, before_lock=not _system)
+    targets = _references(conn, ctx, draft, lines, before_lock=not _system)
     transitions = _transitions(draft, lines)
     snapshot_plan = _snapshot_plan(draft, lines, targets)
     if not _system:
-        conn.execute("BEGIN IMMEDIATE")
+        with _busy_answer():
+            conn.execute("BEGIN IMMEDIATE")
     try:
         if checked:
             _run_sender_check(conn, ctx)  # D6 step 3: again, under the write lock
         # Reference resolution preceded the lock; another writer may have
         # committed this party/key while we were resolving that input.
-        replay = None if _system else _replay(conn, ctx, data)
+        replay = None if _system else _replay(conn, ctx, data, before_lock=False)
         if replay is not None:
             conn.execute("ROLLBACK")
             return replay
@@ -656,6 +674,10 @@ def _admit(conn, ctx, data, now, *, _system=False):
                     # The enclosing handler retains the original rollback before
                     # submit receives this private commit-only signal.
                     raise _CommitRaised(error, admitted) from None
+                code = getattr(error, "sqlite_errorcode", None)
+                if (isinstance(error, sqlite3.OperationalError)
+                        and code is not None and code & 0xFF == 5):
+                    raise errors.error_for("E-STORE-BUSY") from None
                 raise
     except BaseException:
         if not _system:
@@ -717,28 +739,30 @@ def _recipients(ctx, draft, lines):
     return result
 
 
-def _find_relay(conn, project_id, spelling):
+def _find_relay(conn, project_id, spelling, *, before_lock: bool):
     """(id, bundle_id) of a relay of the project by #<n> or UUID, or None."""
-    if spelling.startswith("#"):
-        row = conn.execute("SELECT id, bundle_id FROM relays WHERE project_id = ? AND handle = ?",
-                           (project_id, int(spelling[1:]))).fetchone()
-    else:
-        row = conn.execute("SELECT id, bundle_id FROM relays WHERE project_id = ? AND id = ?",
-                           (project_id, spelling)).fetchone()
+    with _busy_answer() if before_lock else nullcontext():
+        if spelling.startswith("#"):
+            row = conn.execute("SELECT id, bundle_id FROM relays WHERE project_id = ? AND handle = ?",
+                               (project_id, int(spelling[1:]))).fetchone()
+        else:
+            row = conn.execute("SELECT id, bundle_id FROM relays WHERE project_id = ? AND id = ?",
+                               (project_id, spelling)).fetchone()
     return row
 
 
-def _answers(conn, sender, draft, lines, parent) -> tuple[str, ...]:
+def _answers(conn, sender, draft, lines, parent, *, before_lock: bool) -> tuple[str, ...]:
     """Resolve addressed, opened and distinct answers before taking the write lock."""
     resolved = []
     for index, spelling in enumerate(draft.answers):
         params = {"line": lines.of("ANSWERS", index), "value": header._display(spelling)}
-        row = _find_relay(conn, sender.project_id, spelling)
+        row = _find_relay(conn, sender.project_id, spelling, before_lock=before_lock)
         if row is None:
             raise errors.error_for("E-ANSWERS-UNKNOWN", **params)
-        recipient = conn.execute(
-            "SELECT opened_at FROM recipients WHERE relay_id = ? AND " + party_sql() + " = ?",
-            (row[0], sender.seat_id)).fetchone()
+        with _busy_answer() if before_lock else nullcontext():
+            recipient = conn.execute(
+                "SELECT opened_at FROM recipients WHERE relay_id = ? AND " + party_sql() + " = ?",
+                (row[0], sender.seat_id)).fetchone()
         if recipient is None:
             raise errors.error_for("E-ANSWERS-NOT-ADDRESSED", **params)
         if recipient[0] is None and sender.seat_id != OPERATOR_SEAT_ID:
@@ -749,18 +773,19 @@ def _answers(conn, sender, draft, lines, parent) -> tuple[str, ...]:
     return tuple(resolved)
 
 
-def _parent(conn, sender, draft, lines):
+def _parent(conn, sender, draft, lines, *, before_lock: bool):
     if draft.parent is None:
         return None
     line = lines.of("PARENT")
-    row = _find_relay(conn, sender.project_id, draft.parent)
+    row = _find_relay(conn, sender.project_id, draft.parent, before_lock=before_lock)
     if row is None:
         raise errors.error_for("E-PARENT-UNKNOWN", line=line,
                                value=header._display(draft.parent))
-    member = conn.execute(
-        "SELECT 1 FROM relays WHERE id = ? AND " + party_sql("sender_") + " = ?"
-        " UNION ALL SELECT 1 FROM recipients WHERE relay_id = ? AND " + party_sql() + " = ?",
-        (row[0], sender.seat_id, row[0], sender.seat_id)).fetchone()
+    with _busy_answer() if before_lock else nullcontext():
+        member = conn.execute(
+            "SELECT 1 FROM relays WHERE id = ? AND " + party_sql("sender_") + " = ?"
+            " UNION ALL SELECT 1 FROM recipients WHERE relay_id = ? AND " + party_sql() + " = ?",
+            (row[0], sender.seat_id, row[0], sender.seat_id)).fetchone()
     if member is None:
         raise errors.error_for("E-PARENT-NOT-MEMBER", line=line,
                                value=header._display(draft.parent))
@@ -781,7 +806,7 @@ def _bundle(conn, sender, name, created):
     return bundle_id
 
 
-def _references(conn, ctx, draft, lines):
+def _references(conn, ctx, draft, lines, *, before_lock: bool):
     """Each REF resolved and digested, before anything is written."""
     targets = []
     for index, text in enumerate(draft.refs):
@@ -789,16 +814,17 @@ def _references(conn, ctx, draft, lines):
         try:
             targets.append((text, _resolve(
                 conn, ctx, refs.parse_ref(text),
-                keep=SNAPSHOT_BYTES_MAX if draft.kind in SNAPSHOT_KINDS and draft.needs == "review" else 0)))
+                keep=SNAPSHOT_BYTES_MAX if draft.kind in SNAPSHOT_KINDS and draft.needs == "review" else 0,
+                before_lock=before_lock)))
         except errors.EngineError as error:
             raise _at(line, error)
     return targets
 
 
-def _resolve(conn, ctx, spec, *, keep=0):
+def _resolve(conn, ctx, spec, *, keep=0, before_lock: bool):
     if spec.kind == "relay":
         handle, _, project = spec.relay.partition("@")
-        row = _find_relay(conn, project or ctx.sender.project_id, handle)
+        row = _find_relay(conn, project or ctx.sender.project_id, handle, before_lock=before_lock)
         if row is None:
             raise errors.error_for("E-REF-UNRESOLVED", value=header._display(spec.text),
                                    reason="no relay %s in project %s" % (
@@ -818,8 +844,9 @@ def _resolve(conn, ctx, spec, *, keep=0):
         digest, length, kept = refs.read_file(Path(path), keep)
         return {"target_type": "path", "target_path": path,
                 "digest_at_submit": digest, "_length": length, "_bytes": kept}
-    known = conn.execute("SELECT id FROM repositories WHERE project_id = ? AND name = ?",
-                         (ctx.sender.project_id, spec.repo)).fetchone()
+    with _busy_answer() if before_lock else nullcontext():
+        known = conn.execute("SELECT id FROM repositories WHERE project_id = ? AND name = ?",
+                             (ctx.sender.project_id, spec.repo)).fetchone()
     checkout = None if known is None else ctx.directory.checkout(spec.repo)
     if checkout is None:
         raise errors.error_for("E-REF-UNRESOLVED", value=header._display(spec.text),

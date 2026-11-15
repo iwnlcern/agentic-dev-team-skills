@@ -38,6 +38,7 @@ ALL_CODES = POLICY_CODES | {
     "E-ADMISSION-HOOK",
     "E-ADMISSION-COMMIT",
     "E-ADMISSION-UNKNOWN",
+    "E-STORE-BUSY",
     "no-top-seat",
     "E-HEADER",
     "E-DRAFT-SHAPE",
@@ -102,6 +103,17 @@ ALL_CODES = POLICY_CODES | {
 
 
 class TestErrorRegistry(unittest.TestCase):
+    def test_store_busy_code(self):
+        # Breaks: an unregistered/misclassified busy answer or unsafe resend advice.
+        self.assertIn("E-STORE-BUSY", errors.ERRORS)
+        error = errors.error_for("E-STORE-BUSY")
+        self.assertEqual(error.cls, "integrity")
+        self.assertEqual(error.cause, "the store was busy and this attempt could not finish; this attempt committed nothing")
+        self.assertEqual(error.remedy, "send the same draft again with the same submission key")
+        self.assertEqual(errors.explain_for("E-STORE-BUSY"), (
+            "a busy store stops an attempt before it commits, and an earlier attempt under the same key is answered by its receipt, so sending the same draft again is safe",
+            "send the same draft again with the same submission key"))
+
     def test_setting_codes(self):
         codes = {"E-SETTING-OPERATOR-ONLY": "policy", "E-JEV-ACT-NEEDS-RECORD": "policy",
                  "E-SETTING-UNKNOWN": "command", "E-SETTING-VALUE": "command",

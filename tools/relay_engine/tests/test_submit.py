@@ -6,6 +6,7 @@ import inspect
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import threading
 import traceback
@@ -640,25 +641,197 @@ class TestProjectScope(Store):  # PR-3 fold S5: one witness per project filter
 
 
 def _hammer(path, address, count, barrier, queue):
-    """One submitter process for the two-process admission test (S3)."""
+    """One submitter process; only a named busy answer resends the same draft."""
     conn = submit.open_store(path)
-    seen = []
+    seen, resends = [], 0
     try:
         barrier.wait(60)
         for iteration in range(count):
-            try:
-                ctx = submit.SubmitContext(
-                    SEATS[address], None, lambda: 1_700_000_000_000, FakeDirectory(),
-                    submission_key="hammer:%s:%d" % (address, iteration))
-                submit.submit(conn, ctx, draft())
-            except Exception as error:  # every failure is counted, typed or not
-                seen.append("%s: %s" % (type(error).__name__, error))
+            ctx = submit.SubmitContext(
+                SEATS[address], None, lambda: 1_700_000_000_000, FakeDirectory(),
+                submission_key="hammer:%s:%d" % (address, iteration))
+            data, retried = draft(), 0
+            while True:
+                try:
+                    submit.submit(conn, ctx, data)
+                    break
+                except errors.EngineError as error:
+                    if error.code == "E-STORE-BUSY":
+                        if retried < 5:
+                            retried += 1
+                            resends += 1
+                            continue
+                        seen.append("E-STORE-BUSY after 5 resends")
+                    else:
+                        seen.append("%s: %s" % (type(error).__name__, error))
+                    break
+                except Exception as error:  # every other failure is counted, not resent
+                    seen.append("%s: %s" % (type(error).__name__, error))
+                    break
     finally:
         conn.close()
-        queue.put((address, seen))
+        queue.put((address, seen, resends))
+
+
+def _resend_report(results: dict[str, tuple[list[str], int]]) -> str:
+    return ("two-process admission resends: v3-engine.planner=%d v3-engine.implementer=%d"
+            % (results["v3-engine.planner"][1], results["v3-engine.implementer"][1]))
 
 
 class TestConcurrency(Store):  # PR-3 fold S2, S3
+    def test_busy_store_answers_store_busy(self):
+        # Breaks: a busy admission BEGIN escapes raw or leaves state behind.
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "store"
+            holder = submit.open_store(path)
+            self.addCleanup(holder.close)
+            platform_rows(holder)
+            self.assertEqual(holder.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+            self.assertEqual(holder.execute("PRAGMA busy_timeout").fetchone(), (5000,))
+            conn = sqlite3.connect(path, timeout=0.05)
+            self.addCleanup(conn.close)
+            conn.execute("PRAGMA foreign_keys=ON")
+            ctx, data = self.ctx(submission_key="busy-admission"), draft()
+            holder.execute("BEGIN IMMEDIATE")
+            try:
+                outcome = submit.submit(conn, ctx, data)
+            except Exception as error:
+                outcome = error
+            finally:
+                holder.rollback()
+            self.assertEqual(getattr(outcome, "code", None), "E-STORE-BUSY", repr(outcome))
+            self.assertFalse(conn.in_transaction)
+            self.assertEqual(conn.execute("SELECT count(*) FROM relays").fetchone(), (0,))
+            self.assertEqual(conn.execute("SELECT count(*) FROM refusals").fetchone(), (0,))
+            receipt = submit.submit(conn, ctx, data)
+            self.assertIsInstance(receipt, submit.Admitted)
+            self.assertEqual(submit.submit(conn, ctx, data), receipt)
+            self.assertEqual(conn.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+
+    def test_busy_refusal_row_answers_store_busy(self):
+        # Breaks: refusal BEGIN returns the header code or a raw busy fault.
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "store"
+            holder = submit.open_store(path)
+            self.addCleanup(holder.close)
+            platform_rows(holder)
+            self.assertEqual(holder.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+            conn = sqlite3.connect(path, timeout=0.05)
+            self.addCleanup(conn.close)
+            conn.execute("PRAGMA foreign_keys=ON")
+            ctx, data = self.ctx(submission_key="busy-refusal"), b"invalid\n"
+            holder.execute("BEGIN IMMEDIATE")
+            try:
+                outcome = submit.submit(conn, ctx, data)
+            except Exception as error:
+                outcome = error
+            finally:
+                holder.rollback()
+            self.assertEqual(getattr(outcome, "code", None), "E-STORE-BUSY", repr(outcome))
+            self.assertFalse(conn.in_transaction)
+            self.assertEqual(conn.execute("SELECT count(*) FROM refusals").fetchone(), (0,))
+            with self.assertRaises(errors.EngineError) as caught:
+                submit.submit(conn, ctx, data)
+            self.assertEqual(caught.exception.code, "E-HEADER-GRAMMAR")
+            self.assertEqual(conn.execute("SELECT count(*) FROM relays").fetchone(), (0,))
+            self.assertEqual(conn.execute("SELECT count(*) FROM refusals").fetchone(), (1,))
+
+    def test_busy_commit_answers_store_busy(self):
+        # Breaks: admission or refusal COMMIT busy fails to roll back and type the answer.
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "store"
+            conn = submit.open_store(path)
+            self.addCleanup(conn.close)
+            platform_rows(conn)
+            conn.execute("PRAGMA busy_timeout=50")
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone(), ("delete",))
+            reader = sqlite3.connect(path)
+            self.addCleanup(reader.close)
+            reader.execute("BEGIN")
+            reader.execute("SELECT * FROM projects").fetchall()
+            ctx, data = self.ctx(submission_key="busy-commit"), draft()
+            refused = self.ctx(submission_key="busy-refusal-commit")
+            try:
+                try:
+                    outcome = submit.submit(conn, ctx, data)
+                except Exception as error:
+                    outcome = error
+                self.assertEqual(getattr(outcome, "code", None), "E-STORE-BUSY", repr(outcome))
+                self.assertFalse(conn.in_transaction)
+                self.assertEqual(conn.execute("SELECT count(*) FROM relays").fetchone(), (0,))
+                try:
+                    outcome = submit.submit(conn, refused, b"invalid\n")
+                except Exception as error:
+                    outcome = error
+                self.assertEqual(getattr(outcome, "code", None), "E-STORE-BUSY", repr(outcome))
+                self.assertFalse(conn.in_transaction)
+                self.assertEqual(conn.execute("SELECT count(*) FROM refusals").fetchone(), (0,))
+            finally:
+                reader.rollback()
+            receipt = submit.submit(conn, ctx, data)
+            self.assertEqual(submit.submit(conn, ctx, data), receipt)
+            with self.assertRaises(errors.EngineError) as caught:
+                submit.submit(conn, refused, b"invalid\n")
+            self.assertEqual(caught.exception.code, "E-HEADER-GRAMMAR")
+            self.assertEqual(conn.execute("SELECT count(*) FROM relays").fetchone(), (1,))
+            self.assertEqual(conn.execute("SELECT count(*) FROM refusals").fetchone(), (1,))
+
+    def test_hammer_resends_busy_answers(self):
+        # Breaks: lost/changed-key retries, wrong bound, retrying nonbusy, or wrong counts.
+        import queue
+        for case in ("admitted", "exhausted", "not-busy"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "store"
+                conn = submit.open_store(path)
+                self.addCleanup(conn.close)
+                platform_rows(conn)
+                calls = []
+                real_submit = submit.submit
+                def scripted(connection, ctx, data):
+                    calls.append((ctx.submission_key, data))
+                    if ctx.submission_key.endswith(":0"):
+                        count = sum(key == ctx.submission_key for key, _ in calls)
+                        if case == "not-busy":
+                            raise errors.error_for("E-SUBMISSION-KEY-REUSED")
+                        if case == "exhausted" or count == 1:
+                            raise errors.error_for("E-STORE-BUSY")
+                    return real_submit(connection, ctx, data)
+                output = queue.Queue()
+                with mock.patch.object(submit, "submit", scripted):
+                    _hammer(path, "v3-engine.planner", 2, threading.Barrier(1), output)
+                item = output.get_nowait()
+                self.assertEqual(len(item), 3, item)
+                address, seen, resends = item
+                self.assertEqual(address, "v3-engine.planner")
+                first = [(key, data) for key, data in calls if key != "hammer:v3-engine.planner:1"]
+                second = [(key, data) for key, data in calls if key == "hammer:v3-engine.planner:1"]
+                self.assertEqual(len(second), 1)
+                self.assertTrue(all(value == first[0] for value in first))
+                if case == "admitted":
+                    self.assertEqual(len(first), 2)
+                    self.assertEqual(seen, [])
+                    self.assertEqual(resends, 1)
+                    self.assertEqual(conn.execute("SELECT count(*) FROM relays WHERE submission_key=?",
+                        ("hammer:v3-engine.planner:0",)).fetchone(), (1,))
+                elif case == "exhausted":
+                    self.assertEqual(len(first), 6)
+                    self.assertEqual(seen, ["E-STORE-BUSY after 5 resends"])
+                    self.assertEqual(resends, 5)
+                else:
+                    self.assertEqual(len(first), 1)
+                    self.assertEqual(len(seen), 1)
+                    self.assertIn("E-SUBMISSION-KEY-REUSED", seen[0])
+                    self.assertEqual(resends, 0)
+                self.assertEqual(conn.execute("SELECT count(*) FROM relays WHERE submission_key=?",
+                    ("hammer:v3-engine.planner:1",)).fetchone(), (1,))
+
+    def test_resend_report(self):
+        # Breaks: dropping one worker's counts or varying their presentation order.
+        self.assertTrue(callable(globals().get("_resend_report")))
+        self.assertEqual(_resend_report({"v3-engine.implementer": (["x"], 2),
+            "v3-engine.planner": ([], 0)}),
+            "two-process admission resends: v3-engine.planner=0 v3-engine.implementer=2")
+
     def test_two_processes_admit_every_draft(self):  # S3, acceptance 9
         spawn = multiprocessing.get_context("spawn")
         with tempfile.TemporaryDirectory() as name:
@@ -675,10 +848,14 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
                        for address in ("v3-engine.planner", "v3-engine.implementer")]
             for worker in workers:
                 worker.start()
-            results = dict(queue.get(timeout=120) for _ in workers)
+            results = {address: (seen, resends) for address, seen, resends
+                       in (queue.get(timeout=120) for _ in workers)}
             for worker in workers:
                 worker.join(30)
-            self.assertEqual(results, {"v3-engine.planner": [], "v3-engine.implementer": []})
+            report = _resend_report(results)
+            print(report, file=sys.stderr)
+            self.assertEqual({address: value[0] for address, value in results.items()},
+                             {"v3-engine.planner": [], "v3-engine.implementer": []}, report)
             conn = sqlite3.connect(path)
             try:
                 rows = conn.execute("SELECT handle, id, created_at, sender_seat_id FROM relays"
@@ -3040,6 +3217,73 @@ class TestAdmissionOutcome(Store):
         else:
             self.assertFalse(conn.in_transaction)
             self.assertIsInstance(submit.submit(conn, self.ctx(), draft()), submit.Admitted)
+
+    def test_busy_places_fault_answers(self):
+        # Breaks: missing one pre-lock origin, wrapping caller code, or recording busy refusal.
+        replay_sql = ("SELECT ID, HANDLE, CREATED_AT, DRAFT_SHA256 FROM RELAYS"
+            " WHERE COALESCE(SENDER_SEAT_ID, SENDER_SPECIAL) = ? AND SUBMISSION_KEY = ?")
+        parent_sql = ("SELECT 1 FROM RELAYS WHERE ID = ? AND COALESCE(SENDER_SEAT_ID, SENDER_SPECIAL) = ?"
+            " UNION ALL SELECT 1 FROM RECIPIENTS WHERE RELAY_ID = ? AND COALESCE(SEAT_ID, SPECIAL) = ?")
+        cases = (
+            ("replay", replay_sql, 5, True),
+            ("checked", replay_sql, 5, True),
+            ("parent-handle", "SELECT ID, BUNDLE_ID FROM RELAYS WHERE PROJECT_ID = ? AND HANDLE = ?", 5, True),
+            ("parent-member", parent_sql, 5, True),
+            ("answers", "SELECT OPENED_AT FROM RECIPIENTS WHERE RELAY_ID = ? AND COALESCE(SEAT_ID, SPECIAL) = ?", 5, True),
+            ("repository", "SELECT ID FROM REPOSITORIES WHERE PROJECT_ID = ? AND NAME = ?", 5, True),
+            ("begin", "BEGIN IMMEDIATE", 5, True),
+            ("snapshot", "BEGIN IMMEDIATE", 517, True),
+            ("commit", "COMMIT", 5, True),
+            ("refusal-begin", "BEGIN IMMEDIATE", 5, True),
+            ("refusal-commit", "COMMIT", 5, True),
+            ("preflight", "PRAGMA FOREIGN_KEYS", 5, False),
+            ("locked-replay", replay_sql, 5, False),
+            ("checkout", None, 5, False),
+            ("sender", "SELECT 1", 5, False),
+            ("refusal-insert", "INSERT INTO REFUSALS (PROJECT_ID, SEAT_ID, SPECIAL, CODE, LINE, AT, DRAFT_SHA256) VALUES (?, ?, ?, ?, ?, ?, ?)", 5, False),
+        )
+        for name, sql, code, converts in cases:
+            with self.subTest(place=name):
+                conn, ctx, reservations, path = self.fixture(mode="ok", callback=False)
+                ctx = replace(ctx, submission_key="busy-fault")
+                data = draft()
+                if name.startswith("parent-") or name == "answers":
+                    seeded = submit.submit(conn, replace(ctx, submission_key="seed"), draft())
+                    if name == "answers":
+                        conn.execute("UPDATE recipients SET opened_at=1 WHERE relay_id=?", (seeded.relay_id,))
+                        conn.commit()
+                        data = draft(answers=("#%d" % seeded.handle,))
+                    else:
+                        data = draft(parent="#%d" % seeded.handle)
+                if name in ("repository", "checkout"):
+                    data = draft(refs=("bivpak@main:design.md",))
+                if name.startswith("refusal-"):
+                    data = b"invalid\n"
+                if name == "checked":
+                    ctx = replace(ctx, sender_check=lambda c: None)
+                if name == "sender":
+                    ctx = replace(ctx, sender_check=lambda c: c.execute("SELECT 1").fetchone())
+                if name == "checkout":
+                    fault = sqlite3.OperationalError("checkout busy")
+                    fault.sqlite_errorcode = 5
+                    class BusyDirectory(FakeDirectory):
+                        def checkout(self, repo):
+                            raise fault
+                    ctx = replace(ctx, directory=BusyDirectory())
+                before = self.state(conn)
+                markers = conn.execute("SELECT * FROM recipients ORDER BY relay_id, seat_id").fetchall()
+                if sql is not None:
+                    nth = conn.operations.get(sql, 0) + (2 if name == "locked-replay" else 1)
+                    conn.failures.append(self.fault(sql, nth, code=code))
+                outcome = self.outcome(conn, ctx, data)
+                if converts:
+                    self.assertEqual(getattr(outcome, "code", None), "E-STORE-BUSY", repr(outcome))
+                else:
+                    self.assertIsInstance(outcome, sqlite3.OperationalError, repr(outcome))
+                    self.assertEqual(outcome.sqlite_errorcode, 5)
+                self.assertEqual(self.state(conn), before)
+                self.assertEqual(conn.execute("SELECT * FROM recipients ORDER BY relay_id, seat_id").fetchall(), markers)
+                self.assertFalse(conn.in_transaction)
 
     def test_after_rollback_context(self):
         # Breaks: accepting an unusable callback or calling it before the hook.
