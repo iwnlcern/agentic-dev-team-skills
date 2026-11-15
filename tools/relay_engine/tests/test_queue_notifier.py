@@ -37,7 +37,7 @@ class TestQueueNotifier(unittest.TestCase):
         self.conn = store_layout.open_catalogue(self.root)
         self.addCleanup(lambda: self.conn.close())
         for project, name in ((P, 'billing-service'), (Q, 'q')):
-            self.conn.execute('INSERT INTO project_routes VALUES (?,?,?,?)',
+            self.conn.execute('INSERT INTO project_routes (project_id, name, state, created_at) VALUES (?,?,?,?)',
                               (project, name, 'active', 0)).close()
         self.conn.commit()
         self.port = TrackedPort(self.root)
@@ -131,7 +131,6 @@ class TestQueueNotifier(unittest.TestCase):
         self.assertEqual(rows[1][1:], ('pending', '"notifier"'))
         self.assertEqual(receipt_count(), 2)
 
-
     def test_unhealthy_sentence_from_table(self):
         self.raise_it()
         with mock.patch.object(records, 'raise_item', wraps=records.raise_item) as raising:
@@ -141,7 +140,6 @@ class TestQueueNotifier(unittest.TestCase):
         request = raising.call_args.args[2]
         self.assertEqual(request.texts, {'sentence': kinds.fixed_text('notifier_unhealthy', 'notifier')})
         self.assertFalse(hasattr(notifier, '_UNHEALTHY_TEXT'))
-
 
     def test_argv_stops_option_parsing(self):
         note = notifier.Notification('item', 1, '-e', '-e do shell script "x"')

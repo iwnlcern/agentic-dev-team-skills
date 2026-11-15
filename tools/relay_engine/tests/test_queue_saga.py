@@ -310,7 +310,6 @@ class TestQueueApply(unittest.TestCase):
         self.assertEqual(self.outcome(item), ('applying', 2))
         self.assertEqual(records._one(self.c, "SELECT COUNT(*) FROM queue_items WHERE subkind='answer_faulted'"), (0,))
 
-
     def test_record_answer_refuses_faulted_notice(self):
         item = self.recorded()
         saga.confirm(self.c, item.item_id,
