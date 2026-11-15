@@ -271,6 +271,11 @@ class SealWorker:
             if all(f.item_id != fault.item_id for f in self._clear_pending):
                 self._clear_pending.append(fault)
             return
+        if any(other is not fault and other.item_id == fault.item_id
+               for current in self._faults.values() for other in [current, *current.older]):
+            fault.item_id = None
+            fault.cleared = True
+            return
         result = self._call(fault.project,self.queue.clear_condition,self.principal,fault.item_id,
                             'notice','approval_seal_unusable',fault.project,fault.key)
         if result is not None:

@@ -985,6 +985,57 @@ class TestSealWorker(unittest.TestCase):
                 release.set(); self.queue.before_clear = None
                 self.repair(saved); self.stop(worker)
 
+    def test_stale_pending_clear_spares_adopted_item(self):
+        for case in ('recurring-cause', 'stale-shared-item'):
+            with self.subTest(case=case):
+                self.queue = st.QueueServiceStandIn()
+                self.ended.clear()
+                worker = self.worker()
+                saved = self.damage('pointer')
+                patch = None
+                try:
+                    self.refuse()
+                    first = self.assert_cause('pointer_damaged', None)
+                    original = worker._faults[P]
+                    if case == 'stale-shared-item':
+                        stale = self.m._Fault(P, None, 'pointer_damaged', self.clock(), first)
+                        count = self.queue.calls.count(('clear', first))
+                        worker._clear(stale, worker._generation - 1)
+                        self.assertIn(stale, worker._clear_pending)
+                        self.assertEqual(self.queue.calls.count(('clear', first)), count)
+                        self.tick(worker)
+                        self.assertEqual(self.queue.calls.count(('clear', first)), count)
+                        self.assertNotIn(stale, worker._clear_pending)
+                        self.assertTrue(self.queue.items[first]['open'])
+                        self.assertEqual(original.item_id, first)
+                        continue
+                    self.queue.behavior[('clear', P)] = st.Refusal()
+                    patch = self.folder_fault()
+                    self.tick(worker)
+                    second = next(item['item_id'] for item in self.items()
+                                  if item['condition_key']['cause'] == 'folder_unusable')
+                    self.assertIn(original, worker._clear_pending)
+                    patch.stop(); patch = None
+                    self.queue.behavior.pop(('clear', P))
+                    count = self.queue.calls.count(('clear', first))
+                    for _ in range(3):
+                        self.tick(worker)
+                        self.assertTrue(self.queue.items[first]['open'])
+                        self.assertFalse(self.queue.items[second]['open'])
+                        self.assertEqual(worker._faults[P].item_id, first)
+                        self.assertEqual(worker._clear_pending, [])
+                        self.assertEqual(self.queue.calls.count(('clear', first)), count)
+                    self.repair(saved)
+                    self.tick(worker)
+                    self.assertEqual(self.queue.calls.count(('clear', first)), count + 1)
+                    self.assertFalse(self.queue.items[first]['open'])
+                    self.assertEqual(self.ended, [(P, 'pointer_damaged')])
+                finally:
+                    if patch is not None:
+                        patch.stop()
+                    self.repair(saved)
+                    self.shutdown()
+
     def test_pointer_damaged_then_folder_cause_change(self):
         self.worker();self.damage('pointer');self.refuse();self.assert_cause('pointer_damaged',None)
         p=self.folder_fault()
