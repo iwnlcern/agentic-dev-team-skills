@@ -209,6 +209,7 @@ _AUTHORITY_TABLES = (
     by_special TEXT NOT NULL CHECK (by_special = 'operator'),
     words TEXT NOT NULL CHECK (length(words) > 0),
     created_at INTEGER NOT NULL,
+    after_handle INTEGER NOT NULL,
     UNIQUE (claim_relay_id, kind)
 ) STRICT""",
 )

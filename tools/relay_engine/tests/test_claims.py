@@ -471,3 +471,44 @@ class TestClaims(ClaimStore):
             call()
             self.assertFalse(self.conn.in_transaction)
             self.assertEqual(self.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0], 1)
+
+
+class TestRuleHClaims(ClaimStore):
+    """Waiver frontier and two-query H reads, with real claim admissions."""
+
+    def test_waive_records_after_handle(self):
+        # An older wall-clock value must not replace the relay frontier.
+        _, claim = self.claim()
+        self.submit(draft(kind='SITREP', to=IMPL.address))
+        highest = self.conn.execute('SELECT max(handle) FROM relays WHERE project_id = ?',
+                                    ('p',)).fetchone()[0]
+        claims.waive(self.conn, claim.relay_id, 'plan', 'operator', 'waive', self.clock)
+        recorded = self.conn.execute('SELECT after_handle FROM waivers WHERE claim_relay_id = ?',
+                                     (claim.relay_id,)).fetchone()[0]
+        self.assertEqual(recorded, highest)
+
+    def test_standing_objection_statement_count(self):
+        # Count both H queries and ensure the frontier read is in the write TX.
+        _, claim = self.claim()
+        trace = []
+        self.conn.set_trace_callback(trace.append)
+        try:
+            claims.standing_objection(self.conn, 'p', str(self.plan),
+                                      hashlib.sha256(self.plan.read_bytes()).hexdigest())
+        finally:
+            self.conn.set_trace_callback(None)
+        self.assertEqual(len(trace), 2, trace)
+        self.assertIn('verification_requests', trace[0])
+        self.assertIn('waivers', trace[1])
+        trace = []
+        self.conn.set_trace_callback(trace.append)
+        try:
+            claims.waive(self.conn, claim.relay_id, 'plan', 'operator', 'waive', self.clock)
+        finally:
+            self.conn.set_trace_callback(None)
+        begin = trace.index('BEGIN IMMEDIATE')
+        end = trace.index('COMMIT')
+        reads = [i for i, statement in enumerate(trace) if 'max(handle)' in statement.lower()]
+        self.assertEqual(len(reads), 1, trace)
+        self.assertLess(begin, reads[0], trace)
+        self.assertLess(reads[0], end, trace)

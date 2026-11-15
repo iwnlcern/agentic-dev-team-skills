@@ -459,28 +459,29 @@ def _checked_slip(conn, slip, effect, digest):
             return _answer(bound['kind'] + '-changed',
                            strings.render('authority-artifact', artifact=bound['artifact']), planner, slip)
     for claim in binds['claims']:
+        for lock in claim['locks']:
+            objection = claims.standing_objection(
+                conn, slip['project_id'], lock['artifact'], lock['content_sha256'])
+            if objection is not None:
+                unblocker = 'operator' if objection.verdict == 'human-decision-required' else planner
+                return _answer('verification-objected',
+                               strings.render('authority-verification', kind=claim['kind'],
+                                              state='objected', relay=objection.review_relay_id),
+                               unblocker, slip)
         state = claims.verification_state(conn, claim['claim'])
-        if state not in ('approved', 'waived'):
+        if state == 'pending':
             row = conn.execute('SELECT reviewer_seat_id FROM verification_requests WHERE claim_relay_id = ? LIMIT 1',
                                (claim['claim'],)).fetchone()
             reviewer = _seat(conn, row[0]) if row and row[0] is not None else None
-            if state == 'pending' and not claims.reviewer_can_answer(conn, row[0] if row else None):
+            if not claims.reviewer_can_answer(conn, row[0] if row else None):
                 reviewer = None
             unblocker = reviewer[3] + '.' + reviewer[2] if reviewer else 'operator'
-            code = 'verification-pending' if state == 'pending' else 'verification-objected'
-            if state == 'pending' and reviewer is None:
-                reason = strings.render('authority-no-reviewer')
+            if reviewer is None:
+                reason = strings.render('authority-no-reviewer', relay=claim['claim'])
             else:
-                reason = strings.render('authority-verification', kind=claim['kind'], state=state)
-            if state == 'objected':
-                verdict = conn.execute(
-                    'SELECT r.verdict FROM relays r JOIN verification_requests v'
-                    " ON v.request_relay_id = r.parent_id WHERE v.claim_relay_id = ?"
-                    " AND r.sender_seat_id = v.reviewer_seat_id AND r.kind = 'REVIEW'"
-                    ' AND r.verdict IS NOT NULL ORDER BY r.created_at DESC LIMIT 1',
-                    (claim['claim'],)).fetchone()
-                unblocker = 'operator' if verdict and verdict[0] == 'human-decision-required' else planner
-            return _answer(code, reason, unblocker, slip)
+                reason = strings.render('authority-verification', kind=claim['kind'],
+                                        state=state, relay=claim['claim'])
+            return _answer('verification-pending', reason, unblocker, slip)
     return _allow(slip)
 
 

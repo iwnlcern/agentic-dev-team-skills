@@ -131,6 +131,46 @@ def verification_state(conn, claim_relay_id):
         return 'approved' if verdict[0] == 'approve' else 'objected'
 
 
+@dataclass(frozen=True)
+class StandingObjection:
+    review_relay_id: str
+    claim_relay_id: str
+    verdict: str
+
+
+def standing_objection(conn, project_id: str, artifact: str,
+                       content_sha256: str) -> StandingObjection | None:
+    """Newest standing reviewer objection over the project's same locked bytes."""
+    with submit.read_guard(conn):
+        verdicts = conn.execute(
+            'SELECT v.claim_relay_id, v.reviewer_seat_id, r.id, r.verdict, r.handle'
+            ' FROM verification_requests v JOIN relays c ON c.id = v.claim_relay_id'
+            ' LEFT JOIN relays r ON r.parent_id = v.request_relay_id'
+            " AND r.sender_seat_id = v.reviewer_seat_id AND r.kind = 'REVIEW'"
+            ' AND r.verdict IS NOT NULL'
+            ' WHERE c.project_id = ? AND v.artifact = ? AND v.content_sha256 = ?',
+            (project_id, artifact, content_sha256)).fetchall()
+        waivers = conn.execute(
+            'SELECT w.claim_relay_id, w.after_handle FROM waivers w'
+            ' JOIN verification_requests v ON v.claim_relay_id = w.claim_relay_id'
+            ' AND v.kind = w.kind JOIN relays c ON c.id = v.claim_relay_id'
+            ' WHERE c.project_id = ? AND v.artifact = ? AND v.content_sha256 = ?',
+            (project_id, artifact, content_sha256)).fetchall()
+    waived = {claim for claim, _ in waivers}
+    frontier = max((after_handle for _, after_handle in waivers), default=0)
+    newest = {}
+    for claim, reviewer, review, verdict, handle in verdicts:
+        if claim in waived or review is None:
+            continue
+        if reviewer not in newest or handle > newest[reviewer][0]:
+            newest[reviewer] = (handle, review, claim, verdict)
+    standing = [row for row in newest.values() if row[3] != 'approve' and row[0] > frontier]
+    if not standing:
+        return None
+    _, review, claim, verdict = max(standing)
+    return StandingObjection(review, claim, verdict)
+
+
 def reviewer_can_answer(conn, seat_id: str | None) -> bool:
     """Whether the recorded reviewer is a standing seat of an open team."""
     if seat_id is None:
@@ -204,11 +244,19 @@ def waive(conn, claim_relay_id, kind, by_principal, words, now_ms):
     conn.execute('BEGIN IMMEDIATE')
     try:
         with submit.read_guard(conn):
-            if conn.execute('SELECT 1 FROM verification_requests WHERE claim_relay_id = ?'
-                            ' AND kind = ?', (claim_relay_id, kind)).fetchone() is None:
+            claim = conn.execute(
+                'SELECT r.project_id FROM verification_requests v JOIN relays r'
+                ' ON r.id = v.claim_relay_id WHERE v.claim_relay_id = ? AND v.kind = ?',
+                (claim_relay_id, kind)).fetchone()
+            if claim is None:
                 raise ValueError('the claim has no verification row')
-            conn.execute('INSERT INTO waivers (claim_relay_id, kind, by_special, words, created_at)'
-                         " VALUES (?, ?, 'operator', ?, ?)", (claim_relay_id, kind, words, now_ms))
+            after_handle = conn.execute(
+                'SELECT coalesce(max(handle), 0) FROM relays WHERE project_id = ?',
+                (claim[0],)).fetchone()[0]
+            conn.execute('INSERT INTO waivers (claim_relay_id, kind, by_special, words,'
+                         ' created_at, after_handle)'
+                         " VALUES (?, ?, 'operator', ?, ?, ?)",
+                         (claim_relay_id, kind, words, now_ms, after_handle))
             conn.execute('COMMIT')
     except BaseException:
         if conn.in_transaction:

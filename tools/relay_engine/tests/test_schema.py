@@ -328,9 +328,9 @@ class TestTask4Waiver(ClaimStore):
         self.conn.execute('SAVEPOINT seat_waiver')
         accepted = False
         try:
-            self.conn.execute('INSERT INTO waivers (claim_relay_id, kind, by_seat_id, words, created_at)'
-                              " VALUES (?, 'plan', ?, 'seat waiver', ?)",
-                              (claim.relay_id, test_submit.PLANNER.seat_id, self.clock))
+            self.conn.execute('INSERT INTO waivers (claim_relay_id, kind, by_special, words, created_at, after_handle)'
+                              " VALUES (?, 'plan', 'seat', 'seat waiver', ?, 0)",
+                              (claim.relay_id, self.clock))
             accepted = True
         except sqlite3.Error:
             pass
@@ -1087,3 +1087,33 @@ class TestSnapshotSchema(Store):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRuleHSchema(ClaimStore):
+    """Savepoint-only malformed-row refusal; no direct Authority row survives."""
+
+    def test_request_and_reviewer_null_together(self):
+        # E2-M1: remove the pairing CHECK and this otherwise valid insert succeeds.
+        _, source = self.claim()
+        row = self.conn.execute('SELECT artifact, kind, snapshot_handle, snapshot_request_relay_id,'
+                                ' content_sha256, request_relay_id, created_at'
+                                ' FROM verification_requests WHERE claim_relay_id = ?',
+                                (source.relay_id,)).fetchone()
+        _, empty = self.claim(paths=())
+        self.assertIsNone(self.request(empty))
+        accepted = False
+        self.conn.execute('SAVEPOINT null_pair')
+        try:
+            self.conn.execute('INSERT INTO verification_requests (claim_relay_id, artifact, kind,'
+                              ' snapshot_handle, snapshot_request_relay_id, content_sha256,'
+                              ' request_relay_id, reviewer_seat_id, created_at)'
+                              ' VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)',
+                              (empty.relay_id, *row))
+            accepted = True
+        except sqlite3.Error:
+            pass
+        finally:
+            self.conn.execute('ROLLBACK TO null_pair')
+            self.conn.execute('RELEASE null_pair')
+        self.assertFalse(accepted, 'a request with no reviewer must be refused')
+        self.assertIsNone(self.request(empty))

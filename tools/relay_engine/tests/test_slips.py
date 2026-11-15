@@ -1249,6 +1249,7 @@ class TestErratum5(SlipStore):
         self.verify(approval, 'must-revise')
         self.code('verification-objected')
         claims.waive(self.conn, approval.relay_id, 'plan', 'operator', 'the operator accepts this plan', self.clock)
+        self.assertEqual(self.act().outcome, 'allow')
         self.assertEqual(self.act().slip_id, self.issued(impl))
 
     def test_non_approve_naming_unheld_path_objects_all(self):
@@ -1700,6 +1701,7 @@ class TestTask4PlainReview(SlipStore):
         held = self.code('verification-pending')
         self.assertEqual(held.unblocker, 'operator')
         claims.waive(self.conn, claim.relay_id, 'plan', 'operator', 'waive missing reviewer', self.clock)
+        self.assertEqual(self.act().outcome, 'allow')
         self.assertEqual(self.act().slip_id, self.issued(issued))
         claims.assign_reviewer(self.conn, 't1', SECOND.seat_id, 'operator', self.clock)
         self.assertEqual(self.request(claim), (None, None))
@@ -2057,7 +2059,20 @@ class TestErratum6(SlipStore):
                                   to=PLANNER.address, cc=self.issuers, refs=self.refs(p)), IMPL)
         impl = self.issue(again)
         self.assertEqual(self.claim_artifacts(impl), {('plan', approval.relay_id): [str(p)]})
+        self.assertEqual(self.act().outcome, 'allow')
         self.assertEqual(self.act().slip_id, self.issued(impl))
+
+    def test_newer_verification_objection_on_same_bytes_holds(self):
+        p = self.file('p.md', b'p X\n')
+        approval = self.reviewed(self.requested('P', self.go(), p), 'approve', p)
+        request = self.requested('P', approval, p)
+        again = self.answer(request, 'approve', p)
+        self.verify(again, 'must-revise')
+        self.issue(again)
+        answer = self.act()
+        self.assertEqual(answer.outcome, 'held',
+                         'outcome=%s code=%s' % (answer.outcome, answer.code))
+        self.assertEqual(answer.code, 'authority.verification-objected')
 
     def test_mis_kinded_approve_pins_bytes(self):
         x, y = b'p X\n', b'p Y\n'
@@ -2147,3 +2162,193 @@ class TestErratum6(SlipStore):
         self.assertEqual(record['admitted'] + record['refused'], len(LINEAGE_NAMED_WORDS))
         self.assertEqual(record['violations'], [],
                          'named lineages violate the property: %s' % json.dumps(record, default=repr))
+
+
+class TestRuleH(SlipStore):
+    """Real admissions for project/path/content standing objections and their cost.
+
+    Waivers use the operator writer; no Authority rows are fixture-inserted.
+    Platform sender admission and the records slice remain outside this fixture.
+    """
+    file = TestErratum6.file
+    refs = TestErratum6.refs
+    requested = TestErratum6.requested
+    reviewed = TestErratum6.reviewed
+
+    def test_reviewer_approve_after_own_objection_lifts(self):
+        # M1: newest effective verdict is per reviewer across same-byte claims.
+        p = self.file('p.md', b'p X\n')
+        first = self.answer(self.requested('P', self.go(), p), 'approve', p)
+        self.verify(first, 'must-revise')
+        newer = self.reviewed(self.requested('P', first, p), 'approve', p)
+        self.issue(newer)
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_waiver_older_than_objection_does_not_lift(self):
+        # M2: an older waiver cannot dismiss a later objection.
+        p = self.file('p.md', b'p X\n')
+        first = self.answer(self.requested('P', self.go(), p), 'approve', p)
+        claims.waive(self.conn, first.relay_id, 'plan', 'operator', 'waive first', self.clock)
+        newer = self.answer(self.requested('P', first, p), 'approve', p)
+        self.verify(newer, 'must-revise')
+        self.issue(newer)
+        answer = self.act()
+        self.assertEqual(answer.outcome, 'held')
+        self.assertEqual(answer.code, 'authority.verification-objected')
+
+    def test_waiver_newer_than_objection_lifts(self):
+        # M4: position, not the fixed raw waiver clock, dismisses the old objection.
+        p = self.file('p.md', b'p X\n')
+        first = self.answer(self.requested('P', self.go(), p), 'approve', p)
+        objection = self.verify(first, 'must-revise')
+        newer = self.answer(self.requested('P', first, p), 'approve', p)
+        objection_time = self.conn.execute('SELECT created_at FROM relays WHERE id = ?',
+                                           (objection.relay_id,)).fetchone()[0]
+        self.assertLessEqual(self.clock, objection_time)
+        claims.waive(self.conn, newer.relay_id, 'plan', 'operator', 'waive newer', self.clock)
+        self.issue(newer)
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_objection_to_non_deciding_approve_holds(self):
+        # IN: a non-holder's recorded claim remains in the same-byte set.
+        p = self.file('p.md', b'p X\n')
+        other = self.reviewed(self.requested('P', self.go(), p, to=SECOND), 'approve', p, sender=SECOND)
+        holder = self.reviewed(self.requested('P', other, p), 'approve', p)
+        objection = self.verify(other, 'must-revise')
+        self.issue(holder)
+        answer = self.act()
+        self.assertEqual(answer.outcome, 'held')
+        self.assertEqual(answer.code, 'authority.verification-objected')
+        self.assertIn(objection.relay_id, answer.reason)
+
+    def test_objection_filed_after_issue_holds(self):
+        # LX: answer-time reads include objections filed after the slip issued.
+        p = self.file('p.md', b'p X\n')
+        first = self.reviewed(self.requested('P', self.go(), p), 'approve', p)
+        issued = self.issue(first)
+        newer = self.answer(self.requested('P', first, p), 'approve', p)
+        self.verify(newer, 'must-revise')
+        self.assertEqual(self.act().outcome, 'held')
+        self.verify(newer)
+        self.assertEqual(self.act().outcome, 'allow')
+        self.assertEqual(self.act().slip_id, self.issued(issued))
+
+    def test_objection_on_waived_claim_does_not_mask_other_objection(self):
+        # Excluding waived claims must precede newest-per-reviewer selection.
+        for control in (False, True):
+            with self.subTest(control=control):
+                if control:
+                    self.conn.close()
+                    self.setUp()
+                p = self.file('p.md', b'p X\n')
+                first = self.answer(self.requested('P', self.go(), p), 'approve', p)
+                claims.waive(self.conn, first.relay_id, 'plan', 'operator', 'waive first', self.clock)
+                newer = self.answer(self.requested('P', first, p), 'approve', p)
+                objection = self.verify(newer, 'must-revise')
+                self.issue(newer)
+                self.assertEqual(self.act().outcome, 'held')
+                if control:
+                    self.verify(newer)
+                    self.assertEqual(self.act().outcome, 'allow')
+                else:
+                    self.verify(first, 'must-revise')
+                    answer = self.act()
+                    self.assertEqual(answer.outcome, 'held')
+                    self.assertIn(objection.relay_id, answer.reason)
+
+    def test_held_reasons_name_their_relay(self):
+        # A correct code with no actionable relay in its reason is insufficient.
+        p = self.file('p.md', b'p X\n')
+        first = self.answer(self.requested('P', self.go(), p), 'approve', p)
+        objection = self.verify(first, 'must-revise')
+        self.issue(first)
+        self.assertIn(objection.relay_id, self.act().reason)
+        self.conn.close()
+        self.setUp()
+        p = self.file('p.md', b'p X\n')
+        pending = self.answer(self.requested('P', self.go(), p), 'approve', p)
+        self.issue(pending)
+        self.assertIn(pending.relay_id, self.act().reason)
+
+    def test_objection_elsewhere_leaves_answer(self):
+        # H-PATH/H-CONTENT: neither coordinate alone identifies the locked bytes.
+        for other_path in (False, True):
+            with self.subTest(other_path=other_path):
+                if other_path:
+                    self.conn.close()
+                    self.setUp()
+                p = self.file('p.md', b'p X\n')
+                first = self.reviewed(self.requested('P', self.go(), p), 'approve', p)
+                self.issue(first)
+                q = self.file('q.md', b'p X\n') if other_path else p
+                if not other_path:
+                    p.write_bytes(b'p Y\n')
+                newer = self.answer(self.requested('P', first, q), 'approve', q)
+                self.verify(newer, 'must-revise')
+                p.write_bytes(b'p X\n')
+                self.assertEqual(self.act().outcome, 'allow')
+
+    def test_waiver_outranks_later_verdict_on_its_claim(self):
+        # H-OWN: later verdicts on the waived claim cannot stand.
+        p = self.file('p.md', b'p X\n')
+        first = self.answer(self.requested('P', self.go(), p), 'approve', p)
+        claims.waive(self.conn, first.relay_id, 'plan', 'operator', 'waive', self.clock)
+        self.verify(first, 'must-revise')
+        issued = self.issue(first)
+        self.assertEqual(self.act().outcome, 'allow')
+        self.assertEqual(self.act().slip_id, self.issued(issued))
+
+    def test_act_traces_rule_h_reads_once_per_lock(self):
+        # H-REPEAT: correct answers must not hide two calls for each lock.
+        from collections import Counter
+        for count in (1, 2):
+            with self.subTest(locks=count):
+                if count == 2:
+                    self.conn.close()
+                    self.setUp()
+                paths = [self.file('p%d.md' % i, b'X\n') for i in range(count)]
+                claim = self.reviewed(self.requested('P', self.go(), *paths), 'approve', *paths)
+                self.issue(claim)
+                def traced(call):
+                    statements = []
+                    self.conn.set_trace_callback(statements.append)
+                    try:
+                        value = call()
+                    finally:
+                        self.conn.set_trace_callback(None)
+                    return value, statements
+                expected_h = []
+                for path in paths:
+                    _, statements = traced(lambda: claims.standing_objection(
+                        self.conn, 'p', str(path), hashlib.sha256(path.read_bytes()).hexdigest()))
+                    self.assertEqual(len(statements), 2, statements)
+                    expected_h.extend(statements)
+                _, expected_state = traced(lambda: claims.verification_state(self.conn, claim.relay_id))
+                self.conn.execute('BEGIN IMMEDIATE')
+                try:
+                    answer, whole = traced(lambda: slips.act(
+                        self.conn, IMPL.seat_id, slips.Effect('commit', 'repo-1', 'work'), self.clock,
+                        digest=lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()))
+                    self.assertEqual(answer.outcome, 'allow', whole)
+                    actual = Counter(whole)
+                    for statement, occurrences in Counter(expected_h).items():
+                        self.assertEqual(actual[statement], occurrences, whole)
+                    for statement, occurrences in Counter(expected_state).items():
+                        self.assertEqual(actual[statement], occurrences, whole)
+                finally:
+                    self.conn.rollback()
+
+    def test_project_orchestrator_revokes_slip_it_did_not_issue(self):
+        # RV-ORCH/RV-PROJ: same-project delegation, with a foreign-project control.
+        _, _, issued = self.build(design=False)
+        slip_id = self.issued(issued)
+        self.conn.execute("INSERT INTO seats (id, team_instance_id, role, state)"
+                          " VALUES ('seat-q-orch', 'tq', 'orchestrator-planner', 'occupied')")
+        self.conn.commit()
+        refused = slips.revoke(self.conn, slip_id, 'seat-q-orch', 'foreign', self.clock)
+        self.assertEqual(refused.code, 'authority.not-issuer')
+        allowed = slips.revoke(self.conn, slip_id, ORCH.seat_id, 'project orchestrator', self.clock)
+        self.assertEqual(allowed.outcome, 'allow')
+        answer = self.act()
+        self.assertEqual(answer.outcome, 'deny')
+        self.assertEqual(answer.code, 'authority.slip-invalid')
