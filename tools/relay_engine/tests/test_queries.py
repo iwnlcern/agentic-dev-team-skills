@@ -32,7 +32,7 @@ from relay_engine.tests.test_submit import (FOREIGN, IMPL, ORCH, OTHER, PLANNER,
 OPERATOR = SEATS["operator"]
 
 ENVELOPE = {"handle", "kind", "sender", "to", "cc", "subject", "parent", "verdict", "needs",
-            "created_at", "imported"}
+            "created_at", "imported", "parent_id"}
 
 
 def retain_query_evidence(name, states):
@@ -45,6 +45,70 @@ def retain_query_evidence(name, states):
 
 
 class TestReads(Store):
+    def test_read_parent_id(self):
+        """R1/R2: pointer ids and key order are the read-by-id wire contract."""
+        root = self.submit(draft(to=IMPL.address))
+        child = self.submit(draft(to=IMPL.address, parent="#1"))
+        result = queries.read(self.conn, child.relay_id, IMPL.seat_id, 5000)
+        self.assertEqual(list(result.envelope), [
+            "handle", "kind", "sender", "to", "cc", "subject", "parent", "parent_id",
+            "verdict", "needs", "created_at", "imported"])
+        self.assertEqual((result.envelope["parent_id"], result.envelope["parent"]),
+                         (root.relay_id, root.handle))
+        result = queries.read(self.conn, root.relay_id, IMPL.seat_id, 6000)
+        self.assertIsNone(result.envelope["parent_id"])
+        self.assertIsNone(result.envelope["parent"])
+
+    def test_review_pointers_open_by_id(self):
+        """R5: every unopened lineage pointer can be passed directly to read."""
+        first = self.submit(draft(to=IMPL.address))
+        second = self.submit(draft(to=IMPL.address, parent="#1"))
+        review = self.submit(draft(kind="REVIEW", needs="review", to=IMPL.address,
+                                   parent="#2"))
+        result = queries.read(self.conn, review.relay_id, IMPL.seat_id, 5000)
+        self.assertEqual(result.unopened, [(first.relay_id, first.handle),
+                                           (second.relay_id, second.handle)])
+        self.assertEqual(result.envelope["parent_id"], second.relay_id)
+        for relay_id, handle in result.unopened:
+            self.assertEqual(queries.read(self.conn, relay_id, IMPL.seat_id,
+                                          6000).envelope["handle"], handle)
+        self.assertEqual(queries.read(self.conn, review.relay_id, IMPL.seat_id,
+                                      7000).unopened, [])
+
+    def test_read_opens_only_own_row(self):
+        """R3/R4: neither another party nor a parent is opened as a side effect."""
+        self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        child = self.submit(draft(to=IMPL.address, cc=OTHER.address, parent="#1"))
+        writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}
+        for seat, at in ((IMPL, 5000), (OTHER, 6000), (ORCH, 7000)):
+            with self.subTest(seat=seat.seat_id):
+                before = self.conn.execute(
+                    "SELECT relay_id, seat_id, opened_at, delivered_at, answered_by"
+                    " FROM recipients ORDER BY rowid").fetchall()
+                expected = [(rid, sid, at if rid == child.relay_id and sid == seat.seat_id
+                             and opened is None else opened, delivered, answered)
+                            for rid, sid, opened, delivered, answered in before]
+                seen = []
+                def authorizer(action, table, column, database, trigger):
+                    if action in writes:
+                        seen.append((action, table, column))
+                    return sqlite3.SQLITE_OK
+                self.conn.set_authorizer(authorizer)
+                try:
+                    queries.read(self.conn, child.relay_id, seat.seat_id, at)
+                finally:
+                    self.conn.set_authorizer(None)
+                self.assertEqual(self.conn.execute(
+                    "SELECT relay_id, seat_id, opened_at, delivered_at, answered_by"
+                    " FROM recipients ORDER BY rowid").fetchall(), expected)
+                self.assertTrue(seen)
+                self.assertLessEqual({table for _, table, _ in seen},
+                                     {"recipients", "seat_activity"})
+                self.assertEqual(self.conn.execute(
+                    "SELECT last_request_at FROM seat_activity WHERE seat_id = ?",
+                    (seat.seat_id,)).fetchone(), (at,))
+
+
     def actor_state(self):
         return {"activity": self.conn.execute(
                     "SELECT * FROM seat_activity ORDER BY seat_id").fetchall(),
@@ -62,7 +126,8 @@ class TestReads(Store):
         self.assertEqual(result.envelope, {
             "handle": 2, "kind": "SITREP", "sender": PLANNER.seat_id,
             "to": [IMPL.seat_id, OTHER.seat_id], "cc": [ORCH.seat_id],
-            "subject": "please act", "parent": 1, "verdict": None, "needs": "act",
+            "subject": "please act", "parent": 1, "parent_id": root.relay_id,
+            "verdict": None, "needs": "act",
             "created_at": child.created_at_ms, "imported": False})
         self.assertIsNone(result.meta)
         opened = lambda: self.conn.execute(
@@ -450,9 +515,9 @@ class TestLineage(Store):
                                    to="v3-engine.implementer"), sender=OTHER)
         queries.mark_opened(self.conn, first.relay_id, IMPL.seat_id, 1)
         self.assertEqual(queries.unopened_in_lineage(self.conn, review.relay_id, IMPL.seat_id),
-                         [second.handle])
+                         [(second.relay_id, second.handle)])
         result = queries.read(self.conn, review.relay_id, IMPL.seat_id, 2)
-        self.assertEqual(result.unopened, [second.handle])
+        self.assertEqual(result.unopened, [(second.relay_id, second.handle)])
         plain = self.submit(draft(parent="#3", to="v3-engine.implementer"), sender=OTHER)
         self.assertEqual(queries.read(self.conn, plain.relay_id, IMPL.seat_id, 3).unopened, [])
         self.assertIsNotNone(third)
@@ -766,11 +831,11 @@ class TestRecords(Store):
         self.conn.commit()
         after = queries.read(self.conn, relay_id, IMPL.seat_id, self.clock + 3).envelope
         self.assertEqual(after, {"handle": 2, "kind": "SITREP", "sender": PLANNER.seat_id,
-                                "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None,
+                                "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None, "parent_id": None,
                                 "verdict": None, "needs": "none", "created_at": self.clock + 1,
                                 "imported": True})
         self.assertEqual(before, {"handle": 1, "kind": "SITREP", "sender": PLANNER.seat_id,
-                                 "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None,
+                                 "to": [IMPL.seat_id], "cc": [], "subject": "s", "parent": None, "parent_id": None,
                                  "verdict": None, "needs": "none", "created_at": native.created_at_ms,
                                  "imported": False})
 

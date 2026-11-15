@@ -126,7 +126,7 @@ class ReadResult:
     body: bytes
     envelope: dict
     meta: dict | None
-    unopened: list
+    unopened: list[tuple[str, int]]
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,7 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
     row = conn.execute(
         "SELECT r.handle, r.kind, " + party_sql("r.sender_") + ", r.subject, p.handle, r.verdict, r.needs,"
         " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id, r.project_id, r.id,"
-        " r.submission_key, r.sender_special"
+        " r.submission_key, r.sender_special, r.parent_id"
         " FROM relays r JOIN bodies b ON b.relay_id = r.id"
         " LEFT JOIN relays p ON p.id = r.parent_id WHERE r.id = ?", (relay_id,)).fetchone()
     if row is None:
@@ -222,7 +222,8 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
         "handle": row[0], "kind": row[1], "sender": row[2],
         "to": [seat for seat, role in seats if role == "to"],
         "cc": [seat for seat, role in seats if role == "cc"],
-        "subject": row[3], "parent": row[4], "verdict": row[5], "needs": row[6],
+        "subject": row[3], "parent": row[4], "parent_id": row[16],
+        "verdict": row[5], "needs": row[6],
         "created_at": row[7],
         "imported": row[14] is None and row[15] != "system",
     }
@@ -310,8 +311,8 @@ def blocking_findings(conn, bundle_id):
     return [FindingRow(*row) for row in conn.execute(_BLOCKING_SQL, (bundle_id,))]
 
 
-def unopened_in_lineage(conn, relay_id, seat_id):
-    """Handles of the other relays up this relay's lineage that were
+def unopened_in_lineage(conn, relay_id, seat_id) -> list[tuple[str, int]]:
+    """Ids and handles of the other relays up this relay's lineage that were
     addressed to the seat (TO or CC) and that it has not opened."""
     walk = [row.id for row in lineage(conn, relay_id)[1:]]
     if not walk:
@@ -321,7 +322,7 @@ def unopened_in_lineage(conn, relay_id, seat_id):
         "SELECT r.id, r.handle FROM relays r JOIN recipients c ON c.relay_id = r.id"
         " WHERE " + party_sql("c.") + " = ? AND c.opened_at IS NULL AND r.id IN (%s)" % marks,
         [seat_id, *walk]).fetchall())
-    return [rows[rid] for rid in reversed(walk) if rid in rows]
+    return [(rid, rows[rid]) for rid in reversed(walk) if rid in rows]
 
 
 def mark_delivered(conn, relay_id, seat_id, at_ms):
