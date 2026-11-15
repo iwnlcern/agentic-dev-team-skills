@@ -3,7 +3,7 @@ import importlib
 import unittest
 
 from relay_engine import slips
-from relay_engine.tests.test_slips import SlipStore
+from relay_engine.tests.test_slips import SlipStore, with_repo
 from relay_engine.tests.test_submit import PLANNER, draft
 
 
@@ -344,8 +344,8 @@ class TestHold(RestoreStore):
         from relay_engine import submit
         from relay_engine.tests.test_submit import IMPL
         operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
-        return self.submit(draft(kind='IMPL', needs='act', to=(seat or IMPL).address,
-                                 bundle=bundle), operator)
+        return self.submit(with_repo(draft(kind='IMPL', needs='act', to=(seat or IMPL).address,
+                                 bundle=bundle)), operator)
 
     def refusal_rows(self):
         return self.conn.execute('SELECT relay_id, job_id FROM restore_refusals ORDER BY rowid').fetchall()

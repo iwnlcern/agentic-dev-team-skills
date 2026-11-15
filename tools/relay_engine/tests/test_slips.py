@@ -145,6 +145,17 @@ QIMPL = submit.SeatRef('seat-q-impl', 'v3-engine.implementer@q', 'implementer', 
 QREVIEWER = submit.SeatRef('seat-q-reviewer', 'v3.orchestrator-reviewer@q', 'orchestrator-reviewer', 'tq', 'q')
 
 
+def with_repo(text: str | bytes, name: str = 'bivpak') -> str | bytes:
+    encoded = isinstance(text, bytes)
+    lines = (text.decode('utf-8') if encoded else text).splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.startswith('NEEDS:'):
+            lines.insert(index + 1, 'REPO: ' + name + '\n')
+            result = ''.join(lines)
+            return result.encode('utf-8') if encoded else result
+    raise ValueError('draft has no NEEDS line')
+
+
 class SlipStore(ClaimStore):
     """Admission-backed claims/slips over hand-built project, team and seat rows.
 
@@ -213,9 +224,9 @@ class SlipStore(ClaimStore):
         issued = self.issue(pc, issuer) if issue else None
         return dc, pc, issued
 
-    def issue(self, parent, issuer=PLANNER, refs=(), **kwargs):
-        return self.submit(draft(kind='IMPL', needs='act', parent=parent.relay_id,
-                                 to=IMPL.address, refs=refs), issuer, **kwargs)
+    def issue(self, parent, issuer=PLANNER, refs=(), repo: str = 'bivpak', **kwargs):
+        return self.submit(with_repo(draft(kind='IMPL', needs='act', parent=parent.relay_id,
+                                 to=IMPL.address, refs=refs), repo), issuer, **kwargs)
 
     def slip(self, relay):
         return self.conn.execute('SELECT id FROM slips WHERE issued_in = ?', (relay.relay_id,)).fetchone()
@@ -312,7 +323,7 @@ class TestQueries(SlipStore):
         self.assertIsNone(self.slip(impl))
         self.code('lineage-incomplete')
         operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
-        impl = self.submit(draft(kind='IMPL', needs='act', to=IMPL.address, bundle='operator'), operator)
+        impl = self.submit(with_repo(draft(kind='IMPL', needs='act', to=IMPL.address, bundle='operator')), operator)
         row = self.conn.execute('SELECT binds FROM slips WHERE issued_in = ?', (impl.relay_id,)).fetchone()
         self.assertTrue(json.loads(row[0])['waived'])
         self.assertEqual(self.act().outcome, 'allow')
@@ -393,7 +404,7 @@ class TestQueries(SlipStore):
 
     def test_issue_is_atomic_with_admission(self):
         _, pc, _ = self.build(issue=False)
-        data = draft(kind='IMPL', needs='act', parent=pc.relay_id, to=IMPL.address)
+        data = with_repo(draft(kind='IMPL', needs='act', parent=pc.relay_id, to=IMPL.address))
         original = slips.on_admitted
         for fault in (RuntimeError('fault'), errors.error_for('E-SUBMISSION-KEY-REUSED')):
             def hook(conn, admitted, parsed, ctx):
@@ -561,16 +572,16 @@ class TestQueries(SlipStore):
 
     def test_impl_diagnostic_scope(self):
         self.code('slip-missing')
-        self.submit(draft(kind='IMPL', needs='act', to=SECOND.address), OTHER)
+        self.submit(with_repo(draft(kind='IMPL', needs='act', to=SECOND.address)), OTHER)
         self.submit(draft())
         # Each relay below differs from a diagnostic IMPL by one filter: kind, NEEDS, the TO role, the project.
         self.submit(draft(kind='SITREP', needs='act', to=IMPL.address))
         self.submit(draft(kind='IMPL', needs='none', to=IMPL.address))
-        self.submit(draft(kind='IMPL', needs='act', to=PLANNER.address, cc=IMPL.address))
+        self.submit(with_repo(draft(kind='IMPL', needs='act', to=PLANNER.address, cc=IMPL.address)))
         resolve = self.directory.resolve
         self.directory.resolve = lambda address, sender: (IMPL if address == 'v3-cross.implementer'
                                                           else resolve(address, sender))
-        crossing = self.submit(draft(kind='IMPL', needs='act', to='v3-cross.implementer'), FOREIGN)
+        crossing = self.submit(with_repo(draft(kind='IMPL', needs='act', to='v3-cross.implementer')), FOREIGN)
         self.directory.resolve = resolve
         self.assertEqual(self.conn.execute("SELECT seat_id FROM recipients WHERE relay_id = ? AND role = 'to'",
                                            (crossing.relay_id,)).fetchone(), (IMPL.seat_id,))
@@ -615,7 +626,7 @@ class TestQueries(SlipStore):
         approval = self.submit(draft(kind='PLAN-REVIEW', verdict='approve', parent=request.relay_id,
                                      to=ORCH.address, refs=refs), SECOND)
         self.verify(approval)
-        second = self.submit(draft(kind='IMPL', needs='act', parent=approval.relay_id, to=SECOND.address), ORCH)
+        second = self.submit(with_repo(draft(kind='IMPL', needs='act', parent=approval.relay_id, to=SECOND.address)), ORCH)
         self.issued(second)
         held = self.code('slip-invalid', seat=SECOND, branch='owned')
         self.assertIn('seat', held.reason)
@@ -977,12 +988,12 @@ class TestErratum3(SlipStore):
                     self.assertEqual(answer.code or answer.outcome,
                                      'allow' if role in planners else 'authority.slip-missing')
         for role in sorted(reviewers):
-            self.submit(draft(kind='IMPL', needs='act', to=roster[role].address, bundle='roster-' + role))
+            self.submit(with_repo(draft(kind='IMPL', needs='act', to=roster[role].address, bundle='roster-' + role)))
             for branch in ('free', 'bound'):
                 with self.subTest(role=role, branch=branch, addressed=True):
                     self.assertEqual(self.act(seat=roster[role], branch=branch).code, 'authority.not-issuer')
         # Erratum 5 r4 S2: the unlisted role answers slip-missing with an IMPL addressed to it too.
-        self.submit(draft(kind='IMPL', needs='act', to=roster['unlisted-role'].address, bundle='roster-unlisted'))
+        self.submit(with_repo(draft(kind='IMPL', needs='act', to=roster['unlisted-role'].address, bundle='roster-unlisted')))
         for branch in ('free', 'bound'):
             with self.subTest(role='unlisted-role', branch=branch, addressed=True):
                 self.assertEqual(self.act(seat=roster['unlisted-role'], branch=branch).code, 'authority.slip-missing')
@@ -1063,7 +1074,7 @@ class TestErratum3(SlipStore):
         objection = self.answer(self.ask('plan', base, self.plan), 'must-revise', self.plan,
                                 cc=self.issuers + ', operator')
         operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
-        impl = self.submit(draft(kind='IMPL', needs='act', parent=objection.relay_id, to=IMPL.address), operator)
+        impl = self.submit(with_repo(draft(kind='IMPL', needs='act', parent=objection.relay_id, to=IMPL.address)), operator)
         self.assertIn('objected:' + str(self.plan), self.binds(impl)['waived'])
         # Erratum 5 r4 S3: B2's plan-lock waiver stays beside it (erratum 4 r3 R2).
         self.assertIn('plan-lock', self.binds(impl)['waived'])
@@ -1239,7 +1250,7 @@ class TestErratum5(SlipStore):
             _, dc = self.designed()
             approval = self.answer(self.ask('plan', dc, self.plan), 'approve', self.plan,
                                    cc=self.issuers + ', operator')
-            impl = self.submit(draft(kind='IMPL', needs='act', parent=approval.relay_id, to=IMPL.address), operator)
+            impl = self.submit(with_repo(draft(kind='IMPL', needs='act', parent=approval.relay_id, to=IMPL.address)), operator)
             return approval, impl
         approval, impl = lineage()
         self.assertEqual([w for w in self.binds(impl)['waived'] if w.startswith('verification:')], [])
@@ -1802,7 +1813,7 @@ class TestTask4PlainReview(SlipStore):
         # CT-M1..4: closing an issuer is an issue-time rule, not a standing rule.
         _, direct_claim, direct = self.build(bundle='closed-direct', issuer=ORCH, design=False)
         _, pair_claim, _ = self.build(bundle='closed-pair', design=False, issue=False)
-        pair = self.issue(pair_claim, git_state=replace(GIT_STATE, repository_id='repo-2'))
+        pair = self.issue(pair_claim, repo='other', git_state=replace(GIT_STATE, repository_id='repo-2'))
         direct_slip, pair_slip = self.issued(direct), self.issued(pair)
         self.conn.execute("UPDATE team_instances SET closed_at = 2 WHERE id = 't3'")
         self.conn.commit()
@@ -2624,10 +2635,10 @@ class TestSupersede(SlipStore):
     def test_issue_keeps_other_bundle_and_repository_live(self):
         _, _, other_bundle = self.build(bundle='other', design=False)
         _, claim, _ = self.build(bundle='same', design=False, issue=False)
-        other_repo = self.issue(claim, git_state=replace(GIT_STATE, repository_id='repo-2'))
+        other_repo = self.issue(claim, repo='other', git_state=replace(GIT_STATE, repository_id='repo-2'))
         operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
-        other_seat = self.submit(draft(kind='IMPL', needs='act', bundle='same',
-                                       to=SECOND.address), operator)
+        other_seat = self.submit(with_repo(draft(kind='IMPL', needs='act', bundle='same',
+                                       to=SECOND.address)), operator)
         saved = [self.issued(r) for r in (other_bundle, other_repo, other_seat)]
         last = self.issue(claim)
         self.issued(last)
