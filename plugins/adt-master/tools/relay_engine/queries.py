@@ -54,6 +54,73 @@ class RelayRow:
 
 
 @dataclass(frozen=True)
+class AddressedRow:
+    relay_id: str
+    handle: int
+    created_at: int
+    sender: str
+    subject: str
+    needs: str
+    state: str
+
+
+@dataclass(frozen=True)
+class AddressedPage:
+    total: int
+    answered: int
+    unanswered: int
+    imported: int
+    truncated: bool
+    rows: tuple[AddressedRow, ...]
+
+
+def addressed_to(conn, project_id: str, seat_id: str, *, limit: int,
+                 since_ms: int | None = None) -> AddressedPage:
+    """List a seat's TO relays and parent-rule answers in one read-only snapshot."""
+    if conn.in_transaction:
+        raise ValueError("addressed_to needs a connection with no open transaction")
+    if type(limit) is not int or not 1 <= limit <= 500:
+        raise ValueError("limit must be an int from 1 to 500")
+    if since_ms is not None and (type(since_ms) is not int or not 0 <= since_ms < 2**48):
+        raise ValueError("since_ms must be None or an int from 0 to 2**48 - 1")
+    conn.execute("BEGIN")
+    try:
+        if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise ValueError("the addressed project does not exist")
+        if conn.execute("SELECT 1 FROM seats s JOIN team_instances t ON t.id=s.team_instance_id"
+                        " WHERE s.id=? AND t.project_id=?", (seat_id, project_id)).fetchone() is None:
+            raise ValueError("the addressed seat does not belong to the project")
+        selected = (
+            "SELECT r.id, r.handle, r.created_at, " + party_sql("r.sender_") +
+            " AS sender, r.subject, r.needs, CASE WHEN EXISTS ("
+            " SELECT 1 FROM relays child WHERE child.parent_id=r.id"
+            " AND child.project_id=r.project_id AND child.sender_seat_id=?) THEN 'answered'"
+            " WHEN r.submission_key IS NULL AND coalesce(r.sender_special, '') != 'system'"
+            " THEN 'imported' ELSE 'unanswered' END AS state"
+            " FROM recipients recipient JOIN relays r ON r.id=recipient.relay_id"
+            " WHERE recipient.role='to' AND recipient.seat_id=? AND r.project_id=?")
+        parameters = (seat_id, seat_id, project_id)
+        if since_ms is not None:
+            selected += " AND r.created_at>=?"
+            parameters += (since_ms,)
+        total, answered, unanswered, imported = conn.execute(
+            "SELECT count(*), coalesce(sum(state='answered'), 0),"
+            " coalesce(sum(state='unanswered'), 0), coalesce(sum(state='imported'), 0)"
+            " FROM (" + selected + ")", parameters).fetchone()
+        rows = tuple(AddressedRow(*row) for row in conn.execute(
+            selected + " ORDER BY r.handle DESC LIMIT ?", parameters + (limit,)))
+        conn.execute("COMMIT")
+        return AddressedPage(total, answered, unanswered, imported, total > len(rows), rows)
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except BaseException:
+                pass  # Keep the original query error, even if cleanup itself fails.
+        raise
+
+
+@dataclass(frozen=True)
 class FindingRow:
     id: str
     handle: int

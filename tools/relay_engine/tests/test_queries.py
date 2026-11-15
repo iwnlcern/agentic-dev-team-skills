@@ -1083,6 +1083,286 @@ class TestRecords(Store):
                 first.close()
 
 
+class TestAddressedTo(Store):
+    def _import(self, conn=None, *, sender=PLANNER, to=IMPL, parent=None):
+        from relay_engine import imports
+        conn = self.conn if conn is None else conn
+        created = max(self.clock, conn.execute(
+            "SELECT coalesce(max(created_at), 0) + 1 FROM relays").fetchone()[0])
+        relay = imports.ImportedRelay(
+            created, "SITREP", None, "imported", sender.seat_id, sender.role,
+            sender.team_instance_id, (to.seat_id,), (), parent,
+            parent if parent else None, b"body\n", 0, "0" * 64)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rid = imports.import_relay_step(conn, "p", relay, marked_at_ms=created + 1)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return rid
+
+    def _writes(self, seen):
+        def authorize(action, table, column, database, trigger):
+            if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
+                seen.append((action, table, column))
+            return sqlite3.SQLITE_OK
+        return authorize
+
+    def test_addressed_lists_to_only(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        own = self.submit(draft(to=IMPL.address, subject="own", needs="act"))
+        self.submit(draft(to=OTHER.address, cc=IMPL.address))
+        self.submit(draft(to=OTHER.address))
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual(page, queries.AddressedPage(1, 0, 1, 0, False, (
+            queries.AddressedRow(own.relay_id, own.handle, own.created_at_ms,
+                                 PLANNER.seat_id, "own", "act", "unanswered"),)))
+        with self.assertRaises(FrozenInstanceError):
+            page.total = 2
+        with self.assertRaises(FrozenInstanceError):
+            page.rows[0].state = "answered"
+
+    def test_addressed_answered_rule(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        yes = self.submit(draft(to=IMPL.address))
+        other = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        no = self.submit(draft(to=IMPL.address))
+        self.submit(draft(to=PLANNER.address, parent=yes.relay_id), sender=IMPL)
+        self.submit(draft(to=PLANNER.address, parent=other.relay_id), sender=OTHER)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual({r.relay_id: r.state for r in page.rows},
+                         {yes.relay_id: "answered", other.relay_id: "unanswered",
+                          no.relay_id: "unanswered"})
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (3, 1, 2, 0))
+
+    def test_addressed_matches_answered_by(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        yes = self.submit(draft(to=IMPL.address))
+        no = self.submit(draft(to=IMPL.address))
+        self.submit(draft(to=PLANNER.address, parent=yes.relay_id), sender=IMPL)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        marks = dict(self.conn.execute("SELECT relay_id, answered_by FROM recipients"
+                                      " WHERE seat_id=? AND role='to'", (IMPL.seat_id,)))
+        self.assertEqual({r.relay_id: r.state == "answered" for r in page.rows},
+                         {rid: mark is not None for rid, mark in marks.items()})
+        imported_reply_parent = self.submit(draft(to=IMPL.address))
+        self._import(sender=IMPL, to=PLANNER, parent=imported_reply_parent.relay_id)
+        mark = self.conn.execute("SELECT answered_by FROM recipients WHERE relay_id=?"
+                                 " AND seat_id=?", (imported_reply_parent.relay_id,
+                                                    IMPL.seat_id)).fetchone()
+        self.assertEqual(mark, (None,))
+        states = {r.relay_id: r.state for r in addressed(
+            self.conn, "p", IMPL.seat_id, limit=10).rows}
+        self.assertEqual(states, {yes.relay_id: "answered", no.relay_id: "unanswered",
+                                 imported_reply_parent.relay_id: "answered"})
+
+    def test_addressed_imported_state(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        answered = self._import()
+        self._import(sender=IMPL, to=PLANNER, parent=answered)
+        untouched = self._import()
+        live = self._import()
+        self.submit(draft(to=PLANNER.address, parent=live), sender=IMPL)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual({r.relay_id: r.state for r in page.rows},
+                         {answered: "answered", untouched: "imported", live: "answered"})
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (3, 2, 0, 1))
+
+    def test_addressed_bound_and_counts(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        relays = [self.submit(draft(to=IMPL.address)) for _ in range(7)]
+        self.submit(draft(to=PLANNER.address, parent=relays[0].relay_id), sender=IMPL)
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=3)
+        self.assertEqual([r.handle for r in page.rows], [r.handle for r in relays[-3:]][::-1])
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (7, 1, 6, 0))
+        self.assertTrue(page.truncated)
+        full = addressed(self.conn, "p", IMPL.seat_id, limit=7)
+        self.assertFalse(full.truncated)
+        self.assertEqual(len(full.rows), 7)
+
+    def test_addressed_writes_nothing(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        seen = []
+        self.conn.set_authorizer(self._writes(seen))
+        try:
+            page = addressed(self.conn, "p", IMPL.seat_id, limit=10)
+        finally:
+            self.conn.set_authorizer(None)
+        self.assertEqual(seen, [])
+        self.assertFalse(self.conn.in_transaction)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.db"
+            with contextlib.closing(sqlite3.connect(path)) as copy:
+                self.conn.backup(copy)
+            with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                                    isolation_level=None)) as reader:
+                reader.execute("PRAGMA query_only=ON")
+                result = addressed(reader, "p", IMPL.seat_id, limit=10)
+                self.assertEqual(result, page)
+                self.assertFalse(reader.in_transaction)
+
+    def test_addressed_refusals(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        cases = [("missing", IMPL.seat_id, 3), ("p", FOREIGN.seat_id, 3),
+                 ("p", "missing", 3), ("p", OPERATOR.seat_id, 3)]
+        cases += [("p", IMPL.seat_id, bound) for bound in (0, 501, True, "3")]
+        for project, seat, bound in cases:
+            seen = []
+            self.conn.set_authorizer(self._writes(seen))
+            try:
+                try:
+                    addressed(self.conn, project, seat, limit=bound)
+                except Exception as error:
+                    outcome = type(error).__name__
+                else:
+                    outcome = None
+            finally:
+                self.conn.set_authorizer(None)
+            self.assertEqual(outcome, "ValueError", (project, seat, bound))
+            self.assertEqual(seen, [])
+            self.assertFalse(self.conn.in_transaction)
+        self.conn.execute("BEGIN")
+        self.conn.execute("UPDATE seat_activity SET last_request_at=123 WHERE seat_id=?",
+                          (PLANNER.seat_id,))
+        try:
+            try:
+                addressed(self.conn, "p", IMPL.seat_id, limit=3)
+            except Exception as error:
+                outcome = type(error).__name__
+            else:
+                outcome = None
+            self.assertEqual(outcome, "ValueError")
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.conn.execute("SELECT last_request_at FROM seat_activity"
+                                              " WHERE seat_id=?", (PLANNER.seat_id,)).fetchone(),
+                             (123,))
+        finally:
+            self.conn.rollback()
+
+    def test_addressed_ends_own_transaction(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        seen = []
+        record = self._writes(seen)
+        def deny_relays(action, table, column, database, trigger):
+            record(action, table, column, database, trigger)
+            return (sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "relays"
+                    else sqlite3.SQLITE_OK)
+        self.conn.set_authorizer(deny_relays)
+        try:
+            try:
+                addressed(self.conn, "p", IMPL.seat_id, limit=3)
+            except Exception as error:
+                outcome = error
+            else:
+                outcome = None
+        finally:
+            self.conn.set_authorizer(None)
+        self.assertIsInstance(outcome, sqlite3.DatabaseError)
+        self.assertEqual(getattr(outcome, "sqlite_errorname", None), "SQLITE_AUTH")
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(seen, [])
+
+    def test_addressed_one_snapshot(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        self.submit(draft(to=IMPL.address))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.db"
+            with contextlib.closing(sqlite3.connect(path)) as writer:
+                self.conn.backup(writer)
+                writer.execute("PRAGMA foreign_keys=ON")
+                self.assertEqual(writer.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+                before = [r[0] for r in writer.execute(
+                    "SELECT r.handle FROM relays r JOIN recipients p ON p.relay_id=r.id"
+                    " WHERE p.seat_id=? AND p.role='to'", (IMPL.seat_id,))]
+                outcomes = []
+                with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True,
+                                                        isolation_level=None)) as reader:
+                    reader.execute("PRAGMA query_only=ON")
+                    def trace(sql):
+                        if sql.lstrip().upper().startswith("SELECT"):
+                            try:
+                                rid = self._import(writer)
+                                outcomes.append(writer.execute("SELECT handle FROM relays"
+                                                               " WHERE id=?", (rid,)).fetchone()[0])
+                            except BaseException as error:
+                                outcomes.append(type(error).__name__)
+                    reader.set_trace_callback(trace)
+                    try:
+                        page = addressed(reader, "p", IMPL.seat_id, limit=500)
+                    finally:
+                        reader.set_trace_callback(None)
+                    self.assertTrue(all(type(x) is int for x in outcomes), outcomes)
+                    self.assertGreaterEqual(len(outcomes), 2)
+                    self.assertEqual([r.handle for r in page.rows],
+                                     sorted(before + outcomes[:1], reverse=True))
+                    self.assertTrue(set(outcomes[1:]).isdisjoint(r.handle for r in page.rows))
+                    self.assertEqual(page.total, len(page.rows))
+                    self.assertEqual(page.answered + page.unanswered + page.imported, page.total)
+                    later = addressed(reader, "p", IMPL.seat_id, limit=500)
+                    self.assertEqual([r.handle for r in later.rows],
+                                     sorted(before + outcomes, reverse=True))
+
+    def test_addressed_empty(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=3)
+        self.assertEqual(page, queries.AddressedPage(0, 0, 0, 0, False, ()))
+
+    def test_addressed_since(self):
+        try:
+            addressed = queries.addressed_to
+        except AttributeError as error:
+            self.fail(str(error))
+        old = self.submit(draft(to=IMPL.address + ", " + OTHER.address))
+        self.clock += 100
+        later = self.submit(draft(to=IMPL.address))
+        since = old.created_at_ms + 1
+        page = addressed(self.conn, "p", IMPL.seat_id, limit=10, since_ms=since)
+        self.assertEqual([r.relay_id for r in page.rows], [later.relay_id])
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported), (1, 0, 1, 0))
+        self.assertEqual(addressed(self.conn, "p", OTHER.seat_id, limit=10, since_ms=since),
+                         queries.AddressedPage(0, 0, 0, 0, False, ()))
+        for bad in (-1, 2**48, True, 1.5):
+            with self.assertRaises(ValueError):
+                addressed(self.conn, "p", IMPL.seat_id, limit=10, since_ms=bad)
+
+
 class TestSessionSteps(Store):
     SESSION = ("SELECT host_session_id, host, seat_id, occupant_id, generation, signed_in_at,"
                " last_seen_at, ended_at FROM seat_sessions ORDER BY generation")
