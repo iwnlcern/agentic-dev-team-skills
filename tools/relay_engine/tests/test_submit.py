@@ -2870,8 +2870,6 @@ class TestReadGuard(Store):
                     pass
         self.assertEqual(submit._READ_GUARDS, {})
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class OutcomeConnection(sqlite3.Connection):
@@ -3022,7 +3020,8 @@ class TestAdmissionOutcome(Store):
         self.assertEqual(outcome.cause, (
             "whether this draft was stored is not yet known: the store did not confirm its commit"
             if variant else "this draft was not stored, and whether what the admission hook "
-            "relay_engine.tests.test_submit.OutcomeReservations.hook reserved was released is not yet known"))
+            + submit._hook_name(OutcomeReservations.hook)
+            + " reserved was released is not yet known"))
         self.assertIsNone(outcome.__cause__)
 
     def assert_clean(self, conn, ctx, reservations, path, *, closed=False):
@@ -3115,17 +3114,23 @@ class TestAdmissionOutcome(Store):
                 self.assertEqual(self.state(fresh), (0, 0))
 
     def test_already_voided_detail(self):
-        # Breaks: omitting the notice detail, or adding it for an ordinary void.
-        for answer, detail in (("already-voided", "undone-with-notice"), (None, None),
-                               ("voided", None)):
-            with self.subTest(answer=answer):
-                conn, ctx, r, path = self.fixture(answer=answer)
+        # Breaks: omitting the notice detail or losing its admission-hook name.
+        cases = (("H", "already-voided", "undone-with-notice"), ("H", None, None),
+                 ("H", "voided", None), ("C", "already-voided", "undone-with-notice"))
+        for path_kind, answer, detail in cases:
+            with self.subTest(path=path_kind, answer=answer):
+                failures = [self.fault("COMMIT", 1)] if path_kind == "C" else []
+                conn, ctx, r, path = self.fixture(answer=answer, failures=failures,
+                    mode="ok" if path_kind == "C" else "plain")
                 result = self.outcome(conn, ctx)
                 self.assertIsInstance(result, errors.EngineError, repr(result))
-                self.assertEqual(result.code, "E-ADMISSION-HOOK")
+                self.assertEqual(result.code, "E-ADMISSION-COMMIT" if path_kind == "C"
+                                 else "E-ADMISSION-HOOK")
                 self.assertEqual(result.reservation, detail)
                 if detail:
-                    self.assertIn("was undone by another writer", result.as_dict()["reservation_note"])
+                    self.assertEqual(result.as_dict()["reservation_note"],
+                        "what the admission hook " + submit._hook_name(r.hook)
+                        + " reserved was undone by another writer, and the operator was told")
                 else:
                     self.assertEqual(set(result.as_dict()), {"code", "cls", "cause", "remedy"})
 
@@ -3276,3 +3281,7 @@ class TestAdmissionOutcome(Store):
                     self.assertNotIn("reservation-1", r.open)
                     self.assertEqual(r.open, {})
                 self.assertEqual(self.outcome(conn, ctx, data), retried)
+
+
+if __name__ == "__main__":
+    unittest.main()

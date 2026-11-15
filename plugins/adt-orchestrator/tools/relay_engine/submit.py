@@ -284,7 +284,7 @@ def submit(conn, ctx, data):
     except _CommitRaised as failed:
         code = getattr(failed.error, "sqlite_errorcode", None)
         busy = code is not None and code & 0xFF == 5
-        refusal = errors.error_for("E-ADMISSION-COMMIT")
+        refusal = errors.error_for("E-ADMISSION-COMMIT", hook=_hook_name(ctx.after_admit))
         try:
             conn.execute("BEGIN IMMEDIATE")
             stored = conn.execute("SELECT 1 FROM relays WHERE id = ?",
