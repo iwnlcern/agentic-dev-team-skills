@@ -7,7 +7,7 @@ from unittest import mock
 from relay_engine.operator_queue import kinds
 
 
-WORKERS = ('queue_reconcile', 'queue_question_ingest', 'queue_lifecycle_ingest', 'engine_liveness')
+WORKERS = ('queue_reconcile', 'queue_question_ingest', 'queue_lifecycle_ingest', 'engine_liveness', 'store_backup_daily')
 EXPECTED_MATRIX = (
     ('question', None, 'internal', 'console_queue', 'pr1', None),
     ('cross_project_permission', None, 'queue.raise', 'xproject_transfer', 'pr2', None),
@@ -25,12 +25,13 @@ EXPECTED_MATRIX = (
     ('notice', 'worker_stalled', 'queue.raise', 'supervision', 'pr1', frozenset(WORKERS)),
     ('notice', 'operator_act_carried', 'internal', 'console_queue', 'pr3c', None),
     ('notice', 'answer_faulted', 'internal', 'console_queue', 'pr1', None),
+    ('notice', 'backup_missed', 'queue.raise', 'supervision', 'pr1', frozenset({'daily'})),
 )
 ALL_TAGS = frozenset({'pr1','pr2','pr3','pr3c','pr4','pr5','pr6'})
 NOTICE_NAMES = frozenset({'seat_registered','seat_replaced','seat_stood_down','seat_unseated',
     'engine_restart_requested','engine_updated','engine_update_failed','doorbell_off',
     'notifier_unhealthy','operator_act_carried','worker_stalled','bridge_refused',
-    'panel_key_enrolled','answer_faulted','instruction_carried','seat_record_missing','seat_ambiguous'})
+    'panel_key_enrolled','answer_faulted','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed'})
 
 
 class TestQueueKinds(unittest.TestCase):
@@ -52,7 +53,7 @@ class TestQueueKinds(unittest.TestCase):
             'EVENT_KINDS': {'raised','answered','applied','superseded','refused','faulted','withdrawn','opened','dismissed','dismissed_all','cleared','clear_requested','condition_closed','retired'},
             'NOTIFICATION_STATES': {'pending','delivered','retired'},
             'RETIRE_REASONS': {'project_undone'},
-            'NO_PROJECT_SUBKINDS': {'notifier_unhealthy','worker_stalled','bridge_refused','panel_key_enrolled','engine_updated','engine_update_failed','instruction_carried','seat_record_missing','seat_ambiguous'},
+            'NO_PROJECT_SUBKINDS': {'notifier_unhealthy','worker_stalled','bridge_refused','panel_key_enrolled','engine_updated','engine_update_failed','instruction_carried','seat_record_missing','seat_ambiguous','backup_missed'},
             'NO_CLEAR_SUBKINDS': {'bridge_refused','panel_key_enrolled','instruction_carried','seat_record_missing','seat_ambiguous'},
             'OPERATOR_CLOSED_SUBKINDS': {'instruction_carried'},
         }
@@ -72,7 +73,7 @@ class TestQueueKinds(unittest.TestCase):
 
     def test_ring_set(self):
         expected = frozenset({'question','cross_project_permission','merge_go_ahead','verification_held',
-                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted'})
+                             'notice/doorbell_off','notice/instruction_carried','notice/worker_stalled','notice/bridge_refused','notice/answer_faulted','notice/backup_missed'})
         self.assertEqual(kinds.RING_SET,expected)
         for member in expected:
             parts=member.split('/')

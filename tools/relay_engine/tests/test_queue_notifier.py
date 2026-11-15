@@ -91,6 +91,79 @@ class TestQueueNotifier(unittest.TestCase):
         self.conn.close()
         self.conn = store_layout.open_catalogue(self.root)
 
+    def test_backup_missed_notice(self):
+        with mock.patch.object(api_principals, 'SERVICE_NAMES',
+                               (*api_principals.SERVICE_NAMES, 'supervision')):
+            supervision = ServicePrincipal('supervision')
+        sentence = ('v3 has made no complete daily backup of its store yesterday or today, '
+                    'so putting the store back from a backup could lose more than a day of work. '
+                    'Run adt engine status.')
+        request = records.RaiseRequest('notice', 'backup_missed', None,
+                                       {'sentence': 'Other words.'}, {}, 'daily', 'backup-1')
+        first = records.raise_item(self.conn, supervision, request, 100, enabled=ALL)
+        self.assertIsInstance(first, records.RaiseResult)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM queue_items').fetchone()[0], 1)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM queue_conditions '
+                                           'WHERE closed_at_ms IS NULL').fetchone()[0], 1)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM queue_notifications').fetchone()[0], 1)
+        stored = self.conn.execute('SELECT texts,condition_key,pins,actor_address FROM queue_items '
+                                   'WHERE item_id=?', (first.item_id,)).fetchone()
+        self.assertEqual((json.loads(stored[0]), stored[1], json.loads(stored[2]), stored[3]),
+                         ({'sentence': sentence}, '"daily"', {}, None))
+        self.assertEqual(notifier.due_notifications(self.conn, 1000, 10),
+                         [notifier.Notification(first.item_id, 1, 'v3: supervision', sentence)])
+        before = tuple(self.conn.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
+                       for table in ('queue_events', 'queue_notifications'))
+        second = records.raise_item(self.conn, supervision,
+                                    replace(request, operation_key='backup-2'), 101, enabled=ALL)
+        self.assertIsInstance(second, records.RaiseResult)
+        self.assertEqual(second.item_id, first.item_id)
+        self.assertEqual(tuple(self.conn.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
+                               for table in ('queue_events', 'queue_notifications')), before)
+        self.assertEqual([item.item_id for item in records.open_condition_items(
+            self.conn, supervision, None)], [first.item_id])
+        cleared = records.clear_condition(self.conn, supervision, first.item_id,
+                                           'notice', 'backup_missed', None, 'daily', 102)
+        self.assertEqual(cleared, records.ClearResult('cleared'))
+        self.assertEqual(self.conn.execute('SELECT state FROM queue_items WHERE item_id=?',
+                                           (first.item_id,)).fetchone()[0], 'cleared')
+        self.assertIsNotNone(self.conn.execute('SELECT closed_at_ms FROM queue_conditions '
+                                               'WHERE item_id=?', (first.item_id,)).fetchone()[0])
+        self.assertEqual(records.open_condition_items(self.conn, supervision, None), [])
+        controls = (
+            (records.InternalWriter(), replace(request, operation_key='backup-internal'), 'kind_not_raisable'),
+            (supervision, replace(request, project_id=P, operation_key='backup-project'), 'subject_unresolved'),
+            (supervision, replace(request, condition_key='weekly', operation_key='backup-weekly'), 'subject_unresolved'),
+        )
+        for principal, control, reason in controls:
+            with self.subTest(operation_key=control.operation_key):
+                changes = self.conn.total_changes
+                result = records.raise_item(self.conn, principal, control, 103, enabled=ALL)
+                self.assertEqual(result, records.QueueRefusal('E_QUEUE_INVALID', reason))
+                self.assertEqual(self.conn.total_changes, changes)
+
+    def test_backup_stall_key(self):
+        with mock.patch.object(api_principals, 'SERVICE_NAMES',
+                               (*api_principals.SERVICE_NAMES, 'supervision')):
+            supervision = ServicePrincipal('supervision')
+        sentence = ('v3 has stopped making its daily backup, so your store may go without one. '
+                    'Run adt engine status.')
+        request = records.RaiseRequest('notice', 'worker_stalled', None,
+                                       {'sentence': 'Other words.'}, {}, 'store_backup_daily', 'stall-1')
+        result = records.raise_item(self.conn, supervision, request, 100, enabled=ALL)
+        self.assertIsInstance(result, records.RaiseResult)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM queue_items').fetchone()[0], 1)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM queue_notifications').fetchone()[0], 1)
+        stored = self.conn.execute('SELECT texts FROM queue_items WHERE item_id=?',
+                                   (result.item_id,)).fetchone()[0]
+        self.assertEqual(json.loads(stored), {'sentence': sentence})
+        changes = self.conn.total_changes
+        refused = records.raise_item(self.conn, supervision,
+                                      replace(request, condition_key='queue_notify',
+                                              operation_key='stall-notify'), 101, enabled=ALL)
+        self.assertEqual(refused, records.QueueRefusal('E_QUEUE_INVALID', 'subject_unresolved'))
+        self.assertEqual(self.conn.total_changes, changes)
+
     def test_unhealthy_raised_at_exactly_five(self):
         from relay_engine.api_principals import OperatorPrincipal
         from relay_engine.operator_queue import operations

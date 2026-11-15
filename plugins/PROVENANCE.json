@@ -10730,7 +10730,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/catalogue.py",
-    "sha256": "e705ea64963c336c4db1ae697f6c50fc177f2f327f7c6fe3f516a1604c2bfe11",
+    "sha256": "8dc8fdf0d889d817f9d8a3eacc84ce2277d2f1f9c6eeb8e57f4fe51b7e57c3ef",
     "source": "tools/relay_engine/catalogue.py"
   },
   {
@@ -10880,7 +10880,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/operator_queue/kinds.py",
-    "sha256": "fa5ff2c4d61febece16d7f39a2add63106216d9c70c68d1825bd99840c107981",
+    "sha256": "a3d7f1b04f3f36f3f981e193d6ee6bd7cfc76f17e8d8db932fd8e6355ed87e37",
     "source": "tools/relay_engine/operator_queue/kinds.py"
   },
   {
@@ -21680,7 +21680,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/catalogue.py",
-    "sha256": "e705ea64963c336c4db1ae697f6c50fc177f2f327f7c6fe3f516a1604c2bfe11",
+    "sha256": "8dc8fdf0d889d817f9d8a3eacc84ce2277d2f1f9c6eeb8e57f4fe51b7e57c3ef",
     "source": "tools/relay_engine/catalogue.py"
   },
   {
@@ -21830,7 +21830,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/operator_queue/kinds.py",
-    "sha256": "fa5ff2c4d61febece16d7f39a2add63106216d9c70c68d1825bd99840c107981",
+    "sha256": "a3d7f1b04f3f36f3f981e193d6ee6bd7cfc76f17e8d8db932fd8e6355ed87e37",
     "source": "tools/relay_engine/operator_queue/kinds.py"
   },
   {
@@ -32546,7 +32546,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/catalogue.py",
-    "sha256": "e705ea64963c336c4db1ae697f6c50fc177f2f327f7c6fe3f516a1604c2bfe11",
+    "sha256": "8dc8fdf0d889d817f9d8a3eacc84ce2277d2f1f9c6eeb8e57f4fe51b7e57c3ef",
     "source": "tools/relay_engine/catalogue.py"
   },
   {
@@ -32696,7 +32696,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/operator_queue/kinds.py",
-    "sha256": "fa5ff2c4d61febece16d7f39a2add63106216d9c70c68d1825bd99840c107981",
+    "sha256": "a3d7f1b04f3f36f3f981e193d6ee6bd7cfc76f17e8d8db932fd8e6355ed87e37",
     "source": "tools/relay_engine/operator_queue/kinds.py"
   },
   {
