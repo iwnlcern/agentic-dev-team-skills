@@ -200,6 +200,10 @@ class LogLine:
     fields: Mapping
 
 
+def _log_string(value) -> bool:
+    return isinstance(value, str) and not any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+
+
 def read_lifecycle_log(data: bytes) -> tuple[LogLine, ...]:
     lines = []
     for raw in data.splitlines(keepends=True):
@@ -211,7 +215,7 @@ def read_lifecycle_log(data: bytes) -> tuple[LogLine, ...]:
             continue
         if (not isinstance(row, dict) or row.get('format') != 'adt-lifecycle-v1'
                 or type(row.get('seq')) is not int
-                or not isinstance(row.get('id'), str) or not row['id']):
+                or not _log_string(row.get('id')) or not row['id']):
             continue
         lines.append(LogLine(row['seq'], row['id'], row.get('kind'), row.get('project_id'),
             row.get('at'), {key: value for key, value in row.items()
@@ -222,6 +226,8 @@ def read_lifecycle_log(data: bytes) -> tuple[LogLine, ...]:
 def log_notice(line: LogLine) -> tuple[str, Mapping] | str:
     from relay_engine.operator_queue import notice_text
 
+    if isinstance(line.kind, str) and not _log_string(line.kind):
+        return 'bad_field:kind'
     if line.kind == 'outage':
         names = ('started_at', 'ended_at')
     elif line.kind == 'update':
@@ -236,7 +242,8 @@ def log_notice(line: LogLine) -> tuple[str, Mapping] | str:
             return 'missing_field:' + name
         value = values[name]
         if (name in ('from', 'to', 'outcome') and not isinstance(value, str)
-                or name not in ('from', 'to', 'outcome') and type(value) not in (str, int)):
+                or name not in ('from', 'to', 'outcome') and type(value) not in (str, int)
+                or isinstance(value, str) and not _log_string(value)):
             return 'bad_field:' + name
     if line.kind == 'outage':
         return 'engine_was_down', notice_text.fit_integers({name: values[name] for name in names})
@@ -320,14 +327,25 @@ def _read_log_path(log_path: Path) -> tuple[LogLine, ...]:
     return read_lifecycle_log(data)
 
 
-def store_ingest_pass(port: records.JobPort, log_path: Path, now_ms: int) -> int:
+@dataclass(frozen=True)
+class StorePassResult:
+    raised: int
+    log_unreadable: str | None
+
+
+def store_ingest_pass(port: records.JobPort, log_path: Path, now_ms: int) -> StorePassResult:
     raised = 0
+    log_unreadable = None
     try:
         cursor = port.read_catalogue(lambda conn: records.read_cursor(conn, None, 'lifecycle_log'))
-        lines = _read_log_path(log_path)
-        result = port.catalogue(lambda conn: ingest_log(conn, lines, cursor, now_ms))
-        if isinstance(result, int):
-            raised += result
+        try:
+            lines = _read_log_path(log_path)
+        except OSError as error:
+            log_unreadable = type(error).__name__
+        else:
+            result = port.catalogue(lambda conn: ingest_log(conn, lines, cursor, now_ms))
+            if isinstance(result, int):
+                raised += result
     except records.JobUnavailable:
         pass
     try:
@@ -336,7 +354,7 @@ def store_ingest_pass(port: records.JobPort, log_path: Path, now_ms: int) -> int
             raised += result
     except records.JobUnavailable:
         pass
-    return raised
+    return StorePassResult(raised, log_unreadable)
 
 
 class StartupIngestIncomplete(Exception):

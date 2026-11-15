@@ -37,7 +37,7 @@ class TestStoreIngest(unittest.TestCase):
         self.log.write_bytes(b''.join(json.dumps(line).encode()+b'\n' for line in lines))
 
     def run_pass(self):
-        return ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        return ingest.store_ingest_pass(self.port, self.log, self.f.clock).raised
 
     def items(self):
         return self.c.execute('SELECT subkind,project_id,texts,pins FROM queue_items ORDER BY raised_position').fetchall()
@@ -243,3 +243,80 @@ class TestStoreIngest(unittest.TestCase):
         self.assertEqual(self.run_pass(), 1)
         self.assertEqual(self.skips(), [('lifecycle_log','id-1','bad_field:started_at')])
         self.assertEqual(json.loads(self.items()[0][3])['at'], str(2**53))
+
+    def test_log_unencodable_value_skipped(self):
+        self.write(self.line(1, 'update', **{'from': '\ud800'}),
+                   self.line(2, kind='\ud800'),
+                   self.line(3, 'update', to='v3-\u00e9'))
+        stopped = self.stop()
+        result = ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual((result.raised, result.log_unreadable), (2, None))
+        self.assertEqual(self.skips(), [('lifecycle_log', 'id-1', 'bad_field:from'),
+                                       ('lifecycle_log', 'id-2', 'bad_field:kind')])
+        self.assertEqual([row[0] for row in self.items()], ['engine_updated', 'engine_stopped'])
+        self.assertEqual(json.loads(self.items()[0][3])['to'], 'v3-\u00e9')
+        self.assertEqual(self.cursor('lifecycle_log'), records.Cursor(3, 0, 'id-3'))
+        self.assertEqual(self.cursor('stop_events').position, stopped)
+        ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual(len(self.items()), 2)
+        self.assertEqual(len(self.skips()), 2)
+
+    def test_log_unencodable_id_is_absent(self):
+        self.write(self.line(1, id='\ud800'), self.line(2, 'update'))
+        lines = ingest.read_lifecycle_log(self.log.read_bytes())
+        self.assertEqual([line.id for line in lines], ['id-2'])
+        ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual([row[0] for row in self.items()], ['engine_updated'])
+        self.assertEqual(self.skips(), [])
+        self.assertEqual(self.cursor('lifecycle_log'), records.Cursor(2, 0, 'id-2'))
+
+    def test_store_pass_skips_unreadable_log(self):
+        self.log.mkdir()
+        stopped = self.stop()
+        before = self.cursor('lifecycle_log')
+        result = ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual((result.raised, result.log_unreadable), (1, 'IsADirectoryError'))
+        self.assertEqual([row[0] for row in self.items()], ['engine_stopped'])
+        self.assertEqual(self.cursor('stop_events').position, stopped)
+        self.assertEqual(self.cursor('lifecycle_log'), before)
+        self.assertEqual(self.skips(), [])
+        self.log.rmdir()
+        self.write(self.line(1))
+        result = ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual((result.raised, result.log_unreadable), (1, None))
+        self.assertEqual([row[0] for row in self.items()], ['engine_stopped', 'engine_was_down'])
+        self.assertEqual(self.cursor('lifecycle_log'), records.Cursor(1, 0, 'id-1'))
+
+    def test_startup_unreadable_log_raises(self):
+        self.log.mkdir()
+        self.stop()
+        before = self.f.snapshot()
+        with self.assertRaises(IsADirectoryError):
+            ingest.store_ingest_startup(self.port, self.log, self.f.clock)
+        self.assertEqual(self.f.snapshot(), before)
+        self.assertEqual(self.items(), [])
+
+    def test_store_pass_result_names_no_fault(self):
+        self.write(self.line(1))
+        result = ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual((result.raised, result.log_unreadable), (1, None))
+        self.log.unlink()
+        result = ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual((result.raised, result.log_unreadable), (0, None))
+
+    def test_store_pass_catalogue_oserror_propagates(self):
+        self.write(self.line(1))
+        self.stop()
+        before = self.f.snapshot()
+        catalogue = self.port.catalogue
+        calls = 0
+        def log_job_fault(fn):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError('catalogue fault')
+            return catalogue(fn)
+        with mock.patch.object(self.port, 'catalogue', side_effect=log_job_fault):
+            with self.assertRaisesRegex(OSError, 'catalogue fault'):
+                ingest.store_ingest_pass(self.port, self.log, self.f.clock)
+        self.assertEqual(self.f.snapshot(), before)
