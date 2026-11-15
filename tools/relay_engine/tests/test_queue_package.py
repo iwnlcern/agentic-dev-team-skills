@@ -24,9 +24,10 @@ def executable_nodes(path):
 def transaction_violations(package):
     found = []
     for path in sorted(package.glob('*.py')):
+        pure = path.name == 'notice_text.py'
         for node in executable_nodes(path):
             reason = None
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if not pure and isinstance(node, ast.Constant) and isinstance(node.value, str):
                 sql = node.value.upper()
                 if re.search(r'\b(?:BEGIN\s+IMMEDIATE|COMMIT)\b', sql):
                     reason = 'write transaction'
@@ -35,6 +36,12 @@ def transaction_violations(package):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 if node.func.attr in ('executescript','commit'):
                     reason = node.func.attr
+                if pure and node.func.attr in ('execute', 'executemany', 'cursor'):
+                    reason = 'call in notice_text'
+            if pure and ((isinstance(node, ast.Import)
+                          and any(alias.name == 'sqlite3' for alias in node.names))
+                         or (isinstance(node, ast.ImportFrom) and node.module == 'sqlite3')):
+                reason = 'sqlite3 in notice_text'
             if isinstance(node, ast.With):
                 if any(isinstance(i.context_expr, ast.Name) and i.context_expr.id == 'conn'
                        for i in node.items):
@@ -91,6 +98,25 @@ class TestQueuePackage(unittest.TestCase):
             probe.unlink()
             (folder / 'liveness.py').write_text('conn.execute("BEGIN DEFERRED")\nconn.execute("ROLLBACK")')
             self.assertEqual(transaction_violations(folder), [])
+            (folder / 'liveness.py').unlink()
+            with self.subTest(source='English outside notice_text'):
+                probe.write_text('x = "a merge commit"\n')
+                self.assertTrue(transaction_violations(folder))
+                probe.unlink()
+            pure = folder / 'notice_text.py'
+            with self.subTest(source='English in notice_text'):
+                pure.write_text('x = "a merge commit"\ny = "commit or merge"\n')
+                self.assertEqual(transaction_violations(folder), [])
+                pure.unlink()
+            for source in ('conn.execute("COMMIT")',
+                           'conn.executemany("COMMIT", [])', 'conn.cursor()',
+                           'import sqlite3', 'from sqlite3 import connect',
+                           'conn.commit()', 'conn.executescript("SELECT 1")',
+                           'with conn:\n    pass'):
+                with self.subTest(source=source, filename='notice_text.py'):
+                    pure.write_text(source)
+                    self.assertTrue(transaction_violations(folder))
+                    pure.unlink()
 
 
 if __name__ == '__main__':

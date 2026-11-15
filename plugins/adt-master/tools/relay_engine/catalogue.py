@@ -113,13 +113,18 @@ ON checkout_routes (dev, ino) WHERE ended_at IS NULL""",
         'engine_restart_requested', 'engine_updated', 'engine_update_failed',
         'doorbell_off', 'notifier_unhealthy', 'operator_act_carried', 'worker_stalled',
         'bridge_refused', 'panel_key_enrolled', 'answer_faulted', 'instruction_carried',
-        'seat_record_missing', 'seat_ambiguous', 'backup_missed'))),
+        'seat_record_missing', 'seat_ambiguous', 'backup_missed',
+        'settlement_finished', 'settlement_undone', 'engine_stopped', 'engine_started',
+        'project_stopped', 'project_started', 'engine_was_down', 'merge_target_changed',
+        'approval_seal_unusable', 'approval_seal_backup_included'))),
     project_id TEXT CHECK ((project_id IS NULL) = (
         subkind IS 'notifier_unhealthy' OR subkind IS 'worker_stalled' OR
         subkind IS 'bridge_refused' OR subkind IS 'panel_key_enrolled' OR
         subkind IS 'engine_updated' OR subkind IS 'engine_update_failed' OR
         subkind IS 'instruction_carried' OR subkind IS 'seat_record_missing' OR
-        subkind IS 'seat_ambiguous' OR subkind IS 'backup_missed')),
+        subkind IS 'seat_ambiguous' OR subkind IS 'backup_missed' OR
+        subkind IS 'engine_stopped' OR subkind IS 'engine_started' OR
+        subkind IS 'engine_was_down' OR subkind IS 'approval_seal_backup_included')),
     raiser TEXT NOT NULL,
     asking_seat_id TEXT,
     actor_address TEXT,
