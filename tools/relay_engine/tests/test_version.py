@@ -79,6 +79,7 @@ EXPECTED_ROSTER = (
     "relay_engine/slips.py",
     "relay_engine/store_evidence.py",
     "relay_engine/store_layout.py",
+    "relay_engine/store_steps.py",
     "relay_engine/strings.py",
     "relay_engine/submit.py",
     "relay_engine/supersede.py",
