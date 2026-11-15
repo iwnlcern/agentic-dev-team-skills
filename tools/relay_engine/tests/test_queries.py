@@ -1467,6 +1467,38 @@ class TestAddressedTo(Store):
                 self.fail(str(error))
             self.assertEqual(page, queries.AddressedPage(0, 0, 0, 0, False, ()))
 
+    def test_addressed_answers_rule(self):
+        # Breaks: ignore own marker, count twice or accept another seat's marker (L1/L2).
+        first = self.submit(draft(to=IMPL.address))
+        double = self.submit(draft(to=IMPL.address))
+        other = self.submit(draft(to=IMPL.address, cc=OTHER.address))
+        parent = self.submit(draft(to=IMPL.address))
+        for relay in (first, double):
+            queries.read(self.conn, relay.relay_id, IMPL.seat_id, self.clock)
+        self.submit(draft(to=PLANNER.address, parent=double.relay_id), sender=IMPL)
+        queries.read(self.conn, other.relay_id, OTHER.seat_id, self.clock)
+        self.submit(draft(to=PLANNER.address, answers=(other.relay_id,)), sender=OTHER)
+        self.submit(draft(to=PLANNER.address, parent=parent.relay_id,
+                          answers=(first.relay_id, double.relay_id)), sender=IMPL)
+        page = queries.addressed_to(self.conn, "p", IMPL.seat_id, limit=10)
+        self.assertEqual({r.relay_id: r.state for r in page.rows},
+                         {first.relay_id: "answered", double.relay_id: "answered",
+                          other.relay_id: "unanswered", parent.relay_id: "answered"})
+        self.assertEqual((page.total, page.answered, page.unanswered, page.imported),
+                         (4, 3, 1, 0))
+        acts = [self.submit(draft(to=IMPL.address, needs="act")) for _ in range(2)]
+        read_at = acts[-1].created_at_ms + 5
+        for relay in acts:
+            queries.read(self.conn, relay.relay_id, IMPL.seat_id, read_at)
+        before = queries.unopened_flags(self.conn, "p", read_at + queries.IDLE_MS + 1)
+        self.assertEqual([flag.relay_id for flag in before
+                          if flag.rule == "idle" and flag.seat_id == IMPL.seat_id],
+                         [acts[1].relay_id])
+        self.submit(draft(to=PLANNER.address, parent=parent.relay_id,
+                          answers=tuple(r.relay_id for r in acts)), sender=IMPL)
+        after = queries.unopened_flags(self.conn, "p", read_at + queries.IDLE_MS + 1)
+        self.assertEqual([flag for flag in after if flag.seat_id == IMPL.seat_id], [])
+
 
 class TestSessionSteps(Store):
     SESSION = ("SELECT host_session_id, host, seat_id, occupant_id, generation, signed_in_at,"
@@ -2495,6 +2527,20 @@ class TestQueueReaders(Store):
                 elif change=='asking-team':self.assertIsNone(queries.operator_questions(c,'p',0,500)[0].sender_address)
                 else:self.assertIsNone(queries.doorbell_off(c,'p',10000000,1)[0].seat_address)
             w.close();c.close()
+
+    def test_operator_questions_answers(self):
+        # Breaks: ignore operator marker or accept a CC seat's answer (L4/L5).
+        first = self.submit(draft(kind="QUESTION", to="operator", needs="answer"))
+        second = self.submit(draft(kind="QUESTION", to="operator", needs="answer"))
+        third = self.submit(draft(kind="QUESTION", to="operator", needs="answer",
+                                  cc=IMPL.address))
+        self.submit(draft(to=PLANNER.address, parent=first.relay_id,
+                          answers=(second.relay_id,)), sender=OPERATOR)
+        queries.read(self.conn, third.relay_id, IMPL.seat_id, self.clock)
+        self.submit(draft(to=PLANNER.address, answers=(third.relay_id,)), sender=IMPL)
+        page = queries.operator_questions(self.conn, "p", 0, 500)
+        self.assertEqual({r.relay_id: r.answered for r in page},
+                         {first.relay_id: True, second.relay_id: True, third.relay_id: False})
 
 
 class TestProjectSettings(Store):

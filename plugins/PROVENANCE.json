@@ -10922,7 +10922,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/queries.py",
-    "sha256": "0e1691d0e2a5452dddfcb2cfdbafe66a9a7c2990c3299a28f12a3f44f0eec902",
+    "sha256": "9970950fdf1f7c3ac181044169087793434cb87b102b9c7732af856d0190ce97",
     "source": "tools/relay_engine/queries.py"
   },
   {
@@ -21872,7 +21872,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/queries.py",
-    "sha256": "0e1691d0e2a5452dddfcb2cfdbafe66a9a7c2990c3299a28f12a3f44f0eec902",
+    "sha256": "9970950fdf1f7c3ac181044169087793434cb87b102b9c7732af856d0190ce97",
     "source": "tools/relay_engine/queries.py"
   },
   {
@@ -32738,7 +32738,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/queries.py",
-    "sha256": "0e1691d0e2a5452dddfcb2cfdbafe66a9a7c2990c3299a28f12a3f44f0eec902",
+    "sha256": "9970950fdf1f7c3ac181044169087793434cb87b102b9c7732af856d0190ce97",
     "source": "tools/relay_engine/queries.py"
   },
   {
