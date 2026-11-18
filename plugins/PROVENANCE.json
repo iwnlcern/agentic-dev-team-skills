@@ -10861,6 +10861,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/identity_import.py",
+    "sha256": "8d24e4d9955a854faf350269d3c2c76f0f321fd7b84cf0241b18340cfa6eb86c",
+    "source": "tools/relay_engine/identity_import.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/imports.py",
     "sha256": "bf6a37797a8be8820b564c6c66fead55b15c4f2b7f922c9bafb6c1f7e24e8389",
     "source": "tools/relay_engine/imports.py"
@@ -11096,7 +11102,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "4bd8b84469ebc29a49bbe14c680a5c07dec6059553b458d442f30b81a22dba7e",
+    "sha256": "b993ae3c1504cbc61f0a7615dfa2e0df1278e3765f2a726b52d60c7f8d78454f",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -21865,6 +21871,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/identity_import.py",
+    "sha256": "8d24e4d9955a854faf350269d3c2c76f0f321fd7b84cf0241b18340cfa6eb86c",
+    "source": "tools/relay_engine/identity_import.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/imports.py",
     "sha256": "bf6a37797a8be8820b564c6c66fead55b15c4f2b7f922c9bafb6c1f7e24e8389",
     "source": "tools/relay_engine/imports.py"
@@ -22100,7 +22112,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "4bd8b84469ebc29a49bbe14c680a5c07dec6059553b458d442f30b81a22dba7e",
+    "sha256": "b993ae3c1504cbc61f0a7615dfa2e0df1278e3765f2a726b52d60c7f8d78454f",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -32785,6 +32797,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/identity_import.py",
+    "sha256": "8d24e4d9955a854faf350269d3c2c76f0f321fd7b84cf0241b18340cfa6eb86c",
+    "source": "tools/relay_engine/identity_import.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/imports.py",
     "sha256": "bf6a37797a8be8820b564c6c66fead55b15c4f2b7f922c9bafb6c1f7e24e8389",
     "source": "tools/relay_engine/imports.py"
@@ -33020,7 +33038,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "4bd8b84469ebc29a49bbe14c680a5c07dec6059553b458d442f30b81a22dba7e",
+    "sha256": "b993ae3c1504cbc61f0a7615dfa2e0df1278e3765f2a726b52d60c7f8d78454f",
     "source": "tools/relay_engine/version.py"
   },
   {
