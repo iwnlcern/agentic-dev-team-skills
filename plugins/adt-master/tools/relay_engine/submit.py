@@ -616,6 +616,7 @@ def _admit(conn, ctx, data, now, *, _system=False):
         if replay is not None:
             conn.execute("ROLLBACK")
             return replay
+        repository_id = None if _system else _repository(conn, sender, draft, lines)
         _check_findings(conn, sender, transitions)
         locks = _lock_plan(conn, sender, draft, lines, parent, targets)
         handle, created, relay_id = _identity(conn, sender.project_id, now)
@@ -625,16 +626,17 @@ def _admit(conn, ctx, data, now, *, _system=False):
         conn.execute(
             "INSERT INTO relays (id, handle, project_id, team_instance_id, bundle_id, kind,"
             " verdict, needs, subject, parent_id, sender_seat_id, sender_special, sender_role,"
-            " created_at, body_sha256, meta_sha256, body_bytes, header_bytes, git_state_id,"
+            " created_at, body_sha256, meta_sha256, body_bytes, header_bytes, git_state_id, repository_id,"
             " submission_key, draft_sha256)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (relay_id, handle, sender.project_id, sender.team_instance_id, bundle_id,
              draft.kind, draft.verdict, draft.needs, draft.subject,
              None if parent is None else parent[0], *party_columns(sender.seat_id),
              sender.role, created, hashlib.sha256(draft.body).hexdigest(),
-             meta_digest(draft, None if parent is None else parent[0], targets, answers),
+             meta_digest(draft, None if parent is None else parent[0], targets, answers,
+                         repository_id=repository_id),
              len(draft.body),
-             draft.header_bytes, git_state_id, None if _system else ctx.submission_key,
+             draft.header_bytes, git_state_id, repository_id, None if _system else ctx.submission_key,
              None if _system else hashlib.sha256(data).hexdigest()))
         conn.execute("INSERT INTO bodies (relay_id, body) VALUES (?, ?)",
                      (relay_id, draft.body))
@@ -696,7 +698,7 @@ _DIGEST_TARGET = {"relay": ("target_relay_id",), "path": ("target_path",),
                           "target_line_start", "target_line_end")}
 
 
-def meta_digest(draft, parent_id=None, targets=(), answers=()):
+def meta_digest(draft, parent_id=None, targets=(), answers=(), repository_id=None):
     """sha256 of the parsed fields in JCS form (DD § 5, erratum E1): list
     whitespace is gone after parsing, and addresses are never case-folded.
     PARENT and each REF enter as their resolved targets, so equivalent
@@ -716,7 +718,22 @@ def meta_digest(draft, parent_id=None, targets=(), answers=()):
     }
     if answers:
         fields["answers"] = list(answers)
+    if repository_id is not None:
+        fields["repository"] = repository_id
     return hashlib.sha256(jcs.jcs_encode(fields)).hexdigest()
+
+
+def _repository(conn, sender, draft, lines):
+    """Resolve the signed name inside admission's write transaction."""
+    if draft.repo is None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM repositories WHERE project_id = ? AND name = ?",
+        (sender.project_id, draft.repo)).fetchone()
+    if row is None:
+        raise errors.error_for("E-REPO-UNKNOWN", line=lines.of("REPO"),
+                               value=header._display(draft.repo))
+    return row[0]
 
 
 def _recipients(ctx, draft, lines):

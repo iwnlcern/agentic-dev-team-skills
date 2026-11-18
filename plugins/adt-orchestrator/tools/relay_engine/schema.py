@@ -80,7 +80,7 @@ _PLATFORM_TABLES = (
     """CREATE TABLE IF NOT EXISTS repositories (
     id TEXT NOT NULL PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects (id),
-    name TEXT NOT NULL,
+    name TEXT NOT NULL CHECK (instr(name, char(0)) = 0 AND length(name) BETWEEN 1 AND 32 AND name NOT GLOB '*[^a-z0-9-]*' AND name NOT GLOB '-*'),
     UNIQUE (project_id, name)
 ) STRICT""",
     """CREATE TABLE IF NOT EXISTS repository_checkouts (
@@ -182,7 +182,105 @@ TABLE_OWNERS: dict[str, str] = {
     "imported_relays": "store",
 }
 
-_TABLES = _PLATFORM_TABLES + (
+_AUTHORITY_TABLES = (
+    """CREATE TABLE IF NOT EXISTS reviewer_assignments (
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    team_instance_id TEXT NOT NULL PRIMARY KEY,
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    assigned_at INTEGER NOT NULL,
+    FOREIGN KEY (team_instance_id, project_id) REFERENCES team_instances (id, project_id)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS verification_requests (
+    claim_relay_id TEXT NOT NULL REFERENCES relays (id),
+    artifact TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('design', 'plan')),
+    snapshot_handle INTEGER NOT NULL REFERENCES snapshots (handle),
+    snapshot_request_relay_id TEXT NOT NULL REFERENCES relays (id),
+    content_sha256 TEXT NOT NULL %s,
+    request_relay_id TEXT REFERENCES relays (id),
+    reviewer_seat_id TEXT REFERENCES seats (id),
+    created_at INTEGER NOT NULL,
+    CHECK ((request_relay_id IS NULL) = (reviewer_seat_id IS NULL)),
+    UNIQUE (claim_relay_id, artifact)
+) STRICT""" % _sha('content_sha256'),
+    """CREATE TABLE IF NOT EXISTS waivers (
+    claim_relay_id TEXT NOT NULL REFERENCES relays (id),
+    kind TEXT NOT NULL CHECK (kind IN ('design', 'plan')),
+    by_special TEXT NOT NULL CHECK (by_special = 'operator'),
+    words TEXT NOT NULL CHECK (length(words) > 0),
+    created_at INTEGER NOT NULL,
+    after_handle INTEGER NOT NULL,
+    UNIQUE (claim_relay_id, kind)
+) STRICT""",
+)
+TABLE_OWNERS.update({name: 'authority' for name in
+                    ('reviewer_assignments', 'verification_requests', 'waivers')})
+
+_AUTHORITY_TABLES += (
+    """CREATE TABLE IF NOT EXISTS slips (
+    id TEXT NOT NULL PRIMARY KEY,
+    handle INTEGER NOT NULL CHECK (handle >= 1),
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    kind TEXT NOT NULL CHECK (kind IN ('implement', 'merge')),
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    %s,
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    issued_in TEXT NOT NULL UNIQUE REFERENCES relays (id),
+    binds TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('live', 'revoked', 'consumed', 'ended')),
+    issued_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    end_reason TEXT CHECK (end_reason IN ('revoked', 'bundle-closed', 'merged', 'pr-closed', 'superseded')),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    UNIQUE (project_id, handle),
+    UNIQUE (seat_id, kind, repository_id, issued_at, handle),
+    CHECK ((state = 'live') = (ended_at IS NULL)),
+    CHECK ((ended_at IS NULL) = (end_reason IS NULL))
+) STRICT""" % _arc('issuer_', {'operator'}),
+    """CREATE TABLE IF NOT EXISTS slip_events (
+    slip_id TEXT NOT NULL REFERENCES slips (id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    event TEXT NOT NULL CHECK (event IN ('issue', 'revoke', 'end')),
+    at INTEGER NOT NULL,
+    %s,
+    detail TEXT NOT NULL,
+    UNIQUE (slip_id, revision)
+) STRICT""" % _arc('by_', {'operator'}),
+    """CREATE TABLE IF NOT EXISTS branch_bindings (
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    branch TEXT NOT NULL,
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    bound_at INTEGER NOT NULL,
+    UNIQUE (repository_id, branch)
+) STRICT""",
+)
+TABLE_OWNERS.update({name: 'authority' for name in ('slips', 'slip_events', 'branch_bindings')})
+
+_AUTHORITY_TABLES += (
+    """CREATE TABLE IF NOT EXISTS restore_cancels (
+    project_id TEXT NOT NULL PRIMARY KEY REFERENCES projects (id),
+    job_id TEXT NOT NULL,
+    cut_handle INTEGER NOT NULL CHECK (cut_handle >= 0),
+    held_at INTEGER NOT NULL,
+    released_at INTEGER,
+    released_by TEXT CHECK (released_by IS NULL OR released_by = 'operator'),
+    CHECK ((released_at IS NULL) = (released_by IS NULL))
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS restore_refusals (
+    relay_id TEXT NOT NULL PRIMARY KEY REFERENCES relays (id),
+    project_id TEXT NOT NULL REFERENCES projects (id),
+    seat_id TEXT NOT NULL REFERENCES seats (id),
+    bundle_id TEXT NOT NULL REFERENCES bundles (id),
+    repository_id TEXT NOT NULL REFERENCES repositories (id),
+    job_id TEXT NOT NULL
+) STRICT""",
+)
+TABLE_OWNERS.update({name: 'authority' for name in ('restore_cancels', 'restore_refusals')})
+
+
+_TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
     """CREATE TABLE IF NOT EXISTS imported_relays (
     relay_id TEXT NOT NULL REFERENCES relays(id),
     root_uuid TEXT NOT NULL,
@@ -243,9 +341,11 @@ _TABLES = _PLATFORM_TABLES + (
     body_bytes INTEGER NOT NULL CHECK (body_bytes >= 0),
     header_bytes INTEGER NOT NULL CHECK (header_bytes >= 0),
     git_state_id TEXT REFERENCES git_states (id),
+    repository_id TEXT REFERENCES repositories (id),
     submission_key TEXT CHECK (submission_key IS NULL OR length(submission_key) > 0),
     draft_sha256 TEXT %s,
     CHECK ((submission_key IS NULL) = (draft_sha256 IS NULL)),
+    CHECK (repository_id IS NULL OR (kind = 'IMPL' AND needs = 'act')),
     UNIQUE (project_id, handle),
     UNIQUE (project_id, created_at),
     %s,
@@ -555,6 +655,7 @@ _TABLES = _PLATFORM_TABLES + (
 )
 
 _INDEXES = (
+    "CREATE INDEX IF NOT EXISTS verification_requests_bytes ON verification_requests (artifact, content_sha256)",
     "CREATE UNIQUE INDEX IF NOT EXISTS relays_submission_party ON relays"
     " (coalesce(sender_seat_id, sender_special), submission_key)"
     " WHERE submission_key IS NOT NULL",
@@ -625,6 +726,26 @@ BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox row is never replaced'); END""",
 WHEN EXISTS (SELECT 1 FROM lifecycle_outbox_events
              WHERE project_id = NEW.project_id AND position = NEW.position AND event_index = NEW.event_index)
 BEGIN SELECT RAISE(ABORT, 'a lifecycle outbox event is never replaced'); END""",
+)
+
+_TRIGGERS += (
+    """CREATE TRIGGER IF NOT EXISTS verification_requests_consistent_insert
+BEFORE INSERT ON verification_requests
+WHEN EXISTS (
+    SELECT 1 FROM verification_requests v WHERE v.claim_relay_id = NEW.claim_relay_id
+    AND (v.request_relay_id IS NOT NEW.request_relay_id
+         OR v.kind IS NOT NEW.kind OR v.reviewer_seat_id IS NOT NEW.reviewer_seat_id)
+)
+BEGIN SELECT RAISE(ABORT, 'verification rows must share request, kind and reviewer'); END""",
+    """CREATE TRIGGER IF NOT EXISTS verification_requests_consistent_update
+BEFORE UPDATE OF claim_relay_id, request_relay_id, kind, reviewer_seat_id ON verification_requests
+WHEN EXISTS (
+    SELECT 1 FROM verification_requests v WHERE v.claim_relay_id = NEW.claim_relay_id
+    AND v.rowid != OLD.rowid
+    AND (v.request_relay_id IS NOT NEW.request_relay_id
+         OR v.kind IS NOT NEW.kind OR v.reviewer_seat_id IS NOT NEW.reviewer_seat_id)
+)
+BEGIN SELECT RAISE(ABORT, 'verification rows must share request, kind and reviewer'); END""",
 )
 
 

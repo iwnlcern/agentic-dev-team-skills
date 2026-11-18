@@ -219,6 +219,7 @@ class ReadResult:
     unopened: list[tuple[str, int]]
     refs: tuple[RefLine, ...]
     findings: tuple[RaisedFinding, ...]
+    repository: str | None
 
 
 @dataclass(frozen=True)
@@ -285,7 +286,7 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
     row = conn.execute(
         "SELECT r.handle, r.kind, " + party_sql("r.sender_") + ", r.subject, p.handle, r.verdict, r.needs,"
         " r.created_at, b.body, r.body_sha256, r.meta_sha256, r.git_state_id, r.project_id, r.id,"
-        " r.submission_key, r.sender_special, r.parent_id"
+        " r.submission_key, r.sender_special, r.parent_id, r.repository_id"
         " FROM relays r JOIN bodies b ON b.relay_id = r.id"
         " LEFT JOIN relays p ON p.id = r.parent_id WHERE r.id = ?", (relay_id,)).fetchone()
     if row is None:
@@ -342,7 +343,12 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
                     " WHERE relay_id = ? ORDER BY rowid", (relay_id,))],
             "git_state": _git_state(conn, row[11]),
         }
-    return ReadResult(bytes(row[8]), envelope, extra, unopened, ref_lines, raised_findings)
+    repository = None
+    if row[17] is not None:
+        repository = conn.execute("SELECT name FROM repositories WHERE id = ?",
+                                  (row[17],)).fetchone()[0]
+    return ReadResult(bytes(row[8]), envelope, extra, unopened, ref_lines, raised_findings,
+                      repository)
 
 
 def _check_foreign_release(conn, target, foreign_release):

@@ -668,3 +668,63 @@ def _check(ledger, root, relay_path: str, seat: str, action: str) -> dict:
     return {'allowed':not reasons,'reasons':sorted(reasons),'relay':relay_path,
             'seat':seat,'action':action,'checked_at':datetime.now().strftime('%Y%m%d-%H%M%S'),
             'external':external}
+
+
+_GIT_BLOB_HASHES = {'git-sha1': hashlib.sha1, 'git-sha256': hashlib.sha256}
+
+
+def working_copy_digest(path, algorithm='sha256'):
+    """Digest the current regular working copy, holding on missing or unreadable bytes.
+
+    One read under the regular-file rule (F6): the last path component is never
+    followed as a symbolic link, and a directory, FIFO or device answers None
+    without being read, since the caller holds the store's write lock.
+    `algorithm` is `sha256`, or `git-sha1` or `git-sha256` for a Git blob id of the
+    bytes (erratum 4 r2 R3). A tuple of those names returns their digests in
+    order from the same read; an unknown name raises ValueError before reading.
+    """
+    algorithms = algorithm if isinstance(algorithm, tuple) else (algorithm,)
+    if any(name != 'sha256' and name not in _GIT_BLOB_HASHES for name in algorithms):
+        raise ValueError('unknown working-copy digest algorithm')
+    try:
+        parent = os.open(os.path.dirname(path) or '.', os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            data = _read_regular_at(parent, os.path.basename(path))
+        finally:
+            os.close(parent)
+    except OSError:
+        return None
+    def hashed(name):
+        if name == 'sha256':
+            return hashlib.sha256(data).hexdigest()
+        return _GIT_BLOB_HASHES[name](b'blob %d\0' % len(data) + data).hexdigest()
+    values = tuple(hashed(name) for name in algorithms)
+    return values if isinstance(algorithm, tuple) else values[0]
+
+
+def act_entry(conn, seat_id, effect, now_ms):
+    """Isolate act's writes while keeping the caller's write transaction open."""
+    if not conn.in_transaction:
+        raise ValueError('act_entry needs an open transaction')
+    from relay_engine import slips, strings, submit
+
+    opened = False
+    try:
+        conn.execute('SAVEPOINT authority_act')
+        opened = True
+        with submit.read_guard(conn):
+            answer = slips.act(conn, seat_id, effect, now_ms, digest=working_copy_digest)
+        if answer.outcome == 'held' and answer.code == 'authority.check-unavailable':
+            conn.execute('ROLLBACK TO authority_act')
+        conn.execute('RELEASE authority_act')
+        return answer
+    except Exception:
+        pass
+    # Erratum 4 r3 R5: the cleanup runs after the except clause, so an error here escapes
+    # with nothing of the first fault attached, for the caller to roll back (F5).  A callee
+    # that ended the caller's transaction took the savepoint with it (F4): nothing to undo.
+    if opened and conn.in_transaction:
+        conn.execute('ROLLBACK TO authority_act')
+        conn.execute('RELEASE authority_act')
+    return slips.Answer('held', 'authority.check-unavailable',
+                        strings.render('authority-fault'), 'operator', None, None)

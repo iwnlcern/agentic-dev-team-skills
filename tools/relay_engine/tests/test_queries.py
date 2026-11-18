@@ -3914,3 +3914,42 @@ class TestGitSnapshotCopies(submit_tests.GitSnapshots):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRepositoryField(Store):
+    """Breaks: read exposes a stale/id/meta-only repository or imports bind one."""
+    def test_read_repository_current_name(self):
+        data = draft(kind="IMPL", needs="act", to=IMPL.address).replace(b"\n\n", b"\nREPO: bivpak\n\n", 1)
+        try:
+            admitted = self.submit(data)
+        except errors.EngineError as exc:
+            self.fail("repository filing must admit: " + exc.code)
+        for name in ("bivpak", "renamed"):
+            if name == "renamed":
+                self.conn.execute("UPDATE repositories SET name = ? WHERE id = 'repo-1'", (name,))
+                self.conn.commit()
+            for meta in (True, False):
+                with self.subTest(name=name, meta=meta):
+                    result = queries.read(self.conn, admitted.relay_id, IMPL.seat_id, 5000, meta=meta)
+                    self.assertEqual(getattr(result, "repository", "missing"), name)
+                    self.assertEqual(set(result.envelope), ENVELOPE)
+                    self.assertEqual(self.relay(admitted.relay_id)["repository_id"], "repo-1")
+        plain = self.submit(draft(to=IMPL.address))
+        self.assertIsNone(queries.read(self.conn, plain.relay_id, IMPL.seat_id, 6000).repository)
+
+    def test_import_writes_no_repository(self):
+        from relay_engine import imports
+        data = b"KIND: IMPL\nREPO: /Users/x/repo\n\nold body\n"
+        header_bytes = data.index(b"\n\n") + 2
+        relay = imports.ImportedRelay(created_at=100, kind="IMPL", verdict=None, subject="old relay",
+            sender=PLANNER.seat_id, sender_role=PLANNER.role, team_instance_id=PLANNER.team_instance_id,
+            to=(IMPL.seat_id,), cc=(), parent_id=None, parent_spelling=None, body=data,
+            header_bytes=header_bytes, header_sha256=hashlib.sha256(data[:header_bytes]).hexdigest())
+        self.conn.execute("BEGIN")
+        try:
+            relay_id = imports.import_relay_step(self.conn, "p", relay, marked_at_ms=200)
+        except sqlite3.Error as exc:
+            self.fail("import must return its relay id: " + str(exc))
+        self.assertIsInstance(relay_id, str)
+        self.assertEqual(self.conn.execute("SELECT body FROM bodies WHERE relay_id = ?", (relay_id,)).fetchone()[0], data)
+        self.assertIsNone(self.relay(relay_id).get("repository_id", "missing"))

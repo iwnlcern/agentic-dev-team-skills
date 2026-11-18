@@ -2225,9 +2225,14 @@ class TestHookWriteOwners(Store):
                 with self.assertRaises(ValueError, msg=owner) as caught:
                     replace(self.ctx(), after_admit_writes=frozenset({"fixture_owned"}))
                 self.assertEqual(str(caught.exception), message)
-        for table in sorted(schema.TABLE_OWNERS):
-            with self.assertRaises(ValueError, msg=table):
-                replace(self.ctx(), after_admit_writes=frozenset({table}))
+        for table, owner in sorted(schema.TABLE_OWNERS.items()):
+            if owner == "authority":
+                ctx = replace(self.ctx(), after_admit_writes=frozenset({table}))
+                self.assertEqual(ctx.after_admit_writes, frozenset({table}), table)
+            else:
+                with self.assertRaises(ValueError, msg=table) as caught:
+                    replace(self.ctx(), after_admit_writes=frozenset({table}))
+                self.assertEqual(str(caught.exception), message)
 
 
 class TestSenderCheck(Store):
@@ -4132,3 +4137,114 @@ class TestAnswers(Store):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRepositoryField(Store):
+    """Breaks: wrong project/id/digest, out-of-lock lookup or writes on refusal."""
+    @staticmethod
+    def repo_draft(repo="bivpak", **kwargs):
+        data = draft(kind="IMPL", needs="act", **kwargs)
+        return data.replace(b"\n\n", ("\nREPO: " + repo + "\n\n").encode(), 1)
+
+    def admit_repo(self, data, **kwargs):
+        try:
+            return self.submit(data, **kwargs)
+        except (errors.EngineError, sqlite3.Error, AttributeError, KeyError) as exc:
+            self.fail("repository filing must admit: " + str(exc))
+
+    @staticmethod
+    def legacy_fields(kind="SITREP", verdict=None, needs="none"):
+        # Independent pre-A11 JCS oracle, deliberately without repository/answers.
+        return dict(kind=kind, to=[PLANNER.address], cc=[], parent=None, bundle="b1",
+                    verdict=verdict, needs=needs, subject="s", refs=[], findings=[],
+                    fixes=[], resolves=[])
+
+    def test_repo_admits_with_repository_id(self):
+        from relay_engine import jcs
+        admitted = self.admit_repo(self.repo_draft())
+        row = self.relay(admitted.relay_id)
+        self.assertEqual(row.get("repository_id", "missing"), "repo-1")
+        fields = self.legacy_fields("IMPL", needs="act")
+        old = hashlib.sha256(jcs.jcs_encode(fields)).hexdigest()
+        expected = hashlib.sha256(jcs.jcs_encode(dict(fields, repository="repo-1"))).hexdigest()
+        self.assertEqual(row["meta_sha256"], expected)
+        self.assertNotEqual(row["meta_sha256"], old)
+
+    def test_repo_refusals_write_one_row(self):
+        self.conn.execute("INSERT INTO repositories (id, project_id, name) VALUES ('only-q', 'q', 'elsewhere')")
+        self.conn.commit()
+        cases = []
+        for kind, needs, verdict in (("PLAN", "none", None), ("SITREP", "none", None),
+                                     ("PLAN-REVIEW", "none", "approve"), ("IMPL", "none", None)):
+            data = draft(kind=kind, needs=needs, verdict=verdict).replace(b"\n\n", b"\nREPO: bivpak\n\n", 1)
+            cases.append((kind + needs, data, "E-FIELD-FORBIDDEN", {"field": "REPO", "rule": "REPO sits only on an IMPL with NEEDS: act"}))
+        for value in ("/Users/x/repo", "Repo", "a" * 33):
+            cases.append((value, self.repo_draft(value), "E-FIELD-SHAPE",
+                          {"field": "REPO", "form": "[a-z0-9][a-z0-9-]{0,31}"}))
+        for value in ("nope", "elsewhere"):
+            cases.append((value, self.repo_draft(value), "E-REPO-UNKNOWN", {"value": value}))
+        duplicate = self.repo_draft().replace(b"\n\n", b"\nREPO: bivpak\n\n", 1)
+        cases.append(("duplicate", duplicate, "E-HEADER-DUPLICATE", {"field": "REPO"}))
+        for label, data, code, params in cases:
+            with self.subTest(case=label):
+                field_line = len(data.split(b"\n\n", 1)[0].splitlines())
+                exc = self.refused(code, data, line=field_line)
+                for key, value in params.items():
+                    self.assertEqual(exc.params[key], value)
+
+    def test_repo_unknown_then_registered_admits(self):
+        data = self.repo_draft("later")
+        ctx = self.ctx(submission_key="repo-later")
+        with self.assertRaises(errors.EngineError) as caught:
+            submit.submit(self.conn, ctx, data)
+        self.assertEqual(caught.exception.code, "E-REPO-UNKNOWN")
+        self.conn.execute("INSERT INTO repositories (id, project_id, name) VALUES ('later-id', 'p', 'later')")
+        self.conn.commit()
+        admitted = submit.submit(self.conn, ctx, data)
+        self.assertEqual(self.relay(admitted.relay_id)["repository_id"], "later-id")
+
+    def test_other_relays_keep_meta_digest(self):
+        from relay_engine import jcs
+        for kind, verdict in (("SITREP", None), ("PLAN", None), ("PLAN-REVIEW", "approve"), ("IMPL", None)):
+            with self.subTest(kind=kind):
+                admitted = self.submit(draft(kind=kind, verdict=verdict))
+                fields = self.legacy_fields(kind, verdict)
+                expected = hashlib.sha256(jcs.jcs_encode(fields)).hexdigest()
+                self.assertEqual(self.relay(admitted.relay_id)["meta_sha256"], expected)
+
+    def test_other_relays_store_no_repository(self):
+        for kind, verdict in (("SITREP", None), ("PLAN", None), ("PLAN-REVIEW", "approve"), ("IMPL", None)):
+            with self.subTest(kind=kind):
+                admitted = self.submit(draft(kind=kind, verdict=verdict))
+                self.assertIsNone(self.relay(admitted.relay_id).get("repository_id", "missing"))
+
+    def test_repo_lookup_under_write_lock(self):
+        trace = []
+        self.conn.set_trace_callback(trace.append)
+        self.addCleanup(self.conn.set_trace_callback, None)
+        self.admit_repo(self.repo_draft())
+        lookups = [i for i, sql in enumerate(trace) if "SELECT id FROM repositories WHERE project_id" in sql]
+        self.assertTrue(lookups, trace)
+        self.assertGreater(lookups[0], trace.index("BEGIN IMMEDIATE"))
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "repo-lock.sqlite3")
+            conn = submit.open_store(path)
+            other = sqlite3.connect(path, timeout=0)
+            try:
+                schema.init_v3(conn)
+                platform_rows(conn)
+                conn.execute("PRAGMA busy_timeout = 0")
+                other.execute("BEGIN IMMEDIATE")
+                locked_trace = []
+                conn.set_trace_callback(locked_trace.append)
+                try:
+                    submit.submit(conn, self.ctx(), self.repo_draft())
+                except errors.EngineError as exc:
+                    self.assertEqual(exc.code, "E-STORE-BUSY")
+                else:
+                    self.fail("a held write lock must refuse")
+                self.assertFalse(any("SELECT id FROM repositories WHERE project_id" in sql for sql in locked_trace), locked_trace)
+            finally:
+                other.rollback()
+                other.close()
+                conn.close()

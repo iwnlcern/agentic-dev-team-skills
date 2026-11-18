@@ -26,6 +26,17 @@ POLICY_CODES = {
 ALL_CODES = POLICY_CODES | {
     "E-SETTING-UNKNOWN",
     "E-SETTING-VALUE",
+    "E-AUTHORITY-SLIP-MISSING",
+    "E-AUTHORITY-SLIP-INVALID",
+    "E-AUTHORITY-LINEAGE-INCOMPLETE",
+    "E-AUTHORITY-NOT-ISSUER",
+    "E-AUTHORITY-PLAN-CHANGED",
+    "E-AUTHORITY-DESIGN-CHANGED",
+    "E-AUTHORITY-VERIFICATION-PENDING",
+    "E-AUTHORITY-VERIFICATION-OBJECTED",
+    "E-AUTHORITY-CHECK-UNAVAILABLE",
+    "E-AUTHORITY-RESTORE-HELD",
+
     "E-SNAPSHOT-STALE",
     "E-SNAPSHOT-NOT-TO",
     "E-SNAPSHOT-NO-REF",
@@ -80,7 +91,7 @@ ALL_CODES = POLICY_CODES | {
     "E-QUESTION-ADDRESS",
     "E-SQLITE-VERSION",
     "E-SCHEMA-MISMATCH",
-    "E-PARENT-UNKNOWN",
+    "E-PARENT-UNKNOWN", "E-REPO-UNKNOWN",
     "E-PARENT-NOT-MEMBER",
     "E-ANSWERS-UNKNOWN",
     "E-ANSWERS-NOT-ADDRESSED",
@@ -114,6 +125,15 @@ class TestErrorRegistry(unittest.TestCase):
             self.assertIn(key, text)
             if spec.minimum is not None:
                 self.assertIn("from %s to %s" % (spec.minimum, spec.maximum), text)
+
+    def test_repo_unknown_code(self):
+        # Breaks: unknown repository is absent, misclassified or gives the wrong remedy.
+        self.assertIn("E-REPO-UNKNOWN", errors.ERRORS)
+        exc = errors.error_for("E-REPO-UNKNOWN", line=7, value="missing")
+        self.assertEqual(exc.cls, "integrity")
+        self.assertEqual(exc.cause, "line 7: REPO missing names no repository of this project")
+        self.assertEqual(exc.remedy, "name a repository this project has registered, by its name; a path or a URL is not a name")
+        self.assertEqual(errors.explain_for("E-REPO-UNKNOWN")[0], "REPO names the repository a go-ahead is for, among the sender's own project's repositories")
 
     def test_store_busy_code(self):
         # Breaks: an unregistered/misclassified busy answer or unsafe resend advice.

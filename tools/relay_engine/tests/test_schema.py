@@ -15,9 +15,11 @@ from relay_engine import schema
 from relay_engine import refs
 from relay_engine.tests import test_submit
 from relay_engine.tests.test_submit import Store as SubmitStore
+from relay_engine.tests.test_claims import ClaimStore
+from relay_engine import claims
 
 
-TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
+TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch_bindings", "reviewer_assignments", "verification_requests", "waivers", "relays", "bodies", "recipients", "edges", "git_states", "findings",
           "finding_events", "bundles", "refusals", "seat_activity",
           "seat_sessions", "token_counts", "snapshots", "schema_version", "projects", "repositories",
           "repository_checkouts", "team_instances", "seats", "seat_occupants", "project_settings", "settings_history", "mutation_receipts",
@@ -27,6 +29,7 @@ TABLES = {"relays", "bodies", "recipients", "edges", "git_states", "findings",
           "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
 
 INDEXES = {
+    "verification_requests": {("artifact", "content_sha256")},
     "snapshots": {("relay_id",), ("artifact", "handle"), ("content_sha256",)},
     "relays": {("parent_id",), ("bundle_id",), ("project_id", "handle"),
                ("sender_seat_id", "kind"), ("project_id", "id")},
@@ -73,6 +76,10 @@ def platform_rows(conn):
 
 
 class Store(unittest.TestCase):
+    """Schema fixtures build p/q, open pair teams, occupied/vacant seats and rows
+    for constraints; they do not build reviewer replacement, actual directory
+    resolution, authenticated keys/session lifecycle or concurrent identity changes.
+    """
     def connect(self, init=True):
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
@@ -217,6 +224,126 @@ class TestReservedNames(Store):
         self.assertFalse(conn.in_transaction)
 
 
+class TestTask4Waiver(ClaimStore):
+    """E5's seat-principal refusal over a real claim, not a fabricated claim row.
+
+    No closed team, absent reviewer or multi-project reviewer selection is built.
+    """
+
+    def test_verification_rows_share_request_and_kind(self):
+        message = re.escape('verification rows must share request, kind and reviewer')
+        columns = ('claim_relay_id', 'artifact', 'kind', 'snapshot_handle',
+                   'snapshot_request_relay_id', 'content_sha256', 'request_relay_id',
+                   'reviewer_seat_id', 'created_at')
+
+        def first_row(label, paths=None):
+            _, claim = self.claim(paths=paths, bundle='gc20-' + label)
+            rows = self.conn.execute('SELECT rowid, ' + ', '.join(columns) +
+                                     ' FROM verification_requests WHERE claim_relay_id = ?',
+                                     (claim.relay_id,)).fetchall()
+            self.assertEqual(len(rows), 1)
+            return rows[0][0], dict(zip(columns, rows[0][1:]))
+
+        def insert(row):
+            return ('INSERT INTO verification_requests (' + ', '.join(columns) +
+                    ') VALUES (' + ', '.join('?' for _ in columns) + ')',
+                    tuple(row[name] for name in columns))
+
+        def second(row, **changes):
+            return dict(row, artifact=row['artifact'] + '.second', **changes)
+
+        def raw_statement(sql, parameters):
+            self.conn.execute('SAVEPOINT gc20_case')
+            try:
+                self.conn.execute(sql, parameters)
+            except sqlite3.IntegrityError:
+                self.conn.execute('ROLLBACK TO gc20_case')
+                raise
+            finally:
+                self.conn.execute('RELEASE gc20_case')
+                self.assertFalse(self.conn.in_transaction)
+
+        def refused(sql, parameters):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, message):
+                raw_statement(sql, parameters)
+
+        def admitted(sql, parameters):
+            try:
+                raw_statement(sql, parameters)
+            except sqlite3.IntegrityError as error:
+                self.fail('admitted row refused: %s' % error)
+
+        # Admission control: a different artifact sharing all three columns is legal.
+        _, row = first_row('same')
+        extra = second(row)
+        admitted(*insert(extra))
+        self.assertEqual(self.conn.execute(
+            'SELECT request_relay_id, kind, reviewer_seat_id FROM verification_requests'
+            ' WHERE claim_relay_id = ? AND artifact = ?',
+            (extra['claim_relay_id'], extra['artifact'])).fetchone(),
+            (row['request_relay_id'], row['kind'], row['reviewer_seat_id']))
+
+        # GC-20a: this is the first refusal, and the predicted base AssertionError.
+        _, row = first_row('request')
+        _, other = first_row('request-other')
+        refused(*insert(second(row, request_relay_id=other['request_relay_id'])))
+
+        # GC-20b: the nullable pair changes together, so E2's CHECK admits its shape.
+        _, row = first_row('null')
+        refused(*insert(second(row, request_relay_id=None, reviewer_seat_id=None)))
+
+        # GC-20c and GC-20d each differ in one non-NULL column only.
+        _, row = first_row('kind')
+        refused(*insert(second(row, kind='design')))
+        _, row = first_row('reviewer')
+        refused(*insert(second(row, reviewer_seat_id='seat-reviewer-2')))
+
+        # GC-20e: the UPDATE trigger must guard one of two rows in place.
+        rowid, row = first_row('update')
+        admitted(*insert(second(row)))
+        _, other = first_row('update-other')
+        refused('UPDATE verification_requests SET request_relay_id = ? WHERE rowid = ?',
+                (other['request_relay_id'], rowid))
+
+        # GC-20f: moving a distinct artifact into a claim must check its new peers.
+        _, row = first_row('move-target')
+        rowid, other = first_row('move-source', paths=(self.design,))
+        self.assertNotEqual(other['artifact'], row['artifact'])
+        refused('UPDATE verification_requests SET claim_relay_id = ? WHERE rowid = ?',
+                (row['claim_relay_id'], rowid))
+
+        # GC-20g: a one-row claim must not compare the new row with its own old row.
+        rowid, row = first_row('single-update')
+        _, other = first_row('single-update-other')
+        admitted('UPDATE verification_requests SET request_relay_id = ?, reviewer_seat_id = ?'
+                 ' WHERE rowid = ?',
+                 (other['request_relay_id'], 'seat-reviewer-2', rowid))
+        self.assertEqual(self.conn.execute(
+            'SELECT request_relay_id, kind, reviewer_seat_id FROM verification_requests'
+            ' WHERE rowid = ?', (rowid,)).fetchone(),
+            (other['request_relay_id'], row['kind'], 'seat-reviewer-2'))
+
+    def test_waiver_principal_is_operator_only(self):
+        # WP-M1: restoring the seat arc would let this row waive verification.
+        _, claim = self.claim()
+        self.conn.execute('SAVEPOINT seat_waiver')
+        accepted = False
+        try:
+            self.conn.execute('INSERT INTO waivers (claim_relay_id, kind, by_special, words, created_at, after_handle)'
+                              " VALUES (?, 'plan', 'seat', 'seat waiver', ?, 0)",
+                              (claim.relay_id, self.clock))
+            accepted = True
+        except sqlite3.Error:
+            pass
+        finally:
+            self.conn.execute('ROLLBACK TO seat_waiver')
+            self.conn.execute('RELEASE seat_waiver')
+        self.assertFalse(accepted, 'a seat principal must not be stored as a waiver')
+        self.assertEqual(claims.verification_state(self.conn, claim.relay_id), 'pending')
+        claims.waive(self.conn, claim.relay_id, 'plan', 'operator', 'operator waiver', self.clock)
+        self.assertEqual(claims.verification_state(self.conn, claim.relay_id), 'waived')
+
+
 class TestShape(Store):
     def test_tables_are_strict(self):
         conn = self.connect()
@@ -269,7 +396,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 29)
+        self.assertEqual(len(named), 30)
 
 
 class TestChecks(Store):
@@ -847,6 +974,37 @@ class TestAdmissionReplaySchema(Store):
         schema.init_v3(control)
         self.assertEqual(self.objects(control), objects)
 
+    def test_pre_change_store_refused(self):
+        old_tables = tuple(sql for sql in schema._TABLES
+                           if not any('CREATE TABLE IF NOT EXISTS ' + name + ' ' in sql
+                                      for name in ('restore_cancels', 'restore_refusals')))
+        conn = self.connect(init=False)
+        with mock.patch.object(schema, '_TABLES', old_tables):
+            schema.init_v3(conn)
+        before = self.objects(conn)
+        digest = conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.objects(conn), before)
+        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(), digest)
+
+
+    def test_pre_supersede_store_refused(self):
+        old_tables = tuple(sql.replace(", 'superseded'", "") if 'CREATE TABLE IF NOT EXISTS slips ' in sql
+                           else sql.replace(", 'end'", "") if 'CREATE TABLE IF NOT EXISTS slip_events ' in sql
+                           else sql for sql in schema._TABLES)
+        conn = self.connect(init=False)
+        with mock.patch.object(schema, '_TABLES', old_tables):
+            schema.init_v3(conn)
+        before = self.objects(conn)
+        digest = conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, 'E-SCHEMA-MISMATCH')
+        self.assertEqual(self.objects(conn), before)
+        self.assertEqual(conn.execute('SELECT ddl_sha256 FROM schema_version').fetchone(), digest)
+
 
 
 class TestTableOwners(Store):
@@ -875,19 +1033,24 @@ class TestTableOwners(Store):
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
-        self.assertEqual(len(actual), 35)
+        self.assertEqual(len(actual), 43)
+        authority = {"reviewer_assignments", "verification_requests", "waivers",
+                     "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals"}
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "authority"}, authority)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)
         console = {"lifecycle_outbox", "lifecycle_outbox_events"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "console"}, console)
-        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console - store)
+        self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "engine"}, actual - platform - console - store - authority)
         fixture = SubmitStore()
         fixture.setUp()
         try:
-            for table in sorted(actual | {"missing_table"}):
+            for table in sorted((actual - authority) | {"missing_table"}):
                 with self.subTest(table=table):
                     with self.assertRaises(ValueError):
                         replace(fixture.ctx(), after_admit_writes=frozenset({table}))
+            for table in sorted(authority):
+                replace(fixture.ctx(), after_admit_writes=frozenset({table}))
         finally:
             fixture.doCleanups()
 
@@ -956,3 +1119,99 @@ class TestSnapshotSchema(Store):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRuleHSchema(ClaimStore):
+    """Savepoint-only malformed-row refusal; no direct Authority row survives."""
+
+    def test_reviewer_without_request_refused(self):
+        # E2-M2: the reverse implication of the existing NULL-pair witness.
+        _, source = self.claim()
+        row = self.conn.execute('SELECT artifact, kind, snapshot_handle, snapshot_request_relay_id,'
+                                ' content_sha256, reviewer_seat_id, created_at'
+                                ' FROM verification_requests WHERE claim_relay_id = ?',
+                                (source.relay_id,)).fetchone()
+        _, empty = self.claim(paths=())
+        self.assertIsNone(self.request(empty))
+        accepted = False
+        self.conn.execute('SAVEPOINT reviewer_without_request')
+        try:
+            self.conn.execute('INSERT INTO verification_requests (claim_relay_id, artifact, kind,'
+                              ' snapshot_handle, snapshot_request_relay_id, content_sha256,'
+                              ' request_relay_id, reviewer_seat_id, created_at)'
+                              ' VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)',
+                              (empty.relay_id, *row))
+            accepted = True
+        except sqlite3.Error:
+            pass
+        finally:
+            self.conn.execute('ROLLBACK TO reviewer_without_request')
+            self.conn.execute('RELEASE reviewer_without_request')
+        self.assertFalse(accepted, 'a reviewer with no request must be refused')
+        self.assertIsNone(self.request(empty))
+
+    def test_request_and_reviewer_null_together(self):
+        # E2-M1: remove the pairing CHECK and this otherwise valid insert succeeds.
+        _, source = self.claim()
+        row = self.conn.execute('SELECT artifact, kind, snapshot_handle, snapshot_request_relay_id,'
+                                ' content_sha256, request_relay_id, created_at'
+                                ' FROM verification_requests WHERE claim_relay_id = ?',
+                                (source.relay_id,)).fetchone()
+        _, empty = self.claim(paths=())
+        self.assertIsNone(self.request(empty))
+        accepted = False
+        self.conn.execute('SAVEPOINT null_pair')
+        try:
+            self.conn.execute('INSERT INTO verification_requests (claim_relay_id, artifact, kind,'
+                              ' snapshot_handle, snapshot_request_relay_id, content_sha256,'
+                              ' request_relay_id, reviewer_seat_id, created_at)'
+                              ' VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)',
+                              (empty.relay_id, *row))
+            accepted = True
+        except sqlite3.Error:
+            pass
+        finally:
+            self.conn.execute('ROLLBACK TO null_pair')
+            self.conn.execute('RELEASE null_pair')
+        self.assertFalse(accepted, 'a request with no reviewer must be refused')
+        self.assertIsNone(self.request(empty))
+
+
+class TestRepositoryField(Store):
+    """Breaks: missing repository constraints or acceptance of the previous digest."""
+    def test_relays_repository_check(self):
+        conn = self.connect()
+        try:
+            for handle, (kind, needs) in enumerate((("SITREP", "none"), ("IMPL", "none"), ("IMPL", "act")), 1):
+                sql = ("INSERT INTO relays (id, handle, project_id, kind, needs, subject,"
+                       " sender_seat_id, created_at, body_sha256, meta_sha256, body_bytes,"
+                       " header_bytes, repository_id)"
+                       " VALUES (?, ?, 'p', ?, ?, 's', 's-a', ?, ?, ?, 0, 10, 'repo-1')")
+                params = ("repo-relay-" + str(handle), handle, kind, needs, handle, SHA, SHA)
+                if kind == "IMPL" and needs == "act":
+                    conn.execute(sql, params)
+                    self.assertEqual(conn.execute("SELECT repository_id FROM relays WHERE handle = ?", (handle,)).fetchone(), ("repo-1",))
+                else:
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute(sql, params)
+        except sqlite3.OperationalError as exc:
+            self.fail("repository column missing: " + str(exc))
+
+    def test_repositories_name_check(self):
+        conn = self.connect()
+        for index, name in enumerate(("Repo", "-x", "a_b", "a b", "", "a" * 33, "a\0b")):
+            with self.subTest(name=name):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute("INSERT INTO repositories (id, project_id, name) VALUES (?, 'p', ?)", ("bad-repo-" + str(index), name))
+        for index, name in enumerate(("a", "0", "agentic-dev-team-skills")):
+            conn.execute("INSERT INTO repositories (id, project_id, name) VALUES (?, 'p', ?)", ("good-repo-" + str(index), name))
+
+    def test_old_ledger_refused_at_open(self):
+        old = "5b8e0fb408762de241120b1850a8b3082b08bd7d4ce72dc30fada31e9c77686b"
+        self.assertNotEqual(schema.ddl_digest(), old)
+        conn = self.connect()
+        conn.execute("UPDATE schema_version SET ddl_sha256 = ?", (old,))
+        conn.commit()
+        with self.assertRaises(errors.EngineError) as caught:
+            schema.init_v3(conn)
+        self.assertEqual(caught.exception.code, "E-SCHEMA-MISMATCH")

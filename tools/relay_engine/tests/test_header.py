@@ -50,7 +50,7 @@ class TestRegistry(unittest.TestCase):
         names = [spec.name for spec in header.FIELDS]
         self.assertEqual(sorted(names), sorted({
             "KIND", "TO", "CC", "PARENT", "ANSWERS", "BUNDLE", "VERDICT", "NEEDS",
-            "SUBJECT", "REF", "FINDING", "FIXES", "RESOLVE"}))
+            "SUBJECT", "REF", "FINDING", "FIXES", "RESOLVE", "REPO"}))
         self.assertEqual(len(names), len(set(names)))
         for spec in header.FIELDS:
             self.assertTrue(spec.reader, spec.name)
@@ -605,3 +605,50 @@ class TestMirrorHeader(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestRepositoryField(Refused):
+    """Breaks: REPO loses its placement, complete-name grammar or count."""
+    def impl(self, repo=None, *, kind="IMPL", needs="act", verdict=None):
+        lines = replace("NEEDS", needs, replace("KIND", kind))
+        if verdict is not None:
+            lines.append("VERDICT: " + verdict)
+        if repo is not None:
+            lines.append("REPO: " + repo)
+        return draft(lines)
+
+    def test_repo_parsed_on_impl_act(self):
+        try:
+            parsed = header.parse(self.impl("bivpak"))
+        except errors.EngineError as exc:
+            self.fail("REPO must parse: " + exc.code)
+        self.assertEqual(parsed.repo, "bivpak")
+        for kind, needs in (("SITREP", "none"), ("PLAN", "none"), ("IMPL", "none")):
+            self.assertIsNone(header.parse(self.impl(kind=kind, needs=needs)).repo)
+
+    def test_repo_forbidden_elsewhere(self):
+        for kind, needs, verdict in (("PLAN", "none", None), ("SITREP", "none", None),
+                                     ("PLAN-REVIEW", "none", "approve"), ("IMPL", "none", None)):
+            with self.subTest(kind=kind, needs=needs):
+                exc = self.refused(self.impl("bivpak", kind=kind, needs=needs, verdict=verdict),
+                                   "E-FIELD-FORBIDDEN")
+                self.assertEqual(exc.params["field"], "REPO")
+                self.assertEqual(exc.params["rule"], "REPO sits only on an IMPL with NEEDS: act")
+
+    def test_repo_shape(self):
+        for value in ("/Users/x/repo", "Repo", "Bivpak", "-x", "a_b", "a" * 33):
+            with self.subTest(value=value):
+                exc = self.refused(self.impl(value), "E-FIELD-SHAPE")
+                self.assertEqual(exc.params["field"], "REPO")
+                self.assertEqual(exc.params["form"], "[a-z0-9][a-z0-9-]{0,31}")
+        try:
+            valid = header.parse(self.impl("a" * 32))
+        except errors.EngineError as exc:
+            self.fail("32-character name must parse: " + exc.code)
+        self.assertEqual(valid.repo, "a" * 32)
+        # BUNDLE's _read_line baseline rejects trailing whitespace before validation.
+        self.refused(self.impl("bivpak "), "E-HEADER-GRAMMAR")
+
+    def test_repo_second_line(self):
+        data = self.impl("bivpak").replace(b"\n\n", b"\nREPO: bivpak\n\n", 1)
+        self.refused(data, "E-HEADER-DUPLICATE", line=7)
