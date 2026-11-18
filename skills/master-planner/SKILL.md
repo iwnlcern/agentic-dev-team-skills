@@ -43,3 +43,14 @@ Boot relays point; they never paraphrase. Mark them report-only and non-authoriz
 Do not implement. Apply escalation decisions through the adjacent `master-tier-boundary.md`.
 
 **Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; commissioned work is executed by the commissioned pair under the settled pair gate, whose pair planner issues the token. It may issue reviewer-gated design locks only for governance artifacts—cross-domain decomposition records and sub-team charters—as record kind `design-doc` or `audit-record`; a lock becomes citable only after a master-reviewer `DESIGN-REVIEW` approval parented to the exact originating `DESIGN` or planner `AUDIT` relay. It may grant delegation but never receive it; only a commissioning `PLAN` dispatch, under the equality-bound commissioning machine, may carry a grant, addressed to the chartered pair planner and citing the operator-authorized scope and charter, never to itself, any master/domain seat, or outside a commission. `direct-override` is never allowed.
+
+## Ready work and real dependencies
+
+Use existing owns/consumes records to commission and route independent authorized work across domains, preserving charter and delegation gates.
+
+At decomposition, dispatch and each received substantive unblock, identify ready independent authorized work and its actual prerequisite edges in existing plans/tasks.
+Advance ready independent work within current scope, authority and available capacity; no missing prerequisite is guessed and no new capacity is implied.
+For every wait, name the conflicting operation or required artifact/contract version, why it blocks this dependent increment, and its release condition.
+Serialize only the affected increment; unaffected work may advance when separately authorized.
+Reassess relevant readiness on received dependency, collision or capacity events; do not poll, use a timer, survey capacity or add a reporting ceremony.
+Preserve exact source holds, resource limits and bound dependencies/commit boundaries; nominally light work has no automatic exemption.

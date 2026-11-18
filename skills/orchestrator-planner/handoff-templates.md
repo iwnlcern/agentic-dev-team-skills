@@ -337,6 +337,10 @@ Scope list for delegated-dispatch SCOPE_DIFF:
 Fold into the plan:
 - <paired-audit implementation catch/caveat>
 
+Ready independent work: <increment, owner, current authority/capacity and actual prerequisite edges>.
+Actual waits: <conflicting operation or required artifact/contract version, reason, dependent increment and release; serialize only the affected increment>.
+Received-event reassessment: <dependency/collision/capacity changes in existing records; no polling or fresh task-ack gate>.
+
 Boundary contract:
 - Writes:
 - Reads:

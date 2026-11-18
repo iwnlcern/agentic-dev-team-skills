@@ -78,8 +78,22 @@ A nudge grants nothing, changes no grant and starts no work, and it is no reason
 
 ## Routing rules
 
-Use all available teams. Disjoint surfaces can run in parallel. Shared files, migrations, generated schemas, downstream contracts, or the same asserting test must serialize. Name the colliding file/test/contract.
+Advance independent work through existing authorized teams and capacities.
+A shared file, migration, generated schema, downstream contract or asserting test creates a wait only for an actual conflicting operation or required-contract/version invalidation, not its category or common path alone.
+Name the artifact/version and operation, reason, dependent increment and release condition; serialize only that increment and let unaffected separately authorized work advance.
+Apply the operation-level controls in `orchestration-moves.md` § Sequencing and collision management.
 
 ## Relay transport
 
 Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. For v3 delivery, connect with `adt connect --key <key-path> [--switch]` (DD-v3-adapter § 4.1–4.2); the pointer block remains the fallback. If a receiver cannot access the path, relay or attach the file contents.
+
+## Ready work and real dependencies
+
+Use existing bundle/plan records to route independent authorized work across pairs; a received substantive event re-engages only the relevant sequencing decision, not task-by-task execution or a standing plan-approval round.
+
+At decomposition, dispatch and each received substantive unblock, identify ready independent authorized work and its actual prerequisite edges in existing plans/tasks.
+Advance ready independent work within current scope, authority and available capacity; no missing prerequisite is guessed and no new capacity is implied.
+For every wait, name the conflicting operation or required artifact/contract version, why it blocks this dependent increment, and its release condition.
+Serialize only the affected increment; unaffected work may advance when separately authorized.
+Reassess relevant readiness on received dependency, collision or capacity events; do not poll, use a timer, survey capacity or add a reporting ceremony.
+Preserve exact source holds, resource limits and bound dependencies/commit boundaries; nominally light work has no automatic exemption.

@@ -28,7 +28,7 @@ Use a fenced block only for a signature, a command and expected outcome, a file:
 Review task order, interfaces, tests and scope; do not ask for code bodies.
 Code correctness belongs to implementation and PR review.
 Support codebase claims with probes; reviewers independently test completeness with controlled searches.
-
+Advance ready work; justify narrow waits/releases; reassess events; review idle/unsafe work.
 Execution binds scope, exclusions, criteria, contracts, task boundaries, interfaces, test behaviors and assertions, and TDD order.
 Snippet bytes are not bound.
 The Implementer writes the code and tests; adding a test or discriminating control is in bounds.

@@ -33,3 +33,12 @@ Treat a child run's lineage claim and its deliverable claims as E0 until reconci
 Do not build or implement. Review decisions against the adjacent `master-tier-boundary.md`.
 
 **Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; it may cite locks; never issues them. It never grants or receives delegation, and `direct-override` is never allowed.
+
+## Ready work and real dependencies
+
+Apply this scrutiny to cross-domain ownership, commissioning, arbitration and the actual owns/consumes seams; a shared domain name alone is not a dependency.
+
+Challenge both unnecessary ordering/idle authorized work and unsafe overlap in the corresponding Planner's decomposition, dispatch and unblock decisions.
+For each finding, name the actual prerequisite or conflicting operation or required contract/version, its reason and release, and the smallest remedy for the affected increment.
+Preserve exact authority, source holds and resource/capacity limits; require no new actor or approval gate to manufacture parallel work.
+Check readiness after received substantive events and narrow serialization of actual conflicts, with no polling or fresh Planner task acknowledgment.

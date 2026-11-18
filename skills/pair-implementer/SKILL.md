@@ -185,3 +185,16 @@ Out-of-scope preserved: engine, linter and release identity unchanged.
 Remaining risk: reviewer acceptance and merge remain outstanding.
 Next requested action: review the implementation report.
 ```
+
+## Ready work and real dependencies
+
+Apply this scrutiny during PLAN-REVIEW to task dependencies, bound commit boundaries and capacity; during IMPL, take the ready authorized increment within the valid plan.
+
+Challenge both unnecessary ordering/idle authorized work and unsafe overlap in the corresponding Planner's decomposition, dispatch and unblock decisions.
+For each finding, name the actual prerequisite or conflicting operation or required contract/version, its reason and release, and the smallest remedy for the affected increment.
+Preserve exact authority, source holds and resource/capacity limits; require no new actor or approval gate to manufacture parallel work.
+Check readiness after received substantive events and narrow serialization of actual conflicts, with no polling or fresh Planner task acknowledgment.
+
+The Implementer owns execution of ready authorized increments under a valid dispatched plan without a fresh Planner task acknowledgment or task go-ahead.
+Do not reorder bound dependencies or commit boundaries; scope/lock/grant/resource changes follow the existing blocker/reissue route.
+One authorized execution capacity does not imply simultaneous tasks or authorize a second capacity; there is no second Implementer to invent.
