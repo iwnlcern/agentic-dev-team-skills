@@ -113,19 +113,16 @@ CEREMONY_DOWNGRADE: skipped <step> because <reason>. Residual risk: <risk or non
 
 ## Sequencing and collision management
 
-Parallelize only when safe.
-
-Serialize when teams touch:
-
-- same component
-- same migration chain
-- same canonical object semantics
-- same asserting test
-- same generated artifact
-- same API/event contract
-- same downstream consumer behavior
-
-Always name the colliding file/test/contract.
+Advance ready independent work within existing authority and capacity.
+Every category must pass the actual conflicting operation or required-contract/version invalidation test before it creates a wait.
+Component, migration, canonical semantics, asserting test, generated artifact, API/event contract and consumer labels alone do not serialize work.
+Two read-only uses of a pinned consumer have no collision solely because they share its path or name.
+A separate-file change can invalidate another increment's required contract; resolve the required compatible version before that dependent work proceeds.
+Shared writes and invalidating write/read or write/write operations are unsafe to overlap; include asserting tests, generated outputs and migration/version chains in this operation-level analysis.
+Name the artifact/version and conflicting operation, reason overlap is unsafe, dependent increment and release condition in the existing plan/task record.
+Serialize only that increment; unaffected preparation proceeds only under its own authority and available capacity.
+An honest empty ready set names the missing artifact or unavailable authorized capacity and its release; it does not create a worker, workspace, process or allowance.
+On a received dependency, collision or capacity event, reassess only the relevant waits; no polling, recurring survey, task acknowledgment or extra approval/report ceremony is required.
 
 ## Post-approve fold
 

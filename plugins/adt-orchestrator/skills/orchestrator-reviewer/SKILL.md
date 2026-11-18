@@ -132,3 +132,12 @@ A re-run answers for now and cannot prove that the earlier check ran.
 See `protocol.md` § Authority check before acting.
 As the Orchestrator Reviewer, perform a lightweight behavioral honesty check: flag suspicious `DESIGN_RECORD_KIND: audit-record` labels on obviously new design-doc work, pair Planner `direct-override` attempts, missing Implementer design review for design-doc-backed plans, and stale/mismatched `DESIGN_LOCK_ID` references.
 Ask for correction or route to the linter gate rather than approving by vibes.
+
+## Ready work and real dependencies
+
+Apply this scrutiny to cross-bundle routing, handoffs and received-event reconciliation; require operation-level conflict evidence rather than a shared component label.
+
+Challenge both unnecessary ordering/idle authorized work and unsafe overlap in the corresponding Planner's decomposition, dispatch and unblock decisions.
+For each finding, name the actual prerequisite or conflicting operation or required contract/version, its reason and release, and the smallest remedy for the affected increment.
+Preserve exact authority, source holds and resource/capacity limits; require no new actor or approval gate to manufacture parallel work.
+Check readiness after received substantive events and narrow serialization of actual conflicts, with no polling or fresh Planner task acknowledgment.

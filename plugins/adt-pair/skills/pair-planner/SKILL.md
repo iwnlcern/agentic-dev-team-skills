@@ -116,3 +116,18 @@ Questions for Implementer/operator:
 
 A plan is ready only when it includes: locked design, locked scope, file/function targets, boundary contract, interfaces as one-line signatures and named test behaviors each with a one-line assertion and no body, exact verification commands and expected outcomes, out-of-scope lines, acceptance criteria, anti-half-fix guards, ceremony downgrade record if any, and operator-judgment questions if any.
 It carries no implementation body or full test body, per the Plan contract section of `protocol.md`.
+
+## Ready work and real dependencies
+
+Identify readiness and edges in the plan and route actual changes when received; do not direct task-by-task execution after dispatch.
+
+At decomposition, dispatch and each received substantive unblock, identify ready independent authorized work and its actual prerequisite edges in existing plans/tasks.
+Advance ready independent work within current scope, authority and available capacity; no missing prerequisite is guessed and no new capacity is implied.
+For every wait, name the conflicting operation or required artifact/contract version, why it blocks this dependent increment, and its release condition.
+Serialize only the affected increment; unaffected work may advance when separately authorized.
+Reassess relevant readiness on received dependency, collision or capacity events; do not poll, use a timer, survey capacity or add a reporting ceremony.
+Preserve exact source holds, resource limits and bound dependencies/commit boundaries; nominally light work has no automatic exemption.
+
+The Implementer owns execution of ready authorized increments under a valid dispatched plan without a fresh Planner task acknowledgment or task go-ahead.
+Do not reorder bound dependencies or commit boundaries; scope/lock/grant/resource changes follow the existing blocker/reissue route.
+One authorized execution capacity does not imply simultaneous tasks or authorize a second capacity; there is no second Implementer to invent.
