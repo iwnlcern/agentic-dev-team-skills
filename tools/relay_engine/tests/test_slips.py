@@ -2747,3 +2747,60 @@ class TestRepositoryRule(SlipStore):
                     self.assertEqual(answer.reason, 'no implement slip was issued because the IMPL names no repository; an IMPL imported from 2.9.7 never issues one')
                 else:
                     self.assertEqual(answer.reason, 'no implement slip exists for this seat')
+
+
+class TestAnswerCodesR22(unittest.TestCase):
+    def test_answer_codes_r22(self):
+        from relay_engine import slips
+        expected = {
+            'slip-missing': 'deny', 'slip-invalid': 'deny',
+            'lineage-incomplete': 'deny', 'not-issuer': 'deny',
+            'plan-changed': 'held', 'design-changed': 'held',
+            'verification-pending': 'held', 'verification-objected': 'held',
+            'check-unavailable': 'held', 'restore-held': 'held',
+            'project-stopped': 'held', 'cross-project-commit': 'deny',
+            'session-not-current': 'held', 'protected-ref-push': 'deny',
+            'api-merge-refused': 'deny', 'merge-head-unpinned': 'deny',
+            'merge-flag-refused': 'deny', 'hook-bypass': 'deny',
+            'hook-disable': 'deny', 'key-file-read': 'deny',
+            'operator-endpoint': 'deny', 'operator-only': 'deny',
+            'checkout-unregistered': 'deny',
+        }
+        self.assertEqual(slips.ANSWER_CODES,
+                         {'authority.' + code: outcome for code, outcome in expected.items()})
+
+    def test_retired_codes_absent(self):
+        from relay_engine import slips, errors
+        for code in ('merge-no-seat', 'checkout-not-active', 'continuation-pending'):
+            with self.subTest(code=code):
+                self.assertNotIn('authority.' + code, slips.ANSWER_CODES)
+                self.assertNotIn('E-AUTHORITY-' + code.upper(), errors.ERRORS)
+
+
+class TestAnswerWordsR22(unittest.TestCase):
+    def test_unavailable_words(self):
+        from relay_engine import slips
+        for code, reason, remedy in [['no-service', 'the engine is not running, so this act could not be checked', 'start the engine, then try again'], ['connect-refused', 'the engine refused the connection, so this act could not be checked', 'run adt engine status, then try again'], ['deadline', 'the engine did not answer in time, so this act could not be checked', 'try again; if it repeats, run adt engine status'], ['fault', 'the check failed inside the engine', 'run adt engine status and tell the operator the fault it shows'], ['seat-found-unavailable', 'this session is a seat, and its check could not finish', "try again; a seat's act is never passed unchecked"], ['unanswerable', 'the kit could not tell whose session this is, so this act could not be checked', 'start the session again from its host, or sign it in with adt connect; the operator can run the act from their own terminal']]:
+            with self.subTest(code=code):
+                self.assertEqual(slips.unavailable_words(code), (reason, remedy))
+        with self.assertRaises(KeyError):
+            slips.unavailable_words('unknown')
+
+    def test_session_not_current_words(self):
+        from relay_engine import slips
+        for cause, reason, remedy in [['ended', "this session's sign-in has ended: a newer sign-in took its seat, or the operator unseated it", "sign this session in as its seat, or commit from the seat's current session"], ['not-occupant', "the seat's occupant has changed since this session signed in", "sign this session in as its seat, or commit from the seat's current session"], ['stood-down', "this session's seat has been stood down", "sign this session in as its seat, or commit from the seat's current session"], ['team-closed', "this session's team is closed", "sign this session in as its seat, or commit from the seat's current session"], ['record-other-seat', "this session's sign-in record names another seat than the one it signed in as", "sign this session in as its seat, or commit from the seat's current session"], ['record-without-row', "this session's sign-in record was written, but its sign-in never completed", "sign this session in as its seat, or commit from the seat's current session"], ['project-unreadable', "this session's current sign-in may be in project {project}, which could not be read", 'commit again once project {project} can be read; if it is faulted, ask the operator to rejoin it']]:
+            project = 'p-2' if cause == 'project-unreadable' else None
+            with self.subTest(cause=cause):
+                self.assertEqual(slips.session_not_current_words(cause, project),
+                                 (reason.replace('{project}', 'p-2'), remedy.replace('{project}', 'p-2')))
+        for cause, project in [('project-unreadable', None), ('ended', 'p-2')]:
+            with self.subTest(cause=cause), self.assertRaises(ValueError):
+                slips.session_not_current_words(cause, project)
+        with self.assertRaises(KeyError):
+            slips.session_not_current_words('unknown', None)
+
+    def test_project_stopped_answer(self):
+        from relay_engine import slips
+        self.assertEqual(slips.project_stopped_answer(),
+                         slips.Answer('held', 'authority.project-stopped',
+                                      'this project is stopped', 'operator', None, None))

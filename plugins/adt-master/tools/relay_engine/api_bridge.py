@@ -10,7 +10,7 @@ from relay_engine import api_definitions as d, api_protocol as p, api_registry a
 
 STATUS_BY_CLASS = {
     'wire': 400, 'auth': 401, 'version': 409, 'conflict': 409,
-    'internal': 500, 'unavailable': 503,
+    'internal': 500, 'unavailable': 503, 'admission': 422,
 }
 
 

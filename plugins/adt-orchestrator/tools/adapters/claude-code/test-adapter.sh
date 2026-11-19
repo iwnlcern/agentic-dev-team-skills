@@ -73,6 +73,7 @@ stage_engine_root() {
   rm -rf "$root/tools"
   mkdir -p "$root/tools"
   cp "$TOOLS_DIR/relay" "$root/tools/relay"
+  cp "$TOOLS_DIR/adt" "$root/tools/adt"
   cp -R "$TOOLS_DIR/relay_engine" "$root/tools/relay_engine"
   # The trace is test-fixture instrumentation in a real roster member: the
   # hook still executes the bundled CLI and rules, while the selected cache
@@ -708,7 +709,10 @@ payload="$(payload_for_command "$bare_patch" Bash "$tmp/work")"
 assert_payload_handler "r12-clean-patch-primary-route-silent" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
 
 # This proves SHIPPED CONFIGURATION, not live host installation.
-if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); expected="bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""; events=("PostToolUse","PostToolUseFailure"); assert all(any(e.get("matcher") == "Bash" and any(h.get("type") == "command" and h.get("command") == expected for h in e.get("hooks", [])) for e in d.get("hooks", {}).get(event, [])) for event in events)' "$SETTINGS"; then
+if python3 -c 'import json,sys
+with open(sys.argv[1]) as settings_file:
+    d=json.load(settings_file)
+expected="bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""; events=("PostToolUse","PostToolUseFailure"); assert all(any(e.get("matcher") == "Bash" and any(h.get("type") == "command" and h.get("command") == expected for h in e.get("hooks", [])) for e in d.get("hooks", {}).get(event, [])) for event in events)' "$SETTINGS"; then
   echo "PASS s1-shipped-bash-registration-both-events"
 else
   echo "FAIL s1-shipped-bash-registration-both-events: expected Bash guard under PostToolUse and PostToolUseFailure" >&2

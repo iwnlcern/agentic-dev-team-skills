@@ -21,11 +21,15 @@ _version = importlib.import_module("relay_engine.version")
 KIT_VERSION = _version.KIT_VERSION
 ENGINE_SET = tuple(_version.ROSTER)
 assert ENGINE_SET == (
+    "adt",
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
     "relay_engine/addresses.py",
+    "relay_engine/adt_cli.py",
     "relay_engine/api_bridge.py",
+    "relay_engine/api_client.py",
+    "relay_engine/api_compose.py",
     "relay_engine/api_definitions.py",
     "relay_engine/api_keys.py",
     "relay_engine/api_platform.py",
@@ -33,7 +37,9 @@ assert ENGINE_SET == (
     "relay_engine/api_protocol.py",
     "relay_engine/api_registry.py",
     "relay_engine/api_schema.py",
+    "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
+    "relay_engine/api_submit.py",
     "relay_engine/api_wire.py",
     "relay_engine/api_writer.py",
     "relay_engine/approval_seal.py",

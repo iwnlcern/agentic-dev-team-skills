@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Emit or check discovery artifacts from the actual frozen implementation graph."""
 import argparse
+from dataclasses import fields
 import hashlib
 import json
 import re
@@ -14,7 +15,7 @@ GENERATED_PREFIX = 'tools/relay_engine/generated/api/'
 
 
 def build_registry():
-    return api_platform.build_platform_registry()
+    return api_platform.build_platform().registry
 
 
 def generate(tools_dir: Path) -> dict[str, bytes]:
@@ -57,6 +58,20 @@ def build_manifest(artifact: api_schema.SchemaArtifact, binding_hashes, operatio
         'bindings': dict(binding_hashes), 'operations': list(operations)})
 
 
+def _require_supported_rules(artifact):
+    d = api_definitions
+    classes = (d.Utf8MaxBytes, d.CanonicalUInt64, d.CanonicalBase64,
+               d.SortedUnique, d.ProtocolWindowV1, d.SchemaPayloadV1, d.NegotiatedSchemaV1)
+    profiles = {cls.kind: {'kind'} | {f.name for f in fields(cls)} for cls in classes}
+    rules = json.loads(artifact.canonical_bytes)['x-adt']['rules']
+    if not isinstance(rules, list):
+        raise ValueError('unsupported_rule_descriptor')
+    for rule in rules:
+        if (not isinstance(rule, dict) or rule.get('kind') not in profiles
+                or set(rule) != profiles[rule['kind']]):
+            raise ValueError('unsupported_rule_descriptor')
+
+
 def _quoted(value):
     return json.dumps(value, ensure_ascii=True)
 
@@ -94,7 +109,10 @@ def _rust_regex(pattern):
             else:
                 raise ValueError('unsupported_regex')
         return 'Rx::Seq(vec![' + ','.join(pieces) + '])'
-    return sequence(regex_parser.parse(pattern, 0))
+    parsed = regex_parser.parse(pattern, 0)
+    if parsed.state.flags & ~re.UNICODE:
+        raise ValueError('unsupported_regex_flags')
+    return sequence(parsed)
 
 
 RUST_RUNTIME = r'''
@@ -159,7 +177,7 @@ fn regex_match(rx:Rx,s:&str)->bool{let chars=s.chars().collect::<Vec<_>>();rx.po
 fn version(s:&str)->Result<Vec<u16>,()>{s.split('.').map(|x|x.parse().map_err(|_|())).collect()}
 fn rule_uint(v:&Value)->bool{v.string().is_ok_and(|s|s.parse::<u64>().is_ok())}
 fn rule_utf8(v:&Value,limit:usize)->bool{v.string().is_ok_and(|s|s.len()<=limit)}
-fn rule_base64(v:&Value,cache:&mut BTreeMap<String,Vec<u8>>)->bool{let Ok(s)=v.string()else{return false;};if cache.contains_key(s){return true;}match base64_decode(s){Ok(raw)=>{cache.insert(s.to_string(),raw);true},Err(())=>false}}
+fn rule_base64(v:&Value,cache:&mut BTreeMap<String,Vec<u8>>,minimum:usize,maximum:usize)->bool{let Ok(s)=v.string()else{return false;};if !cache.contains_key(s){match base64_decode(s){Ok(raw)=>{cache.insert(s.to_string(),raw);},Err(())=>return false}}cache.get(s).is_some_and(|raw|raw.len()>=minimum&&raw.len()<=maximum)}
 fn rule_sorted(v:&Value,key:&str)->bool{let Ok(a)=v.array()else{return false;};a.windows(2).all(|pair|matches!((pair[0].get(key).and_then(Value::string),pair[1].get(key).and_then(Value::string)),(Ok(a),Ok(b)) if a<b))}
 fn rule_window(v:&Value,min:&str,max:&str)->bool{let pair=||->Result<bool,()>{let a=version(v.get(min)?.string()?)?;let b=version(v.get(max)?.string()?)?;Ok(a[0]==b[0]&&a<=b)};pair().unwrap_or(false)}
 fn rule_payload(v:&Value,cache:&BTreeMap<String,Vec<u8>>,bytes:&str,count:&str,digest:&str)->bool{let check=||->Result<bool,()>{let raw=cache.get(v.get(bytes)?.string()?).ok_or(())?;Ok(raw.len().to_string()==v.get(count)?.string()?&&sha256(raw)==v.get(digest)?.string()?)};check().unwrap_or(false)}
@@ -172,9 +190,9 @@ pub fn validate_operation_result(operation:&str,value:&Value,context:Option<&Val
 }
 pub fn encode_request(operation:&str,id:&str,args:&Value)->Result<Vec<u8>,()>{if !validate_type("RequestId",&text(id)){return Err(());}let name=match operation{@REQUEST_TYPES@ _=>return Err(())};if !validate_type(name,args){return Err(());}let raw=canonical(&object(vec![("request_id",text(id)),("op",text(operation)),("args",args.clone())])).into_bytes();if raw.is_empty()||raw.len()>@MAX_API_FRAME@{return Err(());}let mut out=(raw.len() as u32).to_be_bytes().to_vec();out.extend(raw);Ok(out)}
 #[derive(Clone,Debug)]
-pub enum DecodedResponse { @RESPONSE_VARIANTS@, Error(ApiError), Unavailable }
+pub enum DecodedResponse { @RESPONSE_VARIANTS@, Error(ApiError), ConnectionError(ApiError), Unavailable }
 pub fn decode_response(frame:&[u8],operation:&str,outstanding:&str,context:Option<&ValidatedConnect>)->DecodedResponse{
- let decode=||->Result<DecodedResponse,()>{if !validate_type("RequestId",&text(outstanding))||frame.len()<5{return Err(());}let n=u32::from_be_bytes(frame[..4].try_into().map_err(|_|())?)as usize;if n==0||n>@MAX_API_FRAME@||frame.len()!=n+4{return Err(());}let value=parse_strict_json(&frame[4..])?;let o=value.object()?;if o.len()!=2||value.get("request_id")?.string()?!=outstanding{return Err(());}if let Ok(error)=value.get("error"){return Ok(DecodedResponse::Error(ApiError::from_value(error)?));}let result=value.get("result")?;if !validate_operation_result(operation,result,context){return Err(());}match operation{@RESPONSE_ARMS@_=>Err(())}};
+ let decode=||->Result<DecodedResponse,()>{if !validate_type("RequestId",&text(outstanding))||frame.len()<5{return Err(());}let n=u32::from_be_bytes(frame[..4].try_into().map_err(|_|())?)as usize;if n==0||n>@MAX_API_FRAME@||frame.len()!=n+4{return Err(());}let value=parse_strict_json(&frame[4..])?;let o=value.object()?;if o.len()!=2{return Err(());}if *value.get("request_id")?==Value::Null{return Ok(DecodedResponse::ConnectionError(ApiError::from_value(value.get("error")?)?));}if value.get("request_id")?.string()?!=outstanding{return Err(());}if let Ok(error)=value.get("error"){return Ok(DecodedResponse::Error(ApiError::from_value(error)?));}let result=value.get("result")?;if !validate_operation_result(operation,result,context){return Err(());}match operation{@RESPONSE_ARMS@_=>Err(())}};
  decode().unwrap_or(DecodedResponse::Unavailable)
 }
 impl DecodedResponse{pub fn result_value(&self)->Option<Value>{match self{@RESPONSE_VALUES@ _=>None}}}
@@ -182,16 +200,20 @@ pub fn supports_schema(schema:&str)->bool{let check=||->Result<bool,()>{let doc=
 pub trait WireType:Sized {fn from_value(v:&Value)->Result<Self,()>;fn to_value(&self)->Value;}
 '''
 
-def _runtime_constants(source):
+def _runtime_constants(source, replacements=None):
     bounds = {'MAX_API_FRAME': api_wire.MAX_API_FRAME,
               'MAX_SCHEMA_BYTES': api_definitions.MAX_SCHEMA_BYTES,
               'MAX_SCHEMA_BASE64_CHARS': api_definitions.MAX_SCHEMA_BASE64_CHARS,
               'MAX_JSON_DEPTH': api_definitions.MAX_JSON_DEPTH,
               'MAX_SAFE_JSON_INTEGER': api_definitions.MAX_SAFE_JSON_INTEGER,
               'MAX_UINT64': api_definitions.MAX_UINT64}
-    for name, value in bounds.items():
-        source = source.replace('@' + name + '@', str(value))
-    return source
+    values = {name: str(value) for name, value in bounds.items()}
+    values.update(replacements or {})
+    def substitute(match):
+        if match[1] not in values:
+            raise ValueError('unknown_template_token')
+        return values[match[1]]
+    return re.sub(r'@([A-Z0-9_]+)@', substitute, source)
 
 
 def _identifier(value):
@@ -204,7 +226,7 @@ def _identifier(value):
 
 def _operation_variants(registry):
     variants = {}
-    used = {'Error', 'Unavailable'}
+    used = {'Error', 'ConnectionError', 'Unavailable'}
     for name in registry.operations:
         variant = {'protocol.connect': 'Connect', 'protocol.schema': 'Schema'}.get(name, _identifier(name))
         if variant in used:
@@ -263,12 +285,21 @@ def _binding_names(registry):
     return names
 
 
+RUST_KEYWORDS = frozenset('''as break const continue crate else enum extern false fn for if impl
+in let loop match mod move mut pub ref return self Self static struct super trait true type
+unsafe use where while async await dyn abstract become box do final gen macro override priv
+typeof unsized virtual yield try'''.split())
+
+
 def _rust_types(registry):
     d = api_definitions
     out = []
     names = _binding_names(registry)
     for name, node in registry.types.items():
         shape = node.shape
+        if name in RUST_KEYWORDS or (isinstance(shape, d.Record) and
+                any(field.name in RUST_KEYWORDS for field in shape.fields)):
+            raise ValueError('rust_reserved_identifier')
         prefix = '#[derive(Clone,Debug,PartialEq)]\n'
         check = f'if !validate_type({_quoted(name)},v) {{return Err(());}}'
         if isinstance(shape, d.Record):
@@ -308,6 +339,7 @@ def _rust_types(registry):
 
 
 def emit_rust(registry, artifact: api_schema.SchemaArtifact) -> bytes:
+    _require_supported_rules(artifact)
     d = api_definitions
     branches = []
     for name, node in registry.types.items():
@@ -338,7 +370,7 @@ def emit_rust(registry, artifact: api_schema.SchemaArtifact) -> bytes:
             elif isinstance(rule, d.CanonicalUInt64):
                 check += ' && rule_uint(v)'
             elif isinstance(rule, d.CanonicalBase64):
-                check += ' && rule_base64(v,cache)'
+                check += f' && rule_base64(v,cache,{1 if name == "DraftBase64" else 0},{rule.max_decoded})'
             elif isinstance(rule, d.SortedUnique):
                 check += f' && rule_sorted(v,{_quoted(rule.key)})'
             elif isinstance(rule, d.ProtocolWindowV1):
@@ -357,9 +389,11 @@ def emit_rust(registry, artifact: api_schema.SchemaArtifact) -> bytes:
                 raise ValueError('unsupported_rule')
             expression += f' && context.is_some_and(|c|value.get({_quoted(rule.protocol_field)}).and_then(Value::string)==Ok(c.protocol.as_str()) && value.get({_quoted(rule.digest_field)}).and_then(Value::string)==Ok(c.digest.as_str()))'
         results.append(f'{_quoted(name)}=>{expression},')
-    raw = _runtime_constants(RUST_RUNTIME).replace('@RESULT_VALIDATION@', ''.join(results)).replace('@REQUEST_TYPES@', ''.join(f'{_quoted(name)}=>{_quoted(op.request_ref.name)},' for name, op in registry.operations.items()))
     variants, arms, values = _response_bindings(registry, 'rs')
-    raw = raw.replace('@RESPONSE_VARIANTS@', variants).replace('@RESPONSE_ARMS@', arms).replace('@RESPONSE_VALUES@', values)
+    raw = _runtime_constants(RUST_RUNTIME, {
+        'RESULT_VALIDATION': ''.join(results),
+        'REQUEST_TYPES': ''.join(f'{_quoted(name)}=>{_quoted(op.request_ref.name)},' for name, op in registry.operations.items()),
+        'RESPONSE_VARIANTS': variants, 'RESPONSE_ARMS': arms, 'RESPONSE_VALUES': values})
     rules = json.loads(artifact.canonical_bytes)['x-adt']['rules']
     raw += '\nconst EXPECTED_RULES:&str=r###"' + json.dumps(rules, separators=(',', ':')) + '"###;\n'
     return (raw + validator + '\n' + _rust_types(registry) + '\n').encode()
@@ -456,7 +490,7 @@ async function validate(name: string, value: unknown, cache: Map<string, Uint8Ar
         const kind = rule['kind'];
         if (kind === 'utf8_max_bytes') { if (encoder.encode(string(value)).length > Number(rule['limit'])) return false; }
         else if (kind === 'canonical_uint64') { if (BigInt(string(value)) > @MAX_UINT64@n) return false; }
-        else if (kind === 'canonical_base64') { const s = string(value); if (!cache.has(s)) cache.set(s, decodeBase64(s)); }
+        else if (kind === 'canonical_base64') { const s = string(value); if (!cache.has(s)) cache.set(s, decodeBase64(s)); const bytes = cache.get(s); if (!bytes || bytes.length > Number(rule['max_decoded']) || (name === 'DraftBase64' && bytes.length === 0)) return false; }
         else if (kind === 'sorted_unique') { if (!Array.isArray(value)) return false; const names = value.map(x => string(record(x)[string(rule['key'])])); if (names.some((x, i) => i > 0 && names[i - 1] >= x)) return false; }
         else if (kind === 'protocol_window_v1') { const o = record(value), a = string(o[string(rule['min_field'])]).split('.').map(Number), b = string(o[string(rule['max_field'])]).split('.').map(Number); if (a[0] !== b[0] || a[0] > b[0] || (a[0] === b[0] && a[1] > b[1])) return false; }
         else if (kind === 'schema_payload_v1') { const o = record(value), raw = cache.get(string(o[string(rule['bytes_field'])])); if (!raw || String(raw.length) !== o[string(rule['count_field'])] || await digest(raw) !== o[string(rule['digest_field'])]) return false; }
@@ -479,9 +513,11 @@ export async function encodeRequest(operation: string, id: string, args: unknown
     if (!op || !await validateType('RequestId', id) || !wire(args) || !await validate(string(record(op)['request_ref']), args, new Map(), 0)) throw Error('invalid_request');
     const raw = encoder.encode(canonical({ request_id: id, op: operation, args })); if (raw.length === 0 || raw.length > @MAX_API_FRAME@) throw Error('frame'); const frame = new Uint8Array(4 + raw.length); new DataView(frame.buffer).setUint32(0, raw.length); frame.set(raw, 4); return frame;
 }
-export type DecodedResponse = @RESPONSE_VARIANTS@ | { kind: 'error'; error: ApiError } | { kind: 'unavailable' };
+export type DecodedResponse = @RESPONSE_VARIANTS@ | { kind: 'error'; error: ApiError } | { kind: 'connection_error'; error: ApiError } | { kind: 'unavailable' };
 export async function decodeResponse(frame: Uint8Array, operation: string, outstanding: string, context?: ValidatedConnect): Promise<DecodedResponse> {
-    try { if (!await validateType('RequestId', outstanding) || frame.length < 5) throw Error('frame'); const n = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(0); if (n === 0 || n > @MAX_API_FRAME@ || frame.length !== n + 4) throw Error('frame'); const value = record(parseStrictJson(decoder.decode(frame.subarray(4)))); if (Object.keys(value).length !== 2 || value['request_id'] !== outstanding) throw Error('correlation');
+    try { if (!await validateType('RequestId', outstanding) || frame.length < 5) throw Error('frame'); const n = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(0); if (n === 0 || n > @MAX_API_FRAME@ || frame.length !== n + 4) throw Error('frame'); const value = record(parseStrictJson(decoder.decode(frame.subarray(4)))); if (Object.keys(value).length !== 2) throw Error('correlation');
+        if (value['request_id'] === null) { if (!await validateType('ApiError', value['error'])) throw Error('error'); return { kind: 'connection_error', error: value['error'] as ApiError }; }
+        if (value['request_id'] !== outstanding) throw Error('correlation');
         if (Object.hasOwn(value, 'error')) { if (!await validateType('ApiError', value['error'])) throw Error('error'); return { kind: 'error', error: value['error'] as ApiError }; }
         const result = value['result']; if (!await validateOperationResult(operation, result, context)) throw Error('result');
         @RESPONSE_ARMS@
@@ -492,6 +528,7 @@ export async function decodeResponse(frame: Uint8Array, operation: string, outst
 
 
 def emit_typescript(registry, artifact: api_schema.SchemaArtifact) -> bytes:
+    _require_supported_rules(artifact)
     d = api_definitions
     types = []
     names = _binding_names(registry)
@@ -515,7 +552,9 @@ def emit_typescript(registry, artifact: api_schema.SchemaArtifact) -> bytes:
         types.append('export type ' + name + ' = ' + expression + ';')
     types.append('export type Types = {' + ';'.join(_quoted(name) + ': ' + name for name in registry.types) + '};')
     variants, arms, _ = _response_bindings(registry, 'ts')
-    body = _runtime_constants(TYPESCRIPT_RUNTIME).replace('@SCHEMA@', artifact.canonical_bytes.decode()).replace('@RESPONSE_VARIANTS@', variants).replace('@RESPONSE_ARMS@', arms)
+    body = _runtime_constants(TYPESCRIPT_RUNTIME, {
+        'SCHEMA': artifact.canonical_bytes.decode(),
+        'RESPONSE_VARIANTS': variants, 'RESPONSE_ARMS': arms})
     return ('\n'.join(types) + '\n' + body.rstrip('\n') + '\n').encode()
 
 

@@ -1,4 +1,4 @@
-"""One worker owns the project connection and each job's transaction.
+"""One worker owns every served ledger and runs both transaction modes.
 
 A job that ends its own transaction produces an indeterminate outcome.
 In that case even KeyboardInterrupt or SystemExit is returned as its value,
@@ -17,7 +17,7 @@ import queue
 import sqlite3
 import threading
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from relay_engine import store_layout
 
@@ -31,7 +31,33 @@ class JobOutcome:
 
 
 class WriterJob(Protocol):
+    files: frozenset[str]
     def run(self, conn: sqlite3.Connection) -> JobOutcome: ...
+
+
+class CalleeJob(Protocol):
+    files: frozenset[str]
+    def run(self, conn: sqlite3.Connection) -> JobOutcome: ...
+
+
+T = TypeVar('T')
+
+
+class StorePort(Protocol):
+    def submit(self, project_id: str, job: WriterJob) -> JobOutcome: ...
+    def submit_callee(self, project_id: str, job: CalleeJob) -> JobOutcome: ...
+    def read(self, project_id: str, fn: Callable[[sqlite3.Connection], T]) -> T: ...
+    def ledger_file(self, project_id: str) -> str: ...
+    def store_id(self) -> str: ...
+    def served_projects(self) -> frozenset[str]: ...
+
+
+class CalleeLeftTransaction(Exception):
+    """A callee returned without closing its transaction."""
+
+
+class UndeclaredFile(ValueError):
+    """A job does not declare exactly its served ledger file."""
 
 
 class WriterUnavailable(Exception):
@@ -49,7 +75,8 @@ class NestedWriterJob(Exception):
 @dataclass
 class _Request:
     kind: str
-    job: WriterJob | None = None
+    project_id: str | None = None
+    job: WriterJob | CalleeJob | None = None
     ready: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     result: object = None
@@ -64,19 +91,76 @@ def _unavailable(reason, cause):
 
 
 class StoreWriter:
-    def __init__(self, root: str | os.PathLike, project_id: str, *,
+    def __init__(self, root: str | os.PathLike, *, runtime_instance_id: str,
                  phase_hook: Callable[[str], None] | None = None):
         self._root = root
-        self._project_id = project_id
+        self._runtime_instance_id = runtime_instance_id
+        self._active_project = None
         self._phase_hook = phase_hook
         self._queue = queue.Queue()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._local = threading.local()
         self._worker = None
         self._closed = False
-        self._served = False
-        self._rollback_error = None
+        self._served = set()
+        self._rollback_errors = {}
+        self._connections = {}
+        self._ledger_files = {}
         self._conn = None
+        self._catalogue = None
+        self._started = threading.Event()
+        self._start_error = None
+
+    @property
+    def runtime_instance_id(self) -> str:
+        return self._runtime_instance_id
+
+    def _require_served(self, project_id):
+        if self._closed or self._worker is None:
+            raise WriterUnavailable('closed')
+        if project_id not in self._served:
+            raise WriterUnavailable('project_not_served')
+
+    def _check_files(self, project_id, job):
+        files = getattr(job, 'files', None)
+        if not isinstance(files, frozenset) or len(files) != 1:
+            raise UndeclaredFile()
+        try:
+            actual = os.stat(next(iter(files)))
+            expected = os.stat(self._ledger_files[project_id])
+        except (OSError, TypeError, ValueError):
+            raise UndeclaredFile() from None
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise UndeclaredFile()
+
+    def ledger_file(self, project_id: str) -> str:
+        with self._lock:
+            self._require_served(project_id)
+            return self._ledger_files[project_id]
+
+    def served_projects(self) -> frozenset[str]:
+        with self._lock:
+            return frozenset(self._served)
+
+    def store_id(self) -> str:
+        conn = store_layout.open_catalogue_readonly(self._root)
+        try:
+            cursor = conn.execute('SELECT store_id FROM catalogue_identity WHERE id=1')
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
+
+    def read(self, project_id: str, fn: Callable[[sqlite3.Connection], T]) -> T:
+        with self._lock:
+            self._require_served(project_id)
+        conn = store_layout.open_ledger_readonly(self._root, project_id)
+        try:
+            return fn(conn)
+        finally:
+            conn.close()
 
     def start(self) -> None:
         with self._lock:
@@ -85,6 +169,11 @@ class StoreWriter:
             if self._worker is None:
                 self._worker = threading.Thread(target=self._work, name='store-writer')
                 self._worker.start()
+            self._started.wait()
+            if self._start_error is not None:
+                self._closed = True
+                self._worker.join()
+                raise self._start_error
 
     def _nested(self):
         return (threading.current_thread() is self._worker
@@ -102,11 +191,12 @@ class StoreWriter:
             with self._lock:
                 if self._closed or self._worker is None:
                     raise WriterUnavailable('closed')
-                if request.kind == 'job' and not self._served:
-                    raise WriterUnavailable('project_not_served')
+                if request.kind in {'job', 'callee'}:
+                    self._require_served(request.project_id)
+                    self._check_files(request.project_id, request.job)
                 self._queue.put(request)
             try:
-                if request.kind == 'job':
+                if request.kind in {'job', 'callee'}:
                     self._phase('queued')
             except BaseException:
                 request.withdrawn = True
@@ -130,14 +220,13 @@ class StoreWriter:
             self._local.active = False
 
     def open_project(self, project_id: str) -> None:
-        if self._nested():
-            raise NestedWriterJob()
-        if project_id != self._project_id:
-            raise ValueError('wrong_project')
-        self._call(_Request('open'))
+        self._call(_Request('open', project_id))
 
-    def submit(self, job: WriterJob) -> JobOutcome:
-        return self._call(_Request('job', job))
+    def submit(self, project_id: str, job: WriterJob) -> JobOutcome:
+        return self._call(_Request('job', project_id, job))
+
+    def submit_callee(self, project_id: str, job: CalleeJob) -> JobOutcome:
+        return self._call(_Request('callee', project_id, job))
 
     def close(self) -> None:
         if self._nested():
@@ -153,19 +242,21 @@ class StoreWriter:
         if worker is not None:
             worker.join()
 
-    def _open(self):
-        if self._rollback_error is not None:
-            raise _unavailable('rollback_failed', self._rollback_error)
-        if self._conn is None:
-            conn = store_layout.open_ledger(self._root, self._project_id)
+    def _open(self, project_id):
+        if project_id in self._rollback_errors:
+            raise _unavailable('rollback_failed', self._rollback_errors[project_id])
+        if project_id not in self._connections:
+            conn = store_layout.open_ledger(self._root, project_id)
             try:
                 conn.isolation_level = None
+                path = os.path.realpath(store_layout.ledger_path(self._root, project_id))
             except BaseException:
                 conn.close()
                 raise
-            self._conn = conn
+            self._connections[project_id] = conn
             with self._lock:
-                self._served = True
+                self._ledger_files[project_id] = path
+                self._served.add(project_id)
 
     def _rollback(self, original=None):
         failure = None
@@ -175,9 +266,9 @@ class StoreWriter:
             failure = error
         if failure is not None:
             with self._lock:
-                self._served = False
-                self._rollback_error = failure
-            conn, self._conn = self._conn, None
+                self._served.discard(self._active_project)
+                self._rollback_errors[self._active_project] = failure
+            conn, self._conn = self._connections.pop(self._active_project), None
             conn.close()
             if original is not None:
                 original.add_note('writer ROLLBACK failed: ' + type(failure).__name__
@@ -187,8 +278,8 @@ class StoreWriter:
         return original
 
     def _run_job(self, job):
-        if self._rollback_error is not None:
-            return None, _unavailable('rollback_failed', self._rollback_error)
+        if self._active_project in self._rollback_errors:
+            return None, _unavailable('rollback_failed', self._rollback_errors[self._active_project])
         self._phase('dequeued')
         try:
             self._conn.execute('BEGIN IMMEDIATE').close()
@@ -224,7 +315,37 @@ class StoreWriter:
             return None, original
         return outcome, None
 
+    def _run_callee(self, job):
+        if self._active_project in self._rollback_errors:
+            return None, _unavailable('rollback_failed', self._rollback_errors[self._active_project])
+        self._phase('dequeued')
+        if self._conn.in_transaction:
+            return None, self._rollback(CalleeLeftTransaction())
+        original = None
+        outcome = None
+        try:
+            self._phase('handed')
+            outcome = job.run(self._conn)
+            self._phase('returned')
+        except BaseException as error:
+            original = error
+        if self._conn.in_transaction:
+            original = self._rollback(original if original is not None else CalleeLeftTransaction())
+        if original is not None:
+            return None, original
+        return outcome, None
+
     def _work(self):
+        try:
+            path = store_layout.catalogue_path(self._root)
+            if not path.exists() or path.stat().st_size == 0:
+                raise store_layout.LayoutFault('missing')
+            self._catalogue = store_layout.open_catalogue(self._root)
+        except BaseException as error:
+            self._start_error = error
+            return
+        finally:
+            self._started.set()
         while True:
             request = self._queue.get()
             request.ready.wait()
@@ -232,14 +353,22 @@ class StoreWriter:
                 if request.withdrawn:
                     continue
                 if request.kind == 'close':
-                    if self._conn is not None:
-                        self._conn.close()
-                        self._conn = None
+                    for conn in self._connections.values():
+                        conn.close()
+                    self._connections.clear()
+                    self._catalogue.close()
+                    self._catalogue = None
+                    self._conn = None
+                    with self._lock:
+                        self._served.clear()
                     return
                 if request.kind == 'open':
-                    self._open()
+                    self._open(request.project_id)
                 else:
-                    request.result, request.error = self._run_job(request.job)
+                    self._active_project = request.project_id
+                    self._conn = self._connections.get(request.project_id)
+                    run = self._run_callee if request.kind == 'callee' else self._run_job
+                    request.result, request.error = run(request.job)
             except BaseException as error:
                 request.error = error
             finally:

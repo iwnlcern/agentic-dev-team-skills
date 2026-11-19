@@ -102,13 +102,19 @@ def _rule(rule, node, types, operation=None):
             raise RegistryCompileError('invalid_rule')
         return
     if isinstance(rule, d.Utf8MaxBytes):
-        expected = d.Utf8MaxBytes(d.TypeRef('OpaqueId'), d.MAX_OPAQUE_ID_BYTES)
+        limits = {'OpaqueId': d.MAX_OPAQUE_ID_BYTES, 'SubmissionKey': 256}
+        if node.name not in limits or type(rule.limit) is not int:
+            raise RegistryCompileError('invalid_rule')
+        expected = d.Utf8MaxBytes(d.TypeRef(node.name), limits[node.name])
     elif isinstance(rule, d.CanonicalUInt64):
         expected = d.CanonicalUInt64(d.TypeRef(node.name))
         if node.name not in {'UInt64', 'RequestId'}:
             raise RegistryCompileError('invalid_rule')
     elif isinstance(rule, d.CanonicalBase64):
-        expected = d.CanonicalBase64(d.TypeRef('CanonicalSchemaBase64'))
+        limits = {'CanonicalSchemaBase64': d.MAX_SCHEMA_BYTES, 'DraftBase64': 131072}
+        if node.name not in limits or type(rule.max_decoded) is not int:
+            raise RegistryCompileError('invalid_rule')
+        expected = d.CanonicalBase64(d.TypeRef(node.name), limits[node.name])
     elif isinstance(rule, d.ProtocolWindowV1):
         expected = d.ProtocolWindowV1(d.TypeRef('ProtocolWindow'))
         members = _members(node)
@@ -283,10 +289,10 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
         if op.name in operations:
             raise RegistryCompileError('duplicate_operation')
         if (not re.fullmatch(r'[a-z][a-z0-9.\-]{0,95}', op.name)
-                or op.principal not in {'unsigned', 'seat_key', 'seat_session'}
+                or op.principal not in {'unsigned', 'seat_key', 'seat_session', 'operator', 'service'}
                 or op.effect not in {'connection_metadata', 'pure_observation',
-                                     'session_write', 'connection_binding'}
-                or op.retry not in {'read_repeat', 'operation_key'}
+                                     'session_write', 'connection_binding', 'relay_admission'}
+                or op.retry not in {'read_repeat', 'operation_key', 'submission_key'}
                 or op.browser_get not in {'connect', 'schema', 'none'}
                 or (op.browser_get != 'none' and op.principal != 'unsigned')):
             raise RegistryCompileError('invalid_definition')
@@ -368,9 +374,11 @@ def _validate(registry, ref, value, path, decoded, depth=0):
                     raw = base64.b64decode(value, validate=True)
                 except (ValueError, binascii.Error):
                     return ValidationFailure(rule.kind, path)
-                if len(raw) > d.MAX_SCHEMA_BYTES or base64.b64encode(raw).decode('ascii') != value:
+                if base64.b64encode(raw).decode('ascii') != value:
                     return ValidationFailure(rule.kind, path)
                 decoded[value] = raw
+            if len(decoded[value]) > rule.max_decoded or (node.name == 'DraftBase64' and not decoded[value]):
+                return ValidationFailure(rule.kind, path)
         elif isinstance(rule, d.SortedUnique):
             names = [item['operation'] for item in value]
             if any(a >= b for a, b in zip(names, names[1:])):

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from relay_engine.version import (
     FingerprintError,
@@ -22,11 +23,15 @@ TOOLS = Path(__file__).parents[2]
 REPO = TOOLS.parent
 GENERATOR = REPO / "tools" / "generate-plugins.py"
 EXPECTED_ROSTER = (
+    "adt",
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
     "relay_engine/addresses.py",
+    "relay_engine/adt_cli.py",
     "relay_engine/api_bridge.py",
+    "relay_engine/api_client.py",
+    "relay_engine/api_compose.py",
     "relay_engine/api_definitions.py",
     "relay_engine/api_keys.py",
     "relay_engine/api_platform.py",
@@ -34,7 +39,9 @@ EXPECTED_ROSTER = (
     "relay_engine/api_protocol.py",
     "relay_engine/api_registry.py",
     "relay_engine/api_schema.py",
+    "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
+    "relay_engine/api_submit.py",
     "relay_engine/api_wire.py",
     "relay_engine/api_writer.py",
     "relay_engine/approval_seal.py",
@@ -199,7 +206,7 @@ class TestVersion(unittest.TestCase):
         self.assertEqual(str(raised.exception), reason)
 
     def test_kit_version_and_roster_match_canonical_universe(self):
-        actual = {"relay"}
+        actual = {"relay", "adt"}
         for path in (TOOLS / "relay_engine").rglob("*"):
             relative = path.relative_to(TOOLS)
             if "__pycache__" in relative.parts:
@@ -213,6 +220,23 @@ class TestVersion(unittest.TestCase):
         self.assertEqual(KIT_VERSION, "2.9.7")
         self.assertEqual(ROSTER, EXPECTED_ROSTER)
         self.assertEqual(set(ROSTER), actual)
+
+    def test_fingerprint_inventories_adt_launcher(self):
+        from relay_engine import version
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _stage_roster(root)
+            launcher = root / "adt"
+            launcher.write_bytes(b"#!/usr/bin/env python3\n")
+            self.assertRegex(fingerprint(root), r"^[0-9a-f]{64}$")
+            launcher.unlink()
+            self.assert_reason(root, "missing-member")
+            launcher.write_bytes(b"#!/usr/bin/env python3\n")
+            actual_inventory = version._inventory
+            # 68078196's launcher universe contains relay alone.
+            with mock.patch.object(version, "_inventory",
+                                   side_effect=lambda path: actual_inventory(path) - {"adt"}):
+                self.assert_reason(root, "missing-member")
 
     def test_staged_fingerprint_is_deterministic_and_canonically_framed(self):
         with tempfile.TemporaryDirectory() as temporary:

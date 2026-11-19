@@ -115,13 +115,18 @@ class TestOperatorPrincipal(unittest.TestCase):
 
 
 class TestServicePrincipal(unittest.TestCase):
+    def test_service_principal_accepts_supervision(self):
+        error = construction_error(p.ServicePrincipal, 'supervision')
+        self.assertIsNone(error)
+        self.assertEqual(p.ServicePrincipal('supervision').service, 'supervision')
+
     def test_service_principal_accepts_approval_seal(self):
         self.assertEqual(p.ServicePrincipal("approval_seal").service, "approval_seal")
         self.assertEqual(p.SERVICE_NAMES, ("approval_seal", "authority_service", "console_queue",
-                                           "engine_liveness", "xproject_transfer"))
+                                           "engine_liveness", "supervision", "xproject_transfer"))
 
     def test_service_principal_accepts_each_service(self):
-        expected = ("approval_seal", "authority_service", "console_queue", "engine_liveness", "xproject_transfer")
+        expected = ("approval_seal", "authority_service", "console_queue", "engine_liveness", "supervision", "xproject_transfer")
         self.assertEqual(p.SERVICE_NAMES, expected)
         for service in expected:
             principal = p.ServicePrincipal(service)

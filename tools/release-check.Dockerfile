@@ -42,3 +42,4 @@ RUN set -eu; \
     cd /; rm -rf "$downloads"; \
     test "$("$ADT_TOOLCHAINS/rust-1.99.1/bin/rustc" --version)" = 'rustc 1.99.1 (58cf8f9c3 2026-10-13)'; \
     test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" --version)" = 'v26.13.0'
+RUN test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" "$ADT_TOOLCHAINS/typescript-7.0.2/node_modules/typescript/bin/tsc" --version)" = 'Version 7.0.2'

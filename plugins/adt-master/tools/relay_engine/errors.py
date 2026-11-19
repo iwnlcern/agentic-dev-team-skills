@@ -624,6 +624,72 @@ strings.register_inventory(_SETTINGS_TEXT, {})
 
 
 _AUTHORITY_TEXT = {
+    'error-authority-project-stopped-cause': 'this project is stopped',
+    'error-authority-project-stopped-remedy': 'start the project, then commit again',
+    'error-authority-project-stopped-explain': 'while a project is stopped no agent of it commits, whatever its role',
+    'error-authority-cross-project-commit-cause': 'this session is a seat of another project',
+    'error-authority-cross-project-commit-remedy': 'commit from a seat of this project',
+    'error-authority-cross-project-commit-explain': "a seat commits only in its own project's checkouts",
+    'error-authority-session-not-current-cause': 'this session no longer holds its seat',
+    'error-authority-session-not-current-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'error-authority-session-not-current-explain': "the reason names why: a newer sign-in, the operator's unseat, a sign-in that never committed, a replaced occupant, a stood-down seat, a closed team, or a project that could not be read",
+    'error-authority-protected-ref-push-cause': 'a seat may not push to a protected branch',
+    'error-authority-protected-ref-push-remedy': 'merge through the pinned PR merge',
+    'error-authority-protected-ref-push-explain': 'protected branches change only by a pinned merge',
+    'error-authority-api-merge-refused-cause': 'a seat may not write a protected branch through the API',
+    'error-authority-api-merge-refused-remedy': 'use the pinned PR merge',
+    'error-authority-api-merge-refused-explain': 'protected branches change only by a pinned merge',
+    'error-authority-merge-head-unpinned-cause': "this merge does not pin the pull request's head",
+    'error-authority-merge-head-unpinned-remedy': 'merge with the head your merge slip names',
+    'error-authority-merge-head-unpinned-explain': 'a merge slip allows one head',
+    'error-authority-merge-flag-refused-cause': '--auto and --admin merges are refused',
+    'error-authority-merge-flag-refused-remedy': 'merge without the flag, under your merge slip',
+    'error-authority-merge-flag-refused-explain': 'a flagged merge lands at a time or head no slip checked',
+    'error-authority-hook-bypass-cause': "a seat may not skip the kit's hooks for a command",
+    'error-authority-hook-bypass-remedy': 'run the command without the bypass',
+    'error-authority-hook-bypass-explain': "the hooks check every seat's commit and push",
+    'error-authority-hook-disable-cause': "this would switch the kit's hooks off for every session that works here later",
+    'error-authority-hook-disable-remedy': 'if you mean to, do it from your own terminal, which the hooks never check',
+    'error-authority-hook-disable-explain': "the hooks check every agent's commits, pushes and merges, so only the operator's terminal changes them",
+    'error-authority-key-file-read-cause': 'an agent session may not read this key file',
+    'error-authority-key-file-read-remedy': "give the key's path to the command that signs, which reads the key itself; never open the file",
+    'error-authority-key-file-read-explain': "a key's contents never enter an agent's conversation, and no agent reads the operator's or another seat's key",
+    'error-authority-operator-endpoint-cause': "only the operator answers the kit's questions and records prompts",
+    'error-authority-operator-endpoint-remedy': 'ask the operator; they answer from their own page or terminal',
+    'error-authority-operator-endpoint-explain': 'an agent cannot answer for the operator',
+    'error-authority-operator-only-cause': "this command is the operator's alone",
+    'error-authority-operator-only-remedy': 'ask the operator to run it from their own terminal',
+    'error-authority-operator-only-explain': 'stopping, starting, updating or installing the engine, registering or unregistering a checkout, unseating a session, claiming a seat from a session that is already one, and opening the next team decide what every agent may do',
+    'error-authority-checkout-unregistered-cause': 'this checkout is not registered with the engine',
+    'error-authority-checkout-unregistered-remedy': 'register the checkout, or remove its hooks',
+    'error-authority-checkout-unregistered-explain': 'only the operator registers a checkout, with adt checkout register --project NAME --repository NAME from their own terminal, or removes its hooks with adt checkout unregister',
+    'authority-unavailable-no-service-reason': 'the engine is not running, so this act could not be checked',
+    'authority-unavailable-no-service-remedy': 'start the engine, then try again',
+    'authority-unavailable-connect-refused-reason': 'the engine refused the connection, so this act could not be checked',
+    'authority-unavailable-connect-refused-remedy': 'run adt engine status, then try again',
+    'authority-unavailable-deadline-reason': 'the engine did not answer in time, so this act could not be checked',
+    'authority-unavailable-deadline-remedy': 'try again; if it repeats, run adt engine status',
+    'authority-unavailable-fault-reason': 'the check failed inside the engine',
+    'authority-unavailable-fault-remedy': 'run adt engine status and tell the operator the fault it shows',
+    'authority-unavailable-seat-found-unavailable-reason': 'this session is a seat, and its check could not finish',
+    'authority-unavailable-seat-found-unavailable-remedy': "try again; a seat's act is never passed unchecked",
+    'authority-unavailable-unanswerable-reason': 'the kit could not tell whose session this is, so this act could not be checked',
+    'authority-unavailable-unanswerable-remedy': 'start the session again from its host, or sign it in with adt connect; the operator can run the act from their own terminal',
+    'authority-not-current-ended-reason': "this session's sign-in has ended: a newer sign-in took its seat, or the operator unseated it",
+    'authority-not-current-ended-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'authority-not-current-not-occupant-reason': "the seat's occupant has changed since this session signed in",
+    'authority-not-current-not-occupant-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'authority-not-current-stood-down-reason': "this session's seat has been stood down",
+    'authority-not-current-stood-down-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'authority-not-current-team-closed-reason': "this session's team is closed",
+    'authority-not-current-team-closed-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'authority-not-current-record-other-seat-reason': "this session's sign-in record names another seat than the one it signed in as",
+    'authority-not-current-record-other-seat-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'authority-not-current-record-without-row-reason': "this session's sign-in record was written, but its sign-in never completed",
+    'authority-not-current-record-without-row-remedy': "sign this session in as its seat, or commit from the seat's current session",
+    'authority-not-current-project-unreadable-reason': "this session's current sign-in may be in project {project}, which could not be read",
+    'authority-not-current-project-unreadable-remedy': 'commit again once project {project} can be read; if it is faulted, ask the operator to rejoin it',
+
     'error-authority-restore-held-cause': "a restore holds this project, so no planner's go-ahead is issued",
     'error-authority-restore-held-remedy': 'ask the operator to end the restore hold at their terminal, then ask your planner for a new go-ahead',
     'error-authority-restore-held-explain': 'a restore cancels every go-ahead and approval, and only the operator ends its hold',
@@ -656,9 +722,26 @@ _AUTHORITY_TEXT = {
     'error-authority-check-unavailable-remedy': 'report the permission-check fault to the operator before acting',
     'error-authority-check-unavailable-explain': 'an unavailable check grants no permission and must be investigated',
 }
-strings.register_inventory(_AUTHORITY_TEXT, {})
+strings.register_inventory(_AUTHORITY_TEXT, {
+    ('authority-not-current-project-unreadable-' + part, 'project'): strings._is_show_text
+    for part in ('reason', 'remedy')
+})
 
 ERRORS = {
+    'E-AUTHORITY-PROJECT-STOPPED': _spec('authority-project-stopped', "command"),
+    'E-AUTHORITY-CROSS-PROJECT-COMMIT': _spec('authority-cross-project-commit', "command"),
+    'E-AUTHORITY-SESSION-NOT-CURRENT': _spec('authority-session-not-current', "command"),
+    'E-AUTHORITY-PROTECTED-REF-PUSH': _spec('authority-protected-ref-push', "command"),
+    'E-AUTHORITY-API-MERGE-REFUSED': _spec('authority-api-merge-refused', "command"),
+    'E-AUTHORITY-MERGE-HEAD-UNPINNED': _spec('authority-merge-head-unpinned', "command"),
+    'E-AUTHORITY-MERGE-FLAG-REFUSED': _spec('authority-merge-flag-refused', "command"),
+    'E-AUTHORITY-HOOK-BYPASS': _spec('authority-hook-bypass', "command"),
+    'E-AUTHORITY-HOOK-DISABLE': _spec('authority-hook-disable', "command"),
+    'E-AUTHORITY-KEY-FILE-READ': _spec('authority-key-file-read', "command"),
+    'E-AUTHORITY-OPERATOR-ENDPOINT': _spec('authority-operator-endpoint', "command"),
+    'E-AUTHORITY-OPERATOR-ONLY': _spec('authority-operator-only', "command"),
+    'E-AUTHORITY-CHECKOUT-UNREGISTERED': _spec('authority-checkout-unregistered', "command"),
+
     "E-SETTING-OPERATOR-ONLY": _spec("setting-operator-only", "policy"),
     "E-JEV-ACT-NEEDS-RECORD": _spec("jev-act-needs-record", "policy"),
     "E-DELIVERY-INTERVAL-MARGIN": _spec("delivery-interval-margin", "policy"),
@@ -964,7 +1047,16 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
     types = [t for t in d.discovery_definitions().types
              if t.name in {"ProtocolVersion", "ProtocolWindow", "Digest"}]
     types.append(d.TypeDef("ApiPinField", d.LiteralSet(("build_id", "schema_digest"))))
+    types.append(d.TypeDef("ApiEngineCode", d.String(r"E-[A-Z0-9-]{1,63}", 3, 65)))
     rows = (
+        ("E_API_ADMISSION", "admission", "ApiAdmissionCause", (
+            ("client", "correct_draft"),
+            ("policy", "change_request"),
+            ("registration", "check_registration"),
+            ("command", "check_command"),
+            ("wire", "correct_draft"),
+            ("integrity", "report_nonsecret_failure"),
+        )),
         ("E_API_PROTOCOL", "wire", "ApiProtocolCause", (
             ("malformed_frame", "resend_valid_request"),
             ("malformed_json", "resend_valid_request"),
@@ -984,6 +1076,9 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
         ("E_API_UNAVAILABLE", "unavailable", "ApiUnavailableCause", (
             ("runtime_not_ready", "restore_expected_runtime"),
             ("schema_unavailable", "restore_expected_runtime"),
+            ("authority_unavailable", "retry_same_submission"),
+            ("admission_not_stored", "retry_same_submission"),
+            ("admission_unknown", "retry_same_submission"),
         )),
         ("E_API_INTERNAL", "internal", "ApiInternalCause", (
             ("handler_fault", "report_nonsecret_failure"),
@@ -998,6 +1093,7 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
         )),
         ("E_API_CONFLICT", "conflict", "ApiConflictCause", (
             ("operation_key_reused", "use_new_operation_key"),
+            ("submission_key_reused", "use_new_submission_key"),
         )),
     )
     variants = []
@@ -1010,7 +1106,9 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
             leaf_name = "ApiCause" + suffix
             types.append(d.TypeDef(kind_name, d.LiteralSet((kind,))))
             members = [d.FieldDef("kind", d.TypeRef(kind_name))]
-            if kind == "protocol_window":
+            if api_class == "admission":
+                members.append(d.FieldDef("engine_code", d.TypeRef("ApiEngineCode")))
+            elif kind == "protocol_window":
                 members.extend((d.FieldDef("requested", d.TypeRef("ProtocolWindow")),
                                 d.FieldDef("supported", d.TypeRef("ProtocolWindow"))))
             elif kind == "pin_mismatch":

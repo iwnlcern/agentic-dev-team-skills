@@ -50,6 +50,18 @@ INVENTORY = {
     "unexpected-error": "unexpected error",
     "daemon-start-failed": "daemon start failed",
     "command-result": "{result}",
+    "adt-refusal": "{result}",
+    "adt-local-refusal": "{result}",
+    "adt-unknown-outcome": "{result}",
+    "adt-ready": "{path}",
+    "serve-no-folder": "adt engine serve: no store at {path}: there is no folder there",
+    "serve-no-catalogue": "adt engine serve: no store at {path}: the folder has no store catalogue",
+    "serve-store-unreadable": "adt engine serve: the store at {path} cannot be opened ({cause})",
+    "serve-store-locked": "adt engine serve: the store at {path} is already served by another adt engine serve; stop that one first",
+    "serve-project-unavailable": "adt engine serve: project {project} cannot be opened in the store at {path}",
+    "serve-runtime-unsafe": "adt engine serve: the private folder it made in {tmp} for the store at {path} is not private to you; set TMPDIR to a folder of your own and run it again",
+    "serve-install-incomplete": "adt engine serve: this install cannot serve the store at {path} ({reason}); reinstall the kit",
+    "serve-install-mismatch": "adt engine serve: this install's files do not match its roster ({cause}), so it will not serve the store at {path}; reinstall the kit",
     "version-result": "{result}",
     "rejected-value": "unrecognized-input (sha256:{digest}, length {length})",
     "engine-root-sweep-summary": "engine-root sweep: {count} record-known relays not re-judged; context source: {mode}",
@@ -92,6 +104,20 @@ CONTEXT_FRAME_MARGIN = 1024 * 1024
 CONTEXT_PAGE_BUDGET = (16 * 1024 * 1024) - CONTEXT_FRAME_MARGIN
 CONTEXT_ENTRY_CAP = 4096
 _CODE_VALUES = {
+    'E-AUTHORITY-PROJECT-STOPPED',
+    'E-AUTHORITY-CROSS-PROJECT-COMMIT',
+    'E-AUTHORITY-SESSION-NOT-CURRENT',
+    'E-AUTHORITY-PROTECTED-REF-PUSH',
+    'E-AUTHORITY-API-MERGE-REFUSED',
+    'E-AUTHORITY-MERGE-HEAD-UNPINNED',
+    'E-AUTHORITY-MERGE-FLAG-REFUSED',
+    'E-AUTHORITY-HOOK-BYPASS',
+    'E-AUTHORITY-HOOK-DISABLE',
+    'E-AUTHORITY-KEY-FILE-READ',
+    'E-AUTHORITY-OPERATOR-ENDPOINT',
+    'E-AUTHORITY-OPERATOR-ONLY',
+    'E-AUTHORITY-CHECKOUT-UNREGISTERED',
+
     "E-SETTING-OPERATOR-ONLY", "E-JEV-ACT-NEEDS-RECORD",
     "E-DELIVERY-INTERVAL-MARGIN",
     "E-SETTING-UNKNOWN", "E-SETTING-VALUE",
@@ -193,6 +219,10 @@ def _is_show_absolute(value):
     return _is_show_text(value) and value.startswith('/')
 
 
+def _is_show_path_or_rejected(value):
+    return _is_show_absolute(value) or _is_rejected(value)
+
+
 def _is_digest12(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{12}", value)
 
@@ -279,6 +309,23 @@ _VALIDATORS.update({
     ("rejected-value", "digest"): _is_digest12,
     ("rejected-value", "length"): _is_count,
     ("command-result", "result"): _is_machine_result,
+    ("adt-refusal", "result"): _is_machine_result,
+    ("adt-local-refusal", "result"): _is_machine_result,
+    ("adt-unknown-outcome", "result"): _is_machine_result,
+    ("adt-ready", "path"): _is_show_absolute,
+    ("serve-no-folder", "path"): _is_show_path_or_rejected,
+    ("serve-no-catalogue", "path"): _is_show_path_or_rejected,
+    ("serve-store-unreadable", "path"): _is_show_path_or_rejected,
+    ("serve-store-unreadable", "cause"): _is_show_text,
+    ("serve-store-locked", "path"): _is_show_path_or_rejected,
+    ("serve-project-unavailable", "project"): _is_show_text,
+    ("serve-project-unavailable", "path"): _is_show_path_or_rejected,
+    ("serve-runtime-unsafe", "tmp"): _is_show_path_or_rejected,
+    ("serve-runtime-unsafe", "path"): _is_show_path_or_rejected,
+    ("serve-install-incomplete", "path"): _is_show_path_or_rejected,
+    ("serve-install-incomplete", "reason"): _is_show_text,
+    ("serve-install-mismatch", "cause"): _is_show_text,
+    ("serve-install-mismatch", "path"): _is_show_path_or_rejected,
     ("version-result", "result"): _is_machine_result,
     ("engine-root-sweep-summary", "count"): _is_count,
     ("engine-root-sweep-summary", "mode"):
