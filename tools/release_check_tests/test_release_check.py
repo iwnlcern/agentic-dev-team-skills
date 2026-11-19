@@ -842,11 +842,12 @@ def adapter_repo(test_case, named, extra=(), skip=False):
     modules = " ".join(f"tools.adapters.tests.{name}" for name in named)
     script = repo.tool(ADAPTER_SCRIPT, f'''
         echo "e1 cases: PASS"
-        if ! python3 -m unittest {modules} 2>"$TMPDIR/unittest.err.$$"; then
-          cat "$TMPDIR/unittest.err.$$" >&2; exit 1
+        stderr_file="$PWD/.adapter-unittest.err"
+        if ! python3 -m unittest {modules} 2>"$stderr_file"; then
+          cat "$stderr_file" >&2; exit 1
         fi
         echo "PASS relay-monitor unittest"
-        cat "$TMPDIR/unittest.err.$$" >&2
+        cat "$stderr_file" >&2
     ''')
     script.chmod(0o755)
     return repo
@@ -865,15 +866,21 @@ class Coverage(unittest.TestCase):
 
     def test_adapter_block_skip_fails_step(self):
         repo = adapter_repo(self, ["test_named"], skip=True)
-        code, err = repo.run()
+        outer_tmp = repo.pids / "outer-tmp"
+        outer_tmp.mkdir(mode=0o700)
+        environ = dict(os.environ, TMPDIR=str(outer_tmp))
+        code, err = repo.run(environ=environ)
         self.assertEqual(code, 1, err)
         step = repo.step("test-adapter.sh")
         self.assertEqual((step["outcome"], step["reason"]), ("fail", "skipped"))
+        self.assertEqual(list(outer_tmp.iterdir()), [])
+
         control = adapter_repo(self, ["test_named"])
-        code, err = control.run()
+        code, err = control.run(environ=environ)
         self.assertEqual(code, 0, err)
         step = control.step("test-adapter.sh")
         self.assertEqual((step["outcome"], step["reason"]), ("pass", None))
+        self.assertEqual(list(outer_tmp.iterdir()), [])
 
 
 class Discovery(unittest.TestCase):

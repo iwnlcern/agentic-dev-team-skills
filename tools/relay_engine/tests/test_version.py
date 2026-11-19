@@ -154,7 +154,10 @@ def _invoke_rules(tools_dir):
     environment["PYTHONPATH"] = os.fspath(tools_dir)
     if prior:
         environment["PYTHONPATH"] += os.pathsep + prior
-    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    if tools_dir == TOOLS:
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    else:
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
     return subprocess.run(
         [sys.executable, "-c", "import relay_engine.rules"],
         cwd=tools_dir,
@@ -234,11 +237,11 @@ class TestVersion(unittest.TestCase):
             shutil.copytree(TOOLS, shared)
             _stage_roster(bundle)
             generated_copies = []
-            live_generated_caches = []
+            live_caches = [TOOLS / "relay_engine" / "__pycache__"]
             for plugin in ("adt-pair", "adt-orchestrator", "adt-master"):
                 generated = REPO / "plugins" / plugin / "tools"
                 if (generated / "relay_engine" / "version.py").is_file():
-                    live_generated_caches.append(
+                    live_caches.append(
                         generated / "relay_engine" / "__pycache__")
                     staged_generated = root / "generated" / plugin / "tools"
                     shutil.copytree(generated, staged_generated)
@@ -249,7 +252,7 @@ class TestVersion(unittest.TestCase):
             else:
                 copies.append(bundle)
             live_cache_state = {
-                cache: _tree_state(cache) for cache in live_generated_caches
+                cache: _tree_state(cache) for cache in live_caches
             }
             checkout_marker = (
                 TOOLS / "relay_engine" / "__pycache__" / "ignored.pyc")
@@ -268,7 +271,7 @@ class TestVersion(unittest.TestCase):
                 after.append(fingerprint(copy))
             self.assertEqual(len(set(before + after)), 1)
             self.assertEqual(
-                {cache: _tree_state(cache) for cache in live_generated_caches},
+                {cache: _tree_state(cache) for cache in live_caches},
                 live_cache_state,
             )
             # The checkout may be read-only: the marker goes only into copies,

@@ -317,10 +317,10 @@ assert producer.generate(tools)
 forbidden={"sqlite3","_sqlite3","socket"}|{"relay_engine."+x for x in ("daemon","cli","client","ledger","submit","schema","queries")}
 assert not forbidden.intersection(sys.modules),sorted(forbidden.intersection(sys.modules))
 '''
-        result = subprocess.run([sys.executable, '-I', '-c', probe, str(TOOLS)], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', probe, str(TOOLS)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         control = probe.replace('assert not forbidden.intersection', 'import sqlite3\nassert not forbidden.intersection')
-        result = subprocess.run([sys.executable, '-I', '-c', control, str(TOOLS)], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', control, str(TOOLS)], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('sqlite3', result.stderr)
 
