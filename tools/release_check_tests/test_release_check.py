@@ -535,32 +535,207 @@ class ValidatorPin(unittest.TestCase):
 
 class StartRefusals(unittest.TestCase):
 
-    def test_release_mode_refuses_nonempty_exclusions(self):
+    def refuse_release(self, repo, policy, exclusions, *options):
+        # create=True lets the controls exercise the former guard before implementation.
+        with mock.patch.object(rc, "RELEASE_POLICY", policy, create=True), \
+             mock.patch.object(rc, "run_leg") as mac, \
+             mock.patch.object(rc, "_run_linux_host") as linux:
+            code, err = repo.run("--release", "--leg", "both", *options, exclusions=exclusions)
+        self.assertEqual(code, 2, err)
+        self.assertFalse(repo.out.exists())
+        mac.assert_not_called()
+        linux.assert_not_called()
+        return err
+
+    def test_release_accepts_empty_policy_and_preserves_leg_verdicts(self):
+        for mac_exit, linux_exit in ((0, 0), (0, 1), (0, 2), (1, 2)):
+            with self.subTest(mac=mac_exit, linux=linux_exit):
+                repo = FixtureRepo(self)
+                repo.passing("test_a_ok")
+                with mock.patch.object(rc, "RELEASE_POLICY", (), create=True), \
+                     mock.patch.object(rc, "run_leg", return_value=rc.LegResult("mac", mac_exit)) as mac, \
+                     mock.patch.object(rc, "_run_linux_host",
+                                       return_value=rc.LegResult("linux", linux_exit)) as linux:
+                    code, err = repo.run("--release", "--leg", "both", "--cap-seconds", "1800")
+                self.assertEqual(code, max(mac_exit, linux_exit), err)
+                mac.assert_called_once()
+                linux.assert_called_once()
+                summary = json.loads((repo.out / "release-check.json").read_text())
+                self.assertEqual(summary["cap_seconds"], 1800)
+                self.assertEqual(summary["exit"], code)
+                self.assertEqual(summary["exclusions"], [])
+                self.assertEqual({leg: value["exit"] for leg, value in summary["legs"].items()},
+                                 {"mac": mac_exit, "linux": linux_exit})
+
+    def test_release_exact_selection_and_serialized_receipts(self):
+        repo = FixtureRepo(self)
+        for name in ("test_a_ok", "test_legacy_a", "test_legacy_z", "test_pdc_consumer"):
+            repo.passing(name)
+        literal = "tools/check-old[1].py"
+        active = "tools/check-old1.py"
+        repo.tool(literal, "raise SystemExit(5)")
+        repo.tool(active, "pass")
+        repo.tool("AGENTS.md", "fixture")
+        head = repo.commit()
+        exclusions = (rc.Exclusion("tools/relay_engine/tests/test_legacy*.py", "legacy"),
+                      rc.Exclusion("tools/check-old[[]1].py", "obsolete"))
+        legacy_paths = ("tools/relay_engine/tests/test_legacy_a.py",
+                        "tools/relay_engine/tests/test_legacy_z.py")
+        policy = ((exclusions[0], legacy_paths), (exclusions[1], (literal,)))
+
+        def local_transport(steps, args, root, environ, exclusions, history, *, exact_exclusions=False):
+            leg_dir = Path(args.out) / "linux"
+            leg_dir.mkdir()
+            rc.write_container_plan(leg_dir, steps, "linux", exclusions, (),
+                                    exact_exclusions=exact_exclusions)
+            args = type(args)(**vars(args))
+            args.out = str(leg_dir)
+            code = rc._run_in_container(args, root, dict(environ, ADT_EXPECTED_HEAD=head,
+                                                        ADT_SOURCE_MOUNTS=""))
+            return rc.LegResult("linux", code, leg_dir / "results.json")
+
+        with mock.patch.object(rc, "RELEASE_POLICY", policy, create=True), \
+             mock.patch.object(rc, "KNOWN_CHECKS", ((active, (), rc.BOTH),)), \
+             mock.patch.object(rc, "_run_linux_host", side_effect=local_transport) as linux, \
+             mock.patch.object(rc, "run_leg", wraps=rc.run_leg) as run_leg:
+            code, err = repo.run("--release", "--leg", "both", "--workers", "1", exclusions=exclusions)
+        self.assertEqual(code, 0, err)
+        linux.assert_called_once()
+        self.assertCountEqual([call.args[0] for call in run_leg.call_args_list], ["mac", "linux"])
+        mac = repo.results()
+        linux = json.loads((repo.out / "linux" / "results.json").read_text())
+        plan = json.loads((repo.out / "linux" / rc.CONTAINER_PLAN).read_text())
+        summary = json.loads((repo.out / "release-check.json").read_text())
+        expected = [{"path": path, "reason": reason} for path, reason in
+                    sorted([(literal, "obsolete"), *((path, "legacy") for path in legacy_paths)])]
+        for receipt in (summary, plan, mac, linux):
+            self.assertEqual(receipt["exclusions"], expected)
+        self.assertTrue(plan["exact_exclusions"])
+        self.assertEqual(summary["exit"], 0)
+        self.assertTrue(summary["release"])
+        self.assertFalse(summary["interrupted"])
+        both = ["relay_engine.tests.test_a_ok", "check-old1.py"]
+        self.assertEqual(plan["step_ids"], both)
+        expected_steps = {"mac": [both[0], "relay_engine.tests.test_pdc_consumer", both[1]], "linux": both}
+        for receipt in (mac, linux):
+            leg = receipt["leg"]
+            roster = expected_steps[leg]
+            self.assertEqual([row["id"] for row in receipt["steps"]], roster)
+            self.assertEqual([row["outcome"] for row in receipt["steps"]], ["pass"] * len(roster))
+            self.assertEqual([row["leaked"] for row in receipt["steps"]], [[] for _ in roster])
+            self.assertEqual(receipt["unattributed"], [])
+            self.assertIsNone(receipt["error"])
+            self.assertFalse(receipt["interrupted"])
+            self.assertEqual(receipt["exit"], 0)
+            leg_dir = repo.out / leg
+            self.assertEqual(summary["legs"][leg], {
+                "exit": 0,
+                "results": str(leg_dir / "results.json"),
+            })
+            started = (leg_dir / rc.STARTED_LOG).read_text()
+            self.assertEqual([row["id"] for row in map(json.loads, started.splitlines())], roster)
+
+        # The focused comparison can preserve the real serialized fixture files before cleanup.
+        evidence = os.environ.get("ADT_RELEASE_POLICY_TEST_EVIDENCE")
+        if evidence:
+            dest = Path(evidence) / "controlled-legs"
+            for name in ("release-check.json", f"linux/{rc.CONTAINER_PLAN}",
+                         "mac/results.json", "linux/results.json",
+                         f"mac/{rc.STARTED_LOG}", f"linux/{rc.STARTED_LOG}"):
+                target = dest / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(repo.out / name, target)
+            (dest / "expected.json").write_text(json.dumps(
+                {"exclusions": expected, "step_ids": expected_steps}, indent=2) + "\n")
+
+    def test_full_keeps_glob_and_summary_shape(self):
         repo = FixtureRepo(self)
         repo.passing("test_a_ok")
-        repo.tool("tools/check-old.py", "pass\n")
-        exclusion = rc.Exclusion("tools/check-old.py", "R250.5: called by nothing; removed at DD stage 4")
-        code, err = repo.run("--release", exclusions=[exclusion])
-        self.assertEqual(code, 2)
-        self.assertIn("tools/check-old.py", err)
-        self.assertFalse((repo.out / "mac" / "results.json").exists())
+        repo.passing("test_old")
+        exclusion = rc.Exclusion("tools/relay_engine/tests/test_old*.py", "legacy")
+        code, err = repo.run(exclusions=[exclusion])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(repo.results()["exclusions"], [{"path": exclusion.path, "reason": "legacy"}])
+        self.assertEqual([row["id"] for row in repo.results()["steps"]], ["relay_engine.tests.test_a_ok"])
+        summary = json.loads((repo.out / "release-check.json").read_text())
+        self.assertNotIn("exclusions", summary)
+        self.assertEqual(set(summary["legs"]), {"mac"})
+
+    def test_release_refuses_table_disagreement(self):
+        repo = FixtureRepo(self)
+        literal = "tools/check-old.py"
+        repo.tool(literal, "")
+        approved = rc.Exclusion(literal, "legacy")
+        other = rc.Exclusion("tools/check-old*.py", "legacy")
+        policy = ((approved, (literal,)),)
+        self.assertIn("duplicate approved", self.refuse_release(repo, policy * 2, (approved,)))
+        for table, message in (
+            ((approved, other), "unknown"),
+            ((approved, approved), "duplicate"),
+            ((rc.Exclusion(literal, "changed"),), "reason"),
+            ((), "missing"),
+        ):
+            with self.subTest(table=table):
+                err = self.refuse_release(repo, policy, table)
+                self.assertIn(message, err)
+        err = self.refuse_release(repo, (*policy, (other, (literal,))), (approved, other))
+        self.assertIn("overlap", err)
+        self.assertIn(literal, err)
+
+    def test_release_refuses_lost_added_or_stale_members(self):
+        for stem in ("test_xroot", "test_b9_fold", "test_authority_b9"):
+            with self.subTest(pattern=stem):
+                repo = FixtureRepo(self)
+                repo.passing(stem + "_a")
+                repo.passing(stem + "_b")
+                repo.passing(stem + "_new")
+                folder = "tools/relay_engine/tests/"
+                row = rc.Exclusion(folder + stem + "*.py", "legacy")
+                pinned = tuple(folder + stem + suffix + ".py" for suffix in ("_a", "_b", "_lost"))
+                err = self.refuse_release(repo, ((row, pinned),), (row,))
+                self.assertIn("missing", err)
+                self.assertIn(folder + stem + "_lost.py", err)
+                self.assertIn("extra", err)
+                self.assertIn(folder + stem + "_new.py", err)
+                actual = tuple(folder + stem + suffix + ".py" for suffix in ("_a", "_b", "_new"))
+                err = self.refuse_release(repo, ((row, actual[:2]),), (row,))
+                self.assertIn(f"extra paths {[actual[2]]}", err)
+                err = self.refuse_release(repo, ((row, (*actual, pinned[2])),), (row,))
+                self.assertIn(f"missing paths {[pinned[2]]}", err)
+        repo = FixtureRepo(self)
+        row = rc.Exclusion("tools/check-stale.py", "legacy")
+        err = self.refuse_release(repo, ((row, (row.path,)),), (row,))
+        self.assertIn("stale", err)
+        self.assertIn(row.path, err)
+
+    def test_release_refuses_uncovered_or_misaligned_steps(self):
+        repo = FixtureRepo(self)
+        repo.tool("tools/check-new.py", "")
+        self.assertIn("neither a step nor an exclusion", self.refuse_release(repo, (), ()))
+
+        repo = FixtureRepo(self)
+        repo.passing("test_legacy")
+        repo.passing("test_live")
+        literal = "tools/relay_engine/tests/test_legacy.py"
+        row = rc.Exclusion(literal, "legacy")
+        for steps, message in (
+            ([rc.Step("relay_engine.tests.test_legacy", [], rc.MAC, (literal,))], "suppression"),
+            ([rc.Step("mixed", [], rc.BOTH, (literal, "tools/relay_engine/tests/test_live.py"))], "executing"),
+            ([rc.Step("directory", [], rc.BOTH, ("tools/relay_engine/tests",))], "executing"),
+        ):
+            with self.subTest(steps=steps), mock.patch.object(rc, "step_table", return_value=steps):
+                self.assertIn(message, self.refuse_release(repo, ((row, (literal,)),), (row,)))
 
     def test_release_refuses_one_leg(self):
-        repo = FixtureRepo(self)
-        repo.passing("test_a_ok")
-        code, err = repo.run("--release")
-        self.assertEqual(code, 2, err)
-        self.assertIn("--leg mac", err)
-        self.assertFalse(repo.out.exists(), "a refused release run wrote results")
+        for leg in ("mac", "linux"):
+            repo = FixtureRepo(self)
+            self.assertIn(f"--leg {leg}", self.refuse_release(repo, (), (), "--leg", leg))
 
     def test_release_refuses_long_cap(self):
         repo = FixtureRepo(self)
-        repo.passing("test_a_ok")
-        code, err = repo.run("--release", "--leg", "both", "--cap-seconds", "1801")
-        self.assertEqual(code, 2, err)
+        err = self.refuse_release(repo, (), (), "--cap-seconds", "1801")
         self.assertIn("--cap-seconds 1801", err)
         self.assertNotIn("--leg", err)
-        self.assertFalse(repo.out.exists(), "a refused release run wrote results")
 
     def test_uncovered_module_refuses_to_start(self):
         repo = FixtureRepo(self)
@@ -595,6 +770,10 @@ class StartRefusals(unittest.TestCase):
         name = f"adt-release-check-{uuid.uuid4().hex}"
         outside = [f"/tmp/{name}", f"/private/tmp/{name}-p",
                    os.path.join(os.path.realpath(tempfile.gettempdir()), name)]
+        if sys.platform == "darwin":
+            darwin_temp = subprocess.check_output(["getconf", "DARWIN_USER_TEMP_DIR"], text=True,
+                                                  stdin=subprocess.DEVNULL).strip()
+            outside.append(str(Path(darwin_temp).resolve() / name))
         for path in outside:
             self.addCleanup(shutil.rmtree, path, True)
         self.assertTrue(any(p.startswith("/var/folders") or p.startswith("/private/var/folders")
@@ -663,11 +842,12 @@ def adapter_repo(test_case, named, extra=(), skip=False):
     modules = " ".join(f"tools.adapters.tests.{name}" for name in named)
     script = repo.tool(ADAPTER_SCRIPT, f'''
         echo "e1 cases: PASS"
-        if ! python3 -m unittest {modules} 2>"$TMPDIR/unittest.err.$$"; then
-          cat "$TMPDIR/unittest.err.$$" >&2; exit 1
+        stderr_file="$PWD/.adapter-unittest.err"
+        if ! python3 -m unittest {modules} 2>"$stderr_file"; then
+          cat "$stderr_file" >&2; exit 1
         fi
         echo "PASS relay-monitor unittest"
-        cat "$TMPDIR/unittest.err.$$" >&2
+        cat "$stderr_file" >&2
     ''')
     script.chmod(0o755)
     return repo
@@ -686,15 +866,21 @@ class Coverage(unittest.TestCase):
 
     def test_adapter_block_skip_fails_step(self):
         repo = adapter_repo(self, ["test_named"], skip=True)
-        code, err = repo.run()
+        outer_tmp = repo.pids / "outer-tmp"
+        outer_tmp.mkdir(mode=0o700)
+        environ = dict(os.environ, TMPDIR=str(outer_tmp))
+        code, err = repo.run(environ=environ)
         self.assertEqual(code, 1, err)
         step = repo.step("test-adapter.sh")
         self.assertEqual((step["outcome"], step["reason"]), ("fail", "skipped"))
+        self.assertEqual(list(outer_tmp.iterdir()), [])
+
         control = adapter_repo(self, ["test_named"])
-        code, err = control.run()
+        code, err = control.run(environ=environ)
         self.assertEqual(code, 0, err)
         step = control.step("test-adapter.sh")
         self.assertEqual((step["outcome"], step["reason"]), ("pass", None))
+        self.assertEqual(list(outer_tmp.iterdir()), [])
 
 
 class Discovery(unittest.TestCase):
@@ -1195,7 +1381,8 @@ class LinuxLeg(unittest.TestCase):
         # Control for the release refusals: both legs and the full cap start and pass.
         fixture.out = fixture.out.parent / (fixture.out.name + "-release")
         self.addCleanup(shutil.rmtree, fixture.out, True)
-        code, err = fixture.run_legs("both", extra=("--release", "--cap-seconds", "1800"))
+        with mock.patch.object(rc, "RELEASE_POLICY", ()):
+            code, err = fixture.run_legs("both", extra=("--release", "--cap-seconds", "1800"))
         self.assertEqual(code, 0, err)
         summary = json.loads((fixture.out / "release-check.json").read_text())
         self.assertEqual((summary["release"], summary["cap_seconds"], set(summary["legs"])),
@@ -1310,6 +1497,53 @@ class RealTree(unittest.TestCase):
 
     def test_real_tree_is_covered(self):
         self.assertEqual(rc.uncovered(REPO, rc.step_table(REPO), rc.EXCLUSIONS), [])
+
+    def test_real_tree_release_policy(self):
+        # Expected literals and reasons transcribed from the reviewed 142543 comparison.
+        root = "tools/relay_engine/tests/"
+        names = (
+            "test_xroot", "test_xroot_b9_peer", "test_xroot_cache", "test_xroot_cache_differential",
+            "test_xroot_deadline", "test_xroot_narrow", "test_xroot_narrow_corpus", "test_xroot_reader",
+            "test_xroot_spawn", "test_b9_fold1", "test_b9_fold2", "test_b9_fold3", "test_b9_fold4",
+            "test_authority_b9", "test_authority_b9_ancestors",
+        )
+        paths = ("tools/check-index-oracle.py", "tools/check-t11-closure.py",
+                 "tools/check-dispatch-head.py", "tools/check-s375-escaped-rows.py")
+        reason = "R250.5: argument-driven v2.9 oracle called by nothing (audit Q1); removed at DD stage 4"
+        expected = {path: reason for path in paths}
+        expected["tools/mtbattery.py"] = (
+            "R250.5: mutation battery retired once the live matrix cases move (operator O5); "
+            "removed at DD stage 4"
+        )
+        expected.update({
+            root + name + ".py": (
+                "R250.5: cross-root reader replaced by brief 5.9 (operator O1); removed with its code "
+                "at DD stage 3; excluded so a leg's cap measures surviving code"
+            ) for name in names
+        })
+        steps = rc.step_table(REPO)
+        exclusions, problems = rc.release_preflight(REPO, steps, rc.EXCLUSIONS)
+        self.assertEqual(problems, [])
+        self.assertEqual([(entry.path, entry.reason) for entry in exclusions], sorted(expected.items()))
+        expected_omissions = sorted("relay_engine.tests." + name for name in names)
+        observed = {}
+        for leg in ("mac", "linux"):
+            selected = rc._selected_steps(steps, leg, exclusions, exact_exclusions=True)
+            ids = [step.id for step in selected]
+            offered = [step.id for step in steps if leg in step.legs]
+            omitted = sorted(set(offered) - set(ids))
+            self.assertEqual(omitted, expected_omissions)
+            self.assertEqual("relay_engine.tests.test_pdc_consumer" in ids, leg == "mac")
+            observed[leg] = {"selected": ids, "omitted": omitted}
+
+        evidence = os.environ.get("ADT_RELEASE_POLICY_TEST_EVIDENCE")
+        if evidence:
+            (Path(evidence) / "real-tree-policy.json").write_text(json.dumps({
+                "expected_paths_and_reasons": expected,
+                "observed_paths_and_reasons": {entry.path: entry.reason for entry in exclusions},
+                "expected_omissions_per_leg": expected_omissions,
+                "observed": observed,
+            }, indent=2) + "\n")
 
     def test_pdc_consumer_runs_on_mac_only(self):  # PR-3 G-E2; DD-v3-tests § 3.6
         module = "relay_engine.tests.test_pdc_consumer"

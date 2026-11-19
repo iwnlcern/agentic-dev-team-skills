@@ -3,14 +3,19 @@
 import hashlib
 import os
 from pathlib import Path
+import selectors
+import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from relay_engine import errors
 from relay_engine import refs
 from relay_engine import rules
+from relay_engine.tests.xroot_test_stops import stop
 
 
 ODD = "range-@@ -01 +1 @@.diff"
@@ -457,6 +462,262 @@ class TestLinterSeam(unittest.TestCase):
                                         deadline=time.monotonic() - 1)
                     self.assertIn("timed out", str(caught.exception))
             start.assert_not_called()
+
+class TestOneShotGit(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(stop(30))
+        clean_git_environment(self)
+        self.enterContext(mock.patch.dict(os.environ, _GIT_ENV))
+        self.repo = Repo({"held": "seed\n"})
+        self.addCleanup(self.repo.close)
+
+    def blocked_object(self):
+        oid = "a" * 40
+        obj = self.repo.path / ".git" / "objects" / oid[:2] / oid[2:]
+        obj.parent.mkdir(exist_ok=True)
+        os.mkfifo(obj)
+        return oid
+
+    def close_child(self, child):
+        try:
+            if child.returncode is None:
+                try:
+                    child.kill()
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=5)
+        finally:
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+
+    def git_descriptors(self, child):
+        proc = Path(f"/proc/{child.pid}")
+        if sys.platform.startswith("linux"):
+            self.assertEqual("git", (proc / "comm").read_text().strip())
+            rows = {}
+            for descriptor in (proc / "fd").iterdir():
+                try:
+                    name = os.readlink(descriptor)
+                except FileNotFoundError:
+                    continue
+                rows[int(descriptor.name)] = ("PIPE" if name.startswith("pipe:[") else "FILE", name)
+        else:
+            listing = subprocess.run(
+                ["lsof", "-nP", "-p", str(child.pid), "-Fpcftn"],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, check=True,
+            )
+            fields = listing.stdout.splitlines()
+            self.assertIn(f"p{child.pid}", fields)
+            self.assertIn("cgit", fields)
+            rows = {}
+            descriptor = None
+            for field in fields:
+                key, value = field[:1], field[1:]
+                if key == "f":
+                    descriptor = int(value) if value.isdecimal() else None
+                    if descriptor is not None:
+                        rows[descriptor] = ("", "")
+                elif descriptor is not None and key in ("t", "n"):
+                    kind, name = rows[descriptor]
+                    rows[descriptor] = (value, name) if key == "t" else (kind, value)
+        self.assertIsNone(child.poll(), "Git exited before its descriptors could be observed")
+        self.assertEqual(rows.get(1, ("", ""))[0], "PIPE")
+        self.assertEqual(rows.get(2, ("", ""))[0], "PIPE")
+        return rows
+
+    def test_git_child_excludes_inheritable_descriptor(self):
+        oid = self.blocked_object()
+        marker = self.repo.path / "inheritable-marker"
+        marker.write_text("marker\n")
+        with marker.open("rb") as handle:
+            fd = handle.fileno()
+            os.set_inheritable(fd, True)
+            command = ["git", "-C", str(self.repo.path), "cat-file", "blob", oid]
+            control = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, pass_fds=(fd,),
+            )
+            try:
+                self.assertEqual(self.git_descriptors(control)[fd][1], str(marker))
+            finally:
+                self.close_child(control)
+
+            start = rules._xroot_start_git
+            observed = []
+
+            def inspect(*args, **kwargs):
+                child = start(*args, **kwargs)
+                try:
+                    observed.append(self.git_descriptors(child))
+                except BaseException:
+                    self.close_child(child)
+                    raise
+                self.addCleanup(self.close_child, child)
+                return child
+
+            with mock.patch.object(rules, "_xroot_start_git", side_effect=inspect), \
+                 mock.patch.object(rules, "XROOT_GIT_TIMEOUT_SECONDS", 0.25):
+                with self.assertRaises(rules.XrootAxisError) as error:
+                    rules.xroot_git(self.repo.path, "cat-file", "blob", oid)
+            self.assertEqual(error.exception.axis, "capacity")
+            self.assertEqual(len(observed), 1)
+            self.assertNotIn(str(marker), (name for _, name in observed[0].values()))
+
+    def test_git_query_finishes_with_unrelated_writer_open(self):
+        content = b"held-writer fixture\n" * 10000
+        git_input(self.repo.path, "hash-object", "-w", "--stdin", data=content)
+        blob = self.repo.path / "held"
+        blob.write_bytes(content)
+        oid = git(self.repo.path, "hash-object", "held")
+        missing = ("rev-parse", "--verify", "missing-ref")
+        expected_failure = subprocess.run(
+            ["git", "-C", str(self.repo.path), *missing], stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=5,
+        )
+        self.assertNotEqual(expected_failure.returncode, 0)
+        real_pipe = os.pipe
+        start = rules._xroot_start_git
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                held = []
+
+                def identity(fd):
+                    status = os.fstat(fd)
+                    return status.st_dev, status.st_ino, status.st_mode
+
+                def pipe():
+                    read_fd, write_fd = real_pipe()
+                    if not held:
+                        try:
+                            writer = identity(write_fd)
+                            duplicate = os.dup(write_fd)
+                        except BaseException:
+                            os.close(read_fd)
+                            os.close(write_fd)
+                            raise
+                        held.append((read_fd, duplicate, writer))
+                    return read_fd, write_fd
+
+                def retain_writer(*args, **kwargs):
+                    with mock.patch.object(os, "pipe", side_effect=pipe):
+                        child = start(*args, **kwargs)
+                    try:
+                        self.assertEqual(len(held), 1)
+                        read_fd, duplicate, writer = held[0]
+                        # This is the stdout reader from the very allocation
+                        # whose writer was duplicated, even on split-inode pipes.
+                        self.assertEqual(child.stdout.fileno(), read_fd)
+                        self.assertEqual(identity(duplicate), writer)
+                        self.assertTrue(stat.S_ISFIFO(os.fstat(read_fd).st_mode))
+                    except BaseException:
+                        self.close_child(child)
+                        raise
+                    self.addCleanup(self.close_child, child)
+                    return child
+
+                try:
+                    with mock.patch.object(rules, "_xroot_start_git", side_effect=retain_writer):
+                        if failure:
+                            with self.assertRaises(rules.XrootAxisError) as caught:
+                                rules.xroot_git(self.repo.path, *missing, binary=True)
+                            error = caught.exception
+                            self.assertEqual((error.axis, error.detail), ("repository", "Git object query failed"))
+                            self.assertEqual(error.returncode, expected_failure.returncode)
+                            self.assertEqual(error.stdout, expected_failure.stdout)
+                            self.assertEqual(error.stderr, expected_failure.stderr)
+                        else:
+                            result = rules.xroot_git(self.repo.path, "cat-file", "blob", oid, binary=True)
+                            self.assertEqual(result, content)
+                            with self.assertRaises(AssertionError):
+                                self.assertEqual(result[:-1], content)
+                    self.assertEqual(len(held), 1)
+                    _, duplicate, writer = held[0]
+                    self.assertEqual(identity(duplicate), writer)
+                finally:
+                    for _, duplicate, _ in held:
+                        os.close(duplicate)
+
+    def assert_reaped(self, child):
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+
+    def test_git_query_deadline_reaps_blocked_child(self):
+        oid = self.blocked_object()
+        fixture = self.repo.path / "launcher"
+        fixture.mkdir()
+        gate = fixture / "gate"
+        ready = fixture / "ready"
+        os.mkfifo(gate)
+        launcher = fixture / "git"
+        launcher.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "os.close(1)\n"
+            "os.close(2)\n"
+            f"open({str(ready)!r}, 'xb').close()\n"
+            f"with open({str(gate)!r}, 'rb') as gate:\n"
+            "    gate.read(1)\n"
+        )
+        launcher.chmod(0o700)
+
+        control = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read(1)"],
+                                   stdin=subprocess.PIPE)
+        try:
+            with self.assertRaises(AssertionError):
+                self.assert_reaped(control)
+        finally:
+            self.close_child(control)
+
+        start = rules._xroot_start_git
+        selector_type = selectors.DefaultSelector
+        for closed_streams in (False, True):
+            with self.subTest(closed_streams=closed_streams):
+                children = []
+                stream_fds = set()
+                eof_fds = set()
+
+                def remember_child(*args, **kwargs):
+                    child = start(*args, **kwargs)
+                    children.append(child)
+                    self.addCleanup(self.close_child, child)
+                    stream_fds.update((child.stdout.fileno(), child.stderr.fileno()))
+                    return child
+
+                class ObserveEof(selector_type):
+                    def unregister(self, fd):
+                        key = super().unregister(fd)
+                        if closed_streams and fd in stream_fds:
+                            testcase.assertIsNone(children[0].returncode)
+                            os.kill(children[0].pid, 0)
+                            eof_fds.add(fd)
+                        return key
+
+                testcase = self
+                path = os.environ["PATH"]
+                if closed_streams:
+                    path = str(fixture) + os.pathsep + path
+                with mock.patch.dict(os.environ, PATH=path), \
+                     mock.patch.object(rules, "_xroot_start_git", side_effect=remember_child), \
+                     mock.patch.object(rules, "XROOT_GIT_TIMEOUT_SECONDS", 1), \
+                     mock.patch.object(selectors, "DefaultSelector", ObserveEof):
+                    started = time.monotonic()
+                    with self.assertRaises(rules.XrootAxisError) as caught:
+                        rules.xroot_git(self.repo.path, "cat-file", "blob", oid)
+                self.assertEqual(len(children), 1)
+                self.assert_reaped(children[0])
+                self.assertGreaterEqual(time.monotonic() - started, 1)
+                self.assertEqual(caught.exception.axis, "capacity")
+                self.assertEqual(
+                    caught.exception.detail,
+                    "Git object query timed out at the 5 s bound during cat-file; "
+                    "this is a time limit on a cold read, not a lineage fault; "
+                    "a large root can reach it on a busy machine",
+                )
+                if closed_streams:
+                    self.assertTrue(ready.is_file())
+                    self.assertEqual(eof_fds, stream_fds)
+
 
 if __name__ == "__main__":
     unittest.main()

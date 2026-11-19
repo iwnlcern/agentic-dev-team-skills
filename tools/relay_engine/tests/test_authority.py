@@ -174,6 +174,82 @@ class TestAuthority(LedgerFixture):
         grant=self.add(extra='PARENT_DISPATCH_ID: conflict-review')
         self.denied('header-conflict',grant)
 
+    def _historical_grant(self, parent):
+        pin = self.artifact('plans', 'PL-historical')
+        plan_id = f'{parent}-selected-plan'
+        review_id = f'{parent}-selected-review'
+        plan = self.add('PLAN', ident=plan_id,
+                        extra=f'PARENT_DISPATCH_ID: {parent}\nPLAN_LOCK_ID: PL\n{pin}',
+                        content='')
+        self.add('PLAN-REVIEW', 'p.implementer', 'p.planner', review_id,
+                 f'PARENT_DISPATCH_ID: {plan_id}\nPLAN_LOCK_ID: PL\n{pin}\nVERDICT: approve', '')
+        grant = self.add(extra=f'PARENT_DISPATCH_ID: {review_id}\nPLAN_LOCK_ID: PL')
+        return plan, grant
+
+    def _historical_walk(self, plan):
+        rows = tuple(authority.authorizations(self.ledger, 'p.implementer', 'implement'))
+        selected = next(row for row in rows if row.seq == plan.seq)
+        walked, conflict = authority._walked_ancestors(self.ledger, rows, selected)
+        return [row.seq for row in walked], conflict
+
+    def _replace_historical_body(self, carrier, raw):
+        # Model a changed imported record while keeping its admitted envelope.
+        self.ledger.execute('UPDATE relays SET body=?, body_sha256=? WHERE seq=?',
+                            (raw, hashlib.sha256(raw).hexdigest(), carrier.seq))
+
+    def test_historical_parent_conflict_stops_walk(self):
+        older = self.add('SITREP', ident='older', content='earlier record')
+        carrier = self.add('SITREP', ident='history', extra='PARENT_DISPATCH_ID: older',
+                           content='plain prose')
+        plan, grant = self._historical_grant('history')
+        clean = self.check(grant)
+        self.assertTrue(clean['allowed'], clean)
+        self.assertEqual([], clean['reasons'])
+        self.assertEqual([], clean['external'])
+        self.assertEqual(([carrier.seq, older.seq], False), self._historical_walk(plan))
+
+        self._replace_historical_body(carrier, body(
+            'SITREP', ident='history',
+            extra='PARENT_DISPATCH_ID: older\nPARENT_DISPATCH_ID: missing',
+            content='\nplain prose'))
+        refused = self.check(grant)
+        self.assertFalse(refused['allowed'], refused)
+        self.assertEqual(['authority.header-conflict'], refused['reasons'])
+        self.assertEqual([], refused['external'])
+        self.assertEqual(([], True), self._historical_walk(plan))
+
+    def test_historical_control_prose_refuses(self):
+        carrier = self.add('SITREP', ident='history', content='plain prose')
+        plan, grant = self._historical_grant('history')
+        clean = self.check(grant)
+        self.assertTrue(clean['allowed'], clean)
+        self.assertEqual([], clean['reasons'])
+        self.assertEqual([], clean['external'])
+
+        raw = self.ledger.execute('SELECT body FROM relays WHERE seq=?', (carrier.seq,)).fetchone()[0]
+        self._replace_historical_body(carrier, raw.replace(b'plain prose', b'plain\f prose'))
+        self.assertEqual(([carrier.seq], False), self._historical_walk(plan))
+        refused = self.check(grant)
+        self.assertFalse(refused['allowed'], refused)
+        self.assertEqual(['authority.lineage-incomplete'], refused['reasons'])
+        self.assertEqual([], refused['external'])
+
+    def test_historical_walk_selects_earliest_opener_once(self):
+        for ident in ('self', 'repeat'):
+            with self.subTest(ident=ident):
+                parent = f'PARENT_DISPATCH_ID: {ident}'
+                opener = self.add('SITREP', ident=ident, extra=parent, content='opener')
+                if ident == 'repeat':
+                    later = self.add('SITREP', ident=ident, extra=parent, content='later record')
+                    self.assertLess(opener.seq, later.seq)
+                plan, grant = self._historical_grant(ident)
+                self.assertLess(opener.seq, plan.seq)
+                self.assertEqual(([opener.seq], False), self._historical_walk(plan))
+                answer = self.check(grant)
+                self.assertTrue(answer['allowed'], answer)
+                self.assertEqual([], answer['reasons'])
+                self.assertEqual([], answer['external'])
+
     def test_quoted_token_is_inert(self):
         for content in ('`DISPATCH IMPL`','```\nDISPATCH IMPL\n```','> DISPATCH IMPL'):
             with self.subTest(content=content):

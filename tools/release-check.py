@@ -110,7 +110,7 @@ class Exclusion:
 
 # The single place a discovered unit is not run; each entry names its R250.5
 # basis and the DD-v3-tests stage that removes the file.  A stale entry (its
-# path matches nothing) stops the runner, and --release refuses a non-empty table.
+# path matches nothing) stops ordinary full. Release validates the exact policy below.
 EXCLUSIONS = (
     Exclusion("tools/check-index-oracle.py",
               "R250.5: argument-driven v2.9 oracle called by nothing (audit Q1); removed at DD stage 4"),
@@ -131,6 +131,42 @@ EXCLUSIONS = (
     Exclusion("tools/relay_engine/tests/test_authority_b9*.py",
               "R250.5: cross-root reader replaced by brief 5.9 (operator O1); removed with its code at DD stage 3; "
               "excluded so a leg's cap measures surviving code"),
+)
+
+
+# Batch 13 comparison policy reviewed in 142543. Keep the literal expansions
+# independent of the configured pattern table and the tree being checked.
+def _engine_test_paths(*names):
+    return tuple(f"tools/relay_engine/tests/{name}.py" for name in names)
+
+
+_RELEASE_ORACLE_REASON = (
+    "R250.5: argument-driven v2.9 oracle called by nothing (audit Q1); removed at DD stage 4"
+)
+_RELEASE_READER_REASON = (
+    "R250.5: cross-root reader replaced by brief 5.9 (operator O1); removed with its code at DD stage 3; "
+    "excluded so a leg's cap measures surviving code"
+)
+RELEASE_POLICY = (
+    *((Exclusion(path, _RELEASE_ORACLE_REASON), (path,)) for path in (
+        "tools/check-index-oracle.py",
+        "tools/check-t11-closure.py",
+        "tools/check-dispatch-head.py",
+        "tools/check-s375-escaped-rows.py",
+    )),
+    (Exclusion("tools/mtbattery.py",
+               "R250.5: mutation battery retired once the live matrix cases move (operator O5); "
+               "removed at DD stage 4"),
+     ("tools/mtbattery.py",)),
+    (Exclusion("tools/relay_engine/tests/test_xroot*.py", _RELEASE_READER_REASON),
+     _engine_test_paths("test_xroot", "test_xroot_b9_peer", "test_xroot_cache",
+                        "test_xroot_cache_differential", "test_xroot_deadline",
+                        "test_xroot_narrow", "test_xroot_narrow_corpus", "test_xroot_reader",
+                        "test_xroot_spawn")),
+    (Exclusion("tools/relay_engine/tests/test_b9_fold*.py", _RELEASE_READER_REASON),
+     _engine_test_paths("test_b9_fold1", "test_b9_fold2", "test_b9_fold3", "test_b9_fold4")),
+    (Exclusion("tools/relay_engine/tests/test_authority_b9*.py", _RELEASE_READER_REASON),
+     _engine_test_paths("test_authority_b9", "test_authority_b9_ancestors")),
 )
 
 # Checks the runner knows how to run, while their files exist (DD § 3.2 table).
@@ -192,12 +228,20 @@ def step_table(repo):
     return steps
 
 
-def _matches(path, exclusion):
-    return fnmatch.fnmatchcase(path, exclusion.path)
+def _matches(path, exclusion, exact_exclusions=False):
+    return path == exclusion.path if exact_exclusions else fnmatch.fnmatchcase(path, exclusion.path)
 
 
-def _excluded(step, exclusions):
-    return bool(step.covers) and all(any(_matches(c, e) for e in exclusions) for c in step.covers)
+def _excluded(step, exclusions, exact_exclusions=False):
+    return bool(step.covers) and all(
+        any(_matches(path, exclusion, exact_exclusions) for exclusion in exclusions)
+        for path in step.covers
+    )
+
+
+def _selected_steps(steps, leg, exclusions, *, exact_exclusions=False):
+    return [step for step in steps
+            if leg in step.legs and not _excluded(step, exclusions, exact_exclusions)]
 
 
 def _discovered_units(repo):
@@ -215,22 +259,97 @@ def _discovered_units(repo):
     return units
 
 
+def _coverage(repo, steps):
+    paths = {path for step in steps for path in step.covers}
+    directories = tuple(path + "/" for path in sorted(paths) if (repo / path).is_dir())
+    return paths, directories
+
+
+def _coverage_problems(repo, units, steps, exclusions, *, exact_exclusions=False):
+    covered, directories = _coverage(repo, steps)
+    return [
+        f"{unit}: discovered but neither a step nor an exclusion"
+        for unit in units
+        if unit not in covered and not unit.startswith(directories)
+        and not any(_matches(unit, exclusion, exact_exclusions) for exclusion in exclusions)
+    ]
+
+
 def uncovered(repo, steps, exclusions):
-    """Discovered units no step or exclusion covers, plus exclusions that match nothing."""
+    """Discovered units no ordinary step or exclusion covers, plus stale patterns."""
     repo = Path(repo)
-    covered = {c for s in steps if not _excluded(s, exclusions) for c in s.covers}
-    # A directory step covers every file inside its directory.
-    directories = tuple(c + "/" for c in covered if (repo / c).is_dir())
-    problems = []
-    for unit in _discovered_units(repo):
-        if unit in covered or unit.startswith(directories):
-            continue
-        if not any(_matches(unit, e) for e in exclusions):
-            problems.append(f"{unit}: discovered but neither a step nor an exclusion")
+    active = [step for step in steps if not _excluded(step, exclusions)]
+    problems = _coverage_problems(repo, _discovered_units(repo), active, exclusions)
     for exclusion in exclusions:
         if not list(repo.glob(exclusion.path)):
             problems.append(f"{exclusion.path}: exclusion matches no file (stale entry)")
     return problems
+
+
+def _literal_release_exclusions(units, exclusions):
+    approved = {}
+    problems = []
+    for row, paths in RELEASE_POLICY:
+        if row.path in approved:
+            problems.append(f"{row.path}: duplicate approved exclusion row")
+        approved[row.path] = row.reason, set(paths)
+    configured = set()
+    literals = {}
+    for row in exclusions:
+        if row.path in configured:
+            problems.append(f"{row.path}: duplicate exclusion row")
+            continue
+        configured.add(row.path)
+        if row.path not in approved:
+            problems.append(f"{row.path}: unknown exclusion row")
+            continue
+        reason, expected = approved[row.path]
+        if row.reason != reason:
+            problems.append(f"{row.path}: exclusion reason differs from approved reason")
+        matched = {unit for unit in units if _matches(unit, row)}
+        if not matched:
+            problems.append(f"{row.path}: stale exclusion row (no discovered matches)")
+        if matched != expected:
+            problems.append(f"{row.path}: missing paths {sorted(expected - matched)}; "
+                            f"extra paths {sorted(matched - expected)}")
+        overlap = sorted(matched.intersection(literals))
+        if overlap:
+            problems.append(f"{row.path}: exclusion paths overlap another row: {overlap}")
+        literals.update(dict.fromkeys(matched, reason))
+    for path in sorted(approved.keys() - configured):
+        problems.append(f"{path}: missing configured exclusion row")
+    return tuple(Exclusion(path, reason) for path, reason in sorted(literals.items())), problems
+
+
+def release_preflight(repo, steps, exclusions):
+    """Validate the reviewed literal receipt and the suppressed steps before starting."""
+    repo = Path(repo)
+    units = _discovered_units(repo)
+    literals, problems = _literal_release_exclusions(units, exclusions)
+    if problems:
+        return (), problems
+
+    # All reviewed omitted Engine modules run on both legs in the step table.
+    engine_dir = Path("tools/relay_engine/tests")
+    expected = sorted(
+        "relay_engine.tests." + Path(path).stem
+        for _, paths in RELEASE_POLICY for path in paths
+        if Path(path).parent == engine_dir
+    )
+    suppressed = [step for step in steps if _excluded(step, literals, True)]
+    for leg in ("mac", "linux"):
+        actual = sorted(step.id for step in suppressed if leg in step.legs)
+        if actual != expected:
+            problems.append(f"{leg}: exclusion suppression IDs differ: "
+                            f"expected {expected}, observed {actual}")
+        active = _selected_steps(steps, leg, literals, exact_exclusions=True)
+        covered, directories = _coverage(repo, active)
+        for row in literals:
+            if row.path in covered or row.path.startswith(directories):
+                problems.append(f"{leg}: excluded path {row.path} is covered by an executing step")
+    active = [step for step in steps if not _excluded(step, literals, True)]
+    problems.extend(_coverage_problems(repo, units, active, literals, exact_exclusions=True))
+    return literals, problems
 
 
 def _listing():
@@ -412,7 +531,7 @@ class LegResult:
 
 
 def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, exclusions=EXCLUSIONS,
-            leg_dir=None):
+            leg_dir=None, exact_exclusions=False):
     """Run one leg's steps under the cap; write out/<leg>/results.json and one log per step."""
     environ = dict(os.environ if environ is None else environ)
     repo = Path(repo)
@@ -421,7 +540,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     logs.mkdir(parents=True, exist_ok=True)
     engine_results = leg_out / "engine-results"
     engine_results.mkdir(exist_ok=True)
-    active = [s for s in steps if leg in s.legs and not _excluded(s, exclusions)]
+    active = _selected_steps(steps, leg, exclusions, exact_exclusions=exact_exclusions)
 
     base_env = dict(environ)
     base_env.update({
@@ -659,12 +778,16 @@ def docker_args(worktree, common_git_dir, out, image, expected_head, extra=(), p
     return args
 
 
-def write_container_plan(leg_dir, steps, leg, exclusions, history=PINNED_HISTORY):
+def write_container_plan(leg_dir, steps, leg, exclusions, history=PINNED_HISTORY, *,
+                         exact_exclusions=False):
     """The host's step selection, which the container runs as given, and the pinned history
     its preflight resolves."""
-    plan = {"step_ids": [s.id for s in steps if leg in s.legs and not _excluded(s, exclusions)],
+    selected = _selected_steps(steps, leg, exclusions, exact_exclusions=exact_exclusions)
+    plan = {"step_ids": [step.id for step in selected],
             "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions],
             "history": list(history)}
+    if exact_exclusions:
+        plan["exact_exclusions"] = True
     path = Path(leg_dir) / CONTAINER_PLAN
     path.write_text(json.dumps(plan, indent=2) + "\n")
     return path
@@ -715,7 +838,8 @@ def _run_in_container(args, repo, environ):
         return 2
     exclusions = tuple(Exclusion(**e) for e in plan["exclusions"])
     return run_leg("linux", [table[i] for i in plan["step_ids"]], args.workers, args.cap_seconds, out,
-                   repo=repo, environ=environ, exclusions=exclusions, leg_dir=out).exit
+                   repo=repo, environ=environ, exclusions=exclusions, leg_dir=out,
+                   exact_exclusions=plan.get("exact_exclusions", False)).exit
 
 
 def _labelled(docker, label):
@@ -746,7 +870,8 @@ def _stop_container(docker, label, proc):
         subprocess.run([docker, "rm", "-f", *leftover], capture_output=True, stdin=subprocess.DEVNULL)
 
 
-def _run_linux_host(steps, args, repo, environ, exclusions, history=PINNED_HISTORY):
+def _run_linux_host(steps, args, repo, environ, exclusions, history=PINNED_HISTORY, *,
+                    exact_exclusions=False):
     leg_dir = Path(args.out) / "linux"
     leg_dir.mkdir(parents=True, exist_ok=True)
     results_path = leg_dir / "results.json"
@@ -770,7 +895,8 @@ def _run_linux_host(steps, args, repo, environ, exclusions, history=PINNED_HISTO
     except Stopped as stopped:
         print(f"release-check: linux leg {stopped}", file=sys.stderr)
         return LegResult("linux", 1)
-    write_container_plan(leg_dir, steps, "linux", exclusions, history)
+    write_container_plan(leg_dir, steps, "linux", exclusions, history,
+                         exact_exclusions=exact_exclusions)
     command = [docker, command[0], "--name", name, "--label", label] + command[1:]
     with open(leg_dir / "docker.log", "wb") as log:
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
@@ -818,7 +944,7 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS, history=P
     full.add_argument("--workers", type=int, default=8)
     full.add_argument("--cap-seconds", type=int, default=1800)
     full.add_argument("--release", action="store_true",
-                      help="release-head run: refuse while any exclusion remains")
+                      help="release-head run: require the reviewed exact exclusion policy")
     full.add_argument("--in-container", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -851,7 +977,7 @@ def _run_host(args, repo, environ, exclusions, history):
               "/var/folders, so results there may vanish before they are cited", file=sys.stderr)
         return 2
     if args.release:
-        refusals = [f"exclusion {e.path} ({e.reason})" for e in exclusions]
+        refusals = []
         if args.leg != "both":
             refusals.append(f"--leg {args.leg}: a release check runs both legs")
         if args.cap_seconds > RELEASE_CAP_SECONDS:
@@ -870,7 +996,12 @@ def _run_host(args, repo, environ, exclusions, history):
               "choose a new directory so no stale result is cited", file=sys.stderr)
         return 2
     steps = step_table(repo)
-    problems = uncovered(repo, steps, exclusions)
+    selection_options = {}
+    if args.release:
+        exclusions, problems = release_preflight(repo, steps, exclusions)
+        selection_options = {"exact_exclusions": True}
+    else:
+        problems = uncovered(repo, steps, exclusions)
     if problems:
         for problem in problems:
             print(f"release-check: refusing to start: {problem}", file=sys.stderr)
@@ -881,10 +1012,10 @@ def _run_host(args, repo, environ, exclusions, history):
     legs_run = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         linux = (pool.submit(_guarded, "linux", _run_linux_host, steps, args, repo, environ, exclusions,
-                             history) if "linux" in legs else None)
+                             history, **selection_options) if "linux" in legs else None)
         if "mac" in legs:
             legs_run["mac"] = _guarded("mac", run_leg, "mac", steps, args.workers, args.cap_seconds, out,
-                                       repo=repo, environ=environ, exclusions=exclusions)
+                                       repo=repo, environ=environ, exclusions=exclusions, **selection_options)
         if linux is not None:
             # Polled, so the main thread keeps taking signals while the linux leg runs.
             while not linux.done():
@@ -897,6 +1028,8 @@ def _run_host(args, repo, environ, exclusions, history):
                "legs": {leg: {"exit": result.exit,
                               "results": str(result.results_path) if result.results_path else None}
                         for leg, result in legs_run.items()}}
+    if args.release:
+        summary["exclusions"] = [{"path": row.path, "reason": row.reason} for row in exclusions]
     (out / "release-check.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"release-check: overall exit {overall} ({out / 'release-check.json'})", file=sys.stderr)
     return overall

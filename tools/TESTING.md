@@ -46,7 +46,9 @@ It runs every step on two legs side by side: `mac` on this host and `linux` in a
 Each leg is cut at 30 minutes, and anything unfinished at the cap counts as failed.
 A failure on either leg fails the check, and the runner never turns a failure green.
 The results go to `<out>/release-check.json`, with one `results.json` per leg; `--out` must be under `$HOME`, since macOS purges `/tmp` and `/var/folders`.
-At the release head, add `--release`, which refuses to start while any exclusion in the runner's table remains, with `--leg` other than `both`, or with `--cap-seconds` above 1800; `release-check.json` records `release`, `cap_seconds` and, as the keys of `legs`, the legs run.
+At the release head, add `--release`, which requires both legs, a cap of at most 1800 seconds per leg, and an exact match to the reviewed exclusion paths, reasons and omitted steps.
+A mismatch or uncovered discovered unit stops the run before either leg starts.
+The release summary records `release`, `cap_seconds`, the legs run and the validated literal exclusions also written to the Linux plan and both leg results.
 Every `test_*.py` under `tools/` is a discovered unit, so a new test module or directory refuses the start until a step runs it or the exclusion table names it.
 
 ### After a SIGKILL

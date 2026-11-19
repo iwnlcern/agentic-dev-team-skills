@@ -235,7 +235,7 @@ print(json.dumps(sorted(sys.modules)))
         forbidden = {'sqlite3', '_sqlite3', 'socket'} | {'relay_engine.' + x for x in
             ('api_sessions', 'api_writer', 'api_keys', 'submit', 'schema', 'queries', 'daemon', 'cli', 'client')}
         def inspect(extra):
-            result = subprocess.run([sys.executable, '-I', '-c', probe.replace('EXTRA', extra),
+            result = subprocess.run([sys.executable, '-I', '-B', '-c', probe.replace('EXTRA', extra),
                                      str(TOOLS)], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             return forbidden & set(json.loads(result.stdout))
