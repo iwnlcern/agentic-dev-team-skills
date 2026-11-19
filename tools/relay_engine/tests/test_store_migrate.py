@@ -306,6 +306,281 @@ class StoreMigrationCopyTests(unittest.TestCase):
         (ledger,) = source.glob('*/ledger.db')
         return {name: ledger.with_name(name) for name in wanted}
 
+    def test_committed_copy_reader(self):
+        import json
+        import shutil
+        import stat
+
+        from relay_engine import store_import
+        from relay_engine.tests.test_store_import import LEGACY_DDL
+
+        migrate = self.producer('copy')
+        rendered_path = 'fixture/r1.md'
+        original_mtime = 1793525400000000000
+        headers = {'FROM': 'fixture.planner', 'TO': '', 'CC': ''}
+        document = b'# synthetic\n\nPHASE: SITREP\nFROM: fixture.planner\nTO: \nCC: \n\nfixture\n'
+
+        def inventory(directory):
+            entries = {}
+            for entry in (directory, *sorted(directory.rglob('*'))):
+                metadata = entry.lstat()
+                data = entry.read_bytes() if stat.S_ISREG(metadata.st_mode) else None
+                entries[entry.relative_to(directory).as_posix()] = (
+                    metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mode,
+                    metadata.st_mtime_ns, data,
+                )
+            return entries
+
+        def make(label, *, literal=rendered_path, write_render=True, mtime=original_mtime,
+                 rendered=document):
+            root, turns, legacy = self.fixture(label)
+            seed = legacy.parent / 'legacy-seed.sqlite3'
+            with closing(sqlite3.connect(seed)) as conn, conn:
+                conn.executescript(LEGACY_DDL).close()
+                conn.executemany('INSERT INTO meta VALUES (?, ?)', (
+                    ('schema_version', '1'), ('canonical_root', str(legacy)),
+                    ('root_uuid', ROOT_ID), ('run_id', 'fixture'),
+                )).close()
+                conn.execute(
+                    'INSERT INTO relays (seq,stamp,rendered_path,phase,role,dispatch_id,'
+                    'run_id,from_seat,to_seats,cc_seats,subject,headers_json,body,'
+                    'body_sha256,content_hash,origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (1, '20261101-013000', literal, 'SITREP', 'Pair Planner', 'fixture-1',
+                     'fixture', 'fixture.planner', '[]', '[]', 'Synthetic source',
+                     json.dumps(headers), document, hashlib.sha256(document).hexdigest(),
+                     '0' * 64, 'hand'),
+                ).close()
+            engine = legacy / '.engine'
+            (engine / 'ledger.db').write_bytes(seed.read_bytes())
+            self.assertTrue((engine / 'ledger.db-wal').is_file())
+            self.assertTrue((engine / 'ledger.db-shm').is_file())
+            render = legacy / rendered_path
+            if write_render:
+                self.assertEqual(literal, rendered_path)
+                render.parent.mkdir()
+                render.write_bytes(rendered)
+                os.utime(render, ns=(mtime, mtime))
+                self.assertEqual(render.stat().st_mtime_ns, mtime)
+            return root, turns, legacy, render, self.start(migrate, root, turns, legacy)
+
+        def job_paths(root, job_id):
+            job = self.job_path(root, job_id)
+            return job, job / 'source' / '0'
+
+        @contextmanager
+        def private_sqlite(legacy, job):
+            connect = sqlite3.connect
+            duplicates = []
+            ordinary = []
+
+            def guarded(database, *args, **kwargs):
+                value = os.fsdecode(database)
+                path = Path(unquote(urlsplit(value).path) if value.startswith('file:') else value)
+                resolved = path.resolve()
+                self.assertFalse(resolved.is_relative_to(legacy), resolved)
+                if resolved.name == 'ledger.db':
+                    self.assertFalse(resolved.is_relative_to(job), resolved)
+                    duplicates.append(resolved.parent)
+                else:
+                    ordinary.append(resolved)
+                return connect(database, *args, **kwargs)
+
+            with mock.patch.object(sqlite3, 'connect', guarded):
+                yield duplicates, ordinary
+            self.assertTrue(all(not path.exists() for path in duplicates))
+
+        def root_read_guard(legacy):
+            original_dirs = {(item.stat().st_dev, item.stat().st_ino)
+                             for item in (legacy, *legacy.rglob('*')) if item.is_dir()}
+
+            def guard(name, descriptor):
+                if isinstance(name, int):
+                    return
+                candidate = Path(os.fsdecode(name))
+                if candidate.is_absolute():
+                    self.assertFalse(candidate.is_relative_to(legacy), candidate)
+                elif descriptor is not None:
+                    metadata = os.fstat(descriptor)
+                    self.assertNotIn((metadata.st_dev, metadata.st_ino), original_dirs, candidate)
+            return self.observe_opens(guard)
+
+        def checked_read(root, turns, legacy, job_id):
+            job, _ = job_paths(root, job_id)
+            with private_sqlite(legacy, job) as (duplicates, ordinary), root_read_guard(legacy):
+                roots = migrate.read_copied_sources(root, turns, job_id)
+            self.assertTrue(duplicates)
+            self.assertTrue(ordinary)
+            (source,) = roots
+            self.assertEqual((source.root_uuid, source.run_id), (ROOT_ID, 'fixture'))
+            return roots
+
+        def quiet_copy(root, turns, legacy, job_id):
+            self.quiet(migrate, root, turns, job_id)
+            job, _ = job_paths(root, job_id)
+            with private_sqlite(legacy, job):
+                migrate.copy(root, turns, job_id)
+            self.assertEqual(self.checkpoint(root, job_id)[0], 'copy')
+
+        def assert_plan(roots):
+            plan = store_import.plan_relays(roots)
+            self.assertEqual(plan.listed, (
+                store_import.Listed('offset resolved by file mtime', rendered_path, False),
+            ))
+            self.assertEqual(plan.refused, 0)
+            (relay,) = plan.relays
+            self.assertEqual(relay.header_bytes + relay.body, document)
+            self.assertEqual(relay.created_at, original_mtime // 1_000_000)
+            self.assertEqual(roots[0].relays[0]['rendered_bytes'], document)
+            return plan
+
+        def assert_refused(roots, literal):
+            plan = store_import.plan_relays(roots)
+            self.assertEqual(plan.relays, ())
+            self.assertEqual(plan.refused, 1)
+            self.assertIn(store_import.Listed('source bytes differ', literal), plan.listed)
+
+        def invalid(root, turns, legacy, job_id, reason):
+            job, _ = job_paths(root, job_id)
+            phase = self.checkpoint(root, job_id)
+            retained = inventory(job / 'source')
+            before_source = inventory(legacy)
+            with (private_sqlite(legacy, job), root_read_guard(legacy),
+                  self.assertRaises(ValueError) as failure):
+                migrate.read_copied_sources(root, turns, job_id)
+            self.assertEqual(failure.exception.reason, reason)
+            self.assertIn(job_id, str(failure.exception))
+            self.assertIn('0', str(failure.exception))
+            self.assertEqual(self.checkpoint(root, job_id), phase)
+            self.assertEqual(inventory(job / 'source'), retained)
+            self.assertEqual(inventory(legacy), before_source)
+
+        root, turns, legacy, render, job_id = make('reader-repeated-hour')
+        original = inventory(legacy)
+        quiet_copy(root, turns, legacy, job_id)
+        self.assertEqual(inventory(legacy), original)
+        self.assertTrue(callable(getattr(migrate, 'read_copied_sources', None)),
+                        'missing store_migrate.read_copied_sources')
+
+        with self.subTest(case='repeated-hour-replay'):
+            job, copy_root = job_paths(root, job_id)
+            self.assertTrue((copy_root / 'ledger.db').is_file())
+            self.assertTrue((copy_root / 'ledger.db-wal').is_file())
+            self.assertTrue((copy_root / 'ledger.db-shm').is_file())
+            checkpoint = self.checkpoint(root, job_id)
+            first = assert_plan(checked_read(root, turns, legacy, job_id))
+            copied = copy_root / 'rendered' / rendered_path
+            os.utime(copied, ns=(original_mtime + 3_600_000_000_000,) * 2)
+            retained = inventory(job / 'source')
+            second = assert_plan(checked_read(root, store_steps.DirectTurns(root), legacy, job_id))
+            self.assertEqual(first, second)
+            self.assertEqual(inventory(legacy), original)
+            self.assertEqual(inventory(job / 'source'), retained)
+            self.assertEqual(self.checkpoint(root, job_id), checkpoint)
+            print('copy-reader case: repeated-hour-replay')
+
+        with self.subTest(case='integer-second-boundary'):
+            r, t, l, _, j = make('reader-second-boundary', mtime=original_mtime + 999_999_999)
+            quiet_copy(r, t, l, j)
+            assert_plan(checked_read(r, t, l, j))
+            print('copy-reader case: integer-second-boundary')
+
+        for label, literal in (('missing-at-quiet', rendered_path),
+                               ('unsafe-ledger-spelling', '../outside.md')):
+            with self.subTest(case=label):
+                r, t, l, _, j = make(label, literal=literal, write_render=False)
+                before = inventory(l)
+
+                def no_unsafe_open(name, _dir_fd):
+                    if not isinstance(name, int):
+                        self.assertNotIn('outside.md', os.fsdecode(name))
+
+                with self.observe_opens(no_unsafe_open):
+                    quiet_copy(r, t, l, j)
+                roots = checked_read(r, t, l, j)
+                self.assertEqual(len(roots[0].relays), 1)
+                (row,) = roots[0].relays
+                self.assertEqual((row['seq'], row['rendered_path']), (1, literal))
+                self.assertIsNone(row['rendered_bytes'])
+                self.assertIsNone(row['file_mtime'])
+                self.assertTrue(row['file_error'])
+                assert_refused(roots, literal)
+                self.assertEqual(inventory(l), before)
+                print(f'copy-reader case: {label}')
+
+        for label in ('selected-path-drift', 'selected-mtime-drift-during-quiet',
+                      'selected-mtime-drift-after-quiet'):
+            with self.subTest(case=label):
+                r, t, l, path, j = make(label)
+                if label == 'selected-mtime-drift-during-quiet':
+                    self.quiet(migrate, r, t, j, clock=QuietClock(
+                        lambda: os.utime(path, ns=(original_mtime + 1000,) * 2)))
+                else:
+                    self.quiet(migrate, r, t, j)
+                    if label == 'selected-path-drift':
+                        path.unlink()
+                    else:
+                        os.utime(path, ns=(original_mtime + 1000,) * 2)
+                before = inventory(l)
+                checkpoint = self.checkpoint(r, j)
+                with self.assertRaises(migrate.NotQuiet) as failure:
+                    migrate.copy(r, t, j)
+                self.assertIn(rendered_path, str(failure.exception))
+                self.assertEqual(self.checkpoint(r, j), checkpoint)
+                self.assertFalse((self.job_path(r, j) / 'source').exists())
+                self.assertEqual(inventory(l), before)
+                print(f'copy-reader case: {label}')
+
+        for label in ('committed-render-byte-damage', 'committed-render-absent',
+                      'committed-receipt-damage', 'committed-receipt-missing-row'):
+            with self.subTest(case=label):
+                selected = label != 'committed-receipt-missing-row'
+                r, t, l, _, j = make(label, write_render=selected)
+                quiet_copy(r, t, l, j)
+                job, copy_root = job_paths(r, j)
+                copied = copy_root / 'rendered' / rendered_path
+                receipt = copy_root / 'rendered-receipt.json'
+                if label == 'committed-render-byte-damage':
+                    data = copied.read_bytes()
+                    copied.write_bytes(bytes((data[0] ^ 1,)) + data[1:])
+                elif label == 'committed-render-absent':
+                    copied.unlink()
+                elif label == 'committed-receipt-damage':
+                    receipt.write_bytes(receipt.read_bytes() + b'!')
+                else:
+                    record = json.loads(receipt.read_bytes())
+                    self.assertEqual(len(record['defects']), 1)
+                    record['defects'] = []
+                    raw = json.dumps(record, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+                    receipt.write_bytes(raw)
+                    _, data = self.checkpoint(r, j)
+                    data['rendered_receipts'][0] = hashlib.sha256(raw).hexdigest()
+                    with closing(store_steps.open_journal(job)) as journal:
+                        journal.checkpoint('copy', data)
+                invalid(r, t, l, j, 'copy-input-invalid')
+                print(f'copy-reader case: {label}')
+
+        with self.subTest(case='legacy-copy-checkpoint'):
+            r, t, l, _, j = make('legacy-copy-checkpoint')
+            self.quiet(migrate, r, t, j)
+            _, data = self.checkpoint(r, j)
+            data.pop('fingerprint_mtimes', None)
+            job, copy_root = job_paths(r, j)
+            copy_root.mkdir(parents=True)
+            for name in ('ledger.db', 'ledger.db-wal', 'ledger.db-shm'):
+                shutil.copyfile(l / '.engine' / name, copy_root / name)
+            (copy_root / 'manifest.json').write_bytes(
+                json.dumps(data['fingerprints'][0], sort_keys=True, separators=(',', ':')).encode() + b'\n')
+            with closing(store_steps.open_journal(job)) as journal:
+                journal.checkpoint('copy', data)
+            invalid(r, t, l, j, 'copy-format-incompatible')
+            print('copy-reader case: legacy-copy-checkpoint')
+
+        with self.subTest(case='committed-ledger-document-mismatch'):
+            r, t, l, _, j = make('committed-ledger-document-mismatch', rendered=document + b'changed')
+            quiet_copy(r, t, l, j)
+            assert_refused(checked_read(r, t, l, j), rendered_path)
+            print('copy-reader case: committed-ledger-document-mismatch')
+
     def test_copy_never_opens_in_place(self):
         root, turns, legacy = self.fixture('raw-copy')
         original = source_snapshot(legacy)

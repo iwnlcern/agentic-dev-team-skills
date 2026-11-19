@@ -11240,7 +11240,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/store_import.py",
-    "sha256": "ce6cf3181a75f839179ad46a1c1f4383e333008fc8fd53d64b8dff522ae86d55",
+    "sha256": "cbc6570ce50fd1736d25bca1f9f70ff7e8a6302b4fd47bcd16a4084517754be6",
     "source": "tools/relay_engine/store_import.py"
   },
   {
@@ -11252,7 +11252,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/store_migrate.py",
-    "sha256": "2cd2161a6fd7a6e2596dfa5cccb442334c1d2db5f58e2769c17a4d7407b37a76",
+    "sha256": "bbe263b9e9eb73efe1fc494c761f78c9d5c3328f193c5e99d7f52379fc570a02",
     "source": "tools/relay_engine/store_migrate.py"
   },
   {
@@ -22430,7 +22430,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/store_import.py",
-    "sha256": "ce6cf3181a75f839179ad46a1c1f4383e333008fc8fd53d64b8dff522ae86d55",
+    "sha256": "cbc6570ce50fd1736d25bca1f9f70ff7e8a6302b4fd47bcd16a4084517754be6",
     "source": "tools/relay_engine/store_import.py"
   },
   {
@@ -22442,7 +22442,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/store_migrate.py",
-    "sha256": "2cd2161a6fd7a6e2596dfa5cccb442334c1d2db5f58e2769c17a4d7407b37a76",
+    "sha256": "bbe263b9e9eb73efe1fc494c761f78c9d5c3328f193c5e99d7f52379fc570a02",
     "source": "tools/relay_engine/store_migrate.py"
   },
   {
@@ -33536,7 +33536,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/store_import.py",
-    "sha256": "ce6cf3181a75f839179ad46a1c1f4383e333008fc8fd53d64b8dff522ae86d55",
+    "sha256": "cbc6570ce50fd1736d25bca1f9f70ff7e8a6302b4fd47bcd16a4084517754be6",
     "source": "tools/relay_engine/store_import.py"
   },
   {
@@ -33548,7 +33548,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/store_migrate.py",
-    "sha256": "2cd2161a6fd7a6e2596dfa5cccb442334c1d2db5f58e2769c17a4d7407b37a76",
+    "sha256": "bbe263b9e9eb73efe1fc494c761f78c9d5c3328f193c5e99d7f52379fc570a02",
     "source": "tools/relay_engine/store_migrate.py"
   },
   {
