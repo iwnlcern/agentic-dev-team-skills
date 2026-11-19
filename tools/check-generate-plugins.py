@@ -191,6 +191,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/store_create.py",
     "relay_engine/store_evidence.py",
     "relay_engine/store_import.py",
+    "relay_engine/store_migrate.py",
     "relay_engine/store_layout.py",
     "relay_engine/store_steps.py",
     "relay_engine/strings.py",

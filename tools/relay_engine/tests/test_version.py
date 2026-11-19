@@ -93,6 +93,7 @@ EXPECTED_ROSTER = (
     "relay_engine/store_create.py",
     "relay_engine/store_evidence.py",
     "relay_engine/store_import.py",
+    "relay_engine/store_migrate.py",
     "relay_engine/store_layout.py",
     "relay_engine/store_steps.py",
     "relay_engine/strings.py",
@@ -113,7 +114,7 @@ def _stage_roster(destination):
 def _independent_fingerprint(tools_dir):
     digest = hashlib.sha256()
     digest.update(b"adt-engine-fp/1\0")
-    for relative in EXPECTED_ROSTER:
+    for relative in sorted(EXPECTED_ROSTER):
         content = (tools_dir / relative).read_bytes()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
