@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import errno
 import fcntl
 import hashlib
@@ -17,7 +17,7 @@ import stat
 import tempfile
 import time
 
-from relay_engine import store_import, store_layout, store_steps, submit
+from relay_engine import identity_import, imports, store_import, store_layout, store_steps, submit
 from relay_engine.store_evidence import _sync_dir, _sync_file
 
 
@@ -29,6 +29,7 @@ _READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 _MOVED_MARKER_SHA256 = '4a9c34859cf78db4a00dfcdbf152dc08650613784507b1b9eea6a9fc024632f0'
 _QUIET_SECONDS = 60
 _CHUNK_SIZE = 1024 * 1024
+_IMPORT_BATCH_SIZE = 256
 _COPY_FORMAT = 1
 _RENDERED = 'rendered'
 _RECEIPT = 'rendered-receipt.json'
@@ -618,33 +619,179 @@ def read_copied_sources(root, turns: store_steps.TurnRunner, job_id: str) -> tup
     with _job(store_layout.resolve_root(root), job_id) as (job, journal):
         phase, data = journal.last_checkpoint()
         _bound_turn(turns, data)
-        invalid = 'copy-input-invalid'
-        if phase != 'copy' or data['job_id'] != job_id:
-            raise CopiedSourceError(invalid, job_id, 0, 'checkpoint', 'expected this job in copy phase')
-        if 'copy_format' not in data and 'rendered_receipts' not in data:
-            raise CopiedSourceError('copy-format-incompatible', job_id, 0, _RECEIPT,
-                                    'original rendered mtime evidence is absent')
-        version = data.get('copy_format')
-        if type(version) is not int or version != _COPY_FORMAT:
-            raise CopiedSourceError(invalid, job_id, 0, _RECEIPT, 'invalid copy format')
+        return _read_committed_sources(job, phase, data, job_id)
+
+
+def _read_committed_sources(job, phase, data, job_id, *, prepared_ok=False):
+    invalid = 'copy-input-invalid'
+    valid_phase = phase == 'copy' or (prepared_ok and phase == 'import')
+    if not valid_phase or data['job_id'] != job_id:
+        raise CopiedSourceError(invalid, job_id, 0, 'checkpoint', 'expected this job in copy phase')
+    if 'copy_format' not in data and 'rendered_receipts' not in data:
+        raise CopiedSourceError('copy-format-incompatible', job_id, 0, _RECEIPT,
+                                'original rendered mtime evidence is absent')
+    version = data.get('copy_format')
+    if type(version) is not int or version != _COPY_FORMAT:
+        raise CopiedSourceError(invalid, job_id, 0, _RECEIPT, 'invalid copy format')
+    try:
+        roots = data['roots']
+        count = len(roots)
+        first, second = data['fingerprint_mtimes']
+        if (not isinstance(roots, list) or not count or any(
+            not isinstance(records, list) or len(records) != count for records in
+            (data['fingerprints'], first, second, data['rendered_receipts'])
+        )):
+            raise ValueError('source root, fingerprint and receipt counts differ')
+        with _legacy_dir(job / 'source') as parent:
+            if set(os.listdir(parent)) != {str(index) for index in range(count)}:
+                raise ValueError('committed source root roster differs')
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise CopiedSourceError(invalid, job_id, 0, _RECEIPT, str(exc)) from exc
+    sources = []
+    for index in range(count):
         try:
-            roots = data['roots']
-            count = len(roots)
-            first, second = data['fingerprint_mtimes']
-            if (not isinstance(roots, list) or not count or any(
-                not isinstance(records, list) or len(records) != count for records in
-                (data['fingerprints'], first, second, data['rendered_receipts'])
-            )):
-                raise ValueError('source root, fingerprint and receipt counts differ')
-            with _legacy_dir(job / 'source') as parent:
-                if set(os.listdir(parent)) != {str(index) for index in range(count)}:
-                    raise ValueError('committed source root roster differs')
-        except (KeyError, TypeError, ValueError, OSError) as exc:
-            raise CopiedSourceError(invalid, job_id, 0, _RECEIPT, str(exc)) from exc
-        sources = []
-        for index in range(count):
-            try:
-                sources.append(_read_copy_root(job / 'source' / str(index), data, index))
-            except (KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
-                raise CopiedSourceError(invalid, job_id, index, _RECEIPT, str(exc)) from exc
-        return tuple(sources)
+            sources.append(_read_copy_root(job / 'source' / str(index), data, index))
+        except (KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
+            raise CopiedSourceError(invalid, job_id, index, _RECEIPT, str(exc)) from exc
+    return tuple(sources)
+
+
+def _write_import_batches(conn, data, relays, identities):
+    project_id = data['project_id']
+    marked_at_ms = data['marked_at_ms']
+    seats = {seat.id: seat for seat in identities.seats}
+    instances = {instance.id: instance.name for instance in identities.instances}
+    seat_ids = {
+        instances[seat.team_instance_id] + '.' + seat.role: seat.id
+        for seat in identities.seats
+    }
+    seat_ids['operator'] = 'operator'
+    relay_ids = []
+    for offset in range(0, max(1, len(relays)), _IMPORT_BATCH_SIZE):
+        with conn:
+            store_layout._pragma(conn, 'BEGIN IMMEDIATE')
+            if offset == 0:
+                identity_import.import_identities_step(
+                    conn, project_id=project_id, project_name=data['project_name'],
+                    created_at=min((relay.created_at for relay in relays), default=marked_at_ms),
+                    instances=identities.instances, seats=identities.seats,
+                    top_seat_id=identities.top_seat_id,
+                )
+            for relay in relays[offset:offset + _IMPORT_BATCH_SIZE]:
+                sender = seat_ids[relay.sender]
+                seat = seats.get(sender)
+                imported = imports.ImportedRelay(
+                    created_at=relay.created_at, kind=relay.kind, verdict=relay.verdict,
+                    subject=relay.subject, sender=sender,
+                    sender_role=None if seat is None else seat.role,
+                    team_instance_id=None if seat is None else seat.team_instance_id,
+                    to=tuple(seat_ids[party] for party in relay.to),
+                    cc=tuple(seat_ids[party] for party in relay.cc),
+                    parent_id=None if relay.parent is None else relay_ids[relay.parent],
+                    parent_spelling=relay.parent_spelling, body=relay.body,
+                    header_bytes=len(relay.header_bytes), header_sha256=relay.header_sha256,
+                    answers=tuple(relay_ids[position] for position in relay.answers),
+                )
+                relay_id = imports.import_relay_step(
+                    conn, project_id, imported, marked_at_ms=marked_at_ms,
+                )
+                conn.executemany(
+                    'INSERT INTO imported_relays '
+                    '(relay_id,root_uuid,seq,stamp,zone,utc_offset_s,rendered_path,origin,'
+                    'headers_json,source_sha256,original_phase,foreign_to_json,delivery_marked_at) '
+                    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    [(relay_id, item.root_uuid, item.seq, item.stamp, item.zone, item.offset,
+                      item.rendered_path, item.origin, _canonical_bytes(item.headers).decode('utf-8'),
+                      item.file_sha256, item.original_phase,
+                      _canonical_bytes(item.foreign).decode('utf-8') if item.foreign else None,
+                      marked_at_ms) for item in relay.provenance],
+                ).close()
+                relay_ids.append(relay_id)
+
+
+def _discard_staging(staging):
+    if os.path.lexists(staging):
+        shutil.rmtree(staging)
+        _sync_dir(staging.parent)
+
+
+def _prepared_receipt(staging, ledger):
+    with _legacy_dir(staging) as parent:
+        if set(os.listdir(parent)) != {ledger.name}:
+            raise ValueError('prepared import staging contains unexpected files')
+        with _descriptor(ledger.name, _READ, parent=parent, display=ledger) as file_fd:
+            info = os.fstat(file_fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('prepared import ledger is not a regular file')
+            with os.fdopen(file_fd, 'rb', closefd=False) as file:
+                digest = hashlib.file_digest(file, 'sha256').hexdigest()
+            if _signature(os.fstat(file_fd)) != _signature(info):
+                raise ValueError('prepared import ledger changed during verification')
+        return {'size': info.st_size, 'sha256': digest}
+
+
+def import_staging(root, turns: store_steps.TurnRunner, job_id: str) -> store_import.Report:
+    """Build a private prepared ledger from the job's verified committed copies."""
+    with _job(store_layout.resolve_root(root), job_id) as (job, journal):
+        phase, data = journal.last_checkpoint()
+        _bound_turn(turns, data)
+        sources = _read_committed_sources(job, phase, data, job_id, prepared_ok=True)
+        staging = job / 'staging'
+        ledger = staging / 'ledger.sqlite3'
+        fixed = {key: data[key] for key in (
+            'job_id', 'store_id', 'project_id', 'project_name', 'marked_at_ms', 'rendered_receipts',
+        )}
+        attempt = data.get('import_attempt')
+        if attempt is None:
+            if phase == 'import':
+                raise ValueError('prepared import checkpoint has no fixed attempt inputs')
+            decisions = json.loads(_canonical_bytes(data.get('decisions', {})))
+            attempt = {**fixed, 'decisions': decisions}
+            data = {**data, 'import_attempt': attempt}
+            _bound_turn(turns, data, lambda: journal.checkpoint('copy', data))
+        elif attempt != {**fixed, 'decisions': attempt['decisions']}:
+            raise ValueError('fixed import attempt inputs differ from the job checkpoint')
+
+        planned = store_import.plan_relays(sources)
+        identities = store_import.plan_identities(sources, attempt['decisions'])
+
+        def report(plan):
+            return store_import.Report(
+                plan, identities, store_id=attempt['store_id'], project_id=attempt['project_id'],
+            )
+
+        if phase == 'import':
+            if _prepared_receipt(staging, ledger) != data.get('prepared'):
+                raise ValueError('prepared import ledger differs from the import checkpoint')
+            return report(planned)
+
+        _discard_staging(staging)
+        staging.mkdir(mode=0o700)
+        try:
+            with closing(submit.open_store(ledger)) as conn:
+                store_layout._configure(conn)
+                if store_layout._row(conn, 'PRAGMA foreign_keys') != (1,):
+                    raise store_layout.LayoutFault('foreign-keys-off')
+                try:
+                    _write_import_batches(conn, attempt, planned.relays, identities)
+                except identity_import.IdentityImportRefused as exc:
+                    refusal = store_import.Listed(exc.reason, str(exc.item))
+                except ValueError as exc:
+                    refusal = store_import.Listed('import refused', str(exc))
+                else:
+                    refusal = None
+            if refusal is not None:
+                _discard_staging(staging)
+                return report(replace(planned, listed=planned.listed + (refusal,)))
+            prepared = store_steps.prepare_database(ledger)
+            _sync_dir(staging)
+            _sync_dir(job)
+        except BaseException:
+            _discard_staging(staging)
+            raise
+
+        # After checkpoint publication begins, a retry must inspect the journal
+        # before discarding any output. A failure can follow a durable commit.
+        receipt = {'size': prepared.size, 'sha256': prepared.sha256}
+        _bound_turn(turns, data, lambda: journal.checkpoint('import', {**data, 'prepared': receipt}))
+        return report(planned)

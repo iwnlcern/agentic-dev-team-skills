@@ -30,6 +30,7 @@ PRIVATE_DESCRIPTOR_SITES = frozenset({
     ('owner_start', '_run_child', 'fdopen', 'retire_write'),
     ('store_layout', '_read_frame', 'fdopen', 'fd'),
     ('store_layout', '_replace', 'fdopen', 'fd'),
+    ('store_migrate', '_prepared_receipt', 'fdopen', 'file_fd'),
 })
 
 
@@ -343,6 +344,7 @@ class TestGate(unittest.TestCase):
             ('owner_start', '_run_child', 'fdopen', 'retire_write'),
             ('store_layout', '_read_frame', 'fdopen', 'fd'),
             ('store_layout', '_replace', 'fdopen', 'fd'),
+            ('store_migrate', '_prepared_receipt', 'fdopen', 'file_fd'),
         })
 
     def test_private_descriptor_allowance_keeps_other_raw_sinks_blocked(self):

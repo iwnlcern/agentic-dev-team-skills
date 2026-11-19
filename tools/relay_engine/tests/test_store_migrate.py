@@ -581,6 +581,431 @@ class StoreMigrationCopyTests(unittest.TestCase):
             assert_refused(checked_read(r, t, l, j), rendered_path)
             print('copy-reader case: committed-ledger-document-mismatch')
 
+    def test_import_staging_rows(self):
+        import json
+
+        from relay_engine import store_import
+        from relay_engine.tests.test_store_import import LEGACY_DDL
+
+        migrate = self.producer('copy')
+        root, turns, legacy_a = self.fixture('prepared-a')
+        _, _, legacy_b = self.fixture('prepared-b')
+        other_root_id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+        parent_path, reply_path = 'fixture/parent.md', 'fixture/reply.md'
+        stamp = '20260801-120000'
+        parent = ('parent', parent_path, 'fixture.planner', 'fixture.implementer', b'parent payload\n')
+        reply = ('reply', reply_path, 'fixture.implementer', 'fixture.planner', b'reply payload\n')
+        expected = {}
+
+        for legacy, source_id, rows, origin in (
+                (legacy_a, ROOT_ID, (parent, reply), 'hand'),
+                (legacy_b, other_root_id, (parent,), 'adopted')):
+            seed = legacy.parent / 'staging-seed.sqlite3'
+            with closing(sqlite3.connect(seed)) as db, db:
+                db.executescript(LEGACY_DDL).close()
+                db.executemany('INSERT INTO meta VALUES (?, ?)', (
+                    ('schema_version', '1'), ('canonical_root', str(legacy)),
+                    ('root_uuid', source_id), ('run_id', 'fixture'),
+                )).close()
+                db.execute("INSERT INTO runs VALUES ('fixture', 'operator')").close()
+                for number, (name, path, sender, to, body) in enumerate(rows, 1):
+                    headers = {'PHASE': 'SITREP', 'FROM': sender, 'TO': to, 'CC': 'operator'}
+                    if name == 'reply':
+                        headers['IN_REPLY_TO'] = parent_path
+                    prefix = (f'# {name}\n\n' + ''.join(f'{k}: {v}\n' for k, v in headers.items()) + '\n').encode()
+                    document = prefix + body
+                    digest = hashlib.sha256(document).hexdigest()
+                    target = legacy / path
+                    target.parent.mkdir(exist_ok=True)
+                    target.write_bytes(document)
+                    db.execute(
+                        'INSERT INTO relays (seq,stamp,rendered_path,phase,role,dispatch_id,'
+                        'run_id,from_seat,to_seats,cc_seats,subject,headers_json,body,'
+                        'body_sha256,content_hash,origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (number, stamp, path, 'SITREP',
+                         'Pair Planner' if name == 'parent' else 'Pair Implementer',
+                         name, 'fixture', sender, json.dumps([to]), '["operator"]',
+                         name, json.dumps(headers), document, digest, digest, origin),
+                    ).close()
+                    expected[source_id, number] = (name, path, origin, headers, prefix, body, digest)
+            (legacy / '.engine' / 'ledger.db').write_bytes(seed.read_bytes())
+
+        source_before = {legacy: source_snapshot(legacy) for legacy in (legacy_a, legacy_b)}
+        job_id = self.start(migrate, root, turns, legacy_a, roots=(legacy_a, legacy_b))
+        self.quiet(migrate, root, turns, job_id)
+        migrate.copy(root, turns, job_id)
+        phase, copied = self.checkpoint(root, job_id)
+        self.assertEqual(phase, 'copy')
+        self.assertEqual(len(copied['rendered_receipts']), 2)
+        sources = migrate.read_copied_sources(root, turns, job_id)
+        self.assertEqual([source.root_uuid for source in sources], [ROOT_ID, other_root_id])
+        mapped = store_import.plan_relays(sources)
+        self.assertEqual([item.subject for item in mapped.relays], ['parent', 'reply'])
+        self.assertEqual([len(item.provenance) for item in mapped.relays], [2, 1])
+        self.assertEqual(mapped.relays[1].parent, 0)
+        stage = self.job_path(root, job_id) / 'staging' / 'ledger.sqlite3'
+        self.assertFalse(stage.parent.exists())
+
+        self.assertTrue(callable(getattr(migrate, 'import_staging', None)),
+                        'reached committed copy: missing store_migrate.import_staging')
+        report = migrate.import_staging(root, turns, job_id)
+        self.assertIsInstance(report, store_import.Report)
+        self.assertEqual((report.store_id, report.project_id), (copied['store_id'], copied['project_id']))
+        self.assertEqual(self.checkpoint(root, job_id)[0], 'import')
+        self.assertTrue(stage.is_file())
+        self.assertFalse(Path(str(stage) + '-wal').exists())
+        self.assertFalse(Path(str(stage) + '-shm').exists())
+        prepared = self.checkpoint(root, job_id)[1]['prepared']
+        self.assertEqual((prepared['size'], prepared['sha256']),
+                         (stage.stat().st_size, hashlib.sha256(stage.read_bytes()).hexdigest()))
+
+        def rows(db, query):
+            with closing(db.execute(query)) as cursor:
+                return cursor.fetchall()
+
+        with closing(sqlite3.connect(stage.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            stored = rows(db, 'SELECT id,subject,parent_id,needs,header_bytes,body FROM relays '
+                              'JOIN bodies ON bodies.relay_id=relays.id ORDER BY handle')
+            parent_id, reply_id = (row[0] for row in stored)
+            first = expected[ROOT_ID, 1]
+            second = expected[ROOT_ID, 2]
+            self.assertEqual(stored, [
+                (parent_id, 'parent', None, 'none', len(first[4]), first[5]),
+                (reply_id, 'reply', parent_id, 'none', len(second[4]), second[5]),
+            ])
+            self.assertEqual(rows(db, 'SELECT from_relay_id,target_relay_id,spelling FROM edges'),
+                             [(reply_id, parent_id, parent_path)])
+            provenance = rows(db, 'SELECT relay_id,root_uuid,seq,rendered_path,origin,headers_json,'
+                                  'source_sha256,delivery_marked_at FROM imported_relays ORDER BY root_uuid,seq')
+            relay_ids = {'parent': parent_id, 'reply': reply_id}
+            marked = copied['marked_at_ms']
+            self.assertEqual([(rid, source, seq, path, origin, json.loads(headers), sha, marker)
+                              for rid, source, seq, path, origin, headers, sha, marker in provenance],
+                             [(relay_ids[name], source, seq, path, origin, headers, sha, marked)
+                              for (source, seq), (name, path, origin, headers, _, _, sha)
+                              in sorted(expected.items())])
+            self.assertEqual(rows(db, 'SELECT r.subject,c.role,s.role,c.special,c.delivered_at,c.opened_at '
+                                      'FROM recipients c JOIN relays r ON r.id=c.relay_id '
+                                      'LEFT JOIN seats s ON s.id=c.seat_id ORDER BY r.handle,c.role'), [
+                ('parent', 'cc', None, 'operator', None, marked),
+                ('parent', 'to', 'implementer', None, marked, marked),
+                ('reply', 'cc', None, 'operator', None, marked),
+                ('reply', 'to', 'planner', None, marked, marked),
+            ])
+            for table in ('snapshots', 'verification_requests', 'slips', 'slip_events', 'seat_activity'):
+                self.assertEqual(rows(db, f'SELECT count(*) FROM {table}'), [(0,)])
+            with closing(sqlite3.connect(':memory:')) as control:
+                db.backup(control)
+                offered = ("SELECT relay_id FROM recipients WHERE role='to' "
+                           "AND delivered_at IS NULL AND opened_at IS NULL ORDER BY relay_id")
+                self.assertEqual(rows(control, offered), [])
+                control.execute('UPDATE recipients SET delivered_at=NULL, opened_at=NULL').close()
+                self.assertCountEqual(rows(control, offered), [(parent_id,), (reply_id,)])
+
+        def private_catalogue(conns):
+            db = conns['catalogue']
+            self.assertEqual(store_layout.route_state(db, copied['project_id']), 'absent')
+            self.assertEqual(rows(db, 'SELECT count(*) FROM maintenance_holds'), [(0,)])
+
+        turns.run(store_steps.Declared('read', {}), private_catalogue)
+        self.assertEqual({legacy: source_snapshot(legacy) for legacy in (legacy_a, legacy_b)}, source_before)
+
+    def _copied_import_fixture(self, label, rows):
+        import json
+
+        from relay_engine.tests.test_store_import import LEGACY_DDL
+
+        migrate = self.producer('copy')
+        root, turns, legacy = self.fixture(label)
+        seed = legacy.parent / 'import-controls.sqlite3'
+        with closing(sqlite3.connect(seed)) as db, db:
+            db.executescript(LEGACY_DDL).close()
+            db.executemany('INSERT INTO meta VALUES (?, ?)', (
+                ('schema_version', '1'), ('canonical_root', str(legacy)),
+                ('root_uuid', ROOT_ID), ('run_id', 'fixture'),
+            )).close()
+            db.execute("INSERT INTO runs VALUES ('fixture', 'operator')").close()
+            for seq, (name, sender, to, cc, references) in enumerate(rows, 1):
+                path = f'relays/{name}.md'
+                headers = {'PHASE': 'SITREP', 'FROM': sender, 'TO': to}
+                if cc:
+                    headers['CC'] = ', '.join(cc)
+                if references:
+                    headers['IN_REPLY_TO'] = ', '.join(f'relays/{ref}.md' for ref in references)
+                fields = ''.join(f'{key}: {value}\n' for key, value in headers.items())
+                document = f'# {name}\n\n{fields}\n{name} payload\n'.encode()
+                digest = hashlib.sha256(document).hexdigest()
+                (legacy / path).write_bytes(document)
+                db.execute(
+                    'INSERT INTO relays (seq,stamp,rendered_path,phase,role,dispatch_id,'
+                    'run_id,from_seat,to_seats,cc_seats,subject,headers_json,body,'
+                    'body_sha256,content_hash,origin) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (seq, '20260801-120000', path, 'SITREP',
+                     'Pair Planner' if sender == 'fixture.planner' else 'Pair Implementer',
+                     name, 'fixture', sender, json.dumps([to]), json.dumps(cc), name,
+                     json.dumps(headers), document, digest, digest, 'hand'),
+                ).close()
+        (legacy / '.engine' / 'ledger.db').write_bytes(seed.read_bytes())
+
+        job_id = self.start(migrate, root, turns, legacy)
+        self.quiet(migrate, root, turns, job_id)
+        migrate.copy(root, turns, job_id)
+        self.assertEqual(self.checkpoint(root, job_id)[0], 'copy')
+        return migrate, root, turns, legacy, job_id
+
+    def _assert_copy_retained_for_import(self, root, job_id, copied):
+        attempt = {key: copied[key] for key in (
+            'job_id', 'store_id', 'project_id', 'project_name', 'marked_at_ms',
+            'rendered_receipts',
+        )}
+        attempt['decisions'] = copied.get('decisions', {})
+        self.assertEqual(self.checkpoint(root, job_id),
+                         ('copy', {**copied, 'import_attempt': attempt}))
+        self.assertFalse((self.job_path(root, job_id) / 'staging').exists())
+        return attempt
+
+    def test_import_answers_rows(self):
+        from relay_engine import imports
+
+        planner, implementer = 'fixture.planner', 'fixture.implementer'
+        rows = (
+            ('parent', planner, implementer, ('operator',), ()),
+            ('answered', planner, 'operator', (implementer,), ()),
+            ('unrelated', planner, implementer, ('operator',), ()),
+            ('first', implementer, planner, ('operator',), ('parent', 'answered')),
+            ('second', implementer, planner, ('operator',), ('parent', 'answered')),
+        )
+        migrate, root, turns, _, job_id = self._copied_import_fixture('answers', rows)
+        _, copied = self.checkpoint(root, job_id)
+        marked = copied['marked_at_ms']
+        ledger = self.job_path(root, job_id) / 'staging' / 'ledger.sqlite3'
+        write_relay = imports.import_relay_step
+        ids = {}
+
+        def observe(conn, project_id, relay, *, marked_at_ms):
+            if relay.subject in ('first', 'second'):
+                self.assertEqual(relay.parent_id, ids['parent'])
+                self.assertEqual(relay.answers, (ids['answered'],))
+            relay_id = write_relay(conn, project_id, relay, marked_at_ms=marked_at_ms)
+            ids[relay.subject] = relay_id
+            return relay_id
+
+        with mock.patch.object(imports, 'import_relay_step', side_effect=observe):
+            report = migrate.import_staging(root, turns, job_id)
+        self.assertEqual(report.unresolved(), ['team needs finished-or-running choice: fixture'])
+        self.assertEqual(report.answers_listed(), [])
+        self.assertEqual(self.checkpoint(root, job_id)[0], 'import')
+        with closing(sqlite3.connect(ledger.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            with closing(db.execute('SELECT id,subject,parent_id FROM relays ORDER BY handle')) as cursor:
+                self.assertEqual(cursor.fetchall(), [
+                    (ids[name], name, ids['parent'] if name in ('first', 'second') else None)
+                    for name, *_ in rows
+                ])
+            with closing(db.execute(
+                    'SELECT r.subject,c.role,s.role,c.special,c.delivered_at,c.opened_at,c.answered_by '
+                    'FROM recipients c JOIN relays r ON r.id=c.relay_id '
+                    'LEFT JOIN seats s ON s.id=c.seat_id '
+                    "WHERE r.subject IN ('parent','answered','unrelated') ORDER BY r.handle,c.role"
+            )) as cursor:
+                self.assertEqual(cursor.fetchall(), [
+                    ('parent', 'cc', None, 'operator', None, marked, None),
+                    ('parent', 'to', 'implementer', None, marked, marked, None),
+                    ('answered', 'cc', 'implementer', None, None, marked, ids['first']),
+                    ('answered', 'to', None, 'operator', marked, marked, None),
+                    ('unrelated', 'cc', None, 'operator', None, marked, None),
+                    ('unrelated', 'to', 'implementer', None, marked, marked, None),
+                ])
+
+    def test_import_step_refusal_discards_staging(self):
+        from dataclasses import replace
+
+        from relay_engine import identity_import, imports
+
+        planner, implementer = 'fixture.planner', 'fixture.implementer'
+        rows = (
+            ('parent', planner, implementer, ('operator',), ()),
+            ('denied', planner, 'operator', (), ()),
+            ('reply', implementer, planner, ('operator',), ('parent', 'denied')),
+        )
+        write_relay = imports.import_relay_step
+        write_identities = identity_import.import_identities_step
+
+        for case in ('answer', 'identity', 'unrelated'):
+            with self.subTest(case=case):
+                migrate, root, turns, legacy, job_id = self._copied_import_fixture(case, rows)
+                _, copied = self.checkpoint(root, job_id)
+                job = self.job_path(root, job_id)
+                original = source_snapshot(legacy)
+                committed = source_snapshot(job / 'source')
+                ids = {}
+
+                def unfiltered(conn, project_id, relay, *, marked_at_ms):
+                    if relay.subject == 'reply':
+                        self.assertEqual(relay.answers, ())
+                        relay = replace(relay, answers=(ids['denied'],))
+                    relay_id = write_relay(conn, project_id, relay, marked_at_ms=marked_at_ms)
+                    ids[relay.subject] = relay_id
+                    return relay_id
+
+                def wrong_top(conn, **fields):
+                    self.assertIsNotNone(fields['top_seat_id'])
+                    self.assertNotEqual(fields['top_seat_id'], fields['project_id'])
+                    fields['top_seat_id'] = fields['project_id']
+                    return write_identities(conn, **fields)
+
+                def unexpected(conn, project_id, relay, *, marked_at_ms):
+                    write_relay(conn, project_id, relay, marked_at_ms=marked_at_ms)
+                    raise RuntimeError('unexpected fixture failure after a real relay step')
+
+                if case == 'answer':
+                    with mock.patch.object(imports, 'import_relay_step', side_effect=unfiltered):
+                        report = migrate.import_staging(root, turns, job_id)
+                    self.assertEqual(report.answers_listed(), [(2, 'relays/denied.md', 'not-received')])
+                    self.assertIn(
+                        'import refused: the import answers must name earlier relays of this project '
+                        'that the sender holds and has opened, each once and none its parent',
+                        report.unresolved(),
+                    )
+                elif case == 'identity':
+                    with mock.patch.object(identity_import, 'import_identities_step', side_effect=wrong_top):
+                        report = migrate.import_staging(root, turns, job_id)
+                    self.assertIn(f"top_seat_mismatch: {copied['project_id']}", report.unresolved())
+                else:
+                    with mock.patch.object(imports, 'import_relay_step', side_effect=unexpected):
+                        with self.assertRaisesRegex(RuntimeError, '^unexpected fixture failure after a real relay step$'):
+                            migrate.import_staging(root, turns, job_id)
+
+                attempt = self._assert_copy_retained_for_import(root, job_id, copied)
+                self.assertEqual(source_snapshot(legacy), original)
+                self.assertEqual(source_snapshot(job / 'source'), committed)
+                recovered = migrate.import_staging(root, turns, job_id)
+                phase, prepared = self.checkpoint(root, job_id)
+                self.assertEqual(phase, 'import')
+                self.assertEqual(prepared['import_attempt'], attempt)
+                self.assertEqual((recovered.store_id, recovered.project_id),
+                                 (attempt['store_id'], attempt['project_id']))
+                self.assertEqual(source_snapshot(legacy), original)
+                self.assertEqual(source_snapshot(job / 'source'), committed)
+
+    def test_import_copied_receipt_mismatch_stops(self):
+        row = ('parent', 'fixture.planner', 'fixture.implementer', ('operator',), ())
+        migrate, root, turns, legacy, job_id = self._copied_import_fixture('receipt-mismatch', (row,))
+        checkpoint = self.checkpoint(root, job_id)
+        job = self.job_path(root, job_id)
+        receipt = job / 'source' / '0' / 'rendered-receipt.json'
+        original = source_snapshot(legacy)
+        receipt.write_bytes(receipt.read_bytes() + b' ')
+        damaged = source_snapshot(job / 'source')
+        with self.assertRaises(migrate.CopiedSourceError) as failure:
+            migrate.import_staging(root, turns, job_id)
+        error = failure.exception
+        self.assertEqual((error.reason, error.job_id, error.root_index, error.path),
+                         ('copy-input-invalid', job_id, 0, receipt.name))
+        self.assertIn(f'copy receipt digest differs from checkpoint: {receipt}', str(error))
+        self.assertEqual(self.checkpoint(root, job_id), checkpoint)
+        self.assertFalse((job / 'staging').exists())
+        self.assertEqual(source_snapshot(legacy), original)
+        self.assertEqual(source_snapshot(job / 'source'), damaged)
+
+    def test_import_batch_restart_uses_fixed_inputs(self):
+        import json
+
+        from relay_engine import imports
+
+        planner, implementer = 'fixture.planner', 'fixture.implementer'
+        rows = (
+            ('first', planner, implementer, ('operator',), ()),
+            ('second', implementer, planner, ('operator',), ('first',)),
+        )
+        migrate, root, turns, legacy, job_id = self._copied_import_fixture('restart-batches', rows)
+        _, copied = self.checkpoint(root, job_id)
+        job = self.job_path(root, job_id)
+        ledger = job / 'staging' / 'ledger.sqlite3'
+        original = source_snapshot(legacy)
+        committed = source_snapshot(job / 'source')
+        marked = copied['marked_at_ms']
+        write_relay = imports.import_relay_step
+
+        def read_rows(db, query):
+            with closing(db.execute(query)) as cursor:
+                return cursor.fetchall()
+
+        def provenance(db):
+            return read_rows(db, 'SELECT r.subject,p.root_uuid,p.seq,p.rendered_path,p.source_sha256,'
+                             'p.delivery_marked_at FROM imported_relays p '
+                             'JOIN relays r ON r.id=p.relay_id ORDER BY p.seq')
+
+        def semantic_digest(path):
+            with closing(sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+                relays = read_rows(db, 'SELECT r.handle,r.subject,p.subject,r.project_id,r.created_at,'
+                                   'r.body_sha256,r.header_bytes,r.sender_role,hex(b.body) FROM relays r '
+                                   'LEFT JOIN relays p ON p.id=r.parent_id '
+                                   'JOIN bodies b ON b.relay_id=r.id ORDER BY r.handle')
+                recipients = read_rows(
+                    db, 'SELECT r.subject,c.role,s.role,c.special,c.delivered_at,c.opened_at '
+                    'FROM recipients c JOIN relays r ON r.id=c.relay_id '
+                    'LEFT JOIN seats s ON s.id=c.seat_id ORDER BY r.handle,c.role',
+                )
+                source_rows = provenance(db)
+            self.assertEqual([(row[1], row[2], row[3]) for row in relays],
+                             [('first', None, copied['project_id']),
+                              ('second', 'first', copied['project_id'])])
+            self.assertEqual([(row[0], row[1], row[2], row[3], row[5]) for row in source_rows], [
+                ('first', ROOT_ID, 1, 'relays/first.md', marked),
+                ('second', ROOT_ID, 2, 'relays/second.md', marked),
+            ])
+            self.assertEqual({opened for _, _, _, _, _, opened in recipients}, {marked})
+            self.assertEqual({delivered for _, role, _, _, delivered, _ in recipients if role == 'to'},
+                             {marked})
+            value = json.dumps((relays, recipients, source_rows), separators=(',', ':')).encode()
+            return hashlib.sha256(value).hexdigest()
+
+        def stop_in_second_batch(conn, project_id, relay, *, marked_at_ms):
+            if relay.subject == 'second':
+                # A separate connection sees only data already committed by the writer.
+                with closing(sqlite3.connect(ledger.as_uri() + '?mode=ro', uri=True)) as db:
+                    self.assertEqual(read_rows(db, 'SELECT subject FROM relays'), [('first',)])
+                    self.assertEqual([(row[0], row[2], row[5]) for row in provenance(db)],
+                                     [('first', 1, marked)])
+                raise RuntimeError('stop after the first committed batch')
+            return write_relay(conn, project_id, relay, marked_at_ms=marked_at_ms)
+
+        expected = []
+
+        def capture_before_prepare(path):
+            self.assertEqual(path, ledger)
+            expected.append(semantic_digest(path))
+            raise RuntimeError('stop after both committed batches and before preparation')
+
+        with mock.patch.object(migrate, '_IMPORT_BATCH_SIZE', 1):
+            with mock.patch.object(imports, 'import_relay_step', side_effect=stop_in_second_batch):
+                with self.assertRaisesRegex(RuntimeError, '^stop after the first committed batch$'):
+                    migrate.import_staging(root, turns, job_id)
+            attempt = self._assert_copy_retained_for_import(root, job_id, copied)
+            self.assertEqual(source_snapshot(job / 'source'), committed)
+
+            with mock.patch.object(store_steps, 'prepare_database', side_effect=capture_before_prepare):
+                with self.assertRaisesRegex(RuntimeError, '^stop after both committed batches'):
+                    migrate.import_staging(root, turns, job_id)
+            self.assertEqual(self._assert_copy_retained_for_import(root, job_id, copied), attempt)
+            self.assertEqual(len(expected), 1)
+
+            earlier_ms = marked - 86_400_000
+            with mock.patch.object(time, 'time', return_value=earlier_ms / 1_000), mock.patch.object(
+                    time, 'time_ns', return_value=earlier_ms * 1_000_000):
+                self.assertLess(time.time_ns() // 1_000_000, marked)
+                report = migrate.import_staging(root, turns, job_id)
+
+        self.assertEqual(report.unresolved(), ['team needs finished-or-running choice: fixture'])
+        self.assertEqual((report.store_id, report.project_id), (attempt['store_id'], attempt['project_id']))
+        self.assertEqual(semantic_digest(ledger), expected[0])
+        receipt = {'size': ledger.stat().st_size, 'sha256': hashlib.sha256(ledger.read_bytes()).hexdigest()}
+        self.assertEqual(self.checkpoint(root, job_id),
+                         ('import', {**copied, 'import_attempt': attempt, 'prepared': receipt}))
+        self.assertEqual(set(ledger.parent.iterdir()), {ledger})
+        self.assertEqual(source_snapshot(legacy), original)
+        self.assertEqual(source_snapshot(job / 'source'), committed)
+
     def test_copy_never_opens_in_place(self):
         root, turns, legacy = self.fixture('raw-copy')
         original = source_snapshot(legacy)
