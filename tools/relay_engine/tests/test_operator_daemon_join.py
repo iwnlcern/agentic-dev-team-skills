@@ -1,5 +1,7 @@
 """Exercise the checked launcher, guarded bridge and real Store on one scratch project."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import fcntl
 from http.client import HTTPConnection
 import importlib.util
 import json
@@ -9,12 +11,14 @@ import signal
 import socket as network
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from relay_engine import api_client, api_operator_bridge, jcs, lifecycle_paths, queries, store_layout
+from relay_engine import api_client, api_operator_bridge, api_writer, jcs, lifecycle_paths, queries, store_layout
+from relay_engine.operator_queue import notifier, records
 from relay_engine.tests import test_api_service as service_fixture
 from relay_engine.tests.test_api_service import P
 from relay_engine.tests.test_submit import draft
@@ -314,19 +318,8 @@ const { chromium } = require(process.argv[1]);
         installed = checker.install_tier('adt-orchestrator', self.base / 'installed')
 
         program = self.base / 'terminal-notifier'
-        held_message = '\\Held local decision'
-        program.write_text(f"""#!{sys.executable}
-import json, os, pathlib, signal, sys, time
-held = sys.argv[-1] == {held_message!r}
-if held:
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-path = pathlib.Path({str(self.base)!r}) / ('held' if held else 'sent')
-with path.with_suffix('.pending').open('w') as stream:
-    json.dump({{'pid': os.getpid(), 'argv': sys.argv[1:]}}, stream)
-path.with_suffix('.pending').replace(path)
-if held:
-    time.sleep(15)
-""")
+        marker = self.base / 'notifier-started'
+        program.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n')
         program.chmod(0o700)
 
         def submit_question(peer, subject):
@@ -337,14 +330,20 @@ if held:
             self.assertIn('result', reply)
             return reply['result']['relay_id']
 
-        def outbox(relay_id, *, stopped=False):
+        with store_layout.open_catalogue(self.root) as catalogue:
+            catalogue.execute('INSERT INTO queue_notifier_health VALUES (1,2,7)').close()
+        catalogue.close()
+
+        def snapshot(relay_id, *, stopped=False):
             catalogue = (store_layout.open_catalogue(self.root, kind='isolated') if stopped else
                          store_layout.open_catalogue_readonly(self.root))
             try:
-                return catalogue.execute(
-                    'SELECT n.state,n.attempts,n.last_error_class,n.revision FROM queue_notifications n '
-                    'JOIN queue_items i ON i.item_id=n.item_id WHERE i.source_relay_id=?',
-                    (relay_id,)).fetchall()
+                row = records._one(catalogue,
+                    'SELECT n.item_id,n.revision,n.state,n.attempts,n.next_attempt_at_ms,n.last_error_class '
+                    'FROM queue_notifications n JOIN queue_items i ON i.item_id=n.item_id '
+                    'WHERE i.source_relay_id=?', (relay_id,))
+                health = records._one(catalogue, 'SELECT * FROM queue_notifier_health')
+                return tuple(row) if row is not None else None, tuple(health)
             finally:
                 catalogue.close()
 
@@ -362,48 +361,101 @@ if held:
                 origin = data['bridge_origin']
                 peer = self.connect(data)
                 self.sign_in(peer)
-                sent_id = submit_question(peer, 'Local decision')
-                sent = self.base / 'sent'
-                self.wait_until(sent.is_file)
-                sent_record = json.loads(sent.read_bytes())
-                self.assertEqual(sent_record['argv'],
-                                 ['-title', '\\service: platform.planner', '-message', '\\Local decision'])
-                delivered_row = ('delivered', 0, None, 1)
-                self.wait_until(lambda: outbox(sent_id) == [delivered_row])
+                question = submit_question(peer, 'Local decision')
+                second = submit_question(peer, 'Another local decision')
+                questions = (question, second)
+                for relay_id in questions:
+                    self.wait_until(lambda: snapshot(relay_id)[0])
+                before = [snapshot(relay_id) for relay_id in questions]
+                for row, _ in before:
+                    self.assertEqual(row[1:4], (1, 'pending', 0))
+                    self.assertIsNone(row[-1])
+                self.assertFalse(marker.exists())
+                time.sleep(1.2)
+                self.assertEqual([snapshot(relay_id) for relay_id in questions], before)
+                discovery = self.request(origin, '/api/connect?min_protocol=3.0&max_protocol=3.0')
+                self.assertEqual(discovery[0], 200)
+                self.assertEqual(json.loads(discovery[2])['result']['schema_digest'], data['schema_digest'])
+                launch = subprocess.check_output(
+                    [sys.executable, str(installed / 'tools' / 'adt'),
+                     'console', 'open', '--ready', str(ready), '--print'],
+                    env=environment, text=True, timeout=3).strip().split('#launch=', 1)[1]
+                headers = {'Origin': origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json'}
+                status, session_headers, body = self.request(origin, '/api/session', payload={'launch': launch},
+                                                             headers=headers)
+                self.assertEqual(status, 200)
+                signed = {**headers, 'Cookie': session_headers['Set-Cookie'].split(';', 1)[0],
+                          'X-ADT-CSRF': json.loads(body)['csrf_token']}
+                status, _, body = self.request(
+                    origin, '/api/read/queue.list?scope=machine&state=pending&kind=question&page_size=100',
+                    headers=signed)
+                self.assertEqual(status, 200, body)
+                self.assertEqual({item['source_relay_id'] for item in json.loads(body)['result']['items']},
+                                 set(questions))
 
-                held_id = submit_question(peer, 'Held local decision')
-                held = self.base / 'held'
-                self.wait_until(held.is_file)
-                held_record = json.loads(held.read_bytes())
-                self.assertEqual(held_record['argv'],
-                                 ['-title', '\\service: platform.planner', '-message', held_message])
-                os.kill(held_record['pid'], 0)
-                self.assertEqual(self.request(origin, '/')[0], 200)
-                self.connect(data)
-                pending_row = ('pending', 0, None, 1)
-                self.assertEqual(outbox(held_id), [pending_row])
-
-                started = time.monotonic()
-                daemon.send_signal(signal.SIGTERM)
-                _, stderr = daemon.communicate(timeout=3)
-                elapsed = time.monotonic() - started
-                self.assertEqual(daemon.returncode, 0, stderr)
-                self.assertLess(elapsed, 3)
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(held_record['pid'], 0)
+                lock = self.root / 'api-service.lock'
+                with lock.open('r+b') as witness:
+                    held = os.fstat(witness.fileno())
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(witness, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    started = time.monotonic()
+                    daemon.send_signal(signal.SIGTERM)
+                    _, stderr = daemon.communicate(timeout=3)
+                    elapsed = time.monotonic() - started
+                    self.assertEqual(daemon.returncode, 0, stderr)
+                    self.assertLess(elapsed, 2)
+                    fcntl.flock(witness, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    after = lock.stat()
+                    self.assertEqual((after.st_dev, after.st_ino), (held.st_dev, held.st_ino))
+                self.assertEqual(stderr.splitlines().count(
+                    b'adt engine serve: notifier issue capability unavailable'), 1, stderr)
+                self.assertFalse(marker.exists())
                 self.assertFalse(ready.parent.exists())
                 with self.assertRaises(OSError):
                     self.request(origin, '/')
-                self.assertEqual(outbox(sent_id, stopped=True), [delivered_row])
-                self.assertEqual(outbox(held_id, stopped=True), [pending_row])
-                print(json.dumps({'sent': sent_record, 'held': held_record,
-                                  'delivered': delivered_row, 'cancelled': pending_row,
-                                  'term_seconds': round(elapsed, 3), 'owned_cleanup': True}))
+                self.assertEqual([snapshot(relay_id, stopped=True) for relay_id in questions], before)
+                print(json.dumps({'installed_refusal': True, 'zero_issue': True, 'guarded_request': True,
+                                  'outbox_and_health_unchanged': True, 'status': daemon.returncode,
+                                  'term_seconds': round(elapsed, 3), 'same_inode_return': True}))
             finally:
                 if daemon.poll() is None:
-                    daemon.terminate()
-                    try:
-                        daemon.communicate(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        daemon.kill()
-                        daemon.communicate(timeout=3)
+                    daemon.kill()
+                    daemon.communicate(timeout=3)
+
+        for (relay_id, (row, _)), phase in zip(zip(questions, before), ('finishing', 'commit_permitted')):
+            with self.subTest(receipt_phase=phase):
+                owner = self.m.ApiService(str(self.root), P, clock=lambda: time.time_ns() // 1000000,
+                                          bridge_port=0)
+                owner.arm_foreground()
+                try:
+                    self.assertIsNotNone(owner.start())
+                    note = notifier.Notification(row[0], row[1], 'synthetic', 'synthetic')
+                    parked, release = threading.Event(), threading.Event()
+
+                    def park(current_phase):
+                        if current_phase == phase:
+                            parked.set()
+                            release.wait(3)
+
+                    owner.writer._phase_hook = park
+                    with ThreadPoolExecutor(1) as pool:
+                        receipt = pool.submit(owner._queue.port.catalogue,
+                                              lambda conn: notifier.notify_delivered(conn, note, owner.clock()))
+                        try:
+                            self.assertTrue(parked.wait(1))
+                            owner._foreground.publish_stop(time.monotonic() - 1.5)
+                            if phase == 'finishing':
+                                with self.assertRaisesRegex(records.JobUnavailable, 'stopped'):
+                                    receipt.result(1)
+                            else:
+                                with self.assertRaisesRegex(api_writer.TurnIndeterminate, 'stop_commit_unknown'):
+                                    receipt.result(1)
+                        finally:
+                            release.set()
+                finally:
+                    self.assertEqual(owner.stop(), 0)
+                durable, _ = snapshot(relay_id, stopped=True)
+                expected = 'pending' if phase == 'finishing' else 'delivered'
+                self.assertEqual(durable[:3], (row[0], row[1], expected))
+                print(json.dumps({'component_receipt_phase': phase, 'durable_state': expected,
+                                  'revision': row[1], 'retired': True}))

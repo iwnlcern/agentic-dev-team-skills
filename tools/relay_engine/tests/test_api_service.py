@@ -2,20 +2,25 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+import fcntl
 import itertools
 import json
 import os
+import select
 from pathlib import Path
 import signal
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 from relay_engine import api_compose, api_definitions as d, api_keys, api_platform
-from relay_engine import api_protocol as p, api_writer, jcs, store_layout, version
+from relay_engine import api_protocol as p, api_writer, jcs, store_layout, store_steps, version
 from relay_engine.tests.test_api_sessions import replace_occupant_for_test
 from relay_engine.tests.test_submit import draft
 
@@ -150,6 +155,209 @@ class ApiServiceTests(unittest.TestCase):
             return conn.execute(sql, args).fetchall()
         finally:
             conn.close()
+
+    def test_foreground_stop_wins_parked_first_ready(self):
+        self.service.bridge_port = 0
+        self.service.arm_foreground()
+        link = os.link
+
+        def stop_before_ack(source, target, **kwargs):
+            os.kill(os.getpid(), signal.SIGTERM)
+            link(source, target, **kwargs)
+
+        with patch.object(os, 'link', side_effect=stop_before_ack):
+            self.assertIsNone(self.service.start())
+        ready = Path(self.service.ready_path)
+        self.assertTrue(self.service.is_stopping())
+        self.assertEqual(self.service.stop(), 0)
+        self.assertFalse(ready.parent.exists())
+
+    def test_foreground_watchdog_exits_with_original_work_parked(self):
+        for phase in ('cleanup', 'report', 'accept'):
+            with self.subTest(phase=phase):
+                self.check_hard_stop_with_parked_owner(phase)
+
+    def check_hard_stop_with_parked_owner(self, phase):
+        tools = Path(__file__).resolve().parents[2]
+        # Keep the original process alive with the same actual flock, then park
+        # ordinary cleanup. The observer must own the native exit independently.
+        script = f"""
+import os, threading
+from pathlib import Path
+from relay_engine.api_service import ApiService
+
+marker = Path({str(self.base)!r}) / {phase!r}
+
+def park(*_args):
+    marker.write_text("parked")
+    threading.Event().wait()
+
+service = ApiService({str(self.root)!r}, {P!r}, clock=lambda: 1, stop_report=park)
+service.arm_foreground()
+service.start()
+if {phase!r} == 'accept':
+    class ParkedAccept:
+        listener = service._listener
+
+        def accept(self):
+            endpoint = self.listener.accept()
+            park()
+            return endpoint
+
+    service._listener = ParkedAccept()
+print(service.socket_path, flush=True)
+service.serve_forever()
+if {phase!r} == 'cleanup':
+    service._stop_owned = park
+else:
+    def refuse(_attempt):
+        raise OSError('fixture outstanding')
+    service._stop_owned = refuse
+service.stop()
+"""
+        environment = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
+        lock = self.root / 'api-service.lock'
+        with (subprocess.Popen([sys.executable, '-c', script], env=environment,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child,
+              socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer):
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 3)[0])
+                endpoint = child.stdout.readline().decode().strip()
+                self.assertTrue(endpoint)
+                if phase == 'accept':
+                    peer.connect(endpoint)
+                    deadline = time.monotonic() + 2
+                    while not (self.base / phase).exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                with lock.open('rb') as observer:
+                    original_inode = os.fstat(observer.fileno()).st_ino
+                    started = time.monotonic()
+                    child.terminate()
+                    deadline = started + 2
+                    while not (self.base / phase).exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(observer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _, error = child.communicate(timeout=5)
+                    elapsed = time.monotonic() - started
+                    self.assertEqual(child.returncode, 75, error)
+                    self.assertLess(elapsed, 5)
+                    self.assertEqual(original_inode, lock.stat().st_ino)
+                    fcntl.flock(observer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if phase == 'accept':
+                        peer.settimeout(1)
+                        self.assertEqual(peer.recv(1), b'')
+                    print(json.dumps({'parked': phase, 'hard_stop_seconds': round(elapsed, 3),
+                                      'status': child.returncode, 'same_inode_kernel_return': True}))
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate(timeout=3)
+
+    def test_declared_turn_stop_distinguishes_body_and_commit_permit(self):
+        for parked_phase, expected_fault in (('finishing', 'stop_unwritten'),
+                                              ('commit_permitted', 'stop_commit_unknown')):
+            with self.subTest(phase=parked_phase):
+                service = self.m.ApiService(str(self.root), P, clock=lambda: 1)
+                service.arm_foreground()
+                service.start()
+                parked, release = threading.Event(), threading.Event()
+
+                def pause(phase):
+                    if phase == parked_phase:
+                        parked.set()
+                        release.wait(3)
+
+                service.writer._phase_hook = pause
+                original = 22 if parked_phase == 'finishing' else 33
+
+                def body(connections):
+                    connections['catalogue'].execute(
+                        'UPDATE catalogue_identity SET created_at=?', (original,)).close()
+                    return api_writer.JobOutcome(True, 'committed')
+
+                job = api_writer.DeclaredJob(store_steps.Declared('written', {}), body)
+                try:
+                    with ThreadPoolExecutor(1) as pool:
+                        turn = pool.submit(service.writer.submit_declared, job)
+                        try:
+                            self.assertTrue(parked.wait(1))
+                            service._foreground.publish_stop(time.monotonic() - 1.5)
+                            outcome = turn.result(1)
+                            self.assertEqual(outcome.fault, expected_fault)
+                            self.assertEqual(outcome.indeterminate, parked_phase == 'commit_permitted')
+                        finally:
+                            release.set()
+                finally:
+                    self.assertEqual(service.stop(), 0)
+                catalogue = store_layout.open_catalogue(self.root)
+                try:
+                    value, = catalogue.execute('SELECT created_at FROM catalogue_identity').fetchone()
+                    self.assertEqual(value == original, parked_phase == 'commit_permitted')
+                finally:
+                    catalogue.close()
+
+    def test_stop_retains_a_reader_parked_before_open(self):
+        self.service.arm_foreground()
+        self.assertIsNotNone(self.service.start())
+        writer = self.service.writer
+        parked, release = threading.Event(), threading.Event()
+        original = store_layout.open_ledger_readonly
+        used = []
+
+        def park(*args):
+            parked.set()
+            release.wait(3)
+            return original(*args)
+
+        with patch.object(store_layout, 'open_ledger_readonly', side_effect=park):
+            with ThreadPoolExecutor(1) as pool:
+                reading = pool.submit(writer.read, P, used.append)
+                try:
+                    self.assertTrue(parked.wait(1))
+                    attempt = self.service._foreground.publish_stop(time.monotonic())
+                    self.assertIn(None, writer._readers.values())
+                    self.assertTrue(self.service._foreground.join_fencer(attempt))
+                    self.assertFalse(reading.done())
+                finally:
+                    release.set()
+                with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                    reading.result(1)
+        self.assertEqual(used, [])
+        self.assertEqual(self.service.stop(), 0)
+
+    def test_admitted_callee_remains_original_owned_after_waiter_cut(self):
+        self.service.arm_foreground()
+        self.assertIsNotNone(self.service.start())
+        writer = self.service.writer
+        parked, release = threading.Event(), threading.Event()
+
+        class Callee:
+            files = frozenset({writer.ledger_file(P)})
+
+            def run(self, conn):
+                parked.set()
+                release.wait(3)
+                return api_writer.JobOutcome(True, 'late')
+
+        with ThreadPoolExecutor(1) as pool:
+            running = pool.submit(writer.submit_callee, P, Callee())
+            try:
+                self.assertTrue(parked.wait(1))
+                attempt = self.service._foreground.publish_stop(time.monotonic() - 1.5)
+                outcome = running.result(1)
+                self.assertTrue(outcome.indeterminate)
+                self.assertEqual(outcome.fault, 'stop_commit_unknown')
+                self.assertIsNotNone(writer._active_request)
+                with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                    writer.submit_callee(P, Callee())
+                self.assertTrue(self.service._foreground.join_fencer(attempt))
+            finally:
+                release.set()
+        self.assertEqual(self.service.stop(), 0)
+        self.assertIsNone(writer._active_request)
 
     def test_start_writes_ready_file_after_listening(self):
         original = os.replace

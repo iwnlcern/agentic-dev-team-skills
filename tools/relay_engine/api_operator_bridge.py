@@ -17,6 +17,7 @@ import secrets
 import socket
 import stat
 import sys
+import time
 from threading import Condition, Event, Lock, Thread
 from typing import TYPE_CHECKING, Protocol
 
@@ -370,6 +371,7 @@ class OperatorBridge:
         self._server: _Server | None = None
         self._thread: Thread | None = None
         self._launch_runtime_dir: os.PathLike[str] | str | None = None
+        self._admission: Callable[[], bool] = lambda: True
 
     def start(self) -> str:
         with self._lifecycle:
@@ -402,17 +404,20 @@ class OperatorBridge:
             self._thread = thread
             return server.context.advertised_origin
 
-    def stop(self) -> None:
+    def stop(self, *, deadline=None) -> bool:
         with self._lifecycle:
             if self._server is None:
-                return
+                return True
             server = self._server
-            server.stop()
-            self._thread.join()
+            settled = server.stop(deadline)
+            self._thread.join(None if deadline is None else max(0, deadline - time.monotonic()))
+            if deadline is not None and (not settled or self._thread.is_alive()):
+                return False
             self._server = None
             self._thread = None
             if server.launch_page is not None:
                 server.launch_page.close()
+            return True
 
     def consume_launch(self, value: str) -> bool:
         server = self._server
@@ -433,7 +438,8 @@ def _new_operator_bridge(*, port: int, run_id: str, store_id: str, clock_ms: Cal
                          runtime_dir: os.PathLike[str] | str | None = None,
                          page_registry: FrozenApiRegistry | None = None,
                          page_state: Callable[[], ConnectionState] | None = None,
-                         drain_seconds: float | None = None) -> OperatorBridge:
+                         drain_seconds: float | None = None,
+                         admission: Callable[[], bool] | None = None) -> OperatorBridge:
     bridge = OperatorBridge(port=port, run_id=run_id, store_id=store_id, clock_ms=clock_ms,
                             dispatch=dispatch, supervisor_post=supervisor_post)
     bridge._open_discovery_backend = open_backend
@@ -441,6 +447,8 @@ def _new_operator_bridge(*, port: int, run_id: str, store_id: str, clock_ms: Cal
     bridge._page_registry = page_registry
     bridge._page_state = page_state
     bridge._drain_seconds = drain_seconds
+    if admission is not None:
+        bridge._admission = admission
     return bridge
 
 
@@ -463,6 +471,7 @@ class _Server(ThreadingHTTPServer):
         self._refresh_thread: Thread | None = None
         self.connections = Condition()
         self.active: dict[socket.socket, int] = {}
+        self._failed_closes = set()
         self.handling: set[socket.socket] = set()
         self.closing = False
         super().__init__(('127.0.0.1', bridge._port), _RequestHandler)
@@ -515,7 +524,7 @@ class _Server(ThreadingHTTPServer):
 
     def process_request(self, request, client_address):
         with self.connections:
-            accepted = not self.closing and len(self.active) < _CONNECTIONS
+            accepted = not self.closing and self.bridge._admission() and len(self.active) < _CONNECTIONS
             if accepted:
                 self.active[request] = self.bridge._clock_ms() + _REQUEST_MS
                 self.connections.notify_all()
@@ -534,6 +543,14 @@ class _Server(ThreadingHTTPServer):
         finally:
             self._retire(request)
 
+    def close_request(self, request):
+        try:
+            super().close_request(request)
+        except OSError:
+            with self.connections:
+                self._failed_closes.add(request)
+            raise
+
     def _retire(self, request):
         with self.connections:
             self.active.pop(request, None)
@@ -542,7 +559,7 @@ class _Server(ThreadingHTTPServer):
 
     def begin_handler(self, request):
         with self.connections:
-            if self.closing:
+            if self.closing or not self.bridge._admission():
                 return False
             self.handling.add(request)
             return True
@@ -557,7 +574,7 @@ class _Server(ThreadingHTTPServer):
         except OSError:
             pass
 
-    def stop(self):
+    def stop(self, deadline=None):
         with self.connections:
             self.closing = True
             for request in self.active.keys() - self.handling:
@@ -566,12 +583,24 @@ class _Server(ThreadingHTTPServer):
         self.server_close()
         with self.connections:
             drain = self.bridge._drain_seconds
-            self.connections.wait_for(lambda: not self.handling, BRIDGE_DRAIN_S if drain is None else drain)
+            drain = BRIDGE_DRAIN_S if drain is None else drain
+            if deadline is not None:
+                drain = max(0, min(drain, deadline - time.monotonic()))
+            self.connections.wait_for(lambda: not self.handling, drain)
             for request in self.active:
                 self._interrupt(request)
+            if deadline is not None:
+                self.connections.wait_for(lambda: not self.active, max(0, deadline - time.monotonic()))
+                if self.active or self._failed_closes:
+                    return False
+        if deadline is not None and self._refresh_thread is not None:
+            self._refresh_thread.join(max(0, deadline - time.monotonic()))
+            if self._refresh_thread.is_alive():
+                return False
         with self._sessions_lock:
             self._sessions_retired = True
             self.sessions.clear()
+        return True
 
 
 class _RequestHandler(BaseHTTPRequestHandler):

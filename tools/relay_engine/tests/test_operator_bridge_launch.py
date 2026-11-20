@@ -1,5 +1,6 @@
 """Private launch page and the actual adt Console parser."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import io
 import json
@@ -10,15 +11,19 @@ import runpy
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
-from threading import get_ident
+import time
+from threading import Event, get_ident
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from relay_engine import (
     adt_cli, api_client, api_operator_bridge, lifecycle_paths, lifecycle_state, store_layout, submit,
 )
+
+from relay_engine.operator_queue.notifier import DeliveryCancelled, NotifierIssueUnavailable
 
 
 _PREFIX = b'<!doctype html><meta name="referrer" content="no-referrer"><meta http-equiv="refresh" content="0;url='
@@ -46,14 +51,14 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / 'terminal-notifier'
             path.touch()
-            deliver = launcher['make_deliver'](str(path), stopping=lambda: False, popen=popen)
+            deliver = launcher['make_deliver'](str(path), stopping=lambda: False, issue=popen)
             for name, executable in (
                 ('osascript', '/usr/bin/osascript'), ('notify-send', '/usr/bin/notify-send'),
                 ('terminal-notifier', str(path)),
             ):
                 suffix = ['--', r'\literal argument']
                 deliver([name, *suffix])
-                popen.assert_called_with([executable, *suffix], stdin=subprocess.DEVNULL,
+                popen.assert_called_with([executable, *suffix], expires_at=ANY, stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             popen.reset_mock()
             other = path.with_name('other')
@@ -99,6 +104,86 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
         secret = address[len(prefix):]
         self.assertTrue(re.fullmatch(rb'[A-Za-z0-9_-]{43}', secret) is not None)
         return contents, address.decode('ascii'), secret.decode('ascii')
+
+    def test_notifier_unavailable_or_expired_before_fixture_issue(self):
+        launcher = load_launcher()
+        stopping = Mock(return_value=False)
+        with self.assertRaises(NotifierIssueUnavailable):
+            launcher['make_deliver'](None, stopping=stopping)(['notify-send'])
+        stopping.assert_not_called()
+        issue = Mock()
+        offered, release = Event(), Event()
+
+        def fixture_issuer(argv, *, expires_at, **kwargs):
+            offered.set()
+            release.wait(5)
+            if time.monotonic() >= expires_at:
+                raise NotifierIssueUnavailable()
+            return issue(argv, **kwargs)
+
+        deliver = launcher['make_deliver'](None, stopping=stopping, issue=fixture_issuer)
+        with ThreadPoolExecutor(1) as pool:
+            receipt = pool.submit(deliver, ['notify-send'])
+            try:
+                self.assertTrue(offered.wait(1))
+                # The fixture backend reads no STOP flag across the issue deadline.
+                time.sleep(3.05)
+                self.assertFalse(receipt.done())
+            finally:
+                release.set()
+            with self.assertRaises(NotifierIssueUnavailable):
+                receipt.result(1)
+        issue.assert_not_called()
+
+    def test_notifier_fixture_parent_owns_child_with_delayed_issue_return(self):
+        launcher = load_launcher()
+        issued, release, stopped = Event(), Event(), Event()
+        children = []
+
+        def fixture_issuer(_argv, *, expires_at, **kwargs):
+            self.assertLess(time.monotonic(), expires_at)
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)
+            children.append(child)
+            issued.set()
+            release.wait(8)
+            return child
+
+        deliver = launcher['make_deliver'](None, stopping=stopped.is_set, issue=fixture_issuer)
+        foreground = subprocess.Popen([sys.executable, '-c', 'import threading; threading.Event().wait()'])
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                result = pool.submit(deliver, ['notify-send'])
+                try:
+                    self.assertTrue(issued.wait(1))
+                    self.assertIsNone(children[0].poll())
+                    started = time.monotonic()
+                    stopped.set()
+                    foreground.terminate()
+                    foreground.wait(timeout=2)
+                    # Park the native return beyond the original foreground budget.
+                    time.sleep(max(0, started + 4.05 - time.monotonic()))
+                    self.assertIsNone(children[0].poll())
+                    self.assertFalse(result.done())
+                finally:
+                    release.set()
+                with self.assertRaises(DeliveryCancelled):
+                    result.result(2)
+            child, = children
+            self.assertIsNotNone(child.returncode)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(child.pid, os.WNOHANG)
+            self.assertGreater(time.monotonic() - started, 4)
+            print(json.dumps({'inert_child_pid': child.pid, 'parent_reaped': True,
+                              'fixture_foreground_exited': True, 'return_after_original_H': True}))
+        finally:
+            if foreground.poll() is None:
+                foreground.kill()
+                foreground.wait(timeout=2)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+
 
     def test_launch_once_and_bounded(self):
         self.assertTrue(hasattr(api_operator_bridge.OperatorBridge, 'consume_launch'),

@@ -16,7 +16,9 @@ import os
 import queue
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from types import MappingProxyType
 from typing import Protocol, TypeVar
 
@@ -116,6 +118,7 @@ class _Request:
     result: object = None
     error: BaseException | None = None
     withdrawn: bool = False
+    committing: bool = False
 
 
 def _unavailable(reason, cause):
@@ -133,6 +136,14 @@ class StoreWriter:
         self._phase_hook = phase_hook
         self._queue = queue.Queue()
         self._lock = threading.RLock()
+        self._changed = threading.Condition(self._lock)
+        self._epoch = None
+        self._holder = None
+        self._readers = {}
+        self._failed_closes = []
+        self._requests = {}
+        self._active_request = None
+        self._close_complete = False
         self._local = threading.local()
         self._worker = None
         self._closed = False
@@ -151,9 +162,31 @@ class StoreWriter:
     def runtime_instance_id(self) -> str:
         return self._runtime_instance_id
 
-    def _require_served(self, project_id):
+    def bind_service_owner(self, holder, epoch):
+        self._holder = holder
+        self._epoch = epoch
+
+    def verify_service_owner(self):
+        fd, path, identity = self._holder
+        status = os.fstat(fd)
+        if (status.st_dev, status.st_ino) != identity or status.st_nlink != 1:
+            raise UndeclaredFile()
+        _require_identity(path, identity)
+        with self._lock:
+            for label, binding in self._bindings.items():
+                self._check_binding(label, binding)
+
+    def _stop_attempt(self):
+        return self._epoch.attempt if self._epoch is not None else None
+
+    def _require_running(self):
+        if self._stop_attempt() is not None:
+            raise WriterUnavailable('stopped')
         if self._closed or self._worker is None:
             raise WriterUnavailable('closed')
+
+    def _require_served(self, project_id):
+        self._require_running()
         if project_id not in self._served:
             raise WriterUnavailable('project_not_served')
 
@@ -189,14 +222,52 @@ class StoreWriter:
         finally:
             conn.close()
 
+    @contextmanager
+    def _reader(self, open_connection, check):
+        reader = object()
+        with self._changed:
+            check()
+            self._readers[reader] = None
+        conn = None
+        try:
+            try:
+                conn = open_connection()
+            except store_layout.LayoutFault as error:
+                if error.cause == 'no-writer' and self._stop_attempt() is not None:
+                    raise WriterUnavailable('stopped') from error
+                raise
+            with self._changed:
+                self._readers[reader] = conn
+                check()
+            yield conn
+        finally:
+            try:
+                if conn is not None:
+                    self._close_handle(conn)
+            finally:
+                with self._changed:
+                    del self._readers[reader]
+                    self._changed.notify_all()
+
     def read(self, project_id: str, fn: Callable[[sqlite3.Connection], T]) -> T:
+        if self._epoch is None:
+            with self._lock:
+                self._require_served(project_id)
+            conn = store_layout.open_ledger_readonly(self._root, project_id)
+            try:
+                return fn(conn)
+            finally:
+                conn.close()
         with self._lock:
             self._require_served(project_id)
-        conn = store_layout.open_ledger_readonly(self._root, project_id)
-        try:
+            binding = self._bindings[project_id]
+
+        def check():
+            self._require_served(project_id)
+            self._check_binding(project_id, binding)
+
+        with self._reader(lambda: store_layout.open_ledger_readonly(self._root, project_id), check) as conn:
             return fn(conn)
-        finally:
-            conn.close()
 
     def _file_path(self, label):
         if label == 'catalogue':
@@ -210,8 +281,7 @@ class StoreWriter:
         _require_identity(self._file_path(label), binding.identity)
 
     def _require_catalogue(self):
-        if self._closed or self._worker is None:
-            raise WriterUnavailable('closed')
+        self._require_running()
         if self._catalogue_fault is not None:
             raise _unavailable('catalogue_faulted', self._catalogue_fault)
         return self._bindings['catalogue']
@@ -222,23 +292,24 @@ class StoreWriter:
         with self._lock:
             binding = self._require_catalogue()
             self._check_binding('catalogue', binding)
-        try:
-            conn = store_layout.open_catalogue_readonly(self._root)
-        except store_layout.LayoutFault as error:
-            if error.cause == 'no-writer':
-                raise _unavailable('store_held', error) from error
-            raise
-        try:
-            with self._lock:
-                self._require_catalogue()
-                self._check_binding('catalogue', binding)
+        def open_connection():
+            try:
+                return store_layout.open_catalogue_readonly(self._root)
+            except store_layout.LayoutFault as error:
+                if error.cause == 'no-writer':
+                    raise _unavailable('store_held', error) from error
+                raise
+
+        def check():
+            self._require_catalogue()
+            self._check_binding('catalogue', binding)
+
+        with self._reader(open_connection, check) as conn:
             self._local.active = True
             try:
                 return fn(conn)
             finally:
                 self._local.active = False
-        finally:
-            conn.close()
 
     def _admit_declared(self, job):
         ledgers = dict(job.declared.ledgers)
@@ -259,16 +330,19 @@ class StoreWriter:
 
     def start(self) -> None:
         with self._lock:
+            if self._stop_attempt() is not None:
+                raise WriterUnavailable('stopped')
             if self._closed:
                 raise WriterUnavailable('closed')
             if self._worker is None:
                 self._worker = threading.Thread(target=self._work, name='store-writer')
                 self._worker.start()
-            self._started.wait()
-            if self._start_error is not None:
+        self._started.wait()
+        if self._start_error is not None:
+            with self._lock:
                 self._closed = True
-                self._worker.join()
-                raise self._start_error
+            self._worker.join()
+            raise self._start_error
 
     def _nested(self):
         return (threading.current_thread() is self._worker
@@ -284,13 +358,14 @@ class StoreWriter:
         self._local.active = True
         try:
             with self._lock:
-                if self._closed or self._worker is None:
-                    raise WriterUnavailable('closed')
+                self._require_running()
                 if request.kind in {'job', 'callee'}:
                     self._require_served(request.project_id)
                     self._check_files(request.project_id, request.job)
                 elif request.kind == 'declared':
                     request.bindings = self._admit_declared(request.job)
+                self._require_running()
+                self._requests[id(request)] = request
                 self._queue.put(request)
             try:
                 if request.kind in {'job', 'callee', 'declared'}:
@@ -328,19 +403,103 @@ class StoreWriter:
     def submit_declared(self, job: DeclaredJob) -> JobOutcome:
         return self._call(_Request('declared', job=job))
 
+    def _request_close(self):
+        if not self._closed:
+            self._closed = True
+            if self._worker is not None:
+                request = _Request('close')
+                request.ready.set()
+                self._queue.put(request)
+
     def close(self) -> None:
         if self._nested():
             raise NestedWriterJob()
         with self._lock:
+            self._request_close()
             worker = self._worker
-            if not self._closed:
-                self._closed = True
-                if worker is not None:
-                    request = _Request('close')
-                    request.ready.set()
-                    self._queue.put(request)
         if worker is not None:
             worker.join()
+
+    def _publish_stop_outcome(self, request):
+        if request.done.is_set():
+            return
+        if request.kind in {'job', 'declared', 'callee'}:
+            uncertain = request.committing or request.kind == 'callee'
+            fault = 'stop_commit_unknown' if uncertain else 'stop_unwritten'
+            request.result = JobOutcome(False, None, uncertain, fault)
+        else:
+            request.error = WriterUnavailable('stopped')
+        request.done.set()
+
+    def fence_for_stop(self, attempt):
+        with self._changed:
+            active = self._active_request
+            for request in self._requests.values():
+                if request is not active:
+                    request.withdrawn = True
+                    request.error = WriterUnavailable('stopped')
+                    request.done.set()
+                    request.ready.set()
+            self._request_close()
+            connections = [conn for conn in self._readers.values() if conn is not None]
+            if active is not None and active.kind == 'declared':
+                connections.extend(binding.conn for binding in active.bindings.values())
+            elif active is not None:
+                conn = self._connections.get(active.project_id)
+                if conn is not None:
+                    connections.append(conn)
+
+        interrupt = threading.Thread(target=self._interrupt, args=(connections,),
+                                     name='store-stop-interrupt')
+        interrupt.start()
+        if active is not None:
+            with self._changed:
+                remaining = max(0, attempt.active - time.monotonic())
+                if not self._changed.wait_for(lambda: self._active_request is not active, remaining):
+                    self._publish_stop_outcome(active)
+        interrupt.join(max(0, attempt.work - time.monotonic()))
+        return not interrupt.is_alive()
+
+    @staticmethod
+    def _interrupt(connections):
+        for conn in connections:
+            try:
+                conn.interrupt()
+            except sqlite3.Error:
+                # The original worker may have retired the handle.
+                pass
+
+    def settle_service_stop(self, attempt):
+        if self._stop_attempt() is not attempt:
+            return False
+        worker = self._worker
+        if worker is not None:
+            worker.join(max(0, attempt.work - time.monotonic()))
+            if worker.is_alive() or not (self._close_complete or self._start_error is not None):
+                return False
+        with self._changed:
+            self._changed.wait_for(lambda: not self._readers, max(0, attempt.work - time.monotonic()))
+            return not self._readers and not self._failed_closes
+
+    def _close_handle(self, conn):
+        try:
+            conn.close()
+        except BaseException:
+            with self._lock:
+                self._failed_closes.append(conn)
+            raise
+
+    def _permit_commit(self):
+        with self._lock:
+            sampled = time.monotonic()
+            attempt = self._stop_attempt()
+            if attempt is not None and sampled >= attempt.active:
+                self._publish_stop_outcome(self._active_request)
+                return False
+            self._active_request.committing = True
+        if self._epoch is not None:
+            self._phase('commit_permitted')
+        return True
 
     def _open(self, project_id):
         if project_id in self._rollback_errors:
@@ -357,7 +516,7 @@ class StoreWriter:
                 _require_identity(path, identity)
                 path = os.path.realpath(path)
             except BaseException:
-                conn.close()
+                self._close_handle(conn)
                 raise
             self._connections[project_id] = conn
             with self._lock:
@@ -377,7 +536,7 @@ class StoreWriter:
                 self._bindings.pop(self._active_project, None)
                 self._rollback_errors[self._active_project] = failure
             conn, self._conn = self._connections.pop(self._active_project), None
-            conn.close()
+            self._close_handle(conn)
             try:
                 strings.emit('stderr', 'store-writer-rollback-failed')
             except Exception:
@@ -418,6 +577,9 @@ class StoreWriter:
             return None, self._rollback(original)
         try:
             if outcome.commit:
+                if not self._permit_commit():
+                    failure = self._rollback()
+                    return JobOutcome(False, None, False, 'stop_unwritten'), failure
                 self._conn.execute('COMMIT').close()
             else:
                 failure = self._rollback()
@@ -428,6 +590,8 @@ class StoreWriter:
         if original is not None:
             if self._conn is not None and self._conn.in_transaction:
                 original = self._rollback(original)
+            if self._epoch is not None and self._active_request.committing:
+                return JobOutcome(False, original, True, 'commit_unknown'), None
             return None, original
         return outcome, None
 
@@ -471,7 +635,7 @@ class StoreWriter:
                 self._rollback_errors[label] = failure
                 self._connections.pop(label)
         try:
-            conn.close()
+            self._close_handle(conn)
         except Exception as close_error:
             failure.add_note(f'{label}: connection close failed: {type(close_error).__name__}')
 
@@ -538,13 +702,18 @@ class StoreWriter:
         committed = False
         if original is None and outcome.commit and not outcome.indeterminate:
             try:
-                conns['catalogue'].execute('COMMIT').close()
-                committed = True
+                if self._permit_commit():
+                    conns['catalogue'].execute('COMMIT').close()
+                    committed = True
+                else:
+                    outcome = JobOutcome(False, None, False, 'stop_unwritten')
             except BaseException as error:
                 original = error
 
         failure = self._finish_declared(conns, original, read_label)
         if original is not None:
+            if self._epoch is not None and request.committing:
+                return JobOutcome(False, original, True, 'commit_unknown')
             raise original
         if failure is not None:
             if committed:
@@ -562,7 +731,7 @@ class StoreWriter:
             try:
                 _require_identity(path, identity)
             except BaseException:
-                conn.close()
+                self._close_handle(conn)
                 raise
             self._catalogue = conn
             self._bindings['catalogue'] = _FileBinding(conn, identity)
@@ -574,32 +743,55 @@ class StoreWriter:
         while True:
             request = self._queue.get()
             request.ready.wait()
+            result = error = None
             try:
-                if request.withdrawn:
-                    continue
                 if request.kind == 'close':
-                    for conn in self._connections.values():
-                        conn.close()
-                    self._connections.clear()
-                    if self._catalogue is not None:
-                        self._catalogue.close()
-                    self._catalogue = None
-                    self._conn = None
-                    with self._lock:
-                        self._served.clear()
-                        self._bindings.clear()
+                    self._close_files()
                     return
+                with self._changed:
+                    if request.withdrawn:
+                        continue
+                    if self._stop_attempt() is not None:
+                        request.error = WriterUnavailable('stopped')
+                        continue
+                    self._active_request = request
                 if request.kind == 'open':
                     self._open(request.project_id)
                 elif request.kind == 'declared':
-                    request.result = self._run_declared(request)
+                    result = self._run_declared(request)
                 else:
                     self._active_project = request.project_id
                     self._conn = self._connections.get(request.project_id)
                     run = self._run_callee if request.kind == 'callee' else self._run_job
-                    request.result, request.error = run(request.job)
-            except BaseException as error:
-                request.error = error
+                    result, error = run(request.job)
+            except BaseException as caught:
+                error = caught
+                if request.kind == 'close':
+                    return
             finally:
-                request.done.set()
+                with self._changed:
+                    if self._active_request is request:
+                        attempt = self._stop_attempt()
+                        if attempt is not None and time.monotonic() >= attempt.active:
+                            self._publish_stop_outcome(request)
+                        self._active_request = None
+                    if not request.done.is_set():
+                        if request.error is None:
+                            request.result, request.error = result, error
+                        request.done.set()
+                    self._requests.pop(id(request), None)
+                    self._changed.notify_all()
                 self._queue.task_done()
+
+    def _close_files(self):
+        for project_id, conn in tuple(self._connections.items()):
+            self._close_handle(conn)
+            del self._connections[project_id]
+        if self._catalogue is not None:
+            self._close_handle(self._catalogue)
+        self._catalogue = None
+        self._conn = None
+        with self._lock:
+            self._served.clear()
+            self._bindings.clear()
+            self._close_complete = True

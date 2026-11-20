@@ -44,6 +44,10 @@ class PlatformJobPort:
             if isinstance(outcome.value, BaseException):
                 raise error from outcome.value
             raise error
+        if outcome.fault == 'stop_unwritten':
+            from relay_engine.operator_queue import records
+
+            raise records.JobUnavailable('stopped')
         return outcome.value
 
     def _declared(self, ledgers, fn, labels):

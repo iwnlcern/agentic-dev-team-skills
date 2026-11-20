@@ -29,6 +29,10 @@ class DeliveryCancelled(Exception):
     """Shutdown interrupted a send, leaving its outbox entry eligible to retry."""
 
 
+class NotifierIssueUnavailable(Exception):
+    """No eligible native issue, so the pass must leave outbox and health untouched."""
+
+
 def notification_title(project_name: str | None, actor: str) -> str:
     return f"{project_name if project_name is not None else 'v3'}: {actor}"
 
@@ -122,19 +126,23 @@ def notify_pass(port: JobPort, deliver: Callable[[list[str]], None], now_ms: int
                 notifier: str, limit: int = 5) -> NotifyReport:
     if notifier == 'none':
         return NotifyReport()
-    notes = port.read_catalogue(lambda conn: due_notifications(conn, now_ms, min(5, max(0, limit))))
     delivered = failed = 0
-    for note in notes:
-        argv = notification_argv(note, notifier)
-        try:
-            deliver(argv)
-        except DeliveryCancelled:
-            break
-        except Exception as exc:
-            error_class = type(exc).__name__
-            port.catalogue(lambda conn: notify_failed(conn, note, error_class, now_ms))
-            failed += 1
-        else:
-            port.catalogue(lambda conn: notify_delivered(conn, note, now_ms))
-            delivered += 1
+    try:
+        notes = port.read_catalogue(lambda conn: due_notifications(conn, now_ms, min(5, max(0, limit))))
+        for note in notes:
+            argv = notification_argv(note, notifier)
+            try:
+                deliver(argv)
+            except (DeliveryCancelled, NotifierIssueUnavailable):
+                break
+            except Exception as exc:
+                error_class = type(exc).__name__
+                port.catalogue(lambda conn: notify_failed(conn, note, error_class, now_ms))
+                failed += 1
+            else:
+                port.catalogue(lambda conn: notify_delivered(conn, note, now_ms))
+                delivered += 1
+    except records.JobUnavailable as error:
+        if error.reason != 'stopped':
+            raise
     return NotifyReport(delivered, failed)

@@ -27,7 +27,7 @@ class WindowSession:
 
 
 WindowResolver = Callable[[], WindowSession | None]
-NotifierFactory = Callable[[str | None, Callable[[], bool]], api_service.QueueNotifier]
+NotifierFactory = Callable[[str | None, Callable[[], bool]], api_service.QueueNotifier | None]
 
 
 def _bridge_port(value):
@@ -127,7 +127,8 @@ def _serve_refusal(error, root, project):
 
 
 def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
-         resolver: WindowResolver | None = None, queue_notifier: NotifierFactory | None = None) -> int:
+         resolver: WindowResolver | None = None, queue_notifier: NotifierFactory | None = None,
+         stop_report=None) -> int:
     retry = {}
     try:
         args = _parser(groups).parse_args(list(argv))
@@ -136,16 +137,18 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
         if args.command == 'engine':
             service = api_service.ApiService(args.store_root, args.project_id,
                                              clock=lambda: time.time_ns() // 1000000,
-                                             bridge_port=args.bridge_port)
-            if args.bridge_port is not None and queue_notifier is not None:
-                service.queue_notifier = queue_notifier(args.terminal_notifier, service.is_stopping)
+                                             bridge_port=args.bridge_port, stop_report=stop_report)
+            service.arm_foreground()
             try:
+                if args.bridge_port is not None and queue_notifier is not None:
+                    service.queue_notifier = queue_notifier(args.terminal_notifier, service.is_stopping)
                 try:
                     path = service.start()
                 except (api_service.ServiceStartRefused, store_layout.LayoutFault, version.FingerprintError) as error:
                     return _serve_refusal(error, args.store_root, args.project_id)
-                strings.emit('stdout', 'adt-ready', path=path)
-                service.serve_forever()
+                if path is not None and not service.is_stopping():
+                    strings.emit('stdout', 'adt-ready', path=path)
+                    service.serve_forever()
                 return 0
             finally:
                 service.stop()

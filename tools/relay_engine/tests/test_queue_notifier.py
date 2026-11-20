@@ -91,6 +91,22 @@ class TestQueueNotifier(unittest.TestCase):
         self.conn.close()
         self.conn = store_layout.open_catalogue(self.root)
 
+    def test_issue_refusal_leaves_due_rows_and_health_untouched(self):
+        self.raise_it()
+        self.raise_it()
+        self.conn.execute('INSERT INTO queue_notifier_health VALUES (1,2,7)').close()
+        self.conn.commit()
+
+        def snapshot():
+            return tuple(self.conn.execute('SELECT * FROM ' + table + ' ORDER BY rowid').fetchall()
+                         for table in ('queue_notifications', 'queue_notifier_health'))
+
+        before = snapshot()
+        deliver = mock.Mock(side_effect=notifier.NotifierIssueUnavailable)
+        self.assertEqual(self.run_pass(deliver), notifier.NotifyReport())
+        self.assertEqual(deliver.call_count, 1)
+        self.assertEqual(snapshot(), before)
+
     def test_backup_missed_notice(self):
         with mock.patch.object(api_principals, 'SERVICE_NAMES',
                                (*api_principals.SERVICE_NAMES, 'supervision')):
