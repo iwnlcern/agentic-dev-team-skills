@@ -285,16 +285,21 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
         raise RegistryCompileError('invalid_error')
     types['ApiError'] = d.TypeDef('ApiError', d.TaggedUnion('code', tuple(error_refs)))
     operations = {}
+    queue_get_routes = {'queue.get', 'queue.list'}
     for op in definitions.operations:
         if op.name in operations:
             raise RegistryCompileError('duplicate_operation')
         if (not re.fullmatch(r'[a-z][a-z0-9.\-]{0,95}', op.name)
                 or op.principal not in {'unsigned', 'seat_key', 'seat_session', 'operator', 'service'}
                 or op.effect not in {'connection_metadata', 'pure_observation',
-                                     'session_write', 'connection_binding', 'relay_admission'}
+                                     'session_write', 'connection_binding', 'relay_admission', 'catalogue_write'}
                 or op.retry not in {'read_repeat', 'operation_key', 'submission_key'}
-                or op.browser_get not in {'connect', 'schema', 'none'}
-                or (op.browser_get != 'none' and op.principal != 'unsigned')):
+                or op.browser_get not in {'connect', 'schema', 'none'} | queue_get_routes
+                or (op.browser_get != 'none' and
+                    (op.principal != 'unsigned' or op.effect == 'catalogue_write'))
+                or (op.browser_get in queue_get_routes and
+                    (op.name != op.browser_get or op.effect != 'pure_observation'
+                     or op.retry != 'read_repeat'))):
             raise RegistryCompileError('invalid_definition')
         for ref in (op.request_ref, op.result_ref, op.error_ref):
             _ref(ref, types)

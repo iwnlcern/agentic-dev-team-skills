@@ -255,7 +255,7 @@ class TestErrorCatalog(unittest.TestCase):
         catalog = errors.api_error_catalog()
         pairs = {(v.code, v.api_class, b.cause_kind, b.remedy)
                  for v in catalog.variants for b in v.branches}
-        self.assertEqual(len(catalog.variants), 8)
+        self.assertEqual(len(catalog.variants), 10)
         self.assertEqual(pairs, {
             ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
             ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
@@ -287,6 +287,20 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_UNAVAILABLE', 'unavailable', 'runtime_not_ready', 'restore_expected_runtime'),
             ('E_API_UNAVAILABLE', 'unavailable', 'schema_unavailable', 'restore_expected_runtime'),
             ('E_API_INTERNAL', 'internal', 'handler_fault', 'report_nonsecret_failure'),
+            ('E_API_AUTH', 'auth', 'not_operator', 'use_operator_surface'),
+            ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
+            ('E_QUEUE_STATE', 'conflict', 'revision_mismatch', 'refresh_item'),
+            ('E_QUEUE_STATE', 'conflict', 'item_not_pending', 'refresh_item'),
+            ('E_QUEUE_STATE', 'conflict', 'answer_unroutable', 'refresh_item'),
+            ('E_QUEUE_STATE', 'conflict', 'item_not_found', 'refresh_list'),
+            ('E_QUEUE_STATE', 'conflict', 'project_not_active', 'check_subject'),
+            ('E_QUEUE_INVALID', 'wire', 'kind_not_raisable', 'use_permitted_kind'),
+            ('E_QUEUE_INVALID', 'wire', 'surface_not_allowed', 'answer_on_permitted_surface'),
+            ('E_QUEUE_INVALID', 'wire', 'choice_not_allowed', 'refresh_item'),
+            ('E_QUEUE_INVALID', 'wire', 'subject_unresolved', 'check_subject'),
+            ('E_QUEUE_INVALID', 'wire', 'text_too_long', 'shorten_text'),
+            ('E_QUEUE_INVALID', 'wire', 'not_a_notice', 'refresh_item'),
+            ('E_QUEUE_INVALID', 'wire', 'stale_continuation', 'restart_query'),
         })
 
     def admission_registry(self):
@@ -353,6 +367,8 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_AUTH', 'auth', 'session_not_current', 'sign_in_again'),
             ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
             ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
+            ('E_API_AUTH', 'auth', 'not_operator', 'use_operator_surface'),
+            ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
             ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
             ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
         }
@@ -409,6 +425,9 @@ class TestErrorCatalog(unittest.TestCase):
                     self.assertEqual(types[payload['field']].shape.values, ('build_id', 'schema_digest'))
                 elif variant.api_class == 'admission':
                     self.assertEqual(set(payload), {'engine_code'})
+                elif kind == 'revision_mismatch':
+                    self.assertEqual(payload, {'current_revision': 'QueueInteger',
+                                               'current_state': 'QueueState'})
                 else:
                     self.assertEqual(payload, {})
             self.assertEqual(sorted(kinds), [b.cause_kind for b in variant.branches])
@@ -490,6 +509,48 @@ class TestCompile(unittest.TestCase):
                 self.assertEqual(registry.capabilities(), ('test.seat',))
         self.assertEqual(self.compile().capabilities(), ('protocol.connect', 'protocol.schema'))
 
+    def test_queue_browser_get_metadata_is_closed(self):
+        from dataclasses import replace
+        from relay_engine import api_schema
+        prototype = self.graph.operations[1]
+        for name, other in (('queue.list', 'queue.get'), ('queue.get', 'queue.list')):
+            op = replace(prototype, name=name, effect='pure_observation',
+                         browser_get=name, rules=())
+            for changes in ({'browser_get': other}, {'name': 'test.read'},
+                            {'browser_get': 'queue.unknown'}, {'browser_get': 'list'},
+                            {'browser_get': 'get'}, {'principal': 'seat_session'},
+                            {'principal': 'operator'}, {'effect': 'session_write'},
+                            {'effect': 'catalogue_write'},
+                            {'retry': 'operation_key'}, {'retry': 'submission_key'}):
+                candidate = replace(op, **changes)
+                with self.subTest(name=name, changes=changes):
+                    graph = replace(self.graph, operations=(candidate,))
+                    with self.assertRaises(self.r.RegistryCompileError) as caught:
+                        self.compile(graph=graph, handlers={candidate.name: lambda args: {}})
+                    self.assertEqual(caught.exception.reason, 'invalid_definition')
+            with self.subTest(name=name):
+                graph = replace(self.graph, operations=(op,))
+                compiled = self.compile(graph=graph, handlers={name: lambda args: {}})
+                artifact = api_schema.export_schema(compiled, '3.0')
+                import json
+                row, = json.loads(artifact.canonical_bytes)['x-adt']['operations']
+                self.assertEqual(compiled.operation(name), op)
+                self.assertEqual((row['name'], row['browser_get']), (name, name))
+
+    def test_catalogue_write_effect_requires_no_browser_get(self):
+        from dataclasses import replace
+        op = replace(self.graph.operations[1], name='test.write',
+                     effect='catalogue_write', browser_get='none', rules=())
+        self.assertEqual(op.retry, 'read_repeat')
+        graph = replace(self.graph, operations=(op,))
+        compiled = self.compile(graph=graph, handlers={op.name: lambda args: {}})
+        self.assertEqual(compiled.operation(op.name), op)
+        discovery_get = replace(self.graph.operations[1], effect='catalogue_write')
+        graph = replace(self.graph, operations=(discovery_get,))
+        with self.assertRaises(self.r.RegistryCompileError) as caught:
+            self.compile(graph=graph, handlers={discovery_get.name: lambda args: {}})
+        self.assertEqual(caught.exception.reason, 'invalid_definition')
+
     def test_unknown_metadata_still_refuses(self):
         from dataclasses import replace
         for field in ('principal', 'effect', 'retry', 'browser_get'):
@@ -549,7 +610,7 @@ class TestCompile(unittest.TestCase):
                 with self.assertRaises(self.r.RegistryCompileError) as caught:
                     self.compile(graph)
                 self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
-        self.assertEqual(len(self.compile().error_arms()), 30)
+        self.assertEqual(len(self.compile().error_arms()), 44)
 
     def test_compile_refuses_branch_defects(self):
         from dataclasses import replace
@@ -632,7 +693,7 @@ class TestCompile(unittest.TestCase):
 
     def test_error_arms_are_complete_records(self):
         registry = self.compile()
-        self.assertEqual(len(registry.error_arms()), 30)
+        self.assertEqual(len(registry.error_arms()), 44)
         for arm in registry.error_arms():
             leaf = registry.types[arm.cause_type.name].shape
             kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]

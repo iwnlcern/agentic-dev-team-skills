@@ -29,6 +29,13 @@ class WindowSession:
 WindowResolver = Callable[[], WindowSession | None]
 
 
+def _bridge_port(value):
+    port = int(value)
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError('expected a port from 0 to 65535')
+    return port
+
+
 def _parser(groups):
     parser = argparse.ArgumentParser(prog='adt')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -36,6 +43,7 @@ def _parser(groups):
     serve = engine.add_parser('serve')
     serve.add_argument('--store-root', required=True)
     serve.add_argument('--project-id', required=True)
+    serve.add_argument('--bridge-port', type=_bridge_port)
     submit = commands.add_parser('submit')
     submit.add_argument('draft')
     submit.add_argument('--submission-key')
@@ -125,7 +133,8 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
             return args.handler(args)
         if args.command == 'engine':
             service = api_service.ApiService(args.store_root, args.project_id,
-                                             clock=lambda: time.time_ns() // 1000000)
+                                             clock=lambda: time.time_ns() // 1000000,
+                                             bridge_port=args.bridge_port)
             try:
                 try:
                     path = service.start()

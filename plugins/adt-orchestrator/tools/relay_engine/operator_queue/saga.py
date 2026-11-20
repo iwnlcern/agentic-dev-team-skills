@@ -28,20 +28,26 @@ def answer_draft(item: records.ItemView, choice: str | None, text: str,
     return ('\n'.join(lines) + '\n\n').encode('utf-8') + encoded
 
 
-def record_answer(conn, principal: OperatorPrincipal, item_id, expected_revision,
-                  answer: Mapping, operation_key, now_ms, *, frank_conformed: bool,
-                  top_seat_address: str | None):
+def answer_request(item_id, expected_revision, answer):
+    return dict(item_id=item_id, expected_revision=expected_revision, answer=dict(answer))
+
+
+@dataclass(frozen=True)
+class ValidatedAnswer:
+    item: Mapping
+
+
+def answer_preflight(conn, principal, operation_key, args, *, frank_conformed):
     if not isinstance(principal, OperatorPrincipal):
         return records.QueueRefusal('E_API_AUTH', 'not_operator')
-    args = dict(item_id=item_id, expected_revision=expected_revision, answer=dict(answer))
     replay = operations._replay(conn, principal, 'queue.answer', operation_key, args)
     if replay is not None:
         return replay
-    rows = operations._dicts(conn, 'SELECT * FROM queue_items WHERE item_id=?', (item_id,))
+    rows = operations._dicts(conn, 'SELECT * FROM queue_items WHERE item_id=?', (args['item_id'],))
     if not rows:
         return records.QueueRefusal('E_QUEUE_STATE', 'item_not_found')
     item = rows[0]
-    if item['revision'] != expected_revision:
+    if item['revision'] != args['expected_revision']:
         return records.QueueRefusal('E_QUEUE_STATE', 'revision_mismatch',
             {'current_revision': item['revision'], 'current_state': item['state']})
     if item['state'] != 'pending':
@@ -50,18 +56,33 @@ def record_answer(conn, principal: OperatorPrincipal, item_id, expected_revision
         return records.QueueRefusal('E_QUEUE_INVALID', 'surface_not_allowed')
     if not records.route_active(conn, item['project_id']):
         return records.QueueRefusal('E_QUEUE_STATE', 'project_not_active')
-    choice, text = answer.get('choice'), answer.get('text', '')
+    choice = args['answer'].get('choice')
     if principal.surface not in kinds.answer_surfaces(item['kind'], choice, frank_conformed=frank_conformed):
         return records.QueueRefusal('E_QUEUE_INVALID', 'surface_not_allowed')
     fixed = kinds.fixed_choices(item['kind'])
     if fixed and choice not in fixed:
         return records.QueueRefusal('E_QUEUE_INVALID', 'choice_not_allowed')
+    if item['kind'] == 'question' and item['answer_to'] is None:
+        return records.QueueRefusal('E_QUEUE_STATE', 'answer_unroutable')
+    return ValidatedAnswer(item)
+
+
+def record_answer(conn, principal: OperatorPrincipal, item_id, expected_revision,
+                  answer: Mapping, operation_key, now_ms, *, frank_conformed: bool,
+                  top_seat_address: str | None, resolve_top_seat=None):
+    args = answer_request(item_id, expected_revision, answer)
+    checked = answer_preflight(conn, principal, operation_key, args,
+                               frank_conformed=frank_conformed)
+    if not isinstance(checked, ValidatedAnswer):
+        return checked
+    item = checked.item
+    if resolve_top_seat is not None:
+        top_seat_address = resolve_top_seat(item)
     draft = None
     if item['kind'] == 'question':
-        if item['answer_to'] is None:
-            return records.QueueRefusal('E_QUEUE_STATE', 'answer_unroutable')
         position = records._one(conn, 'SELECT MAX(position) FROM queue_events WHERE item_id=?', (item_id,))[0]
         view = records.ItemView(**item, events_position=position)
+        choice, text = args['answer'].get('choice'), args['answer'].get('text', '')
         try:
             draft = answer_draft(view, choice, text, top_seat_address)
         except ValueError as exc:
@@ -193,11 +214,15 @@ def confirm(catalogue_conn, item_id, result: ApplyResult, now_ms) -> None:
             (item_id, revision, 'pending', now_ms))
 
 
-def reconcile_pass(port: records.JobPort, runtime: QueueRuntime, now_ms) -> ReconcileReport:
+def reconcile_pass(port: records.JobPort, runtime: QueueRuntime, now_ms,
+                   *, stopping=lambda: False) -> ReconcileReport:
     items = port.read_catalogue(lambda conn: records._rows(conn,
         "SELECT item_id FROM queue_answers WHERE phase='recorded' ORDER BY item_id"))
-    confirmed = transient = 0
+    visited = confirmed = transient = 0
     for (item_id,) in items:
+        if stopping():
+            break
+        visited += 1
         job = port.read_catalogue(lambda conn: load_apply_job(conn, item_id))
         try:
             result = port.callee_ledger(job.project_id,
@@ -213,5 +238,5 @@ def reconcile_pass(port: records.JobPort, runtime: QueueRuntime, now_ms) -> Reco
             transient += 1
         else:
             confirmed += 1
-    runtime.ready = True
-    return ReconcileReport(len(items), confirmed, transient)
+    runtime.ready = visited == len(items)
+    return ReconcileReport(visited, confirmed, transient)

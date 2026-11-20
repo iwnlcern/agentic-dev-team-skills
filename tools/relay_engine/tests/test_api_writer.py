@@ -1,7 +1,10 @@
 """Slice A's worker transaction, failure and thread ownership contract."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager, redirect_stderr
+from io import StringIO
 from pathlib import Path
+import os
 import signal
 import sqlite3
 import sys
@@ -10,7 +13,7 @@ import threading
 import unittest
 from unittest import mock
 
-from relay_engine import api_writer, store_layout, submit, catalogue
+from relay_engine import api_writer, store_layout, store_steps, strings, submit, catalogue
 from relay_engine.tests.writer_support import serve_for_test
 
 
@@ -53,7 +56,7 @@ class WriterTests(unittest.TestCase):
         self.make_ledger()
 
     def make_ledger(self, project=P):
-        conn = store_layout.open_ledger(self.root, P, create=True)
+        conn = store_layout.open_ledger(self.root, project, create=True)
         try:
             conn.execute('INSERT INTO projects (id, name, created_at) VALUES (?, ?, 1)', (project, 'before')).close()
             conn.commit()
@@ -100,6 +103,267 @@ class WriterTests(unittest.TestCase):
             call()
         self.assertEqual(caught.exception.reason, reason)
         return caught.exception
+
+    def declared(self, run, project=None):
+        ledgers = {} if project is None else {project: 'read'}
+        return api_writer.DeclaredJob(store_steps.Declared('written', ledgers), run)
+
+    def record_receipt(self, conn):
+        conn.execute(
+            'INSERT INTO queue_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            ('receipt', 'operator', 'principal', 'answer', 'key', 'a' * 64, 'result', 1),
+        ).close()
+
+    @staticmethod
+    def receipts(conn):
+        with closing(conn.execute('SELECT receipt_id, result FROM queue_receipts')) as cursor:
+            return cursor.fetchall()
+
+    def test_declared_catalogue_only_commits(self):
+        order = []
+        waiting, release, queued = (threading.Event() for _ in range(3))
+
+        def hook(phase):
+            if phase == 'queued' and waiting.is_set():
+                queued.set()
+
+        writer = self.writer(hook)
+
+        def run(conns):
+            waiting.set()
+            self.assertTrue(release.wait(5))
+            self.assertEqual(tuple(conns), ('catalogue',))
+            self.assertTrue(conns['catalogue'].in_transaction)
+            order.append('write')
+            self.record_receipt(conns['catalogue'])
+            return api_writer.JobOutcome(True, 'receipt')
+
+        def project_run(conn):
+            order.append('project')
+            return api_writer.JobOutcome(False, None)
+
+        with ThreadPoolExecutor(2) as pool:
+            pending = pool.submit(writer.submit_declared, self.declared(run))
+            try:
+                self.assertTrue(waiting.wait(5))
+                project = pool.submit(writer.submit, P, self.job(project_run))
+                self.assertTrue(queued.wait(5))
+            finally:
+                release.set()
+            outcome = pending.result(5)
+            self.assertFalse(project.result(5).commit)
+        self.assertEqual(outcome, api_writer.JobOutcome(True, 'receipt'))
+        self.assertEqual(order, ['write', 'project'])
+        self.assertEqual(writer.read_catalogue(self.receipts), [('receipt', 'result')])
+
+    def test_declared_catalogue_write_can_read_named_project(self):
+        writer = self.writer()
+
+        def run(conns):
+            self.assertEqual(tuple(conns), ('catalogue', P))
+            self.assertTrue(conns[P].in_transaction)
+            with closing(conns[P].execute('SELECT id, name FROM projects')) as cursor:
+                self.assertEqual(cursor.fetchall(), [(P, 'before')])
+            with self.assertRaises(sqlite3.OperationalError) as caught:
+                self.change(conns[P], 'uncommitted')
+            self.assertEqual(caught.exception.sqlite_errorcode, sqlite3.SQLITE_READONLY)
+            self.record_receipt(conns['catalogue'])
+            return api_writer.JobOutcome(True, 'receipt')
+
+        self.assertTrue(writer.submit_declared(self.declared(run, P)).commit)
+        self.assertEqual(self.value(), 'before')
+        self.assertEqual(writer.read_catalogue(self.receipts), [('receipt', 'result')])
+        self.assertTrue(writer.submit(P, self.job(self.success)).commit)
+        self.assertEqual(self.value(), 'after')
+
+    def test_declared_refusal_rolls_back_and_preserves_value(self):
+        writer = self.writer()
+        refusal = object()
+
+        def run(conns):
+            self.record_receipt(conns['catalogue'])
+            return api_writer.JobOutcome(False, refusal)
+
+        outcome = writer.submit_declared(self.declared(run, P))
+        self.assertFalse(outcome.commit)
+        self.assertFalse(outcome.indeterminate)
+        self.assertIsNone(outcome.fault)
+        self.assertIs(outcome.value, refusal)
+        self.assertEqual(self.value(), 'before')
+        self.assertEqual(writer.read_catalogue(self.receipts), [])
+
+    def test_declared_refuses_wrong_identity_or_unserved_project_before_callback(self):
+        for label in ('catalogue', P):
+            with self.subTest(label=label):
+                self.check_declared_identity_drift(label)
+
+    def check_declared_identity_drift(self, label):
+        paths = {'catalogue': store_layout.catalogue_path(self.root),
+                 P: store_layout.ledger_path(self.root, P)}
+        target = paths[label]
+        replacement = target.with_suffix('.replacement')
+        original = target.with_suffix('.original')
+        with closing(sqlite3.connect(target)) as source:
+            with closing(sqlite3.connect(replacement)) as destination:
+                source.backup(destination)
+        entered = threading.Event()
+        release = threading.Event()
+        callback = mock.Mock(side_effect=AssertionError('unexpected declared callback'))
+
+        def hook(phase):
+            if phase == 'queued' and threading.current_thread().name.startswith('identity'):
+                entered.set()
+                self.assertTrue(release.wait(5))
+
+        writer = self.writer(hook)
+        job = self.declared(callback, P)
+        self.assert_unavailable(
+            lambda: writer.submit_declared(self.declared(callback, Q)), 'project_not_served',
+        )
+
+        def read_path(conns):
+            with closing(conns[label].execute('PRAGMA database_list')) as cursor:
+                main = next(row[2] for row in cursor if row[1] == 'main')
+            return api_writer.JobOutcome(False, main)
+
+        cached = writer.submit_declared(self.declared(read_path, P)).value
+        before = os.stat(cached)
+        try:
+            with mock.patch.object(store_layout, 'begin_declared',
+                                   wraps=store_layout.begin_declared) as begin:
+                with ThreadPoolExecutor(1, thread_name_prefix='identity') as pool:
+                    result = pool.submit(writer.submit_declared, job)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        target.rename(original)
+                        replacement.rename(target)
+                        after = target.stat()
+                        cached_now = os.stat(cached)
+                        self.assertNotEqual((before.st_dev, before.st_ino),
+                                            (after.st_dev, after.st_ino))
+                        self.assertEqual((cached_now.st_dev, cached_now.st_ino),
+                                         (after.st_dev, after.st_ino))
+                    finally:
+                        release.set()
+                    with self.assertRaises(api_writer.UndeclaredFile):
+                        result.result(5)
+                with self.assertRaises(api_writer.UndeclaredFile):
+                    writer.submit_declared(job)
+                begin.assert_not_called()
+            callback.assert_not_called()
+        finally:
+            if original.exists():
+                if target.exists():
+                    target.rename(replacement)
+                original.rename(target)
+            writer.close()
+        for file in (target, replacement):
+            with closing(sqlite3.connect(file)) as conn:
+                if label == 'catalogue':
+                    self.assertEqual(self.receipts(conn), [])
+                else:
+                    with closing(conn.execute('SELECT name FROM projects')) as cursor:
+                        self.assertEqual(cursor.fetchall(), [('before',)])
+        with closing(sqlite3.connect(paths['catalogue'])) as conn:
+            self.assertEqual(self.receipts(conn), [])
+        # The second subcase needs a fresh independently prepared replacement.
+        replacement.unlink()
+
+    def test_declared_early_transaction_end_is_indeterminate(self):
+        writer = self.writer()
+        original = ValueError('callback')
+        cause = RuntimeError('cause')
+        original.__cause__ = cause
+
+        def run(conns):
+            self.record_receipt(conns['catalogue'])
+            conns['catalogue'].execute('ROLLBACK').close()
+            raise original
+
+        result = writer.submit_declared(self.declared(run, P))
+        self.assertFalse(result.commit)
+        self.assertTrue(result.indeterminate)
+        self.assertEqual(result.fault, 'job_ended_transaction')
+        self.assertIs(result.value, original)
+        self.assertIs(result.value.__cause__, cause)
+        self.assertEqual(writer.read_catalogue(self.receipts), [])
+
+    def test_declared_committed_receipt_survives_ledger_cleanup_fault(self):
+        writer = self.writer()
+        commit_and_cleanup = []
+
+        def run(conns):
+            cat, ledger = conns['catalogue'], conns[P]
+
+            def deny_cleanup(action, arg, *rest):
+                if action == sqlite3.SQLITE_TRANSACTION and arg == 'ROLLBACK':
+                    with closing(store_layout.open_catalogue_readonly(self.root)) as reader:
+                        commit_and_cleanup.append(self.receipts(reader))
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            self.record_receipt(cat)
+            ledger.set_authorizer(deny_cleanup)
+            return api_writer.JobOutcome(True, 'receipt')
+
+        outcome = writer.submit_declared(self.declared(run, P))
+        self.assertEqual(outcome, api_writer.JobOutcome(True, 'receipt', fault='rollback_failed'))
+        self.assertEqual(commit_and_cleanup, [[('receipt', 'result')]])
+        self.assert_unavailable(lambda: writer.open_project(P), 'rollback_failed')
+        self.assertEqual(writer.read_catalogue(self.receipts), [('receipt', 'result')])
+        self.assertEqual(writer.read_catalogue(self.receipts), [('receipt', 'result')])
+
+    def test_read_catalogue_is_readonly_and_closes_after_callback_or_failure(self):
+        writer = self.writer()
+        escaped = []
+        original = ValueError('catalogue callback')
+        nested_read = mock.Mock()
+
+        def mutate(conns):
+            self.record_receipt(conns['catalogue'])
+            return api_writer.JobOutcome(True, 'unexpected receipt')
+
+        nested_write = mock.Mock(side_effect=mutate)
+
+        def check_nested_refusals():
+            with self.assertRaises(api_writer.NestedWriterJob):
+                writer.submit_declared(self.declared(nested_write))
+            with self.assertRaises(api_writer.NestedWriterJob):
+                writer.read_catalogue(nested_read)
+
+        def inspect(conn):
+            escaped.append(conn)
+            check_nested_refusals()
+            with self.assertRaises(sqlite3.OperationalError) as caught:
+                self.record_receipt(conn)
+            self.assertEqual(caught.exception.sqlite_errorcode, sqlite3.SQLITE_READONLY)
+            return self.receipts(conn)
+
+        def fail(conn):
+            escaped.append(conn)
+            check_nested_refusals()
+            raise original
+
+        self.assertEqual(writer.read_catalogue(inspect), [])
+        self.assertEqual(writer.read_catalogue(self.receipts), [])
+        with self.assertRaises(ValueError) as caught:
+            writer.read_catalogue(fail)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(writer.read_catalogue(self.receipts), [])
+        nested_read.assert_not_called()
+        nested_write.assert_not_called()
+        for conn in escaped:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                conn.execute('SELECT 1')
+
+        def fail_project(conn):
+            self.deny_rollback(conn)
+            return api_writer.JobOutcome(False, None)
+
+        self.assert_unavailable(lambda: writer.submit(P, self.job(fail_project)), 'rollback_failed')
+        self.assertEqual(writer.read_catalogue(self.receipts), [])
+        writer.close()
+        self.assert_unavailable(lambda: writer.read_catalogue(self.receipts), 'closed')
 
     def test_job_runs_inside_begin_immediate(self):
         finishing, release, attempting, acquired = (threading.Event() for _ in range(4))
@@ -342,6 +606,120 @@ class WriterTests(unittest.TestCase):
             return sqlite3.SQLITE_OK
 
         conn.set_authorizer(authorizer)
+
+    @contextmanager
+    def rollback_diagnostics(self, stream, sink):
+        strings.set_diagnostic_sink(sink)
+        try:
+            with redirect_stderr(stream):
+                yield
+        finally:
+            strings.set_diagnostic_sink(None)
+
+    def rollback_refusal(self, conn):
+        self.change(conn)
+        self.deny_rollback(conn)
+        return api_writer.JobOutcome(False, None)
+
+    def test_rollback_fault_reports_without_changing_caller_error(self):
+        original = RuntimeError('private job value')
+        context = ValueError('private context')
+        cause = LookupError('private cause')
+
+        def fail(conn):
+            self.rollback_refusal(conn)
+            try:
+                raise context
+            except ValueError:
+                raise original from cause
+
+        for run in (fail, self.rollback_refusal):
+            with self.subTest(run=run.__name__):
+                writer = self.writer()
+                stderr = StringIO()
+                diagnostics = []
+                with self.rollback_diagnostics(stderr, diagnostics.append):
+                    if run is fail:
+                        with self.assertRaises(RuntimeError) as caught:
+                            writer.submit(P, self.job(run))
+                        self.assertIs(caught.exception, original)
+                        self.assertIs(original.__context__, context)
+                        self.assertIs(original.__cause__, cause)
+                        self.assertEqual(original.__notes__, [
+                            'writer ROLLBACK failed: DatabaseError SQLITE_AUTH'])
+                    else:
+                        error = self.assert_unavailable(
+                            lambda: writer.submit(P, self.job(run)), 'rollback_failed')
+                self.assertEqual(stderr.getvalue(), 'store writer rollback failed\n')
+                self.assertEqual(len(diagnostics), 1)
+                if run is not fail:
+                    self.assertIs(error.__cause__, diagnostics[0])
+                self.assertEqual(diagnostics[0].sqlite_errorcode, sqlite3.SQLITE_AUTH)
+                fenced = self.assert_unavailable(lambda: writer.open_project(P), 'rollback_failed')
+                self.assertIs(diagnostics[0], fenced.__cause__)
+                self.assertEqual(self.value(), 'before')
+                writer.close()
+
+        writer = self.writer()
+        stderr = StringIO()
+        diagnostics = []
+        ordinary = ValueError('ordinary failure')
+
+        def fail_with_successful_rollback(conn):
+            self.change(conn)
+            raise ordinary
+
+        with self.rollback_diagnostics(stderr, diagnostics.append):
+            with self.assertRaises(ValueError) as caught:
+                writer.submit(P, self.job(fail_with_successful_rollback))
+        self.assertIs(caught.exception, ordinary)
+        self.assertEqual(stderr.getvalue(), '')
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(self.value(), 'before')
+
+    def test_rollback_diagnostic_sink_failure_preserves_stderr(self):
+        writer = self.writer()
+        stderr = StringIO()
+        sink = mock.Mock(side_effect=RuntimeError('sink failure'))
+
+        with self.rollback_diagnostics(stderr, sink):
+            error = self.assert_unavailable(
+                lambda: writer.submit(P, self.job(self.rollback_refusal)), 'rollback_failed')
+        self.assertIsInstance(error.__cause__, sqlite3.DatabaseError)
+        sink.assert_called_once_with(error.__cause__)
+        self.assertEqual(stderr.getvalue(), 'store writer rollback failed\n')
+
+    def test_rollback_diagnostic_stderr_failure_preserves_sink(self):
+        writer = self.writer()
+        stderr = mock.Mock()
+        stderr.write.side_effect = BrokenPipeError('stderr failure')
+        diagnostics = []
+
+        with self.rollback_diagnostics(stderr, diagnostics.append):
+            error = self.assert_unavailable(
+                lambda: writer.submit(P, self.job(self.rollback_refusal)), 'rollback_failed')
+        stderr.write.assert_called_once_with('store writer rollback failed\n')
+        self.assertIsInstance(error.__cause__, sqlite3.DatabaseError)
+        self.assertEqual(diagnostics, [error.__cause__])
+
+    def test_rollback_diagnostic_preserves_other_project_progress(self):
+        self.make_ledger(Q)
+        writer = self.writer()
+        serve_for_test(writer, Q)
+        stderr = StringIO()
+        diagnostics = []
+
+        with self.rollback_diagnostics(stderr, diagnostics.append):
+            self.assert_unavailable(
+                lambda: writer.submit(P, self.job(self.rollback_refusal)), 'rollback_failed')
+            self.assertEqual(writer.served_projects(), frozenset({Q}))
+            self.assertTrue(writer.submit(Q, self.job(self.success, Q)).commit)
+        with closing(store_layout.open_ledger_readonly(self.root, Q)) as observer:
+            with closing(observer.execute('SELECT id, name FROM projects')) as cursor:
+                self.assertEqual(cursor.fetchall(), [(Q, 'after')])
+        self.assertEqual(stderr.getvalue(), 'store writer rollback failed\n')
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(self.value(), 'before')
 
     def test_failed_rollback_faults_the_file(self):
         for contextual in (False, True):

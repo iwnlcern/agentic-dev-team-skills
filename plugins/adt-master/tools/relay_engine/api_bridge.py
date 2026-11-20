@@ -51,7 +51,12 @@ def _loopback_context(context):
             return False
         if origin.port is not None and not 1 <= origin.port <= 65535:
             return False
-        return origin.hostname == 'localhost' or ipaddress.ip_address(origin.hostname).is_loopback
+        if origin.hostname == 'localhost':
+            return True
+        address = ipaddress.ip_address(origin.hostname)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            return False
+        return address.is_loopback
     except ValueError:
         return False
 
@@ -131,7 +136,10 @@ def map_discovery_get(request: BridgeRequest, bridge_context: BridgeContext) -> 
     def refuse(kind):
         return answer({'request_id': request_id, 'error': p.api_error(registry, kind)})
 
-    if request_id is None or not _guard(request, bridge_context):
+    headers_valid = isinstance(request.headers, tuple) and all(
+        isinstance(pair, tuple) and len(pair) == 2 and
+        all(isinstance(value, str) for value in pair) for pair in request.headers)
+    if request_id is None or not headers_valid or not _guard(request, bridge_context):
         return refuse('invalid_envelope')
     try:
         query = _query(request.raw_query)

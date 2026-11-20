@@ -63,7 +63,7 @@ class TestExport(unittest.TestCase):
         old_digest = '9445baeef11240763072427eee4f9f629979f0a3cc03a6951428dc005784044a'
         artifact = self.export()
         self.assertNotEqual(artifact.digest, old_digest)
-        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 30)
+        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 44)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(load_generator().main(['--check']), 0)
 
@@ -87,13 +87,45 @@ class TestExport(unittest.TestCase):
             'protocol_window_v1', 'schema_payload_v1', 'negotiated_schema_v1'})
         scopes = [(rule.get('type_ref', rule.get('array_ref', rule.get('operation'))), rule['kind']) for rule in rules]
         self.assertEqual(scopes, sorted(set(scopes)))
-        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 30)
+        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 44)
         for item in doc['$defs'].values():
             if item.get('type') == 'object':
                 self.assertIs(item['additionalProperties'], False)
                 self.assertIn('required', item)
         self.assertNotIn('required_build_id', doc['$defs']['ConnectArgs']['required'])
         self.assertEqual(doc['$defs']['ConnectArgs']['properties']['required_build_id'], {'$ref': '#/$defs/Digest'})
+
+    def test_generated_queue_operation_metadata(self):
+        from relay_engine.api_platform import build_platform
+        compiled = build_platform().registry
+        artifact = self.export(compiled)
+        document = json.loads(artifact.canonical_bytes)
+        expected = {
+            'queue.raise': ('service', 'catalogue_write', 'operation_key', 'none'),
+            'queue.withdraw': ('seat_session', 'catalogue_write', 'operation_key', 'none'),
+            'queue.answer': ('operator', 'catalogue_write', 'operation_key', 'none'),
+            'queue.dismiss': ('operator', 'catalogue_write', 'operation_key', 'none'),
+            'queue.open': ('operator', 'catalogue_write', 'operation_key', 'none'),
+            'queue.dismiss-all': ('operator', 'catalogue_write', 'operation_key', 'none'),
+            'queue.get': ('unsigned', 'pure_observation', 'read_repeat', 'queue.get'),
+            'queue.list': ('unsigned', 'pure_observation', 'read_repeat', 'queue.list'),
+        }
+        fields = ('principal', 'effect', 'retry', 'browser_get')
+        rows = {row['name']: tuple(row[key] for key in fields)
+                for row in document['x-adt']['operations'] if row['name'].startswith('queue.')}
+        self.assertEqual(rows, expected)
+        self.assertEqual({name for name in compiled.capabilities() if name.startswith('queue.')},
+                         set(expected))
+        path = TOOLS / 'relay_engine' / 'generated' / 'api'
+        self.assertEqual((path / 'schema-3.0.json').read_bytes(), artifact.canonical_bytes)
+        manifest = json.loads((path / 'manifest.json').read_bytes())
+        self.assertEqual(manifest['schema_digest'], artifact.digest)
+        self.assertEqual(sorted(name for name in manifest['operations'] if name.startswith('queue.')),
+                         sorted(expected))
+        for binding in ('api_3_0.rs', 'api_3_0.ts'):
+            body = (path / binding).read_text()
+            self.assertIn('"queue.dismiss-all"', body)
+            self.assertNotIn('"queue.dismiss_all"', body)
 
     def test_no_remote_refs_or_runtime_values(self):
         artifact = self.export()
@@ -188,7 +220,7 @@ class TestGenerator(unittest.TestCase):
         from relay_engine import api_platform, api_schema
         generator = load_generator()
         compiled = generator.build_registry()
-        self.assertEqual(dict(compiled.handlers), api_platform.platform_handlers())
+        self.assertEqual(dict(compiled.handlers), dict(api_platform.build_platform().registry.handlers))
         expected = api_schema.export_schema(compiled, '3.0').canonical_bytes
         with patch('builtins.open', side_effect=AssertionError('generator opened a file')):
             generated = generator.generate(TOOLS)
@@ -211,7 +243,7 @@ class TestGenerator(unittest.TestCase):
             variants=(replace(variant, branches=variant.branches +
                       (d.ErrorBranchDef('aaa_earlier', variant.branches[0].remedy),)),) + catalogue.variants[1:])
         with patch.object(errors, 'api_error_catalog', return_value=updated):
-            grown = r.compile_registry(d.platform_definitions(), original.handlers, (updated,))
+            grown = generator.build_registry()
         old_names = {ref.name for ref in original.types['ApiError'].shape.arms}
         self.assertTrue(old_names <= {ref.name for ref in grown.types['ApiError'].shape.arms})
         self.assertIn('ApiErrorIncompatiblePinMismatch', old_names)
@@ -484,6 +516,51 @@ def consumer_scenarios():
     decode(schema.response)
     decode({'request_id': '3', 'result': {'relay_id': 'relay', 'handle': '1', 'created_at': '2'}},
            'relay.submit', '3')
+    item_id = '00000000-0000-7000-8000-000000000001'
+    action = dict(item_id=item_id, expected_revision='1', operation_key='act')
+    subject = dict(kind='doorbell_off', seat_id='s-a', generation='7')
+    action_result = dict(item_id=item_id, revision='2', state='dismissed',
+                         receipt='receipt', replayed='false')
+    read_result = dict(store_id='store', observed_revision='2',
+                       queue_event_position='2', continuation=None)
+    item = dict(item_id=item_id, revision='2', state='dismissed', kind='notice',
+                subkind='doorbell_off', project_id='p', raiser='engine_liveness',
+                asking_seat_id=None, actor_address=None, fields=None, answer_to=None,
+                source_handle=None, source_relay_id=None, texts='{"sentence":"Doorbell off"}',
+                popup_text=None, choices=None, choices_reason=None,
+                pins='{"generation":7,"seat_id":"s-a"}',
+                condition_key='{"generation":7,"seat_id":"s-a"}',
+                raised_position='1', raised_at_ms='10', events_position='2')
+    queue_rows = (
+        ('queue.answer', dict(action, answer={'text': 'Yes'}),
+         dict(action_result, state='applying', answer_id='answer')),
+        ('queue.dismiss', action, action_result),
+        ('queue.dismiss-all', dict(scope='machine', up_to_event_position='1', operation_key='all'),
+         dict(count='1', item_ids=[item_id], more_remaining='false',
+              receipt='receipt', replayed='false')),
+        ('queue.get', dict(item_id=item_id, history_page_size='100', history_continuation=None),
+         dict(read_result, item=dict(item, answer=None, job=None, outcome=None), events=[])),
+        ('queue.list', dict(scope='machine', state_filter=None, kind_filter=None, page_size='100',
+                            continuation=None), dict(read_result, items=[item])),
+        ('queue.open', action, action_result),
+        ('queue.raise', dict(kind='notice', subkind='doorbell_off', project_id='p',
+                            texts={'sentence': 'Doorbell off'}, pins=subject,
+                            condition_key=subject, actor_address=None, operation_key='raise'),
+         dict(item_id=item_id, revision='1', state='pending', receipt='original')),
+        ('queue.withdraw', dict(action, reason_text=None), dict(action_result, state='withdrawn')),
+    )
+    for op, args, result in queue_rows:
+        request = frame({'request_id': '4', 'op': op, 'args': args})
+        response = {'request_id': '4', 'result': result}
+        spec = compiled.operation(op)
+        add({'action': 'encode_checked', 'operation': op, 'id': '4', 'value': args},
+            {'hex': request})
+        add({'action': 'decode_request', 'operation': op, 'id': '4',
+             'type': spec.request_ref.name, 'frame': request}, {'args': args})
+        add({'action': 'encode_result', 'id': '4', 'type': spec.result_ref.name, 'value': result},
+            {'hex': frame(response)})
+        decode(response, op, '4')
+
     for arm in compiled.arms:
         cause = compiled.types[arm.cause_type.name].shape
         kind_ref = next(f.type_ref for f in cause.fields if f.name == 'kind')
@@ -494,6 +571,8 @@ def consumer_scenarios():
             payload = {'requested': {'min': '2.0', 'max': '2.9'}, 'supported': {'min': '3.0', 'max': '3.0'}}
         elif kind == 'pin_mismatch':
             payload = {'field': 'build_id', 'required': 'f' * 64, 'actual': 'a' * 64}
+        elif kind == 'revision_mismatch':
+            payload = {'current_revision': '1', 'current_state': 'pending'}
         if api_class == 'admission':
             payload = {'engine_code': 'E-ADDRESS'}
         error = p.api_error(compiled, kind, **payload)
@@ -731,8 +810,12 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['schema_digest'], artifact.digest)
         self.assertEqual(manifest['schema_byte_count'], str(artifact.byte_count))
         self.assertEqual(manifest['protocol'], '3.0')
-        self.assertEqual(manifest['operations'], ['protocol.connect', 'protocol.schema', 'relay.submit', 'seat.identify',
-                                                   'session.end', 'session.resume', 'session.sign-in'])
+        self.assertEqual(manifest['operations'], [
+            'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
+            'queue.dismiss-all', 'queue.get', 'queue.list', 'queue.open', 'queue.raise',
+            'queue.withdraw', 'relay.submit', 'seat.identify', 'session.end',
+            'session.resume', 'session.sign-in',
+        ])
         self.assertEqual(set(manifest['bindings']), {'api_3_0.rs', 'api_3_0.ts'})
         for name, digest in manifest['bindings'].items():
             self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)

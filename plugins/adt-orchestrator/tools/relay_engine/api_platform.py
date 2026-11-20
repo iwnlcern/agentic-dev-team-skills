@@ -39,7 +39,9 @@ def platform_component() -> api_compose.ApiComponent:
 
 
 def platform_components() -> tuple[api_compose.ApiComponent, ...]:
-    return (platform_component(),)
+    from relay_engine.operator_queue.component import queue_component
+
+    return (platform_component(), queue_component())
 
 
 def build_platform() -> PlatformBuild:

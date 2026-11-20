@@ -1042,12 +1042,18 @@ def explain_for(code):
 
 def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
     """Export the sole closed discovery error catalog, separate from legacy errors."""
+    from relay_engine.operator_queue import kinds
+
     d = api_definitions
     # Reuse the neutral producer's nodes rather than author a second window/digest type.
     types = [t for t in d.discovery_definitions().types
              if t.name in {"ProtocolVersion", "ProtocolWindow", "Digest"}]
     types.append(d.TypeDef("ApiPinField", d.LiteralSet(("build_id", "schema_digest"))))
     types.append(d.TypeDef("ApiEngineCode", d.String(r"E-[A-Z0-9-]{1,63}", 3, 65)))
+    types.extend((
+        d.TypeDef("QueueInteger", d.String(kinds.INTEGER_PATTERN, 1, 15)),
+        d.TypeDef("QueueState", d.LiteralSet(tuple(sorted(kinds.STATES)))),
+    ))
     rows = (
         ("E_API_ADMISSION", "admission", "ApiAdmissionCause", (
             ("client", "correct_draft"),
@@ -1090,10 +1096,28 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
             ("session_not_current", "sign_in_again"),
             ("not_signed_in", "sign_in_first"),
             ("already_bound", "open_new_connection"),
+            ("not_operator", "use_operator_surface"),
+            ("not_asking_seat", "withdraw_own_item"),
         )),
         ("E_API_CONFLICT", "conflict", "ApiConflictCause", (
             ("operation_key_reused", "use_new_operation_key"),
             ("submission_key_reused", "use_new_submission_key"),
+        )),
+        ("E_QUEUE_STATE", "conflict", "ApiQueueStateCause", (
+            ("revision_mismatch", "refresh_item"),
+            ("item_not_pending", "refresh_item"),
+            ("answer_unroutable", "refresh_item"),
+            ("item_not_found", "refresh_list"),
+            ("project_not_active", "check_subject"),
+        )),
+        ("E_QUEUE_INVALID", "wire", "ApiQueueInvalidCause", (
+            ("kind_not_raisable", "use_permitted_kind"),
+            ("surface_not_allowed", "answer_on_permitted_surface"),
+            ("choice_not_allowed", "refresh_item"),
+            ("subject_unresolved", "check_subject"),
+            ("text_too_long", "shorten_text"),
+            ("not_a_notice", "refresh_item"),
+            ("stale_continuation", "restart_query"),
         )),
     )
     variants = []
@@ -1115,6 +1139,9 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
                 members.extend((d.FieldDef("field", d.TypeRef("ApiPinField")),
                                 d.FieldDef("required", d.TypeRef("Digest")),
                                 d.FieldDef("actual", d.TypeRef("Digest"))))
+            elif kind == "revision_mismatch":
+                members.extend((d.FieldDef("current_revision", d.TypeRef("QueueInteger")),
+                                d.FieldDef("current_state", d.TypeRef("QueueState"))))
             types.append(d.TypeDef(leaf_name, d.Record(tuple(members))))
             arms.append(d.TypeRef(leaf_name))
             branch_defs.append(d.ErrorBranchDef(kind, remedy))

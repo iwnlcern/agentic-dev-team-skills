@@ -1,7 +1,73 @@
 #!/usr/bin/env python3
+import argparse
+from collections.abc import Callable, Sequence
+import os
+from pathlib import Path
+import shlex
+import subprocess
 import sys
 
-from relay_engine.adt_cli import main
+from relay_engine import lifecycle_paths, store_layout
+from relay_engine.adt_cli import CommandGroup, main
+from relay_engine.api_client import LocalRefusal, read_ready_file
+from relay_engine.api_operator_bridge import _private_launch_file, _read_launch_url
 
 
-raise SystemExit(main(sys.argv[1:]))
+def console_open(ready_path: str, *, print_only: bool, run: Callable = subprocess.run) -> int:
+    try:
+        ready = read_ready_file(ready_path)
+        path = Path(ready.path).with_name('open.html')
+        status = path.lstat()
+        if not _private_launch_file(status):
+            raise ValueError('unsafe_launch_page')
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        with open(path, 'rb', opener=lambda name, _: os.open(name, flags)) as page:
+            actual = os.fstat(page.fileno())
+            if ((actual.st_dev, actual.st_ino) != (status.st_dev, status.st_ino)
+                    or not _private_launch_file(actual)):
+                raise ValueError('unsafe_launch_page')
+            if print_only:
+                print(_read_launch_url(page.read(1024)))
+                return 0
+        argv = (['/usr/bin/open', '--', str(path)] if sys.platform == 'darwin'
+                else ['xdg-open', str(path)])
+        if run(argv).returncode != 0:
+            raise ValueError('opener_failed')
+    except (LocalRefusal, OSError, ValueError):
+        print('The Console launch page could not be opened.', file=sys.stderr)
+        return 1
+    print('If the page did not open, run adt console open --print and paste the address.')
+    return 0
+
+
+def _console_open_selected(args: argparse.Namespace) -> int:
+    if args.ready is not None:
+        return console_open(args.ready, print_only=args.print_only)
+
+    root = args.store_root if args.store_root is not None else str(store_layout.production_root())
+    target = lifecycle_paths.console_target(root)
+    if isinstance(target, lifecycle_paths.ConsoleTargetUnavailable):
+        remedy = f'adt engine status --store-root {shlex.quote(root)}'
+        print(f'The selected Store is unavailable for Console. Run {remedy} for status and doctor guidance.',
+              file=sys.stderr)
+        return 1 if target.reason == 'identity_unavailable' else 75
+    return console_open(target.ready_path, print_only=args.print_only)
+
+
+def console_group(extra: Sequence[Callable[[argparse._SubParsersAction], None]] = ()) -> CommandGroup:
+    def build(commands):
+        console = commands.add_parser('console')
+        nested = console.add_subparsers(dest='console_command', required=True)
+        launch = nested.add_parser('open')
+        target = launch.add_mutually_exclusive_group()
+        target.add_argument('--ready')
+        target.add_argument('--store-root')
+        launch.add_argument('--print', dest='print_only', action='store_true')
+        launch.set_defaults(handler=_console_open_selected)
+        for extend in extra:
+            extend(nested)
+    return CommandGroup('console', build)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:], groups=(console_group(),)))

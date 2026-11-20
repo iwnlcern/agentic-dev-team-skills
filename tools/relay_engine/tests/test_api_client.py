@@ -172,6 +172,16 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(self.c.EndpointUnavailable) as error: self.c.ApiClient.open(ready)
         self.assertEqual(error.exception.outcome, 'not_performed')
 
+    def test_ready_file_reader_ignores_unknown_keys(self):
+        path, data = self.start()
+        expected = self.c.read_ready_file(str(path))
+        path.write_text(json.dumps({**data, 'store_state': 'serving', 'held_causes': [],
+                                    'future_metadata': {'value': None}}))
+        self.assertEqual(self.c.read_ready_file(str(path)), expected)
+        for required in data:
+            path.write_text(json.dumps({k: v for k, v in data.items() if k != required}))
+            with self.assertRaises(self.c.LocalRefusal): self.c.read_ready_file(str(path))
+
     def test_schema_pin_mismatch(self):
         from dataclasses import replace as dc_replace
         original = self.service.start

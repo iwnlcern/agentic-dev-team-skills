@@ -696,6 +696,22 @@ class TestApiAdmissionCatalog(unittest.TestCase):
             self.assertIsInstance(record, d.Record)
             self.assertEqual(tuple(field.name for field in record.fields), ('kind', 'engine_code'))
             self.assertFalse(any(field.optional for field in record.fields))
+    def test_revision_mismatch_has_closed_wire_payload(self):
+        from relay_engine import api_protocol, api_wire
+        registry = api_protocol.discovery_registry()
+        error = api_protocol.api_error(registry, 'revision_mismatch',
+                                       current_revision='2', current_state='retired')
+        self.assertEqual(error, {
+            'code': 'E_QUEUE_STATE', 'class': 'conflict', 'remedy': 'refresh_item',
+            'cause': {'kind': 'revision_mismatch', 'current_revision': '2',
+                      'current_state': 'retired'},
+        })
+        api_wire.encode_api_response({'request_id': '1', 'error': error}, registry, None, None)
+        for extra in ({'current_revision': 2}, {'text': 'private item'}):
+            malformed = dict(error, cause=dict(error['cause'], **extra))
+            with self.assertRaisesRegex(ValueError, 'invalid_response'):
+                api_wire.encode_api_response({'request_id': '1', 'error': malformed},
+                                             registry, None, None)
 
 if __name__ == "__main__":
     unittest.main()

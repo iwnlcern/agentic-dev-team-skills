@@ -49,6 +49,7 @@ INVENTORY = {
     "usage-error": "usage error",
     "unexpected-error": "unexpected error",
     "daemon-start-failed": "daemon start failed",
+    "store-writer-rollback-failed": "store writer rollback failed",
     "command-result": "{result}",
     "adt-refusal": "{result}",
     "adt-local-refusal": "{result}",

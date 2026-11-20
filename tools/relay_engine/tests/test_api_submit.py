@@ -548,8 +548,14 @@ class SubmitServiceTests(unittest.TestCase):
                 self.assertEqual(self.rows('SELECT count(*) FROM relays'), [(0,)])
 
     def test_platform_is_one_component(self):
-        self.assertEqual(api_platform.platform_components()[0].owner, 'platform')
-        self.assertEqual(set(self.build.composition.owners.values()), {'platform'})
+        self.assertCountEqual([component.owner for component in api_platform.platform_components()],
+                              ['platform', 'console'])
+        platform = ('protocol.connect', 'protocol.schema', 'relay.submit', 'seat.identify',
+                    'session.end', 'session.resume', 'session.sign-in')
+        queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
+                 'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
+        owners = dict.fromkeys(platform, 'platform') | dict.fromkeys(queue, 'console')
+        self.assertEqual(self.build.composition.owners, owners)
         self.assertIs(self.ports['relay.submit'], self.ports['session.sign-in'])
         op = d.OperationDef('test.echo', d.TypeRef('EchoArgs'), d.TypeRef('EchoArgs'),
             d.TypeRef('ApiError'), 'unsigned', 'pure_observation', 'read_repeat', 'none')

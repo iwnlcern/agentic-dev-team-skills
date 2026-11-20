@@ -328,7 +328,9 @@ class SessionTests(unittest.TestCase):
 
     def test_capabilities_are_exactly_the_handled_operations(self):
         names = ('protocol.connect', 'protocol.schema', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
-        self.assertEqual(self.registry.capabilities(), names)
+        queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
+                 'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
+        self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue)))
         self.assertEqual(set(platform.platform_handlers()), set(names))
         with patch.object(p, 'session_handlers', return_value={'protocol.connect': lambda: None}):
             with self.assertRaises(ValueError):

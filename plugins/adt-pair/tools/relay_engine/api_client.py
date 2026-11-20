@@ -87,7 +87,7 @@ def read_ready_file(path: str) -> ReadyFile:
                 raise LocalRefusal('ready_file_invalid')
             data = json.loads(stream.read(16385))
         if (type(data) is not dict
-                or set(data) != {'format', 'socket', 'store_id', 'build_id', 'schema_digest', 'pid'}
+                or not {'format', 'socket', 'store_id', 'build_id', 'schema_digest', 'pid'} <= set(data)
                 or data['format'] != 'adt-ready-v1' or type(data['socket']) is not str
                 or not Path(data['socket']).is_absolute()
                 or Path(data['socket']).resolve().parent != target.parent.resolve()
