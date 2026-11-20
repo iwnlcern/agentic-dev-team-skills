@@ -1,0 +1,72 @@
+#!/usr/bin/python3 -IS
+"""System-owned entry for the terminal operator confirmation signer."""
+import re
+import subprocess
+import sys
+from typing import NamedTuple
+
+PURPOSES = (
+    'engine_stop', 'engine_start', 'project_stop', 'project_start',
+    'restore', 'mirror_recovery', 'adopt_restored', 'abandonment',
+    'new_folder_pass', 'answer_5d', 'report_confirmation',
+    'authority.set_reapproval', 'authority.release_restore',
+    'authority.assign_reviewer', 'authority.unbind_branch',
+    'queue.answer', 'queue.open', 'queue.dismiss', 'queue.dismiss_all',
+    'checkout_register', 'checkout_unregister', 'queue.go_ahead_without_review',
+    'queue.waive_verification', 'slip.revoke', 'slip.reissue', 'seat_unseat',
+)
+SIGNER = ('/usr/bin/ssh-keygen', '-Y', 'sign', '-f', '/opt/adt-operator/key/operator-check',
+          '-n', 'adt-terminal-check-v1')
+
+
+class Message(NamedTuple):
+    purpose: str
+    args_digest: str
+    store_id: str
+    value: str
+
+
+def parse_message(raw: bytes) -> Message:
+    try:
+        protocol, purpose, args_digest, store_id, value = raw.decode('ascii').split('\0')
+    except ValueError as error:
+        raise ValueError('invalid terminal message') from error
+    if protocol != 'adt-terminal-check-v1':
+        raise ValueError('invalid terminal message')
+    if purpose not in PURPOSES:
+        raise ValueError('unknown purpose')
+    if (not re.fullmatch('[0-9a-f]{64}', args_digest)
+            or not re.fullmatch('[0-9a-f]{64}', value)
+            or not re.fullmatch('[ -~]+', store_id)):
+        raise ValueError('invalid terminal message')
+    return Message(purpose, args_digest, store_id, value)
+
+
+def main(argv: list[str], *, signer: tuple[str, ...] = SIGNER) -> int:
+    if argv == ['probe']:
+        return 0
+    if len(argv) != 2 or argv[0] != 'sign':
+        print('usage: operator-check probe | sign HEX', file=sys.stderr)
+        return 2
+    try:
+        if not re.fullmatch('(?:[0-9a-fA-F]{2})+', argv[1]):
+            raise ValueError('invalid terminal message')
+        raw = bytes.fromhex(argv[1])
+        message = parse_message(raw)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    print(f'Signing: {message.purpose}, arguments {message.args_digest[:16]}, store {message.store_id}',
+          file=sys.stderr, flush=True)
+    try:
+        result = subprocess.run(signer, input=raw, capture_output=True, check=False)
+    except OSError:
+        return 3
+    if result.returncode:
+        return 3
+    sys.stdout.buffer.write(result.stdout)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

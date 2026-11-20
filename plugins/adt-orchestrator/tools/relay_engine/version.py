@@ -7,6 +7,7 @@ import stat
 KIT_VERSION = "2.9.7"
 ROSTER = (
     "adt",
+    "adt-operator-check",
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
@@ -61,6 +62,8 @@ ROSTER = (
     "relay_engine/lifecycle_paths.py",
     "relay_engine/lifecycle_state.py",
     "relay_engine/migrate.py",
+    "relay_engine/operator_check_install.py",
+    "relay_engine/operator_check_words.py",
     "relay_engine/operator_queue/__init__.py",
     "relay_engine/operator_queue/component.py",
     "relay_engine/operator_queue/ingest.py",
@@ -71,6 +74,7 @@ ROSTER = (
     "relay_engine/operator_queue/operations.py",
     "relay_engine/operator_queue/records.py",
     "relay_engine/operator_queue/saga.py",
+    "relay_engine/operator_terminal.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",
@@ -107,7 +111,7 @@ class FingerprintError(RuntimeError):
 
 def _inventory(tools_dir):
     members = set()
-    for name in ("relay", "adt"):
+    for name in ("relay", "adt", "adt-operator-check"):
         launcher = tools_dir / name
         try:
             launcher.lstat()

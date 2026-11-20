@@ -22,6 +22,7 @@ KIT_VERSION = _version.KIT_VERSION
 ENGINE_SET = tuple(_version.ROSTER)
 assert ENGINE_SET == (
     "adt",
+    "adt-operator-check",
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
@@ -76,6 +77,8 @@ assert ENGINE_SET == (
     "relay_engine/lifecycle_paths.py",
     "relay_engine/lifecycle_state.py",
     "relay_engine/migrate.py",
+    "relay_engine/operator_check_install.py",
+    "relay_engine/operator_check_words.py",
     "relay_engine/operator_queue/__init__.py",
     "relay_engine/operator_queue/component.py",
     "relay_engine/operator_queue/ingest.py",
@@ -86,6 +89,7 @@ assert ENGINE_SET == (
     "relay_engine/operator_queue/operations.py",
     "relay_engine/operator_queue/records.py",
     "relay_engine/operator_queue/saga.py",
+    "relay_engine/operator_terminal.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",

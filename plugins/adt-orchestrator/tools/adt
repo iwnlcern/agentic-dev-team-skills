@@ -461,9 +461,166 @@ def console_group(extra: Sequence[Callable[[argparse._SubParsersAction], None]] 
     return CommandGroup('console', build)
 
 
+
+def _operator_run(command, *, input=None, timeout=120):
+    return subprocess.run(command, input=input, capture_output=True, check=False, timeout=timeout,
+                          env={**os.environ, 'LC_ALL': 'C'})
+
+
+def _installed_helper_line():
+    from relay_engine.operator_check_install import CHECK_PATH
+
+    with open(CHECK_PATH, 'rb') as helper:
+        return helper.readline(4096)
+
+
+def probe(run: Callable) -> str:
+    from relay_engine.operator_check_install import CHECK_PATH
+
+    result = run(['/usr/bin/sudo', '-k', '-n', CHECK_PATH, 'probe'], timeout=5)
+    return 'passwordless' if result.returncode == 0 else 'asks'
+
+
+def prove(message: bytes, act_line: str, *, run: Callable, clock: Callable,
+          lstat: Callable, read_helper: Callable = _installed_helper_line) -> bytes:
+    from relay_engine.operator_check_install import CHECK_PATH, chain_failure
+    from relay_engine.operator_check_words import classify_sudo_failure, prompt_text, render_act_line
+    from relay_engine.operator_terminal import OperatorCheckRefused
+
+    deadline = clock() + 120_000_000_000
+    try:
+        line = read_helper().decode('utf-8')
+    except FileNotFoundError as error:
+        raise OperatorCheckRefused('not_installed') from error
+    except (OSError, UnicodeError) as error:
+        raise OperatorCheckRefused('interpreter_unsafe') from error
+    if not line.startswith('#!') or not line.endswith(' -IS\n'):
+        raise OperatorCheckRefused('interpreter_unsafe')
+    interpreter = line[2:-5]
+    unsafe = chain_failure(interpreter, lstat=lstat)
+    if unsafe is not None:
+        raise OperatorCheckRefused('interpreter_unsafe', f'{render_act_line(unsafe)}; run adt operator install-check again')
+    try:
+        if probe(run) == 'passwordless':
+            raise OperatorCheckRefused('passwordless')
+        remaining = (deadline - clock()) / 1_000_000_000
+        if remaining <= 0:
+            raise OperatorCheckRefused('timeout')
+        result = run(['/usr/bin/sudo', '-k', '-p', prompt_text(act_line), CHECK_PATH,
+                      'sign', message.hex()], timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        raise OperatorCheckRefused('timeout') from error
+    except OSError as error:
+        raise OperatorCheckRefused('prove_failed') from error
+    if clock() >= deadline:
+        raise OperatorCheckRefused('timeout')
+    stderr = result.stderr.decode('utf-8', errors='replace')
+    if result.returncode:
+        if result.returncode == 2 and 'unknown purpose' in stderr:
+            raise OperatorCheckRefused('prove_failed',
+                                       'The installed check does not know this act. Run adt operator install-check again.')
+        raise OperatorCheckRefused(classify_sudo_failure(stderr))
+    for line in stderr.splitlines():
+        if line.startswith('Signing: '):
+            print(line, file=sys.stderr)
+    return result.stdout
+
+
+def confirm_locally(purpose: str, args, *, store_id: str):
+    from relay_engine.operator_check_words import describe_act
+    from relay_engine.operator_terminal import require_operator
+
+    act_line = describe_act(purpose, args)
+    return require_operator(
+        purpose, args, store_id=store_id, act_line=act_line,
+        prove=lambda message: prove(message, act_line, run=_operator_run, clock=time.monotonic_ns,
+                                    lstat=os.lstat),
+        show=lambda line: print(line, file=sys.stderr, flush=True),
+    )
+
+
+def _call_interpreter(interpreter, expression):
+    try:
+        result = subprocess.run([interpreter, '-IS', '-c', expression], env={}, capture_output=True,
+                                check=False, timeout=5)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError('interpreter did not answer') from error
+    if result.returncode:
+        raise ValueError('interpreter did not answer')
+    return result.stdout.decode('utf-8').strip()
+
+
+def _operator_check_command(args, *, run: Callable = _operator_run) -> int:
+    import pwd
+
+    from relay_engine import operator_check_install as install
+
+    uninstalling = args.operator_command == 'uninstall-check'
+    helper = Path(__file__).with_name('adt-operator-check')
+    try:
+        interpreter = install.choose_interpreter(
+            sys.platform,
+            read_executable=lambda path: _call_interpreter(path, 'import os, sys; print(os.path.realpath(sys.executable))'),
+            read_version=lambda path: tuple(map(int, _call_interpreter(
+                path, 'import sys; print(*sys.version_info[:2])').split())),
+            lstat=os.lstat,
+        )
+        files = install.install_plan(sys.platform, helper.read_bytes(), interpreter)
+        payload = install.invocation_payload(sys.platform, interpreter, pwd.getpwuid(os.getuid()).pw_name, files)
+        print(f'Operator check interpreter: {interpreter}', file=sys.stderr)
+        for path, _, _, _ in files:
+            print(path, file=sys.stderr)
+        if not uninstalling:
+            print('To remove the terminal check, run adt operator uninstall-check.', file=sys.stderr)
+        sys.stderr.flush()
+
+        def change(action, program):
+            result = run(['/usr/bin/sudo', interpreter, '-IS', '-c', program, action], input=payload)
+            if not result.stdout:
+                raise install.InstallRefused('operator_check_not_installed')
+            report = json.loads(result.stdout)
+            if result.returncode:
+                if report['outcome'] == 'not_permitted':
+                    print('Your account may not run the operator check. Its sudo rule must allow the helper.',
+                          file=sys.stderr)
+                    if report['remaining']:
+                        print('Existing paths left in place:', file=sys.stderr)
+                        for path in report['remaining']:
+                            print(path, file=sys.stderr)
+                        print('After fixing the rule, run adt operator install-check again, '
+                              'or run adt operator uninstall-check to remove those paths.', file=sys.stderr)
+                    else:
+                        print('No operator check paths were installed.', file=sys.stderr)
+                raise install.InstallRefused(report['outcome'], tuple(report['paths']))
+            for path in report['paths']:
+                print(path)
+
+        if uninstalling:
+            change('uninstall', install.UNINSTALLER_SOURCE)
+        else:
+            change('install', install.INSTALLER_SOURCE)
+            if probe(run) == 'passwordless':
+                change('uninstall', install.UNINSTALLER_SOURCE)
+                raise install.InstallRefused('operator_check_passwordless')
+    except (install.InstallRefused, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f'adt operator: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+def operator_group() -> CommandGroup:
+    def build(commands):
+        operator = commands.add_parser('operator')
+        nested = operator.add_subparsers(dest='operator_command', required=True)
+        for name in ('install-check', 'uninstall-check'):
+            nested.add_parser(name).set_defaults(handler=_operator_check_command)
+
+    return CommandGroup('operator', build)
+
+
 if __name__ == '__main__':
     if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
         _, _, configured, gate_fd, channel_fd, epoch = sys.argv
         raise SystemExit(_custodian(int(gate_fd), int(channel_fd), epoch, configured))
-    raise SystemExit(main(sys.argv[1:], groups=(console_group(),), queue_notifier=_queue_notifier,
+    raise SystemExit(main(sys.argv[1:], groups=(console_group(), operator_group()), queue_notifier=_queue_notifier,
                           stop_report=_report_incomplete_stop))

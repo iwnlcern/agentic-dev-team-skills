@@ -7,7 +7,8 @@ import unittest
 
 PACKAGE = Path(__file__).parents[1]
 CONSTRUCTION_SITES = {'ServicePrincipal': {'approval_seal': 'seal_worker.py'},
-                      'OperatorPrincipal': {}}
+                      'OperatorPrincipal': {'page': 'api_operator_bridge.py',
+                                            'terminal': 'operator_terminal.py'}}
 
 
 def _resolved_kinds(node, names):
@@ -73,7 +74,11 @@ class TestPrincipalConstruction(unittest.TestCase):
     def test_only_seal_worker_constructs_approval_seal(self):
         self.assertEqual(violations(PACKAGE), [])
         sites=[(p,k,v) for p,n,k,v in constructions(PACKAGE)]
-        self.assertEqual(sites,[('seal_worker.py','ServicePrincipal','approval_seal')])
+        self.assertCountEqual(sites, [
+            ('api_operator_bridge.py', 'OperatorPrincipal', 'page'),
+            ('operator_terminal.py', 'OperatorPrincipal', 'terminal'),
+            ('seal_worker.py', 'ServicePrincipal', 'approval_seal'),
+        ])
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'other.py';p.write_text("ServicePrincipal('approval_seal')\nServicePrincipal(name)\n")
             self.assertEqual(len(violations(d)),2)
@@ -93,7 +98,7 @@ class TestPrincipalConstruction(unittest.TestCase):
             self.assertEqual({r[0] for r in got},set(fixtures)-{'seal_worker.py'})
             self.assertEqual(len(got),5)
         self.assertEqual(violations(PACKAGE),[])
-        self.assertEqual(len(constructions(PACKAGE)),1)
+        self.assertEqual(len(constructions(PACKAGE)), 3)
 
 
     def test_construction_scan_ends_on_rebinding(self):
