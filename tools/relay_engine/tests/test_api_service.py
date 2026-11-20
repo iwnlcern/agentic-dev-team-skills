@@ -178,6 +178,106 @@ class ApiServiceTests(unittest.TestCase):
             opens.assert_not_called()
             self.assertIsNone(service.ready_path)
 
+    @contextmanager
+    def _sqlite_trace(self, phase):
+        original = store_layout.sqlite3.connect
+        observed = []
+
+        def connect(database, *args, **kwargs):
+            observed.append((phase(), database, kwargs.get('uri', False)))
+            return original(database, *args, **kwargs)
+
+        with patch.object(store_layout.sqlite3, 'connect', connect):
+            yield observed
+
+    def _assert_protected_trace(self, observed, expected):
+        actual = [entry for entry in observed if entry[1] != ':memory:']
+        self.assertEqual(actual, [(phase, path.resolve().as_uri() + '?mode=ro&immutable=1', True)
+                                  for phase, path in expected])
+
+    def _assert_no_publication(self, service, root):
+        self.assertIsNone(service.ready_path)
+        self.assertIsNone(service._retired_admission)
+        self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
+
+    def _assert_armed(self, service, root, admission):
+        self._assert_no_publication(service, root)
+        with store_layout.IncumbentGuard.acquire(root, expected_lock=admission.idle.lock) as guard:
+            armed = guard.read()
+            self.assertEqual(armed, service._owned_arm)
+            self.assertEqual((armed.phase, armed.root, armed.lock),
+                             ('armed', admission.idle.root, admission.idle.lock))
+
+    @staticmethod
+    def _replace_member(path):
+        replacement = path.with_name('replacement')
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(path)
+
+    def test_startup_path_and_proof_refusals_precede_sqlite(self):
+        root = self.root.resolve()
+        record = root / store_layout._INCUMBENT
+        idle = record.read_bytes()
+        cases = (
+            (root, None, 'startup-unverified'),
+            (root, str(self.base / 'missing-startup-socket'), 'startup_peer'),
+            (root.with_name(root.name.upper()), None, 'startup-unverified'),
+            (root.with_name('canonical-leaf'), None, 'startup-unverified'),
+        )
+        for canonical, startup_socket, reason in cases:
+            with self.subTest(canonical=canonical, startup_socket=startup_socket):
+                visible = Path.lstat
+
+                def stat_canonical(path):
+                    return visible(root if path == canonical else path)
+
+                service = self.m.ApiService(str(root), P, clock=lambda: 1,
+                                            admission=self.admitted.receipt, startup_socket=startup_socket)
+                self.addCleanup(service.stop)
+                with (patch.object(Path, 'lstat', stat_canonical),
+                      patch.object(store_layout, 'production_root', return_value=canonical),
+                      patch.object(store_layout.sqlite3, 'connect') as opens):
+                    with self.assertRaisesRegex(store_layout.LayoutFault, reason):
+                        service.start()
+                    opens.assert_not_called()
+                self.assertEqual(record.read_bytes(), idle)
+                self._assert_no_publication(service, root)
+
+    def test_production_symlink_refuses_before_startup_and_sqlite(self):
+        root = self.root.resolve()
+        alias = root.with_name('production-link')
+        alias.symlink_to(root, target_is_directory=True)
+        record = root / store_layout._INCUMBENT
+        idle = record.read_bytes()
+        from relay_engine import owner_start
+
+        service = self.m.ApiService(str(alias), P, clock=lambda: 1, admission=self.admitted.receipt,
+                                    startup_socket=str(self.base / 'synthetic-startup-socket'))
+        self.addCleanup(service.stop)
+        with (patch.object(store_layout, 'production_root', return_value=root),
+              patch.object(owner_start, 'verify_service_start') as startup,
+              patch.object(store_layout.sqlite3, 'connect') as opens):
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'startup-unverified'):
+                service.start()
+            startup.assert_not_called()
+            opens.assert_not_called()
+        self.assertEqual(record.read_bytes(), idle)
+        self._assert_no_publication(service, root)
+
+    def test_moved_production_kind_refuses_at_immutable_preflight(self):
+        record = self.root / store_layout._INCUMBENT
+        idle = record.read_bytes()
+        path = store_layout.catalogue_path(self.root)
+        with closing(store_layout.sqlite3.connect(path)) as db, db:
+            db.execute("UPDATE catalogue_identity SET kind='production' WHERE id=1").close()
+        with self._sqlite_trace(lambda: 'armed' if self.service._owned_arm else 'preflight') as trace:
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'wrong-kind'):
+                self.service.start()
+        self._assert_protected_trace(trace, [('preflight', path)])
+        self.assertEqual(record.read_bytes(), idle)
+        self._assert_no_publication(self.service, self.root)
+
     def test_wrong_store_or_selected_member_fences_before_writable_setup(self):
         for case in ('store', 'route', 'ledger'):
             with self.subTest(substitution=case):
@@ -186,30 +286,23 @@ class ApiServiceTests(unittest.TestCase):
                 other_root = self.base / f'other-{case}'
                 other_project = str(uuid4()) if case == 'ledger' else P
                 admitted_store_fixture(other_root, other_project, project_name='other')
+                catalogue_path = store_layout.catalogue_path(root)
+                ledger_path = store_layout.ledger_path(root, P)
                 if case == 'store':
-                    os.replace(store_layout.catalogue_path(other_root), store_layout.catalogue_path(root))
+                    os.replace(store_layout.catalogue_path(other_root), catalogue_path)
                 elif case == 'route':
                     with closing(store_layout.open_catalogue(root)) as catalog, catalog:
                         catalog.execute('DELETE FROM project_routes WHERE project_id=?', (P,)).close()
                 else:
-                    os.replace(store_layout.ledger_path(other_root, other_project), store_layout.ledger_path(root, P))
+                    os.replace(store_layout.ledger_path(other_root, other_project), ledger_path)
                 service = self.m.ApiService(str(root), P, clock=lambda: 1, admission=admission.receipt)
                 self.addCleanup(service.stop)
-                with (patch.object(store_layout, '_immutable_incumbent_read',
-                                   wraps=store_layout._immutable_incumbent_read) as protected,
-                      patch.object(store_layout, '_configure', wraps=store_layout._configure) as configure,
-                      patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as ledger):
+                with self._sqlite_trace(lambda: 'armed' if service._owned_arm else 'preflight') as trace:
                     with self.assertRaises(store_layout.LayoutFault):
                         service.start()
-                    self.assertEqual(protected.call_count, 2)
-                    configure.assert_not_called()
-                    ledger.assert_not_called()
-                self.assertIsNone(service.ready_path)
-                self.assertIsNone(service._retired_admission)
-                self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
-                with store_layout.IncumbentGuard.acquire(root, expected_lock=admission.idle.lock) as guard:
-                    self.assertEqual(guard.read().phase, 'armed')
-                print(json.dumps({'identity_substitution': case, 'protected_reads': 2, 'writable_opens': 0}))
+                self._assert_protected_trace(trace, [
+                    ('preflight', catalogue_path), ('armed', catalogue_path), ('armed', ledger_path)])
+                self._assert_armed(service, root, admission)
 
     def test_member_inode_substitution_after_protected_read_fences_writer(self):
         ledger = store_layout.ledger_path(self.root, P)
@@ -217,23 +310,52 @@ class ApiServiceTests(unittest.TestCase):
 
         def substitute(guard, arm):
             members = obtain(guard, arm)
-            replacement = ledger.with_name('replacement')
-            replacement.write_bytes(ledger.read_bytes())
-            replacement.chmod(0o600)
-            replacement.replace(ledger)
+            self._replace_member(ledger)
             return members
 
         with (patch.object(store_layout.IncumbentGuard, '_admit_members', substitute),
-              patch.object(store_layout.sqlite3, 'connect', wraps=store_layout.sqlite3.connect) as opens):
+              self._sqlite_trace(lambda: 'armed' if self.service._owned_arm else 'preflight') as trace):
             with self.assertRaisesRegex(store_layout.LayoutFault, 'member-changed'):
                 self.service.start()
-            selected = [call.args[0] for call in opens.call_args_list if call.args[0] != ':memory:']
-            self.assertEqual(len(selected), 2)
-            self.assertTrue(all('mode=ro&immutable=1' in uri for uri in selected))
-        self.assertIsNone(self.service.ready_path)
-        self.assertIsNone(self.service._retired_admission)
-        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=self.admitted.idle.lock) as guard:
-            self.assertEqual(guard.read().phase, 'armed')
+        path = store_layout.catalogue_path(self.root)
+        self._assert_protected_trace(trace, [('preflight', path), ('armed', path), ('armed', ledger)])
+        self._assert_armed(self.service, self.root, self.admitted)
+
+    def test_member_substitution_between_preflight_and_arm_preserves_idle(self):
+        catalogue_path = store_layout.catalogue_path(self.root)
+        record = self.root / store_layout._INCUMBENT
+        idle = record.read_bytes()
+        create_runtime = self.service._create_runtime
+
+        def substitute(store):
+            create_runtime(store)
+            self._replace_member(catalogue_path)
+
+        with (patch.object(self.service, '_create_runtime', substitute),
+              self._sqlite_trace(lambda: 'armed' if self.service._owned_arm else 'preflight') as trace):
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'member-changed'):
+                self.service.start()
+        self._assert_protected_trace(trace, [('preflight', catalogue_path)])
+        self.assertEqual(record.read_bytes(), idle)
+        self._assert_no_publication(self.service, self.root)
+
+    def test_member_substitution_after_arm_preserves_fence(self):
+        catalogue_path = store_layout.catalogue_path(self.root)
+        ledger = store_layout.ledger_path(self.root, P)
+        arm = store_layout.IncumbentGuard.arm
+
+        def substitute(guard, idle, owner):
+            armed = arm(guard, idle, owner)
+            self._replace_member(catalogue_path)
+            return armed
+
+        with (patch.object(store_layout.IncumbentGuard, 'arm', substitute),
+              self._sqlite_trace(lambda: 'armed' if self.service._owned_arm else 'preflight') as trace):
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'member-changed'):
+                self.service.start()
+        self._assert_protected_trace(trace, [
+            ('preflight', catalogue_path), ('armed', catalogue_path), ('armed', ledger)])
+        self._assert_armed(self.service, self.root, self.admitted)
 
     def test_stop_before_first_open_keeps_sqlite_unopened(self):
         for port in (None, 0):
@@ -253,12 +375,158 @@ class ApiServiceTests(unittest.TestCase):
                     return record
 
                 with (patch.object(store_layout.IncumbentGuard, 'arm', arm_then_stop),
-                      patch.object(store_layout.sqlite3, 'connect') as opens):
-                    self.assertIsNone(service.start())
-                    opens.assert_not_called()
-                self.assertIsNone(service.ready_path)
-                self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
-                self.assertEqual(service.stop(), 0)
+                      self._sqlite_trace(lambda: 'after-stop' if service.is_stopping() else 'preflight') as trace):
+                    try:
+                        self.assertIsNone(service.start())
+                        self.assertFalse(any(phase == 'after-stop' for phase, *_ in trace))
+                        path = store_layout.catalogue_path(root)
+                        self._assert_protected_trace(trace, [('preflight', path)])
+                        self._assert_no_publication(service, root)
+                    finally:
+                        with self._sqlite_trace(lambda: 'retirement') as retirement:
+                            self.assertEqual(service.stop(), 0)
+                self._assert_protected_trace(retirement, [
+                    ('retirement', path), ('retirement', store_layout.ledger_path(root, P))])
+                with store_layout.IncumbentGuard.acquire(root, expected_lock=admission.idle.lock) as guard:
+                    guard.verify_idle(*service._retired_admission)
+
+    def test_stop_before_kind_preflight_opens_no_sqlite(self):
+        guard_verify = store_layout.IncumbentGuard.verify_idle
+
+        def stop_after_receipt(guard, idle, proof):
+            result = guard_verify(guard, idle, proof)
+            self.service._foreground.enter_stop()
+            return result
+
+        self._check_preflight_stop(store_layout.IncumbentGuard, 'verify_idle', stop_after_receipt, ())
+
+    def test_stop_during_kind_preflight_refuses_arm(self):
+        open_protected = store_layout._immutable_incumbent_read
+
+        def stop_during_connection(path):
+            result = open_protected(path)
+            self.service._foreground.enter_stop()
+            return result
+
+        path = store_layout.catalogue_path(self.root)
+        self._check_preflight_stop(store_layout, '_immutable_incumbent_read', stop_during_connection,
+                                   [('preflight', path)])
+
+    def _check_preflight_stop(self, target, name, replacement, expected):
+        record = self.root / store_layout._INCUMBENT
+        idle = record.read_bytes()
+        self.service.arm_foreground()
+        with (patch.object(target, name, replacement),
+              self._sqlite_trace(lambda: 'after-stop' if self.service.is_stopping() else 'preflight') as trace):
+            try:
+                self.assertIsNone(self.service.start())
+                self.assertFalse(any(phase == 'after-stop' for phase, *_ in trace))
+                self._assert_protected_trace(trace, expected)
+                self._assert_no_publication(self.service, self.root)
+            finally:
+                self.assertEqual(self.service.stop(), 0)
+        self.assertEqual(record.read_bytes(), idle)
+
+    def test_parked_kind_preflight_honors_hard_stop(self):
+        self._check_incomplete_startup_stop('preflight', None)
+
+    def test_early_stop_member_substitution_preserves_fence(self):
+        for port in (None, 0):
+            with self.subTest(bridge=port):
+                self._check_incomplete_startup_stop('early-substitution', port)
+
+    def test_unresolved_armed_admission_stop_preserves_fence(self):
+        for port in (None, 0):
+            with self.subTest(bridge=port):
+                self._check_incomplete_startup_stop('unresolved', port)
+
+    def _check_incomplete_startup_stop(self, phase, port):
+        root = self.base / f'{phase}-{port}'
+        admission = admitted_store_fixture(root, P, project_name='service')
+        tools = Path(__file__).resolve().parents[2]
+        reader, writer = os.pipe()
+        script = f"""
+import os, threading
+from pathlib import Path
+from relay_engine import api_service, store_layout
+
+root = Path({str(root)!r})
+phase = {phase!r}
+record = root / store_layout._INCUMBENT
+arm = store_layout.IncumbentGuard.arm
+connect = store_layout.sqlite3.connect
+open_protected = store_layout._immutable_incumbent_read
+
+def trace(database, *args, **kwargs):
+    if database != ':memory:' and not database.endswith('?mode=ro&immutable=1'):
+        print('unexpected ordinary SQLite', flush=True)
+    return connect(database, *args, **kwargs)
+
+def arm_cut(guard, idle, owner):
+    armed = arm(guard, idle, owner)
+    if phase == 'early-substitution':
+        catalogue = store_layout.catalogue_path(root)
+        replacement = catalogue.with_name('replacement')
+        replacement.write_bytes(catalogue.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(catalogue)
+        print(record.read_bytes().hex(), flush=True)
+        service._foreground.enter_stop()
+    return armed
+
+def park(guard, armed):
+    assert service._admission_unresolved
+    print(record.read_bytes().hex(), flush=True)
+    threading.Event().wait()
+
+def park_preflight(path):
+    with open_protected(path):
+        print(record.read_bytes().hex(), flush=True)
+        threading.Event().wait()
+
+store_layout.sqlite3.connect = trace
+store_layout.IncumbentGuard.arm = arm_cut
+if phase == 'unresolved':
+    store_layout.IncumbentGuard._admit_members = park
+if phase == 'preflight':
+    store_layout._immutable_incumbent_read = park_preflight
+service = api_service.ApiService(str(root), {P!r}, clock=lambda: 1, bridge_port={port!r},
+                                 idle_fd=int(os.environ.pop('ADT_PRIVATE_IDLE_FD')),
+                                 retirement_fd={writer}, notifier_mode='off')
+service.arm_foreground()
+assert service.start() is None
+raise SystemExit(service.stop())
+"""
+        try:
+            with private_idle(admission) as (fd, env), subprocess.Popen(
+                [sys.executable, '-c', script], pass_fds=(fd, writer),
+                env=dict(env, PYTHONPATH=str(tools)), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            ) as proc:
+                os.close(writer)
+                writer = None
+                try:
+                    self.assertTrue(select.select([proc.stdout], [], [], 3)[0])
+                    held_record = bytes.fromhex(proc.stdout.readline().decode('ascii'))
+                    self.assertTrue(held_record)
+                    started = time.monotonic()
+                    if phase != 'early-substitution':
+                        proc.terminate()
+                    output, error = proc.communicate(timeout=5)
+                    self.assertEqual((proc.returncode, output), (75, b''), error)
+                    self.assertLess(time.monotonic() - started, 5)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.communicate(timeout=5)
+            self.assertEqual(os.read(reader, 1), b'')
+        finally:
+            os.close(reader)
+            if writer is not None:
+                os.close(writer)
+        self.assertEqual((root / store_layout._INCUMBENT).read_bytes(), held_record)
+        self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
+        with store_layout.IncumbentGuard.acquire(root, expected_lock=admission.idle.lock) as guard:
+            self.assertEqual(guard.read().phase, 'idle' if phase == 'preflight' else 'armed')
 
     def test_receipt_transport_refuses_short_oversized_and_expired_before_open(self):
         for case in ('short', 'oversized', 'expired'):

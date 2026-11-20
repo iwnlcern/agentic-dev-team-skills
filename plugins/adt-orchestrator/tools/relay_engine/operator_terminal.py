@@ -122,14 +122,19 @@ def _installed_key(key_path: str, stat: Callable) -> bytes:
         raise OperatorCheckRefused('key_unsafe') from error
 
 
-def _principal_after_verify(message: bytes, signature: bytes, *, key_path: str = _KEY_PATH,
-                            stat: Callable = os.lstat) -> OperatorPrincipal:
+def _verify_signature(message: bytes, signature: bytes, *, key_path: str = _KEY_PATH,
+                      stat: Callable = os.lstat) -> None:
     key = _installed_key(key_path, stat)
     parsed = parse_sshsig(signature)
     signed = b'SSHSIG' + b''.join(_ssh_string(value) for value in
                                   (_NAMESPACE, b'', b'sha512', sha512(message).digest()))
     if parsed.public_key != key or not ed25519_verify.verify(key, signed, parsed.signature):
         raise OperatorCheckRefused('bad_signature')
+
+
+def _principal_after_verify(message: bytes, signature: bytes, *, key_path: str = _KEY_PATH,
+                            stat: Callable = os.lstat) -> OperatorPrincipal:
+    _verify_signature(message, signature, key_path=key_path, stat=stat)
     return OperatorPrincipal('terminal')
 
 

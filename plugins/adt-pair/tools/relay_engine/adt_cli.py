@@ -164,6 +164,7 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
                 idle_fd, retire_fd = _private_store_channels()
             except store_layout.LayoutFault as error:
                 return _serve_refusal(error, args.store_root, args.project_id)
+            startup_socket = os.environ.pop('ADT_PRIVATE_START_SOCKET', None)
             use_notifier = args.bridge_port is not None
             setup = None
             if use_notifier and queue_notifier is not None:
@@ -172,6 +173,7 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
                                              clock=lambda: time.time_ns() // 1000000,
                                              bridge_port=args.bridge_port, stop_report=stop_report,
                                              idle_fd=idle_fd, retirement_fd=retire_fd,
+                                             startup_socket=startup_socket,
                                              notifier_setup=setup,
                                              notifier_mode='configured' if use_notifier else 'off')
             service.arm_foreground()

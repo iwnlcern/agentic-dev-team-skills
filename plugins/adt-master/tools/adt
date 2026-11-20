@@ -539,6 +539,17 @@ def confirm_locally(purpose: str, args, *, store_id: str):
     )
 
 
+def confirm_owner_start(selection):
+    from relay_engine.owner_start import NativeIdentity, authorize_owner_start, startup_act
+
+    return authorize_owner_start(
+        selection, NativeIdentity.current(),
+        prove=lambda message: prove(message, startup_act(selection), run=_operator_run,
+                                    clock=time.monotonic_ns, lstat=os.lstat),
+        show=lambda line: print(line, file=sys.stderr, flush=True),
+    )
+
+
 def _call_interpreter(interpreter, expression):
     try:
         result = subprocess.run([interpreter, '-IS', '-c', expression], env={}, capture_output=True,

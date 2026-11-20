@@ -90,6 +90,7 @@ assert ENGINE_SET == (
     "relay_engine/operator_queue/records.py",
     "relay_engine/operator_queue/saga.py",
     "relay_engine/operator_terminal.py",
+    "relay_engine/owner_start.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",

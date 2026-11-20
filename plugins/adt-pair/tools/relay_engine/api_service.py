@@ -1,6 +1,6 @@
 """Explicit foreground API serving for one project, with bounded request reads."""
 from collections.abc import Callable, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import asdict, dataclass
 import io
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 import select
 import signal
 import socket
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -17,7 +18,7 @@ import time
 import uuid
 
 from relay_engine import api_compose, api_platform, api_protocol, api_registry, api_schema
-from relay_engine import api_wire, errors, lifecycle_paths, store_layout, version
+from relay_engine import api_wire, catalogue, errors, lifecycle_paths, owner_start, store_layout, version
 from relay_engine.api_compose import ApiComponent
 from relay_engine.api_submit import ServiceContext
 from relay_engine.api_writer import StoreWriter, WriterUnavailable
@@ -327,9 +328,10 @@ class ApiService:
                  bridge_port: int | None = None,
                  queue_notifier: QueueNotifier | None = None,
                  admission=None, idle_fd=None, retirement_fd=None, notifier_setup=None,
-                 notifier_mode=None,
+                 notifier_mode=None, startup_socket=None,
                  stop_report: Callable[[str | None, float, tuple[int, int] | None, str], None] | None = None):
-        self.store_root = str(Path(store_root).resolve())
+        self._requested_store_root = Path(store_root)
+        self.store_root = str(self._requested_store_root.resolve())
         self.project_id = project_id
         self.clock = clock
         self.components = None if components is None else tuple(components)
@@ -338,8 +340,10 @@ class ApiService:
         self._notifier_custodian = None
         self._admission = admission
         self._admission_unresolved = False
+        self._early_admission_members = None
         self._idle_fd = idle_fd
         self._retirement_fd = retirement_fd
+        self._startup_socket = startup_socket
         self._notifier_setup = notifier_setup
         if notifier_mode not in (None, 'off', 'configured'):
             raise ValueError('invalid notifier mode')
@@ -423,10 +427,63 @@ class ApiService:
                                                     stopping=self.is_stopping)
             except (OSError, ValueError) as error:
                 raise store_layout.LayoutFault('idle-receipt-invalid') from error
-        if self._notifier_setup is not None and not self.is_stopping():
-            self._notifier_setup(self)
         if not self.is_stopping():
             self._take_lock()
+
+    def _check_startup(self, idle):
+        guard = self._guard
+        canonical_production = owner_start._production_root()
+        production_path = guard._path == canonical_production
+        if production_path != (self._requested_store_root == canonical_production):
+            raise store_layout.LayoutFault('startup-unverified')
+        if not production_path:
+            try:
+                canonical_identity = store_layout._inode(canonical_production.lstat())
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise store_layout.LayoutFault('startup-unverified') from error
+            else:
+                if canonical_identity == guard._root_identity:
+                    raise store_layout.LayoutFault('startup-unverified')
+        startup_socket, self._startup_socket = self._startup_socket, None
+        if production_path != (startup_socket is not None):
+            raise store_layout.LayoutFault('startup-unverified')
+        if not production_path:
+            return 'isolated', None
+        try:
+            startup = owner_start.verify_service_start(startup_socket, guard, idle, self.bridge_port)
+        except owner_start.StartupRefused as error:
+            raise store_layout.LayoutFault(error.reason) from error
+        return 'production', startup
+
+    def _preflight_catalogue_kind(self, idle, expected_kind):
+        guard = self._guard
+        guard._current(idle)
+        members = guard._member_identities(idle.project)
+        if self.is_stopping():
+            return None
+        try:
+            path = store_layout.catalogue_path(guard._path)
+            with closing(store_layout._immutable_incumbent_read(path)) as protected:
+                if self.is_stopping():
+                    return None
+                catalogue._require_matching(protected)
+                with closing(protected.execute('SELECT kind FROM catalogue_identity')) as kinds:
+                    kind = kinds.fetchmany(2)
+        except (sqlite3.Error, ValueError, errors.EngineError) as error:
+            raise store_layout.LayoutFault('protected-read-unproved') from error
+        if self.is_stopping():
+            return None
+        self._check_idle_members(idle, members)
+        if kind != [(expected_kind,)]:
+            raise store_layout.LayoutFault('wrong-kind')
+        return members
+
+    def _check_idle_members(self, idle, members):
+        self._guard._current(idle)
+        if self._guard._member_identities(idle.project) != members:
+            raise store_layout.LayoutFault('member-changed')
 
     def _capture_recovery_checkpoint(self, armed, settled_operation):
         if (self._checkpointing or self.is_stopping() or self._owned_arm != armed
@@ -498,6 +555,16 @@ class ApiService:
             self._guard.verify_idle(idle, proof)
             if idle.project != self.project_id:
                 raise store_layout.LayoutFault('wrong-project')
+            expected_kind, startup = self._check_startup(idle)
+            if self.is_stopping():
+                return None
+            preflight_members = self._preflight_catalogue_kind(idle, expected_kind)
+            if preflight_members is None or self.is_stopping():
+                return None
+            if self._notifier_setup is not None and not self.is_stopping():
+                self._notifier_setup(self)
+            if self.is_stopping():
+                return None
             self._signal_requested = False
             self._notify_error = None
             epoch = uuid.uuid4()
@@ -509,19 +576,34 @@ class ApiService:
                 raise store_layout.LayoutFault('owner-identity-unavailable') from error
             owner = store_layout._IncumbentOwner(str(epoch), os.getpid(), birth, boot,
                                                  str(self.runtime_dir), self._notifier_mode)
+            self._check_idle_members(idle, preflight_members)
+            if startup is not None:
+                try:
+                    startup.recheck_before_arm()
+                except owner_start.StartupRefused as error:
+                    raise store_layout.LayoutFault(error.reason) from error
             if self.is_stopping():
                 return None
+            self._early_admission_members = preflight_members
             self._owned_arm = self._guard.arm(idle, owner)
             if self.is_stopping():
                 return None
             self._admission_unresolved = True
+            self._early_admission_members = None
+            if self.is_stopping():
+                return None
             members = self._guard._admit_members(self._owned_arm)
+            if self.is_stopping():
+                return None
+            if members != preflight_members:
+                raise store_layout.LayoutFault('member-changed')
+            self._guard._check_admitted_members(self._owned_arm, preflight_members)
             if self.is_stopping():
                 return None
             writer = StoreWriter(self.store_root, runtime_instance_id=instance_id)
             holder = (self._lock_fd, Path(self.store_root) / 'api-service.lock', self._lock_identity)
             writer.bind_service_owner(holder, self._foreground)
-            writer.bind_store_arm(self._guard, self._owned_arm, self.is_stopping, members)
+            writer.bind_store_arm(self._guard, self._owned_arm, self.is_stopping, preflight_members)
             self.writer = writer
             writer.start()
             try:
@@ -928,9 +1010,12 @@ class ApiService:
             if self._owned_arm is not None and not self._admission_unresolved:
                 if self._checkpointing:
                     raise OSError('checkpoint epoch remains armed')
+                if self._early_admission_members is not None:
+                    self._guard._check_admitted_members(self._owned_arm, self._early_admission_members)
                 proof = self._guard._retirement_proof(self._owned_arm, b'all original service I/O settled')
                 idle = self._guard.retire(self._owned_arm, proof)
                 self._retired_admission = idle, proof
+                self._early_admission_members = None
                 self._owned_arm = None
                 if self._retirement_fd is not None:
                     fd, self._retirement_fd = self._retirement_fd, None

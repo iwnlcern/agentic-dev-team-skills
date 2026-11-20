@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -269,6 +270,130 @@ class AdtTests(unittest.TestCase):
         out, err = proc.communicate(timeout=10)
         self.assertEqual((proc.returncode, out, err), (0, '', ''))
         self.assertFalse(Path(line).exists())
+
+    def _assert_production_refusal(self, spelling, canonical, reason):
+        from relay_engine import api_service, store_layout
+
+        record = self.root / store_layout._INCUMBENT
+        original = record.read_bytes()
+        argv = ['engine', 'serve', '--store-root', str(spelling), '--project-id', fixture.P]
+        with fixture.private_idle(self.admitted) as (fd, environment):
+            environment['ADT_PRIVATE_IDLE_FD'] = str(os.dup(fd))
+            with patch.dict(os.environ, environment), patch.object(
+                store_layout, 'production_root', return_value=canonical
+            ), patch.object(api_service.ApiService, 'arm_foreground'), patch.object(
+                store_layout.IncumbentGuard, 'arm', side_effect=store_layout.LayoutFault('test-arm-reached')
+            ) as arm, patch.object(api_service.StoreWriter, 'start') as writer:
+                status, output, error = self.run_command(argv)
+        self.assertEqual((status, output), (1, ''))
+        self.assertIn(reason, error)
+        arm.assert_not_called()
+        writer.assert_not_called()
+        self.assertEqual(record.read_bytes(), original)
+
+    def test_child_refuses_receipt_only_production_before_open(self):
+        self._assert_production_refusal(self.root, self.root, 'startup-unverified')
+
+    def test_canonical_production_inode_cannot_use_isolated_intake(self):
+        actual = self.root.resolve()
+        canonical = actual.with_name(actual.name.upper())
+        original_lstat = Path.lstat
+
+        def case_insensitive_lstat(path):
+            return original_lstat(actual if path == canonical else path)
+
+        with patch.object(Path, 'lstat', case_insensitive_lstat):
+            self._assert_production_refusal(actual, canonical, 'startup-unverified')
+
+    def _mark_fixture_production(self):
+        import sqlite3
+
+        from relay_engine import store_layout
+
+        with sqlite3.connect(store_layout.catalogue_path(self.root)) as catalogue:
+            catalogue.execute("UPDATE catalogue_identity SET kind='production' WHERE id=1")
+        catalogue.close()
+
+    def test_production_alias_cannot_use_isolated_intake(self):
+        self._mark_fixture_production()
+        alias = self.base / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        self._assert_production_refusal(alias, self.base / 'original-production-root', 'wrong-kind')
+
+    def test_production_child_checks_expiry_under_original_lock(self):
+        from relay_engine import operator_terminal, owner_start, store_layout
+        from relay_engine.tests.test_owner_start import EXPIRES, ISSUED, installed_key
+
+        self._mark_fixture_production()
+        root = self.root.resolve()
+        record = root / store_layout._INCUMBENT
+        original = record.read_bytes()
+        key = self.base / 'synthetic-signer'
+        subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)],
+                       check=True, capture_output=True, timeout=10)
+        public_key = key.with_suffix('.pub')
+        raw_key = installed_key(public_key, None)
+
+        def prove(message):
+            return subprocess.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', str(key),
+                                   '-n', 'adt-terminal-check-v1'], input=message, check=True,
+                                  capture_output=True, timeout=10).stdout
+
+        child_script = """
+from pathlib import Path
+import sys
+from unittest.mock import patch
+from relay_engine import adt_cli, api_service, operator_terminal, owner_start, store_layout
+from relay_engine.tests.test_owner_start import installed_key
+root, project, pub, clock, expire_after_check = sys.argv[1:]
+current = [int(clock)]
+
+def at_runtime(_service, _store):
+    if expire_after_check == '1':
+        current[0] += 1
+
+with (patch.object(store_layout, 'production_root', return_value=Path(root)),
+      patch.object(operator_terminal, '_installed_key', return_value=installed_key(pub, None)),
+      patch.object(owner_start, '_clock_ns', side_effect=lambda: current[0]),
+      patch.object(api_service.ApiService, '_create_runtime', at_runtime),
+      patch.object(store_layout.IncumbentGuard, 'arm',
+                   side_effect=store_layout.LayoutFault('checked-startup-gate'))):
+    raise SystemExit(adt_cli.main(['engine', 'serve', '--store-root', root, '--project-id', project]))
+"""
+        with (patch.object(store_layout, 'production_root', return_value=root),
+              patch.object(operator_terminal, '_installed_key', return_value=raw_key),
+              patch.object(owner_start, '_clock_ns', return_value=ISSUED)):
+            selection = owner_start.StartSelection.checked(root, self.admitted.idle.store, fixture.P)
+            owner = owner_start.NativeIdentity.current()
+            cases = ((EXPIRES - 1, '0', 'checked-startup-gate'),
+                     (EXPIRES, '0', 'startup_expired'),
+                     (EXPIRES - 1, '1', 'startup_expired'))
+            for now, expire_after_check, reason in cases:
+                with self.subTest(now=now, expire_after_check=expire_after_check):
+                    attempt = owner_start.authorize_owner_start(selection, owner, prove=prove, show=lambda _: None)
+                    with owner_start.startup_listener() as (listener, path):
+                        with fixture.private_idle(self.admitted) as (fd, environment):
+                            environment['ADT_PRIVATE_START_SOCKET'] = str(path)
+                            child = attempt.spawn(lambda: subprocess.Popen(
+                                [sys.executable, '-c', child_script, str(root), fixture.P, str(public_key), str(now),
+                                 expire_after_check],
+                                env=environment, pass_fds=(fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True))
+                        try:
+                            with owner_start.offer_child_start(listener, child, attempt, deadline=time.monotonic() + 5):
+                                output, error = child.communicate(timeout=6)
+                            self.assertEqual((child.returncode, output), (1, ''))
+                            self.assertIn(reason, error)
+                        except owner_start.StartupRefused as failure:
+                            if child.poll() is None:
+                                raise
+                            output, error = child.communicate(timeout=5)
+                            self.fail(f'{failure.reason}: {child.returncode} {output} {error}')
+                        finally:
+                            if child.poll() is None:
+                                child.kill()
+                                child.communicate(timeout=5)
+                    self.assertEqual(record.read_bytes(), original)
 
     def test_serve_start_refusals_print_one_line(self):
         from relay_engine import api_service, store_layout, version
