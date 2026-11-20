@@ -7,9 +7,13 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import stat
+import struct
+import subprocess
 import sys
 from typing import Literal
+from uuid import UUID
 
 _CAUSES = ('store_job_open', 'catalogue_unopenable', 'catalogue_faulted',
            'start_fault', 'ingest_fault')
@@ -317,8 +321,112 @@ def read_held_locator(root: str) -> HeldLocatorRead | None:
         raise HeldMetadataUnavailable('diagnostic_metadata_unsafe') from None
 
 
+_LIVE_LOCATOR = '.adt-store-live.json'
+
+
+def _native_identity(pid):
+    """Return full native process birth and boot in the caller's local view."""
+    if type(pid) is not int or not 0 < pid < 2**31:
+        raise ValueError('invalid process')
+    if sys.platform == 'linux':
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip()
+        process = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+        if process.partition(' (')[0] != str(pid):
+            raise ValueError('wrong process')
+        birth = process.rsplit(')', 1)[1].split()[19]
+        if not birth.isascii() or not birth.isdecimal():
+            raise ValueError('invalid Linux birth')
+    elif sys.platform == 'darwin':
+        import ctypes
+
+        class BsdInfo(ctypes.Structure):
+            _fields_ = [(field, ctypes.c_uint32) for field in (
+                'flags', 'status', 'xstatus', 'pid', 'ppid', 'uid', 'gid', 'ruid', 'rgid',
+                'svuid', 'svgid', 'rfu')] + [
+                ('comm', ctypes.c_char * 16), ('name', ctypes.c_char * 32)] + [
+                (field, ctypes.c_uint32) for field in ('nfiles', 'pgid', 'pjobc', 'tdev', 'tpgid')] + [
+                ('nice', ctypes.c_int32), ('seconds', ctypes.c_uint64), ('microseconds', ctypes.c_uint64)]
+
+        lib = ctypes.CDLL('/usr/lib/libproc.dylib')
+        info = BsdInfo()
+        size = ctypes.sizeof(info)
+        if lib.proc_pidinfo(pid, 3, ctypes.c_uint64(0), ctypes.byref(info), size) != size or info.pid != pid:
+            raise ValueError('unverified Darwin process')
+        if not info.seconds or info.microseconds >= 1_000_000:
+            raise ValueError('invalid Darwin birth')
+        birth = f'{info.seconds}.{info.microseconds:06d}'
+        boot = subprocess.check_output(('/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'),
+                                       timeout=1, encoding='ascii').strip()
+    else:
+        raise ValueError('native identity unavailable')
+    canonical_boot = str(UUID(boot))
+    if canonical_boot != boot.lower():
+        raise ValueError('invalid boot identity')
+    return birth, canonical_boot
+
+
+def _peer_pid(path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        peer.settimeout(0.5)
+        peer.connect(path)
+        if sys.platform == 'linux':
+            credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            pid, uid, _ = struct.unpack('=iII', credentials)
+            if uid != os.geteuid():
+                raise ValueError('wrong peer owner')
+            return pid
+        if sys.platform == 'darwin':
+            return peer.getsockopt(0, 2)  # SOL_LOCAL, LOCAL_PEERPID
+        raise ValueError('native peer identity unavailable')
+
+
+def _read_live_locator(root):
+    from relay_engine import api_client, store_layout
+
+    def inode(info):
+        return [info.st_dev, info.st_ino]
+
+    with ExitStack() as stack:
+        directory = _open_directory(stack, root)
+        data = _read_metadata(directory, _LIVE_LOCATOR, 8192)
+        if set(data) != {'arm', 'runtime', 'socket', 'ready', 'build', 'schema', 'instance'}:
+            raise ValueError('invalid live locator')
+        arm = store_layout.IncumbentGuard._parse_record(store_layout._canonical_frame(data['arm']))
+        record = _read_metadata(directory, store_layout._INCUMBENT, store_layout._INCUMBENT_LIMIT)
+        if record != data['arm'] or arm.phase != 'armed' or list(arm.root) != inode(os.fstat(directory)):
+            raise ValueError('wrong live epoch')
+        lock = os.stat(arm.lock_name, dir_fd=directory, follow_symlinks=False)
+        if store_layout._owned_inode(lock) != arm.lock:
+            raise ValueError('wrong live lock')
+        owner = arm.owner
+        if UUID(owner.epoch).hex != data['instance']:
+            raise ValueError('wrong live instance')
+        runtime = _open_directory(stack, owner.runtime)
+        if inode(os.fstat(runtime)) != data['runtime']:
+            raise ValueError('wrong live runtime')
+        ready_info = os.stat('ready.json', dir_fd=runtime, follow_symlinks=False)
+        sock_info = os.stat('api.sock', dir_fd=runtime, follow_symlinks=False)
+        if (inode(ready_info) != data['ready'] or inode(sock_info) != data['socket']
+                or not stat.S_ISSOCK(sock_info.st_mode) or sock_info.st_uid != os.geteuid()):
+            raise ValueError('wrong live publication')
+        ready = api_client.read_ready_file(str(Path(owner.runtime) / 'ready.json'))
+        path = str(Path(owner.runtime) / 'api.sock')
+        if ((ready.store_id, ready.pid, ready.socket, ready.build_id, ready.schema_digest) !=
+                (arm.store, owner.pid, path, data['build'], data['schema'])
+                or _peer_pid(path) != owner.pid
+                or _native_identity(owner.pid) != (owner.birth, owner.boot)):
+            raise ValueError('wrong live endpoint')
+        if (_read_metadata(directory, _LIVE_LOCATOR, 8192) != data
+                or _read_metadata(directory, store_layout._INCUMBENT, store_layout._INCUMBENT_LIMIT) != record
+                or inode(os.stat(root, follow_symlinks=False)) != list(arm.root)
+                or inode(os.stat('api.sock', dir_fd=runtime, follow_symlinks=False)) != data['socket']):
+            raise ValueError('changed live endpoint')
+        return ready.path
+
+
 def console_target(root: str) -> ConsoleTarget | ConsoleTargetUnavailable:
-    """Resolve the selected Store's ordinary ready path after the held probe."""
+    """Resolve the selected Store through its checked live epoch."""
+    from relay_engine import api_client, store_layout
     from relay_engine.lifecycle_state import probe_held_diagnostic
 
     observed = probe_held_diagnostic(root)
@@ -326,14 +434,8 @@ def console_target(root: str) -> ConsoleTarget | ConsoleTargetUnavailable:
         return ConsoleTargetUnavailable('held_diagnostic')
     if observed.kind not in ('absent', 'stale_safe'):
         return ConsoleTargetUnavailable('diagnostic_unavailable')
-
-    import sqlite3
-    from relay_engine import errors, store_layout
-
     try:
-        store_id = store_layout.read_store_id(root)
-        ready_path = ready_file_path(store_id, platform=sys.platform, environ=os.environ,
-                                     home=os.path.expanduser('~'))
-    except (store_layout.LayoutFault, errors.EngineError, sqlite3.Error, OSError, ValueError) as fault:
+        return ConsoleTarget(_read_live_locator(str(Path(root).absolute())))
+    except (HeldMetadataUnavailable, store_layout.LayoutFault, api_client.LocalRefusal,
+            OSError, ValueError, TypeError, IndexError, subprocess.SubprocessError) as fault:
         return ConsoleTargetUnavailable('identity_unavailable', fault)
-    return ConsoleTarget(ready_path)

@@ -189,6 +189,10 @@ def open_ledger(root, project_id: str, *, create: bool = False):
 
 def open_catalogue(root, *, kind: str | None = None):
     """Open a bound catalogue; only an explicit declaration creates production."""
+    return _open_catalogue(root, kind)
+
+
+def _open_catalogue(root, kind, *, reserved=None, existing_only=False):
     from relay_engine import catalogue
 
     if kind not in (None, 'production', 'isolated'):
@@ -197,12 +201,15 @@ def open_catalogue(root, *, kind: str | None = None):
     path = catalogue_path(root)
     projects = root / 'projects'
     has_projects = projects.exists() and any(projects.iterdir())
-    if has_projects and (not path.exists() or path.stat().st_size == 0):
+    if reserved is None and has_projects and (not path.exists() or path.stat().st_size == 0):
         raise LayoutFault('missing-catalogue')
-    root.mkdir(mode=0o700, exist_ok=True)
-    conn = sqlite3.connect(path)
+    if not existing_only:
+        root.mkdir(mode=0o700, exist_ok=True)
+    conn = (sqlite3.connect(path) if reserved is None and not existing_only else
+            sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True))
     try:
-        if has_projects and _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1") is None:
+        if (reserved is None and has_projects
+                and _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1") is None):
             raise LayoutFault('missing-catalogue')
         if catalogue._definitions(conn):
             catalogue._require_matching(conn)
@@ -215,14 +222,22 @@ def open_catalogue(root, *, kind: str | None = None):
         _pragma(conn, 'PRAGMA foreign_keys=ON')
         _pragma(conn, 'BEGIN IMMEDIATE')
         creating = not catalogue._definitions(conn)
+        if reserved is not None and not creating:
+            raise LayoutFault('birth-members-present')
+        if existing_only and creating:
+            raise LayoutFault('missing-catalogue')
         catalogue.init_catalogue(conn)
         identity = _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1')
         if identity is None:
             if not creating:
                 raise LayoutFault('no-identity')
-            now_ms = time.time_ns() // 1_000_000
+            if reserved is None:
+                now_ms = time.time_ns() // 1_000_000
+                store_id = submit.new_uuid7(now_ms)
+            else:
+                store_id, now_ms = reserved
             conn.execute('INSERT INTO catalogue_identity VALUES (1, ?, ?, ?)',
-                         (submit.new_uuid7(now_ms), kind or 'isolated', now_ms)).close()
+                         (store_id, kind or 'isolated', now_ms)).close()
         elif kind is not None and identity != (kind,):
             raise LayoutFault('wrong-kind')
         _pragma(conn, 'COMMIT')
@@ -735,6 +750,7 @@ def owed_ended_routes(catalogue_conn, project_id: str) -> list[CheckoutRoute]:
 _INCUMBENT = '.adt-store-incumbent.json'
 _INCUMBENT_LOCK = 'api-service.lock'
 _INCUMBENT_LIMIT = 16 * 1024
+_IDLE_RECEIPT_LIMIT = 64 * 1024
 _NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW
 
@@ -808,6 +824,9 @@ class IncumbentGuard:
         self._verified_idle = None
         self._owned_arm = None
         self._birth = None
+        self._birth_idle = None
+        self._birth_arm = None
+        self._publication = None
 
     @property
     def lock_identity(self):
@@ -854,6 +873,7 @@ class IncumbentGuard:
             lock_fd, root_fd = self._lock_fd, self._root_fd
             self._lock_fd = self._root_fd = None
             self._verified_idle = self._owned_arm = self._birth = None
+            self._birth_idle = self._birth_arm = self._publication = None
             try:
                 os.close(lock_fd)
             finally:
@@ -905,6 +925,13 @@ class IncumbentGuard:
         return frame, data
 
     def _decode(self, data):
+        frame = self._parse_record(data)
+        if (frame.root, frame.lock) != (self._root_identity, self.lock_identity):
+            raise LayoutFault('incumbent-invalid')
+        return frame
+
+    @staticmethod
+    def _parse_record(data):
         try:
             value = json.loads(data)
             if _canonical_frame(value) != data:
@@ -919,18 +946,19 @@ class IncumbentGuard:
                 disposition['lock'] = tuple(disposition['lock'])
                 value['disposition'] = _IncumbentDisposition(**disposition)
             frame = IncumbentRecord(**value)
-            self._validate_frame(frame)
+            IncumbentGuard._validate_frame(frame)
         except (KeyError, TypeError, ValueError, AttributeError, RecursionError) as exc:
             raise LayoutFault('incumbent-invalid') from exc
         return frame
 
-    def _validate_frame(self, frame):
+    @staticmethod
+    def _validate_frame(frame):
         _canonical_id(frame.store)
         _canonical_id(frame.project)
         if (type(frame.version) is not int or frame.version != 1
                 or frame.lock_name != _INCUMBENT_LOCK
-                or any(type(part) is not int for part in frame.root + frame.lock)
-                or frame.root != self._root_identity or frame.lock != self.lock_identity):
+                or any(len(identity) != 2 or any(type(part) is not int for part in identity)
+                       or identity[0] < 0 or identity[1] <= 0 for identity in (frame.root, frame.lock))):
             raise ValueError('identity')
         if frame.phase == 'idle' and frame.owner is None:
             proof = frame.disposition
@@ -1021,6 +1049,7 @@ class IncumbentGuard:
         if expected_idle.phase != 'idle':
             raise LayoutFault('retirement-pending')
         verified, self._verified_idle = self._verified_idle, None
+        birth_idle, self._birth_idle = self._birth_idle, None
         if verified != expected_idle:
             raise LayoutFault('idle-unverified')
         if not isinstance(owner, _IncumbentOwner) or owner.pid != os.getpid():
@@ -1031,6 +1060,8 @@ class IncumbentGuard:
                                 expected_idle.lock, expected_idle.store, expected_idle.project,
                                 'armed', owner, None)
         self._owned_arm = self._replace(expected_idle, armed)
+        if birth_idle == expected_idle:
+            self._birth_arm = armed
         return armed
 
     @classmethod
@@ -1078,7 +1109,11 @@ class IncumbentGuard:
         self._current(armed)
         if not isinstance(evidence, bytes) or not 0 < len(evidence) <= _INCUMBENT_LIMIT:
             raise LayoutFault('disposition-unproved')
-        evidence = _canonical_frame({'arm': asdict(armed), 'settlement_sha256': sha256(evidence).hexdigest()})
+        evidence = _canonical_frame({
+            'arm': asdict(armed),
+            'settlement_sha256': sha256(evidence).hexdigest(),
+            'nonce': uuid4().hex,
+        })
         return self._retain('retirement', armed.store, armed.project, armed.owner.epoch, evidence)
 
     def verify_idle(self, expected, proof):
@@ -1094,7 +1129,67 @@ class IncumbentGuard:
                 or set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK}):
             raise LayoutFault('enrollment-unproved')
         self._birth = None
-        return self._publish_idle(None, proof.summary()), proof
+        idle = self._publish_idle(None, proof.summary())
+        self._birth_idle = idle
+        return idle, proof
+
+    def _materialize_birth(self, armed, *, project_name, now_ms):
+        """Create only the members reserved by this guard's first verified birth arm."""
+        from relay_engine import store_create, store_steps
+
+        birth_arm, self._birth_arm = self._birth_arm, None
+        if birth_arm is None or birth_arm != armed or self._owned_arm != armed:
+            raise LayoutFault('birth-unproved')
+        self._current(armed)
+        if set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK, _INCUMBENT}:
+            raise LayoutFault('birth-members-present')
+
+        def exclusive(parent, name, *, directory=False):
+            if directory:
+                os.mkdir(name, mode=0o700, dir_fd=parent)
+                return os.open(name, _DIRECTORY, dir_fd=parent)
+            return os.open(name, os.O_RDONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
+                           0o600, dir_fd=parent)
+
+        catalogue_name = catalogue_path(self._path).name
+        ledger_name = ledger_path(self._path, armed.project).name
+        with ExitStack() as stack:
+            try:
+                catalog_fd = stack.enter_context(closing(_DirectoryHandle(
+                    exclusive(self._root_fd, catalogue_name)))).fd
+                projects_fd = stack.enter_context(closing(_DirectoryHandle(
+                    exclusive(self._root_fd, 'projects', directory=True)))).fd
+                project_fd = stack.enter_context(closing(_DirectoryHandle(
+                    exclusive(projects_fd, armed.project, directory=True)))).fd
+                ledger_fd = stack.enter_context(closing(_DirectoryHandle(
+                    exclusive(project_fd, ledger_name)))).fd
+            except FileExistsError as exc:
+                raise LayoutFault('birth-members-present') from exc
+            members = tuple(_inode(os.fstat(fd)) for fd in (projects_fd, project_fd, catalog_fd, ledger_fd))
+
+            def check_members():
+                self._current(armed)
+                if self._member_identities(armed.project) != members:
+                    raise LayoutFault('member-changed')
+
+            class BirthTurns(store_steps.DirectTurns):
+                def run(turns, declared, body, *, fence_project=None):
+                    check_members()
+                    return super().run(declared, body, fence_project=fence_project)
+
+            check_members()
+            with closing(_open_catalogue(self._path, 'isolated', reserved=(armed.store, now_ms))) as conn:
+                _pragma(conn, 'BEGIN IMMEDIATE')
+                reserve_project(conn, armed.project, project_name, now_ms)
+                conn.commit()
+            store_create.finish_creation(BirthTurns(self._path), armed.project)
+            for fd in (catalog_fd, ledger_fd, project_fd, projects_fd, self._root_fd):
+                os.fsync(fd)
+            check_members()
+            with closing(_immutable_incumbent_read(catalogue_path(self._path))) as catalog:
+                if _row(catalog, 'SELECT kind FROM catalogue_identity WHERE id=1') != ('isolated',):
+                    raise LayoutFault('wrong-kind')
+            return self._protected_identity(armed)
 
     def _offline_checkpoint(self, store, project, provenance):
         """Capture member custody under an already authorized offline owner."""
@@ -1137,7 +1232,16 @@ class IncumbentGuard:
             raise LayoutFault('operation-unproved')
         return _IncumbentCheckpoint(armed, self._member_identities(armed.project), operation)
 
-    def recover(self, expected_arm, child, checkpoint):
+    def _retain_recovery_publication(self, armed, evidence):
+        """Bind a checked publication observation to this particular acquisition."""
+        self._current(armed)
+        if (armed.phase != 'armed' or not isinstance(evidence, bytes)
+                or not 0 < len(evidence) <= _INCUMBENT_LIMIT):
+            raise LayoutFault('publication-unresolved')
+        self._publication = _IncumbentPublication(armed, evidence)
+        return self._publication
+
+    def recover(self, expected_arm, child, checkpoint, *, publication):
         self._current(expected_arm)
         if expected_arm.phase != 'armed':
             raise LayoutFault('incumbent-invalid')
@@ -1150,6 +1254,9 @@ class IncumbentGuard:
         if (not isinstance(checkpoint, _IncumbentCheckpoint) or checkpoint.armed != expected_arm
                 or not isinstance(checkpoint.operation, _IncumbentOperation)):
             raise LayoutFault('operation-unproved')
+        if (not isinstance(publication, _IncumbentPublication) or self._publication is not publication
+                or publication.armed != expected_arm):
+            raise LayoutFault('publication-unresolved')
         operation = checkpoint.operation
         self._protected_read(expected_arm.store, expected_arm.project, checkpoint.members, operation)
         evidence = _canonical_frame({
@@ -1160,6 +1267,8 @@ class IncumbentGuard:
             'draft_sha256': sha256(operation.draft).hexdigest(),
             'relay_id': operation.admitted.relay_id,
             'handle': operation.admitted.handle,
+            'publication_sha256': sha256(publication.evidence).hexdigest(),
+            'nonce': uuid4().hex,
         })
         proof = self._retain('recovery', expected_arm.store, expected_arm.project,
                              expected_arm.owner.epoch, evidence)
@@ -1244,6 +1353,42 @@ class _RetainedIncumbentDisposition:
             raise LayoutFault('disposition-unproved')
         return _IncumbentDisposition(self.kind, self.store, self.project, self.root, self.lock,
                                      self.prior_epoch, sha256(self.evidence).hexdigest())
+
+
+def _encode_idle_receipt(idle, proof):
+    frame = _canonical_frame({'idle': asdict(idle), 'evidence': proof.evidence.hex()})
+    if _decode_idle_receipt(frame) != (idle, proof):
+        raise LayoutFault('idle-receipt-invalid')
+    return frame
+
+
+def _decode_idle_receipt(payload):
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= _IDLE_RECEIPT_LIMIT:
+        raise LayoutFault('idle-receipt-invalid')
+    try:
+        value = json.loads(payload)
+        if set(value) != {'idle', 'evidence'} or _canonical_frame(value) != payload:
+            raise ValueError('receipt frame')
+        idle = IncumbentGuard._parse_record(_canonical_frame(value['idle']))
+        if idle.phase != 'idle':
+            raise ValueError('receipt must be idle')
+        encoded = value['evidence']
+        evidence = bytes.fromhex(encoded)
+        if evidence.hex() != encoded:
+            raise ValueError('receipt encoding')
+        proof = _RetainedIncumbentDisposition(idle.disposition.kind, idle.store, idle.project,
+                                             idle.root, idle.lock, idle.disposition.prior_epoch, evidence)
+        if proof.summary() != idle.disposition:
+            raise ValueError('receipt digest')
+    except (LayoutFault, KeyError, TypeError, ValueError, AttributeError, RecursionError) as exc:
+        raise LayoutFault('idle-receipt-invalid') from exc
+    return idle, proof
+
+
+@dataclass(frozen=True)
+class _IncumbentPublication:
+    armed: IncumbentRecord
+    evidence: bytes
 
 
 @dataclass(frozen=True)

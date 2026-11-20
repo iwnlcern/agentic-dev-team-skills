@@ -18,7 +18,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from types import MappingProxyType
 from typing import Protocol, TypeVar
 
@@ -139,6 +139,11 @@ class StoreWriter:
         self._changed = threading.Condition(self._lock)
         self._epoch = None
         self._holder = None
+        self._store_guard = None
+        self._store_arm = None
+        self._stop_pending = None
+        self._checkpoint_only = False
+        self._checkpoint_reentry = False
         self._readers = {}
         self._failed_closes = []
         self._requests = {}
@@ -166,7 +171,21 @@ class StoreWriter:
         self._holder = holder
         self._epoch = epoch
 
+    def bind_store_arm(self, guard, arm, stopping):
+        self._store_guard, self._store_arm, self._stop_pending = guard, arm, stopping
+
+    def _check_store_open(self):
+        if self._store_guard is None:
+            return
+        self._store_guard._current(self._store_arm)
+        if self._closed or self._stop_pending():
+            if self._checkpoint_only:
+                self._checkpoint_reentry = True
+            raise WriterUnavailable('stopped')
+
     def verify_service_owner(self):
+        if self._store_guard is not None:
+            self._store_guard._current(self._store_arm)
         fd, path, identity = self._holder
         status = os.fstat(fd)
         if (status.st_dev, status.st_ino) != identity or status.st_nlink != 1:
@@ -186,6 +205,8 @@ class StoreWriter:
         if self._admission_closed():
             raise WriterUnavailable('stopped')
         if self._closed or self._worker is None:
+            if self._checkpoint_only:
+                self._checkpoint_reentry = True
             raise WriterUnavailable('closed')
 
     def _require_served(self, project_id):
@@ -215,15 +236,11 @@ class StoreWriter:
             return frozenset(self._served)
 
     def store_id(self) -> str:
-        conn = store_layout.open_catalogue_readonly(self._root)
-        try:
-            cursor = conn.execute('SELECT store_id FROM catalogue_identity WHERE id=1')
-            try:
+        def identity(conn):
+            with closing(conn.execute('SELECT store_id FROM catalogue_identity WHERE id=1')) as cursor:
                 return cursor.fetchone()[0]
-            finally:
-                cursor.close()
-        finally:
-            conn.close()
+
+        return self.read_catalogue(identity)
 
     @contextmanager
     def _reader(self, open_connection, check):
@@ -234,6 +251,7 @@ class StoreWriter:
         conn = None
         try:
             try:
+                self._check_store_open()
                 conn = open_connection()
             except store_layout.LayoutFault as error:
                 if error.cause == 'no-writer' and self._stop_attempt() is not None:
@@ -253,7 +271,7 @@ class StoreWriter:
                     self._changed.notify_all()
 
     def read(self, project_id: str, fn: Callable[[sqlite3.Connection], T]) -> T:
-        if self._epoch is None:
+        if self._epoch is None and self._store_guard is None:
             with self._lock:
                 self._require_served(project_id)
             conn = store_layout.open_ledger_readonly(self._root, project_id)
@@ -270,7 +288,12 @@ class StoreWriter:
             self._check_binding(project_id, binding)
 
         with self._reader(lambda: store_layout.open_ledger_readonly(self._root, project_id), check) as conn:
-            return fn(conn)
+            was_reading = getattr(self._local, 'reader', False)
+            self._local.reader = True
+            try:
+                return fn(conn)
+            finally:
+                self._local.reader = was_reading
 
     def _file_path(self, label):
         if label == 'catalogue':
@@ -415,7 +438,7 @@ class StoreWriter:
                 self._queue.put(request)
 
     def close(self) -> None:
-        if self._nested():
+        if self._nested() or getattr(self._local, 'reader', False):
             raise NestedWriterJob()
         with self._lock:
             self._request_close()
@@ -484,6 +507,20 @@ class StoreWriter:
             self._changed.wait_for(lambda: not self._readers, max(0, attempt.work - time.monotonic()))
             return not self._readers and not self._failed_closes
 
+    def settle_private_io(self, deadline, *, checkpoint=False):
+        with self._changed:
+            if checkpoint:
+                self._checkpoint_only = True
+            self._request_close()
+            worker = self._worker
+        if worker is not None:
+            worker.join(None if deadline is None else max(0, deadline - time.monotonic()))
+            if worker.is_alive() or not (self._close_complete or self._start_error is not None):
+                return False
+        with self._changed:
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            return self._changed.wait_for(lambda: not self._readers, remaining) and not self._failed_closes
+
     def _close_handle(self, conn):
         try:
             conn.close()
@@ -517,6 +554,7 @@ class StoreWriter:
                 identity = _identity(path)
             except FileNotFoundError:
                 raise store_layout.LayoutFault('missing') from None
+            self._check_store_open()
             conn = store_layout.open_ledger(self._root, project_id)
             try:
                 conn.isolation_level = None
@@ -734,7 +772,11 @@ class StoreWriter:
             if not path.exists() or path.stat().st_size == 0:
                 raise store_layout.LayoutFault('missing')
             identity = _identity(path)
-            conn = store_layout.open_catalogue(self._root)
+            self._check_store_open()
+            if self._store_guard is None:
+                conn = store_layout.open_catalogue(self._root)
+            else:
+                conn = store_layout._open_catalogue(self._root, None, existing_only=True)
             try:
                 _require_identity(path, identity)
             except BaseException:
@@ -753,6 +795,9 @@ class StoreWriter:
             result = error = None
             try:
                 if request.kind == 'close':
+                    # The last SQLite handle must be writable to retire WAL and SHM.
+                    with self._changed:
+                        self._changed.wait_for(lambda: not self._readers)
                     self._close_files()
                     return
                 with self._changed:

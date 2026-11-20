@@ -3,6 +3,7 @@ import argparse
 import base64
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -126,6 +127,30 @@ def _serve_refusal(error, root, project):
     return 1
 
 
+def _private_store_channels():
+    channels = []
+    try:
+        for name, access in (('ADT_PRIVATE_IDLE_FD', os.O_RDONLY),
+                             ('ADT_PRIVATE_RETIREMENT_FD', os.O_WRONLY)):
+            value = os.environ.pop(name, None)
+            if value is None:
+                channels.append(None)
+                continue
+            if not value.isascii() or not value.isdecimal() or len(value) > 9:
+                raise ValueError('invalid private channel')
+            fd = int(value)
+            if fd < 3 or fd in channels or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != access:
+                raise ValueError('invalid private channel')
+            channels.append(fd)
+            os.set_inheritable(fd, False)
+    except (ValueError, OSError) as error:
+        for fd in channels:
+            if fd is not None:
+                os.close(fd)
+        raise store_layout.LayoutFault('idle-receipt-invalid') from error
+    return channels
+
+
 def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
          resolver: WindowResolver | None = None, queue_notifier: NotifierFactory | None = None,
          stop_report=None) -> int:
@@ -135,13 +160,22 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
         if hasattr(args, 'handler'):
             return args.handler(args)
         if args.command == 'engine':
+            try:
+                idle_fd, retire_fd = _private_store_channels()
+            except store_layout.LayoutFault as error:
+                return _serve_refusal(error, args.store_root, args.project_id)
+            use_notifier = args.bridge_port is not None
+            setup = None
+            if use_notifier and queue_notifier is not None:
+                setup = lambda service: queue_notifier(args.terminal_notifier, service)
             service = api_service.ApiService(args.store_root, args.project_id,
                                              clock=lambda: time.time_ns() // 1000000,
-                                             bridge_port=args.bridge_port, stop_report=stop_report)
+                                             bridge_port=args.bridge_port, stop_report=stop_report,
+                                             idle_fd=idle_fd, retirement_fd=retire_fd,
+                                             notifier_setup=setup,
+                                             notifier_mode='configured' if use_notifier else 'off')
             service.arm_foreground()
             try:
-                if args.bridge_port is not None and queue_notifier is not None:
-                    queue_notifier(args.terminal_notifier, service)
                 try:
                     path = service.start()
                 except (api_service.ServiceStartRefused, store_layout.LayoutFault, version.FingerprintError) as error:

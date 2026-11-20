@@ -252,9 +252,11 @@ class AdtTests(unittest.TestCase):
 
     def test_serve_command_prints_ready_path(self):
         tools = Path(__file__).resolve().parents[2]
-        proc = subprocess.Popen([sys.executable, str(tools / 'adt'), 'engine', 'serve',
-            '--store-root', str(self.root), '--project-id', fixture.P], stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with fixture.private_idle(self.admitted) as (idle_fd, environment):
+            proc = subprocess.Popen([sys.executable, str(tools / 'adt'), 'engine', 'serve',
+                '--store-root', str(self.root), '--project-id', fixture.P], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=environment, pass_fds=(idle_fd,))
         def finish():
             if proc.poll() is None: proc.terminate()
             proc.communicate(timeout=10)

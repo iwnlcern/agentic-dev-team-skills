@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from threading import Event, get_ident
+from threading import Event, Thread, get_ident
 from types import SimpleNamespace
 import unittest
 from unittest.mock import ANY, Mock, patch
@@ -23,6 +23,7 @@ from relay_engine import (
     adt_cli, api_client, api_operator_bridge, lifecycle_paths, lifecycle_state, store_layout, submit,
 )
 
+from relay_engine.tests import test_api_service as service_fixture
 from relay_engine.operator_queue.notifier import DeliveryCancelled, NotifierIssueUnavailable
 
 
@@ -475,7 +476,7 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
             adt_cli._parser((group((lambda sp: sp.add_parser('open'),)),))
 
     def selected_store_fixture(self):
-        temporary = tempfile.TemporaryDirectory(prefix='console-store-')
+        temporary = tempfile.TemporaryDirectory(prefix='co-', dir='/tmp')
         self.addCleanup(temporary.cleanup)
         workspace = Path(temporary.name).resolve()
         home = workspace / 'home'
@@ -492,29 +493,20 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
         self.ready_paths = {}
         self.urls = {}
         identities = set()
-        for root, kind in ((production, 'production'), (selected, 'isolated')):
-            connection = store_layout.open_catalogue(root, kind=kind)
-            connection.close()
-            store_id = store_layout.read_store_id(root)
-            identities.add(store_id)
-            ready = Path(lifecycle_paths.ready_file_path(
-                store_id, platform=os.sys.platform, environ=os.environ, home=str(home)))
-            ready.parent.parent.mkdir(mode=0o700, exist_ok=True)
-            ready.parent.mkdir(mode=0o700)
-            bridge = api_operator_bridge._new_operator_bridge(
-                port=0, run_id='fixture-run', store_id=store_id, clock_ms=lambda: 0,
-                dispatch=Mock(side_effect=AssertionError('application dispatch')),
-                supervisor_post=None,
-                open_backend=Mock(side_effect=AssertionError('discovery backend')),
-                runtime_dir=ready.parent)
-            self.addCleanup(bridge.stop)
-            origin = bridge.start()
-            ready.write_text(json.dumps({
-                'format': 'adt-ready-v1', 'socket': str(ready.with_name('api.sock')),
-                'store_id': store_id, 'build_id': 'b' * 64, 'schema_digest': 'c' * 64,
-                'pid': os.getpid(),
-            }))
-            ready.chmod(0o600)
+        from relay_engine.api_service import ApiService
+
+        for root in (production, selected):
+            root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            admission = service_fixture.admitted_store_fixture(root, service_fixture.P, project_name='console')
+            identities.add(admission.idle.store)
+            service = ApiService(str(root), service_fixture.P, clock=lambda: 0, bridge_port=0,
+                                 notifier_mode='off', admission=admission.receipt)
+            ready = Path(service.start())
+            loop = Thread(target=service.serve_forever)
+            loop.start()
+            self.addCleanup(loop.join, 5)
+            self.addCleanup(service.stop)
+            origin = json.loads(ready.read_bytes())['bridge_origin']
             page = ready.with_name('open.html').read_bytes()
             self.assertTrue(page.startswith(_PREFIX + origin.encode() + b'/#launch='))
             self.assertTrue(page.endswith(_SUFFIX))
@@ -616,10 +608,10 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
         refusal(selected, 75, held=lifecycle_state.HeldProbeOutcome('verified', diagnostic))
         for kind in ('invalid_unavailable', 'timed_out'):
             refusal(selected, 75, held=lifecycle_state.HeldProbeOutcome(kind))
-        refusal(missing, 1, fault='missing')
+        refusal(missing, 1, fault="[Errno 2] No such file or directory: '.adt-store-live.json'")
         directory = self.ready_paths[selected].parent
         directory.chmod(0o755)
         try:
-            refusal(selected, 1, fault='runtime_dir_unsafe')
+            refusal(selected, 1, fault='diagnostic_metadata_unsafe')
         finally:
             directory.chmod(0o700)

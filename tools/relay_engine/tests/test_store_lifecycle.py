@@ -786,6 +786,83 @@ class TestIncumbentOwnerTransitions(unittest.TestCase):
         guard.close()
         return idle, retirement, identity
 
+    def birth_owner(self):
+        return store_layout._IncumbentOwner(str(uuid4()), os.getpid(),
+                                            _incumbent_birth(os.getpid()), _incumbent_boot(),
+                                            'fixture-runtime', 'off')
+
+    def test_reserved_birth_initializes_exact_store_and_project(self):
+        guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
+        with guard:
+            idle, _ = guard.enroll_new(proof)
+            armed = guard.arm(idle, self.birth_owner())
+            self.assertEqual(guard._materialize_birth(armed, project_name='reserved', now_ms=12),
+                             _INCUMBENT_STORE_ID)
+            self.assertEqual(guard._protected_identity(armed), _INCUMBENT_STORE_ID)
+            with closing(store_layout._immutable_incumbent_read(
+                    store_layout.catalogue_path(self.root))) as catalogue:
+                self.assertEqual(store_layout._row(catalogue, 'SELECT store_id,kind FROM catalogue_identity'),
+                                 (_INCUMBENT_STORE_ID, 'isolated'))
+                self.assertEqual(store_layout._row(catalogue, 'SELECT project_id,name,state FROM project_routes'),
+                                 (P, 'reserved', 'active'))
+
+    def test_birth_refuses_existing_members_and_preserves_arm(self):
+        guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
+        with guard:
+            idle, _ = guard.enroll_new(proof)
+            armed = guard.arm(idle, self.birth_owner())
+            path = store_layout.catalogue_path(self.root)
+            path.touch(mode=0o600)
+            with patch.object(store_layout.sqlite3, 'connect') as opens:
+                with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-members-present'):
+                    guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+                with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                    guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+                opens.assert_not_called()
+            self.assertEqual(guard.read(), armed)
+            self.assertEqual(path.stat().st_size, 0)
+
+    def test_birth_refuses_valid_nonbirth_arm_and_consumed_authority(self):
+        idle, proof, lock = self.retire_birth()
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=lock) as guard:
+            for kind in ('retirement', 'enrollment', 'recovery'):
+                with self.subTest(kind=kind):
+                    if kind != 'retirement':
+                        prior = None if kind == 'enrollment' else armed.owner.epoch
+                        proof = guard._retain(kind, armed.store, armed.project, prior, b'typed fixture proof')
+                        idle = guard._publish_idle(armed, proof.summary())
+                    self.assertEqual(guard.verify_idle(idle, proof), idle)
+                    armed = guard.arm(idle, self.birth_owner())
+                    if kind == 'retirement':
+                        store_layout.catalogue_path(self.root).unlink()
+                    with patch.object(store_layout.sqlite3, 'connect') as opens:
+                        with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                            guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+                        opens.assert_not_called()
+                    self.assertEqual(guard.read(), armed)
+                    self.assertFalse(store_layout.catalogue_path(self.root).exists())
+
+    def test_idle_receipt_requires_exact_bounded_one_shot_input(self):
+        idle, proof, lock = self.retire_birth()
+        packet = store_layout._encode_idle_receipt(idle, proof)
+        self.assertEqual(store_layout._decode_idle_receipt(packet), (idle, proof))
+        for data in (b'', packet[:-1], b' ' + packet, packet + packet, b'a' * 65537,
+                     packet.replace(proof.evidence.hex().encode(), b'00')):
+            with self.subTest(size=len(data)):
+                with self.assertRaises(store_layout.LayoutFault):
+                    store_layout._decode_idle_receipt(data)
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=lock) as guard:
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'idle-unverified'):
+                guard.verify_idle(idle, replace(proof, evidence=b'mismatched'))
+            self.assertEqual(guard.verify_idle(*store_layout._decode_idle_receipt(packet)), idle)
+
+    def test_recovery_requires_observed_and_reaped_direct_child(self):
+        armed, checkpoint, child, lock = self.recover_fixture('off')
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=lock) as guard:
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'publication-unresolved'):
+                guard.recover(armed, child, checkpoint, publication=None)
+            self.assertEqual(guard.read(), armed)
+
     def test_explicit_birth_and_clean_rearm(self):
         idle, proof, identity = self.retire_birth()
         with self.assertRaises(FileExistsError):
@@ -867,19 +944,20 @@ class TestIncumbentOwnerTransitions(unittest.TestCase):
     def test_abnormal_notifier_off_with_keyed_readback(self):
         armed, witness, child, lock = self.recover_fixture('off')
         with store_layout.IncumbentGuard.acquire(self.root, expected_lock=lock) as guard:
+            publication = guard._retain_recovery_publication(armed, b'fixture: no listener or publication')
             for value in (None, replace(witness, operation=None),
                           replace(witness, operation=replace(witness.operation, key='unknown')),
                           replace(witness, operation=replace(witness.operation, draft=b'wrong'))):
                 with self.assertRaises(store_layout.LayoutFault):
-                    guard.recover(armed, child, value)
+                    guard.recover(armed, child, value, publication=publication)
                 self.assertEqual(guard.read(), armed)
             sidecar = Path(str(store_layout.ledger_path(self.root, P)) + '-wal')
             sidecar.touch()
             with self.assertRaisesRegex(store_layout.LayoutFault, 'journal-unresolved'):
-                guard.recover(armed, child, witness)
+                guard.recover(armed, child, witness, publication=publication)
             self.assertEqual(guard.read(), armed)
             sidecar.unlink()
-            idle, proof = guard.recover(armed, child, witness)
+            idle, proof = guard.recover(armed, child, witness, publication=publication)
             self.assertEqual(proof.prior_epoch, armed.owner.epoch)
             self.assertEqual(guard.read(), idle)
             successor = guard.arm(idle, replace(armed.owner, epoch=str(uuid4()), pid=os.getpid()))
@@ -899,7 +977,7 @@ class TestIncumbentOwnerTransitions(unittest.TestCase):
                     self.assertEqual(_pending_notification(self.root), expected)
                     with patch.object(store_layout.sqlite3, 'connect') as opens:
                         with self.assertRaisesRegex(store_layout.LayoutFault, 'notifier-unresolved'):
-                            guard.recover(armed, child, witness)
+                            guard.recover(armed, child, witness, publication=None)
                         self.assertEqual(guard.read(), armed)
                         opens.assert_not_called()
                     observed = _pending_notification(self.root)

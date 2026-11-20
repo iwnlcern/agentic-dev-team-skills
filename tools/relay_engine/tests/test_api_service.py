@@ -1,7 +1,8 @@
 """Foreground serving, frame budgets and lifecycle on per-test scratch stores."""
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from contextlib import closing, contextmanager
+from dataclasses import dataclass, replace
 import fcntl
 import itertools
 import json
@@ -18,13 +19,72 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from relay_engine import api_compose, api_definitions as d, api_keys, api_platform
-from relay_engine import api_protocol as p, api_writer, jcs, store_layout, store_steps, version
+from relay_engine import api_protocol as p, api_writer, jcs, lifecycle_paths, store_layout, store_steps, version
 from relay_engine.tests.test_api_sessions import replace_occupant_for_test
 from relay_engine.tests.test_submit import draft
 
 P = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+
+@dataclass(frozen=True)
+class AdmissionFixture:
+    idle: store_layout.IncumbentRecord
+    proof: store_layout._RetainedIncumbentDisposition
+
+    @property
+    def receipt(self):
+        return self.idle, self.proof
+
+
+def admitted_store_fixture(root, project_id, *, project_name, seed=None):
+    store_id = str(uuid4())
+    guard, birth = store_layout.IncumbentGuard._create_new(root, store_id, project_id)
+    with guard:
+        idle, _ = guard.enroll_new(birth)
+        birth_id, boot = lifecycle_paths._native_identity(os.getpid())
+        owner = store_layout._IncumbentOwner(str(uuid4()), os.getpid(), birth_id, boot, 'fixture', 'off')
+        armed = guard.arm(idle, owner)
+        guard._materialize_birth(armed, project_name=project_name, now_ms=1)
+        if seed is not None:
+            seed(root)
+        proof = guard._retirement_proof(armed, b'disposable fixture Store handles closed')
+        idle = guard.retire(armed, proof)
+    return AdmissionFixture(idle, proof)
+
+
+@contextmanager
+def private_idle(admission, environment=None):
+    reader, writer = os.pipe()
+    try:
+        data = store_layout._encode_idle_receipt(*admission.receipt)
+        try:
+            assert os.write(writer, data) == len(data)
+        finally:
+            os.close(writer)
+        env = dict(os.environ if environment is None else environment, ADT_PRIVATE_IDLE_FD=str(reader))
+        yield reader, env
+    finally:
+        os.close(reader)
+
+
+def seed_service_store(root, keys, tick):
+    conn = store_layout.open_ledger(root, P)
+    try:
+        conn.execute(
+            "INSERT INTO team_instances(id,project_id,name,level,opened_at,opened_by)"
+            " VALUES ('team',?,'platform','pair',1,'operator')", (P,)).close()
+        for role in ('planner', 'implementer'):
+            conn.execute(
+                "INSERT INTO seats(id,team_instance_id,role,state) VALUES (?,'team',?,'vacant')",
+                (role, role)).close()
+            key_id, secret = api_keys.issue_occupant_key(conn, role, next(tick))
+            keys[role] = {'key_id': key_id, 'key_secret': secret}
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def frame(op, args, number, size=None):
@@ -101,25 +161,97 @@ class ApiServiceTests(unittest.TestCase):
         from relay_engine import api_service
         self.m = api_service
         self.root = self.base / 'store'
-        catalogue = store_layout.open_catalogue(self.root, kind='isolated')
-        catalogue.close()
-        conn = store_layout.open_ledger(self.root, P, create=True)
         self.keys = {}
         self.tick = itertools.count(10000)
-        try:
-            conn.execute('INSERT INTO projects(id,name,created_at) VALUES (?,?,1)', (P, 'service')).close()
-            conn.execute("INSERT INTO team_instances(id,project_id,name,level,opened_at,opened_by)"
-                         " VALUES ('team',?,'platform','pair',1,'operator')", (P,)).close()
-            for role in ('planner', 'implementer'):
-                conn.execute("INSERT INTO seats(id,team_instance_id,role,state) VALUES (?,'team',?,'vacant')",
-                             (role, role)).close()
-                key_id, secret = api_keys.issue_occupant_key(conn, role, next(self.tick))
-                self.keys[role] = {'key_id': key_id, 'key_secret': secret}
-            conn.commit()
-        finally:
-            conn.close()
-        self.service = self.m.ApiService(str(self.root), P, clock=lambda: next(self.tick))
+        self.admitted = admitted_store_fixture(
+            self.root, P, project_name='service',
+            seed=lambda root: seed_service_store(root, self.keys, self.tick))
+        self.service = self.m.ApiService(str(self.root), P, clock=lambda: next(self.tick),
+                                         admission=self.admitted.receipt)
         self.addCleanup(self.service.stop)
+
+    def test_start_without_verified_idle_opens_no_store(self):
+        service = self.m.ApiService(str(self.root), P, clock=lambda: 1)
+        with patch.object(store_layout.sqlite3, 'connect') as opens:
+            with self.assertRaises(store_layout.LayoutFault):
+                service.start()
+            opens.assert_not_called()
+            self.assertIsNone(service.ready_path)
+
+    def test_stop_before_first_open_keeps_sqlite_unopened(self):
+        service = self.service
+        with patch.object(service, '_take_lock', side_effect=service._stopping.set):
+            with patch.object(store_layout.sqlite3, 'connect') as opens:
+                self.assertIsNone(service.start())
+                opens.assert_not_called()
+        self.assertIsNone(service.ready_path)
+
+    def test_stop_while_receipt_intake_parked(self):
+        tools = Path(__file__).resolve().parents[2]
+        reader, writer = os.pipe()
+        script = f"""
+import sys, threading
+from relay_engine import api_service, store_layout
+def park(fd, **kwargs):
+    print('intake', flush=True)
+    threading.Event().wait()
+def opening(*args, **kwargs):
+    print('unexpected SQLite', flush=True)
+api_service._read_idle_receipt = park
+store_layout.sqlite3.connect = opening
+service = api_service.ApiService({str(self.root)!r}, {P!r}, clock=lambda: 1, idle_fd={reader})
+service.arm_foreground()
+service.start()
+"""
+        try:
+            with subprocess.Popen([sys.executable, '-c', script], pass_fds=(reader,),
+                                  env=dict(os.environ, PYTHONPATH=str(tools)),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+                self.assertTrue(select.select([proc.stdout], [], [], 3)[0])
+                self.assertEqual(proc.stdout.readline().strip(), b'intake')
+                started = time.monotonic()
+                proc.terminate()
+                output, diagnostic = proc.communicate(timeout=5)
+                self.assertEqual((proc.returncode, output), (75, b''), diagnostic)
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertFalse((self.root / lifecycle_paths._LIVE_LOCATOR).exists())
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+    def test_stop_after_admitted_open_before_ready_withdraws_publication(self):
+        for port in (None, 0):
+            with self.subTest(bridge=port):
+                root = self.base / f'late-{port}'
+                admission = admitted_store_fixture(root, P, project_name='service')
+                service = self.m.ApiService(str(root), P, clock=lambda: 1, bridge_port=port,
+                                             admission=admission.receipt, notifier_mode='off')
+                service.arm_foreground()
+                self.addCleanup(service.stop)
+                with patch.object(service, '_publish_locator', side_effect=service._foreground.enter_stop):
+                    with patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as opens:
+                        self.assertIsNone(service.start())
+                        opens.assert_called_once()
+                self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
+                self.assertEqual(service.stop(), 0)
+                self.assertFalse(Path(service.ready_path).exists())
+                self.assertEqual(service._retired_admission[0].phase, 'idle')
+
+    def test_console_ordinary_locator_rejects_wrong_epoch_without_sqlite(self):
+        from relay_engine import lifecycle_paths
+        self.start()
+        target = lifecycle_paths.console_target(str(self.root))
+        self.assertIsInstance(target, lifecycle_paths.ConsoleTarget)
+        locator = self.root / lifecycle_paths._LIVE_LOCATOR
+        original = locator.read_bytes()
+        stale = json.loads(original)
+        stale['instance'] = uuid4().hex
+        locator.write_bytes(store_layout._canonical_frame(stale))
+        self.addCleanup(locator.write_bytes, original)
+        with patch.object(store_layout.sqlite3, 'connect') as opens:
+            observed = lifecycle_paths.console_target(str(self.root))
+        opens.assert_not_called()
+        self.assertIsInstance(observed, lifecycle_paths.ConsoleTargetUnavailable)
 
     def start(self, service=None):
         service = service or self.service
@@ -139,8 +271,8 @@ class ApiServiceTests(unittest.TestCase):
         self.assertIn('result', conn.connected)
         return conn
 
-    def sign_in(self, conn, role='planner'):
-        result = conn.call('session.sign-in', dict(self.keys[role], host='codex',
+    def sign_in(self, conn, role='planner', *, keys=None):
+        result = conn.call('session.sign-in', dict((self.keys if keys is None else keys)[role], host='codex',
             host_session_id=role, operation_key=role))
         self.assertIn('result', result, result)
         return result['result']
@@ -162,7 +294,8 @@ class ApiServiceTests(unittest.TestCase):
         link = os.link
 
         def stop_before_ack(source, target, **kwargs):
-            os.kill(os.getpid(), signal.SIGTERM)
+            if Path(target).name == 'ready.json':
+                os.kill(os.getpid(), signal.SIGTERM)
             link(source, target, **kwargs)
 
         with patch.object(os, 'link', side_effect=stop_before_ack):
@@ -178,6 +311,8 @@ class ApiServiceTests(unittest.TestCase):
                 self.check_hard_stop_with_parked_owner(phase)
 
     def check_hard_stop_with_parked_owner(self, phase):
+        root = self.base / ('guard-' + phase)
+        admission = admitted_store_fixture(root, P, project_name='service')
         tools = Path(__file__).resolve().parents[2]
         # Keep the original process alive with the same actual flock, then park
         # ordinary cleanup. The observer must own the native exit independently.
@@ -192,7 +327,8 @@ def park(*_args):
     marker.write_text("parked")
     threading.Event().wait()
 
-service = ApiService({str(self.root)!r}, {P!r}, clock=lambda: 1, stop_report=park)
+service = ApiService({str(root)!r}, {P!r}, clock=lambda: 1, stop_report=park,
+                     idle_fd=int(os.environ.pop('ADT_PRIVATE_IDLE_FD')))
 service.arm_foreground()
 service.start()
 if {phase!r} == 'accept':
@@ -216,14 +352,15 @@ else:
 service.stop()
 """
         environment = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
-        lock = self.root / 'api-service.lock'
-        with (subprocess.Popen([sys.executable, '-c', script], env=environment,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child,
+        lock = root / 'api-service.lock'
+        with (private_idle(admission, environment) as (idle_fd, child_env),
+              subprocess.Popen([sys.executable, '-c', script], env=child_env,
+                               pass_fds=(idle_fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child,
               socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer):
             try:
                 self.assertTrue(select.select([child.stdout], [], [], 3)[0])
                 endpoint = child.stdout.readline().decode().strip()
-                self.assertTrue(endpoint)
+                self.assertTrue(endpoint, child.stderr.read() if not endpoint else None)
                 if phase == 'accept':
                     peer.connect(endpoint)
                     deadline = time.monotonic() + 2
@@ -286,7 +423,8 @@ class ParkedGate(_NotifierGate):
     def retire(self):
         Path({str(marker)!r}).touch()
         threading.Event().wait()
-service = ApiService({str(self.root)!r}, {P!r}, clock=lambda: 1)
+service = ApiService({str(self.root)!r}, {P!r}, clock=lambda: 1,
+                     idle_fd=int(__import__('os').environ.pop('ADT_PRIVATE_IDLE_FD')))
 service.arm_foreground()
 service._foreground.install_notifier_gate(ParkedGate({writer}))
 service.start()
@@ -295,8 +433,10 @@ service.serve_forever()
 """
         env = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
         try:
-            child = subprocess.Popen([sys.executable, '-c', script], env=env, pass_fds=(writer,),
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            with private_idle(self.admitted, env) as (idle_fd, child_env):
+                child = subprocess.Popen([sys.executable, '-c', script], env=child_env,
+                                         pass_fds=(writer, idle_fd), stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE)
         finally:
             os.close(writer)
         with child:
@@ -377,12 +517,96 @@ service.serve_forever()
                 release.set()
             self.assertTrue(first.result(1).commit)
         self.assertEqual(service.stop(), 0)
+        self.check_late_receipt_permit_uses_original_a()
+
+    def check_late_receipt_permit_uses_original_a(self):
+        from relay_engine.operator_queue import notifier
+
+        root = self.base / 'late-permit'
+        note = notifier.Notification('pending', 1, 'fixture', 'pending')
+
+        def seed(path):
+            with closing(store_layout.open_catalogue(path)) as catalogue, catalogue:
+                catalogue.execute(
+                    "INSERT INTO queue_items (item_id,kind,subkind,project_id,raiser,revision,state,"
+                    "texts,pins,condition_key,raised_position,raised_at_ms) VALUES "
+                    "('pending','notice','project_stopped',?,'fixture',1,'pending','{}','{}',"
+                    "'fixture',1,1000)", (P,)).close()
+                catalogue.execute("INSERT INTO queue_notifications (item_id,revision,state,next_attempt_at_ms) "
+                                  "VALUES ('pending',1,'pending',1000)").close()
+                catalogue.execute('INSERT INTO queue_notifier_health VALUES (1,2,7)').close()
+
+        def snapshot(conn):
+            with closing(conn.execute('SELECT * FROM queue_notifications')) as rows:
+                queue = rows.fetchall()
+            with closing(conn.execute('SELECT * FROM queue_notifier_health')) as health:
+                return queue, health.fetchall()
+
+        admission = admitted_store_fixture(root, P, project_name='late-permit', seed=seed)
+        service = self.m.ApiService(str(root), P, clock=lambda: 20, admission=admission.receipt)
+        service.arm_foreground()
+        self.addCleanup(service.stop)
+        service.start()
+        writer, epoch = service.writer, service._foreground
+        before = writer.read_catalogue(snapshot)
+        parked, execute = threading.Event(), threading.Event()
+        publishing, publish = threading.Event(), threading.Event()
+        origin = []
+        original = epoch.publish_stop
+
+        def delayed(observed):
+            origin.append(observed)
+            publishing.set()
+            if not publish.wait(3):
+                raise AssertionError('fixture never resumed original publication')
+            return original(observed)
+
+        def stop_phase(phase):
+            if phase == 'finishing':
+                parked.set()
+                if not execute.wait(3):
+                    raise AssertionError('declared receipt not resumed')
+
+        def delivered(bindings):
+            notifier.notify_delivered(bindings['catalogue'], note, 20)
+            return api_writer.JobOutcome(True, 'delivered')
+
+        writer._phase_hook = stop_phase
+        job = api_writer.DeclaredJob(store_steps.Declared('written', {}), delivered)
+        with ThreadPoolExecutor(2) as pool:
+            result = pool.submit(writer.submit_declared, job)
+            try:
+                self.assertTrue(parked.wait(1))
+                with patch.object(epoch, 'publish_stop', side_effect=delayed):
+                    stopping = pool.submit(service._signal, signal.SIGTERM, None)
+                    try:
+                        self.assertTrue(publishing.wait(1))
+                        execute.set()
+                        remaining = origin[0] + 1.55 - time.monotonic()
+                        self.assertGreater(remaining, 0)
+                        with self.assertRaises(TimeoutError):
+                            result.result(remaining)
+                        self.assertIsNone(epoch.attempt)
+                    finally:
+                        publish.set()
+                    stopping.result(1)
+                outcome = result.result(1)
+                self.assertEqual((outcome.commit, outcome.fault, outcome.indeterminate),
+                                 (False, 'stop_unwritten', False))
+            finally:
+                execute.set()
+                publish.set()
+        self.assertEqual(service.stop(), 0)
+        with closing(store_layout._immutable_incumbent_read(store_layout.catalogue_path(root))) as conn:
+            self.assertEqual(snapshot(conn), before)
+        print(json.dumps({'late_original_a': True, 'fault': outcome.fault, 'queue_and_health_unchanged': True}))
 
     def test_declared_turn_stop_distinguishes_body_and_commit_permit(self):
+        admission = self.admitted.receipt
         for parked_phase, expected_fault in (('finishing', 'stop_unwritten'),
                                               ('commit_permitted', 'stop_commit_unknown')):
             with self.subTest(phase=parked_phase):
-                service = self.m.ApiService(str(self.root), P, clock=lambda: 1)
+                service = self.m.ApiService(str(self.root), P, clock=lambda: 1, admission=admission)
                 service.arm_foreground()
                 service.start()
                 parked, release = threading.Event(), threading.Event()
@@ -414,6 +638,7 @@ service.serve_forever()
                             release.set()
                 finally:
                     self.assertEqual(service.stop(), 0)
+                    admission = service._retired_admission
                 catalogue = store_layout.open_catalogue(self.root)
                 try:
                     value, = catalogue.execute('SELECT created_at FROM catalogue_identity').fetchone()
@@ -484,7 +709,7 @@ service.serve_forever()
     def test_start_writes_ready_file_after_listening(self):
         original = os.replace
         observed = []
-        def replace_ready(source, target):
+        def replace_ready(source, target, **kwargs):
             if Path(target).name == 'ready.json':
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 try:
@@ -492,7 +717,7 @@ service.serve_forever()
                     observed.append(True)
                 finally:
                     sock.close()
-            return original(source, target)
+            return original(source, target, **kwargs)
         with patch.object(os, 'replace', side_effect=replace_ready):
             ready = Path(self.service.start())
         data = json.loads(ready.read_bytes())
@@ -532,10 +757,11 @@ service.serve_forever()
 
     def test_unrouted_operation_refuses_start(self):
         platform = api_platform.platform_component()
+        admission = self.admitted.receipt
         for mode in ('missing', 'unrouted'):
             with self.subTest(mode=mode):
                 service = self.m.ApiService(str(self.root), P, clock=lambda: 1,
-                    components=(replace(platform, port_factory=lambda context: None),))
+                    components=(replace(platform, port_factory=lambda context: None),), admission=admission)
                 self.addCleanup(service.stop)
                 if mode == 'missing':
                     action = service.start
@@ -550,6 +776,7 @@ service.serve_forever()
                 with self.assertRaises(self.m.ServiceStartRefused) as caught:
                     action()
                 self.assertEqual(caught.exception.reason, 'port_missing' if mode == 'missing' else 'port_unrouted')
+                admission = service._retired_admission
                 self.assertEqual(list(self.temp.rglob('*.sock')), [])
 
     @staticmethod
@@ -618,7 +845,7 @@ service.serve_forever()
         for first in (signal.SIGTERM, signal.SIGINT):
             with self.subTest(first=first.name):
                 root = self.base / first.name
-                root.mkdir()
+                admitted_store_fixture(root, P, project_name='service')
                 script = f'''
 import os, signal, sys
 sys.path.insert(0, {str(tools)!r})
@@ -630,12 +857,13 @@ for name in (signal.SIGTERM, signal.SIGINT):
     signal.signal(name, service._signal)
 class Writer:
     calls = 0
-    def close(self):
+    def settle_private_io(self, deadline):
         self.calls += 1
         print('drain-entered', flush=True)
         os.kill(os.getpid(), signal.SIGTERM)
         if service._lock_fd is not None:
             print('lock-held', flush=True)
+        return True
 writer = Writer()
 service.writer = writer
 os.kill(os.getpid(), {int(first)})
@@ -783,8 +1011,8 @@ print('stopped', flush=True)
                 calls.append('start'); return owner.actual.start()
             def open_project(owner, project):
                 calls.append('open_project'); return owner.actual.open_project(project)
-            def close(owner):
-                calls.append('close'); return owner.actual.close()
+            def settle_private_io(owner, deadline):
+                calls.append('close'); return owner.actual.settle_private_io(deadline)
         with patch.object(self.m, 'StoreWriter', RecordingWriter):
             self.start()
             baseline = list(calls)
@@ -803,7 +1031,8 @@ print('stopped', flush=True)
                 return factory(context)
             calls.clear()
             control = self.m.ApiService(str(self.root), P, clock=lambda: next(self.tick),
-                                        components=(replace(platform, port_factory=wrong_factory),))
+                                        components=(replace(platform, port_factory=wrong_factory),),
+                                        admission=self.service._retired_admission)
             self.addCleanup(control.stop)
             control.start()
             with self.assertRaises(AssertionError):
