@@ -890,6 +890,347 @@ store_layout.sqlite3.connect = refused
                 if fd is not None:
                     os.close(fd)
 
+    def test_composed_owner_birth_refuses_replaced_parent_before_creation(self):
+        from unittest.mock import Mock
+
+        from relay_engine import operator_terminal, owner_start
+        from relay_engine.tests.test_owner_start import installed_key
+
+        home = self.home.resolve()
+        root = home / '.adt'
+        moved = home.with_name('signed-home')
+        owner_directory = home / '.adt-owner' / 'receipts'
+        owner_directory.parent.mkdir(mode=0o700)
+        owner_directory.mkdir(mode=0o700)
+        original_parent = store_layout._inode(home.stat())
+        key = self.base / 'ephemeral-signer'
+        subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)],
+                       check=True, capture_output=True, timeout=10)
+        pub = installed_key(key.with_suffix('.pub'), None)
+        spawn = Mock()
+        native_mkdir = os.mkdir
+        observations = []
+        attempt = None
+
+        def prove(message):
+            return subprocess.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', str(key),
+                                   '-n', 'adt-terminal-check-v1'], input=message, check=True,
+                                  capture_output=True, timeout=10).stdout
+
+        def authorize(selection):
+            nonlocal attempt
+            attempt = owner_start.authorize_owner_start(
+                selection, owner_start.NativeIdentity.current(), prove=prove, show=lambda _: None)
+            return attempt
+
+        def mkdir(path, mode=0o777, *, dir_fd=None):
+            if path == root.name:
+                parent = store_layout._inode(os.fstat(dir_fd))
+                observations.append(('mkdir', parent))
+            native_mkdir(path, mode, dir_fd=dir_fd)
+
+        class GuardedBirthObserved(Exception):
+            pass
+
+        def birth(selection, consume):
+            def observe(selected_root, store, project, parent):
+                self.assertEqual((selected_root, store, project), (root, selection.store, P))
+                observations.append(('consume', parent))
+                consume(selected_root, store, project, parent)
+
+            home.rename(moved)
+            home.mkdir(mode=0o700)
+            replacement = store_layout._inode(home.stat())
+            with patch.object(store_layout.sqlite3, 'connect', wraps=store_layout.sqlite3.connect) as sqlite:
+                with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                    owner_start.production_birth(selection, observe)
+                sqlite.assert_not_called()
+            self.assertEqual(observations, [('consume', replacement)])
+            self.assertFalse(attempt._uses.birth)
+            self.assertFalse(root.exists())
+            self.assertFalse((moved / root.name).exists())
+            spawn.assert_not_called()
+            home.rmdir()
+            moved.rename(home)
+
+            frame = owner_start.production_birth(selection, observe)
+            self.assertEqual(observations, [('consume', replacement), ('consume', original_parent),
+                                           ('mkdir', original_parent)])
+            self.assertTrue(attempt._uses.birth)
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                consume(root, selection.store, P, original_parent)
+            idle, proof = store_layout._decode_idle_receipt(frame)
+            with store_layout.IncumbentGuard.acquire(root, expected_lock=idle.lock) as guard:
+                guard.verify_idle(idle, proof)
+                with closing(store_layout._immutable_incumbent_read(store_layout.catalogue_path(root))) as catalogue:
+                    self.assertEqual(catalogue.execute(
+                        'SELECT kind FROM catalogue_identity WHERE id=1').fetchone(), ('production',))
+            print(json.dumps({'replaced_parent': replacement, 'signed_parent': original_parent,
+                              'held_create_parent': observations[-1][1], 'store': idle.store,
+                              'original_lock': idle.lock, 'replay_refused': True, 'spawn': False}))
+            raise GuardedBirthObserved
+
+        with (patch.object(store_layout, 'production_root', return_value=root),
+              patch.object(operator_terminal, '_installed_key', return_value=pub),
+              patch.object(os, 'mkdir', side_effect=mkdir),
+              self.assertRaises(GuardedBirthObserved)):
+            owner_start.run_owner(root, P, initialize=True, project_name='Selected project', bridge_port=None,
+                                  authorize=authorize, launch=spawn, birth_provider=birth, show=lambda _: None)
+        spawn.assert_not_called()
+
+    def test_installed_foreground_owner_clean_restart(self):
+        import hashlib
+        import pty
+        import sqlite3
+
+        from relay_engine import owner_start, version
+
+        package = self.install_candidate().resolve().parents[1]
+        scratch = self.base.resolve()
+        home = self.home.resolve()
+        drop_in = home / '.agents' / 'skills'
+        drop_in.parent.mkdir(mode=0o700)
+        package.rename(drop_in)
+        launcher = drop_in / 'tools' / 'adt'
+        installed = launcher.parent
+        root = home / '.adt'
+        overlay = scratch / 'synthetic'
+        overlay.mkdir(mode=0o700)
+        trace = scratch / 'installed.jsonl'
+        marker = scratch / 'ordinary-open'
+        (overlay / 'sitecustomize.py').write_text(f"""
+import hashlib, hmac, json, os, pathlib, sqlite3, sys
+sys.path.insert(0, {str(installed)!r})
+from relay_engine import adt_cli, api_service, operator_terminal, owner_start, store_layout, submit
+base = pathlib.Path(os.environ['ADT_SYNTHETIC_HOME'])
+assert base.is_relative_to(pathlib.Path({str(scratch)!r}))
+submit._home = lambda: str(base)
+trace = pathlib.Path({str(trace)!r})
+
+def emit(data):
+    with trace.open('a') as out:
+        print(json.dumps(data), file=out)
+
+emit({{'pid': os.getpid(), 'origins': [module.__file__ for module in
+       (adt_cli, api_service, owner_start, store_layout)], 'sqlite': sqlite3.sqlite_version,
+       'interpreter': sys.executable}})
+
+def sign(message):
+    return hmac.digest(b'ephemeral-installed-fixture', message, 'sha256')
+
+def verify(message, proof):
+    if not hmac.compare_digest(sign(message), proof):
+        raise operator_terminal.OperatorCheckRefused('bad_signature')
+
+operator_terminal._verify_signature = verify
+authorize = owner_start.authorize_owner_start
+
+def confirm(selection, owner, *, prove, show):
+    return authorize(selection, owner, prove=sign, show=show)
+
+owner_start.authorize_owner_start = confirm
+collect = owner_start._collect_retirement
+
+def returned(child, retirement, stop):
+    frame = collect(child, retirement, stop)
+    emit({{'reaped_pid': child.pid, 'native_exit': child.returncode,
+           'receipt_sha256': hashlib.sha256(frame).hexdigest()}})
+    return frame
+
+owner_start._collect_retirement = returned
+if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
+    def forbidden(*args, **kwargs):
+        pathlib.Path({str(marker)!r}).touch()
+        raise AssertionError('SQLite opened during rejected admission')
+    sqlite3.connect = forbidden
+""")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(overlay),
+                   HOME=str(home), ADT_SYNTHETIC_HOME=str(home))
+
+        def receipt_directory(directory):
+            receipts = directory / '.adt-owner' / 'receipts'
+            receipts.mkdir(mode=0o700, parents=True)
+            receipts.parent.chmod(0o700)
+            return receipts
+
+        receipts = receipt_directory(home)
+
+        def command(selected_root, *, initialize=False, project=P):
+            argv = [sys.executable, str(launcher), 'engine', 'run', '--store-root', str(selected_root),
+                    '--project-id', project, '--bridge-port', '0']
+            if initialize:
+                argv += ['--initialize', '--project-name', 'Selected project']
+            return argv
+
+        def arm():
+            return store_layout.IncumbentGuard._parse_record((root / store_layout._INCUMBENT).read_bytes())
+
+        def retained(expected):
+            receipt, = receipts.iterdir()
+            frame = receipt.read_bytes()
+            idle, proof = store_layout._decode_idle_receipt(frame)
+            self.assertEqual((idle.root, idle.lock, idle.store, idle.project, proof.prior_epoch),
+                             (expected.root, expected.lock, expected.store, expected.project, expected.owner.epoch))
+            with store_layout.IncumbentGuard.acquire(root, expected_lock=expected.lock) as guard:
+                guard.verify_idle(idle, proof)
+            expected_return = {'reaped_pid': expected.owner.pid, 'native_exit': 0,
+                               'receipt_sha256': hashlib.sha256(frame).hexdigest()}
+            self.assertIn(expected_return, [json.loads(line) for line in trace.read_text().splitlines()])
+            return {**expected_return, 'raw_receipt_base64': base64.b64encode(frame).decode('ascii')}
+
+        def refuse(argv, expected, *, selected_home=home, environment=env, pass_fds=()):
+            before = len(trace.read_text().splitlines())
+            result = subprocess.run(argv, env=dict(environment, ADT_SYNTHETIC_HOME=str(selected_home),
+                                                   ADT_SYNTHETIC_REFUSAL='1'),
+                                    pass_fds=pass_fds, capture_output=True, timeout=8)
+            self.assertEqual((result.returncode, result.stdout), (1, b''), result.stderr)
+            self.assertIn(expected, result.stderr)
+            self.assertFalse(marker.exists())
+            self.assertEqual(len(trace.read_text().splitlines()), before + 1)
+
+        self.assertFalse(root.exists())
+        terminal_pid, terminal = pty.fork()
+        if terminal_pid == 0:
+            try:
+                os.execve(sys.executable, command(root, initialize=True), env)
+            finally:
+                os._exit(127)
+        status = None
+        transcript = bytearray()
+
+        def reap_terminal():
+            nonlocal status
+            seen, exit_status = os.waitpid(terminal_pid, os.WNOHANG)
+            if seen:
+                status = exit_status
+                return True
+            return False
+
+        try:
+            deadline = time.monotonic() + 8
+            while b'/ready.json' not in transcript and time.monotonic() < deadline:
+                if select.select([terminal], [], [], 0.1)[0]:
+                    try:
+                        data = os.read(terminal, 4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    transcript.extend(data)
+            ready_lines = [line for line in transcript.decode(errors='replace').splitlines()
+                           if line.endswith('/ready.json') and line.startswith('/')]
+            self.assertEqual(len(ready_lines), 1, transcript.decode(errors='replace'))
+            ready = Path(ready_lines[0])
+            metadata = json.loads(ready.read_bytes())
+            expected_build = version.fingerprint(Path(__file__).resolve().parents[2])
+            self.assertEqual(metadata['build_id'], expected_build)
+            self.assertEqual(version.fingerprint(installed), expected_build)
+            live = arm()
+            self.assertEqual((live.store, live.project), (metadata['store_id'], P))
+            self.assertEqual(os.getpgid(terminal_pid), terminal_pid)
+            self.assertEqual(os.getpgid(live.owner.pid), live.owner.pid)
+            with closing(store_layout.open_catalogue_readonly(root)) as catalogue:
+                self.assertEqual(catalogue.execute(
+                    'SELECT store_id, kind FROM catalogue_identity WHERE id=1').fetchone(),
+                                 (live.store, 'production'))
+            installed_launch = subprocess.check_output(
+                [sys.executable, str(launcher), 'console', 'open', '--store-root', str(root), '--print'],
+                env=env, timeout=5).decode().strip()
+            self.assertEqual(urlsplit(installed_launch).netloc, urlsplit(metadata['bridge_origin']).netloc)
+            os.write(terminal, b'\x03')
+            self.wait_until(reap_terminal)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertFalse(ready.exists())
+            first_return = retained(live)
+        finally:
+            os.close(terminal)
+            if status is None:
+                os.kill(terminal_pid, signal.SIGTERM)
+                try:
+                    self.wait_until(reap_terminal)
+                except AssertionError:
+                    os.kill(terminal_pid, signal.SIGKILL)
+                    os.waitpid(terminal_pid, 0)
+
+        infrastructure = scratch / 'infrastructure'
+        infrastructure.mkdir(mode=0o700)
+        receipt_directory(infrastructure)
+        partial_root = infrastructure / '.adt'
+        partial_root.mkdir(mode=0o700)
+        infrastructure_file = partial_root / store_layout._INCUMBENT_LOCK
+        infrastructure_file.touch(mode=0o600)
+        original_infrastructure = (infrastructure_file.stat().st_ino, infrastructure_file.read_bytes())
+        refuse(command(partial_root, initialize=True), b'startup_selection', selected_home=infrastructure)
+        self.assertEqual(list(partial_root.iterdir()), [infrastructure_file])
+        self.assertEqual((infrastructure_file.stat().st_ino, infrastructure_file.read_bytes()),
+                         original_infrastructure)
+        first_frame = base64.b64decode(first_return['raw_receipt_base64'])
+        idle, proof = store_layout._decode_idle_receipt(first_frame)
+        with service_fixture.private_idle(service_fixture.AdmissionFixture(idle, proof), env) as (fd, child_env):
+            refuse([sys.executable, str(launcher), 'engine', 'serve', '--store-root', str(root),
+                    '--project-id', P, '--bridge-port', '0'], b'startup-unverified',
+                   environment=child_env, pass_fds=(fd,))
+        self.assertEqual((root / store_layout._INCUMBENT).read_bytes(), store_layout._canonical_frame(asdict(idle)))
+        changed_project = str(uuid4())
+        wrong_receipt = receipts / owner_start._receipt_name(root, changed_project)
+        wrong_receipt.write_bytes(first_frame)
+        wrong_receipt.chmod(0o600)
+        try:
+            refuse(command(root, project=changed_project), b'receipt-unproved')
+            self.assertEqual(wrong_receipt.read_bytes(), first_frame)
+        finally:
+            wrong_receipt.unlink()
+
+        def stop_round(*, kill_child):
+            with subprocess.Popen(command(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as owner:
+                try:
+                    next_ready = self.ready_from(owner)
+                    current = arm()
+                    self.assertNotEqual(current.owner.epoch, live.owner.epoch)
+                    self.assertEqual(current.lock, live.lock)
+                    if kill_child:
+                        os.kill(current.owner.pid, signal.SIGKILL)
+                    else:
+                        owner.terminate()
+                    output, error = owner.communicate(timeout=8)
+                    self.assertEqual((owner.returncode == 0, output), (not kill_child, b''), error)
+                    if kill_child:
+                        self.assertEqual(arm(), current)
+                    else:
+                        self.assertFalse(next_ready.exists())
+                    return current
+                finally:
+                    if owner.poll() is None:
+                        owner.terminate()
+                        try:
+                            owner.communicate(timeout=6)
+                        except subprocess.TimeoutExpired:
+                            owner.kill()
+                            owner.communicate(timeout=3)
+
+        successor = stop_round(kill_child=False)
+        second_return = retained(successor)
+        abandoned = stop_round(kill_child=True)
+        refuse(command(root), b'incumbent-changed')
+        self.assertEqual(arm(), abandoned)
+        receipt, = receipts.iterdir()
+        self.assertEqual(receipt.read_bytes(), base64.b64decode(second_return['raw_receipt_base64']))
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        origins = sorted({origin for entry in events for origin in entry.get('origins', ())})
+        self.assertEqual(origins, [str(installed / 'relay_engine' / name) for name in
+                                   ('adt_cli.py', 'api_service.py', 'owner_start.py', 'store_layout.py')])
+        self.assertEqual({entry['interpreter'] for entry in events if 'interpreter' in entry}, {sys.executable})
+        self.assertEqual({entry['sqlite'] for entry in events if 'sqlite' in entry}, {sqlite3.sqlite_version})
+        print(json.dumps({'platform': sys.platform, 'machine': os.uname().machine,
+                          'uid': os.geteuid(), 'python': sys.version, 'sqlite': sqlite3.sqlite_version,
+                          'installed_origins': origins, 'build': metadata['build_id'],
+                          'terminal_ctrl_c': True, 'terminal_exit': os.waitstatus_to_exitcode(status),
+                          'first': {**first_return, 'epoch': live.owner.epoch},
+                          'restart': {**second_return, 'epoch': successor.owner.epoch},
+                          'store': live.store, 'project': live.project, 'same_lock': successor.lock,
+                          'refusals_before_sqlite': ['infrastructure', 'missing-proof', 'changed-selection',
+                                                     'abnormal-loss']}))
+
     def test_installed_disposable_guarded_restart(self):
         launcher = self.install_candidate()
         directory = self.base / 'clean'

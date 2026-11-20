@@ -3,7 +3,7 @@ from contextlib import ExitStack, closing
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from typing import Literal
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 import errno
 import fcntl
@@ -1075,17 +1075,36 @@ class IncumbentGuard:
                                 expected_idle.lock, expected_idle.store, expected_idle.project,
                                 'armed', owner, None)
         self._owned_arm = self._replace(expected_idle, armed)
-        if birth_idle == expected_idle:
-            self._birth_arm = armed
+        self._birth_arm = None
+        if birth_idle is not None and birth_idle[0] == expected_idle:
+            self._birth_arm = (armed, birth_idle[1])
         return armed
 
     @classmethod
-    def _create_new(cls, root, store, project):
-        """Reserve a new fixture Store before any provider can open SQLite."""
+    def _create_new(cls, root, store, project, *, kind: Literal['isolated', 'production'] = 'isolated',
+                    consume_production_birth: Callable[[Path, str, str, tuple[int, int]], None] | None = None
+                    ) -> tuple['IncumbentGuard', '_RetainedIncumbentDisposition']:
+        """Reserve a checked new Store before any provider can open SQLite."""
         _canonical_id(store)
         _canonical_id(project)
-        root = Path(root).absolute()
+        root = Path(root)
+        canonical_root = production_root()
+        if kind == 'production':
+            if root != canonical_root:
+                raise LayoutFault('wrong-kind')
+            if consume_production_birth is None:
+                raise LayoutFault('birth-unproved')
+        elif (kind != 'isolated' or root == canonical_root
+              or resolve_root(root) == resolve_root(canonical_root)):
+            raise LayoutFault('wrong-kind')
+        root = root.absolute()
         with closing(_DirectoryHandle(os.open(root.parent, _DIRECTORY))) as parent:
+            # An absent leaf has no inode to resolve on a case-insensitive volume.
+            if (kind == 'isolated' and root.name.casefold() == canonical_root.name.casefold()
+                    and os.path.samestat(os.fstat(parent.fd), canonical_root.parent.stat())):
+                raise LayoutFault('wrong-kind')
+            if kind == 'production':
+                consume_production_birth(canonical_root, store, project, _inode(os.fstat(parent.fd)))
             os.mkdir(root.name, mode=0o700, dir_fd=parent.fd)
             os.fsync(parent.fd)
             descriptor = os.open(root.name, _DIRECTORY, dir_fd=parent.fd)
@@ -1105,7 +1124,7 @@ class IncumbentGuard:
                 raise LayoutFault('incumbent-invalid')
             proof = guard._retain('enrollment', store, project, None,
                                   uuid4().hex.encode('ascii'))
-            guard._birth = proof
+            guard._birth = (proof, kind)
         except BaseException:
             guard.close()
             raise
@@ -1140,12 +1159,13 @@ class IncumbentGuard:
 
     def enroll_new(self, proof):
         self._check_lock()
-        if (proof is None or self._birth is not proof
+        if (self._birth is None or self._birth[0] is not proof
                 or set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK}):
             raise LayoutFault('enrollment-unproved')
+        _, kind = self._birth
         self._birth = None
         idle = self._publish_idle(None, proof.summary())
-        self._birth_idle = idle
+        self._birth_idle = (idle, kind)
         return idle, proof
 
     def _materialize_birth(self, armed, *, project_name, now_ms):
@@ -1153,8 +1173,9 @@ class IncumbentGuard:
         from relay_engine import store_create, store_steps
 
         birth_arm, self._birth_arm = self._birth_arm, None
-        if birth_arm is None or birth_arm != armed or self._owned_arm != armed:
+        if birth_arm is None or birth_arm[0] != armed or self._owned_arm != armed:
             raise LayoutFault('birth-unproved')
+        _, kind = birth_arm
         self._current(armed)
         if set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK, _INCUMBENT}:
             raise LayoutFault('birth-members-present')
@@ -1193,7 +1214,7 @@ class IncumbentGuard:
                     return super().run(declared, body, fence_project=fence_project)
 
             check_members()
-            with closing(_open_catalogue(self._path, 'isolated', reserved=(armed.store, now_ms))) as conn:
+            with closing(_open_catalogue(self._path, kind, reserved=(armed.store, now_ms))) as conn:
                 _pragma(conn, 'BEGIN IMMEDIATE')
                 reserve_project(conn, armed.project, project_name, now_ms)
                 conn.commit()
@@ -1202,7 +1223,7 @@ class IncumbentGuard:
                 os.fsync(fd)
             check_members()
             with closing(_immutable_incumbent_read(catalogue_path(self._path))) as catalog:
-                if _row(catalog, 'SELECT kind FROM catalogue_identity WHERE id=1') != ('isolated',):
+                if _row(catalog, 'SELECT kind FROM catalogue_identity WHERE id=1') != (kind,):
                     raise LayoutFault('wrong-kind')
             return self._protected_identity(armed)
 

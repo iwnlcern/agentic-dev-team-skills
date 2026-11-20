@@ -806,6 +806,214 @@ class TestIncumbentOwnerTransitions(unittest.TestCase):
                 self.assertEqual(store_layout._row(catalogue, 'SELECT project_id,name,state FROM project_routes'),
                                  (P, 'reserved', 'active'))
 
+    def test_production_birth_materializes_only_the_authorized_selection(self):
+        calls = []
+        parent_fds = []
+        creation_fds = []
+        open_path, mkdir = os.open, os.mkdir
+        expected_parent = store_layout._inode(self.root.parent.stat())
+
+        def observe_open(path, *args, **kwargs):
+            fd = open_path(path, *args, **kwargs)
+            if path == self.root.parent:
+                parent_fds.append(fd)
+            return fd
+
+        def consume(root, store, project, parent_identity):
+            self.assertFalse(root.exists())
+            self.assertEqual(len(parent_fds), 1)
+            self.assertEqual(store_layout._inode(os.fstat(parent_fds[0])), expected_parent)
+            calls.append((root, store, project, parent_identity))
+
+        def observe_mkdir(path, *args, dir_fd=None, **kwargs):
+            self.assertEqual(path, self.root.name)
+            self.assertEqual(calls, [(self.root, _INCUMBENT_STORE_ID, P, expected_parent)])
+            self.assertEqual(store_layout._inode(os.fstat(dir_fd)), expected_parent)
+            creation_fds.append(dir_fd)
+            return mkdir(path, *args, dir_fd=dir_fd, **kwargs)
+
+        with (patch.object(store_layout, 'production_root', return_value=self.root),
+              patch.object(os, 'open', side_effect=observe_open),
+              patch.object(os, 'mkdir', side_effect=observe_mkdir)):
+            guard, proof = store_layout.IncumbentGuard._create_new(
+                self.root, _INCUMBENT_STORE_ID, P, kind='production',
+                consume_production_birth=consume)
+        self.addCleanup(guard.close)
+        self.assertEqual(calls, [(self.root, _INCUMBENT_STORE_ID, P, expected_parent)])
+        self.assertEqual(len(creation_fds), 1)
+        self.assertEqual(creation_fds, parent_fds)
+        with guard:
+            lock = guard.lock_identity
+            idle, _ = guard.enroll_new(proof)
+            armed = guard.arm(idle, self.birth_owner())
+            connect = sqlite3.connect
+            opened = []
+
+            def observe(*args, **kwargs):
+                if not opened:
+                    self.assertEqual(guard.read(), armed)
+                    self.assertEqual(guard.lock_identity, lock)
+                opened.append(args[0])
+                return connect(*args, **kwargs)
+
+            with patch.object(sqlite3, 'connect', side_effect=observe):
+                self.assertEqual(guard._materialize_birth(armed, project_name='reserved', now_ms=12),
+                                 _INCUMBENT_STORE_ID)
+            self.assertTrue(opened)
+            with closing(store_layout._immutable_incumbent_read(
+                    store_layout.catalogue_path(self.root))) as catalogue:
+                self.assertEqual(store_layout._row(catalogue, 'SELECT store_id,kind FROM catalogue_identity'),
+                                 (_INCUMBENT_STORE_ID, 'production'))
+                with closing(catalogue.execute('SELECT project_id,name,state FROM project_routes')) as routes:
+                    self.assertEqual(routes.fetchall(), [(P, 'reserved', 'active')])
+            self.assertEqual(list((self.root / 'projects').iterdir()), [self.root / 'projects' / P])
+            retirement = guard._retirement_proof(armed, b'fixture: handles settled')
+            retired = guard.retire(armed, retirement)
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=lock) as guard:
+            self.assertEqual(guard.verify_idle(retired, retirement), retired)
+            self.assertEqual(retired.disposition.prior_epoch, armed.owner.epoch)
+
+    def test_production_birth_refuses_wrong_root_or_kind_before_mutation(self):
+        alias_parent = self.root.with_name('alias-parent')
+        alias_parent.symlink_to(self.root.parent, target_is_directory=True)
+        alias = alias_parent / self.root.name
+        wrong = self.root.with_name('wrong')
+        with (patch.object(store_layout, 'production_root', return_value=self.root),
+              patch.object(sqlite3, 'connect') as opens):
+            for path, kind in ((wrong, 'production'), (alias, 'production'),
+                               (self.root, 'isolated'), (alias, 'isolated'),
+                               (self.root.with_name(self.root.name.upper()), 'isolated'),
+                               (wrong, 'unsupported')):
+                with self.subTest(path=path, kind=kind):
+                    with self.assertRaises(store_layout.LayoutFault):
+                        store_layout.IncumbentGuard._create_new(
+                            path, _INCUMBENT_STORE_ID, P, kind=kind,
+                            consume_production_birth=lambda *_: self.fail('invalid selection reached verifier'))
+                    self.assertFalse(path.exists())
+            opens.assert_not_called()
+
+    def test_production_birth_refuses_missing_mismatched_or_spent_authorization(self):
+        for case in ('missing', 'act', 'store', 'project', 'spent'):
+            with self.subTest(case=case):
+                spent = case == 'spent'
+                expected_act = 'start' if case == 'act' else 'initialize'
+                store = str(uuid4()) if case == 'store' else _INCUMBENT_STORE_ID
+                project = str(uuid4()) if case == 'project' else P
+
+                def consume(root, store_id, project_id, parent_identity):
+                    nonlocal spent
+                    if spent or (expected_act, root, store_id, project_id) != (
+                            'initialize', self.root, _INCUMBENT_STORE_ID, P):
+                        raise store_layout.LayoutFault('birth-unproved')
+                    spent = True
+
+                with (patch.object(store_layout, 'production_root', return_value=self.root),
+                      patch.object(sqlite3, 'connect') as opens):
+                    with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                        store_layout.IncumbentGuard._create_new(
+                            self.root, store, project, kind='production',
+                            consume_production_birth=None if case == 'missing' else consume)
+                    self.assertFalse(self.root.exists())
+                    opens.assert_not_called()
+
+    def test_production_birth_refuses_mismatched_parent_before_creation(self):
+        parent = self.root.with_name('selected-parent')
+        original_parent = parent.with_name('original-parent')
+        parent.mkdir(mode=0o700)
+        root = parent / self.root.name
+        authorized_parent = store_layout._inode(parent.stat())
+        authorized = root, _INCUMBENT_STORE_ID, P, authorized_parent
+        parent.rename(original_parent)
+        parent.mkdir(mode=0o700)
+        replacement_parent = store_layout._inode(parent.stat())
+        self.assertNotEqual(replacement_parent, authorized_parent)
+        observed = []
+        consumed = []
+
+        def consume(path, store, project, parent_identity):
+            attempt = path, store, project, parent_identity
+            observed.append(attempt)
+            if attempt != authorized:
+                raise store_layout.LayoutFault('birth-unproved')
+            consumed.append(attempt)
+
+        with (patch.object(store_layout, 'production_root', return_value=root),
+              patch.object(os, 'mkdir') as mkdir,
+              patch.object(sqlite3, 'connect') as opens):
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                store_layout.IncumbentGuard._create_new(
+                    root, _INCUMBENT_STORE_ID, P, kind='production',
+                    consume_production_birth=consume)
+            mkdir.assert_not_called()
+            opens.assert_not_called()
+        self.assertEqual(observed, [(root, _INCUMBENT_STORE_ID, P, replacement_parent)])
+        self.assertEqual(consumed, [])
+        self.assertFalse(root.exists())
+        self.assertFalse((original_parent / root.name).exists())
+
+    def test_production_birth_refuses_existing_and_interrupted_roots(self):
+        for case in ('infrastructure', 'symlink', 'interrupted'):
+            with self.subTest(case=case):
+                root = self.root.with_name(case)
+                if case == 'symlink':
+                    root.symlink_to(self.root.parent, target_is_directory=True)
+                    retained = None
+                elif case == 'infrastructure':
+                    root.mkdir(mode=0o700)
+                    retained = root / 'installed-member'
+                    retained.write_bytes(b'preserve installation')
+                else:
+                    guard, proof = store_layout.IncumbentGuard._create_new(root, _INCUMBENT_STORE_ID, P)
+                    with guard:
+                        idle, _ = guard.enroll_new(proof)
+                        guard.arm(idle, self.birth_owner())
+                    retained = root / store_layout._INCUMBENT
+                existing = {p.name: p.stat().st_ino for p in root.iterdir()}
+                content = retained.read_bytes() if retained is not None else root.readlink()
+                with (patch.object(store_layout, 'production_root', return_value=root),
+                      patch.object(sqlite3, 'connect') as opens):
+                    with self.assertRaises(FileExistsError):
+                        store_layout.IncumbentGuard._create_new(
+                            root, _INCUMBENT_STORE_ID, P, kind='production',
+                            consume_production_birth=lambda *_: None)
+                    opens.assert_not_called()
+                self.assertEqual({p.name: p.stat().st_ino for p in root.iterdir()}, existing)
+                self.assertEqual(retained.read_bytes() if retained is not None else root.readlink(), content)
+
+    def test_production_birth_reservation_cannot_be_rebound_or_reused(self):
+        for rebind in (True, False):
+            with self.subTest(rebind=rebind):
+                root = self.root.with_name(f'birth-{rebind}')
+                with patch.object(store_layout, 'production_root', return_value=root):
+                    guard, proof = store_layout.IncumbentGuard._create_new(
+                        root, _INCUMBENT_STORE_ID, P, kind='production',
+                        consume_production_birth=lambda *_: None)
+                with guard:
+                    with self.assertRaisesRegex(store_layout.LayoutFault, 'enrollment-unproved'):
+                        guard.enroll_new(replace(proof, project=str(uuid4())))
+                    idle, _ = guard.enroll_new(proof)
+                    armed = guard.arm(idle, self.birth_owner())
+                    if rebind:
+                        with patch.object(sqlite3, 'connect') as opens:
+                            for candidate in (replace(armed, owner=self.birth_owner()), armed):
+                                with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                                    guard._materialize_birth(candidate, project_name='reserved', now_ms=12)
+                            opens.assert_not_called()
+                        self.assertFalse(store_layout.catalogue_path(root).exists())
+                    else:
+                        guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+                        with patch.object(sqlite3, 'connect') as opens:
+                            with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                                guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+                            opens.assert_not_called()
+                        retired = guard.retire(armed, guard._retirement_proof(armed, b'fixture: settled'))
+                        armed = guard.arm(retired, self.birth_owner())
+                        with patch.object(sqlite3, 'connect') as opens:
+                            with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                                guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+                            opens.assert_not_called()
+                    self.assertEqual(guard.read(), armed)
+
     def test_birth_refuses_existing_members_and_preserves_arm(self):
         guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
         with guard:
