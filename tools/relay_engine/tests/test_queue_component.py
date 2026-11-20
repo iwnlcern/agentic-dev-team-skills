@@ -392,14 +392,17 @@ for name in exports:
                     conn.execute('PRAGMA ignore_check_constraints=OFF').close()
             return self.port.run(self.fixture.root / 'machine.sqlite3', apply, transaction=True)
 
-        for tag in ('approval_seal_unusable', 'approval_seal_backup_included'):
+        for tag, project_id in (('approval_seal_unusable', P),
+                                ('approval_seal_backup_included', None)):
             key, pins = arms[tag]
             row = kinds.RaiserRow('notice', tag, 'queue.raise', 'approval_seal', 'pr5', None)
             with (patch.object(kinds, 'RAISER_MATRIX', (*kinds.RAISER_MATRIX, row)),
                   patch.object(self.port, 'catalogue', side_effect=with_seal_rows)):
-                args = dict(doorbell(), subkind=tag, project_id=P, operation_key=tag,
+                args = dict(doorbell(), subkind=tag, project_id=project_id, operation_key=tag,
                             condition_key=dict(key, kind=tag), pins=dict(pins, kind=tag))
-                raised = self.call('queue.raise', args, seal)['result']
+                reply = self.call('queue.raise', args, seal)
+                self.assertIn('result', reply, f'{tag}: {reply!r}')
+                raised = reply['result']
                 retried = self.service.run('queue.raise', dict(args, pins=pins,
                     condition_key=key.get('value', key)), seal)
                 self.assertEqual(retried['item_id'], raised['item_id'])
