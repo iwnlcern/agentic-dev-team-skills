@@ -922,6 +922,131 @@ store_layout.sqlite3.connect = refused
             with self.subTest(mode=mode):
                 self.check_installed_recovery(launcher, mode)
 
+    def test_installed_stop_with_unproved_admission_keeps_armed(self):
+        launcher = self.install_candidate()
+        for cut in ('during_identity', 'immediately_after_arm'):
+            with self.subTest(cut=cut):
+                self.check_unproved_admission_stop(launcher, cut)
+        directory = self.base / 'verified-stop'
+        directory.mkdir(mode=0o700)
+        root = directory / 'store'
+        admission = service_fixture.admitted_store_fixture(root, P, project_name='verified')
+        self.clean_admitted_round(launcher, root, directory, admission)
+
+    def check_unproved_admission_stop(self, launcher, cut):
+        directory = self.base / cut
+        directory.mkdir(mode=0o700)
+        root = directory / 'store'
+        admission = service_fixture.admitted_store_fixture(root, P, project_name='admitted')
+        other = directory / 'other'
+        wrong = service_fixture.admitted_store_fixture(other, P, project_name='different Store')
+        self.assertNotEqual(wrong.idle.store, admission.idle.store)
+        store_layout.catalogue_path(other).replace(store_layout.catalogue_path(root))
+        record = root / store_layout._INCUMBENT
+        parked = directory / 'parked'
+        started = directory / 'startup-result'
+        protected = directory / 'protected'
+        writable = directory / 'ordinary-writable'
+        (directory / 'sitecustomize.py').write_text(f"""
+import json, pathlib, sys, time
+sys.path.insert(0, {str(launcher.parent)!r})
+from relay_engine import api_service, store_layout
+
+original_start = api_service.ApiService.start
+original_arm = store_layout.IncumbentGuard.arm
+original_protected_read = store_layout.IncumbentGuard._protected_read
+original_connect = store_layout.sqlite3.connect
+service = None
+immutable_reads = 0
+
+def wait_for_stop():
+    marker = pathlib.Path({str(parked)!r})
+    staging = marker.with_suffix('.tmp')
+    staging.write_bytes(pathlib.Path({str(record)!r}).read_bytes())
+    staging.replace(marker)
+    deadline = time.monotonic() + 3
+    while not service.is_stopping():
+        if time.monotonic() >= deadline:
+            raise AssertionError('foreground STOP did not arrive')
+        time.sleep(0.01)
+
+def start(self):
+    global service
+    service = self
+    result = original_start(self)
+    pathlib.Path({str(started)!r}).write_text(json.dumps([result, self._admission_unresolved]))
+    return result
+
+def arm(guard, idle, owner):
+    result = original_arm(guard, idle, owner)
+    if {cut!r} == 'immediately_after_arm':
+        wait_for_stop()
+    return result
+
+def connect(path, *args, **kwargs):
+    global immutable_reads
+    if isinstance(path, str) and path.endswith('?mode=ro&immutable=1'):
+        conn = original_connect(path, *args, **kwargs)
+        immutable_reads += 1
+        if immutable_reads == 1 and {cut!r} == 'during_identity':
+            wait_for_stop()
+        return conn
+    if path != ':memory:':
+        pathlib.Path({str(writable)!r}).touch()
+        raise AssertionError('unexpected ordinary SQLite setup')
+    return original_connect(path, *args, **kwargs)
+
+def protected_read(guard, *args):
+    try:
+        return original_protected_read(guard, *args)
+    except store_layout.LayoutFault as error:
+        pathlib.Path({str(protected)!r}).write_text(json.dumps([error.cause, immutable_reads]))
+        raise
+
+api_service.ApiService.start = start
+store_layout.IncumbentGuard.arm = arm
+store_layout.IncumbentGuard._protected_read = protected_read
+store_layout.sqlite3.connect = connect
+""")
+        reader, writer = os.pipe()
+        try:
+            with self.start_installed_store(launcher, root, directory, admission, retirement_fd=writer,
+                                            environment={'PYTHONPATH': str(directory)}) as child:
+                os.close(writer)
+                writer = None
+                self.wait_until(parked.exists)
+                frame = parked.read_bytes()
+                arm = store_layout.IncumbentGuard._parse_record(frame)
+                self.assertEqual((arm.phase, arm.store, arm.owner.pid), ('armed', admission.idle.store, child.pid))
+                self.assertEqual(arm.lock, admission.idle.lock)
+                with self.assertRaisesRegex(store_layout.LayoutFault, 'store-locked'):
+                    store_layout.IncumbentGuard.acquire(root, expected_lock=arm.lock)
+                since = time.monotonic()
+                child.terminate()
+                output, diagnostic = child.communicate(timeout=5)
+                elapsed = time.monotonic() - since
+            self.assertEqual(output, b'')
+            self.assertEqual(json.loads(started.read_text()), [None, cut == 'during_identity'])
+            self.assertEqual(json.loads(protected.read_text()), ['member-unproved', 2])
+            self.assertFalse(writable.exists())
+            self.assertFalse((Path(arm.owner.runtime) / 'ready.json').exists())
+            self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
+            self.assertTrue(select.select([reader], [], [], 1)[0])
+            self.assertEqual(os.read(reader, 1), b'')
+            with store_layout.IncumbentGuard.acquire(root, expected_lock=arm.lock) as guard:
+                self.assertEqual(guard.read(), arm)
+                self.assertEqual(record.read_bytes(), frame)
+            self.assertEqual(child.returncode, 75, diagnostic)
+            self.assertGreaterEqual(elapsed, 3.8)
+            self.assertLess(elapsed, 5)
+            print(json.dumps({'installed_stop': cut, 'status': child.returncode, 'seconds': round(elapsed, 3),
+                              'protected_reads': 2, 'writable_opens': 0, 'same_inode_return': True,
+                              'unchanged_arm': True, 'idle_receipt': False, 'ready_or_locator': False}))
+        finally:
+            for fd in (writer, reader):
+                if fd is not None:
+                    os.close(fd)
+
     def test_installed_recovery_refuses_missing_checkpoint_or_unresolved_publication(self):
         launcher = self.install_candidate()
         for mode in ('missing', 'mismatched', 'publication'):

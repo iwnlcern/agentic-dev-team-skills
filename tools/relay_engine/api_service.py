@@ -946,6 +946,8 @@ class ApiService:
         if attempt is None:
             self._restore_signals()
             return None
+        if self._owned_arm is not None:
+            raise OSError('Store admission unresolved; original arm remains fenced')
         return _RetirementReceipt(attempt, identity)
 
     def _withdraw_runtime(self):
