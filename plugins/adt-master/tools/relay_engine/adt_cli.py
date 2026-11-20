@@ -27,6 +27,7 @@ class WindowSession:
 
 
 WindowResolver = Callable[[], WindowSession | None]
+NotifierFactory = Callable[[str | None, Callable[[], bool]], api_service.QueueNotifier]
 
 
 def _bridge_port(value):
@@ -44,6 +45,7 @@ def _parser(groups):
     serve.add_argument('--store-root', required=True)
     serve.add_argument('--project-id', required=True)
     serve.add_argument('--bridge-port', type=_bridge_port)
+    serve.add_argument('--terminal-notifier', metavar='PATH')
     submit = commands.add_parser('submit')
     submit.add_argument('draft')
     submit.add_argument('--submission-key')
@@ -125,7 +127,7 @@ def _serve_refusal(error, root, project):
 
 
 def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
-         resolver: WindowResolver | None = None) -> int:
+         resolver: WindowResolver | None = None, queue_notifier: NotifierFactory | None = None) -> int:
     retry = {}
     try:
         args = _parser(groups).parse_args(list(argv))
@@ -135,6 +137,8 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
             service = api_service.ApiService(args.store_root, args.project_id,
                                              clock=lambda: time.time_ns() // 1000000,
                                              bridge_port=args.bridge_port)
+            if args.bridge_port is not None and queue_notifier is not None:
+                service.queue_notifier = queue_notifier(args.terminal_notifier, service.is_stopping)
             try:
                 try:
                     path = service.start()

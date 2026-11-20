@@ -25,6 +25,10 @@ class NotifyReport:
     failed: int = 0
 
 
+class DeliveryCancelled(Exception):
+    """Shutdown interrupted a send, leaving its outbox entry eligible to retry."""
+
+
 def notification_title(project_name: str | None, actor: str) -> str:
     return f"{project_name if project_name is not None else 'v3'}: {actor}"
 
@@ -124,6 +128,8 @@ def notify_pass(port: JobPort, deliver: Callable[[list[str]], None], now_ms: int
         argv = notification_argv(note, notifier)
         try:
             deliver(argv)
+        except DeliveryCancelled:
+            break
         except Exception as exc:
             error_class = type(exc).__name__
             port.catalogue(lambda conn: notify_failed(conn, note, error_class, now_ms))

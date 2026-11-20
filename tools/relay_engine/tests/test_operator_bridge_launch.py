@@ -38,6 +38,32 @@ def load_launcher():
 
 
 class TestOperatorBridgeLaunch(unittest.TestCase):
+    def test_notifier_launch_uses_closed_paths_and_rechecks_configured_file(self):
+        launcher = load_launcher()
+        child = Mock()
+        child.wait.return_value = child.poll.return_value = 0
+        popen = Mock(return_value=child)
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / 'terminal-notifier'
+            path.touch()
+            deliver = launcher['make_deliver'](str(path), stopping=lambda: False, popen=popen)
+            for name, executable in (
+                ('osascript', '/usr/bin/osascript'), ('notify-send', '/usr/bin/notify-send'),
+                ('terminal-notifier', str(path)),
+            ):
+                suffix = ['--', r'\literal argument']
+                deliver([name, *suffix])
+                popen.assert_called_with([executable, *suffix], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            popen.reset_mock()
+            other = path.with_name('other')
+            path.rename(other)
+            path.symlink_to(other)
+            for name in ('none', str(path), 'terminal-notifier'):
+                with self.assertRaises(launcher['DeliverRefused']):
+                    deliver([name, '--'])
+            popen.assert_not_called()
+
     def fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix='launch ')
         self.addCleanup(temporary.cleanup)

@@ -26,6 +26,7 @@ REQUEST_BUDGET_BOUND = 262144
 MAX_CONNECTIONS = 64
 QUEUE_INTERVAL = 1.0
 BRIDGE_STOP_DRAIN = 0.25
+QueueNotifier = tuple[str, Callable[[list[str]], None]]
 
 
 class ServiceStartRefused(Exception):
@@ -65,7 +66,7 @@ class ApiService:
     def __init__(self, store_root: str, project_id: str, *, clock: Callable[[], int],
                  components: Sequence[ApiComponent] | None = None,
                  bridge_port: int | None = None,
-                 queue_notifier: tuple[str, Callable[[list[str]], None]] | None = None):
+                 queue_notifier: QueueNotifier | None = None):
         self.store_root = str(Path(store_root).resolve())
         self.project_id = project_id
         self.clock = clock
@@ -75,6 +76,8 @@ class ApiService:
         self.writer = None
         self._bridge = None
         self._queue = None
+        self._notify_thread = None
+        self._notify_error = None
         self._runtime_inode = None
         self._runtime_files = {}
         self.ready_path = None
@@ -113,6 +116,7 @@ class ApiService:
         try:
             self._stopping.clear()
             self._signal_requested = False
+            self._notify_error = None
             instance_id = uuid.uuid4().hex
             self.writer = StoreWriter(self.store_root, runtime_instance_id=instance_id)
             self.writer.start()
@@ -185,6 +189,10 @@ class ApiService:
                 for name in (signal.SIGTERM, signal.SIGINT):
                     self._signals[name] = signal.getsignal(name)
                     signal.signal(name, self._signal)
+            if self._queue is not None and self.queue_notifier is not None and not self.is_stopping():
+                thread = threading.Thread(target=self._notify_queue, name='adt-queue-notify')
+                thread.start()
+                self._notify_thread = thread
             return self.ready_path
         except BaseException:
             self.stop()
@@ -218,7 +226,7 @@ class ApiService:
                                          self.registry, self.operation_ports, principal=principal)
 
     def _page_dispatch(self, state, request, *, principal=None):
-        if self._is_stopping():
+        if self.is_stopping():
             raise ConnectionError('bridge is stopping')
         return self._dispatch(state, request, principal=principal)
 
@@ -238,16 +246,28 @@ class ApiService:
         queue = self._queue
         try:
             ingest.question_ingest_pass(queue.port, (self.project_id,), self.clock())
-            saga.reconcile_pass(queue.port, queue.runtime, self.clock, stopping=self._is_stopping)
-            if self.queue_notifier is not None and not self._is_stopping():
-                program, deliver = self.queue_notifier
-                notifier.notify_pass(queue.port, deliver, self.clock(), notifier=program)
+            saga.reconcile_pass(queue.port, queue.runtime, self.clock, stopping=self.is_stopping)
         except records.JobUnavailable:
             queue.runtime.ready = False
-            if not self._is_stopping():
+            if not self.is_stopping():
                 raise
 
-    def _is_stopping(self):
+    def _notify_queue(self):
+        program, deliver = self.queue_notifier
+
+        def send(argv):
+            if self.is_stopping():
+                raise notifier.DeliveryCancelled()
+            deliver(argv)
+
+        try:
+            while not self.is_stopping():
+                notifier.notify_pass(self._queue.port, send, self.clock(), notifier=program)
+                self._stopping.wait(QUEUE_INTERVAL)
+        except Exception as error:
+            self._notify_error = error
+
+    def is_stopping(self):
         return self._signal_requested or self._stopping.is_set()
 
     def _signal(self, signum, frame):
@@ -263,7 +283,11 @@ class ApiService:
 
     def serve_forever(self) -> None:
         next_queue_pass = 0.0
-        while not self._is_stopping():
+        while not self.is_stopping():
+            if self._notify_error is not None:
+                if isinstance(self._notify_error, records.JobUnavailable):
+                    self._queue.runtime.ready = False
+                raise self._notify_error
             if self._queue is not None and time.monotonic() >= next_queue_pass:
                 self._queue_pass()
                 next_queue_pass = time.monotonic() + QUEUE_INTERVAL
@@ -272,11 +296,11 @@ class ApiService:
             except socket.timeout:
                 continue
             except (OSError, AttributeError):
-                if self._is_stopping():
+                if self.is_stopping():
                     break
                 raise
             with self._condition:
-                if self._is_stopping() or len(self._clients) >= MAX_CONNECTIONS:
+                if self.is_stopping() or len(self._clients) >= MAX_CONNECTIONS:
                     client.close()
                     continue
                 self._clients.add(client)
@@ -308,7 +332,7 @@ class ApiService:
     def _connection(self, client, state=None):
         state = api_protocol.initial_connection_state() if state is None else state
         try:
-            while not self._is_stopping():
+            while not self.is_stopping():
                 request = self._read_request(client, state)
                 if request is None:
                     break
@@ -355,6 +379,9 @@ class ApiService:
         for thread in threads:
             if thread is not threading.current_thread():
                 thread.join()
+        if self._notify_thread is not None:
+            self._notify_thread.join()
+            self._notify_thread = None
         if self.writer is not None:
             writer, self.writer = self.writer, None
             writer.close()

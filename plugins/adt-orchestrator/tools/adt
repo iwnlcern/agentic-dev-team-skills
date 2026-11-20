@@ -4,13 +4,86 @@ from collections.abc import Callable, Sequence
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
+import time
 
 from relay_engine import lifecycle_paths, store_layout
 from relay_engine.adt_cli import CommandGroup, main
 from relay_engine.api_client import LocalRefusal, read_ready_file
 from relay_engine.api_operator_bridge import _private_launch_file, _read_launch_url
+from relay_engine.operator_queue.notifier import DeliveryCancelled
+
+
+class DeliverRefused(Exception):
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(name)
+
+
+_HOST_NOTIFIERS = {'osascript': '/usr/bin/osascript', 'notify-send': '/usr/bin/notify-send'}
+
+
+def _notifier_path(name: str, terminal_notifier: str | None) -> str:
+    if name in _HOST_NOTIFIERS:
+        return _HOST_NOTIFIERS[name]
+    if name == 'terminal-notifier' and terminal_notifier is not None:
+        if os.path.isabs(terminal_notifier) and os.path.basename(terminal_notifier) == name:
+            try:
+                if stat.S_ISREG(os.lstat(terminal_notifier).st_mode):
+                    return terminal_notifier
+            except (OSError, ValueError):
+                pass
+    raise DeliverRefused(name)
+
+
+def make_deliver(
+    terminal_notifier: str | None, *, stopping: Callable[[], bool],
+    timeout_s: float = 10, popen: Callable = subprocess.Popen,
+) -> Callable[[Sequence[str]], None]:
+    def deliver(argv: Sequence[str]) -> None:
+        if not argv:
+            raise DeliverRefused('')
+        executable = _notifier_path(argv[0], terminal_notifier)
+        deadline = time.monotonic() + timeout_s
+        if stopping():
+            raise DeliveryCancelled()
+        child = popen([executable, *argv[1:]], stdin=subprocess.DEVNULL,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            while not stopping():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(executable, timeout_s)
+                try:
+                    code = child.wait(timeout=min(0.05, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                if stopping():
+                    raise DeliveryCancelled()
+                if code != 0:
+                    raise subprocess.CalledProcessError(code, executable)
+                return
+            raise DeliveryCancelled()
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+
+    return deliver
+
+
+def _queue_notifier(terminal_notifier: str | None, stopping: Callable[[], bool]):
+    if terminal_notifier is not None:
+        program = 'terminal-notifier'
+    else:
+        program = 'osascript' if sys.platform == 'darwin' else 'notify-send'
+    return program, make_deliver(terminal_notifier, stopping=stopping)
 
 
 def console_open(ready_path: str, *, print_only: bool, run: Callable = subprocess.run) -> int:
@@ -70,4 +143,4 @@ def console_group(extra: Sequence[Callable[[argparse._SubParsersAction], None]] 
 
 
 if __name__ == '__main__':
-    raise SystemExit(main(sys.argv[1:], groups=(console_group(),)))
+    raise SystemExit(main(sys.argv[1:], groups=(console_group(),), queue_notifier=_queue_notifier))

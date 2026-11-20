@@ -1,12 +1,14 @@
 """Exercise the checked launcher, guarded bridge and real Store on one scratch project."""
 import base64
 from http.client import HTTPConnection
+import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
 import socket as network
 import subprocess
+import sys
 import time
 import unittest
 from unittest.mock import patch
@@ -303,3 +305,105 @@ const { chromium } = require(process.argv[1]);
                 if daemon.poll() is None:
                     daemon.kill()
                     daemon.communicate(timeout=3)
+
+    def test_installed_cli_delivers_and_reaps_held_notifier_on_term(self):
+        checker_path = Path(__file__).resolve().parents[2] / 'check-generate-plugins.py'
+        spec = importlib.util.spec_from_file_location('check_generate_plugins', checker_path)
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        installed = checker.install_tier('adt-orchestrator', self.base / 'installed')
+
+        program = self.base / 'terminal-notifier'
+        held_message = '\\Held local decision'
+        program.write_text(f"""#!{sys.executable}
+import json, os, pathlib, signal, sys, time
+held = sys.argv[-1] == {held_message!r}
+if held:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+path = pathlib.Path({str(self.base)!r}) / ('held' if held else 'sent')
+with path.with_suffix('.pending').open('w') as stream:
+    json.dump({{'pid': os.getpid(), 'argv': sys.argv[1:]}}, stream)
+path.with_suffix('.pending').replace(path)
+if held:
+    time.sleep(15)
+""")
+        program.chmod(0o700)
+
+        def submit_question(peer, subject):
+            raw = draft(kind='QUESTION', to='operator', needs='answer',
+                        subject=subject, body='Can we proceed?\n')
+            reply = peer.call('relay.submit', {'draft_base64': base64.b64encode(raw).decode(),
+                                               'submission_key': subject})
+            self.assertIn('result', reply)
+            return reply['result']['relay_id']
+
+        def outbox(relay_id, *, stopped=False):
+            catalogue = (store_layout.open_catalogue(self.root, kind='isolated') if stopped else
+                         store_layout.open_catalogue_readonly(self.root))
+            try:
+                return catalogue.execute(
+                    'SELECT n.state,n.attempts,n.last_error_class,n.revision FROM queue_notifications n '
+                    'JOIN queue_items i ON i.item_id=n.item_id WHERE i.source_relay_id=?',
+                    (relay_id,)).fetchall()
+            finally:
+                catalogue.close()
+
+        environment = {'HOME': str(self.home), 'TMPDIR': str(self.temp),
+                       'PYTHONDONTWRITEBYTECODE': '1'}
+        command = [sys.executable, str(installed / 'tools' / 'adt'), 'engine', 'serve',
+                   '--store-root', str(self.root), '--project-id', P, '--bridge-port', '0',
+                   '--terminal-notifier', str(program)]
+        with subprocess.Popen(command, cwd=self.base, env=environment,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+            try:
+                ready = Path(lifecycle_paths.console_target(str(self.root)).ready_path)
+                self.wait_until(ready.exists)
+                data = json.loads(ready.read_bytes())
+                origin = data['bridge_origin']
+                peer = self.connect(data)
+                self.sign_in(peer)
+                sent_id = submit_question(peer, 'Local decision')
+                sent = self.base / 'sent'
+                self.wait_until(sent.is_file)
+                sent_record = json.loads(sent.read_bytes())
+                self.assertEqual(sent_record['argv'],
+                                 ['-title', '\\service: platform.planner', '-message', '\\Local decision'])
+                delivered_row = ('delivered', 0, None, 1)
+                self.wait_until(lambda: outbox(sent_id) == [delivered_row])
+
+                held_id = submit_question(peer, 'Held local decision')
+                held = self.base / 'held'
+                self.wait_until(held.is_file)
+                held_record = json.loads(held.read_bytes())
+                self.assertEqual(held_record['argv'],
+                                 ['-title', '\\service: platform.planner', '-message', held_message])
+                os.kill(held_record['pid'], 0)
+                self.assertEqual(self.request(origin, '/')[0], 200)
+                self.connect(data)
+                pending_row = ('pending', 0, None, 1)
+                self.assertEqual(outbox(held_id), [pending_row])
+
+                started = time.monotonic()
+                daemon.send_signal(signal.SIGTERM)
+                _, stderr = daemon.communicate(timeout=3)
+                elapsed = time.monotonic() - started
+                self.assertEqual(daemon.returncode, 0, stderr)
+                self.assertLess(elapsed, 3)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(held_record['pid'], 0)
+                self.assertFalse(ready.parent.exists())
+                with self.assertRaises(OSError):
+                    self.request(origin, '/')
+                self.assertEqual(outbox(sent_id, stopped=True), [delivered_row])
+                self.assertEqual(outbox(held_id, stopped=True), [pending_row])
+                print(json.dumps({'sent': sent_record, 'held': held_record,
+                                  'delivered': delivered_row, 'cancelled': pending_row,
+                                  'term_seconds': round(elapsed, 3), 'owned_cleanup': True}))
+            finally:
+                if daemon.poll() is None:
+                    daemon.terminate()
+                    try:
+                        daemon.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        daemon.kill()
+                        daemon.communicate(timeout=3)
