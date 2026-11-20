@@ -542,6 +542,7 @@ class ApiService:
             raise store_layout.LayoutFault('missing')
         if self.is_stopping():
             return None
+        startup_channel = None
         try:
             self._prepare_admission()
             if self.is_stopping():
@@ -556,6 +557,8 @@ class ApiService:
             if idle.project != self.project_id:
                 raise store_layout.LayoutFault('wrong-project')
             expected_kind, startup = self._check_startup(idle)
+            if startup is not None:
+                verified_startup, startup_channel, startup_deadline = startup
             if self.is_stopping():
                 return None
             preflight_members = self._preflight_catalogue_kind(idle, expected_kind)
@@ -577,9 +580,15 @@ class ApiService:
             owner = store_layout._IncumbentOwner(str(epoch), os.getpid(), birth, boot,
                                                  str(self.runtime_dir), self._notifier_mode)
             self._check_idle_members(idle, preflight_members)
-            if startup is not None:
+            if startup_channel is not None:
                 try:
-                    startup.recheck_before_arm()
+                    verified_startup.recheck_before_arm()
+                    if self.is_stopping():
+                        return None
+                    owner_start.witness_child_epoch(startup_channel, idle, owner, deadline=startup_deadline)
+                    startup_channel.close()
+                    self._check_idle_members(idle, preflight_members)
+                    verified_startup.recheck_before_arm()
                 except owner_start.StartupRefused as error:
                     raise store_layout.LayoutFault(error.reason) from error
             if self.is_stopping():
@@ -710,6 +719,9 @@ class ApiService:
             if self._foreground is None:
                 self.stop()
             raise
+        finally:
+            if startup_channel is not None:
+                startup_channel.close()
 
     @staticmethod
     def _inode(path):

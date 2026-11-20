@@ -18,6 +18,7 @@ from relay_engine import api_client, api_service, strings, store_layout, version
 class CommandGroup:
     name: str
     build: Callable[[argparse._SubParsersAction], None]
+    engine_subcommands: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ def _parser(groups):
         command.add_argument('--key')
         command.add_argument('--ready')
     for group in groups:
-        group.build(commands)
+        group.build(engine if group.engine_subcommands else commands)
     return parser
 
 

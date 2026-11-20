@@ -18,7 +18,7 @@ import threading
 import uuid
 
 from relay_engine import lifecycle_paths, store_layout
-from relay_engine.adt_cli import CommandGroup, main
+from relay_engine.adt_cli import CommandGroup, _bridge_port, main
 from relay_engine.api_client import LocalRefusal, read_ready_file
 from relay_engine.api_operator_bridge import _private_launch_file, _read_launch_url
 from relay_engine.operator_queue.notifier import DeliveryCancelled, KnownNotifierFailure, NotifierIssueUnavailable
@@ -439,8 +439,9 @@ def _console_open_selected(args: argparse.Namespace) -> int:
     root = args.store_root if args.store_root is not None else str(store_layout.production_root())
     target = lifecycle_paths.console_target(root)
     if isinstance(target, lifecycle_paths.ConsoleTargetUnavailable):
-        remedy = f'adt engine status --store-root {shlex.quote(root)}'
-        print(f'The selected Store is unavailable for Console. Run {remedy} for status and doctor guidance.',
+        remedy = f'adt engine run --store-root {shlex.quote(root)} --project-id PROJECT'
+        print('The selected Store is unavailable for Console. Check the operator launch terminal '
+              f'for the refusal. When the Store is eligible, run {remedy} with its selected project ID.',
               file=sys.stderr)
         return 1 if target.reason == 'identity_unavailable' else 75
     return console_open(target.ready_path, print_only=args.print_only)
@@ -550,6 +551,51 @@ def confirm_owner_start(selection):
     )
 
 
+def _engine_owner_group():
+    def build(engine):
+        owner = engine.add_parser('run')
+        owner.add_argument('--store-root', required=True)
+        owner.add_argument('--project-id', required=True)
+        owner.add_argument('--bridge-port', type=_bridge_port)
+        owner.add_argument('--initialize', action='store_true')
+        owner.add_argument('--project-name')
+        owner.set_defaults(handler=_run_selected_owner)
+
+    return CommandGroup('engine-run', build, engine_subcommands=True)
+
+
+def _run_selected_owner(args):
+    from relay_engine import operator_terminal, owner_start
+
+    def launch(command, **options):
+        return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *command], **options)
+
+    try:
+        return owner_start.run_owner(
+            args.store_root, args.project_id, initialize=args.initialize, project_name=args.project_name,
+            bridge_port=args.bridge_port, authorize=confirm_owner_start, launch=launch,
+            show=lambda line: print(line, file=sys.stderr, flush=True),
+        )
+    except operator_terminal.OperatorCheckRefused as error:
+        detail = str(error)
+        if error.reason == 'not_installed':
+            detail = 'The operator check is missing. Run adt operator install-check.'
+        print(f'adt engine run: {detail}', file=sys.stderr)
+        return 1
+    except (owner_start.StartupRefused, store_layout.LayoutFault, OSError, ValueError) as error:
+        guidance = {
+            'startup_expired': 'The signed startup expired. Run the same selection for fresh confirmation.',
+            'receipt-missing': 'The selected Store’s verified restart receipt is missing.',
+            'birth-provider-unavailable': 'This package does not contain the checked production Store provider.',
+            'retirement-incomplete': 'The original child’s stop could not be verified. Check the operator terminal.',
+            'retirement-unproved': 'The original child’s retirement receipt could not be verified and retained.',
+        }
+        reason = getattr(error, 'reason', getattr(error, 'cause', 'owner-unavailable'))
+        print('adt engine run: ' + guidance.get(reason, f'The selected Store could not be served ({reason}).'),
+              file=sys.stderr)
+        return 1
+
+
 def _call_interpreter(interpreter, expression):
     try:
         result = subprocess.run([interpreter, '-IS', '-c', expression], env={}, capture_output=True,
@@ -633,5 +679,5 @@ if __name__ == '__main__':
     if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
         _, _, configured, gate_fd, channel_fd, epoch = sys.argv
         raise SystemExit(_custodian(int(gate_fd), int(channel_fd), epoch, configured))
-    raise SystemExit(main(sys.argv[1:], groups=(console_group(), operator_group()), queue_notifier=_queue_notifier,
-                          stop_report=_report_incomplete_stop))
+    raise SystemExit(main(sys.argv[1:], groups=(console_group(), operator_group(), _engine_owner_group()),
+                          queue_notifier=_queue_notifier, stop_report=_report_incomplete_stop))

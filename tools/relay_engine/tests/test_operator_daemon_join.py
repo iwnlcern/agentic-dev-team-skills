@@ -16,11 +16,13 @@ import signal
 import socket as network
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from relay_engine import (
     api_client, api_operator_bridge, api_service, api_writer, jcs, lifecycle_paths, queries, store_layout, submit,
@@ -1272,3 +1274,409 @@ api_service.ApiService.serve_forever = witnessed
             for fd in (writer, reader):
                 if fd is not None:
                     os.close(fd)
+
+
+def foreground_fixture_main():
+    """Execute the source owner or its private child with synthetic host inputs."""
+    import runpy
+
+    from relay_engine import adt_cli, operator_terminal, owner_start
+    from relay_engine.tests.test_owner_start import installed_key, synthetic_birth
+
+    mode, root, key, *argv = sys.argv[1:]
+    root, key = Path(root), Path(key)
+    pub = key.with_suffix('.pub')
+
+    def prove(message):
+        return subprocess.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', str(key),
+                               '-n', 'adt-terminal-check-v1'], input=message, check=True,
+                              capture_output=True, timeout=10).stdout
+
+    def authorize(selection):
+        if mode == 'missing-signer':
+            raise operator_terminal.OperatorCheckRefused('not_installed')
+        return owner_start.authorize_owner_start(
+            selection, owner_start.NativeIdentity.current(), prove=prove, show=lambda _: None)
+
+    def unexpected_open(*_args, **_kwargs):
+        (root.parent / 'ordinary-open').touch()
+        raise AssertionError('refusal performed an ordinary Store open')
+
+    if argv[:1] == ['child']:
+        argv = argv[1:]
+        arm = store_layout.IncumbentGuard.arm
+
+        def stop_after_arm(guard, idle, owner):
+            result = arm(guard, idle, owner)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return result
+
+        with (patch.object(store_layout, 'production_root', return_value=root),
+              patch.object(operator_terminal, '_installed_key', return_value=installed_key(pub, None))):
+            if mode == 'pre-ready':
+                store_layout.IncumbentGuard.arm = stop_after_arm
+                store_layout.open_catalogue = unexpected_open
+                store_layout.open_ledger = unexpected_open
+                api_service.ApiService._publish_locator = unexpected_open
+            if mode == 'witness-barrier':
+                acknowledge = owner_start.witness_child_epoch
+
+                def record_ack(*args, **kwargs):
+                    acknowledge(*args, **kwargs)
+                    (root.parent / 'witness-acknowledged').touch()
+
+                owner_start.witness_child_epoch = record_ack
+            if mode == 'lost-return':
+                api_service._write_private_frame = lambda fd, *_: os.close(fd)
+            raise SystemExit(adt_cli.main(argv))
+
+    class TracedChild(subprocess.Popen):
+        def send_signal(self, signum):
+            if signum in (signal.SIGTERM, signal.SIGINT):
+                with (root.parent / 'forwarded').open('a') as log:
+                    print(int(signum), file=log)
+            super().send_signal(signum)
+
+    def launch(command, **options):
+        child = TracedChild([sys.executable, '-c',
+                            'from relay_engine.tests.test_operator_daemon_join import foreground_fixture_main;'
+                            'foreground_fixture_main()', mode, str(root), str(key), 'child', *command], **options)
+        (root.parent / 'child').write_text(str(child.pid))
+        if mode == 'spawn-barrier':
+            limit = time.monotonic() + 5
+            while not (root.parent / 'release-spawn').exists():
+                if time.monotonic() >= limit:
+                    child.kill()
+                    child.wait()
+                    raise RuntimeError('test did not release spawn')
+                time.sleep(0.01)
+        return child
+
+    read_child_epoch = owner_start.read_child_epoch
+
+    def at_witness(*args, **kwargs):
+        (root.parent / 'witness-pending').touch()
+        deadline = time.monotonic() + 2
+        while not (root.parent / 'release-witness').exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError('test did not release witness')
+            time.sleep(0.01)
+        return read_child_epoch(*args, **kwargs)
+
+    actual_run_owner = owner_start.run_owner
+
+    def run_owner(root_arg, project, **options):
+        options.update(authorize=authorize, launch=launch, birth_provider=synthetic_birth)
+        return actual_run_owner(root_arg, project, **options)
+
+    adt = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'adt'))
+    with (patch.object(store_layout, 'production_root', return_value=root),
+          patch.object(operator_terminal, '_installed_key', return_value=installed_key(pub, None)),
+          patch.object(owner_start, 'run_owner', side_effect=run_owner)):
+        if mode == 'blocked-restart':
+            store_layout.open_catalogue = unexpected_open
+            store_layout.open_ledger = unexpected_open
+        if mode == 'witness-barrier':
+            owner_start.read_child_epoch = at_witness
+        raise SystemExit(adt_cli.main(argv, groups=(adt['_engine_owner_group'](),)))
+
+
+class ForegroundOwnerTests(unittest.TestCase):
+    def setUp(self):
+        self.base = Path(self.enterContext(tempfile.TemporaryDirectory(dir='/tmp'))).resolve()
+        self.root = self.base / '.adt'
+        self.receipts = self.base / '.adt-owner' / 'receipts'
+        self.receipts.parent.mkdir(mode=0o700)
+        self.receipts.mkdir(mode=0o700)
+        self.key = self.base / 'signer'
+        subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(self.key)],
+                       check=True, capture_output=True, timeout=10)
+
+    def _command(self, mode, initialize=True, project=P):
+        command = [sys.executable, '-c',
+                   'from relay_engine.tests.test_operator_daemon_join import foreground_fixture_main;'
+                   'foreground_fixture_main()', mode, str(self.root), str(self.key),
+                   'engine', 'run', '--store-root', str(self.root), '--project-id', project]
+        if initialize:
+            command += ['--initialize', '--project-name', 'Selected project']
+        return command
+
+    def _wait(self, observation):
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            result = observation()
+            if result:
+                return result
+            time.sleep(0.015)
+        self.fail('foreground fixture did not reach the requested cut')
+
+    def _receipt(self):
+        files = list(self.receipts.iterdir())
+        self.assertEqual(len(files), 1)
+        return files[0].read_bytes()
+
+    def _arm(self):
+        return store_layout.IncumbentGuard._parse_record(
+            (self.root / store_layout._INCUMBENT).read_bytes())
+
+    def _child_pid(self):
+        path = self.base / 'child'
+        return self._wait(lambda: int(path.read_text() or '0') if path.exists() else None)
+
+    @contextmanager
+    def _owner(self, mode, initialize=True):
+        child = subprocess.Popen(self._command(mode, initialize), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            yield child
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.communicate(timeout=6)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.communicate(timeout=3)
+            child.stdout.close()
+            child.stderr.close()
+
+    def _ready(self, process):
+        self.assertTrue(select.select([process.stdout], [], [], 6)[0])
+        line = process.stdout.readline().strip()
+        self.assertTrue(line, process.stderr.read() if process.poll() is not None else b'')
+        return Path(os.fsdecode(line))
+
+    def _assert_retired(self, arm):
+        idle, proof = store_layout._decode_idle_receipt(self._receipt())
+        self.assertEqual((idle.lock, proof.prior_epoch), (arm.lock, arm.owner.epoch))
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=arm.lock) as guard:
+            guard.verify_idle(idle, proof)
+
+    def test_owner_terminal_ctrl_c_reaps_and_retains(self):
+        import pty
+
+        owner, terminal = pty.fork()
+        if owner == 0:
+            command = self._command('normal')
+            os.execv(command[0], command)
+        status = None
+        try:
+            limit = time.monotonic() + 8
+            output = bytearray()
+            while b'/ready.json' not in output and time.monotonic() < limit:
+                if select.select([terminal], [], [], 0.1)[0]:
+                    try:
+                        output.extend(os.read(terminal, 4096))
+                    except OSError:
+                        break
+            self.assertIn(b'/ready.json', output)
+            child = self._child_pid()
+            arm = self._arm()
+            self.assertEqual(os.getpgid(owner), owner)
+            self.assertEqual(os.getpgid(child), child)
+            os.write(terminal, b'\x03')
+
+            def reap():
+                nonlocal status
+                seen, value = os.waitpid(owner, os.WNOHANG)
+                if seen:
+                    status = value
+                    return True
+                return False
+
+            self._wait(reap)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self._assert_retired(arm)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child, 0)
+        finally:
+            os.close(terminal)
+            if status is None:
+                os.kill(owner, signal.SIGTERM)
+                try:
+                    self._wait(reap)
+                except (AssertionError, UnboundLocalError):
+                    os.kill(owner, signal.SIGKILL)
+                    os.waitpid(owner, 0)
+
+    def test_owner_latches_stop_during_spawn(self):
+        with self._owner('spawn-barrier') as owner:
+            child = self._child_pid()
+            owner.send_signal(signal.SIGTERM)
+            owner.send_signal(signal.SIGINT)
+            (self.base / 'release-spawn').touch()
+            owner.communicate(timeout=8)
+            self.assertEqual(len((self.base / 'forwarded').read_text().splitlines()), 1)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child, 0)
+
+    def test_owner_stop_during_witness_refuses_before_arm(self):
+        with self._owner('witness-barrier') as owner:
+            self._wait((self.base / 'witness-pending').exists)
+            child = self._child_pid()
+            receipt = self._receipt()
+            idle = self._arm()
+            self.assertEqual(idle.phase, 'idle')
+            owner.terminate()
+            (self.base / 'release-witness').touch()
+            output, error = owner.communicate(timeout=8)
+            self.assertNotEqual(owner.returncode, 0, error)
+            self.assertEqual(output, b'')
+            self.assertFalse((self.base / 'witness-acknowledged').exists())
+            self.assertEqual(self._receipt(), receipt)
+            self.assertEqual(self._arm(), idle)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child, 0)
+
+    def _assert_abnormal_loss_preserves_fence(self):
+        with self._owner('normal') as owner:
+            ready = self._ready(owner)
+            self.assertTrue(ready.exists())
+            arm = self._arm()
+            prior = self._receipt()
+            os.kill(self._child_pid(), signal.SIGKILL)
+            _, error = owner.communicate(timeout=8)
+            self.assertNotEqual(owner.returncode, 0, error)
+            self.assertEqual(self._arm(), arm)
+            self.assertEqual(self._receipt(), prior)
+
+    def test_owner_incomplete_exit_preserves_fence(self):
+        self._assert_abnormal_loss_preserves_fence()
+
+    def test_owner_abnormal_loss_refuses_without_checkpoint(self):
+        self._assert_abnormal_loss_preserves_fence()
+        prior = self._receipt()
+        marker = self.base / 'child'
+        pid = marker.read_bytes()
+        attempt = subprocess.run(self._command('blocked-restart', False), capture_output=True, timeout=8)
+        self.assertNotEqual(attempt.returncode, 0)
+        self.assertEqual(attempt.stdout, b'')
+        self.assertFalse((self.base / 'ordinary-open').exists())
+        self.assertEqual(marker.read_bytes(), pid)
+        self.assertEqual(self._receipt(), prior)
+
+    def test_owner_clean_restart_requires_retained_exact_receipt(self):
+        with self._owner('normal') as first:
+            self.assertTrue(self._ready(first).exists())
+            arm = self._arm()
+            first.terminate()
+            _, error = first.communicate(timeout=8)
+            self.assertEqual(first.returncode, 0, error)
+        self._assert_retired(arm)
+        accepted = self._receipt()
+        wrong = subprocess.run(self._command('normal', False, str(uuid4())),
+                               capture_output=True, timeout=8)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertEqual(self._receipt(), accepted)
+        with self._owner('lost-return', False) as second:
+            self.assertTrue(self._ready(second).exists())
+            next_arm = self._arm()
+            self.assertNotEqual(next_arm.owner.epoch, arm.owner.epoch)
+            self.assertEqual(next_arm.lock, arm.lock)
+            second.terminate()
+            second.communicate(timeout=8)
+            self.assertNotEqual(second.returncode, 0)
+        self.assertEqual(self._receipt(), accepted)
+        retry = subprocess.run(self._command('normal', False), capture_output=True, timeout=8)
+        self.assertNotEqual(retry.returncode, 0)
+        self.assertEqual(retry.stdout, b'')
+
+    def test_owner_retains_verified_retirement_without_ready(self):
+        result = subprocess.run(self._command('pre-ready'), capture_output=True, timeout=8)
+        self.assertEqual((result.returncode, result.stdout), (0, b''), result.stderr)
+        idle, proof = store_layout._decode_idle_receipt(self._receipt())
+        origin = json.loads(proof.evidence)['arm']
+        self.assertEqual(origin['owner']['pid'], self._child_pid())
+        self.assertEqual(proof.prior_epoch, origin['owner']['epoch'])
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=idle.lock) as guard:
+            guard.verify_idle(idle, proof)
+        self.assertFalse((self.root / lifecycle_paths._LIVE_LOCATOR).exists())
+        self.assertFalse((self.base / 'ordinary-open').exists())
+
+    def test_owner_missing_signer_reports_refusal_before_creation(self):
+        result = subprocess.run(self._command('missing-signer'), capture_output=True, timeout=8)
+        self.assertEqual((result.returncode, result.stdout), (1, b''))
+        self.assertIn(b'Run adt operator install-check.', result.stderr)
+        self.assertFalse(self.root.exists())
+        self.assertEqual(list(self.receipts.iterdir()), [])
+
+    def test_owner_rejects_valid_same_store_receipt_from_another_epoch_or_child(self):
+        from relay_engine import owner_start
+
+        with self._owner('normal') as first:
+            self.assertTrue(self._ready(first).exists())
+            first_arm = self._arm()
+            first.terminate()
+            _, error = first.communicate(timeout=8)
+            self.assertEqual(first.returncode, 0, error)
+        first_receipt = self._receipt()
+        with self._owner('normal', False) as second:
+            self.assertTrue(self._ready(second).exists())
+            child_arm = self._arm()
+            second.terminate()
+            _, error = second.communicate(timeout=8)
+            self.assertEqual(second.returncode, 0, error)
+        current = self._receipt()
+        with patch.object(store_layout, 'production_root', return_value=self.root):
+            selection = owner_start.StartSelection.checked(self.root, child_arm.store, child_arm.project)
+            for wrong_frame, arm in ((first_receipt, child_arm), (current, first_arm)):
+                witness = owner_start.ChildEpochWitness(arm.root, arm.lock, arm.store, arm.project, arm.owner)
+                with self.assertRaisesRegex(owner_start.StartupRefused, 'retirement-unproved'):
+                    owner_start.retain_child_retirement(selection, wrong_frame, witness)
+                self.assertEqual(self._receipt(), current)
+
+    def test_owner_retention_failure_preserves_prior_receipt(self):
+        from relay_engine import owner_start
+
+        frames = []
+        for initialize in (True, False):
+            with self._owner('normal', initialize) as owner:
+                self.assertTrue(self._ready(owner).exists())
+                arm = self._arm()
+                owner.terminate()
+                _, error = owner.communicate(timeout=8)
+                self.assertEqual(owner.returncode, 0, error)
+            frames.append(self._receipt())
+        prior, candidate = frames
+        receipt, = self.receipts.iterdir()
+        receipt.write_bytes(prior)
+        original_fsync = os.fsync
+        original_replace = os.replace
+        fail_restore = False
+        lock = self.root / store_layout._INCUMBENT_LOCK
+        original_lock = lock.with_suffix('.saved')
+
+        def replace_lock_after_publish(fd):
+            if not original_lock.exists() and receipt.read_bytes() == candidate:
+                lock.rename(original_lock)
+                lock.touch(mode=0o600)
+            original_fsync(fd)
+
+        def reject_readback(fd):
+            nonlocal fail_restore
+            if not fail_restore and receipt.read_bytes() == candidate:
+                fail_restore = True
+                raise OSError('post-replace durability failure')
+            original_fsync(fd)
+
+        def reject_restore(src, dst, **kwargs):
+            if fail_restore and dst == receipt.name:
+                raise OSError('restore unavailable')
+            original_replace(src, dst, **kwargs)
+
+        witness = owner_start.ChildEpochWitness(arm.root, arm.lock, arm.store, arm.project, arm.owner)
+        with patch.object(store_layout, 'production_root', return_value=self.root):
+            selection = owner_start.StartSelection.checked(self.root, arm.store, arm.project)
+            with (patch.object(owner_start.os, 'fsync', side_effect=replace_lock_after_publish),
+                  self.assertRaisesRegex(owner_start.StartupRefused, 'retirement-unproved')):
+                owner_start.retain_child_retirement(selection, candidate, witness)
+            self.assertTrue(original_lock.exists())
+            self.assertEqual(self._receipt(), prior)
+            original_lock.replace(lock)
+            with (patch.object(owner_start.os, 'fsync', side_effect=reject_readback),
+                  patch.object(owner_start.os, 'replace', side_effect=reject_restore),
+                  self.assertRaisesRegex(owner_start.StartupRefused, 'retirement-unproved')):
+                owner_start.retain_child_retirement(selection, candidate, witness)
+            self.assertTrue(fail_restore)
+            self.assertIn(prior, [path.read_bytes() for path in self.receipts.iterdir()])
+            with self.assertRaises(owner_start.StartupRefused):
+                owner_start.read_owner_receipt(selection)

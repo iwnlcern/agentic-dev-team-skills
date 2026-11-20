@@ -1,20 +1,25 @@
 """Cold operator proof for one selected Store and one native direct child."""
 from collections.abc import Callable
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import ExitStack, contextmanager
+from dataclasses import asdict, dataclass, field
+from hashlib import sha256
+import inspect
 import json
 import math
 import os
 from pathlib import Path
 import re
 import secrets
+import select
+import signal
 import socket
 import stat
-from subprocess import SubprocessError
+from subprocess import DEVNULL, TimeoutExpired, SubprocessError
 import tempfile
 from threading import Lock
 import time
 from typing import NamedTuple
+from uuid import uuid4
 
 from relay_engine import jcs, lifecycle_paths, operator_terminal, store_layout
 
@@ -222,6 +227,22 @@ class SignedStartup:
             self._uses.birth = True
         return consume()
 
+    def consume_production_birth(self, canonical_root: Path, store: str, project: str,
+                                 parent_identity: tuple[int, int]) -> None:
+        selection = self.selection
+        if (type(parent_identity) is not tuple or len(parent_identity) != 2
+                or any(type(part) is not int for part in parent_identity)
+                or not isinstance(canonical_root, Path) or canonical_root.name != selection.root.name
+                or (canonical_root, store, project, parent_identity)
+                != (selection.root, selection.store, selection.project, selection.identity)):
+            raise store_layout.LayoutFault('birth-unproved')
+        try:
+            self.consume_birth(lambda: None)
+        except StartupRefused as error:
+            if error.reason == 'startup_expired':
+                raise
+            raise store_layout.LayoutFault('birth-unproved') from error
+
     def spawn(self, spawn: Callable[[], object]):
         with self._uses.lock:
             if self._uses.launch:
@@ -295,9 +316,20 @@ def _remaining(deadline):
     return remaining
 
 
-def _receive(channel, count, deadline):
+def _startup_readable(channel, deadline, check):
+    while True:
+        if check is not None:
+            check()
+        remaining = _remaining(deadline)
+        if select.select([channel], [], [], min(remaining, 0.05) if check else remaining)[0]:
+            return
+
+
+def _receive(channel, count, deadline, check=None):
     data = bytearray()
     while len(data) < count:
+        if check is not None:
+            _startup_readable(channel, deadline, check)
         channel.settimeout(_remaining(deadline))
         chunk = channel.recv(count - len(data))
         if not chunk:
@@ -306,11 +338,11 @@ def _receive(channel, count, deadline):
     return bytes(data)
 
 
-def _read_frame(channel, deadline):
-    length = int.from_bytes(_receive(channel, 4, deadline), 'big')
+def _read_frame(channel, deadline, check=None):
+    length = int.from_bytes(_receive(channel, 4, deadline, check), 'big')
     if not 0 < length <= _MAX_FRAME:
         raise StartupRefused('startup_frame')
-    encoded = _receive(channel, length, deadline)
+    encoded = _receive(channel, length, deadline, check)
     data = json.loads(encoded)
     if type(data) is not dict or jcs.jcs_encode(data) != encoded:
         raise StartupRefused('startup_frame')
@@ -338,7 +370,7 @@ def _require_child(channel, child):
     return NativeIdentity.read(child.pid)
 
 
-def offer_child_start(listener, child, attempt: SignedStartup, *, deadline: float):
+def offer_child_start(listener, child, attempt: SignedStartup, *, deadline: float, check=None):
     """Bind and answer one verified child challenge. The caller owns the returned channel."""
     peer = None
     try:
@@ -351,16 +383,19 @@ def offer_child_start(listener, child, attempt: SignedStartup, *, deadline: floa
             # Claim the response slot before any blocking I/O. Any failed
             # exchange also requires a new operator attempt.
             attempt._uses.offered = True
+        _startup_readable(listener, deadline, check)
         listener.settimeout(_remaining(deadline))
         peer, _ = listener.accept()
         native_child = _require_child(peer, child)
         listener.close()
-        challenge = _read_frame(peer, deadline)
+        challenge = _read_frame(peer, deadline, check)
         nonce = challenge.get('nonce')
         if set(challenge) != {'nonce'} or type(nonce) is not str or not _HEX_VALUE.fullmatch(nonce):
             raise StartupRefused('startup_frame')
         if _require_child(peer, child) != native_child:
             raise StartupRefused('startup_peer')
+        if check is not None:
+            check()
         _send_frame(peer, {'nonce': nonce, 'arguments': attempt.arguments,
                            'value': attempt.value.hex(), 'signature': attempt.signature.hex()}, deadline)
         accepted, peer = peer, None
@@ -464,10 +499,453 @@ def verify_service_start(path, guard, idle, bridge_port):
                 or idle.lock != guard.lock_identity):
             raise StartupRefused('startup_selection')
 
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
-            channel.settimeout(_remaining(deadline))
-            channel.connect(path)
-            return _verify_child(channel, require_selection, deadline=deadline)
-    except OSError as error:
-        raise StartupRefused('startup_peer') from error
+        channel.settimeout(_remaining(deadline))
+        channel.connect(path)
+        verified = _verify_child(channel, require_selection, deadline=deadline)
+        return verified, channel, deadline
+    except BaseException as error:
+        channel.close()
+        if isinstance(error, OSError):
+            raise StartupRefused('startup_peer') from error
+        raise
+
+
+@dataclass(frozen=True)
+class ChildEpochWitness:
+    root: tuple[int, int]
+    lock: tuple[int, int]
+    store: str
+    project: str
+    owner: store_layout._IncumbentOwner
+
+
+def _epoch_frame(witness):
+    return {'root': [str(part) for part in witness.root],
+            'lock': [str(part) for part in witness.lock],
+            'store': witness.store, 'project': witness.project, 'owner': asdict(witness.owner)}
+
+
+def _epoch_ack(frame):
+    return {'ack_epoch': sha256(jcs.jcs_encode(frame)).hexdigest()}
+
+
+def witness_child_epoch(channel: socket.socket, idle: store_layout.IncumbentRecord,
+                        owner: store_layout._IncumbentOwner, *, deadline: float) -> None:
+    frame = _epoch_frame(ChildEpochWitness(idle.root, idle.lock, idle.store, idle.project, owner))
+    try:
+        _send_frame(channel, frame, deadline)
+        if _read_frame(channel, deadline) != _epoch_ack(frame):
+            raise StartupRefused('startup_witness')
+    except (OSError, ValueError, TypeError, RecursionError) as error:
+        raise StartupRefused('startup_witness') from error
+
+
+def _epoch_identity(data):
+    if type(data) is not list or len(data) != 2:
+        raise StartupRefused('startup_witness')
+    dev, ino = (_decimal(part, _MAX_NATIVE_ID, 'startup_witness') for part in data)
+    if not ino:
+        raise StartupRefused('startup_witness')
+    return dev, ino
+
+
+def read_child_epoch(channel: socket.socket, child, *, deadline: float,
+                     idle: store_layout.IncumbentRecord | None = None, check=None) -> ChildEpochWitness:
+    try:
+        native = _require_child(channel, child)
+        frame = _read_frame(channel, deadline, check)
+        if set(frame) != {'root', 'lock', 'store', 'project', 'owner'}:
+            raise StartupRefused('startup_witness')
+        owner = store_layout._IncumbentOwner(**frame['owner'])
+        witness = ChildEpochWitness(_epoch_identity(frame['root']), _epoch_identity(frame['lock']),
+                                    store_layout._canonical_id(frame['store']),
+                                    store_layout._canonical_id(frame['project']), owner)
+        store_layout._canonical_id(owner.epoch)
+        if (type(owner.pid) is not int or (owner.pid, owner.birth, owner.boot) != native
+                or owner.notifier not in ('off', 'configured')
+                or not store_layout._bounded_text(owner.runtime) or not Path(owner.runtime).is_absolute()):
+            raise StartupRefused('startup_witness')
+        if idle is not None and (witness.root, witness.lock, witness.store, witness.project) != (
+                idle.root, idle.lock, idle.store, idle.project):
+            raise StartupRefused('startup_witness')
+        if _require_child(channel, child) != native:
+            raise StartupRefused('startup_witness')
+        if check is not None:
+            check()
+        _send_frame(channel, _epoch_ack(frame), deadline)
+        return witness
+    except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
+        raise StartupRefused('startup_witness') from error
+
+
+@contextmanager
+def _receipt_directory(root):
+    home = root.parent
+    try:
+        with ExitStack() as stack:
+            home_fd = os.open(home, store_layout._DIRECTORY)
+            stack.callback(os.close, home_fd)
+            ids = [(None, home, home_fd, store_layout._inode(os.fstat(home_fd)))]
+            for name in ('.adt-owner', 'receipts'):
+                parent = ids[-1][2]
+                fd = os.open(name, store_layout._DIRECTORY, dir_fd=parent)
+                stack.callback(os.close, fd)
+                identity = store_layout._owned_inode(os.fstat(fd), directory=True)
+                ids.append((parent, name, fd, identity))
+
+            def check():
+                for parent, name, fd, expected in ids:
+                    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    opened = os.fstat(fd)
+                    if (info.st_uid != os.geteuid() or info.st_mode & (0o022 if parent is None else 0o077)
+                            or not stat.S_ISDIR(info.st_mode)
+                            or store_layout._inode(info) != expected or not os.path.samestat(opened, info)):
+                        raise StartupRefused('receipt-directory-unproved')
+
+            check()
+            yield ids[-1][2], check
+    except (OSError, store_layout.LayoutFault) as error:
+        raise StartupRefused('receipt-directory-unproved') from error
+
+
+def _receipt_name(root, project):
+    value = os.fsencode(root) + b'\0' + store_layout._canonical_id(project).encode('ascii')
+    return sha256(value).hexdigest() + '.receipt'
+
+
+def _receipt_stat(directory, name):
+    return store_layout._owned_inode(os.stat(name, dir_fd=directory, follow_symlinks=False))
+
+
+def _read_receipt(directory, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | store_layout._NOFOLLOW, dir_fd=directory)
+    with os.fdopen(fd, 'rb') as stream:
+        identity = store_layout._owned_inode(os.fstat(fd))
+        frame = stream.read(store_layout._IDLE_RECEIPT_LIMIT + 1)
+        if (not 0 < len(frame) <= store_layout._IDLE_RECEIPT_LIMIT
+                or _receipt_stat(directory, name) != identity):
+            raise StartupRefused('receipt-unproved')
+        return frame, identity
+
+
+def _read_selected_receipt(root, project):
+    with _receipt_directory(root) as (directory, check):
+        try:
+            name = _receipt_name(root, project)
+            _require_receipt_settled(directory, name)
+            frame, _ = _read_receipt(directory, name)
+            _require_receipt_settled(directory, name)
+        except FileNotFoundError as error:
+            raise StartupRefused('receipt-missing') from error
+        except (OSError, store_layout.LayoutFault) as error:
+            raise StartupRefused('receipt-unproved') from error
+        check()
+        return frame
+
+
+def _selected_frame(selection, frame):
+    idle, proof = store_layout._decode_idle_receipt(frame)
+    root_id = _selection_identity(selection.root, False)
+    if ((idle.root, idle.store, idle.project) != (root_id, selection.store, selection.project)
+            or (not selection.initialize and root_id != selection.identity)):
+        raise StartupRefused('receipt-unproved')
+    return idle, proof
+
+
+def read_owner_receipt(selection: StartSelection) -> bytes:
+    _selection_args(selection)
+    frame = _read_selected_receipt(selection.root, selection.project)
+    _selected_frame(selection, frame)
+    return frame
+
+
+def _stage_receipt(directory, frame):
+    temporary = uuid4().hex + '.tmp'
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | store_layout._NOFOLLOW,
+                 0o600, dir_fd=directory)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            identity = store_layout._owned_inode(os.fstat(fd))
+            stream.write(frame)
+            stream.flush()
+            os.fsync(fd)
+        if _read_receipt(directory, temporary) != (frame, identity):
+            raise StartupRefused('receipt-retention-unproved')
+        return temporary, identity
+    except BaseException:
+        os.unlink(temporary, dir_fd=directory)
+        raise
+
+
+def _named_receipt(directory, name):
+    try:
+        return _receipt_stat(directory, name)
+    except FileNotFoundError:
+        return None
+
+
+def _require_receipt_settled(directory, name):
+    if _named_receipt(directory, name + '.pending') is not None:
+        raise StartupRefused('receipt-retention-unproved')
+
+
+def retain_owner_receipt(selection: StartSelection, frame: bytes, *, check_idle=None) -> None:
+    _selection_args(selection)
+    _selected_frame(selection, frame)
+    name = _receipt_name(selection.root, selection.project)
+    pending = name + '.pending'
+    with _receipt_directory(selection.root) as (directory, check):
+        candidate = backup = None
+        try:
+            _require_receipt_settled(directory, name)
+            try:
+                prior, prior_id = _read_receipt(directory, name)
+            except FileNotFoundError:
+                prior, prior_id = None, None
+            candidate, identity = _stage_receipt(directory, frame)
+            backup, _ = _stage_receipt(directory, frame if prior is None else prior)
+            check()
+            if _named_receipt(directory, name) != prior_id:
+                raise StartupRefused('receipt-retention-unproved')
+            os.replace(backup, pending, src_dir_fd=directory, dst_dir_fd=directory)
+            backup = None
+            # A failed restoration must leave the previous bytes in a named
+            # artifact and prevent intake from trusting the new visible file.
+            published = False
+            try:
+                os.fsync(directory)
+                if check_idle is not None:
+                    check_idle()
+                os.replace(candidate, name, src_dir_fd=directory, dst_dir_fd=directory)
+                candidate = None
+                published = True
+                os.fsync(directory)
+                check()
+                if _read_receipt(directory, name) != (frame, identity):
+                    raise StartupRefused('receipt-retention-unproved')
+                if check_idle is not None:
+                    check_idle()
+            except (OSError, ValueError, store_layout.LayoutFault):
+                if published:
+                    if _named_receipt(directory, name) != identity:
+                        raise
+                    if prior is not None:
+                        os.replace(pending, name, src_dir_fd=directory, dst_dir_fd=directory)
+                    else:
+                        os.unlink(name, dir_fd=directory)
+                        os.unlink(pending, dir_fd=directory)
+                else:
+                    os.unlink(pending, dir_fd=directory)
+                os.fsync(directory)
+                raise
+            # The final receipt is already durable. A crash that resurrects
+            # this marker fails closed on the next intake.
+            os.unlink(pending, dir_fd=directory)
+        except (OSError, ValueError, store_layout.LayoutFault) as error:
+            raise StartupRefused('receipt-retention-unproved') from error
+        finally:
+            for temporary in (candidate, backup):
+                if temporary is not None:
+                    os.unlink(temporary, dir_fd=directory)
+
+
+def _checked_receipt(selection, frame, *, retain=False):
+    idle, proof = _selected_frame(selection, frame)
+    with store_layout.IncumbentGuard.acquire(selection.root, expected_lock=idle.lock) as guard:
+        guard.verify_idle(idle, proof)
+        if retain:
+            retain_owner_receipt(selection, frame, check_idle=lambda: guard._current(idle))
+    return idle
+
+
+def retain_child_retirement(selection, frame, witness):
+    try:
+        idle, proof = _selected_frame(selection, frame)
+        evidence = json.loads(proof.evidence)
+        if (proof.kind != 'retirement' or set(evidence) != {'arm', 'settlement_sha256', 'nonce'}
+                or store_layout._canonical_frame(evidence) != proof.evidence
+                or not _HEX_VALUE.fullmatch(evidence['settlement_sha256'])
+                or not re.fullmatch(r'[0-9a-f]{32}', evidence['nonce'])):
+            raise StartupRefused('retirement-unproved')
+        arm = store_layout.IncumbentGuard._parse_record(store_layout._canonical_frame(evidence['arm']))
+        if (arm.phase != 'armed' or proof.prior_epoch != witness.owner.epoch
+                or (arm.root, arm.lock, arm.store, arm.project, arm.owner)
+                != (witness.root, witness.lock, witness.store, witness.project, witness.owner)
+                or (idle.root, idle.lock, idle.store, idle.project)
+                != (witness.root, witness.lock, witness.store, witness.project)):
+            raise StartupRefused('retirement-unproved')
+        _checked_receipt(selection, frame, retain=True)
+    except (OSError, ValueError, store_layout.LayoutFault, TypeError, KeyError, RecursionError) as error:
+        raise StartupRefused('retirement-unproved') from error
+
+
+def production_birth(selection, consume):
+    """Use the separately reviewed Store provider when the joined package contains it."""
+    create = store_layout.IncumbentGuard._create_new
+    parameters = inspect.signature(create).parameters
+    if 'consume_production_birth' not in parameters:
+        raise StartupRefused('birth-provider-unavailable')
+    guard, enrollment = create(selection.root, selection.store, selection.project, kind='production',
+                               consume_production_birth=consume)
+    with guard:
+        idle, _ = guard.enroll_new(enrollment)
+        native = NativeIdentity.current()
+        owner = store_layout._IncumbentOwner(str(uuid4()), *native, str(selection.root.parent), 'off')
+        armed = guard.arm(idle, owner)
+        guard._materialize_birth(armed, project_name=selection.project_name, now_ms=time.time_ns() // 1_000_000)
+        proof = guard._retirement_proof(armed, b'guarded first birth settled')
+        idle = guard.retire(armed, proof)
+        return store_layout._encode_idle_receipt(idle, proof)
+
+
+class _OwnerStop:
+    def __init__(self):
+        self.signum = None
+        self.forwarded_at = None
+
+    def request(self, signum=signal.SIGTERM, _frame=None):
+        if self.signum is None:
+            self.signum = signum
+
+    def forward(self, child):
+        if self.signum is not None and self.forwarded_at is None and child.poll() is None:
+            self.forwarded_at = time.monotonic()
+            child.send_signal(self.signum)
+
+    def require_running(self):
+        if self.signum is not None:
+            raise StartupRefused('startup-stopped')
+
+
+@contextmanager
+def _owner_stop():
+    stop = _OwnerStop()
+    with ExitStack() as signals:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.signal(signum, stop.request)
+            signals.callback(signal.signal, signum, previous)
+        yield stop
+
+
+def _collect_retirement(child, retirement, stop):
+    status = None
+    exited_at = None
+    eof = False
+    data = bytearray()
+    while status is None or not eof:
+        stop.forward(child)
+        status = child.poll()
+        now = time.monotonic()
+        if status is not None and exited_at is None:
+            exited_at = now
+        if ((exited_at is not None and now >= exited_at + _IO_SECONDS)
+                or (stop.forwarded_at is not None and now >= stop.forwarded_at + 6)):
+            raise StartupRefused('retirement-incomplete')
+        if eof:
+            time.sleep(0.05)
+        elif select.select([retirement], [], [], 0.05)[0]:
+            part = os.read(retirement, store_layout._IDLE_RECEIPT_LIMIT + 1 - len(data))
+            data.extend(part)
+            eof = not part
+            if len(data) > store_layout._IDLE_RECEIPT_LIMIT:
+                raise StartupRefused('retirement-incomplete')
+    if status != 0 or not data:
+        raise StartupRefused('retirement-incomplete')
+    return bytes(data)
+
+
+def _reap_failed_start(child, stop):
+    stop.request()
+    stop.forward(child)
+    try:
+        child.wait(timeout=5)
+    except TimeoutExpired:
+        child.kill()
+        child.wait()
+
+
+def _run_child(attempt, frame, idle, launch, stop):
+    from relay_engine.api_service import _write_private_frame
+
+    selection = attempt.selection
+    command = ['engine', 'serve', '--store-root', str(selection.root), '--project-id', selection.project]
+    if selection.bridge_port is not None:
+        command += ['--bridge-port', str(selection.bridge_port)]
+    with startup_listener() as (listener, path), ExitStack() as pipes:
+        idle_read, idle_write = os.pipe()
+        idle_input = pipes.enter_context(os.fdopen(idle_read, 'rb', buffering=0))
+        idle_output = pipes.enter_context(os.fdopen(idle_write, 'wb', buffering=0))
+        retire_read, retire_write = os.pipe()
+        retirement = pipes.enter_context(os.fdopen(retire_read, 'rb', buffering=0))
+        retire_output = pipes.enter_context(os.fdopen(retire_write, 'wb', buffering=0))
+        environment = dict(os.environ, ADT_PRIVATE_IDLE_FD=str(idle_read),
+                           ADT_PRIVATE_RETIREMENT_FD=str(retire_write), ADT_PRIVATE_START_SOCKET=str(path))
+
+        def spawn():
+            stop.require_running()
+            return launch(command, env=environment, pass_fds=(idle_read, retire_write),
+                          stdin=DEVNULL, start_new_session=True)
+
+        child = attempt.spawn(spawn)
+
+        def check_starting():
+            stop.forward(child)
+            stop.require_running()
+
+        idle_input.close()
+        retire_output.close()
+        deadline = time.monotonic() + _IO_SECONDS
+        try:
+            check_starting()
+            try:
+                _write_private_frame(os.dup(idle_write), frame, deadline)
+            finally:
+                idle_output.close()
+            with offer_child_start(listener, child, attempt, deadline=deadline, check=check_starting) as peer:
+                witness = read_child_epoch(peer, child, deadline=deadline, idle=idle, check=check_starting)
+            return _collect_retirement(child, retirement.fileno(), stop), witness
+        except (OSError, ValueError, store_layout.LayoutFault, SubprocessError) as error:
+            if child.poll() is None:
+                _reap_failed_start(child, stop)
+            raise StartupRefused('retirement-incomplete') from error
+
+
+def run_owner(root, project, *, initialize, project_name, bridge_port, authorize,
+              launch, birth_provider=production_birth, show):
+    root = Path(root)
+    if root != _production_root():
+        raise StartupRefused('startup_selection')
+    if initialize != (project_name is not None):
+        raise StartupRefused('startup_selection')
+    store_layout._canonical_id(project)
+    with _owner_stop() as stop:
+        if initialize:
+            with _receipt_directory(root):
+                pass
+            store = str(uuid4())
+        else:
+            frame = _read_selected_receipt(root, project)
+            store = store_layout._decode_idle_receipt(frame)[0].store
+        selection = StartSelection.checked(root, store, project, initialize=initialize,
+                                           project_name=project_name, bridge_port=bridge_port)
+        if not initialize:
+            idle = _checked_receipt(selection, frame)
+        stop.require_running()
+        attempt = authorize(selection)
+        if attempt.selection != selection:
+            raise StartupRefused('startup_selection')
+        stop.require_running()
+        if initialize:
+            def consume(canonical_root, store, project, parent_identity):
+                stop.require_running()
+                attempt.consume_production_birth(canonical_root, store, project, parent_identity)
+
+            frame = birth_provider(selection, consume)
+            idle = _checked_receipt(selection, frame, retain=True)
+        stop.require_running()
+        frame, witness = _run_child(attempt, frame, idle, launch, stop)
+        retain_child_retirement(selection, frame, witness)
+        show('The Store stopped cleanly and its verified restart receipt was retained.')
+        return 0

@@ -345,17 +345,27 @@ import sys
 from unittest.mock import patch
 from relay_engine import adt_cli, api_service, operator_terminal, owner_start, store_layout
 from relay_engine.tests.test_owner_start import installed_key
-root, project, pub, clock, expire_after_check = sys.argv[1:]
+root, project, pub, clock, expiry_cut = sys.argv[1:]
 current = [int(clock)]
 
-def at_runtime(_service, _store):
-    if expire_after_check == '1':
+create_runtime = api_service.ApiService._create_runtime
+witness_child_epoch = owner_start.witness_child_epoch
+
+def at_runtime(service, store):
+    create_runtime(service, store)
+    if expiry_cut == 'runtime':
+        current[0] += 1
+
+def at_witness(*args, **kwargs):
+    witness_child_epoch(*args, **kwargs)
+    if expiry_cut == 'witness':
         current[0] += 1
 
 with (patch.object(store_layout, 'production_root', return_value=Path(root)),
       patch.object(operator_terminal, '_installed_key', return_value=installed_key(pub, None)),
       patch.object(owner_start, '_clock_ns', side_effect=lambda: current[0]),
       patch.object(api_service.ApiService, '_create_runtime', at_runtime),
+      patch.object(owner_start, 'witness_child_epoch', at_witness),
       patch.object(store_layout.IncumbentGuard, 'arm',
                    side_effect=store_layout.LayoutFault('checked-startup-gate'))):
     raise SystemExit(adt_cli.main(['engine', 'serve', '--store-root', root, '--project-id', project]))
@@ -365,22 +375,27 @@ with (patch.object(store_layout, 'production_root', return_value=Path(root)),
               patch.object(owner_start, '_clock_ns', return_value=ISSUED)):
             selection = owner_start.StartSelection.checked(root, self.admitted.idle.store, fixture.P)
             owner = owner_start.NativeIdentity.current()
-            cases = ((EXPIRES - 1, '0', 'checked-startup-gate'),
-                     (EXPIRES, '0', 'startup_expired'),
-                     (EXPIRES - 1, '1', 'startup_expired'))
-            for now, expire_after_check, reason in cases:
-                with self.subTest(now=now, expire_after_check=expire_after_check):
+            cases = ((EXPIRES - 1, 'none', True, 'checked-startup-gate'),
+                     (EXPIRES, 'none', False, 'startup_expired'),
+                     (EXPIRES - 1, 'runtime', False, 'startup_expired'),
+                     (EXPIRES - 1, 'witness', True, 'startup_expired'),
+                     (EXPIRES - 1, 'no-ack', False, 'startup_witness'))
+            for now, expiry_cut, expect_witness, reason in cases:
+                with self.subTest(now=now, expiry_cut=expiry_cut):
                     attempt = owner_start.authorize_owner_start(selection, owner, prove=prove, show=lambda _: None)
                     with owner_start.startup_listener() as (listener, path):
                         with fixture.private_idle(self.admitted) as (fd, environment):
                             environment['ADT_PRIVATE_START_SOCKET'] = str(path)
                             child = attempt.spawn(lambda: subprocess.Popen(
                                 [sys.executable, '-c', child_script, str(root), fixture.P, str(public_key), str(now),
-                                 expire_after_check],
+                                 expiry_cut],
                                 env=environment, pass_fds=(fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True))
                         try:
-                            with owner_start.offer_child_start(listener, child, attempt, deadline=time.monotonic() + 5):
+                            deadline = time.monotonic() + 5
+                            with owner_start.offer_child_start(listener, child, attempt, deadline=deadline) as peer:
+                                if expect_witness:
+                                    owner_start.read_child_epoch(peer, child, deadline=deadline, idle=self.admitted.idle)
                                 output, error = child.communicate(timeout=6)
                             self.assertEqual((child.returncode, output), (1, ''))
                             self.assertIn(reason, error)

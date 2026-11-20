@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import Mock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from relay_engine import operator_terminal
 
@@ -27,6 +27,32 @@ def installed_key(path, _stat):
         str(path), lambda item: type('Metadata', (), {
             'st_uid': 0, 'st_mode': 0o100644 if item == str(path) else 0o40755})()
     )
+
+
+def synthetic_birth(selection, consume, *, incomplete=False):
+    """Test-only provider using the pinned isolated Store primitives."""
+    from relay_engine import store_layout
+    native_parent = store_layout._inode(selection.root.parent.stat())
+    consume(selection.root, selection.store, selection.project, native_parent)
+    guard, enrollment = store_layout.IncumbentGuard._create_new(
+        selection.root, selection.store, selection.project)
+    with guard:
+        idle, _ = guard.enroll_new(enrollment)
+        from relay_engine import owner_start
+        process = owner_start.NativeIdentity.current()
+        owner = store_layout._IncumbentOwner(str(uuid4()), *process, str(selection.root.parent), 'off')
+        armed = guard.arm(idle, owner)
+        if incomplete:
+            raise store_layout.LayoutFault('synthetic-birth-unsettled')
+        guard._materialize_birth(armed, project_name=selection.project_name, now_ms=1)
+        # The real production-kind materializer stays deferred to Task 4.
+        import sqlite3
+        from contextlib import closing
+        with closing(sqlite3.connect(store_layout.catalogue_path(selection.root))) as db, db:
+            db.execute("UPDATE catalogue_identity SET kind='production'").close()
+        proof = guard._retirement_proof(armed, b'synthetic birth settled')
+        idle = guard.retire(armed, proof)
+        return store_layout._encode_idle_receipt(idle, proof)
 
 
 def child_main(path, pub, root, clock, wrong_parent):
@@ -190,6 +216,86 @@ class OwnerStartTests(unittest.TestCase):
         with patch.object(self.startup, '_selection_identity', return_value=wide_identity):
             attempt = self.authorize(selection=replace(self.selection, identity=wide_identity))
         self.assertEqual(attempt.arguments['identity'], [str(value) for value in wide_identity])
+
+
+    def test_owner_birth_consume_matches_signed_parent_and_leaf(self):
+        from relay_engine import store_layout
+
+        root = self.selection.root
+        expected = self.selection.identity
+        directory = root.parent / '.adt-owner' / 'receipts'
+        directory.parent.mkdir(mode=0o700)
+        directory.mkdir(mode=0o700)
+        spawn = Mock()
+
+        def authorize(selection):
+            return self.authorize(selection=selection)
+
+        def birth(selection, consume):
+            for selected, parent in ((root, (expected[0], expected[1] + 1)),
+                                     (root.with_name('different'), expected)):
+                with self.subTest(root=selected, parent=parent), self.assertRaisesRegex(
+                    store_layout.LayoutFault, 'birth-unproved'
+                ):
+                    consume(selected, selection.store, PROJECT, parent)
+            self.assertFalse(root.exists())
+            consume(root, selection.store, PROJECT, expected)
+            consume(root, selection.store, PROJECT, expected)
+
+        with (patch.object(store_layout, 'production_root', return_value=root),
+              patch.object(self.startup, '_clock_ns', return_value=ISSUED)):
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                self.startup.run_owner(root, PROJECT, initialize=True, project_name='Example',
+                                       bridge_port=None, authorize=authorize, launch=spawn,
+                                       birth_provider=birth, show=lambda _: None)
+        self.assertFalse(root.exists())
+        spawn.assert_not_called()
+
+    def test_expiry_after_guarded_birth_retains_exact_receipt(self):
+        from relay_engine import store_layout
+        for incomplete in (False, True):
+            with self.subTest(incomplete=incomplete), tempfile.TemporaryDirectory(dir=self.base) as home:
+                home = Path(home)
+                root = home / 'store'
+                directory = home / '.adt-owner' / 'receipts'
+                directory.parent.mkdir(mode=0o700)
+                directory.mkdir(mode=0o700)
+                now = [ISSUED]
+                captured = []
+                spawn = Mock()
+
+                def authorize(selection):
+                    captured.append(selection)
+                    return self.startup.authorize_owner_start(
+                        selection, self.owner, prove=self.sign, show=lambda _: None)
+
+                def birth(selection, consume):
+                    frame = synthetic_birth(selection, consume, incomplete=incomplete)
+                    captured.append(frame)
+                    catalogue.reset_mock()
+                    ledger.reset_mock()
+                    now[0] = EXPIRES
+                    return frame
+
+                with (patch.object(store_layout, 'production_root', return_value=root),
+                      patch.object(self.startup, '_clock_ns', side_effect=lambda: now[0]),
+                      patch.object(store_layout, 'open_catalogue', wraps=store_layout.open_catalogue) as catalogue,
+                      patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as ledger):
+                    refusal = 'synthetic-birth-unsettled' if incomplete else 'startup_expired'
+                    with self.assertRaisesRegex((self.startup.StartupRefused, store_layout.LayoutFault), refusal):
+                        self.startup.run_owner(root, PROJECT, initialize=True, project_name='Example',
+                                               bridge_port=None, authorize=authorize, launch=spawn,
+                                               birth_provider=birth, show=lambda _: None)
+                    spawn.assert_not_called()
+                    catalogue.assert_not_called()
+                    ledger.assert_not_called()
+                    with store_layout.IncumbentGuard.acquire(root) as guard:
+                        self.assertEqual(guard.read().phase, 'armed' if incomplete else 'idle')
+                    if incomplete:
+                        self.assertEqual(list(directory.iterdir()), [])
+                    else:
+                        selection = self.startup.StartSelection.checked(root, captured[0].store, PROJECT)
+                        self.assertEqual(self.startup.read_owner_receipt(selection), captured[1])
 
 
 if __name__ == '__main__':
