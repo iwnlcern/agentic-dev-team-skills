@@ -12,6 +12,7 @@ import stat
 import struct
 import subprocess
 import sys
+import time
 from typing import Literal
 from uuid import UUID
 
@@ -365,19 +366,16 @@ def _native_identity(pid):
     return birth, canonical_boot
 
 
-def _peer_pid(path):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
-        peer.settimeout(0.5)
-        peer.connect(path)
-        if sys.platform == 'linux':
-            credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-            pid, uid, _ = struct.unpack('=iII', credentials)
-            if uid != os.geteuid():
-                raise ValueError('wrong peer owner')
-            return pid
-        if sys.platform == 'darwin':
-            return peer.getsockopt(0, 2)  # SOL_LOCAL, LOCAL_PEERPID
-        raise ValueError('native peer identity unavailable')
+def _peer_pid(peer):
+    if sys.platform == 'linux':
+        credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        pid, uid, _ = struct.unpack('=iII', credentials)
+        if uid != os.geteuid():
+            raise ValueError('wrong peer owner')
+        return pid
+    if sys.platform == 'darwin':
+        return peer.getsockopt(0, 2)  # SOL_LOCAL, LOCAL_PEERPID
+    raise ValueError('native peer identity unavailable')
 
 
 def _read_live_locator(root):
@@ -412,13 +410,21 @@ def _read_live_locator(root):
         ready = api_client.read_ready_file(str(Path(owner.runtime) / 'ready.json'))
         path = str(Path(owner.runtime) / 'api.sock')
         if ((ready.store_id, ready.pid, ready.socket, ready.build_id, ready.schema_digest) !=
-                (arm.store, owner.pid, path, data['build'], data['schema'])
-                or _peer_pid(path) != owner.pid
-                or _native_identity(owner.pid) != (owner.birth, owner.boot)):
+                (arm.store, owner.pid, path, data['build'], data['schema'])):
             raise ValueError('wrong live endpoint')
+        registry, digest = api_client._registry_and_digest()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+            deadline = time.monotonic() + 0.5
+            peer.settimeout(0.5)
+            peer.connect(path)
+            if _peer_pid(peer) != owner.pid or _native_identity(owner.pid) != (owner.birth, owner.boot):
+                raise ValueError('wrong live endpoint')
+            api_client.ApiClient(peer, registry, digest)._discover(ready, instance=data['instance'], deadline=deadline)
         if (_read_metadata(directory, _LIVE_LOCATOR, 8192) != data
                 or _read_metadata(directory, store_layout._INCUMBENT, store_layout._INCUMBENT_LIMIT) != record
                 or inode(os.stat(root, follow_symlinks=False)) != list(arm.root)
+                or inode(os.stat(owner.runtime, follow_symlinks=False)) != data['runtime']
+                or inode(os.stat('ready.json', dir_fd=runtime, follow_symlinks=False)) != data['ready']
                 or inode(os.stat('api.sock', dir_fd=runtime, follow_symlinks=False)) != data['socket']):
             raise ValueError('changed live endpoint')
         return ready.path
@@ -436,6 +442,6 @@ def console_target(root: str) -> ConsoleTarget | ConsoleTargetUnavailable:
         return ConsoleTargetUnavailable('diagnostic_unavailable')
     try:
         return ConsoleTarget(_read_live_locator(str(Path(root).absolute())))
-    except (HeldMetadataUnavailable, store_layout.LayoutFault, api_client.LocalRefusal,
+    except (HeldMetadataUnavailable, store_layout.LayoutFault, api_client.LocalRefusal, api_client.EndpointUnavailable,
             OSError, ValueError, TypeError, IndexError, subprocess.SubprocessError) as fault:
         return ConsoleTargetUnavailable('identity_unavailable', fault)

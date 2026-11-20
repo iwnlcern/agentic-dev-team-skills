@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import stat
 import threading
+import time
 
 from relay_engine import api_definitions as d, api_platform, api_registry as r
 from relay_engine import api_schema, api_wire, jcs
@@ -148,27 +149,46 @@ class ApiClient:
             raise EndpointUnavailable('not_performed') from None
         client = cls(connection, registry, digest)
         try:
-            result = client.call('protocol.connect', {'supported': {'min': '3.0', 'max': '3.0'},
-                'required_schema_digest': digest, 'required_build_id': ready.build_id})
-            if isinstance(result, ApiErrorValue) or any(
-                    result[name] != expected for name, expected in (
-                        ('store_id', ready.store_id), ('build_id', ready.build_id),
-                        ('schema_digest', ready.schema_digest))):
-                raise EndpointUnavailable('endpoint_mismatch')
+            client._discover(ready)
             return client
         except BaseException:
             client.close()
             raise
 
+    def _discover(self, ready, *, instance=None, deadline=None):
+        if ready.schema_digest != self._digest:
+            raise LocalRefusal('ready_file_mismatch')
+        arguments = {'supported': {'min': '3.0', 'max': '3.0'},
+                     'required_schema_digest': self._digest, 'required_build_id': ready.build_id}
+        result = (self.call('protocol.connect', arguments) if deadline is None else
+                  self._call('protocol.connect', arguments, deadline=deadline))
+        expected = {'store_id': ready.store_id, 'build_id': ready.build_id, 'schema_digest': ready.schema_digest}
+        if instance is not None:
+            expected['runtime_instance_id'] = instance
+        if isinstance(result, ApiErrorValue) or any(result[name] != value for name, value in expected.items()):
+            raise EndpointUnavailable('endpoint_mismatch')
+
     def call(self, operation: str, args: Mapping) -> Mapping | ApiErrorValue:
+        return self._call(operation, args)
+
+    def _call(self, operation, args, *, deadline=None):
+        def bound_timeout():
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                self._socket.settimeout(remaining)
+
         with self._lock:
             self._request_id += 1
             request_id = str(self._request_id)
             try:
                 raw = jcs.jcs_encode({'request_id': request_id, 'op': operation, 'args': dict(args)})
+                bound_timeout()
                 self._socket.sendall(len(raw).to_bytes(4, 'big') + raw)
                 frames = []
                 while not frames:
+                    bound_timeout()
                     chunk = self._socket.recv(65536)
                     if not chunk:
                         raise EndpointUnavailable('unknown')

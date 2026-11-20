@@ -171,8 +171,17 @@ class StoreWriter:
         self._holder = holder
         self._epoch = epoch
 
-    def bind_store_arm(self, guard, arm, stopping):
+    def bind_store_arm(self, guard, arm, stopping, members):
         self._store_guard, self._store_arm, self._stop_pending = guard, arm, stopping
+        self._admitted_members = members
+
+    def _check_writer_admission(self):
+        self._check_store_open()
+        self._store_guard._check_admitted_members(self._store_arm, self._admitted_members)
+        if self._catalogue is not None:
+            store_layout._require_admission_identity(self._catalogue, self._store_arm.store,
+                                                     self._store_arm.project)
+        self._check_store_open()
 
     def _check_store_open(self):
         if self._store_guard is None:
@@ -555,7 +564,13 @@ class StoreWriter:
             except FileNotFoundError:
                 raise store_layout.LayoutFault('missing') from None
             self._check_store_open()
-            conn = store_layout.open_ledger(self._root, project_id)
+            if self._store_guard is None:
+                conn = store_layout.open_ledger(self._root, project_id)
+            else:
+                if project_id != self._store_arm.project:
+                    raise store_layout.LayoutFault('wrong-project')
+                conn = store_layout.open_ledger(self._root, project_id,
+                                                _check_admission=self._check_writer_admission)
             try:
                 conn.isolation_level = None
                 _require_identity(path, identity)
@@ -776,7 +791,9 @@ class StoreWriter:
             if self._store_guard is None:
                 conn = store_layout.open_catalogue(self._root)
             else:
-                conn = store_layout._open_catalogue(self._root, None, existing_only=True)
+                arm = self._store_arm
+                conn = store_layout._open_catalogue(self._root, None, admission=(arm.store, arm.project),
+                                                    check_admission=self._check_writer_admission)
             try:
                 _require_identity(path, identity)
             except BaseException:

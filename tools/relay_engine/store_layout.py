@@ -149,7 +149,7 @@ def _configure(conn):
         _pragma(conn, 'PRAGMA checkpoint_fullfsync=ON')
 
 
-def open_ledger(root, project_id: str, *, create: bool = False):
+def open_ledger(root, project_id: str, *, create: bool = False, _check_admission=None):
     """Open exactly the named project's current store; creation is explicit."""
     path = ledger_path(root, project_id)
     if create:
@@ -157,6 +157,8 @@ def open_ledger(root, project_id: str, *, create: bool = False):
             directory.mkdir(mode=0o700, exist_ok=True)
         conn = submit.open_store(path)
     else:
+        if _check_admission is not None:
+            _check_admission()
         if not path.exists():
             raise LayoutFault('missing')
         try:
@@ -166,6 +168,8 @@ def open_ledger(root, project_id: str, *, create: bool = False):
                 raise LayoutFault('missing') from None
             raise
     try:
+        if _check_admission is not None:
+            _check_admission()
         if _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'") is None:
             raise LayoutFault('no-project-row')
         rows = conn.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')
@@ -192,7 +196,13 @@ def open_catalogue(root, *, kind: str | None = None):
     return _open_catalogue(root, kind)
 
 
-def _open_catalogue(root, kind, *, reserved=None, existing_only=False):
+def _require_admission_identity(conn, store, project):
+    if (_row(conn, 'SELECT store_id FROM catalogue_identity WHERE id=1') != (store,)
+            or route_state(conn, project) != 'active'):
+        raise LayoutFault('member-unproved')
+
+
+def _open_catalogue(root, kind, *, reserved=None, admission=None, check_admission=None):
     from relay_engine import catalogue
 
     if kind not in (None, 'production', 'isolated'):
@@ -203,11 +213,16 @@ def _open_catalogue(root, kind, *, reserved=None, existing_only=False):
     has_projects = projects.exists() and any(projects.iterdir())
     if reserved is None and has_projects and (not path.exists() or path.stat().st_size == 0):
         raise LayoutFault('missing-catalogue')
-    if not existing_only:
+    if admission is None:
         root.mkdir(mode=0o700, exist_ok=True)
-    conn = (sqlite3.connect(path) if reserved is None and not existing_only else
+    else:
+        check_admission()
+    conn = (sqlite3.connect(path) if reserved is None and admission is None else
             sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True))
     try:
+        if admission is not None:
+            check_admission()
+            _require_admission_identity(conn, *admission)
         if (reserved is None and has_projects
                 and _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1") is None):
             raise LayoutFault('missing-catalogue')
@@ -224,7 +239,7 @@ def _open_catalogue(root, kind, *, reserved=None, existing_only=False):
         creating = not catalogue._definitions(conn)
         if reserved is not None and not creating:
             raise LayoutFault('birth-members-present')
-        if existing_only and creating:
+        if admission is not None and creating:
             raise LayoutFault('missing-catalogue')
         catalogue.init_catalogue(conn)
         identity = _row(conn, 'SELECT kind FROM catalogue_identity WHERE id=1')
@@ -1275,11 +1290,22 @@ class IncumbentGuard:
         return self._publish_idle(expected_arm, proof.summary()), proof
 
     def _protected_identity(self, armed):
-        self._current(armed)
-        self._protected_read(armed.store, armed.project, self._member_identities(armed.project))
+        self._admit_members(armed)
         return armed.store
 
-    def _member_identities(self, project):
+    def _admit_members(self, armed):
+        self._current(armed)
+        members = self._member_identities(armed.project)
+        self._protected_read(armed.store, armed.project, members)
+        self._current(armed)
+        return members
+
+    def _check_admitted_members(self, armed, members):
+        self._current(armed)
+        if self._member_identities(armed.project, sidecar_free=False) != members:
+            raise LayoutFault('member-changed')
+
+    def _member_identities(self, project, *, sidecar_free=True):
         self._check_lock()
         _canonical_id(project)
         with ExitStack() as stack:
@@ -1296,8 +1322,13 @@ class IncumbentGuard:
                                                 directory=True):
                         raise LayoutFault('member-changed')
                     parent_ids.append(identity)
-                catalogue = _sidecar_free_member(self._root_fd, catalogue_path(self._path).name)
-                ledger = _sidecar_free_member(selected, ledger_path(self._path, project).name)
+                def member(directory, name):
+                    if sidecar_free:
+                        return _sidecar_free_member(directory, name)
+                    return _owned_inode(os.stat(name, dir_fd=directory, follow_symlinks=False))
+
+                catalogue = member(self._root_fd, catalogue_path(self._path).name)
+                ledger = member(selected, ledger_path(self._path, project).name)
             except OSError as exc:
                 raise LayoutFault('member-unproved') from exc
         self._check_lock()
@@ -1314,9 +1345,7 @@ class IncumbentGuard:
                 catalog = stack.enter_context(closing(_immutable_incumbent_read(catalogue_path(self._path))))
                 ledger = stack.enter_context(closing(_immutable_incumbent_read(ledger_path(self._path, project))))
                 catalogue._require_matching(catalog)
-                if (_row(catalog, 'SELECT store_id FROM catalogue_identity WHERE id=1') != (store,)
-                        or route_state(catalog, project) != 'active'):
-                    raise LayoutFault('member-unproved')
+                _require_admission_identity(catalog, store, project)
                 with closing(ledger.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')) as projects:
                     if projects.fetchall() != [(project,)]:
                         raise LayoutFault('member-unproved')

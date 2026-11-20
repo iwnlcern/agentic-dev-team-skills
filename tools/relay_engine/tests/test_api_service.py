@@ -178,13 +178,111 @@ class ApiServiceTests(unittest.TestCase):
             opens.assert_not_called()
             self.assertIsNone(service.ready_path)
 
+    def test_wrong_store_or_selected_member_fences_before_writable_setup(self):
+        for case in ('store', 'route', 'ledger'):
+            with self.subTest(substitution=case):
+                root = self.base / f'identity-{case}'
+                admission = admitted_store_fixture(root, P, project_name='admitted')
+                other_root = self.base / f'other-{case}'
+                other_project = str(uuid4()) if case == 'ledger' else P
+                admitted_store_fixture(other_root, other_project, project_name='other')
+                if case == 'store':
+                    os.replace(store_layout.catalogue_path(other_root), store_layout.catalogue_path(root))
+                elif case == 'route':
+                    with closing(store_layout.open_catalogue(root)) as catalog, catalog:
+                        catalog.execute('DELETE FROM project_routes WHERE project_id=?', (P,)).close()
+                else:
+                    os.replace(store_layout.ledger_path(other_root, other_project), store_layout.ledger_path(root, P))
+                service = self.m.ApiService(str(root), P, clock=lambda: 1, admission=admission.receipt)
+                self.addCleanup(service.stop)
+                with (patch.object(store_layout, '_immutable_incumbent_read',
+                                   wraps=store_layout._immutable_incumbent_read) as protected,
+                      patch.object(store_layout, '_configure', wraps=store_layout._configure) as configure,
+                      patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as ledger):
+                    with self.assertRaises(store_layout.LayoutFault):
+                        service.start()
+                    self.assertEqual(protected.call_count, 2)
+                    configure.assert_not_called()
+                    ledger.assert_not_called()
+                self.assertIsNone(service.ready_path)
+                self.assertIsNone(service._retired_admission)
+                self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
+                with store_layout.IncumbentGuard.acquire(root, expected_lock=admission.idle.lock) as guard:
+                    self.assertEqual(guard.read().phase, 'armed')
+                print(json.dumps({'identity_substitution': case, 'protected_reads': 2, 'writable_opens': 0}))
+
+    def test_member_inode_substitution_after_protected_read_fences_writer(self):
+        ledger = store_layout.ledger_path(self.root, P)
+        obtain = store_layout.IncumbentGuard._admit_members
+
+        def substitute(guard, arm):
+            members = obtain(guard, arm)
+            replacement = ledger.with_name('replacement')
+            replacement.write_bytes(ledger.read_bytes())
+            replacement.chmod(0o600)
+            replacement.replace(ledger)
+            return members
+
+        with (patch.object(store_layout.IncumbentGuard, '_admit_members', substitute),
+              patch.object(store_layout.sqlite3, 'connect', wraps=store_layout.sqlite3.connect) as opens):
+            with self.assertRaisesRegex(store_layout.LayoutFault, 'member-changed'):
+                self.service.start()
+            selected = [call.args[0] for call in opens.call_args_list if call.args[0] != ':memory:']
+            self.assertEqual(len(selected), 2)
+            self.assertTrue(all('mode=ro&immutable=1' in uri for uri in selected))
+        self.assertIsNone(self.service.ready_path)
+        self.assertIsNone(self.service._retired_admission)
+        with store_layout.IncumbentGuard.acquire(self.root, expected_lock=self.admitted.idle.lock) as guard:
+            self.assertEqual(guard.read().phase, 'armed')
+
     def test_stop_before_first_open_keeps_sqlite_unopened(self):
-        service = self.service
-        with patch.object(service, '_take_lock', side_effect=service._stopping.set):
-            with patch.object(store_layout.sqlite3, 'connect') as opens:
-                self.assertIsNone(service.start())
-                opens.assert_not_called()
-        self.assertIsNone(service.ready_path)
+        for port in (None, 0):
+            with self.subTest(bridge=port):
+                root = self.base / f'early-{port}'
+                admission = admitted_store_fixture(root, P, project_name='service')
+                service = self.m.ApiService(str(root), P, clock=lambda: 1, bridge_port=port,
+                                             admission=admission.receipt, notifier_mode='off')
+                service.arm_foreground()
+                self.addCleanup(service.stop)
+                arm = store_layout.IncumbentGuard.arm
+
+                def arm_then_stop(guard, idle, owner):
+                    record = arm(guard, idle, owner)
+                    self.assertEqual(guard.read(), record)
+                    service._foreground.enter_stop()
+                    return record
+
+                with (patch.object(store_layout.IncumbentGuard, 'arm', arm_then_stop),
+                      patch.object(store_layout.sqlite3, 'connect') as opens):
+                    self.assertIsNone(service.start())
+                    opens.assert_not_called()
+                self.assertIsNone(service.ready_path)
+                self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
+                self.assertEqual(service.stop(), 0)
+
+    def test_receipt_transport_refuses_short_oversized_and_expired_before_open(self):
+        for case in ('short', 'oversized', 'expired'):
+            with self.subTest(receipt=case):
+                reader, writer = os.pipe()
+                def supply():
+                    with os.fdopen(writer, 'wb') as pipe:
+                        if case == 'expired':
+                            time.sleep(2.2)
+                        else:
+                            size = 1 if case == 'short' else store_layout._IDLE_RECEIPT_LIMIT + 1
+                            pipe.write(b'{' * size)
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    producer = pool.submit(supply)
+                    service = self.m.ApiService(str(self.root), P, clock=lambda: 1, idle_fd=reader)
+                    with patch.object(store_layout.sqlite3, 'connect') as opens:
+                        reason = 'idle-receipt-expired' if case == 'expired' else 'idle-receipt-invalid'
+                        with self.assertRaisesRegex(store_layout.LayoutFault, reason):
+                            service.start()
+                        opens.assert_not_called()
+                    producer.result(timeout=3)
+                self.assertIsNone(service.ready_path)
+                self.assertFalse((self.root / lifecycle_paths._LIVE_LOCATOR).exists())
+                print(json.dumps({'receipt_transport': case, 'refusal': reason, 'ordinary_opens': 0}))
 
     def test_stop_while_receipt_intake_parked(self):
         tools = Path(__file__).resolve().parents[2]
@@ -228,14 +326,65 @@ service.start()
                                              admission=admission.receipt, notifier_mode='off')
                 service.arm_foreground()
                 self.addCleanup(service.stop)
-                with patch.object(service, '_publish_locator', side_effect=service._foreground.enter_stop):
-                    with patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as opens:
-                        self.assertIsNone(service.start())
-                        opens.assert_called_once()
+                stopping = service.is_stopping
+                triggered = False
+
+                def stop_after_last_sample():
+                    nonlocal triggered
+                    observed = stopping()
+                    if not triggered and 'ready.pending' in service._runtime_files:
+                        triggered = True
+                        self.assertTrue((service.runtime_dir / 'ready.pending').exists())
+                        self.assertFalse(Path(service.ready_path).exists())
+                        service._foreground.enter_stop()
+                    return observed
+
+                publish = os.replace if port is None else os.link
+                with (patch.object(service, 'is_stopping', side_effect=stop_after_last_sample),
+                      patch.object(os, publish.__name__, wraps=publish) as published,
+                      patch.object(service, '_publish_locator', wraps=service._publish_locator) as locator,
+                      patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as opens):
+                    self.assertIsNone(service.start())
+                    opens.assert_called_once()
+                    self.assertTrue(triggered)
+                    self.assertFalse(any(Path(call.args[1]).name == 'ready.json'
+                                         for call in published.call_args_list))
+                    locator.assert_not_called()
                 self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
                 self.assertEqual(service.stop(), 0)
                 self.assertFalse(Path(service.ready_path).exists())
                 self.assertEqual(service._retired_admission[0].phase, 'idle')
+
+    def test_direct_stop_fences_a_substituted_runtime(self):
+        ready = Path(self.service.start())
+        runtime = ready.parent
+        moved = runtime.with_name('moved')
+        runtime.rename(moved)
+        runtime.mkdir(mode=0o700)
+        replacement = runtime / 'ready.json'
+        replacement.write_bytes(b'replacement')
+        try:
+            with self.assertRaises(OSError):
+                self.service.stop()
+            self.assertEqual(replacement.read_bytes(), b'replacement')
+            self.assertTrue((moved / 'ready.json').exists())
+            self.assertEqual(self.service._guard.read().phase, 'armed')
+            self.assertIsNone(self.service._retired_admission)
+        finally:
+            replacement.unlink()
+            runtime.rmdir()
+            moved.rename(runtime)
+
+    def test_console_rejects_wrong_live_protocol_instance_without_sqlite(self):
+        from dataclasses import replace
+
+        self.start()
+        with patch.object(store_layout.sqlite3, 'connect') as opens:
+            self.assertIsInstance(lifecycle_paths.console_target(str(self.root)), lifecycle_paths.ConsoleTarget)
+            with patch.object(self.service, 'runtime', replace(self.service.runtime, runtime_instance_id=uuid4().hex)):
+                self.assertIsInstance(lifecycle_paths.console_target(str(self.root)),
+                                      lifecycle_paths.ConsoleTargetUnavailable)
+            opens.assert_not_called()
 
     def test_console_ordinary_locator_rejects_wrong_epoch_without_sqlite(self):
         from relay_engine import lifecycle_paths
@@ -306,7 +455,7 @@ service.start()
         self.assertFalse(ready.parent.exists())
 
     def test_foreground_watchdog_exits_with_original_work_parked(self):
-        for phase in ('cleanup', 'report', 'accept'):
+        for phase in ('cleanup', 'report', 'accept', 'record-sync'):
             with self.subTest(phase=phase):
                 self.check_hard_stop_with_parked_owner(phase)
 
@@ -320,6 +469,7 @@ service.start()
 import os, threading
 from pathlib import Path
 from relay_engine.api_service import ApiService
+from relay_engine import store_layout
 
 marker = Path({str(self.base)!r}) / {phase!r}
 
@@ -331,6 +481,22 @@ service = ApiService({str(root)!r}, {P!r}, clock=lambda: 1, stop_report=park,
                      idle_fd=int(os.environ.pop('ADT_PRIVATE_IDLE_FD')))
 service.arm_foreground()
 service.start()
+if {phase!r} == 'record-sync':
+    original_replace = store_layout.IncumbentGuard._replace
+    original_fsync = os.fsync
+
+    def park_first_idle_record_sync(guard, expected, record):
+        if record.phase == 'idle':
+            def parked_sync(fd):
+                assert os.fstat(fd).st_size > 0
+                park()
+            os.fsync = parked_sync
+        try:
+            return original_replace(guard, expected, record)
+        finally:
+            os.fsync = original_fsync
+
+    store_layout.IncumbentGuard._replace = park_first_idle_record_sync
 if {phase!r} == 'accept':
     class ParkedAccept:
         listener = service._listener
@@ -345,7 +511,7 @@ print(service.socket_path, flush=True)
 service.serve_forever()
 if {phase!r} == 'cleanup':
     service._stop_owned = park
-else:
+elif {phase!r} != 'record-sync':
     def refuse(_attempt):
         raise OSError('fixture outstanding')
     service._stop_owned = refuse
@@ -380,12 +546,16 @@ service.stop()
                     _, error = child.communicate(timeout=5)
                     elapsed = time.monotonic() - started
                     self.assertEqual(child.returncode, 75, error)
+                    self.assertGreaterEqual(elapsed, 3.8)
                     self.assertLess(elapsed, 5)
                     self.assertEqual(original_inode, lock.stat().st_ino)
                     fcntl.flock(observer, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     if phase == 'accept':
                         peer.settimeout(1)
                         self.assertEqual(peer.recv(1), b'')
+                    if phase == 'record-sync':
+                        record = json.loads((root / store_layout._INCUMBENT).read_bytes())
+                        self.assertEqual(record['phase'], 'armed')
                     print(json.dumps({'parked': phase, 'hard_stop_seconds': round(elapsed, 3),
                                       'status': child.returncode, 'same_inode_kernel_return': True}))
             finally:
@@ -833,7 +1003,7 @@ service.serve_forever()
                 release.set()
         self.assertEqual(self.rows('SELECT name FROM projects'), [('drained',)])
         self.assertFalse(ready.exists()); self.assertFalse(Path(data['socket']).exists())
-        self.assertLess(order.index(str(ready)), order.index(data['socket']))
+        self.assertLess(order.index(ready.name), order.index(Path(data['socket']).name))
 
     def test_second_signal_during_drain_finishes_stop(self):
         import fcntl

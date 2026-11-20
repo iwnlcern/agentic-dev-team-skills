@@ -2,7 +2,6 @@
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
-import errno
 import io
 import json
 import os
@@ -78,6 +77,7 @@ class _NotifierGate:
 class _ForegroundEpoch:
     def __init__(self, fence_writer):
         self._initial = {}
+        self._ready_acknowledged = False
         self._stop = {}
         self._ingress = {}
         self.notifier_gate = None
@@ -140,11 +140,17 @@ class _ForegroundEpoch:
         self._wake()
         return attempt
 
-    def acknowledge_ready(self):
+    def claim_ready_publication(self):
+        # Claim publication before filesystem I/O. STOP and the hard observer
+        # never wait for the publisher to finish that I/O.
         return self._initial.setdefault('winner', 'ready') == 'ready' and not self.admission_closed
 
+    def acknowledge_ready(self):
+        self._ready_acknowledged = self._initial.get('winner') == 'ready' and not self.admission_closed
+        return self._ready_acknowledged
+
     def admits(self):
-        return self._initial.get('winner') == 'ready' and not self.admission_closed
+        return self._ready_acknowledged and not self.admission_closed
 
     def try_seal_clean(self, receipt):
         attempt = receipt.attempt
@@ -331,6 +337,7 @@ class ApiService:
         self.queue_notifier = queue_notifier
         self._notifier_custodian = None
         self._admission = admission
+        self._admission_unresolved = False
         self._idle_fd = idle_fd
         self._retirement_fd = retirement_fd
         self._notifier_setup = notifier_setup
@@ -507,16 +514,21 @@ class ApiService:
             self._owned_arm = self._guard.arm(idle, owner)
             if self.is_stopping():
                 return None
+            self._admission_unresolved = True
+            members = self._guard._admit_members(self._owned_arm)
+            if self.is_stopping():
+                return None
             writer = StoreWriter(self.store_root, runtime_instance_id=instance_id)
             holder = (self._lock_fd, Path(self.store_root) / 'api-service.lock', self._lock_identity)
             writer.bind_service_owner(holder, self._foreground)
-            writer.bind_store_arm(self._guard, self._owned_arm, self.is_stopping)
+            writer.bind_store_arm(self._guard, self._owned_arm, self.is_stopping, members)
             self.writer = writer
             writer.start()
             try:
                 self.writer.open_project(self.project_id)
             except (store_layout.LayoutFault, OSError):
                 raise ServiceStartRefused('ledger_unavailable') from None
+            self._admission_unresolved = False
             if self.is_stopping():
                 return None
             if self.components is None:
@@ -577,7 +589,8 @@ class ApiService:
             writer.verify_service_owner()
             if self.is_stopping():
                 return None
-            self._runtime_files['ready.json'] = self._runtime_files['ready.pending']
+            if self._foreground is not None and not self._foreground.claim_ready_publication():
+                return None
             if self.bridge_port is None:
                 os.replace(pending, self.ready_path)
             else:
@@ -585,6 +598,8 @@ class ApiService:
                     os.link(pending, self.ready_path, follow_symlinks=False)
                 except FileExistsError:
                     raise ServiceStartRefused('runtime_dir_unsafe') from None
+            self._runtime_files['ready.json'] = self._runtime_files['ready.pending']
+            if self.bridge_port is not None:
                 pending.unlink()
             self._runtime_files.pop('ready.pending')
             self._publish_locator()
@@ -903,27 +918,14 @@ class ApiService:
                 raise OSError('live locator changed')
             os.unlink(name, dir_fd=self._guard._root_fd)
             self._locator_inode = None
-        if self.runtime_dir is not None and self._runtime_inode is not None:
-            if self._inode(self.runtime_dir) == self._runtime_inode:
-                for name in ('ready.json', 'api.sock', 'ready.pending'):
-                    inode = self._runtime_files.get(name)
-                    path = self.runtime_dir / name
-                    if inode is not None and self._inode(path) == inode:
-                        path.unlink(missing_ok=True)
-                try:
-                    self.runtime_dir.rmdir()
-                except OSError as error:
-                    if deadline is not None or error.errno != errno.ENOTEMPTY:
-                        raise
-            elif deadline is not None:
-                raise OSError('runtime directory changed')
+        if self._runtime_inode is not None:
+            self._withdraw_runtime()
         self._runtime_inode = self.runtime_dir = None
-        self._runtime_files.clear()
         identity = None
         if self._guard is not None:
             self._guard._check_lock()
             identity = self._guard.lock_identity
-            if self._owned_arm is not None:
+            if self._owned_arm is not None and not self._admission_unresolved:
                 if self._checkpointing:
                     raise OSError('checkpoint epoch remains armed')
                 proof = self._guard._retirement_proof(self._owned_arm, b'all original service I/O settled')
@@ -945,3 +947,29 @@ class ApiService:
             self._restore_signals()
             return None
         return _RetirementReceipt(attempt, identity)
+
+    def _withdraw_runtime(self):
+        runtime = self.runtime_dir
+        with ExitStack() as stack:
+            directory = lifecycle_paths._open_directory(stack, runtime)
+            if (store_layout._inode(os.fstat(directory)) != self._runtime_inode
+                    or self._inode(runtime) != self._runtime_inode):
+                raise OSError('runtime directory changed')
+            if set(os.listdir(directory)) != self._runtime_files.keys():
+                raise OSError('runtime publications unresolved')
+
+            def identity(name):
+                return store_layout._inode(os.stat(name, dir_fd=directory, follow_symlinks=False))
+
+            if any(identity(name) != expected for name, expected in self._runtime_files.items()):
+                raise OSError('runtime publication changed')
+            for name in ('ready.json', 'api.sock', 'ready.pending'):
+                if name not in self._runtime_files:
+                    continue
+                if identity(name) != self._runtime_files[name]:
+                    raise OSError('runtime publication changed')
+                os.unlink(name, dir_fd=directory)
+                del self._runtime_files[name]
+            if self._inode(runtime) != self._runtime_inode:
+                raise OSError('runtime directory changed')
+            runtime.rmdir()
