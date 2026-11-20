@@ -497,11 +497,12 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
 
         for root in (production, selected):
             root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            admission = service_fixture.admitted_store_fixture(root, service_fixture.P, project_name='console')
-            identities.add(admission.idle.store)
-            service = ApiService(str(root), service_fixture.P, clock=lambda: 0, bridge_port=0,
-                                 notifier_mode='off', admission=admission.receipt)
-            ready = Path(service.start())
+            with patch.object(submit, '_home', return_value=str(workspace)):
+                admission = service_fixture.admitted_store_fixture(root, service_fixture.P, project_name='console')
+                identities.add(admission.idle.store)
+                service = ApiService(str(root), service_fixture.P, clock=lambda: 0, bridge_port=0,
+                                     notifier_mode='off', admission=admission.receipt)
+                ready = Path(service.start())
             loop = Thread(target=service.serve_forever)
             loop.start()
             self.addCleanup(loop.join, 5)
@@ -597,8 +598,10 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
                 if held is not None:
                     probe.assert_called_once_with(root)
                     identity.assert_not_called()
-                self.assertTrue(not output and 'status' in error and 'doctor' in error)
-                self.assertIn(shlex.quote(root), error)
+                self.assertEqual(output, '')
+                self.assertIn('Check the operator launch terminal for the refusal.', error)
+                command = f'adt engine run --store-root {shlex.quote(root)} --project-id PROJECT'
+                self.assertIn(command, error)
                 read.assert_not_called()
                 key.assert_not_called()
                 client.assert_not_called()

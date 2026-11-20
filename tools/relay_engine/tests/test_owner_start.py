@@ -30,12 +30,11 @@ def installed_key(path, _stat):
 
 
 def synthetic_birth(selection, consume, *, incomplete=False):
-    """Test-only provider using the pinned isolated Store primitives."""
+    """Use the checked production-kind reservation with a synthetic selection."""
     from relay_engine import store_layout
-    native_parent = store_layout._inode(selection.root.parent.stat())
-    consume(selection.root, selection.store, selection.project, native_parent)
     guard, enrollment = store_layout.IncumbentGuard._create_new(
-        selection.root, selection.store, selection.project)
+        selection.root, selection.store, selection.project, kind='production',
+        consume_production_birth=consume)
     with guard:
         idle, _ = guard.enroll_new(enrollment)
         from relay_engine import owner_start
@@ -45,11 +44,6 @@ def synthetic_birth(selection, consume, *, incomplete=False):
         if incomplete:
             raise store_layout.LayoutFault('synthetic-birth-unsettled')
         guard._materialize_birth(armed, project_name=selection.project_name, now_ms=1)
-        # The real production-kind materializer stays deferred to Task 4.
-        import sqlite3
-        from contextlib import closing
-        with closing(sqlite3.connect(store_layout.catalogue_path(selection.root))) as db, db:
-            db.execute("UPDATE catalogue_identity SET kind='production'").close()
         proof = guard._retirement_proof(armed, b'synthetic birth settled')
         idle = guard.retire(armed, proof)
         return store_layout._encode_idle_receipt(idle, proof)
