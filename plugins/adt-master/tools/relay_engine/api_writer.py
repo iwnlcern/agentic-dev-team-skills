@@ -179,8 +179,11 @@ class StoreWriter:
     def _stop_attempt(self):
         return self._epoch.attempt if self._epoch is not None else None
 
+    def _admission_closed(self):
+        return self._epoch is not None and self._epoch.admission_closed
+
     def _require_running(self):
-        if self._stop_attempt() is not None:
+        if self._admission_closed():
             raise WriterUnavailable('stopped')
         if self._closed or self._worker is None:
             raise WriterUnavailable('closed')
@@ -330,7 +333,7 @@ class StoreWriter:
 
     def start(self) -> None:
         with self._lock:
-            if self._stop_attempt() is not None:
+            if self._admission_closed():
                 raise WriterUnavailable('stopped')
             if self._closed:
                 raise WriterUnavailable('closed')
@@ -490,13 +493,17 @@ class StoreWriter:
             raise
 
     def _permit_commit(self):
-        with self._lock:
-            sampled = time.monotonic()
-            attempt = self._stop_attempt()
-            if attempt is not None and sampled >= attempt.active:
-                self._publish_stop_outcome(self._active_request)
-                return False
-            self._active_request.committing = True
+        while True:
+            with self._lock:
+                stopped = self._admission_closed()
+                attempt = self._stop_attempt()
+                if not stopped or attempt is not None:
+                    if attempt is not None and time.monotonic() >= attempt.active:
+                        self._publish_stop_outcome(self._active_request)
+                        return False
+                    self._active_request.committing = True
+                    break
+            self._epoch.wait_for_attempt()
         if self._epoch is not None:
             self._phase('commit_permitted')
         return True
@@ -751,7 +758,7 @@ class StoreWriter:
                 with self._changed:
                     if request.withdrawn:
                         continue
-                    if self._stop_attempt() is not None:
+                    if self._admission_closed():
                         request.error = WriterUnavailable('stopped')
                         continue
                     self._active_request = request

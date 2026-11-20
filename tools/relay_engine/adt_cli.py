@@ -27,7 +27,7 @@ class WindowSession:
 
 
 WindowResolver = Callable[[], WindowSession | None]
-NotifierFactory = Callable[[str | None, Callable[[], bool]], api_service.QueueNotifier | None]
+NotifierFactory = Callable[[str | None, api_service.ApiService], None]
 
 
 def _bridge_port(value):
@@ -141,7 +141,7 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
             service.arm_foreground()
             try:
                 if args.bridge_port is not None and queue_notifier is not None:
-                    service.queue_notifier = queue_notifier(args.terminal_notifier, service.is_stopping)
+                    queue_notifier(args.terminal_notifier, service)
                 try:
                     path = service.start()
                 except (api_service.ServiceStartRefused, store_layout.LayoutFault, version.FingerprintError) as error:

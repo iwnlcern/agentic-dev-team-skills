@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket as network
 import subprocess
@@ -317,26 +318,106 @@ const { chromium } = require(process.argv[1]);
         spec.loader.exec_module(checker)
         installed = checker.install_tier('adt-orchestrator', self.base / 'installed')
 
-        program = self.base / 'terminal-notifier'
-        marker = self.base / 'notifier-started'
-        program.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n')
+        tools = installed / 'tools'
+        launcher = tools / 'adt'
+        cases = ('ordinary', 'finishing', 'commit_permitted', 'held')
+        qualified = (sys.platform, os.uname().machine) in {('darwin', 'arm64'), ('linux', 'aarch64')}
+        if not qualified:
+            cases = ('unsupported',)
+
+        for phase in cases:
+            with self.subTest(phase=phase):
+                self.check_installed_notifier_arm(launcher, phase)
+        if qualified:
+            for phase in ('pre_ready', 'before_final', 'overlap', 'late_invocation', 'late_return'):
+                with self.subTest(phase=phase):
+                    self.check_installed_custody_discriminator(launcher, phase)
+
+    def verify_custodian_inventory(self, custodian, foreground, root, runtime):
+        if sys.platform == 'darwin':
+            files = subprocess.check_output(['/usr/sbin/lsof', '-Ffatn', '-p', str(custodian)],
+                                            text=True, timeout=3)
+            self.assertEqual(files.splitlines().count('tPIPE'), 1, files)
+            self.assertEqual(files.splitlines().count('tunix'), 1, files)
+            self.assertNotIn(str(root), files)
+            self.assertNotIn(str(runtime), files)
+            # Darwin lsof omits PIPE access. READY requires F_GETFL read-only
+            # verification in the installed custodian.
+            return
+
+        def inventory(pid):
+            proc = Path('/proc') / str(pid)
+            records = []
+            for fd in (proc / 'fd').iterdir():
+                try:
+                    name = os.readlink(fd)
+                    lines = (proc / 'fdinfo' / fd.name).read_text().splitlines()
+                except FileNotFoundError:
+                    continue
+                flags = next(int(line.split()[1], 8) for line in lines if line.startswith('flags:'))
+                records.append((fd.name, name, flags))
+            return records
+
+        def settled_inventory():
+            descriptors = [(fd, name, flags) for fd, name, flags in inventory(custodian) if int(fd) > 2]
+            if len(descriptors) == 2 and all(flags & os.O_CLOEXEC for _, _, flags in descriptors):
+                return descriptors
+            return None
+
+        # pass_fds makes the two descriptors inheritable for exec. Observe
+        # them after the custodian restores CLOEXEC and while READY is parked.
+        descriptors = self.wait_until(settled_inventory)
+        self.assertEqual(len(descriptors), 2, descriptors)
+        read_pipe, = [(name, flags) for _, name, flags in descriptors if name.startswith('pipe:')]
+        self.assertEqual(read_pipe[1] & os.O_ACCMODE, os.O_RDONLY)
+        self.assertTrue(read_pipe[1] & os.O_NONBLOCK)
+        self.assertTrue(read_pipe[1] & os.O_CLOEXEC)
+        self.assertEqual(sum(name.startswith('socket:') for _, name, _ in descriptors), 1)
+        writes = [name for _, name, flags in inventory(foreground)
+                  if name == read_pipe[0] and flags & os.O_ACCMODE == os.O_WRONLY]
+        self.assertEqual(writes, [read_pipe[0]])
+
+    def check_installed_notifier_arm(self, launcher, phase):
+        arm = self.base / phase
+        arm.mkdir()
+        root = arm / 'store'
+        shutil.copytree(self.root, root)
+        home = arm / 'home'
+        home.mkdir(mode=0o700)
+        program = arm / 'terminal-notifier'
+        started = arm / 'child.json'
+        parked = arm / 'parked'
+        release = arm / 'release'
+        waiter = arm / 'waiter'
+        program.write_text(f"""#!{sys.executable}
+import json, os, pathlib, signal, sys, time
+if {phase!r} == 'held':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+fds = []
+for fd in range(3, 256):
+    try:
+        os.fstat(fd)
+    except OSError:
+        continue
+    fds.append(fd)
+path = pathlib.Path({str(started)!r})
+path.with_suffix('.tmp').write_text(json.dumps([os.getpid(), os.getppid(), sys.argv[1:], fds]))
+path.with_suffix('.tmp').replace(path)
+if {phase!r} == 'held':
+    time.sleep(15)
+""")
         program.chmod(0o700)
 
-        def submit_question(peer, subject):
-            raw = draft(kind='QUESTION', to='operator', needs='answer',
-                        subject=subject, body='Can we proceed?\n')
-            reply = peer.call('relay.submit', {'draft_base64': base64.b64encode(raw).decode(),
-                                               'submission_key': subject})
-            self.assertIn('result', reply)
-            return reply['result']['relay_id']
-
-        with store_layout.open_catalogue(self.root) as catalogue:
-            catalogue.execute('INSERT INTO queue_notifier_health VALUES (1,2,7)').close()
-        catalogue.close()
+        catalogue = store_layout.open_catalogue(root)
+        try:
+            with catalogue:
+                catalogue.execute('INSERT INTO queue_notifier_health VALUES (1,2,7)').close()
+        finally:
+            catalogue.close()
 
         def snapshot(relay_id, *, stopped=False):
-            catalogue = (store_layout.open_catalogue(self.root, kind='isolated') if stopped else
-                         store_layout.open_catalogue_readonly(self.root))
+            catalogue = (store_layout.open_catalogue(root, kind='isolated') if stopped else
+                         store_layout.open_catalogue_readonly(root))
             try:
                 row = records._one(catalogue,
                     'SELECT n.item_id,n.revision,n.state,n.attempts,n.next_attempt_at_ms,n.last_error_class '
@@ -347,115 +428,308 @@ const { chromium } = require(process.argv[1]);
             finally:
                 catalogue.close()
 
-        environment = {'HOME': str(self.home), 'TMPDIR': str(self.temp),
-                       'PYTHONDONTWRITEBYTECODE': '1'}
-        command = [sys.executable, str(installed / 'tools' / 'adt'), 'engine', 'serve',
-                   '--store-root', str(self.root), '--project-id', P, '--bridge-port', '0',
-                   '--terminal-notifier', str(program)]
-        with subprocess.Popen(command, cwd=self.base, env=environment,
+        args = ['engine', 'serve', '--store-root', str(root), '--project-id', P, '--bridge-port', '0',
+                '--terminal-notifier', str(program)]
+        environment = {'HOME': str(home), 'TMPDIR': str(self.temp), 'PYTHONDONTWRITEBYTECODE': '1'}
+        command = [sys.executable, str(launcher), *args]
+        if phase in {'finishing', 'commit_permitted'}:
+            fixture = f"""
+import pathlib, runpy, sys, threading, time
+sys.path.insert(0, {str(launcher.parent)!r})
+from relay_engine.api_writer import StoreWriter
+from relay_engine.operator_queue import notifier
+target = {phase!r}
+parked = pathlib.Path({str(parked)!r})
+release = pathlib.Path({str(release)!r})
+waiter = pathlib.Path({str(waiter)!r})
+receipt = threading.local()
+old_delivered = notifier.notify_delivered
+old_phase = StoreWriter._phase
+old_submit = StoreWriter.submit_declared
+def delivered(conn, note, now):
+    receipt.active = True
+    return old_delivered(conn, note, now)
+def checkpoint(self, phase):
+    if phase == target and getattr(receipt, 'active', False):
+        receipt.active = False
+        parked.touch()
+        until = time.monotonic() + 5
+        while not release.exists() and time.monotonic() < until:
+            time.sleep(0.01)
+    return old_phase(self, phase)
+def submit(self, job):
+    value = old_submit(self, job)
+    if threading.current_thread().name == 'adt-queue-notify' and value.fault:
+        waiter.write_text(value.fault)
+    return value
+notifier.notify_delivered = delivered
+StoreWriter._phase = checkpoint
+StoreWriter.submit_declared = submit
+sys.argv = { [str(launcher), *args]!r}
+runpy.run_path(sys.argv[0], run_name='__main__')
+"""
+            command = [sys.executable, '-c', fixture]
+
+        with subprocess.Popen(command, cwd=arm, env=environment, start_new_session=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
             try:
-                ready = Path(lifecycle_paths.console_target(str(self.root)).ready_path)
+                store_id = store_layout.read_store_id(root)
+                ready = Path(lifecycle_paths.ready_file_path(
+                    store_id, platform=sys.platform, environ=environment, home=str(home)))
                 self.wait_until(ready.exists)
                 data = json.loads(ready.read_bytes())
                 origin = data['bridge_origin']
                 peer = self.connect(data)
                 self.sign_in(peer)
-                question = submit_question(peer, 'Local decision')
-                second = submit_question(peer, 'Another local decision')
-                questions = (question, second)
-                for relay_id in questions:
-                    self.wait_until(lambda: snapshot(relay_id)[0])
-                before = [snapshot(relay_id) for relay_id in questions]
-                for row, _ in before:
-                    self.assertEqual(row[1:4], (1, 'pending', 0))
-                    self.assertIsNone(row[-1])
-                self.assertFalse(marker.exists())
-                time.sleep(1.2)
-                self.assertEqual([snapshot(relay_id) for relay_id in questions], before)
+                raw = draft(kind='QUESTION', to='operator', needs='answer', subject='Local decision',
+                            body='Can we proceed?\n')
+                reply = peer.call('relay.submit', {'draft_base64': base64.b64encode(raw).decode(),
+                                                   'submission_key': 'question'})
+                self.assertIn('result', reply)
+                question = reply['result']['relay_id']
+                self.wait_until(lambda: snapshot(question)[0])
+                expected_row = 'pending'
+                expected_status = 75 if phase in {'finishing', 'commit_permitted', 'held'} else 0
+                if phase == 'unsupported':
+                    before = snapshot(question)
+                    time.sleep(1.2)
+                    self.assertEqual(snapshot(question), before)
+                    self.assertFalse(started.exists())
+                else:
+                    self.wait_until(started.exists)
+                    pid, custodian, argv, inherited = json.loads(started.read_bytes())
+                    self.assertNotEqual(custodian, daemon.pid)
+                    self.assertEqual(inherited, [])
+                    self.assertEqual(argv, ['-title', '\\service: platform.planner', '-message', '\\Local decision'])
+                    if phase == 'ordinary':
+                        expected_row = 'delivered'
+                        self.wait_until(lambda: snapshot(question)[0][2] == expected_row)
+                    elif phase == 'held':
+                        os.kill(pid, 0)
+                        self.verify_custodian_inventory(custodian, daemon.pid, root, ready.parent)
+                        print(json.dumps({'custodian': custodian, 'pipe_read_only': True,
+                                          'private_control_only': True, 'helper_inherited_fds': inherited}))
+                    else:
+                        self.wait_until(parked.exists)
+                        expected_row = 'delivered' if phase == 'commit_permitted' else 'pending'
+
                 discovery = self.request(origin, '/api/connect?min_protocol=3.0&max_protocol=3.0')
                 self.assertEqual(discovery[0], 200)
                 self.assertEqual(json.loads(discovery[2])['result']['schema_digest'], data['schema_digest'])
-                launch = subprocess.check_output(
-                    [sys.executable, str(installed / 'tools' / 'adt'),
-                     'console', 'open', '--ready', str(ready), '--print'],
-                    env=environment, text=True, timeout=3).strip().split('#launch=', 1)[1]
-                headers = {'Origin': origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json'}
-                status, session_headers, body = self.request(origin, '/api/session', payload={'launch': launch},
-                                                             headers=headers)
-                self.assertEqual(status, 200)
-                signed = {**headers, 'Cookie': session_headers['Set-Cookie'].split(';', 1)[0],
-                          'X-ADT-CSRF': json.loads(body)['csrf_token']}
-                status, _, body = self.request(
-                    origin, '/api/read/queue.list?scope=machine&state=pending&kind=question&page_size=100',
-                    headers=signed)
-                self.assertEqual(status, 200, body)
-                self.assertEqual({item['source_relay_id'] for item in json.loads(body)['result']['items']},
-                                 set(questions))
-
-                lock = self.root / 'api-service.lock'
-                with lock.open('r+b') as witness:
+                with (root / 'api-service.lock').open('r+b') as witness:
                     held = os.fstat(witness.fileno())
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(witness, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    started = time.monotonic()
-                    daemon.send_signal(signal.SIGTERM)
-                    _, stderr = daemon.communicate(timeout=3)
-                    elapsed = time.monotonic() - started
-                    self.assertEqual(daemon.returncode, 0, stderr)
-                    self.assertLess(elapsed, 2)
+                    sent = time.monotonic()
+                    if phase == 'held':
+                        self.assertNotEqual(os.getpgid(custodian), os.getpgid(daemon.pid))
+                        os.killpg(daemon.pid, signal.SIGTERM)
+                    else:
+                        daemon.send_signal(signal.SIGTERM)
+                    if phase in {'finishing', 'commit_permitted'}:
+                        self.wait_until(waiter.exists)
+                        fault = 'stop_commit_unknown' if phase == 'commit_permitted' else 'stop_unwritten'
+                        self.assertEqual(waiter.read_text(), fault)
+                        release.touch()
+                    _, stderr = daemon.communicate(timeout=5)
+                    elapsed = time.monotonic() - sent
+                    self.assertEqual(daemon.returncode, expected_status, stderr)
+                    self.assertLess(elapsed, 2 if expected_status == 0 else 5)
                     fcntl.flock(witness, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    after = lock.stat()
+                    after = (root / 'api-service.lock').stat()
                     self.assertEqual((after.st_dev, after.st_ino), (held.st_dev, held.st_ino))
-                self.assertEqual(stderr.splitlines().count(
-                    b'adt engine serve: notifier issue capability unavailable'), 1, stderr)
-                self.assertFalse(marker.exists())
-                self.assertFalse(ready.parent.exists())
-                with self.assertRaises(OSError):
-                    self.request(origin, '/')
-                self.assertEqual([snapshot(relay_id, stopped=True) for relay_id in questions], before)
-                print(json.dumps({'installed_refusal': True, 'zero_issue': True, 'guarded_request': True,
-                                  'outbox_and_health_unchanged': True, 'status': daemon.returncode,
-                                  'term_seconds': round(elapsed, 3), 'same_inode_return': True}))
+                if expected_status == 0:
+                    self.assertFalse(ready.parent.exists())
+                if phase != 'unsupported':
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+                row, _ = snapshot(question, stopped=True)
+                self.assertEqual(row[1:4], (1, expected_row, 0))
+                print(json.dumps({'installed': phase, 'build': data['build_id'], 'durable_row': expected_row,
+                                  'status': expected_status, 'term_seconds': round(elapsed, 3),
+                                  'same_inode_return': True}))
             finally:
+                release.touch()
                 if daemon.poll() is None:
                     daemon.kill()
                     daemon.communicate(timeout=3)
 
-        for (relay_id, (row, _)), phase in zip(zip(questions, before), ('finishing', 'commit_permitted')):
-            with self.subTest(receipt_phase=phase):
-                owner = self.m.ApiService(str(self.root), P, clock=lambda: time.time_ns() // 1000000,
-                                          bridge_port=0)
-                owner.arm_foreground()
-                try:
-                    self.assertIsNotNone(owner.start())
-                    note = notifier.Notification(row[0], row[1], 'synthetic', 'synthetic')
-                    parked, release = threading.Event(), threading.Event()
 
-                    def park(current_phase):
-                        if current_phase == phase:
-                            parked.set()
-                            release.wait(3)
-
-                    owner.writer._phase_hook = park
-                    with ThreadPoolExecutor(1) as pool:
-                        receipt = pool.submit(owner._queue.port.catalogue,
-                                              lambda conn: notifier.notify_delivered(conn, note, owner.clock()))
+    def check_installed_custody_discriminator(self, launcher, phase):
+        arm = self.base / phase
+        arm.mkdir()
+        root = arm / 'store'
+        shutil.copytree(self.root, root)
+        home = arm / 'home'
+        home.mkdir(mode=0o700)
+        program = arm / 'terminal-notifier'
+        program.write_text(f"""#!{sys.executable}
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(15)
+""")
+        program.chmod(0o700)
+        parked, release = arm / 'parked', arm / 'release'
+        issued, reaped = arm / 'issued', arm / 'reaped'
+        retiring, claimed, eof = arm / 'retiring', arm / 'claimed', arm / 'eof'
+        after_exit = arm / 'after-exit'
+        # The test hook loads in the actual installed launcher processes. It
+        # parks the specified boundary without changing any shipped bytes.
+        (arm / 'sitecustomize.py').write_text(f"""
+import json, os, pathlib, socket, subprocess, sys, threading, time
+phase = {phase!r}
+parked = pathlib.Path({str(parked)!r})
+release = pathlib.Path({str(release)!r})
+issued = pathlib.Path({str(issued)!r})
+reaped = pathlib.Path({str(reaped)!r})
+retiring = pathlib.Path({str(retiring)!r})
+claimed = pathlib.Path({str(claimed)!r})
+eof = pathlib.Path({str(eof)!r})
+after_exit = pathlib.Path({str(after_exit)!r})
+def wait_for(path):
+    deadline = time.monotonic() + 9
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+def park(value):
+    parked.write_text(str(value))
+    wait_for(release)
+def native(argv, **kwargs):
+    if phase == 'late_invocation':
+        park('before invocation')
+    child = original_popen(argv, **kwargs)
+    issued.write_text(str(child.pid))
+    for name in ('poll', 'wait'):
+        method = getattr(child, name)
+        def capture(*args, base=method, **kwargs):
+            result = base(*args, **kwargs)
+            if child.returncode is not None:
+                reaped.write_text(str(child.returncode))
+            return result
+        setattr(child, name, capture)
+    if phase == 'late_return':
+        park('after invocation')
+    return child
+original_popen = subprocess.Popen
+if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
+    if phase in ('late_invocation', 'late_return'):
+        subprocess.Popen = native
+    elif phase in ('before_final', 'overlap'):
+        gate = int(sys.argv[3])
+        reads = 0
+        read = os.read
+        def final_read(fd, size):
+            global reads
+            if fd == gate:
+                reads += 1
+                if phase == 'overlap':
+                    if reads == 1:
+                        park('before claim')
                         try:
-                            self.assertTrue(parked.wait(1))
-                            owner._foreground.publish_stop(time.monotonic() - 1.5)
-                            if phase == 'finishing':
-                                with self.assertRaisesRegex(records.JobUnavailable, 'stopped'):
-                                    receipt.result(1)
-                            else:
-                                with self.assertRaisesRegex(api_writer.TurnIndeterminate, 'stop_commit_unknown'):
-                                    receipt.result(1)
-                        finally:
-                            release.set()
-                finally:
-                    self.assertEqual(owner.stop(), 0)
-                durable, _ = snapshot(relay_id, stopped=True)
-                expected = 'pending' if phase == 'finishing' else 'delivered'
-                self.assertEqual(durable[:3], (row[0], row[1], expected))
-                print(json.dumps({'component_receipt_phase': phase, 'durable_state': expected,
-                                  'revision': row[1], 'retired': True}))
+                            return read(fd, size)
+                        except BlockingIOError:
+                            claimed.touch()
+                            raise
+                    if reads == 2:
+                        wait_for(after_exit)
+                elif reads == 2:
+                    park('final check')
+                result = read(fd, size)
+                if not result:
+                    eof.touch()
+                return result
+            return read(fd, size)
+        os.read = final_read
+        subprocess.Popen = native
+elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
+    if phase == 'pre_ready':
+        def start_custodian(argv, **kwargs):
+            child = original_popen(argv, **kwargs)
+            if '--private-notifier-custodian' in argv:
+                park(child.pid)
+            return child
+        subprocess.Popen = start_custodian
+    elif phase == 'before_final':
+        sendall = socket.socket.sendall
+        def leave_stop_unread(self, data, *args):
+            if b'"kind":"stop"' not in data:
+                return sendall(self, data, *args)
+        socket.socket.sendall = leave_stop_unread
+    elif phase == 'overlap':
+        sys.path.insert(0, {str(launcher.parent)!r})
+        from relay_engine.api_service import _NotifierGate
+        def park_retirement(self):
+            retiring.touch()
+            threading.Event().wait()
+        _NotifierGate.retire = park_retirement
+    elif phase in ('late_invocation', 'late_return'):
+        sys.path.insert(0, {str(launcher.parent)!r})
+        from relay_engine.api_service import ApiService
+        def park_before_control_stop(self, attempt):
+            threading.Event().wait()
+        ApiService._stop_owned = park_before_control_stop
+""")
+        env = {'HOME': str(home), 'TMPDIR': str(self.temp), 'PYTHONDONTWRITEBYTECODE': '1',
+               'PYTHONPATH': str(arm)}
+        command = [sys.executable, str(launcher), 'engine', 'serve', '--store-root', str(root),
+                   '--project-id', P, '--bridge-port', '0', '--terminal-notifier', str(program)]
+        with subprocess.Popen(command, cwd=arm, env=env, start_new_session=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+            try:
+                ready = Path(lifecycle_paths.ready_file_path(store_layout.read_store_id(root),
+                             platform=sys.platform, environ=env, home=str(home)))
+                if phase != 'pre_ready':
+                    self.wait_until(ready.exists)
+                    data = json.loads(ready.read_bytes())
+                    peer = self.connect(data)
+                    self.sign_in(peer)
+                    raw = draft(kind='QUESTION', to='operator', needs='answer', subject='Local decision',
+                                body='Can we proceed?\n')
+                    reply = peer.call('relay.submit', {'draft_base64': base64.b64encode(raw).decode(),
+                                                       'submission_key': 'question'})
+                    self.assertIn('result', reply)
+                self.wait_until(lambda: parked.exists() and parked.stat().st_size)
+                if phase == 'pre_ready':
+                    custodian = int(parked.read_text())
+                    self.assertFalse(ready.exists())
+                    self.assertFalse((root / 'api-service.lock').exists())
+                    self.verify_custodian_inventory(custodian, daemon.pid, root, ready.parent)
+                self.assertEqual(issued.exists(), phase == 'late_return')
+                sent = time.monotonic()
+                daemon.terminate()
+                early = phase in {'pre_ready', 'before_final'}
+                if early:
+                    time.sleep(0.25)
+                    release.touch()
+                if phase == 'overlap':
+                    self.wait_until(retiring.exists)
+                    release.touch()
+                    self.wait_until(claimed.exists)
+                _, stderr = daemon.communicate(timeout=5)
+                elapsed = time.monotonic() - sent
+                self.assertEqual(daemon.returncode, 0 if early else 75, stderr)
+                self.assertLess(elapsed, 2 if early else 5)
+                if early:
+                    self.assertFalse(issued.exists())
+                    if phase == 'before_final':
+                        self.assertTrue(eof.exists())
+                elif phase == 'overlap':
+                    after_exit.touch()
+                    self.wait_until(eof.exists)
+                    self.assertFalse(issued.exists())
+                else:
+                    self.assertEqual(issued.exists(), phase == 'late_return')
+                    release.touch()
+                    self.wait_until(lambda: reaped.exists() and reaped.stat().st_size)
+                    pid = int(issued.read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(pid, 0)
+                print(json.dumps({'installed_custody': phase, 'status': daemon.returncode,
+                                  'term_seconds': round(elapsed, 3), 'issued': issued.exists(),
+                                  'reaped': reaped.exists(), 'overlap_claim': claimed.exists(),
+                                  'eof': eof.exists(), 'stop_unavailable_to_custodian': phase != 'pre_ready'}))
+            finally:
+                after_exit.touch()
+                release.touch()
+                if daemon.poll() is None:
+                    daemon.kill()
+                    daemon.communicate(timeout=3)

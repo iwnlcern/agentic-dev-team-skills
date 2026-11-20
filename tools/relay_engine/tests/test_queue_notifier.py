@@ -91,6 +91,25 @@ class TestQueueNotifier(unittest.TestCase):
         self.conn.close()
         self.conn = store_layout.open_catalogue(self.root)
 
+    def test_completed_native_offer_after_stop_earns_no_receipt(self):
+        item, _, _ = self.raise_it()
+        before = self.row(item)
+        stopped = False
+        settled = mock.Mock()
+        legacy = mock.Mock()
+
+        def offer(note, argv):
+            nonlocal stopped
+            self.assertEqual((note.item_id, note.revision), (item.item_id, 1))
+            stopped = True
+
+        result = notifier.notify_pass(self.port, legacy, 1000, notifier='notify-send',
+                                      offer=offer, settled=settled, stopping=lambda: stopped)
+        self.assertEqual(result, notifier.NotifyReport())
+        self.assertEqual(self.row(item), before)
+        legacy.assert_not_called()
+        settled.assert_not_called()
+
     def test_issue_refusal_leaves_due_rows_and_health_untouched(self):
         self.raise_it()
         self.raise_it()

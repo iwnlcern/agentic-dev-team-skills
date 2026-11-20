@@ -256,6 +256,128 @@ service.stop()
                     child.kill()
                     child.communicate(timeout=3)
 
+    def test_repeated_gate_retirement_does_not_close_reused_fd(self):
+        reader, writer = os.pipe()
+        gate = self.m._NotifierGate(writer)
+        replacement_read = replacement_write = None
+        try:
+            gate.retire()
+            self.assertTrue(gate.released)
+            self.assertEqual(os.read(reader, 1), b'')
+            replacement_read, replacement_write = os.pipe()
+            if writer not in {replacement_read, replacement_write}:
+                os.dup2(replacement_write, writer)
+            gate.retire()
+            os.fstat(writer)
+        finally:
+            for fd in {reader, writer, replacement_read, replacement_write} - {None}:
+                os.close(fd)
+
+    def test_published_clock_reaps_foreground_with_gate_retirement_parked(self):
+        tools = Path(__file__).resolve().parents[2]
+        marker = self.base / 'retiring'
+        reader, writer = os.pipe()
+        os.set_blocking(reader, False)
+        script = f"""
+import threading
+from pathlib import Path
+from relay_engine.api_service import ApiService, _NotifierGate
+class ParkedGate(_NotifierGate):
+    def retire(self):
+        Path({str(marker)!r}).touch()
+        threading.Event().wait()
+service = ApiService({str(self.root)!r}, {P!r}, clock=lambda: 1)
+service.arm_foreground()
+service._foreground.install_notifier_gate(ParkedGate({writer}))
+service.start()
+print('ready', flush=True)
+service.serve_forever()
+"""
+        env = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
+        try:
+            child = subprocess.Popen([sys.executable, '-c', script], env=env, pass_fds=(writer,),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        finally:
+            os.close(writer)
+        with child:
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 3)[0])
+                self.assertEqual(child.stdout.readline(), b'ready\n')
+                began = time.monotonic()
+                child.terminate()
+                while not marker.exists():
+                    self.assertLess(time.monotonic() - began, 2)
+                    time.sleep(0.01)
+                with self.assertRaises(BlockingIOError):
+                    os.read(reader, 1)
+                with (self.root / 'api-service.lock').open('rb') as lock:
+                    inode = os.fstat(lock.fileno()).st_ino
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _, error = child.communicate(timeout=5)
+                    elapsed = time.monotonic() - began
+                    self.assertEqual(child.returncode, 75, error)
+                    self.assertLess(elapsed, 5)
+                    self.assertEqual(os.read(reader, 1), b'')
+                    self.assertEqual((self.root / 'api-service.lock').stat().st_ino, inode)
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                print(json.dumps({'parked_gate_retirement': True, 'status': 75,
+                                  'seconds': round(elapsed, 3), 'post_teardown_eof': True}))
+            finally:
+                os.close(reader)
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate(timeout=3)
+
+    def test_writer_admission_and_permit_while_original_timestamp_is_unpublished(self):
+        service = self.service
+        service.arm_foreground()
+        self.assertIsNotNone(service.start())
+        epoch = service._foreground
+        parked, release = threading.Event(), threading.Event()
+        waiting = threading.Event()
+        original_publish = epoch.publish_stop
+
+        def delay_publication(observed_at):
+            waiting.set()
+            self.assertTrue(release_publication.wait(3))
+            return original_publish(observed_at)
+
+        def pause(phase):
+            if phase == 'finishing':
+                parked.set()
+                self.assertTrue(release.wait(3))
+
+        release_publication = threading.Event()
+        writer = service.writer
+        writer._phase_hook = pause
+        job = api_writer.DeclaredJob(store_steps.Declared('written', {}),
+                                     lambda _: api_writer.JobOutcome(True, 'receipt'))
+        with ThreadPoolExecutor(3) as pool:
+            first = pool.submit(writer.submit_declared, job)
+            try:
+                self.assertTrue(parked.wait(1))
+                with patch.object(epoch, 'publish_stop', side_effect=delay_publication):
+                    stopping = pool.submit(service._signal, signal.SIGTERM, None)
+                    try:
+                        self.assertTrue(waiting.wait(1))
+                        self.assertIsNone(epoch.attempt)
+                        second = pool.submit(writer.submit_declared, job)
+                        with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                            second.result(0.25)
+                        release.set()
+                        with self.assertRaises(TimeoutError):
+                            first.result(0.15)
+                        with writer._lock:
+                            self.assertFalse(writer._active_request.committing)
+                    finally:
+                        release_publication.set()
+                    stopping.result(1)
+            finally:
+                release.set()
+            self.assertTrue(first.result(1).commit)
+        self.assertEqual(service.stop(), 0)
+
     def test_declared_turn_stop_distinguishes_body_and_commit_permit(self):
         for parked_phase, expected_fault in (('finishing', 'stop_unwritten'),
                                               ('commit_permitted', 'stop_commit_unknown')):

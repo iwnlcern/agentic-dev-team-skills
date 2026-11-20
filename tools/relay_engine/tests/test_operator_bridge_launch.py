@@ -105,6 +105,147 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
         self.assertTrue(re.fullmatch(rb'[A-Za-z0-9_-]{43}', secret) is not None)
         return contents, address.decode('ascii'), secret.decode('ascii')
 
+    def test_staged_offer_loses_to_ingress_while_existing_claim_can_win(self):
+        launcher = load_launcher()
+        gate, writer = os.pipe()
+        os.set_blocking(gate, False)
+        try:
+            owner = launcher['_NotifierCustodian'].__new__(launcher['_NotifierCustodian'])
+            owner._disabled = False
+            owner._ticket = None
+            owner._number = 0
+            owner._channel = Mock()
+            observed = []
+
+            def ingress():
+                observed.append(owner._ticket)
+                return True
+
+            owner._stopping = ingress
+            note = SimpleNamespace(item_id='item', revision=1)
+            with self.assertRaises(DeliveryCancelled):
+                owner.offer(note, ['synthetic'])
+            self.assertEqual(observed, [[1, 'item', 1]])
+            self.assertIsNone(owner._ticket)
+            owner._channel.send.assert_not_called()
+
+            # The pipe is still open. A previously admitted ticket can claim.
+            issue = Mock(return_value='issued')
+            self.assertEqual(launcher['_claimed_call'](gate, Event(), ['synthetic'], issue), 'issued')
+            issue.assert_called_once_with(['synthetic'])
+        finally:
+            os.close(gate)
+            os.close(writer)
+
+    def test_known_cancellation_during_final_read_prevents_issue(self):
+        launcher = load_launcher()
+        reader, writer = os.pipe()
+        os.set_blocking(reader, False)
+        cancelled = Event()
+        original = os.read
+        count = 0
+
+        def check(fd, size):
+            nonlocal count
+            count += 1
+            if count == 2:
+                cancelled.set()
+            return original(fd, size)
+
+        issue = Mock()
+        try:
+            with patch.object(os, 'read', side_effect=check):
+                self.assertEqual(launcher['_claimed_call'](reader, cancelled, ['synthetic'], issue), 'refused')
+            issue.assert_not_called()
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+    def test_malformed_custodian_result_retains_ticket(self):
+        launcher = load_launcher()
+        owner = launcher['_NotifierCustodian'].__new__(launcher['_NotifierCustodian'])
+        owner._disabled = False
+        owner._ticket = None
+        owner._number = 0
+        owner._epoch = 'epoch'
+        owner._stopping = lambda: False
+        owner._channel = Mock()
+        owner._channel.receive.return_value = {'epoch': 'epoch', 'ticket': [1, 'item', 1], 'outcome': []}
+        with self.assertRaises(NotifierIssueUnavailable):
+            owner.offer(SimpleNamespace(item_id='item', revision=1), ['synthetic'])
+        self.assertTrue(owner._disabled)
+        self.assertEqual(owner._ticket, [1, 'item', 1])
+        self.assertEqual(owner._channel.send.call_count, 1)
+
+    def test_claimed_worker_keeps_one_late_invocation_and_does_not_renew_grace(self):
+        launcher = load_launcher()
+        gate, writer = os.pipe()
+        os.set_blocking(gate, False)
+        paused, resume, cancelled = Event(), Event(), Event()
+        child = Mock()
+        child.poll.return_value = None
+        child.wait.side_effect = [subprocess.TimeoutExpired('synthetic', 0), -9]
+        issues = []
+
+        def delayed_popen(argv, **kwargs):
+            paused.set()
+            self.assertTrue(resume.wait(7))
+            issues.append(argv)
+            return child
+
+        try:
+            with (patch.object(subprocess, 'Popen', side_effect=delayed_popen),
+                  ThreadPoolExecutor(1) as pool):
+                result = pool.submit(launcher['_launch_notification'], gate, cancelled, [None], ['synthetic'])
+                try:
+                    self.assertTrue(paused.wait(1))
+                    os.close(writer)
+                    writer = None
+                    cancelled.set()
+                    self.assertEqual(issues, [])
+                    time.sleep(4.05)
+                finally:
+                    resume.set()
+                self.assertEqual(result.result(1), 'unknown')
+            self.assertEqual(issues, [['synthetic']])
+            child.terminate.assert_called_once()
+            child.kill.assert_called_once()
+            self.assertEqual(child.wait.call_args_list, [unittest.mock.call(timeout=0), unittest.mock.call()])
+        finally:
+            os.close(gate)
+            if writer is not None:
+                os.close(writer)
+
+    def test_claimed_worker_checks_pipe_again_immediately_before_issue(self):
+        launcher = load_launcher()
+        gate, writer = os.pipe()
+        os.set_blocking(gate, False)
+        observed = Event()
+        issue = Mock()
+        calls = []
+        original = os.read
+
+        def retire_after_claim(fd, count):
+            calls.append(fd)
+            if len(calls) == 1:
+                try:
+                    return original(fd, count)
+                finally:
+                    os.close(writer)
+            return original(fd, count)
+
+        try:
+            with patch.object(os, 'read', side_effect=retire_after_claim):
+                launch = launcher.get('_claimed_call')
+                self.assertIsNotNone(launch)
+                self.assertEqual(launch(gate, observed, ['inert'], issue), 'refused')
+            self.assertEqual(calls, [gate, gate])
+            issue.assert_not_called()
+        finally:
+            os.close(gate)
+            if not calls:
+                os.close(writer)
+
     def test_notifier_unavailable_or_expired_before_fixture_issue(self):
         launcher = load_launcher()
         stopping = Mock(return_value=False)

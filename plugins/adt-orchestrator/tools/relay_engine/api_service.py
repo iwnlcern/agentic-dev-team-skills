@@ -59,10 +59,28 @@ class _RetirementReceipt:
     holder: tuple[int, int] | None
 
 
+class _NotifierGate:
+    def __init__(self, writer_fd):
+        self._writer_fd = writer_fd
+        self._closing = {}
+        self.released = False
+
+    def retire(self):
+        owner = object()
+        if self._closing.setdefault('owner', owner) is owner:
+            try:
+                os.close(self._writer_fd)
+            except OSError:
+                return
+            self.released = True
+
+
 class _ForegroundEpoch:
     def __init__(self, fence_writer):
         self._initial = {}
         self._stop = {}
+        self._ingress = {}
+        self.notifier_gate = None
         self._terminal = {}
         self._finished = False
         self.retiring = False
@@ -82,11 +100,40 @@ class _ForegroundEpoch:
     def attempt(self):
         return self._stop.get('attempt')
 
+    @property
+    def admission_closed(self):
+        return bool(self._ingress)
+
+    def install_notifier_gate(self, gate):
+        if self.notifier_gate is not None:
+            gate.retire()
+            return False
+        self.notifier_gate = gate
+        if self.admission_closed:
+            gate.retire()
+            return False
+        return True
+
+    def enter_stop(self):
+        owner = object()
+        if self._ingress.setdefault('owner', owner) is owner:
+            attempt = self.publish_stop(time.monotonic())
+            gate = self.notifier_gate
+            if gate is not None:
+                gate.retire()
+            return attempt
+        return self.attempt
+
+    def wait_for_attempt(self):
+        self._stopped.wait()
+        return self.attempt
+
     def _wake(self):
         # FileIO is unbuffered. A full nonblocking pipe already carries a wake.
         self._wake_pipe.write(b'\x00')
 
     def publish_stop(self, observed_at):
+        self._ingress.setdefault('owner', self)
         offered = _StopAttempt(observed_at)
         attempt = self._stop.setdefault('attempt', offered)
         self._initial.setdefault('winner', attempt)
@@ -94,10 +141,10 @@ class _ForegroundEpoch:
         return attempt
 
     def acknowledge_ready(self):
-        return self._initial.setdefault('winner', 'ready') == 'ready' and self.attempt is None
+        return self._initial.setdefault('winner', 'ready') == 'ready' and not self.admission_closed
 
     def admits(self):
-        return self._initial.get('winner') == 'ready' and self.attempt is None
+        return self._initial.get('winner') == 'ready' and not self.admission_closed
 
     def try_seal_clean(self, receipt):
         attempt = receipt.attempt
@@ -182,6 +229,7 @@ class ApiService:
         self.components = None if components is None else tuple(components)
         self.bridge_port = bridge_port
         self.queue_notifier = queue_notifier
+        self._notifier_custodian = None
         self._stop_report = stop_report
         self._instance_id = None
         self.writer = None
@@ -350,7 +398,8 @@ class ApiService:
             if self._foreground is not None and not self._foreground.acknowledge_ready():
                 return None
             self._install_signals()
-            if self._queue is not None and self.queue_notifier is not None and not self.is_stopping():
+            if (self._queue is not None and not self.is_stopping()
+                    and (self.queue_notifier is not None or self._notifier_custodian is not None)):
                 thread = threading.Thread(target=self._notify_queue, name='adt-queue-notify')
                 thread.start()
                 self._notify_thread = thread
@@ -419,7 +468,8 @@ class ApiService:
                 raise
 
     def _notify_queue(self):
-        program, deliver = self.queue_notifier
+        custody = self._notifier_custodian
+        program, deliver = self.queue_notifier if custody is None else (custody.program, None)
 
         def send(argv):
             if self.is_stopping():
@@ -428,18 +478,23 @@ class ApiService:
 
         try:
             while not self.is_stopping():
-                notifier.notify_pass(self._queue.port, send, self.clock(), notifier=program)
+                if custody is None:
+                    notifier.notify_pass(self._queue.port, send, self.clock(), notifier=program)
+                else:
+                    notifier.notify_pass(self._queue.port, send, self.clock(), notifier=program,
+                                         offer=custody.offer, settled=custody.settled,
+                                         stopping=self.is_stopping)
                 self._stopping.wait(QUEUE_INTERVAL)
         except Exception as error:
             self._notify_error = error
 
     def is_stopping(self):
         return (self._signal_requested or self._stopping.is_set()
-                or (self._foreground is not None and self._foreground.attempt is not None))
+                or (self._foreground is not None and self._foreground.admission_closed))
 
     def _signal(self, signum, frame):
         if self._foreground is not None:
-            self._foreground.publish_stop(time.monotonic())
+            self._foreground.enter_stop()
             return
         if self.bridge_port is not None:
             self._signal_requested = True
@@ -552,7 +607,9 @@ class ApiService:
 
     def _stop_foreground(self):
         epoch = self._foreground
-        attempt = epoch.publish_stop(time.monotonic())
+        attempt = epoch.enter_stop()
+        if attempt is None:
+            attempt = epoch.wait_for_attempt()
         report = None
         with self._stop_lock:
             if self._foreground is not epoch:
@@ -580,6 +637,9 @@ class ApiService:
     def _stop_owned(self, attempt=None):
         self._stopping.set()
         deadline = None if attempt is None else attempt.work
+        custody = self._notifier_custodian
+        if custody is not None:
+            custody.begin_stop(attempt)
         if self._listener is not None:
             self._listener.close()
             self._listener = None
@@ -612,6 +672,10 @@ class ApiService:
             if self._notify_thread.is_alive():
                 raise OSError('notifier retirement incomplete')
             self._notify_thread = None
+        if custody is not None:
+            if not custody.retire(deadline):
+                raise OSError('notifier custody unresolved')
+            self._notifier_custodian = None
         if attempt is not None:
             epoch = self._foreground
             if not epoch.join_fencer(attempt):
@@ -620,6 +684,9 @@ class ApiService:
                 raise OSError('store retirement incomplete')
         elif self.writer is not None:
             self.writer.close()
+        if (attempt is not None and self._foreground.notifier_gate is not None
+                and not self._foreground.notifier_gate.released):
+            raise OSError('notifier writer retirement incomplete')
         if deadline is not None and time.monotonic() >= deadline:
             raise OSError('retirement deadline reached')
         self.writer = None
