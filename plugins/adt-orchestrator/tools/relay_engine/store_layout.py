@@ -1,14 +1,21 @@
 """Store paths and guarded per-project opening (DD-v3-store slice 1)."""
-from dataclasses import dataclass, fields
+from contextlib import ExitStack, closing
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from typing import Literal
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+import errno
+import fcntl
+from hashlib import sha256
+import json
 import os
+import re
 import sqlite3
+import stat
 import sys
 import time
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from relay_engine import schema, submit
 
@@ -723,3 +730,573 @@ def owed_ended_routes(catalogue_conn, project_id: str) -> list[CheckoutRoute]:
         ' FROM checkout_routes WHERE project_id = ? AND ended_at IS NOT NULL '
         'AND ledger_synced_at IS NULL ORDER BY created_at, checkout_id', (project_id,))
     return [CheckoutRoute(*row) for row in rows]
+
+
+_INCUMBENT = '.adt-store-incumbent.json'
+_INCUMBENT_LOCK = 'api-service.lock'
+_INCUMBENT_LIMIT = 16 * 1024
+_NOFOLLOW = os.O_NOFOLLOW | os.O_CLOEXEC
+_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW
+
+
+def _inode(info):
+    return info.st_dev, info.st_ino
+
+
+def _owned_inode(info, *, directory=False):
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if (not kind(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or (not directory and info.st_nlink != 1)):
+        raise LayoutFault('incumbent-invalid')
+    return _inode(info)
+
+
+def _canonical_frame(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
+
+
+def _bounded_text(value):
+    return isinstance(value, str) and 0 < len(value) <= 256 and value.isprintable()
+
+
+@dataclass(frozen=True)
+class _IncumbentOwner:
+    epoch: str
+    pid: int
+    birth: str
+    boot: str
+    runtime: str
+    notifier: Literal['off', 'configured', 'unknown']
+
+
+@dataclass(frozen=True)
+class _IncumbentDisposition:
+    kind: Literal['enrollment', 'retirement', 'recovery']
+    store: str
+    project: str
+    root: tuple[int, int]
+    lock: tuple[int, int]
+    prior_epoch: str | None
+    digest: str
+
+
+@dataclass(frozen=True)
+class IncumbentRecord:
+    version: int
+    root: tuple[int, int]
+    lock_name: str
+    lock: tuple[int, int]
+    store: str
+    project: str
+    phase: Literal['idle', 'armed']
+    owner: _IncumbentOwner | None
+    disposition: _IncumbentDisposition | None
+
+
+class IncumbentGuard:
+    """Private Store owner seam. This guard never opens an ordinary Store."""
+
+    def __init__(self, root, root_fd, lock_fd, root_identity, lock_identity):
+        self._path = root
+        self._holder_pid = os.getpid()
+        self._root_fd = root_fd
+        self._lock_fd = lock_fd
+        self._root_identity = root_identity
+        self._lock_identity = lock_identity
+        self._record_identity = None
+        self._verified_idle = None
+        self._owned_arm = None
+        self._birth = None
+
+    @property
+    def lock_identity(self):
+        return self._lock_identity
+
+    @classmethod
+    def acquire(cls, root, *, expected_lock=None):
+        root = Path(root).absolute()
+        root_fd = lock_fd = None
+        try:
+            root_fd = os.open(root, _DIRECTORY)
+            root_identity = _owned_inode(os.fstat(root_fd), directory=True)
+            lock_fd = os.open(_INCUMBENT_LOCK, os.O_RDWR | _NOFOLLOW | os.O_NONBLOCK,
+                              dir_fd=root_fd)
+            lock_identity = _owned_inode(os.fstat(lock_fd))
+            guard = cls(root, root_fd, lock_fd, root_identity, lock_identity)
+            guard._check_lock()
+            if expected_lock is not None and lock_identity != expected_lock:
+                raise LayoutFault('incumbent-invalid')
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    raise LayoutFault('store-locked') from None
+                raise
+            guard._check_lock()
+            root_fd = lock_fd = None
+            return guard
+        except OSError as exc:
+            raise LayoutFault('incumbent-invalid') from exc
+        finally:
+            for fd in (lock_fd, root_fd):
+                if fd is not None:
+                    os.close(fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def close(self):
+        if self._lock_fd is not None:
+            lock_fd, root_fd = self._lock_fd, self._root_fd
+            self._lock_fd = self._root_fd = None
+            self._verified_idle = self._owned_arm = self._birth = None
+            try:
+                os.close(lock_fd)
+            finally:
+                os.close(root_fd)
+
+    def _check_lock(self):
+        if self._lock_fd is None or self._holder_pid != os.getpid():
+            raise LayoutFault('incumbent-invalid')
+        try:
+            root_info = os.stat(self._path, follow_symlinks=False)
+            lock_info = os.stat(_INCUMBENT_LOCK, dir_fd=self._root_fd, follow_symlinks=False)
+            if (_owned_inode(root_info, directory=True) != self._root_identity
+                    or _owned_inode(os.fstat(self._root_fd), directory=True) != self._root_identity
+                    or _owned_inode(lock_info) != self.lock_identity
+                    or _owned_inode(os.fstat(self._lock_fd)) != self.lock_identity):
+                raise LayoutFault('incumbent-invalid')
+        except OSError as exc:
+            raise LayoutFault('incumbent-invalid') from exc
+
+    def _named_record(self):
+        info = os.stat(_INCUMBENT, dir_fd=self._root_fd, follow_symlinks=False)
+        return _owned_inode(info)
+
+    def _read_frame(self, *, sync=False):
+        self._check_lock()
+        try:
+            fd = os.open(_INCUMBENT, os.O_RDONLY | _NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=self._root_fd)
+        except FileNotFoundError as exc:
+            if self._record_identity is None:
+                raise LayoutFault('enrollment-required') from exc
+            raise LayoutFault('incumbent-invalid') from exc
+        except OSError as exc:
+            raise LayoutFault('incumbent-invalid') from exc
+        with os.fdopen(fd, 'rb') as source:
+            identity = _owned_inode(os.fstat(fd))
+            if self._record_identity is not None and self._record_identity != identity:
+                raise LayoutFault('incumbent-invalid')
+            if sync:
+                os.fsync(fd)
+                os.fsync(self._root_fd)
+            data = source.read(_INCUMBENT_LIMIT + 1)
+            self._check_lock()
+            if (not data or len(data) > _INCUMBENT_LIMIT
+                    or _owned_inode(os.fstat(fd)) != identity or self._named_record() != identity):
+                raise LayoutFault('incumbent-invalid')
+        frame = self._decode(data)
+        self._record_identity = identity
+        return frame, data
+
+    def _decode(self, data):
+        try:
+            value = json.loads(data)
+            if _canonical_frame(value) != data:
+                raise ValueError('noncanonical')
+            value['root'] = tuple(value['root'])
+            value['lock'] = tuple(value['lock'])
+            if value['owner'] is not None:
+                value['owner'] = _IncumbentOwner(**value['owner'])
+            if value['disposition'] is not None:
+                disposition = value['disposition']
+                disposition['root'] = tuple(disposition['root'])
+                disposition['lock'] = tuple(disposition['lock'])
+                value['disposition'] = _IncumbentDisposition(**disposition)
+            frame = IncumbentRecord(**value)
+            self._validate_frame(frame)
+        except (KeyError, TypeError, ValueError, AttributeError, RecursionError) as exc:
+            raise LayoutFault('incumbent-invalid') from exc
+        return frame
+
+    def _validate_frame(self, frame):
+        _canonical_id(frame.store)
+        _canonical_id(frame.project)
+        if (type(frame.version) is not int or frame.version != 1
+                or frame.lock_name != _INCUMBENT_LOCK
+                or any(type(part) is not int for part in frame.root + frame.lock)
+                or frame.root != self._root_identity or frame.lock != self.lock_identity):
+            raise ValueError('identity')
+        if frame.phase == 'idle' and frame.owner is None:
+            proof = frame.disposition
+            if (not isinstance(proof, _IncumbentDisposition)
+                    or (proof.store, proof.project, proof.root, proof.lock)
+                    != (frame.store, frame.project, frame.root, frame.lock)
+                    or any(type(part) is not int for part in proof.root + proof.lock)
+                    or proof.kind not in ('enrollment', 'retirement', 'recovery')
+                    or (proof.kind == 'enrollment') != (proof.prior_epoch is None)
+                    or not re.fullmatch(r'[0-9a-f]{64}', proof.digest)):
+                raise ValueError('disposition')
+            if proof.prior_epoch is not None:
+                _canonical_id(proof.prior_epoch)
+            return
+        if frame.phase != 'armed' or frame.disposition is not None:
+            raise ValueError('phase')
+        owner = frame.owner
+        if (not isinstance(owner, _IncumbentOwner) or type(owner.pid) is not int
+                or not 0 < owner.pid < 2**31
+                or owner.notifier not in ('off', 'configured', 'unknown')
+                or not all(_bounded_text(text) for text in (owner.birth, owner.boot, owner.runtime))):
+            raise ValueError('owner')
+        _canonical_id(owner.epoch)
+
+    def read(self):
+        return self._read_frame()[0]
+
+    def _current(self, expected):
+        try:
+            actual = self.read()
+        except LayoutFault as exc:
+            if exc.cause != 'enrollment-required' or expected is not None:
+                raise
+            return
+        if actual != expected:
+            raise LayoutFault('incumbent-changed')
+
+    def _replace(self, expected, frame):
+        data = _canonical_frame(asdict(frame))
+        if len(data) > _INCUMBENT_LIMIT or self._decode(data) != frame:
+            raise LayoutFault('incumbent-invalid')
+        self._current(expected)
+        temp = f'{_INCUMBENT}.{uuid4().hex}.tmp'
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
+                     0o600, dir_fd=self._root_fd)
+        try:
+            with os.fdopen(fd, 'wb') as target:
+                identity = _owned_inode(os.fstat(target.fileno()))
+                target.write(data)
+                target.flush()
+                os.fsync(target.fileno())
+                self._current(expected)
+                if _owned_inode(os.stat(temp, dir_fd=self._root_fd, follow_symlinks=False)) != identity:
+                    raise LayoutFault('incumbent-invalid')
+                os.replace(temp, _INCUMBENT, src_dir_fd=self._root_fd, dst_dir_fd=self._root_fd)
+                temp = None
+            self._record_identity = identity
+            os.fsync(self._root_fd)
+            if self._read_frame() != (frame, data):
+                raise LayoutFault('incumbent-invalid')
+        finally:
+            if temp is not None:
+                os.unlink(temp, dir_fd=self._root_fd)
+        return frame
+
+    def _disposition(self, kind, store, project, prior_epoch, digest):
+        return _IncumbentDisposition(kind, store, project, self._root_identity,
+                                     self.lock_identity, prior_epoch, digest)
+
+    def _publish_idle(self, expected, proof):
+        self._verified_idle = None
+        idle = IncumbentRecord(1, proof.root, _INCUMBENT_LOCK, proof.lock, proof.store,
+                               proof.project, 'idle', None, proof)
+        self._replace(expected, idle)
+        self._verified_idle = idle
+        return idle
+
+    def _verify_idle(self, expected, proof):
+        self._verified_idle = None
+        if expected.phase != 'idle' or proof is None or expected.disposition != proof:
+            raise LayoutFault('idle-unverified')
+        if self._read_frame(sync=True)[0] != expected:
+            raise LayoutFault('incumbent-changed')
+        self._verified_idle = expected
+        return expected
+
+    def arm(self, expected_idle, owner):
+        if expected_idle.phase != 'idle':
+            raise LayoutFault('retirement-pending')
+        verified, self._verified_idle = self._verified_idle, None
+        if verified != expected_idle:
+            raise LayoutFault('idle-unverified')
+        if not isinstance(owner, _IncumbentOwner) or owner.pid != os.getpid():
+            raise LayoutFault('incumbent-invalid')
+        if owner.epoch == expected_idle.disposition.prior_epoch:
+            raise LayoutFault('incumbent-changed')
+        armed = IncumbentRecord(1, expected_idle.root, expected_idle.lock_name,
+                                expected_idle.lock, expected_idle.store, expected_idle.project,
+                                'armed', owner, None)
+        self._owned_arm = self._replace(expected_idle, armed)
+        return armed
+
+    @classmethod
+    def _create_new(cls, root, store, project):
+        """Reserve a new fixture Store before any provider can open SQLite."""
+        _canonical_id(store)
+        _canonical_id(project)
+        root = Path(root).absolute()
+        with closing(_DirectoryHandle(os.open(root.parent, _DIRECTORY))) as parent:
+            os.mkdir(root.name, mode=0o700, dir_fd=parent.fd)
+            os.fsync(parent.fd)
+            descriptor = os.open(root.name, _DIRECTORY, dir_fd=parent.fd)
+        with closing(_DirectoryHandle(descriptor)) as directory:
+            root_identity = _owned_inode(os.fstat(directory.fd), directory=True)
+            fd = os.open(_INCUMBENT_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW,
+                         0o600, dir_fd=directory.fd)
+            try:
+                lock_identity = _owned_inode(os.fstat(fd))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(directory.fd)
+        guard = cls.acquire(root, expected_lock=lock_identity)
+        try:
+            if guard._root_identity != root_identity:
+                raise LayoutFault('incumbent-invalid')
+            proof = guard._retain('enrollment', store, project, None,
+                                  uuid4().hex.encode('ascii'))
+            guard._birth = proof
+        except BaseException:
+            guard.close()
+            raise
+        return guard, proof
+
+    def _retain(self, kind, store, project, prior_epoch, evidence):
+        if not isinstance(evidence, bytes) or not 0 < len(evidence) <= _INCUMBENT_LIMIT:
+            raise LayoutFault('disposition-unproved')
+        return _RetainedIncumbentDisposition(kind, store, project, self._root_identity,
+                                             self.lock_identity, prior_epoch, evidence)
+
+    def _retirement_proof(self, armed, evidence):
+        """Owner receipt seam after attributable settlement and handle closure."""
+        if self._owned_arm != armed:
+            raise LayoutFault('disposition-unproved')
+        self._current(armed)
+        if not isinstance(evidence, bytes) or not 0 < len(evidence) <= _INCUMBENT_LIMIT:
+            raise LayoutFault('disposition-unproved')
+        evidence = _canonical_frame({'arm': asdict(armed), 'settlement_sha256': sha256(evidence).hexdigest()})
+        return self._retain('retirement', armed.store, armed.project, armed.owner.epoch, evidence)
+
+    def verify_idle(self, expected, proof):
+        """Re-establish a visible frame using a separately retained owner receipt."""
+        self._verified_idle = None
+        if not isinstance(proof, _RetainedIncumbentDisposition):
+            raise LayoutFault('idle-unverified')
+        return self._verify_idle(expected, proof.summary())
+
+    def enroll_new(self, proof):
+        self._check_lock()
+        if (proof is None or self._birth is not proof
+                or set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK}):
+            raise LayoutFault('enrollment-unproved')
+        self._birth = None
+        return self._publish_idle(None, proof.summary()), proof
+
+    def _offline_checkpoint(self, store, project, provenance):
+        """Capture member custody under an already authorized offline owner."""
+        _canonical_id(store)
+        _canonical_id(project)
+        retained = self._retain('enrollment', store, project, None, provenance)
+        self._current(None)
+        return _OfflineIncumbentEnrollment(retained, self._member_identities(project))
+
+    def enroll_existing(self, proof):
+        if not isinstance(proof, _OfflineIncumbentEnrollment):
+            raise LayoutFault('enrollment-unproved')
+        retained = proof.retained
+        if (retained.kind != 'enrollment' or retained.prior_epoch is not None
+                or (retained.root, retained.lock) != (self._root_identity, self.lock_identity)):
+            raise LayoutFault('enrollment-unproved')
+        self._current(None)
+        self._protected_read(retained.store, retained.project, proof.members)
+        return self._publish_idle(None, retained.summary()), retained
+
+    def retire(self, expected_arm, proof):
+        if (not isinstance(proof, _RetainedIncumbentDisposition)
+                or self._owned_arm != expected_arm or proof.kind != 'retirement'
+                or (proof.store, proof.project, proof.root, proof.lock, proof.prior_epoch)
+                != (*self._arm_identity(expected_arm), expected_arm.owner.epoch)):
+            raise LayoutFault('disposition-unproved')
+        self._current(expected_arm)
+        self._protected_identity(expected_arm)
+        self._owned_arm = None
+        return self._publish_idle(expected_arm, proof.summary())
+
+    @staticmethod
+    def _arm_identity(armed):
+        return armed.store, armed.project, armed.root, armed.lock
+
+    def _checkpoint(self, armed, operation):
+        """Original owner checkpoint after the sole operation and its handles settle."""
+        self._current(armed)
+        if self._owned_arm != armed or not isinstance(operation, _IncumbentOperation):
+            raise LayoutFault('operation-unproved')
+        return _IncumbentCheckpoint(armed, self._member_identities(armed.project), operation)
+
+    def recover(self, expected_arm, child, checkpoint):
+        self._current(expected_arm)
+        if expected_arm.phase != 'armed':
+            raise LayoutFault('incumbent-invalid')
+        if expected_arm.owner.notifier != 'off':
+            raise LayoutFault('notifier-unresolved')
+        if not isinstance(child, _IncumbentChild) or child.armed != expected_arm:
+            raise LayoutFault('exit-unproved')
+        if child.process.exitcode is None or child.process.exitcode == 0:
+            raise LayoutFault('exit-unproved')
+        if (not isinstance(checkpoint, _IncumbentCheckpoint) or checkpoint.armed != expected_arm
+                or not isinstance(checkpoint.operation, _IncumbentOperation)):
+            raise LayoutFault('operation-unproved')
+        operation = checkpoint.operation
+        self._protected_read(expected_arm.store, expected_arm.project, checkpoint.members, operation)
+        evidence = _canonical_frame({
+            'arm': asdict(expected_arm),
+            'exit': child.process.exitcode,
+            'members': checkpoint.members,
+            'key': operation.key,
+            'draft_sha256': sha256(operation.draft).hexdigest(),
+            'relay_id': operation.admitted.relay_id,
+            'handle': operation.admitted.handle,
+        })
+        proof = self._retain('recovery', expected_arm.store, expected_arm.project,
+                             expected_arm.owner.epoch, evidence)
+        return self._publish_idle(expected_arm, proof.summary()), proof
+
+    def _protected_identity(self, armed):
+        self._current(armed)
+        self._protected_read(armed.store, armed.project, self._member_identities(armed.project))
+        return armed.store
+
+    def _member_identities(self, project):
+        self._check_lock()
+        _canonical_id(project)
+        with ExitStack() as stack:
+            try:
+                projects = stack.enter_context(closing(_DirectoryHandle(
+                    os.open('projects', _DIRECTORY, dir_fd=self._root_fd)))).fd
+                selected = stack.enter_context(closing(_DirectoryHandle(
+                    os.open(project, _DIRECTORY, dir_fd=projects)))).fd
+                parent_ids = []
+                for parent, name, fd in ((self._root_fd, 'projects', projects),
+                                         (projects, project, selected)):
+                    identity = _owned_inode(os.fstat(fd), directory=True)
+                    if identity != _owned_inode(os.stat(name, dir_fd=parent, follow_symlinks=False),
+                                                directory=True):
+                        raise LayoutFault('member-changed')
+                    parent_ids.append(identity)
+                catalogue = _sidecar_free_member(self._root_fd, catalogue_path(self._path).name)
+                ledger = _sidecar_free_member(selected, ledger_path(self._path, project).name)
+            except OSError as exc:
+                raise LayoutFault('member-unproved') from exc
+        self._check_lock()
+        return (*parent_ids, catalogue, ledger)
+
+    def _protected_read(self, store, project, members, operation=None):
+        from relay_engine import catalogue, errors, queries, restore_cancel
+
+        if self._member_identities(project) != members:
+            raise LayoutFault('member-changed')
+        schema.require_sqlite()
+        try:
+            with ExitStack() as stack:
+                catalog = stack.enter_context(closing(_immutable_incumbent_read(catalogue_path(self._path))))
+                ledger = stack.enter_context(closing(_immutable_incumbent_read(ledger_path(self._path, project))))
+                catalogue._require_matching(catalog)
+                if (_row(catalog, 'SELECT store_id FROM catalogue_identity WHERE id=1') != (store,)
+                        or route_state(catalog, project) != 'active'):
+                    raise LayoutFault('member-unproved')
+                with closing(ledger.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')) as projects:
+                    if projects.fetchall() != [(project,)]:
+                        raise LayoutFault('member-unproved')
+                with closing(ledger.execute(
+                        "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")) as tables:
+                    schema._require_matching(ledger, {name for (name,) in tables})
+                if (any_hold(catalog) is not None
+                        or any(stop.scope == 'store' or stop.project_id == project
+                               for stop in open_stops(catalog))
+                        or restore_cancel.held(ledger, project) is not None):
+                    raise LayoutFault('incumbent-hold')
+                if operation is not None:
+                    observed = queries.operator_admission(ledger, operation.key, operation.draft)
+                    if observed is None or observed != operation.admitted:
+                        raise LayoutFault('operation-unproved')
+        except (ValueError, sqlite3.Error, errors.EngineError) as exc:
+            raise LayoutFault('protected-read-unproved') from exc
+        if self._member_identities(project) != members:
+            raise LayoutFault('member-changed')
+
+
+@dataclass(frozen=True)
+class _RetainedIncumbentDisposition:
+    kind: Literal['enrollment', 'retirement', 'recovery']
+    store: str
+    project: str
+    root: tuple[int, int]
+    lock: tuple[int, int]
+    prior_epoch: str | None
+    evidence: bytes
+
+    def summary(self):
+        if not isinstance(self.evidence, bytes) or not 0 < len(self.evidence) <= _INCUMBENT_LIMIT:
+            raise LayoutFault('disposition-unproved')
+        return _IncumbentDisposition(self.kind, self.store, self.project, self.root, self.lock,
+                                     self.prior_epoch, sha256(self.evidence).hexdigest())
+
+
+@dataclass(frozen=True)
+class _OfflineIncumbentEnrollment:
+    retained: _RetainedIncumbentDisposition
+    members: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class _IncumbentOperation:
+    key: str
+    draft: bytes
+    admitted: submit.Admitted
+
+
+@dataclass(frozen=True)
+class _IncumbentCheckpoint:
+    armed: IncumbentRecord
+    members: tuple[tuple[int, int], ...]
+    operation: _IncumbentOperation
+
+
+@dataclass(frozen=True)
+class _IncumbentChild:
+    process: object
+    armed: IncumbentRecord
+
+    @classmethod
+    def observe(cls, child, armed, birth, boot):
+        """Bind a retained direct child before exit using observed birth and boot."""
+        if (armed.phase != 'armed' or not child.is_alive()
+                or (child.pid, birth, boot) != (armed.owner.pid, armed.owner.birth, armed.owner.boot)):
+            raise LayoutFault('exit-unproved')
+        return cls(child, armed)
+
+
+@dataclass(frozen=True)
+class _DirectoryHandle:
+    fd: int
+
+    def close(self):
+        os.close(self.fd)
+
+
+def _sidecar_free_member(directory, name):
+    for suffix in ('-wal', '-shm', '-journal'):
+        try:
+            os.stat(name + suffix, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        raise LayoutFault('journal-unresolved')
+    return _owned_inode(os.stat(name, dir_fd=directory, follow_symlinks=False))
+
+
+def _immutable_incumbent_read(path):
+    return sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True, isolation_level=None)
