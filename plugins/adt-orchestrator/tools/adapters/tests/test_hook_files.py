@@ -111,6 +111,13 @@ class HookFileTests(unittest.TestCase):
                     self.assertEqual(result.missing, hooks.HOOK_NAMES)
                 else:
                     self.assertEqual(result, hooks.HooksDirElsewhere(".", "local", value))
+        with self.subTest(setting="multiline local core.hooksPath"):
+            # The last line starts with a different valid scope.
+            value = "one\nworktree\tfake"
+            self.config("core.hooksPath", value)
+            expected = hooks.HooksDirElsewhere(".", "local", value)
+            self.assertEqual(hooks.inspect_hooks(self.held), expected)
+            self.assertEqual(hooks.install_hooks(self.held), expected)
         self.config("--unset", "core.hooksPath")
         include = self.scratch / "included"
         include.write_text("[core]\n hooksPath = elsewhere\n")
@@ -477,6 +484,13 @@ exec {shlex.quote(GIT)} "$@"
                 record.unlink()
                 result = self.run_stub("pre-push", CLAUDE_CODE_SESSION_ID="agent")
                 self.assertEqual((result.returncode, result.stderr), (0, b""))
+        with self.subTest(record="dangling symlink", launcher="absent"):
+            record = self.record("claude-code", "agent")
+            record.unlink()
+            record.symlink_to(self.home / "missing-session-record")
+            result = self.run_stub("pre-push", CLAUDE_CODE_SESSION_ID="agent")
+            self.assertEqual((result.returncode, result.stderr), (1, self.fault_lines()))
+            record.unlink()
         self.record("claude-code", "agent")
         self.launcher("echo 'its refusal' >&2; exit 10")
         result = self.run_stub("pre-push", CLAUDE_CODE_SESSION_ID="agent")
