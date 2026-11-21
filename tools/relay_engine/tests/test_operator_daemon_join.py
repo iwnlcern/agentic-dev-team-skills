@@ -587,6 +587,7 @@ time.sleep(15)
         program.chmod(0o700)
         parked, release = arm / 'parked', arm / 'release'
         issued, reaped = arm / 'issued', arm / 'reaped'
+        custodian_reaped = arm / 'custodian-reaped'
         retiring, claimed, eof = arm / 'retiring', arm / 'claimed', arm / 'eof'
         after_exit = arm / 'after-exit'
         # The test hook loads in the actual installed launcher processes. It
@@ -598,6 +599,7 @@ parked = pathlib.Path({str(parked)!r})
 release = pathlib.Path({str(release)!r})
 issued = pathlib.Path({str(issued)!r})
 reaped = pathlib.Path({str(reaped)!r})
+custodian_reaped = pathlib.Path({str(custodian_reaped)!r})
 retiring = pathlib.Path({str(retiring)!r})
 claimed = pathlib.Path({str(claimed)!r})
 eof = pathlib.Path({str(eof)!r})
@@ -663,6 +665,12 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
         def start_custodian(argv, **kwargs):
             child = original_popen(argv, **kwargs)
             if '--private-notifier-custodian' in argv:
+                wait = child.wait
+                def capture_wait(*args, **kwargs):
+                    status = wait(*args, **kwargs)
+                    custodian_reaped.write_text(json.dumps([child.pid, status]))
+                    return status
+                child.wait = capture_wait
                 park(child.pid)
             return child
         subprocess.Popen = start_custodian
@@ -711,7 +719,8 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
                     custodian = int(parked.read_text())
                     self.assertFalse(ready.exists())
                     with (root / 'api-service.lock').open('rb') as original:
-                        fcntl.flock(original, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(original, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         self.assertEqual(store_layout._inode(os.fstat(original.fileno())), admission.idle.lock)
                     self.verify_custodian_inventory(custodian, daemon.pid, root, ready.parent)
                 self.assertEqual(issued.exists(), phase == 'late_return')
@@ -754,6 +763,11 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
                 self.assertLess(elapsed, 2 if early else 5)
                 if early:
                     self.assertFalse(issued.exists())
+                    if phase == 'pre_ready':
+                        self.assertTrue(custodian_reaped.exists(), 'foreground did not reap the pre-READY custodian')
+                        self.assertEqual(json.loads(custodian_reaped.read_text()), [custodian, 0])
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(custodian, 0)
                     if phase == 'before_final':
                         self.assertTrue(eof.exists())
                 elif phase == 'overlap':
@@ -1301,6 +1315,7 @@ original_protected_read = store_layout.IncumbentGuard._protected_read
 original_connect = store_layout.sqlite3.connect
 service = None
 immutable_reads = 0
+park_on_catalogue_open = False
 
 def wait_for_stop():
     marker = pathlib.Path({str(parked)!r})
@@ -1327,11 +1342,12 @@ def arm(guard, idle, owner):
     return result
 
 def connect(path, *args, **kwargs):
-    global immutable_reads
+    global immutable_reads, park_on_catalogue_open
     if isinstance(path, str) and path.endswith('?mode=ro&immutable=1'):
         conn = original_connect(path, *args, **kwargs)
         immutable_reads += 1
-        if immutable_reads == 1 and {cut!r} == 'during_identity':
+        if park_on_catalogue_open:
+            park_on_catalogue_open = False
             wait_for_stop()
         return conn
     if path != ':memory:':
@@ -1340,11 +1356,15 @@ def connect(path, *args, **kwargs):
     return original_connect(path, *args, **kwargs)
 
 def protected_read(guard, *args):
+    global park_on_catalogue_open
+    park_on_catalogue_open = {cut!r} == 'during_identity'
     try:
         return original_protected_read(guard, *args)
     except store_layout.LayoutFault as error:
         pathlib.Path({str(protected)!r}).write_text(json.dumps([error.cause, immutable_reads]))
         raise
+    finally:
+        park_on_catalogue_open = False
 
 api_service.ApiService.start = start
 store_layout.IncumbentGuard.arm = arm
@@ -1360,6 +1380,7 @@ store_layout.sqlite3.connect = connect
                 self.wait_until(parked.exists)
                 frame = parked.read_bytes()
                 arm = store_layout.IncumbentGuard._parse_record(frame)
+                self.assertIsNotNone(arm.owner)
                 self.assertEqual((arm.phase, arm.store, arm.owner.pid), ('armed', admission.idle.store, child.pid))
                 self.assertEqual(arm.lock, admission.idle.lock)
                 with self.assertRaisesRegex(store_layout.LayoutFault, 'store-locked'):
@@ -1370,7 +1391,9 @@ store_layout.sqlite3.connect = connect
                 elapsed = time.monotonic() - since
             self.assertEqual(output, b'')
             self.assertEqual(json.loads(started.read_text()), [None, cut == 'during_identity'])
-            self.assertEqual(json.loads(protected.read_text()), ['member-unproved', 2])
+            cause, immutable_reads = json.loads(protected.read_text())
+            self.assertEqual(cause, 'member-unproved')
+            self.assertEqual(immutable_reads, 3, 'expected the kind preflight and two protected opens')
             self.assertFalse(writable.exists())
             self.assertFalse((Path(arm.owner.runtime) / 'ready.json').exists())
             self.assertFalse((root / lifecycle_paths._LIVE_LOCATOR).exists())
@@ -1383,7 +1406,7 @@ store_layout.sqlite3.connect = connect
             self.assertGreaterEqual(elapsed, 3.8)
             self.assertLess(elapsed, 5)
             print(json.dumps({'installed_stop': cut, 'status': child.returncode, 'seconds': round(elapsed, 3),
-                              'protected_reads': 2, 'writable_opens': 0, 'same_inode_return': True,
+                              'protected_reads': immutable_reads, 'writable_opens': 0, 'same_inode_return': True,
                               'unchanged_arm': True, 'idle_receipt': False, 'ready_or_locator': False}))
         finally:
             for fd in (writer, reader):
