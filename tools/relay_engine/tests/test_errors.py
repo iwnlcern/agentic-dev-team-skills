@@ -737,3 +737,61 @@ class TestAuthorityCatalogueR22(unittest.TestCase):
                 self.assertTrue(errors.error_for(key).cause)
                 self.assertTrue(errors.error_for(key).remedy)
                 self.assertTrue(errors.explain_for(key)[0])
+
+
+    def test_hook_words_step6_codes(self):
+        rows = {
+            "operator-endpoint": (
+                "only the operator answers the kit's questions and records prompts",
+                "Stop and leave the decision to the operator; do not try to answer it another way.",
+                "The operator answers pending decisions themselves, on the decision page; "
+                "tell them a decision is waiting there.",
+            ),
+            "operator-only": (
+                "this command is the operator's alone",
+                "ask the operator to run it from their own terminal",
+                "The operator runs this command themselves, in their own terminal; "
+                "tell them which command you need run and why.",
+            ),
+            "hook-disable": (
+                "this would switch the kit's hooks off for every session that works here later",
+                "Leave the hooks as they are; changing them is the operator's to do.",
+                "Only the operator changes the kit's hooks, from their own terminal; "
+                "tell them what you wanted to change and why.",
+            ),
+            "key-file-read": (
+                "an agent session may not read this key file",
+                "Leave the file unopened, and carry on with work that does not need it.",
+                "No agent reads this file; tell the operator what your task needs from it, "
+                "and they do that step themselves.",
+            ),
+        }
+        hook_words = errors.hook_words
+        for name, expected in rows.items():
+            with self.subTest(code=name):
+                words = hook_words(f"authority.{name}")
+                self.assertEqual(words, expected)
+                if name == "key-file-read":
+                    for text in words:
+                        self.assertNotIn("path", text)
+                        self.assertNotIn("sign", text)
+                elif name == "operator-endpoint":
+                    for text in words:
+                        self.assertNotIn("terminal", text)
+                elif name == "hook-disable":
+                    self.assertNotIn("your own terminal", words[1])
+        for code in ("authority.protected-ref-push", "authority.unknown"):
+            with self.subTest(code=code), self.assertRaises(KeyError):
+                hook_words(code)
+
+    def test_existing_authority_remedies_unchanged(self):
+        rows = {
+            "key-file-read": "give the key's path to the command that signs, "
+                             "which reads the key itself; never open the file",
+            "operator-endpoint": "ask the operator; they answer from their own page or terminal",
+            "hook-disable": "if you mean to, do it from your own terminal, which the hooks never check",
+        }
+        for name, expected in rows.items():
+            with self.subTest(code=name):
+                actual = strings.render(f"error-authority-{name}-remedy")
+                self.assertEqual(actual.encode("utf-8"), expected.encode("utf-8"))

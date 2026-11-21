@@ -103,14 +103,33 @@ def _private_directory(status):
             and stat.S_IMODE(status.st_mode) == 0o700)
 
 
-def _runtime_base(*, platform: str, environ: Mapping[str, str], home: str):
+def _validate_runtime_home(platform: str, home: str) -> None:
     if platform not in ('darwin', 'linux'):
         raise ValueError('unsupported_platform')
     if type(home) is not str or '\0' in home or not Path(home).is_absolute():
         raise ValueError('invalid_runtime_home')
     os.fsencode(home)
+
+
+def _xdg_runtime_path(platform: str, environ: Mapping[str, str]) -> str | None:
     xdg = environ.get('XDG_RUNTIME_DIR') if platform == 'linux' else None
     if type(xdg) is str and xdg and '\0' not in xdg and Path(xdg).is_absolute():
+        return xdg
+    return None
+
+
+def runtime_bases(*, platform: str, environ: Mapping[str, str], home: str) -> tuple[str, ...]:
+    """Return lexical runtime base candidates without inspecting the filesystem."""
+    _validate_runtime_home(platform, home)
+    fallback = (str(Path(home) / '.adt' / 'run'),)
+    xdg = _xdg_runtime_path(platform, environ)
+    return (*fallback, str(Path(xdg) / 'adt')) if xdg is not None else fallback
+
+
+def _runtime_base(*, platform: str, environ: Mapping[str, str], home: str):
+    _validate_runtime_home(platform, home)
+    xdg = _xdg_runtime_path(platform, environ)
+    if xdg is not None:
         try:
             if _private_directory(os.lstat(xdg)):
                 return Path(xdg), ('adt',)
