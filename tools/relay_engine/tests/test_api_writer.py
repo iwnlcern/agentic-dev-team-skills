@@ -1236,6 +1236,11 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(order, [P, Q, P, Q])
         self.assertEqual(len(set(worker_ids)), 1)
 
+    def test_store_id_requires_a_started_writer(self):
+        writer = api_writer.StoreWriter(self.root, runtime_instance_id='r1')
+        self.addCleanup(writer.close)
+        self.assert_unavailable(writer.store_id, 'closed')
+
     def test_store_id_read_each_call(self):
         # A fresh read must see a catalogue update made after an earlier call.
         root = Path(self.tmp.name) / 'catalogue-store'
@@ -1243,6 +1248,7 @@ class WriterTests(unittest.TestCase):
         self.addCleanup(conn.close)
         writer = api_writer.StoreWriter(root, runtime_instance_id='r1')
         self.addCleanup(writer.close)
+        writer.start()
         first = writer.store_id()
         conn = store_layout.open_catalogue(root)
         conn.execute("UPDATE catalogue_identity SET store_id='second'").close()
@@ -1354,6 +1360,4 @@ class WriterTests(unittest.TestCase):
             self.assertTrue(all(tid != threading.get_ident() for _, tid in closes))
             self.assertFalse(Path(str(path) + '-wal').exists())
             self.assertFalse(Path(str(path) + '-shm').exists())
-            with self.assertRaises(store_layout.LayoutFault) as caught:
-                writer.store_id()
-            self.assertEqual(caught.exception.cause, 'no-writer')
+            self.assert_unavailable(writer.store_id, 'closed')

@@ -68,7 +68,7 @@ class TestCatalogue(unittest.TestCase):
                 self.assertEqual(self.identity(self.opened(root, **kwargs)), rows)
             resolver.assert_not_called()
         # Control: run a classifying variant of the opener itself.
-        source = inspect.getsource(store_layout.open_catalogue)
+        source = inspect.getsource(store_layout._open_catalogue)
         self.assertIn("kind or 'isolated'", source)
         source = source.replace("kind or 'isolated'",
                                 "kind or ('production' if root == production_root() else 'isolated')")
@@ -76,7 +76,7 @@ class TestCatalogue(unittest.TestCase):
             namespace = dict(vars(store_layout))
             exec(compile(source, '<classifying-opener>', 'exec'), namespace)
             with self.assertRaisesRegex(AssertionError, 'resolved'):
-                namespace['open_catalogue'](Path(self.tmp.name) / 'classifying')
+                namespace['_open_catalogue'](Path(self.tmp.name) / 'classifying', None)
 
     def test_default_never_creates_production(self):
         with mock.patch.object(store_layout, 'production_root', return_value=self.root) as resolver:
