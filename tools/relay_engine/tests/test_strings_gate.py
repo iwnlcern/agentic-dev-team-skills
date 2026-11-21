@@ -50,6 +50,20 @@ def storage_term_matches(readme_text=None, inventory=None, parser=None):
             for match in expression.finditer(value)]
 
 
+def _slips_family_key(module, function, key):
+    stem = {
+        "unavailable_words": "authority-unavailable-",
+        "session_not_current_words": "authority-not-current-",
+    }.get(function)
+    if module != "slips" or stem is None:
+        return False
+    if not isinstance(key, ast.BinOp) or not isinstance(key.op, ast.Add):
+        return False
+    while isinstance(key, ast.BinOp) and isinstance(key.op, ast.Add):
+        key = key.left
+    return isinstance(key, ast.Constant) and key.value == stem
+
+
 def gate_violations(paths):
     violations = []
     for path in paths:
@@ -194,7 +208,9 @@ def gate_violations(paths):
                                       node.func.attr == "render" and
                                       isinstance(node.func.value, ast.Name) and
                                       node.func.value.id == "addresses")
-                    if (not internal_dispatch and not address_render and
+                    slips_family = (call_name == "render" and node.args and
+                                    _slips_family_key(module, fn, node.args[0]))
+                    if (not internal_dispatch and not address_render and not slips_family and
                             (len(node.args) <= key_index or
                             not isinstance(node.args[key_index], ast.Constant) or
                             not isinstance(node.args[key_index].value, str) or
@@ -268,6 +284,25 @@ class TestGate(unittest.TestCase):
                     path.write_text(source)
                     self.assertEqual(gate_violations([str(path)]),
                                      [("probe", line, "non-inventory emission key")])
+
+    def test_slips_render_key_allowance_is_site_and_stem_bound(self):
+        cases = (
+            ("slips", "unavailable_words", "'authority-unavailable-' + code + '-' + part", False),
+            ("slips", "session_not_current_words", "'authority-not-current-' + code + '-' + part", False),
+            ("slips", "unavailable_words", "stem + part", True),
+            ("slips", "session_not_current_words", "stem + part", True),
+            ("probe", "unavailable_words", "'authority-unavailable-' + code + '-' + part", True),
+            ("slips", "other", "'authority-unavailable-' + code + '-' + part", True),
+            ("slips", "unavailable_words", "'authority-not-current-' + code + '-' + part", True),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for module, function, key, refused in cases:
+                with self.subTest(module=module, function=function, key=key):
+                    path = Path(temporary) / (module + ".py")
+                    path.write_text(f"def {function}():\n    return strings.render({key})\n",
+                                    encoding="utf-8")
+                    expected = [(module, 2, "non-inventory emission key")] if refused else []
+                    self.assertEqual(gate_violations([path]), expected)
 
     def test_production_tree_uses_only_keyed_output(self):
         self.assertEqual(gate_violations(self.production_paths()), [])

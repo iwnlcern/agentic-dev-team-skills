@@ -2778,6 +2778,20 @@ class TestAnswerCodesR22(unittest.TestCase):
 
 
 class TestAnswerWordsR22(unittest.TestCase):
+    def test_word_families_match_the_inventory_exactly(self):
+        from relay_engine import slips, strings
+
+        for stem, attribute in (
+            ('authority-unavailable-', 'UNAVAILABLE_CODES'),
+            ('authority-not-current-', 'NOT_CURRENT_CAUSES'),
+        ):
+            with self.subTest(stem=stem):
+                self.assertTrue(hasattr(slips, attribute), attribute)
+                codes = getattr(slips, attribute)
+                expected = {f'{stem}{code}-{part}' for code in codes for part in ('reason', 'remedy')}
+                actual = {key for key in strings.INVENTORY if key.startswith(stem)}
+                self.assertEqual(expected, actual)
+
     def test_unavailable_words(self):
         from relay_engine import slips
         for code, reason, remedy in [['no-service', 'the engine is not running, so this act could not be checked', 'start the engine, then try again'], ['connect-refused', 'the engine refused the connection, so this act could not be checked', 'run adt engine status, then try again'], ['deadline', 'the engine did not answer in time, so this act could not be checked', 'try again; if it repeats, run adt engine status'], ['fault', 'the check failed inside the engine', 'run adt engine status and tell the operator the fault it shows'], ['seat-found-unavailable', 'this session is a seat, and its check could not finish', "try again; a seat's act is never passed unchecked"], ['unanswerable', 'the kit could not tell whose session this is, so this act could not be checked', 'start the session again from its host, or sign it in with adt connect; the operator can run the act from their own terminal']]:

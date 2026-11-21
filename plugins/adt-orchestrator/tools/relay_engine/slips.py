@@ -131,20 +131,32 @@ def project_stopped_answer() -> Answer:
                    'operator')
 
 
+UNAVAILABLE_CODES = (
+    'no-service', 'connect-refused', 'deadline', 'fault', 'seat-found-unavailable', 'unanswerable',
+)
+NOT_CURRENT_CAUSES = (
+    'ended', 'not-occupant', 'stood-down', 'team-closed', 'record-other-seat',
+    'record-without-row', 'project-unreadable',
+)
+
+
 def unavailable_words(code: str) -> tuple[str, str]:
+    if code not in UNAVAILABLE_CODES:
+        raise KeyError('authority-unavailable-' + code + '-reason')
     return tuple(strings.render('authority-unavailable-' + code + '-' + part)
                  for part in ('reason', 'remedy'))
 
 
 def session_not_current_words(cause: str, project_id: str | None) -> tuple[str, str]:
-    # Look up the cause first: unknown causes are never parameter errors.
-    stem = 'authority-not-current-' + cause + '-'
-    if stem + 'reason' not in strings.INVENTORY:
+    # Unknown causes are never parameter errors.
+    if (cause not in NOT_CURRENT_CAUSES
+            or 'authority-not-current-' + cause + '-reason' not in strings.INVENTORY):
         raise KeyError(cause)
     if (cause == 'project-unreadable') != (project_id is not None):
         raise ValueError('only project-unreadable takes a project id')
     params = {'project': project_id} if cause == 'project-unreadable' else {}
-    return tuple(strings.render(stem + part, **params) for part in ('reason', 'remedy'))
+    return tuple(strings.render('authority-not-current-' + cause + '-' + part, **params)
+                 for part in ('reason', 'remedy'))
 
 
 def _allow(slip=None):
