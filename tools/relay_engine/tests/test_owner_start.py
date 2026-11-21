@@ -1,13 +1,17 @@
 """Exercise signed cold startup with a test signer and native process peers."""
+import ctypes
 from dataclasses import replace
 import importlib
+import inspect
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
@@ -68,6 +72,158 @@ def child_main(path, pub, root, clock, wrong_parent):
     except startup.StartupRefused as error:
         return error.reason
 
+
+class OwnerStartupBoundaryTests(unittest.TestCase):
+    BOOT = str(UUID(int=7))
+
+    def test_darwin_boot_read_checks_length_and_call_failures(self):
+        from relay_engine import lifecycle_paths, owner_start
+
+        self.assertTrue(hasattr(lifecycle_paths, '_darwin_boot_session'))
+        read_boot = lifecycle_paths._darwin_boot_session
+        frame = self.BOOT.encode('ascii') + b'\0'
+        cases = (
+            ('ok', len(frame), len(frame), frame, None),
+            ('size-error', len(frame), len(frame), frame, OSError),
+            ('fill-error', len(frame), len(frame), frame, OSError),
+            ('zero-size', 0, 0, b'', ValueError),
+            ('large-size', 65, 0, b'', ValueError),
+            ('zero-length', len(frame), 0, frame, ValueError),
+            ('large-length', len(frame), len(frame) + 1, frame, ValueError),
+            ('missing-nul', len(frame), len(frame), frame[:-1] + b'x', ValueError),
+        )
+        for cut, size, length, data, error_type in cases:
+            with self.subTest(cut=cut):
+                calls = []
+
+                def sysctlbyname(name, buffer, size_pointer, new_value, new_size):
+                    self.assertEqual(name, b'kern.bootsessionuuid')
+                    self.assertIsNone(new_value)
+                    self.assertEqual(new_size, 0)
+                    length_pointer = ctypes.cast(size_pointer, ctypes.POINTER(ctypes.c_size_t))
+                    calls.append(buffer is not None)
+                    if buffer is None:
+                        length_pointer[0] = size
+                        return -1 if cut == 'size-error' else 0
+                    self.assertEqual(length_pointer[0], size)
+                    ctypes.memmove(buffer, data, len(data))
+                    length_pointer[0] = length
+                    return -1 if cut == 'fill-error' else 0
+
+                if error_type is None:
+                    self.assertEqual(read_boot(sysctlbyname), self.BOOT)
+                    self.assertEqual(calls, [False, True])
+                    continue
+
+                def native_identity(_pid):
+                    return '1', read_boot(sysctlbyname)
+
+                with (patch.object(ctypes, 'get_errno', return_value=5),
+                      patch.object(lifecycle_paths, '_native_identity', side_effect=native_identity)):
+                    with self.assertRaisesRegex(owner_start.StartupRefused, 'startup_owner') as refused:
+                        owner_start.NativeIdentity.current()
+                self.assertIsInstance(refused.exception.__cause__, error_type)
+                if error_type is OSError:
+                    self.assertEqual(refused.exception.__cause__.errno, 5)
+                self.assertEqual(calls, [False] if cut in ('size-error', 'zero-size', 'large-size')
+                                 else [False, True])
+
+    def test_native_boot_identity_matches_the_host_oracle(self):
+        from relay_engine import owner_start
+
+        if sys.platform == 'darwin':
+            boot = subprocess.check_output(
+                ['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], encoding='ascii', timeout=1)
+        else:
+            self.assertEqual(sys.platform, 'linux')
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii')
+        self.assertEqual(owner_start.NativeIdentity.current().boot, str(UUID(boot.strip())))
+
+    def test_reap_failed_start_kills_a_child_that_exceeds_the_deadline(self):
+        from relay_engine import owner_start
+
+        child = Mock()
+        child.poll.return_value = None
+
+        def wait(timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired('child', timeout)
+            return -signal.SIGKILL
+
+        child.wait.side_effect = wait
+        with patch.object(owner_start.time, 'monotonic', side_effect=[0.0, 0.0, 5.0]):
+            owner_start._reap_failed_start(child, owner_start._OwnerStop())
+        child.send_signal.assert_called_once_with(signal.SIGTERM)
+        child.kill.assert_called_once_with()
+        self.assertEqual(child.wait.call_args.args, ())
+        self.assertEqual(child.wait.call_args.kwargs, {})
+
+    def test_reap_failed_start_preserves_a_child_exit_before_the_deadline(self):
+        from relay_engine import owner_start
+
+        child = Mock()
+        child.poll.side_effect = [None, 0]
+        child.wait.return_value = 0
+        owner_start._reap_failed_start(child, owner_start._OwnerStop())
+        child.send_signal.assert_called_once_with(signal.SIGTERM)
+        child.kill.assert_not_called()
+
+    def test_spawn_oserror_propagates_without_reaping(self):
+        from relay_engine import owner_start
+
+        attempt = SimpleNamespace(selection=SimpleNamespace(root=Path('/test-store'), project=PROJECT,
+                                                            bridge_port=None),
+                                  spawn=lambda launch: launch())
+        failure = OSError('spawn failed')
+        with patch.object(owner_start, '_reap_failed_start') as reap:
+            with self.assertRaises(OSError) as raised:
+                owner_start._run_child(attempt, b'frame', None, Mock(side_effect=failure),
+                                       owner_start._OwnerStop())
+        self.assertIs(raised.exception, failure)
+        reap.assert_not_called()
+
+    def test_post_spawn_oserror_reaps_and_refuses_retirement(self):
+        from relay_engine import owner_start
+
+        attempt = SimpleNamespace(selection=SimpleNamespace(root=Path('/test-store'), project=PROJECT,
+                                                            bridge_port=None),
+                                  spawn=lambda launch: launch())
+        child = Mock()
+        child.poll.return_value = None
+        failure = OSError('post-spawn failure')
+        stop = owner_start._OwnerStop()
+
+        def launch(_command, *, pass_fds, **_options):
+            # Keep the child's read end alive until the injected post-spawn cut.
+            self.addCleanup(os.close, os.dup(pass_fds[0]))
+            return child
+
+        with (patch.object(owner_start, 'offer_child_start', side_effect=failure),
+              patch.object(owner_start, '_reap_failed_start') as reap):
+            with self.assertRaisesRegex(owner_start.StartupRefused, 'retirement-incomplete') as refused:
+                owner_start._run_child(attempt, b'frame', None, launch, stop)
+        self.assertIs(refused.exception.__cause__, failure)
+        reap.assert_called_once_with(child, stop)
+
+    def test_production_birth_capability_matches_provider_signature(self):
+        from relay_engine.store_layout import IncumbentGuard
+
+        supported = getattr(IncumbentGuard, 'ACCEPTS_PRODUCTION_BIRTH', False) is True
+        declared = 'consume_production_birth' in inspect.signature(IncumbentGuard._create_new).parameters
+        self.assertEqual(supported, declared)
+
+    def test_absent_or_non_boolean_birth_capability_refuses_before_calling_provider(self):
+        from relay_engine import owner_start, store_layout
+
+        for attributes in ({}, {'ACCEPTS_PRODUCTION_BIRTH': 1}):
+            with self.subTest(attributes=attributes):
+                # A matching signature makes this test distinguish the new capability check.
+                def create_new(_root, _store, _project, *, kind, consume_production_birth):
+                    self.fail('incapable provider was called')
+                provider = type('Provider', (), {'_create_new': staticmethod(create_new), **attributes})
+                with patch.object(store_layout, 'IncumbentGuard', provider):
+                    with self.assertRaisesRegex(owner_start.StartupRefused, 'birth-provider-unavailable'):
+                        owner_start.production_birth(None, None)
 
 class OwnerStartTests(unittest.TestCase):
     @classmethod
@@ -200,10 +356,11 @@ class OwnerStartTests(unittest.TestCase):
                                         'expires_monotonic_ns': str(2**63 - 1)})
 
     def test_native_identity_lookup_failure_is_a_startup_refusal(self):
-        with patch.object(self.startup.lifecycle_paths, '_native_identity',
-                          side_effect=subprocess.TimeoutExpired('native lookup', 1)):
-            with self.assertRaisesRegex(self.startup.StartupRefused, 'startup_owner'):
+        failure = OSError('native lookup failed')
+        with patch.object(self.startup.lifecycle_paths, '_native_identity', side_effect=failure):
+            with self.assertRaisesRegex(self.startup.StartupRefused, 'startup_owner') as refused:
                 self.startup.NativeIdentity.current()
+        self.assertIs(refused.exception.__cause__, failure)
 
     def test_native_filesystem_identity_is_encoded_losslessly(self):
         wide_identity = (2**53 + 1, 2**64 - 1)
@@ -211,6 +368,25 @@ class OwnerStartTests(unittest.TestCase):
             attempt = self.authorize(selection=replace(self.selection, identity=wide_identity))
         self.assertEqual(attempt.arguments['identity'], [str(value) for value in wide_identity])
 
+
+    def test_production_birth_invokes_the_real_provider_with_a_single_checked_claim(self):
+        from relay_engine import store_layout
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = Path(directory).resolve() / 'store'
+            with (patch.object(store_layout, 'production_root', return_value=root),
+                  patch.object(self.startup, '_clock_ns', return_value=ISSUED)):
+                selection = self.startup.StartSelection.checked(
+                    root, STORE, PROJECT, initialize=True, project_name='Example', bridge_port=None)
+                attempt = self.startup.authorize_owner_start(
+                    selection, self.owner, prove=self.sign, show=lambda _: None)
+                consume = Mock(wraps=attempt.consume_production_birth)
+                frame = self.startup.production_birth(selection, consume)
+                consume.assert_called_once_with(root, STORE, PROJECT, selection.identity)
+                idle, proof = store_layout._decode_idle_receipt(frame)
+                self.assertEqual((idle.store, idle.project, proof.kind), (STORE, PROJECT, 'retirement'))
+                with self.assertRaisesRegex(store_layout.LayoutFault, 'birth-unproved'):
+                    attempt.consume_production_birth(root, STORE, PROJECT, selection.identity)
 
     def test_owner_birth_consume_matches_signed_parent_and_leaf(self):
         from relay_engine import store_layout

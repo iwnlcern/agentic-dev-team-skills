@@ -3,7 +3,6 @@ from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from hashlib import sha256
-import inspect
 import json
 import math
 import os
@@ -14,7 +13,6 @@ import select
 import signal
 import socket
 import stat
-from subprocess import DEVNULL, TimeoutExpired, SubprocessError
 import tempfile
 from threading import Lock
 import time
@@ -49,7 +47,7 @@ class NativeIdentity(NamedTuple):
     def read(cls, pid: int):
         try:
             return cls(pid, *lifecycle_paths._native_identity(pid))
-        except (ValueError, OSError, IndexError, SubprocessError) as error:
+        except (ValueError, OSError, IndexError) as error:
             raise StartupRefused('startup_owner') from error
 
     @classmethod
@@ -783,10 +781,9 @@ def retain_child_retirement(selection, frame, witness):
 
 def production_birth(selection, consume):
     """Use the separately reviewed Store provider when the joined package contains it."""
-    create = store_layout.IncumbentGuard._create_new
-    parameters = inspect.signature(create).parameters
-    if 'consume_production_birth' not in parameters:
+    if getattr(store_layout.IncumbentGuard, 'ACCEPTS_PRODUCTION_BIRTH', False) is not True:
         raise StartupRefused('birth-provider-unavailable')
+    create = store_layout.IncumbentGuard._create_new
     guard, enrollment = create(selection.root, selection.store, selection.project, kind='production',
                                consume_production_birth=consume)
     with guard:
@@ -859,11 +856,14 @@ def _collect_retirement(child, retirement, stop):
 def _reap_failed_start(child, stop):
     stop.request()
     stop.forward(child)
-    try:
-        child.wait(timeout=5)
-    except TimeoutExpired:
-        child.kill()
-        child.wait()
+    deadline = time.monotonic() + 5
+    while child.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            child.kill()
+            child.wait()
+            return
+        time.sleep(min(0.05, remaining))
 
 
 def _run_child(attempt, frame, idle, launch, stop):
@@ -886,7 +886,7 @@ def _run_child(attempt, frame, idle, launch, stop):
         def spawn():
             stop.require_running()
             return launch(command, env=environment, pass_fds=(idle_read, retire_write),
-                          stdin=DEVNULL, start_new_session=True)
+                          start_new_session=True)
 
         child = attempt.spawn(spawn)
 
@@ -906,7 +906,7 @@ def _run_child(attempt, frame, idle, launch, stop):
             with offer_child_start(listener, child, attempt, deadline=deadline, check=check_starting) as peer:
                 witness = read_child_epoch(peer, child, deadline=deadline, idle=idle, check=check_starting)
             return _collect_retirement(child, retirement.fileno(), stop), witness
-        except (OSError, ValueError, store_layout.LayoutFault, SubprocessError) as error:
+        except (OSError, ValueError, store_layout.LayoutFault) as error:
             if child.poll() is None:
                 _reap_failed_start(child, stop)
             raise StartupRefused('retirement-incomplete') from error

@@ -828,6 +828,8 @@ class IncumbentRecord:
 class IncumbentGuard:
     """Private Store owner seam. This guard never opens an ordinary Store."""
 
+    ACCEPTS_PRODUCTION_BIRTH = True
+
     def __init__(self, root, root_fd, lock_fd, root_identity, lock_identity):
         self._path = root
         self._holder_pid = os.getpid()

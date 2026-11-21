@@ -7,12 +7,14 @@ import tempfile
 import json
 import os
 from pathlib import Path
+import runpy
 import select
 import signal
 import socket
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -33,6 +35,75 @@ def forbidden_sign_in(source):
                        for arg in list(node.args) + [k.value for k in node.keywords])):
             found.append(node.lineno)
     return found
+
+
+class OwnerLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.launcher = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'adt'))
+        self.args = SimpleNamespace(store_root='/test-store', project_id='project', initialize=False,
+                                    project_name=None, bridge_port=None)
+
+    def test_owner_launcher_uses_devnull_and_preserves_spawn_errors(self):
+        from relay_engine import owner_start
+
+        def run_owner(*_args, **options):
+            return options['launch'](['engine', 'serve'], env={}, pass_fds=(4,), start_new_session=True)
+
+        failure = subprocess.SubprocessError('spawn failed')
+        with (patch.object(owner_start, 'run_owner', side_effect=run_owner),
+              patch.object(subprocess, 'Popen', side_effect=failure) as popen):
+            with self.assertRaises(subprocess.SubprocessError) as raised:
+                self.launcher['_run_selected_owner'](self.args)
+        self.assertIs(raised.exception, failure)
+        popen.assert_called_once_with(
+            [sys.executable, self.launcher['__file__'], 'engine', 'serve'],
+            env={}, pass_fds=(4,), start_new_session=True, stdin=subprocess.DEVNULL,
+        )
+
+    def test_owner_launcher_preserves_cli_spawn_failure_messages(self):
+        from relay_engine import adt_cli, owner_start
+
+        def run_owner(*_args, **options):
+            return options['launch'](['engine', 'serve'])
+
+        argv = ['engine', 'run', '--store-root', self.args.store_root,
+                '--project-id', self.args.project_id]
+        for failure, message in (
+            (OSError('spawn failed'), 'adt engine run: The selected Store could not be served (owner-unavailable).'),
+            (subprocess.SubprocessError('spawn failed'), 'unexpected error'),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                output = io.StringIO()
+                with (patch.object(owner_start, 'run_owner', side_effect=run_owner),
+                      patch.object(subprocess, 'Popen', side_effect=failure),
+                      patch.object(adt_cli.strings, 'report_diagnostic'),
+                      redirect_stderr(output)):
+                    status = adt_cli.main(argv, groups=(self.launcher['_engine_owner_group'](),))
+                self.assertEqual((status, output.getvalue().strip()), (1, message))
+
+    def test_owner_launcher_preserves_birth_provider_unavailable_guidance(self):
+        from relay_engine import owner_start, store_layout
+
+        def run_owner(*_args, **_options):
+            return owner_start.production_birth(None, None)
+
+        class Provider:
+            @staticmethod
+            def _create_new(root, store, project):
+                raise AssertionError('incapable provider was called')
+
+        for capability in (None, 1):
+            with self.subTest(capability=capability):
+                if capability is not None:
+                    Provider.ACCEPTS_PRODUCTION_BIRTH = capability
+                output = io.StringIO()
+                with (patch.object(store_layout, 'IncumbentGuard', Provider),
+                      patch.object(owner_start, 'run_owner', side_effect=run_owner),
+                      redirect_stderr(output)):
+                    status = self.launcher['_run_selected_owner'](self.args)
+                self.assertEqual(status, 1)
+                self.assertEqual(output.getvalue().strip(),
+                                 'adt engine run: This package does not contain the checked production Store provider.')
 
 
 class AdtTests(unittest.TestCase):
@@ -341,6 +412,7 @@ class AdtTests(unittest.TestCase):
 
         child_script = """
 from pathlib import Path
+import runpy
 import sys
 from unittest.mock import patch
 from relay_engine import adt_cli, api_service, operator_terminal, owner_start, store_layout

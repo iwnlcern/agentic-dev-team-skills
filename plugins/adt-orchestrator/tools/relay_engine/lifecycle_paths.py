@@ -10,7 +10,6 @@ import re
 import socket
 import stat
 import struct
-import subprocess
 import sys
 import time
 from typing import Literal
@@ -325,6 +324,25 @@ def read_held_locator(root: str) -> HeldLocatorRead | None:
 _LIVE_LOCATOR = '.adt-store-live.json'
 
 
+def _darwin_boot_session(sysctlbyname):
+    import ctypes
+
+    name = b'kern.bootsessionuuid'
+    length = ctypes.c_size_t()
+    if sysctlbyname(name, None, ctypes.byref(length), None, 0) != 0:
+        raise OSError(ctypes.get_errno(), 'could not size Darwin boot session UUID')
+    capacity = length.value
+    if not 0 < capacity <= 64:
+        raise ValueError('invalid Darwin boot session UUID size')
+    buffer = ctypes.create_string_buffer(capacity)
+    if sysctlbyname(name, buffer, ctypes.byref(length), None, 0) != 0:
+        raise OSError(ctypes.get_errno(), 'could not read Darwin boot session UUID')
+    used = length.value
+    if not 0 < used <= capacity or buffer[used - 1] != b'\0':
+        raise ValueError('invalid Darwin boot session UUID length')
+    return buffer.raw[:used - 1].decode('ascii')
+
+
 def _native_identity(pid):
     """Return full native process birth and boot in the caller's local view."""
     if type(pid) is not int or not 0 < pid < 2**31:
@@ -356,8 +374,12 @@ def _native_identity(pid):
         if not info.seconds or info.microseconds >= 1_000_000:
             raise ValueError('invalid Darwin birth')
         birth = f'{info.seconds}.{info.microseconds:06d}'
-        boot = subprocess.check_output(('/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'),
-                                       timeout=1, encoding='ascii').strip()
+        system = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+        sysctlbyname = system.sysctlbyname
+        sysctlbyname.argtypes = (ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                                 ctypes.c_void_p, ctypes.c_size_t)
+        sysctlbyname.restype = ctypes.c_int
+        boot = _darwin_boot_session(sysctlbyname)
     else:
         raise ValueError('native identity unavailable')
     canonical_boot = str(UUID(boot))
@@ -443,5 +465,5 @@ def console_target(root: str) -> ConsoleTarget | ConsoleTargetUnavailable:
     try:
         return ConsoleTarget(_read_live_locator(str(Path(root).absolute())))
     except (HeldMetadataUnavailable, store_layout.LayoutFault, api_client.LocalRefusal, api_client.EndpointUnavailable,
-            OSError, ValueError, TypeError, IndexError, subprocess.SubprocessError) as fault:
+            OSError, ValueError, TypeError, IndexError) as fault:
         return ConsoleTargetUnavailable('identity_unavailable', fault)

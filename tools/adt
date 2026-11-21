@@ -568,7 +568,8 @@ def _run_selected_owner(args):
     from relay_engine import operator_terminal, owner_start
 
     def launch(command, **options):
-        return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *command], **options)
+        return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *command],
+                                stdin=subprocess.DEVNULL, **options)
 
     try:
         return owner_start.run_owner(
