@@ -1148,8 +1148,8 @@ raise SystemExit(code)
                 mock.patch.object(rc, "PROBE_INTERVAL_SECONDS", interval, create=True):
             yield
 
-    def full(self, fixture, docker, *args):
-        with self.timings():
+    def full(self, fixture, docker, *args, timings=()):
+        with self.timings(*timings):
             return fixture.run_legs("linux", environ={**os.environ, "DOCKER": str(docker)}, extra=args)
 
     def image_build(self, fixture, docker, *, statement=True):
@@ -1164,12 +1164,19 @@ raise SystemExit(code)
 
     def test_unanswered_lookup_stops_without_building(self):
         fixture, docker, log = self.stub(inspect=[self.MISS])
-        status, err = self.full(fixture, docker)
+        status, err = self.full(fixture, docker, timings=(2.0, 1.5, 0.05))
         self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
         self.assertEqual(status, 2, err)
         self.assertIn(self.TAG, err)
         self.assertIn("all not-found", err)
-        self.assertEqual(self.image_record(fixture)["result"], "unresolved")
+        record = self.image_record(fixture)
+        self.assertEqual(record["result"], "unresolved")
+        wake, *inspects = record["probes"]
+        self.assertEqual((wake["kind"], wake["class"]), ("wake", "woke"))
+        self.assertTrue(inspects, record)
+        self.assertTrue(all(row["kind"] == "inspect" for row in inspects), record)
+        self.assertTrue(all(row["class"] == "not-found" for row in inspects[:-1]), record)
+        self.assertIn(inspects[-1]["class"], ("not-found", "cut"), record)
 
     def test_idle_miss_then_answer_runs_by_id(self):
         fixture, docker, log = self.stub(inspect=[self.MISS, (0, 0, self.IMAGE + " linux/arm64", "")])
@@ -1186,23 +1193,32 @@ raise SystemExit(code)
 
     def test_inconclusive_lookups_stop_without_building(self):
         for case, kwargs, message in [
-            ("wake", {"wake": (0, 1, "", ""), "inspect": [self.MISS]}, "unresolved"),
+            ("wake", {"wake": (0, 1, "", "wake refused"), "inspect": [self.MISS]},
+             "wake failed: wake refused"),
             ("transport", {"inspect": [(0, 1, "", "Cannot connect to the Docker daemon at "
                                        "unix:///var/run/docker.sock. Is the docker daemon running?")]},
              "unresolved"),
-            ("timeout", {"inspect": [(0.6, 1, "", "")]}, "unresolved"),
+            ("timeout", {"inspect": [(2.0, 1, "", "")]}, "inspect timeout"),
             ("malformed", {"inspect": [(0, 0, "not an image record", "")]}, "unresolved"),
             ("foreign", {"inspect": [(0, 0, self.OTHER + " linux/amd64", "")]}, "foreign"),
             ("info", {"info": (1.05, 0, "arm64", ""), "inspect": [self.MISS]}, "platform"),
         ]:
             with self.subTest(case=case):
                 fixture, docker, log = self.stub(**kwargs)
-                status, err = self.full(fixture, docker)
+                timings = (3.0, 0.5, 0.05) if case == "timeout" else ()
+                status, err = self.full(fixture, docker, timings=timings)
                 self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
                 self.assertEqual(status, 2, err)
                 self.assertIn(message, err)
                 if case == "wake":
                     self.assertEqual(self.commands(log), ["info", "ps"])
+                    probes = self.image_record(fixture)["probes"]
+                    self.assertEqual([(row["kind"], row["class"]) for row in probes],
+                                     [("wake", "failed")])
+                elif case == "timeout":
+                    _, first, *later = self.image_record(fixture)["probes"]
+                    self.assertEqual((first["kind"], first["class"]), ("inspect", "timeout"))
+                    self.assertTrue(all(row["class"] in ("timeout", "cut") for row in later), later)
 
     def test_image_pin_mismatch_stops_before_any_container(self):
         fixture, docker, log = self.stub()
@@ -1351,21 +1367,17 @@ raise SystemExit(code)
                     self.assertEqual(after["record"]["result"], case)
 
     def test_shared_window_cuts_a_late_inspect(self):
-        fixture, docker, log = self.stub(
-            wake=(0.3, 0, "", ""),
-            inspect=[(0.2, *self.MISS[1:]), (0.5, 0, self.IMAGE + " linux/arm64", "")],
-        )
-        with self.timings(window=1.0, probe=0.6, interval=0.1):
-            status, err = fixture.run_legs("linux", environ={**os.environ, "DOCKER": str(docker)})
-        # The legacy runner builds after the first miss and creates no ImageRecord.
-        self.assertTrue(callable(rc.resolve_image))
+        fixture, docker, log = self.stub(inspect=[self.MISS, (1.3, 0, self.IMAGE + " linux/arm64", "")])
+        status, err = self.full(fixture, docker, timings=(2.0, 1.6, 1.0))
+        self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
         self.assertEqual(status, 2, err)
         self.assertEqual(self.commands(log), ["info", "ps", "inspect", "inspect"])
         record = self.image_record(fixture)
         self.assertEqual(record["result"], "unresolved")
-        self.assertEqual((record["probes"][-1]["kind"], record["probes"][-1]["class"]),
-                         ("inspect", "timeout"))
         self.assertFalse(alive(self.rows(log)[-1]["pid"]))
+        self.assertEqual([(row["kind"], row["class"]) for row in record["probes"]],
+                         [("wake", "woke"), ("inspect", "not-found"), ("inspect", "cut")], err)
+        self.assertIn("all not-found; last inspect cut at the window's end", err)
 
 
 class DockerArgs(unittest.TestCase):

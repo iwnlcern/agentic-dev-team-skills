@@ -719,13 +719,19 @@ class ImageRecord:
         if self.result == "foreign":
             return f"{self.tag} resolved to a foreign image {self.id} on {self.platform}"
         inspections = [row for row in self.probes if row["kind"] == "inspect"]
-        if inspections and all(row["class"] == "not-found" for row in inspections):
+        completed = [row for row in inspections if row["class"] != "cut"]
+        if completed and all(row["class"] == "not-found" for row in completed):
             detail = "all not-found"
+        elif inspections and not completed:
+            detail = "no completed inspect"
         else:
-            last = self.probes[-1] if self.probes else None
-            detail = f'{last["kind"]} {last["class"]}' if last else "no completed probes"
-            if last and last["first_line"]:
+            # With no inspect rows, retain the wake's own diagnostic.
+            last = completed[-1] if completed else self.probes[-1]
+            detail = f'{last["kind"]} {last["class"]}'
+            if last["first_line"]:
                 detail += f': {last["first_line"]}'
+        if inspections and inspections[-1]["class"] == "cut":
+            detail += "; last inspect cut at the window's end"
         return f"{self.tag} lookup unresolved ({detail})"
 
 
@@ -810,10 +816,11 @@ def resolve_image(docker, platform):
     start = time.monotonic()
     end = start + WINDOW_SECONDS
     wake = [docker, "ps", "-q", "--filter", f"label={WAKE_LABEL}"]
-    response = _docker_child(wake, min(end, start + PROBE_SECONDS))
+    wake_deadline = start + PROBE_SECONDS
+    response = _docker_child(wake, min(end, wake_deadline))
     response.require_running()
     if response.timed_out:
-        wake_class = "timeout"
+        wake_class = "cut" if end < wake_deadline else "timeout"
     else:
         wake_class = "woke" if response.exit == 0 else "failed"
     probes = [_record_probe("wake", wake, response, wake_class, 0.0, time.monotonic() - start)]
@@ -825,7 +832,8 @@ def resolve_image(docker, platform):
     misses = (f"Error response from daemon: {message}",
               f"Error response from daemon: {json.dumps({'message': message}, separators=(',', ':'))}")
     while (started := time.monotonic()) < end:
-        response = _docker_child(inspect, min(end, started + PROBE_SECONDS))
+        probe_deadline = started + PROBE_SECONDS
+        response = _docker_child(inspect, min(end, probe_deadline))
         response.require_running()
         finished = time.monotonic()
         out = response.stdout.decode(errors="replace").removesuffix("\n")
@@ -834,7 +842,7 @@ def resolve_image(docker, platform):
         if answer:
             classification = "answer"
         elif response.timed_out:
-            classification = "timeout"
+            classification = "cut" if end < probe_deadline else "timeout"
         elif response.exit == 1 and not response.stdout and err in misses:
             classification = "not-found"
         else:
