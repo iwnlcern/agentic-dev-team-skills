@@ -6,7 +6,7 @@ worker pool, under a wall cap per leg; anything unfinished at the cap counts as
 failed.  The runner never turns a failure green.
 
 Usage: python3 tools/release-check.py full --out DIR [--leg mac|linux|both]
-           [--workers N] [--cap-seconds S] [--release]
+           [--workers N] [--cap-seconds S] [--release] [--image sha256:ID]
 The linux leg runs the same script inside a pinned container
 (tools/release-check.Dockerfile) with the worktree and its common Git directory
 mounted read-only at their host paths.
@@ -72,6 +72,13 @@ PINNED_HISTORY = ("2138c1c",)
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 DOCKER_PLATFORMS = {"aarch64": "linux/arm64", "arm64": "linux/arm64",
                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
+PROBE_SECONDS = 5
+WINDOW_SECONDS = 15
+PROBE_INTERVAL_SECONDS = 0.5
+WAKE_LABEL = "adt.release-check.wake"
+PIN_ENV = "ADT_RELEASE_CHECK_IMAGE"
+IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+IMAGE_ANSWER = re.compile(r"(sha256:[0-9a-f]{64}) ([a-z0-9]+/[a-z0-9_]+)")
 # Set when the run is interrupted; legs stop their steps (or container) and record it.
 STOP = threading.Event()
 
@@ -699,65 +706,214 @@ def common_git_dir(repo):
     return Path(result.stdout.strip())
 
 
-def image_id(docker, tag):
-    result = subprocess.run([docker, "image", "inspect", "--format", "{{.Id}}", tag],
-                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    return result.stdout.strip() or None
+
+@dataclasses.dataclass(frozen=True)
+class ImageRecord:
+    tag: str
+    result: str
+    id: str | None
+    platform: str | None
+    probes: tuple
+
+    def describe(self):
+        if self.result == "foreign":
+            return f"{self.tag} resolved to a foreign image {self.id} on {self.platform}"
+        inspections = [row for row in self.probes if row["kind"] == "inspect"]
+        if inspections and all(row["class"] == "not-found" for row in inspections):
+            detail = "all not-found"
+        else:
+            last = self.probes[-1] if self.probes else None
+            detail = f'{last["kind"]} {last["class"]}' if last else "no completed probes"
+            if last and last["first_line"]:
+                detail += f': {last["first_line"]}'
+        return f"{self.tag} lookup unresolved ({detail})"
+
+
+@dataclasses.dataclass(frozen=True)
+class DockerChild:
+    exit: int | None
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool = False
+    stopped: bool = False
+
+    def require_running(self):
+        if self.stopped:
+            raise Stopped("interrupted during Docker image resolution")
 
 
 def image_tag():
     return "adt-release-check:" + hashlib.sha256(DOCKERFILE.read_bytes()).hexdigest()[:12]
 
 
-def ensure_image(docker, platform=None):
-    """Build the linux leg's image for the native platform when its tag is absent or foreign."""
-    tag = image_tag()
-    platform = platform or native_platform(docker)
-    try:
-        present = subprocess.run([docker, "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}",
-                                  tag], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        if present.returncode == 0 and present.stdout.strip() == platform:
-            return tag
-        with open(DOCKERFILE, "rb") as dockerfile, tempfile.TemporaryFile() as errors:
-            build = subprocess.Popen([docker, "build", "-q", "--platform", platform, "-t", tag, "-"],
-                                     stdin=dockerfile, stdout=subprocess.DEVNULL, stderr=errors)
-            while build.poll() is None:
-                if STOP.is_set():
-                    build.terminate()
-                    build.wait()
-                    raise Stopped(f"interrupted during docker build of {tag}")
-                time.sleep(0.2)
-            errors.seek(0)
-            stderr = errors.read().decode(errors="replace")
-    except OSError as error:
-        raise SetupError(f"docker could not run ({docker}): {error}") from error
-    if build.returncode != 0:
-        raise SetupError(f"docker build of {tag} failed: {stderr.strip()[-800:]}")
-    return tag
+def _docker_child(argv, deadline=None, *, stdin=subprocess.DEVNULL):
+    """Poll a Docker child using files so a full output pipe cannot stall it."""
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        timed_out = stopped = False
+        try:
+            if STOP.is_set():
+                return DockerChild(None, b"", b"", stopped=True)
+            if deadline is not None and time.monotonic() >= deadline:
+                return DockerChild(None, b"", b"", timed_out=True)
+            with subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr) as proc:
+                while True:
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    stopped = STOP.is_set()
+                    timed_out = remaining is not None and remaining <= 0
+                    if stopped or timed_out:
+                        if deadline is None:
+                            # An explicit build gets a graceful client shutdown first.
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=1)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                        else:
+                            proc.kill()
+                        proc.wait()
+                        break
+                    if proc.poll() is not None:
+                        break
+                    STOP.wait(POLL_SECONDS if remaining is None else min(POLL_SECONDS, remaining))
+        except OSError as error:
+            raise SetupError(f"Docker could not run ({argv[0]}): {error}") from error
+        stdout.seek(0)
+        stderr.seek(0)
+        return DockerChild(proc.returncode, stdout.read(), stderr.read(), timed_out, stopped)
 
 
 def native_platform(docker):
-    """The host's native Docker platform, so the linux leg never runs under emulation."""
-    try:
-        arch = subprocess.run([docker, "info", "--format", "{{.Architecture}}"], capture_output=True,
-                              text=True, stdin=subprocess.DEVNULL).stdout.strip()
-    except OSError as error:
-        raise SetupError(f"docker could not run ({docker}): {error}") from error
+    """Bound the platform query before the shared wake and inspection window."""
+    result = _docker_child([docker, "info", "--format", "{{.Architecture}}"],
+                           time.monotonic() + PROBE_SECONDS)
+    result.require_running()
+    if result.timed_out:
+        raise SetupError("Docker platform query timed out")
+    if result.exit != 0:
+        raise SetupError(f"Docker platform query exited {result.exit}: "
+                         f"{result.stderr.decode(errors='replace').strip()}")
+    arch = result.stdout.decode(errors="replace").strip()
     if arch not in DOCKER_PLATFORMS:
         raise SetupError(f"docker reports an unknown host architecture {arch!r}")
     return DOCKER_PLATFORMS[arch]
 
 
-def docker_args(worktree, common_git_dir, out, image, expected_head, extra=(), platform=None,
-                image_id=None):
-    """Arguments after the docker binary for the linux leg's container."""
+def _record_probe(kind, argv, result, classification, start, end):
+    output = (result.stdout or result.stderr).decode(errors="replace").splitlines()
+    return {"kind": kind, "argv": argv, "exit": result.exit, "class": classification,
+            "start": start, "end": end, "first_line": output[0] if output else ""}
+
+
+def resolve_image(docker, platform):
+    """Resolve the tag without creating or downloading an image."""
+    tag = image_tag()
+    start = time.monotonic()
+    end = start + WINDOW_SECONDS
+    wake = [docker, "ps", "-q", "--filter", f"label={WAKE_LABEL}"]
+    response = _docker_child(wake, min(end, start + PROBE_SECONDS))
+    response.require_running()
+    if response.timed_out:
+        wake_class = "timeout"
+    else:
+        wake_class = "woke" if response.exit == 0 else "failed"
+    probes = [_record_probe("wake", wake, response, wake_class, 0.0, time.monotonic() - start)]
+    if wake_class != "woke":
+        return ImageRecord(tag, "unresolved", None, None, tuple(probes))
+
+    inspect = [docker, "image", "inspect", "--format", "{{.Id}} {{.Os}}/{{.Architecture}}", tag]
+    message = f"No such image: {tag}"
+    misses = (f"Error response from daemon: {message}",
+              f"Error response from daemon: {json.dumps({'message': message}, separators=(',', ':'))}")
+    while (started := time.monotonic()) < end:
+        response = _docker_child(inspect, min(end, started + PROBE_SECONDS))
+        response.require_running()
+        finished = time.monotonic()
+        out = response.stdout.decode(errors="replace").removesuffix("\n")
+        err = response.stderr.decode(errors="replace").removesuffix("\n")
+        answer = IMAGE_ANSWER.fullmatch(out) if response.exit == 0 and not response.timed_out else None
+        if answer:
+            classification = "answer"
+        elif response.timed_out:
+            classification = "timeout"
+        elif response.exit == 1 and not response.stdout and err in misses:
+            classification = "not-found"
+        else:
+            classification = "other"
+        probes.append(_record_probe("inspect", inspect, response, classification,
+                                    started - start, finished - start))
+        if answer:
+            image, found_platform = answer.groups()
+            outcome = "present" if found_platform == platform else "foreign"
+            return ImageRecord(tag, outcome, image, found_platform, tuple(probes))
+        if STOP.wait(max(0, min(PROBE_INTERVAL_SECONDS, end - finished))):
+            raise Stopped("interrupted between Docker image probes")
+    return ImageRecord(tag, "unresolved", None, None, tuple(probes))
+
+
+def pinned(record, pin):
+    if record.result != "present":
+        raise SetupError(record.describe())
+    if pin is not None and record.id != pin:
+        raise SetupError(f"{record.tag} resolved to {record.id}; expected pinned image {pin}")
+    return record.id
+
+
+def _write_json(path, data):
+    payload = json.dumps(data, indent=2) + "\n"
+    path.write_text(payload)
+    return payload
+
+
+def build_image(docker, platform, out):
+    """Attempt one operator-authorized build and record its outcome."""
+    first = resolve_image(docker, platform)
+    before = {"operator_verified_absent": True, "tag": first.tag, "native_platform": platform,
+              "record": dataclasses.asdict(first)}
+    before_payload = _write_json(out / "before.json", before)
+    if first.result != "unresolved":
+        print(before_payload, end="")
+        return 2
+
+    outcome = {"build_exit": None, "build_stderr": ""}
+    status = 1
+    with DOCKERFILE.open("rb") as recipe:
+        try:
+            result = _docker_child([docker, "build", "-q", "--platform", platform, "-t", first.tag, "-"],
+                                   stdin=recipe)
+        except SetupError as error:
+            outcome["build_stderr"] = str(error)
+        else:
+            outcome["build_exit"] = result.exit
+            outcome["build_stderr"] = result.stderr[-800:].decode(errors="replace")
+            if result.stopped:
+                outcome["stopped"] = "build"
+            elif result.exit == 0:
+                # Keep the build outcome on disk even if follow-up resolution is interrupted.
+                _write_json(out / "after.json", outcome)
+                try:
+                    after = resolve_image(docker, platform)
+                except Stopped:
+                    outcome["stopped"] = "post-build-resolution"
+                except SetupError as error:
+                    outcome["error"] = str(error)
+                else:
+                    outcome["record"] = dataclasses.asdict(after)
+                    status = 0 if after.result == "present" else 1
+    print(_write_json(out / "after.json", outcome), end="")
+    return status
+
+
+def docker_args(worktree, common_git_dir, out, image_id, expected_head, extra=(), platform=None):
+    """Arguments after the Docker binary for the Linux leg's container."""
+    if not IMAGE_ID.fullmatch(image_id):
+        raise ValueError(f"expected an immutable Docker image ID, got {image_id!r}")
     worktree = Path(worktree)
     common = Path(common_git_dir)
     sources = [worktree]
     if common != worktree and worktree not in common.parents:
         sources.append(common)
     # --init: an init process, not the runner, is PID 1 and reaps orphans (erratum 1 E1).
-    args = ["run", "--rm", "--init", "--user", f"{os.getuid()}:{os.getgid()}"]
+    args = ["run", "--rm", "--pull=never", "--init", "--user", f"{os.getuid()}:{os.getgid()}"]
     if platform:
         args += ["--platform", platform]
     for source in sources:
@@ -771,9 +927,9 @@ def docker_args(worktree, common_git_dir, out, image, expected_head, extra=(), p
                        ("ADT_SOURCE_MOUNTS", os.pathsep.join(str(s) for s in sources)),
                        ("TMPDIR", CONTAINER_SCRATCH), ("HOME", CONTAINER_SCRATCH),
                        ("RELAY_ENGINE_ACL_DIR", "/var/tmp"),
-                       ("ADT_IMAGE_ID", image_id or "")):
+                       ("ADT_IMAGE_ID", image_id)):
         args += ["-e", f"{key}={value}"]
-    args += ["-w", str(worktree), image, "python3", "tools/release-check.py", "full", "--leg", "linux",
+    args += ["-w", str(worktree), image_id, "python3", "tools/release-check.py", "full", "--leg", "linux",
              "--in-container", "--out", CONTAINER_OUT, *extra]
     return args
 
@@ -879,14 +1035,14 @@ def _run_linux_host(steps, args, repo, environ, exclusions, history=PINNED_HISTO
     name, label = f"adt-release-check-{run_id[:12]}", f"{RUN_LABEL}={run_id}"
     (leg_dir / CONTAINER_RECORD).write_text(json.dumps({"name": name, "label": label}) + "\n")
     try:
-        docker = environ.get("DOCKER") or shutil.which("docker", path=environ.get("PATH"))
-        if not docker or not os.access(docker, os.X_OK):
-            raise SetupError(f"docker not found (DOCKER={environ.get('DOCKER')!r}, PATH lookup)")
+        docker = _docker_binary(environ)
         platform_name = native_platform(docker)
-        image = ensure_image(docker, platform_name)
+        record = resolve_image(docker, platform_name)
+        _write_json(leg_dir / "image.json", {**dataclasses.asdict(record), "pin": args.image})
+        image = pinned(record, args.image)
         command = docker_args(repo, common_git_dir(repo), args.out, image, _commit(repo) or "",
                               extra=["--workers", str(args.workers), "--cap-seconds", str(args.cap_seconds)],
-                              platform=platform_name, image_id=image_id(docker, image))
+                              platform=platform_name)
         if STOP.is_set():
             raise Stopped("interrupted before the container started")
     except SetupError as error:
@@ -934,6 +1090,43 @@ def _under_home(path, environ):
     return real == home or real.startswith(home + os.sep)
 
 
+def _docker_binary(environ):
+    docker = environ.get("DOCKER") or shutil.which("docker", path=environ.get("PATH"))
+    if not docker or not os.access(docker, os.X_OK):
+        raise SetupError(f"docker not found (DOCKER={environ.get('DOCKER')!r}, PATH lookup)")
+    return docker
+
+
+def _run_image_command(args, environ):
+    try:
+        if args.image_command == "build":
+            if not args.operator_verified_absent:
+                raise SetupError("image build requires --operator-verified-absent")
+            if not _under_home(args.out, environ):
+                raise SetupError("image build --out must be a new directory under $HOME")
+            out = Path(args.out)
+            out.mkdir()
+        docker = _docker_binary(environ)
+        platform_name = native_platform(docker)
+        if args.image_command == "build":
+            return build_image(docker, platform_name, out)
+        record = resolve_image(docker, platform_name)
+        print(json.dumps(dataclasses.asdict(record), indent=2))
+        return 0 if record.result == "present" else 2
+    except (OSError, SetupError) as error:
+        print(f"release-check: {error}", file=sys.stderr)
+        return 2
+    except Stopped as stopped:
+        print(f"release-check: {stopped}", file=sys.stderr)
+        return 1
+
+
+def _parse_image_id(value):
+    if not IMAGE_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError("expected sha256: followed by 64 lowercase hex characters")
+    return value
+
+
 def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS, history=PINNED_HISTORY):
     environ = dict(os.environ if environ is None else environ)
     parser = argparse.ArgumentParser(prog="release-check.py", description=__doc__.split("\n\n")[0])
@@ -946,6 +1139,13 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS, history=P
     full.add_argument("--release", action="store_true",
                       help="release-head run: require the reviewed exact exclusion policy")
     full.add_argument("--in-container", action="store_true", help=argparse.SUPPRESS)
+    full.add_argument("--image", type=_parse_image_id, help="pin the resolved image by immutable ID")
+    image = commands.add_parser("image", help="inspect or explicitly build the release check image")
+    image_commands = image.add_subparsers(dest="image_command", required=True)
+    image_commands.add_parser("show", help="resolve the tag and print its probe record")
+    build = image_commands.add_parser("build", help="operator-verified image build")
+    build.add_argument("--operator-verified-absent", action="store_true")
+    build.add_argument("--out", required=True, help="new directory under $HOME for build records")
     args = parser.parse_args(argv)
 
     STOP.clear()
@@ -953,6 +1153,8 @@ def main(argv=None, *, repo=REPO, environ=None, exclusions=EXCLUSIONS, history=P
     if threading.current_thread() is threading.main_thread():
         previous = {sig: signal.signal(sig, _request_stop) for sig in STOP_SIGNALS}
     try:
+        if args.command == "image":
+            return _run_image_command(args, environ)
         if args.in_container:
             return _run_in_container(args, repo, environ)
         return _run_host(args, repo, environ, exclusions, history)
@@ -1014,8 +1216,14 @@ def _run_host(args, repo, environ, exclusions, history):
         linux = (pool.submit(_guarded, "linux", _run_linux_host, steps, args, repo, environ, exclusions,
                              history, **selection_options) if "linux" in legs else None)
         if "mac" in legs:
+            mac_environ = dict(environ)
+            if args.image is None:
+                mac_environ.pop(PIN_ENV, None)
+            else:
+                mac_environ[PIN_ENV] = args.image
             legs_run["mac"] = _guarded("mac", run_leg, "mac", steps, args.workers, args.cap_seconds, out,
-                                       repo=repo, environ=environ, exclusions=exclusions, **selection_options)
+                                       repo=repo, environ=mac_environ, exclusions=exclusions,
+                                       **selection_options)
         if linux is not None:
             # Polled, so the main thread keeps taking signals while the linux leg runs.
             while not linux.done():

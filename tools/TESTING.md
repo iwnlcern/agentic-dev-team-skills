@@ -38,6 +38,17 @@ Run the release runner's own tests (they need Docker):
 
 ## The release check
 
+The check never builds or pulls the release image.
+It resolves the local tag, then starts each Linux container by the resolved immutable image ID with `--pull=never`.
+Use `full --image sha256:<64 lowercase hex digits>` to require the same ID on the host Linux leg and in the macOS leg's Docker tests.
+If the tag does not resolve on the native platform, or it resolves to a different ID than the pin, the Linux leg stops at setup and the macOS `release_check_tests` step fails at class setup.
+Use `python3 tools/release-check.py image show` to see the lookup record.
+
+A separately authorized image build uses `python3 tools/release-check.py image build --operator-verified-absent --out DIR`, where `DIR` is a new directory under `$HOME`.
+Verify the tag's absence on the live image store before using the flag.
+The command refuses a resolving tag and keeps the verification statement and lookup in `before.json` before it starts the write, then records the outcome in `after.json`.
+If an idle Docker client hides an existing image and the caller confirms absence, the build can replace the image behind that tag.
+
 The full run happens once, at the release head, through the release check:
 
     python3 tools/release-check.py full --out <a directory under $HOME>
