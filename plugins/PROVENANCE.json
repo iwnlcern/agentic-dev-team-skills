@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "a943eadbbb096fb97d68335f982fb71a8a74dc972c4b39b12f58531267e6b968",
+    "sha256": "5a60bae8982456242b8bcd61c5fb75a9d72d03a07df6df2b5df7c8cba17b1587",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -358,6 +358,12 @@
     "path": "adt-master/tools/adapters/delivery_interface.py",
     "sha256": "564635d42290506c223908ba42663704d3c2c6cb4e6a39cbb08b4c0eb4585b0b",
     "source": "tools/adapters/delivery_interface.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/hook_files.py",
+    "sha256": "89845a33bf48007b020093dbd4c885a5950c8a60896257c3577ffea11b7cce53",
+    "source": "tools/adapters/hook_files.py"
   },
   {
     "kit_version": "2.9.7",
@@ -496,6 +502,12 @@
     "path": "adt-master/tools/adapters/tests/test_delivery_interface.py",
     "sha256": "ecd116e72d1fa0f4ac278268735a6a3d954faf06f40fabd4c4e949d8b630ca2b",
     "source": "tools/adapters/tests/test_delivery_interface.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_hook_files.py",
+    "sha256": "3205bf89876a50e9ca7b4f29c47e03984eb785ad5c766564d77f517bd14ad373",
+    "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11480,7 +11492,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "a943eadbbb096fb97d68335f982fb71a8a74dc972c4b39b12f58531267e6b968",
+    "sha256": "5a60bae8982456242b8bcd61c5fb75a9d72d03a07df6df2b5df7c8cba17b1587",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11494,6 +11506,12 @@
     "path": "adt-orchestrator/tools/adapters/delivery_interface.py",
     "sha256": "564635d42290506c223908ba42663704d3c2c6cb4e6a39cbb08b4c0eb4585b0b",
     "source": "tools/adapters/delivery_interface.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/hook_files.py",
+    "sha256": "89845a33bf48007b020093dbd4c885a5950c8a60896257c3577ffea11b7cce53",
+    "source": "tools/adapters/hook_files.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11632,6 +11650,12 @@
     "path": "adt-orchestrator/tools/adapters/tests/test_delivery_interface.py",
     "sha256": "ecd116e72d1fa0f4ac278268735a6a3d954faf06f40fabd4c4e949d8b630ca2b",
     "source": "tools/adapters/tests/test_delivery_interface.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_hook_files.py",
+    "sha256": "3205bf89876a50e9ca7b4f29c47e03984eb785ad5c766564d77f517bd14ad373",
+    "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22532,7 +22556,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "a943eadbbb096fb97d68335f982fb71a8a74dc972c4b39b12f58531267e6b968",
+    "sha256": "5a60bae8982456242b8bcd61c5fb75a9d72d03a07df6df2b5df7c8cba17b1587",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -22546,6 +22570,12 @@
     "path": "adt-pair/tools/adapters/delivery_interface.py",
     "sha256": "564635d42290506c223908ba42663704d3c2c6cb4e6a39cbb08b4c0eb4585b0b",
     "source": "tools/adapters/delivery_interface.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/hook_files.py",
+    "sha256": "89845a33bf48007b020093dbd4c885a5950c8a60896257c3577ffea11b7cce53",
+    "source": "tools/adapters/hook_files.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22684,6 +22714,12 @@
     "path": "adt-pair/tools/adapters/tests/test_delivery_interface.py",
     "sha256": "ecd116e72d1fa0f4ac278268735a6a3d954faf06f40fabd4c4e949d8b630ca2b",
     "source": "tools/adapters/tests/test_delivery_interface.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_hook_files.py",
+    "sha256": "3205bf89876a50e9ca7b4f29c47e03984eb785ad5c766564d77f517bd14ad373",
+    "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
     "kit_version": "2.9.7",
