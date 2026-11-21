@@ -910,6 +910,15 @@ class IncumbentGuard:
         except OSError as exc:
             raise LayoutFault('incumbent-invalid') from exc
 
+    def _root_members(self) -> frozenset[str]:
+        fd = os.open('.', _DIRECTORY, dir_fd=self._root_fd)
+        try:
+            if _owned_inode(os.fstat(fd), directory=True) != self._root_identity:
+                raise LayoutFault('incumbent-invalid')
+            return frozenset(os.listdir(fd))
+        finally:
+            os.close(fd)
+
     def _named_record(self):
         info = os.stat(_INCUMBENT, dir_fd=self._root_fd, follow_symlinks=False)
         return _owned_inode(info)
@@ -1162,7 +1171,7 @@ class IncumbentGuard:
     def enroll_new(self, proof):
         self._check_lock()
         if (self._birth is None or self._birth[0] is not proof
-                or set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK}):
+                or self._root_members() != {_INCUMBENT_LOCK}):
             raise LayoutFault('enrollment-unproved')
         _, kind = self._birth
         self._birth = None
@@ -1179,7 +1188,7 @@ class IncumbentGuard:
             raise LayoutFault('birth-unproved')
         _, kind = birth_arm
         self._current(armed)
-        if set(os.listdir(self._root_fd)) != {_INCUMBENT_LOCK, _INCUMBENT}:
+        if self._root_members() != {_INCUMBENT_LOCK, _INCUMBENT}:
             raise LayoutFault('birth-members-present')
 
         def exclusive(parent, name, *, directory=False):

@@ -1,8 +1,9 @@
 """Catalogue lifecycle invariants and caller-owned transaction helpers."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
+import errno
 import logging
 import multiprocessing
 import os
@@ -790,6 +791,88 @@ class TestIncumbentOwnerTransitions(unittest.TestCase):
         return store_layout._IncumbentOwner(str(uuid4()), os.getpid(),
                                             _incumbent_birth(os.getpid()), _incumbent_boot(),
                                             'fixture-runtime', 'off')
+
+    @contextmanager
+    def trace_membership(self, guard, *, other_root=None, list_error=None):
+        events = []
+        reopens = []
+        identities = []
+        real_open, real_listdir, real_close = os.open, os.listdir, os.close
+        module = store_layout.__name__
+
+        def observe_open(path, flags, *args, dir_fd=None, **kwargs):
+            from_store = sys._getframe(1).f_globals.get('__name__') == module
+            reopen = from_store and path == '.' and dir_fd == guard._root_fd
+            if reopen and other_root is not None:
+                fd = real_open(other_root, flags, *args, **kwargs)
+            else:
+                fd = real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+            if from_store:
+                if reopen:
+                    reopens.append(len(events))
+                events.append(('open', fd))
+            return fd
+
+        def observe_listdir(fd):
+            if sys._getframe(1).f_globals.get('__name__') == module:
+                events.append(('list', fd))
+                info = os.fstat(fd)
+                identities.append((info.st_dev, info.st_ino))
+                if (list_error is not None and reopens
+                        and events[reopens[-1]] == ('open', fd)):
+                    raise list_error
+            return real_listdir(fd)
+
+        def observe_close(fd):
+            real_close(fd)
+            if sys._getframe(1).f_globals.get('__name__') == module:
+                events.append(('close', fd))
+
+        with (patch.object(os, 'open', observe_open),
+              patch.object(os, 'listdir', observe_listdir),
+              patch.object(os, 'close', observe_close)):
+            yield events, reopens, identities
+
+    def test_membership_checks_list_a_fresh_root_descriptor(self):
+        guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
+        with guard:
+            held_fd = guard._root_fd
+            with self.trace_membership(guard) as (events, reopens, identities):
+                idle, _ = guard.enroll_new(proof)
+                armed = guard.arm(idle, self.birth_owner())
+                store_id = guard._materialize_birth(armed, project_name='reserved', now_ms=12)
+            self.assertNotIn(('list', held_fd), events, 'membership listed the held root descriptor')
+            self.assertEqual(len(reopens), 2)
+            self.assertEqual(identities, [guard._root_identity, guard._root_identity])
+            for index in reopens:
+                _, fd = events[index]
+                self.assertEqual(events[index:index + 3], [('open', fd), ('list', fd), ('close', fd)])
+            self.assertEqual(store_id, _INCUMBENT_STORE_ID)
+
+    def test_membership_check_refuses_a_descriptor_that_is_not_the_root(self):
+        other_root = self.root.with_name('other')
+        other_root.mkdir(mode=0o700)
+        guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
+        with guard:
+            with self.trace_membership(guard, other_root=other_root) as (events, reopens, _):
+                with self.assertRaises(store_layout.LayoutFault) as caught:
+                    guard.enroll_new(proof)
+            self.assertEqual(caught.exception.cause, 'incumbent-invalid')
+            self.assertEqual(len(reopens), 1)
+            _, fd = events[reopens[0]]
+            self.assertEqual(events[reopens[0]:], [('open', fd), ('close', fd)])
+
+    def test_membership_check_closes_its_descriptor_when_listing_fails(self):
+        guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
+        list_error = OSError(errno.EIO, 'injected')
+        with guard:
+            with self.trace_membership(guard, list_error=list_error) as (events, reopens, _):
+                with self.assertRaises(OSError) as caught:
+                    guard.enroll_new(proof)
+            self.assertIs(caught.exception, list_error)
+            self.assertEqual(len(reopens), 1)
+            _, fd = events[reopens[0]]
+            self.assertEqual(events[reopens[0]:], [('open', fd), ('list', fd), ('close', fd)])
 
     def test_reserved_birth_initializes_exact_store_and_project(self):
         guard, proof = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
