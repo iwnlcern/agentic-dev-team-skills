@@ -1233,7 +1233,8 @@ if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
         origins = sorted({origin for entry in events for origin in entry.get('origins', ())})
         self.assertEqual(origins, [str(installed / 'relay_engine' / name) for name in
                                    ('adt_cli.py', 'api_service.py', 'owner_start.py', 'store_layout.py')])
-        self.assertEqual({entry['interpreter'] for entry in events if 'interpreter' in entry}, {sys.executable})
+        interpreters = {os.path.realpath(entry['interpreter']) for entry in events if 'interpreter' in entry}
+        self.assertEqual(interpreters, {os.path.realpath(sys.executable)})
         self.assertEqual({entry['sqlite'] for entry in events if 'sqlite' in entry}, {sqlite3.sqlite_version})
         print(json.dumps({'platform': sys.platform, 'machine': os.uname().machine,
                           'uid': os.geteuid(), 'python': sys.version, 'sqlite': sqlite3.sqlite_version,
