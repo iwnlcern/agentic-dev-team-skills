@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "c434f36e0f08604d6872e6545fa8dd29694d9f6e516fbd612db40c3010116188",
+    "sha256": "a943eadbbb096fb97d68335f982fb71a8a74dc972c4b39b12f58531267e6b968",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -524,7 +524,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_seat_record.py",
-    "sha256": "dd10849ab7e00dfebdeab15ebb61e0ee7d2227e07fd5142a4f511df4d80619e8",
+    "sha256": "c2ed327543a9013847bb85fc1ccadaf7dcc573ab39cfb3a9e9d4fcb5c9f733ce",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -11480,7 +11480,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "c434f36e0f08604d6872e6545fa8dd29694d9f6e516fbd612db40c3010116188",
+    "sha256": "a943eadbbb096fb97d68335f982fb71a8a74dc972c4b39b12f58531267e6b968",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11660,7 +11660,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_seat_record.py",
-    "sha256": "dd10849ab7e00dfebdeab15ebb61e0ee7d2227e07fd5142a4f511df4d80619e8",
+    "sha256": "c2ed327543a9013847bb85fc1ccadaf7dcc573ab39cfb3a9e9d4fcb5c9f733ce",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -22532,7 +22532,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "c434f36e0f08604d6872e6545fa8dd29694d9f6e516fbd612db40c3010116188",
+    "sha256": "a943eadbbb096fb97d68335f982fb71a8a74dc972c4b39b12f58531267e6b968",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -22712,7 +22712,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_seat_record.py",
-    "sha256": "dd10849ab7e00dfebdeab15ebb61e0ee7d2227e07fd5142a4f511df4d80619e8",
+    "sha256": "c2ed327543a9013847bb85fc1ccadaf7dcc573ab39cfb3a9e9d4fcb5c9f733ce",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {

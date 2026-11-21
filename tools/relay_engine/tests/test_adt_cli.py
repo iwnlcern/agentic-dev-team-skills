@@ -121,7 +121,7 @@ class AdtTests(unittest.TestCase):
                 self.assertEqual(self.submit()[0], 0)
                 self.assertEqual(self.rows('SELECT id,generation,ended_at FROM seat_sessions'), before)
             self.assertEqual(self.run_command(['sign-out', *self.flags])[0], 0)
-        self.assertEqual(operations.count('session.sign-in'), 1)
+        self.assertEqual(sum(op == 'session.sign-in' for op in operations), 1)
         rows = self.rows('SELECT id,generation,ended_at FROM seat_sessions')
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][:2], (signed['session_id'], int(signed['generation'])))
