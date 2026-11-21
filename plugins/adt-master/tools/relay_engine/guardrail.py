@@ -44,6 +44,7 @@ _BRIDGE_ADDRESS = re.compile(
     rf"(?:{re.escape(BRIDGE_OPERATION_PREFIX)}|/{re.escape(LAUNCH_FRAGMENT)})"
 )
 _RUNTIME_ID = re.compile(r"[0-9a-f]{16}")
+_HOME_PREFIX = re.compile(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)")
 _CONSOLE_PRINT_OPTIONS = frozenset(("--p", "--pr", "--pri", "--prin", "--print"))
 _CONSOLE_VALUE_OPTIONS = frozenset(
     option[:size]
@@ -442,7 +443,7 @@ def _path_match(value: str, paths: Sequence[str], home: str | None = None,
     """Compare lexical paths only; unknown roots refuse possible key suffixes."""
     if not value:
         return None
-    prefix = re.match(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)", value)
+    prefix = _HOME_PREFIX.match(value)
     unresolved = bool(prefix and home is None)
     remainder = value[prefix.end():].lstrip("/") if prefix else value
     candidate = _expand_home(value, home)
@@ -476,22 +477,27 @@ def _launch_page_match(value: str, bases: Sequence[str], home: str | None,
                        cwd: str | None, content_reader: bool = False) -> Match | None:
     if not value or not bases:
         return None
+    needs_home = home is None and _HOME_PREFIX.match(value) is not None
     candidate = _expand_home(value, home)
-    if not os.path.isabs(candidate):
-        if cwd is None:
-            return None
+    relative = not os.path.isabs(candidate)
+    unresolved = needs_home or (relative and cwd is None)
+    if relative and not unresolved:
         candidate = os.path.join(cwd, candidate)
     candidate = os.path.normpath(candidate)
     path = candidate.casefold()
     parent, leaf = os.path.split(path)
     base, folder = os.path.split(parent)
+    page = leaf == LAUNCH_PAGE and _RUNTIME_ID.fullmatch(folder) is not None
+    if unresolved:
+        if page:
+            return Match("key-file-read", path=candidate, flags=frozenset({"unparsed"}))
+        return None
     for supplied in bases:
         runtime_base = os.path.normpath(supplied).casefold()
-        page = leaf == LAUNCH_PAGE and base == runtime_base and _RUNTIME_ID.fullmatch(folder)
         directory = content_reader and (
             path == runtime_base or (parent == runtime_base and _RUNTIME_ID.fullmatch(leaf))
         )
-        if page or directory:
+        if (page and base == runtime_base) or directory:
             return Match("key-file-read", path=candidate)
     return None
 
@@ -1056,18 +1062,17 @@ def classify_tool(tool_name: str, tool_input: Mapping[str, object], refused_path
     content_reader = ((name == "grep" and tool_input.get("output_mode") == "content")
                       or (name not in ("glob", "list_directory") and name != "grep"
                           and any(part in name for part in ("search", "read_directory"))))
-    for field, value in tool_input.items():
+    launch_bases = () if name in ("glob", "list_directory") else runtime_bases
+    for value in tool_input.values():
         values = value if isinstance(value, list) else [value]
         for item in values:
             if isinstance(item, str):
                 key = _path_match(item, refused_paths, home, cwd, content_reader)
                 if key:
                     return key
-                if (field in ("path", "file_path", "paths", "file_paths")
-                        and name not in ("glob", "list_directory")):
-                    page = _launch_page_match(item, runtime_bases, home, cwd, content_reader)
-                    if page:
-                        return page
+                page = _launch_page_match(item, launch_bases, home, cwd, content_reader)
+                if page:
+                    return page
     command = tool_input.get("command", tool_input.get("cmd"))
     bridge = any(isinstance(value, str) and _BRIDGE_ADDRESS.search(value)
                  for value in (command, url))

@@ -891,11 +891,13 @@ class TestAnswerRouteRules(unittest.TestCase):
         calls.extend((
             ("Edit", {"new_string": text}),
             ("Write", {"content": text}),
+            ("Edit", {"new_string": "Reference /home/operator/.adt/run/0123456789abcdef/open.html only"}),
             ("Grep", {"pattern": "/api/op/"}),
         ))
         for tool, payload in calls:
             with self.subTest(tool=tool, payload=payload):
-                self.assertIsNone(g.classify_tool(tool, payload, ()))
+                self.assertIsNone(g.classify_tool(
+                    tool, payload, (), runtime_bases=("/home/operator/.adt/run",)))
 
     def test_launch_page_role_refused(self):
         home = "/home/operator"
@@ -906,6 +908,9 @@ class TestAnswerRouteRules(unittest.TestCase):
             ("Read", {"path": f"{base}/{runtime}/open.html"}),
             ("Read", {"path": f"{base}/{runtime.upper()}/OPEN.HTML"}),
             ("Read", {"path": f"{base.upper()}/{runtime}/open.html"}),
+            ("NotebookRead", {"notebook_path": f"{base}/{runtime}/open.html"}),
+            ("mcp__filesystem__read_file", {"uri": f"{base}/{runtime}/open.html"}),
+            ("mcp__filesystem__read_text_file", {"source": f"{base}/{runtime}/open.html"}),
             ("Bash", {"command": f"cat {xdg}/{runtime}/open.html"}),
             ("Grep", {"path": base, "output_mode": "content"}),
             ("Grep", {"path": f"{base}/{runtime}", "output_mode": "content"}),
@@ -928,6 +933,16 @@ class TestAnswerRouteRules(unittest.TestCase):
         for tool, payload in negative:
             with self.subTest(tool=tool, payload=payload):
                 self.assertIsNone(g.classify_tool(tool, payload, (), runtime_bases=(base, xdg)))
+        for path, context in (
+            (f"{runtime}/open.html", {"home": home}),
+            (f"~/.adt/run/{runtime}/open.html", {"cwd": "/work"}),
+        ):
+            with self.subTest(unresolved_path=path):
+                match = g.classify_tool("Read", {"path": path}, (), runtime_bases=(base, xdg),
+                                        **context)
+                self.assertIsNotNone(match)
+                self.assertEqual(match.effect, "key-file-read")
+                self.assertIn("unparsed", match.flags)
         for tool, payload in positive + negative:
             with self.subTest(tool=tool, payload=payload, bases=()):
                 self.assertIsNone(g.classify_tool(tool, payload, (), runtime_bases=()))
