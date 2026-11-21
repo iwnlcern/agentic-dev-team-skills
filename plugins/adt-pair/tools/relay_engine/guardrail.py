@@ -1,7 +1,8 @@
 """Rules data and pure effect classifiers shared by host hooks."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Callable
 from dataclasses import dataclass
+import json
 import os.path
 import re
 import shlex
@@ -9,10 +10,10 @@ import shlex
 
 EFFECT_CLASSES = (
     "commit", "protected-push", "pr-merge", "api-ref-write", "hook-bypass",
-    "key-file-read", "operator-endpoint", "operator-only",
+    "key-file-read", "operator-endpoint", "operator-only", "hook-disable", "top-seat-init",
 )
 _SHAPES = {
-    "commit": ("git pre-commit",),
+    "commit": ("git reference-transaction (prepared)",),
     "protected-push": ("git pre-push (each ref update)", "git push"),
     "pr-merge": ("gh pr merge", "MCP merge_pull_request"),
     "api-ref-write": ("gh api REST merge/refs/contents/merges write",
@@ -26,7 +27,11 @@ _SHAPES = {
                       "content reader naming an ancestor directory",
                       "command naming refused path"),
     "operator-endpoint": ("relay answer", "relay prompt-record"),
-    "operator-only": ("adt engine stop", "adt engine configure", "relay engine off", "relay team open"),
+    "operator-only": ("adt engine stop", "adt engine configure", "relay engine off", "relay team open",
+                      "adt engine start", "adt engine update", "adt engine install",
+                      "adt checkout register", "adt checkout unregister", "adt seat unseat"),
+    "hook-disable": ("persistent kit hook disabling write",),
+    "top-seat-init": ("adt seat claim",),
 }
 _SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -70,6 +75,7 @@ def table() -> dict:
     supplying ``classify_tool``'s refused_paths; labels alone protect no files.
     """
     return {
+        "design": "DD-v3-authority-20261104-r22",
         "protected_refs": ["refs/heads/main"],
         "refused_paths": ["frank operator key", "Jev key", "prompt-hook key", "other seat keys"],
         "flags": {"values": ["pinned", "auto", "admin", "unparsed", "compound"],
@@ -77,13 +83,261 @@ def table() -> dict:
         # Platform's final names retain distinct stop and restart-request semantics.
         "operator_commands": {"stop": [["adt", "engine", "stop"]],
                               "restart": [["adt", "engine", "restart"]],
-                              "configure": [["adt", "engine", "configure"]]},
+                              "configure": [["adt", "engine", "configure"]],
+                              "start": [["adt", "engine", "start"]],
+                              "update": [["adt", "engine", "update"]],
+                              "install": [["adt", "engine", "install"]],
+                              "checkout_register": [["adt", "checkout", "register"]],
+                              "checkout_unregister": [["adt", "checkout", "unregister"]],
+                              "unseat": [["adt", "seat", "unseat"]],
+                              "seat_claim": [["adt", "seat", "claim"]]},
         "effects": {
             effect: {"command_shapes": list(_SHAPES[effect]),
-                     "slip_kind": {"commit": "implement", "pr-merge": "merge"}.get(effect)}
+                     "slip_kind": {"commit": "implement", "pr-merge": "merge"}.get(effect),
+                     "hook_codes": ['authority.' + code for code in {
+                         'commit': [], 'protected-push': ['protected-ref-push'],
+                         'pr-merge': ['merge-head-unpinned', 'merge-flag-refused'],
+                         'api-ref-write': ['api-merge-refused'], 'top-seat-init': ['operator-only'],
+                     }.get(effect, [effect])],
+                     "no_seat": 'refuse' if effect in (
+                         'hook-disable', 'key-file-read', 'operator-endpoint', 'operator-only') else 'pass'}
             for effect in EFFECT_CLASSES
         },
     }
+
+
+KIT_LAUNCHER_SUFFIX = '/.adt/bin/adt'
+
+
+@dataclass(frozen=True)
+class ClassifierContext:
+    hooks_dir: str | None
+    git_config_paths: tuple[str, ...]
+    host_config_paths: tuple[str, ...]
+    kit_hook_files: tuple[str, ...]
+    kit_entry_files: Mapping[str, str]
+    resolve: Callable[[str], str]
+
+
+def kit_entries(settings_text: str, home: str | None) -> frozenset[tuple[str, str, str]] | None:
+    """Keep each kit launcher entry's event, matcher and exact command spelling."""
+    try:
+        settings = json.loads(settings_text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(settings, dict):
+        return None
+    hooks = settings.get('hooks', {})
+    if not isinstance(hooks, dict):
+        return None
+    launchers = {prefix + KIT_LAUNCHER_SUFFIX for prefix in ('~', '$HOME', '${HOME}')}
+    if home is not None:
+        launchers.add(home.rstrip('/') + KIT_LAUNCHER_SUFFIX)
+    entries = set()
+    for event, rows in hooks.items():
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get('hooks', []), list):
+                return None
+            matcher = row.get('matcher', '')
+            if not isinstance(matcher, str):
+                return None
+            for hook in row.get('hooks', []):
+                if not isinstance(hook, dict):
+                    return None
+                command = hook.get('command')
+                if not isinstance(command, str):
+                    continue
+                try:
+                    words = shlex.split(command)
+                except ValueError:
+                    continue
+                if len(words) >= 2 and words[0] in launchers and words[1] == 'hook':
+                    entries.add((event, matcher, command))
+    return frozenset(entries)
+
+
+def _target(value: str, context: ClassifierContext, home: str | None,
+            cwd: str | None) -> str | None:
+    """None means a target cannot be resolved from the supplied context."""
+    if re.match(r'^(?:~|\$HOME|\$\{HOME\})(?=/|$)', value) and home is None:
+        return None
+    value = _expand_home(value, home)
+    if not os.path.isabs(value):
+        if cwd is None:
+            return None
+        value = os.path.join(cwd, value)
+    return context.resolve(os.path.normpath(value))
+
+
+def _hook_target(path: str, context: ClassifierContext) -> bool:
+    directory = context.hooks_dir
+    return bool(directory and (path == directory or path.startswith(directory.rstrip('/') + '/')))
+
+
+def _config_write(text: str, fragment: bool = False) -> bool:
+    """Recognize Git's core.hooksPath and include paths in written config text."""
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(('#', ';')):
+            continue
+        match = re.match(r'\[([^\]]+)\]', line)
+        if match:
+            section = match[1].split()[0].lower()
+            continue
+        key = re.match(r'([\w.-]+)\s*=', line)
+        if key:
+            key = key[1].lower()
+            if (key == 'hookspath' and (section == 'core' or fragment)
+                    or key == 'path' and (section == 'include' or section == 'includeif' or fragment)
+                    or _hook_config_key(key)):
+                return True
+    return False
+
+
+def _host_off(text: str, path: str, fragment: bool = False) -> bool:
+    if path.endswith('.toml'):
+        section = None
+        for line in text.splitlines():
+            match = re.match(r'\s*\[([^\]]+)\]', line)
+            if match:
+                section = match[1].strip()
+            elif (section == 'features' or fragment) and re.match(r'\s*hooks\s*=\s*false\b', line):
+                return True
+        return False
+    try:
+        value = json.loads(text)
+    except ValueError:
+        # Edits may carry just the replaced key rather than a whole object.
+        return bool(fragment and (re.search(r'"disableAllHooks"\s*:\s*true\b', text)
+            or re.search(r'"adt-(?:pair|orchestrator|master)(?:@[^"\s]+)?"\s*:\s*false\b', text)))
+    if not isinstance(value, dict):
+        return False
+    plugin_maps = [value.get('enabledPlugins', {})]
+    if fragment:
+        plugin_maps.append(value)
+    return value.get('disableAllHooks') is True or any(
+        isinstance(plugins, dict) and any(setting is False and name.split('@')[0]
+        in ('adt-pair', 'adt-orchestrator', 'adt-master') for name, setting in plugins.items())
+        for plugins in plugin_maps)
+
+
+def _hook_config_key(key: str) -> bool:
+    key = key.lower()
+    return key in ('core.hookspath', 'include.path') or key.startswith('includeif.') and key.endswith('.path')
+
+
+def _file_disable(name: str, payload: Mapping[str, object], context: ClassifierContext | None,
+                  home: str | None, cwd: str | None) -> Match | None:
+    if context is None or name not in ('write', 'edit', 'multiedit'):
+        return None
+    path = payload.get('file_path', payload.get('path'))
+    if not isinstance(path, str):
+        return None
+    target = _target(path, context, home, cwd)
+    if target is None:
+        return Match('hook-disable')
+    current = context.kit_entry_files.get(target)
+    fragment = name != 'write'
+    if name == 'write':
+        text = payload.get('content', '')
+    else:
+        edits = payload.get('edits', []) if name == 'multiedit' else [payload]
+        text = current
+        fragments = []
+        changed = False
+        for edit in edits:
+            if not isinstance(edit, Mapping):
+                continue
+            old, new = edit.get('old_string'), edit.get('new_string')
+            if not isinstance(old, str) or not isinstance(new, str):
+                continue
+            if text is not None:
+                if old not in text:
+                    continue
+                text = text.replace(old, new, -1 if edit.get('replace_all') else 1)
+            fragments.append(new)
+            changed = True
+        if not changed:
+            return None
+        if text is None:
+            text = '\n'.join(fragments)
+    if not isinstance(text, str):
+        return None
+    if _hook_target(target, context) or target in context.kit_hook_files:
+        return Match('hook-disable')
+    if target in context.git_config_paths and _config_write(text, fragment):
+        return Match('hook-disable')
+    if target in context.host_config_paths and _host_off(text, target, fragment):
+        return Match('hook-disable')
+    if current is not None:
+        before, after = kit_entries(current, home), kit_entries(text, home)
+        if after is None or before is not None and not before <= after:
+            return Match('hook-disable')
+    return None
+
+
+def _patch_disable(text: str, context: ClassifierContext | None,
+                   home: str | None, cwd: str | None) -> Match | None:
+    if context is None:
+        return None
+    sections = re.split(r'^\*\*\* (Add File|Update File|Delete File|Move to): (.+)\n', text, flags=re.M)
+    for i in range(1, len(sections), 3):
+        operation, raw, body = sections[i:i + 3]
+        target = _target(raw.strip(), context, home, cwd)
+        if target is None or _hook_target(target, context) or target in context.kit_hook_files:
+            return Match('hook-disable')
+        if target in context.kit_entry_files and operation != 'Add File':
+            return Match('hook-disable')
+        added = '\n'.join(line[1:] for line in body.splitlines() if line.startswith('+'))
+        if target in context.git_config_paths and _config_write(added, True):
+            return Match('hook-disable')
+        if target in context.host_config_paths and _host_off(added, target, True):
+            return Match('hook-disable')
+    return None
+
+
+def _command_disable(words: list[str], context: ClassifierContext | None,
+                     home: str | None, cwd: str | None) -> Match | None:
+    if context is None or not words:
+        return None
+    program, args = os.path.basename(words[0]), words[1:]
+    if program == 'adt' and args[:2] == ['hooks', 'remove'] and context.hooks_dir:
+        return Match('hook-disable')
+    # Classify only actual writes: operand mentions in readers are inert.
+    targets = []
+    if program in ('rm', 'mv', 'unlink', 'truncate', 'ln'):
+        targets.extend(word for word in args if not word.startswith('-'))
+    elif program == 'cp':
+        operands = [word for word in args if not word.startswith('-')]
+        if len(operands) == 2 and operands[0] == '/dev/null':
+            targets.append(operands[1])
+    elif program == 'chmod' and args:
+        mode = args[0]
+        symbolic_loss = re.search(r'(?:^|,)[ugoa]*-[rwxXst]*[xX]', mode)
+        numeric_loss = re.fullmatch(r'[0-7]{3,4}', mode) and any(int(d) % 2 == 0 for d in mode[-3:])
+        if symbolic_loss or numeric_loss:
+            targets.extend(word for word in args[1:] if not word.startswith('-'))
+    redirections = []
+    for index, word in enumerate(words[:-1]):
+        if word in ('>', '>>', '>|', '<>'):
+            redirections.append(words[index + 1])
+    targets.extend(redirections)
+    for raw in targets:
+        target = _target(raw, context, home, cwd)
+        if target is None or _hook_target(target, context) or target in context.kit_hook_files or target in context.kit_entry_files:
+            return Match('hook-disable')
+        if raw in redirections:
+            # printf's quoted payload stays one token; turn its escaped lines
+            # into text for the config-key check without executing anything.
+            text = ' '.join(words).replace('\\n', '\n').replace('\\t', '\t')
+            if target in context.git_config_paths and _config_write(text, True):
+                return Match('hook-disable')
+            if target in context.host_config_paths and _host_off(text, target, True):
+                return Match('hook-disable')
+    return None
 
 
 def protected(ref: str, protected_refs: Sequence[str]) -> bool:
@@ -234,7 +488,7 @@ def _unparsed(text: str, paths: Sequence[str]) -> Match | None:
             _MUTATIONS.search(text) or re.search(r"(?:-X\s*|--method[=\s]+)(?:PUT|POST|PATCH|DELETE)\b", text)
             or re.search(r"(?:-f|-F|--field|--raw-field)[=\s]*", text)):
         effect = "api-ref-write"
-    elif re.search(r"\bgit\b.*\bpush\b", text, re.S):
+    elif re.search(r"(?<![\w./-])(?:/[^\s;|&'\"]*/)?git(?=[\s'\"]|$).*\bpush\b", text, re.S):
         effect = "protected-push"
     else:
         return None
@@ -291,7 +545,8 @@ def _unwrap(words: list[str], depth: int) -> tuple[list[str], list[str], int]:
 
 
 def _command(words: list[str], paths: Sequence[str], depth: int,
-             inherited: Sequence[str], cwd: str | None = None) -> Match | None:
+             inherited: Sequence[str], cwd: str | None = None,
+             context: ClassifierContext | None = None, home: str | None = None) -> Match | None:
     original = words
     try:
         words, assignments, depth = _unwrap(words, depth)
@@ -304,10 +559,13 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
         match = _path_match(word, paths, cwd=cwd)
         if match:
             return match
+    disabling = _command_disable(words, context, home, cwd)
+    if disabling is not None:
+        return disabling
     program = os.path.basename(words[0])
     args = words[1:]
     if program == "eval":
-        return _shell(" ".join(args), paths, depth + 1, configuration, cwd)
+        return _shell(" ".join(args), paths, depth + 1, configuration, cwd, context, home)
     if program in ("bash", "sh", "zsh", "dash", "ksh"):
         index = 0
         while index < len(args):
@@ -318,11 +576,11 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
             elif arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
                 if index < len(args) and args[index] == "--":
                     index += 1
-                return _shell(args[index], paths, depth + 1, configuration, cwd) if index < len(args) else _unparsed(" ".join(words), paths)
+                return _shell(args[index], paths, depth + 1, configuration, cwd, context, home) if index < len(args) else _unparsed(" ".join(words), paths)
         if "<<<" in args:
             index = args.index("<<<")
             if index + 1 < len(args):
-                return _shell(args[index + 1], paths, depth + 1, configuration, cwd)
+                return _shell(args[index + 1], paths, depth + 1, configuration, cwd, context, home)
         return _unparsed(" ".join(words), paths)
     if program == "git":
         global_options, command = _leading_options(args, {name: name for name in
@@ -343,10 +601,10 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
         if operation in ("commit", "push", "merge") and (hook_configuration or "--no-verify" in options
                                                         or (operation == "commit" and "-n" in options)):
             return Match("hook-bypass")
-        if operation == "config" and positional and positional[0].lower() == "core.hookspath":
+        if operation == "config" and positional and _hook_config_key(positional[0]):
             read_only = any(name in options for name in ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"))
             if not read_only and (len(positional) > 1 or any(name in options for name in ("--unset", "--unset-all", "--remove-section"))):
-                return Match("hook-bypass")
+                return Match("hook-disable")
         if operation == "push":
             refs = positional if "--repo" in options else positional[1:]
             ref = refs[0].rsplit(":", 1)[-1].lstrip("+") if len(refs) == 1 else None
@@ -398,9 +656,9 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
                 return Match("api-ref-write", repository=repository)
     if program.startswith("python") and args:
         if os.path.basename(args[0]) in ("relay", "relay.py"):
-            return _command(args, paths, depth + 1, configuration, cwd)
+            return _command(args, paths, depth + 1, configuration, cwd, context, home)
         if args[:2] == ["-m", "relay_engine"]:
-            return _command(["relay", *args[2:]], paths, depth + 1, configuration, cwd)
+            return _command(["relay", *args[2:]], paths, depth + 1, configuration, cwd, context, home)
     if program in ("relay", "relay.py"):
         _, args = _leading_options(args, {"--root": "root", "--key": "key"})
         if args[:1] in (["answer"], ["prompt-record"]) or args[:2] in (["authority", "prompt-record"], ["operator", "answer"], ["prompt", "record"]):
@@ -408,8 +666,10 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
         if args[:2] in (["engine", "off"], ["team", "open"], ["team", "open-next"]):
             return Match("operator-only")
     if any([program, *args[:len(row) - 1]] == row
-           for name in ("stop", "configure") for row in table()["operator_commands"][name]):
+           for name in ("stop", "configure", "start", "update", "install", "checkout_register", "checkout_unregister", "unseat") for row in table()["operator_commands"][name]):
         return Match("operator-only")
+    if any([program, *args[:len(row) - 1]] == row for row in table()["operator_commands"]["seat_claim"]):
+        return Match("top-seat-init")
     fallback = " ".join(words)
     if program in ("rg", "grep"):
         options, positional = _arguments(args, {"-e": "pattern", "--regexp": "pattern"})
@@ -438,8 +698,8 @@ def _backtick_end(text: str, start: int) -> int:
     raise ValueError("unclosed command substitution")
 
 
-def _without_heredocs(text: str) -> str:
-    """Keep heredoc headers and shell syntax, removing their non-command data."""
+def _without_heredocs(text: str, bodies: dict[str, list[str]] | None = None) -> str:
+    """Mask heredoc data without changing source offsets or shell syntax."""
     output, pending = [], []
     quote = None
     contexts = []
@@ -482,13 +742,19 @@ def _without_heredocs(text: str) -> str:
         index += 1
         if char == "\n" and pending:
             for delimiter, strip_tabs in pending:
+                body = []
                 while index < len(text):
                     end = text.find("\n", index)
                     end = len(text) if end < 0 else end + 1
-                    line = text[index:end].rstrip("\n")
+                    raw_line = text[index:end]
+                    line = raw_line.rstrip("\n")
                     index = end
+                    output.append(''.join('\n' if char == '\n' else ' ' for char in raw_line))
                     if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        if bodies is not None and not contexts:
+                            bodies.setdefault(delimiter, []).append(''.join(body))
                         break
+                    body.append(raw_line.lstrip("\t") if strip_tabs else raw_line)
                 else:
                     raise ValueError("unclosed heredoc")
             pending = []
@@ -533,8 +799,9 @@ def _substitution_end(text: str, start: int) -> int:
     raise ValueError("unclosed command substitution")
 
 
-def _shell_parts(text: str) -> tuple[str, list[str]]:
+def _shell_parts(text: str, source: str | None = None) -> tuple[str, list[tuple[int, str]]]:
     """Separate executable substitutions and discard non-executable comments."""
+    source = text if source is None else source
     cleaned, substitutions = [], []
     quote = None
     index = 0
@@ -554,13 +821,13 @@ def _shell_parts(text: str) -> tuple[str, list[str]]:
             quote = None if quote == '"' else '"'
         elif char == "$" and text[index:index + 2] == "$(":
             end = _substitution_end(text, index + 1)
-            substitutions.append(text[index + 2:end])
+            substitutions.append((sum(map(len, cleaned)), source[index + 2:end]))
             cleaned.append("__adt_substitution__")
             index = end + 1
             continue
         elif char == "`":
             end = _backtick_end(text, index)
-            substitutions.append(text[index + 1:end])
+            substitutions.append((sum(map(len, cleaned)), source[index + 1:end]))
             cleaned.append("__adt_substitution__")
             index = end + 1
             continue
@@ -576,33 +843,40 @@ def _shell_parts(text: str) -> tuple[str, list[str]]:
 
 
 def _shell(text: str, paths: Sequence[str], depth: int = 0,
-           inherited: Sequence[str] = (), cwd: str | None = None) -> Match | None:
+           inherited: Sequence[str] = (), cwd: str | None = None,
+           context: ClassifierContext | None = None, home: str | None = None) -> Match | None:
     if depth > 10:
         return _unparsed(text, paths)
     try:
         # Heredoc bodies are data for parsing, but still name refused files.
-        path = _refused(text, paths)
-        if path:
-            return Match("key-file-read", path=path)
-        cleaned, substitutions = _shell_parts(_without_heredocs(text))
-        path = _refused(cleaned, paths)
-        if path:
-            return Match("key-file-read", path=path)
+        mentioned_key = _refused(text, paths)
+        heredocs = {}
+        cleaned, substitutions = _shell_parts(_without_heredocs(text, heredocs), source=text)
         lexer = shlex.shlex(cleaned, posix=True, punctuation_chars=";&|(){}<>\n")
         lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
         lexer.commenters = ""
-        words = list(lexer)
+        # shlex normalizes token text and reads one character ahead. Retain
+        # source boundaries excluding that unread lookahead, not token spelling.
+        words = [(word, lexer.instream.tell() - len(lexer._pushback_chars)) for word in lexer]
     except ValueError:
         return _unparsed(text, paths)
     segment = []
     environment = list(inherited)
     directory = cwd
     piped = None
-    matches = [match for command in substitutions
-               if (match := _shell(command, paths, depth + 1, inherited, cwd)) is not None]
-    for word in [*words, ";"]:
+    matches = []
+    next_substitution = 0
+    for word, boundary in [*words, (";", len(cleaned))]:
         if all(char in ";&|(){}\n" for char in word):
+            # Consume genuine source occurrences once at their owning command,
+            # before its effect and after all earlier commands.
+            while next_substitution < len(substitutions) and substitutions[next_substitution][0] < boundary:
+                _, command = substitutions[next_substitution]
+                next_substitution += 1
+                match = _shell(command, paths, depth + 1, environment, directory, context, home)
+                if match is not None:
+                    matches.append(match)
             if segment[:1] in (["export"], ["declare"], ["typeset"]):
                 environment.extend(item for item in segment[1:] if _ASSIGN.match(item))
             elif segment and _ASSIGN.match(segment[0]):
@@ -615,10 +889,31 @@ def _shell(text: str, paths: Sequence[str], depth: int = 0,
                         if not item.startswith("-") and os.path.normpath(os.path.join(directory, item)) == os.path.normpath(path):
                             matches.append(Match("key-file-read", path=path))
             if piped is not None and segment and os.path.basename(segment[0]) in ("bash", "sh", "zsh", "dash", "ksh"):
-                match = _shell(piped, paths, depth + 1, environment, directory)
+                match = _shell(piped, paths, depth + 1, environment, directory, context, home)
             else:
-                match = _command(segment, paths, depth, environment, directory)
-            if match:
+                match = _command(segment, paths, depth, environment, directory, context, home)
+            # A patch contributes at this command's position, never before
+            # earlier refused segments. Consume other heredocs as data too.
+            try:
+                command_words, _, _ = _unwrap(segment, depth)
+            except ValueError:
+                command_words = []
+            for index, token in enumerate(segment[:-1]):
+                if token == '<<':
+                    delimiter = segment[index + 1]
+                    if delimiter not in heredocs:
+                        delimiter = delimiter.lstrip('-')
+                    bodies = heredocs.get(delimiter, [])
+                    if bodies:
+                        body = bodies.pop(0)
+                        if command_words and os.path.basename(command_words[0]) == 'apply_patch':
+                            disabling = _patch_disable(body, context, home, directory)
+                            if disabling is not None:
+                                match = disabling
+            key = _refused(' '.join(segment), paths)
+            if key:
+                matches.append(Match('key-file-read', path=key))
+            elif match:
                 matches.append(match)
             piped = None
             if word == "|" and segment:
@@ -629,7 +924,14 @@ def _shell(text: str, paths: Sequence[str], depth: int = 0,
             segment = []
         else:
             segment.append(word)
-    # An always-refused effect cannot hide behind a merge that might be allowed.
+    if mentioned_key and not any(match.effect == 'key-file-read' for match in matches):
+        # Preserve refused-path protection for heredoc bodies discarded as data.
+        matches.append(Match('key-file-read', path=mentioned_key))
+    # A no-seat-refused effect wins before any effect a no-seat session passes.
+    for match in matches:
+        if table()["effects"][match.effect]["no_seat"] == 'refuse':
+            return match
+    # Otherwise retain the established compound merge/push rule.
     for match in matches:
         if match.effect not in ("pr-merge", "protected-push"):
             return match
@@ -669,9 +971,16 @@ def _mcp_match(tool_name: str, tool_input: Mapping[str, object],
 
 def classify_tool(tool_name: str, tool_input: Mapping[str, object], refused_paths: Sequence[str],
                   home: str | None = None, cwd: str | None = None,
-                  protected_refs: Mapping[str, Sequence[str]] | None = None) -> Match | None:
+                  protected_refs: Mapping[str, Sequence[str]] | None = None,
+                  context: ClassifierContext | None = None) -> Match | None:
     """Classify with hook-supplied context only; do not read environment or files."""
     name = tool_name.lower().split("__")[-1]
+    if name == 'apply_patch':
+        patch = tool_input.get('command', '')
+        return _patch_disable(patch, context, home, cwd) if isinstance(patch, str) else None
+    disabling = _file_disable(name, tool_input, context, home, cwd)
+    if disabling is not None:
+        return disabling
     match = _mcp_match(name, tool_input, protected_refs)
     content_reader = ((name == "grep" and tool_input.get("output_mode") == "content")
                       or (name not in ("glob", "list_directory") and name != "grep"
@@ -685,5 +994,5 @@ def classify_tool(tool_name: str, tool_input: Mapping[str, object], refused_path
                     return key
     command = tool_input.get("command", tool_input.get("cmd"))
     if isinstance(command, str):
-        return _shell(_expand_home(command, home), refused_paths, cwd=cwd)
+        return _shell(_expand_home(command, home), refused_paths, cwd=cwd, context=context, home=home)
     return match

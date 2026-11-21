@@ -16,6 +16,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from relay_engine.tests.writer_support import serve_for_test
 from relay_engine import api_keys as keys, api_platform as platform, api_sessions as sessions
 from relay_engine import api_protocol as p, api_schema, api_wire as w, api_writer as writer
 from relay_engine import jcs, store_layout
@@ -25,8 +26,9 @@ TOOLS = Path(__file__).resolve().parents[2]
 
 
 class Job:
-    def __init__(self, run):
+    def __init__(self, run, files):
         self.run = run
+        self.files = files
 
 
 def replace_on_connection(conn, seat_id, at_ms):
@@ -103,6 +105,8 @@ class SessionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / 'store'
+        catalogue_conn = store_layout.open_catalogue(self.root, kind='isolated')
+        catalogue_conn.close()
         conn = store_layout.open_ledger(self.root, P, create=True)
         try:
             conn.execute('INSERT INTO projects(id,name,created_at) VALUES (?,?,1)', (P, 'test')).close()
@@ -116,29 +120,35 @@ class SessionTests(unittest.TestCase):
         self.phase = None
         self.step = None
         self.worker_conn = None
+        self.submitted = []
         self.returned = []
         self.raised = []
-        self.writer = writer.StoreWriter(self.root, P,
+        self.writer = writer.StoreWriter(self.root, runtime_instance_id="r1",
             phase_hook=lambda phase: self.phase(phase) if self.phase else None)
         self.writer.start()
         self.addCleanup(self.writer.close)
-        self.writer.open_project(P)
+        serve_for_test(self.writer, P)
         owner = self
         class Probe:
-            def submit(self, job):
+            def ledger_file(self, project_id):
+                return owner.writer.ledger_file(project_id)
+            def read(self, project_id, fn):
+                return owner.writer.read(project_id, fn)
+            def submit(self, project_id, job):
+                owner.submitted.append((project_id, job.files))
                 def run(conn):
                     owner.worker_conn = conn
                     return job.run(conn)
                 try:
-                    answer = owner.writer.submit(Job(run))
+                    answer = owner.writer.submit(project_id, Job(run, job.files))
                 except BaseException as exc:
                     owner.raised.append(exc)
                     raise
                 owner.returned.append(answer)
                 return answer
-        self.service = sessions.SessionService(Probe(), lambda: next(self.n),
+        self.service = sessions.SessionService(Probe(), lambda: next(self.n), project_id=P,
             step_hook=lambda phase: self.step(phase) if self.step else None)
-        self.registry = platform.build_platform_registry()
+        self.registry = platform.build_platform().registry
         artifact = api_schema.export_schema(self.registry, '3.0')
         self.runtime = p.RuntimeContext('store', 'isolated', 'runtime', '3.0.0', 'a' * 64,
                                        True, {'3.0': artifact})
@@ -147,7 +157,7 @@ class SessionTests(unittest.TestCase):
     def connection(self):
         return p.dispatch_api(p.initial_connection_state(),
             w.ApiRequest('1', 'protocol.connect', {'supported': {'min': '3.0', 'max': '3.0'}}),
-            self.runtime, self.registry, self.service).state
+            self.runtime, self.registry, {name: platform.PlatformPort(self.service, None) for name in self.registry.handlers}).state
 
     def add_seat(self):
         seat = 'seat' + str(next(self.seat_n))
@@ -169,7 +179,7 @@ class SessionTests(unittest.TestCase):
     def call(self, op='session.sign-in', args=None, state=None):
         state = self.connection() if state is None else state
         return p.dispatch_api(state, w.ApiRequest(str(state.last_request_id + 1), op,
-            self.args() if args is None else args), self.runtime, self.registry, self.service)
+            self.args() if args is None else args), self.runtime, self.registry, {name: platform.PlatformPort(self.service, None) for name in self.registry.handlers})
 
     def success(self, result):
         self.assertIn('result', result.response, result.response)
@@ -199,6 +209,115 @@ class SessionTests(unittest.TestCase):
     def end_args(self, signed, key=None, operation_key='end'):
         return self.resume_args(signed, key) | {'operation_key': operation_key}
 
+    def job(self, call):
+        return Job(call, frozenset({str(store_layout.ledger_path(self.root, P).absolute())}))
+
+    def identify_args(self, key=None):
+        key = self.key if key is None else key
+        return {k: key[k] for k in ('key_id', 'key_secret')}
+
+    def test_identify_answers_the_seat(self):
+        from relay_engine.submit import TableDirectory, SeatRef
+        self.writer.submit(P, self.job(lambda c: (c.execute(
+            "UPDATE seats SET role='implementer' WHERE id=?", (self.key['seat'],)).close(),
+            writer.JobOutcome(True, None))[1]))
+        signed = self.success(self.call())
+        answer = self.success(self.call('seat.identify', self.identify_args()))
+        self.assertEqual(answer, {'seat_id': signed['seat_id'], 'project_id': signed['project_id'],
+                                  'seat_address': 'test.implementer'})
+        conn = store_layout.open_ledger(self.root, P)
+        try:
+            sender = SeatRef(signed['seat_id'], answer['seat_address'], 'implementer', 'team', P)
+            self.assertEqual(TableDirectory(conn, P).resolve(answer['seat_address'], sender).seat_id,
+                             signed['seat_id'])
+            self.assertEqual(sessions.seat_address(conn, signed['seat_id']), answer['seat_address'])
+        finally:
+            conn.close()
+
+    def test_identify_refuses_as_sign_in_does(self):
+        wrong = dict(self.key, key_secret='A' * 43)
+        unknown = dict(self.key, key_id='00000000-0000-4000-8000-000000000000')
+        def check(key, kind):
+            identified = self.refusal(self.call('seat.identify', self.identify_args(key)), kind)
+            signed = self.refusal(self.call(args=self.args(key)), kind)
+            self.assertEqual(identified.response['error'], signed.response['error'])
+        check(wrong, 'key_rejected')
+        check(unknown, 'key_rejected')
+        replace_occupant_for_test(self.root, P, self.key['seat'], next(self.n))
+        check(self.key, 'key_replaced')
+        stood = self.add_seat()
+        self.writer.submit(P, self.job(lambda c: (c.execute(
+            "UPDATE seats SET state='stood-down' WHERE id=?", (stood['seat'],)).close(),
+            writer.JobOutcome(True, None))[1]))
+        check(stood, 'seat_stood_down')
+
+    def test_identify_writes_nothing(self):
+        phases, observed, denied = [], [], []
+        self.phase = phases.append
+        original = self.writer.read
+        def read(project_id, fn):
+            def checked(conn):
+                before = conn.total_changes
+                allowed = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT,
+                           sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+                def authorize(action, *args):
+                    if action not in allowed:
+                        denied.append(action)
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+                conn.set_authorizer(authorize)
+                try:
+                    answer = fn(conn)
+                    observed.append((before, conn.total_changes))
+                    return answer
+                finally:
+                    conn.set_authorizer(None)
+            return original(project_id, checked)
+        before = self.counts()
+        with patch.object(self.writer, 'read', side_effect=read) as reading, patch.object(
+                self.service.writer, 'submit', side_effect=AssertionError('identify_submitted')) as submit:
+            self.success(self.call('seat.identify', self.identify_args()))
+            reading.assert_called_once()
+            submit.assert_not_called()
+        self.assertEqual(observed, [(0, 0)])
+        self.assertEqual(denied, [])
+        self.assertNotIn('dequeued', phases)
+        self.assertEqual(self.counts(), before)
+
+    def test_identify_keeps_binding(self):
+        from relay_engine import api_definitions as d, api_registry as r, errors
+        graph = d.platform_definitions()
+        operation = d.OperationDef('test.bound', d.TypeRef('IdentifyBoundArgs'),
+            d.TypeRef('IdentifyBoundResult'), d.TypeRef('ApiError'), 'seat_session',
+            'pure_observation', 'read_repeat', 'none')
+        graph = replace(graph, types=graph.types + (
+            d.TypeDef('IdentifyBoundArgs', d.Record(())),
+            d.TypeDef('IdentifyBoundResult', d.Record(()))), operations=graph.operations + (operation,))
+        seen = []
+        def bound(args, principal, port):
+            seen.append(principal)
+            return {}
+        self.registry = r.compile_registry(graph, dict(platform.platform_handlers(), **{'test.bound': bound}),
+                                            (errors.api_error_catalog(),))
+        self.runtime = replace(self.runtime, schemas={'3.0': api_schema.export_schema(self.registry, '3.0')})
+        signed = self.call()
+        self.success(signed)
+        replace_occupant_for_test(self.root, P, self.key['seat'], next(self.n))
+        identified = self.refusal(self.call('seat.identify', self.identify_args(), signed.state), 'key_replaced')
+        self.assertEqual(identified.state.binding, signed.state.binding)
+        self.assertEqual(self.success(self.call('test.bound', {}, identified.state)), {})
+        self.assertEqual(seen, [signed.state.binding])
+
+    def test_session_jobs_declare_the_ledger(self):
+        phases = []
+        self.phase = phases.append
+        signed_result = self.call()
+        signed = self.success(signed_result)
+        self.success(self.call('session.resume', self.resume_args(signed)))
+        self.success(self.call('session.end', self.end_args(signed), signed_result.state))
+        self.assertEqual(self.submitted, [(P, frozenset({self.writer.ledger_file(P)}))] * 3)
+        self.assertEqual(phases.count('dequeued'), 3)
+
     def test_session_operations_metadata(self):
         expected = {'session.sign-in': ('seat_key', 'session_write', 'operation_key', 'none'),
                     'session.resume': ('seat_key', 'connection_binding', 'read_repeat', 'none'),
@@ -208,8 +327,10 @@ class SessionTests(unittest.TestCase):
             self.assertEqual((op.principal, op.effect, op.retry, op.browser_get), row)
 
     def test_capabilities_are_exactly_the_handled_operations(self):
-        names = ('protocol.connect', 'protocol.schema', 'session.end', 'session.resume', 'session.sign-in')
-        self.assertEqual(self.registry.capabilities(), names)
+        names = ('protocol.connect', 'protocol.schema', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
+        queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
+                 'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
+        self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue)))
         self.assertEqual(set(platform.platform_handlers()), set(names))
         with patch.object(p, 'session_handlers', return_value={'protocol.connect': lambda: None}):
             with self.assertRaises(ValueError):
@@ -226,9 +347,9 @@ class SessionTests(unittest.TestCase):
     def test_generation_import_boundary_fresh_process(self):
         probe = '''import sys,json
 sys.path.insert(0,sys.argv[1])
-from relay_engine.api_platform import build_platform_registry
+from relay_engine.api_platform import build_platform
 from relay_engine.api_schema import export_schema
-assert export_schema(build_platform_registry(),'3.0').canonical_bytes
+assert export_schema(build_platform().registry,'3.0').canonical_bytes
 EXTRA
 print(json.dumps(sorted(sys.modules)))
 '''
@@ -283,7 +404,7 @@ print(json.dumps(sorted(sys.modules)))
         replace_occupant_for_test(self.root, P, self.key['seat'], next(self.n))
         self.refusal(self.call(), 'key_replaced')
         new = self.add_seat()
-        self.writer.submit(Job(lambda c: (c.execute("UPDATE seats SET state='stood-down' WHERE id=?",
+        self.writer.submit(P, self.job(lambda c: (c.execute("UPDATE seats SET state='stood-down' WHERE id=?",
             (new['seat'],)).close(), writer.JobOutcome(True, None))[1]))
         self.refusal(self.call(args=self.args(new)), 'seat_stood_down')
 
@@ -378,7 +499,7 @@ print(json.dumps(sorted(sys.modules)))
                 if name == 'queued': queued.set()
             self.phase = phase
             def replacement():
-                return self.writer.submit(Job(lambda c: writer.JobOutcome(True,
+                return self.writer.submit(P, self.job(lambda c: writer.JobOutcome(True,
                     replace_on_connection(c, key['seat'], next(self.n))))).value
             with ThreadPoolExecutor(2) as pool:
                 try:
@@ -437,6 +558,82 @@ print(json.dumps(sorted(sys.modules)))
         finally:
             conn.close()
 
+    def test_require_current_binding_each_reason(self):
+        result = self.call()
+        self.success(result)
+        binding = result.state.binding
+        conn = store_layout.open_ledger(self.root, P)
+        self.addCleanup(conn.close)
+        conn.execute('BEGIN IMMEDIATE').close()
+        self.assertIsNone(sessions.require_current_binding(conn, binding))
+        from relay_engine import errors, queries
+        def refused(snapshot, reason):
+            with self.assertRaises(errors.EngineError) as caught:
+                sessions.require_current_binding(conn, snapshot)
+            self.assertEqual(caught.exception.code, 'E-SENDER-NOT-CURRENT')
+            self.assertEqual(caught.exception.params, {'reason': reason})
+            self.assertTrue(conn.in_transaction)
+        for sql, reason in (
+                ('UPDATE seat_occupants SET ended_at=9999', 'key_replaced'),
+                ("UPDATE seats SET state='stood-down'", 'seat_stood_down'),
+                ('UPDATE seat_sessions SET ended_at=9999', 'session_not_current')):
+            with self.subTest(reason=reason):
+                conn.execute('SAVEPOINT changed').close()
+                conn.execute(sql).close()
+                refused(binding, reason)
+                conn.execute('ROLLBACK TO changed').close()
+                conn.execute('RELEASE changed').close()
+        queries.record_session_step(conn, 'new-host-session', 'codex', binding.seat_id, 9999)
+        refused(binding, 'session_not_current')
+        conn.rollback()
+        conn.execute('BEGIN IMMEDIATE').close()
+        refused(replace(binding, session_id='unknown'), 'session_not_current')
+        for field in dataclasses.fields(binding):
+            if field.name == 'session_id':
+                continue
+            value = 999 if field.name == 'generation' else 'different'
+            with self.subTest(field=field.name):
+                refused(replace(binding, **{field.name: value}), 'session_not_current')
+        conn.rollback()
+
+    def test_require_current_binding_only_reads(self):
+        result = self.call()
+        self.success(result)
+        conn = store_layout.open_ledger(self.root, P)
+        self.addCleanup(conn.close)
+        conn.execute('BEGIN IMMEDIATE').close()
+        denied = []
+        allowed = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT,
+                   sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
+        def authorize(action, *args):
+            if action in allowed:
+                return sqlite3.SQLITE_OK
+            denied.append(action)
+            return sqlite3.SQLITE_DENY
+        conn.set_authorizer(authorize)
+        try:
+            self.assertIsNone(sessions.require_current_binding(conn, result.state.binding))
+            self.assertEqual(denied, [])
+        finally:
+            conn.set_authorizer(None)
+            conn.rollback()
+
+    def test_require_current_binding_store_fault_propagates(self):
+        result = self.call()
+        self.success(result)
+        conn = store_layout.open_ledger(self.root, P)
+        self.addCleanup(conn.close)
+        conn.execute('BEGIN IMMEDIATE').close()
+        fault = sessions.BindingUnavailable('store_unavailable')
+        before = conn.total_changes
+        with patch.object(sessions, 'current_binding', side_effect=fault):
+            with self.assertRaises(sessions.BindingUnavailable) as caught:
+                sessions.require_current_binding(conn, result.state.binding)
+        self.assertIs(caught.exception, fault)
+        self.assertEqual(conn.total_changes, before)
+        self.assertTrue(conn.in_transaction)
+        conn.rollback()
+
     def test_unsigned_new_end_with_valid_key_is_not_signed_in(self):
         signed = self.success(self.call()); before = self.counts()
         self.refusal(self.call('session.end', self.end_args(signed)), 'not_signed_in')
@@ -493,17 +690,17 @@ print(json.dumps(sorted(sys.modules)))
         def clear(conn):
             conn.set_progress_handler(None, 0); conn.set_trace_callback(None)
             return writer.JobOutcome(False, None)
-        self.writer.submit(Job(clear)); self.step = None
+        self.writer.submit(P, self.job(clear)); self.step = None
         self.assertEqual(self.counts(), (0, 0))
         self.success(self.call())
 
     def test_session_jobs_create_no_platform_savepoint(self):
         trace = []
-        self.writer.submit(Job(lambda c: (c.set_trace_callback(trace.append), writer.JobOutcome(False, None))[1]))
+        self.writer.submit(P, self.job(lambda c: (c.set_trace_callback(trace.append), writer.JobOutcome(False, None))[1]))
         result = self.call(); signed = self.success(result)
         self.success(self.call('session.resume', self.resume_args(signed)))
         self.success(self.call('session.end', self.end_args(signed), result.state))
-        self.writer.submit(Job(lambda c: (c.set_trace_callback(None), writer.JobOutcome(False, None))[1]))
+        self.writer.submit(P, self.job(lambda c: (c.set_trace_callback(None), writer.JobOutcome(False, None))[1]))
         starts = [sql.split()[1] for sql in trace if sql.startswith('SAVEPOINT ')]
         self.assertEqual(len(starts), 1)
         for sql in trace:

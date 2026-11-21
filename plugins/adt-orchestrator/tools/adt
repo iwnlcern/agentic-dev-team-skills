@@ -1,0 +1,684 @@
+#!/usr/bin/env python3
+import argparse
+from collections.abc import Callable, Sequence
+import errno
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import select
+import shlex
+import socket
+import stat
+import subprocess
+import sys
+import time
+import threading
+import uuid
+
+from relay_engine import lifecycle_paths, store_layout
+from relay_engine.adt_cli import CommandGroup, _bridge_port, main
+from relay_engine.api_client import LocalRefusal, read_ready_file
+from relay_engine.api_operator_bridge import _private_launch_file, _read_launch_url
+from relay_engine.operator_queue.notifier import DeliveryCancelled, KnownNotifierFailure, NotifierIssueUnavailable
+
+
+class DeliverRefused(Exception):
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(name)
+
+
+_HOST_NOTIFIERS = {'osascript': '/usr/bin/osascript', 'notify-send': '/usr/bin/notify-send'}
+
+
+def _notifier_path(name: str, terminal_notifier: str | None) -> str:
+    if name in _HOST_NOTIFIERS:
+        return _HOST_NOTIFIERS[name]
+    if name == 'terminal-notifier' and terminal_notifier is not None:
+        if os.path.isabs(terminal_notifier) and os.path.basename(terminal_notifier) == name:
+            try:
+                if stat.S_ISREG(os.lstat(terminal_notifier).st_mode):
+                    return terminal_notifier
+            except (OSError, ValueError):
+                pass
+    raise DeliverRefused(name)
+
+
+def make_deliver(
+    terminal_notifier: str | None, *, stopping: Callable[[], bool],
+    issue: Callable | None = None, timeout_s: float = 10,
+) -> Callable[[Sequence[str]], None]:
+    """Run in the launch owner with an issuer that enforces expiry at native issue.
+
+    The local product has no such issuer. Injected issuers exercise the launch
+    owner in isolation without granting production capability.
+    """
+    def deliver(argv: Sequence[str]) -> None:
+        if issue is None:
+            raise NotifierIssueUnavailable()
+        if not argv:
+            raise DeliverRefused('')
+        executable = _notifier_path(argv[0], terminal_notifier)
+        reserved_at = time.monotonic()
+        if stopping():
+            raise DeliveryCancelled()
+        # A reservation before T expires no later than the first attempt's W.
+        expiry = reserved_at + 3.0
+        deadline = reserved_at + timeout_s
+        child = issue([executable, *argv[1:]], expires_at=expiry, stdin=subprocess.DEVNULL,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            while not stopping():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(executable, timeout_s)
+                try:
+                    code = child.wait(timeout=min(0.05, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                if stopping():
+                    raise DeliveryCancelled()
+                if code != 0:
+                    raise subprocess.CalledProcessError(code, executable)
+                return
+            raise DeliveryCancelled()
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                if stopping():
+                    child.kill()
+                else:
+                    try:
+                        child.wait(timeout=0.1)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                child.wait()
+
+    return deliver
+
+
+def _open_gate(fd):
+    try:
+        os.read(fd, 1)
+    except BlockingIOError as error:
+        return error.errno in {errno.EAGAIN, errno.EWOULDBLOCK}
+    except OSError:
+        pass
+    return False
+
+
+def _claimed_call(gate, cancelled, argv, issue):
+    if not _open_gate(gate):
+        return 'refused'
+    # The same worker checks the actual pipe after its claim. A parked control
+    # observer, or a STOP message waiting on the socket, cannot mask EOF.
+    if not _open_gate(gate) or cancelled.is_set():
+        return 'refused'
+    try:
+        return issue(argv)
+    except FileNotFoundError:
+        return 'not_found'
+    except OSError:
+        return 'unknown'
+
+
+class _Control:
+    def __init__(self, sock):
+        self.socket = sock
+        self._read = sock.makefile('rb')
+        self._send_lock = threading.Lock()
+
+    def send(self, message):
+        data = json.dumps(message, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+        with self._send_lock:
+            self.socket.sendall(data)
+
+    def receive(self):
+        data = self._read.readline(65537)
+        if not data or len(data) > 65536:
+            return None
+        message = json.loads(data)
+        return message if isinstance(message, dict) else None
+
+    def close(self):
+        self._read.close()
+        self.socket.close()
+
+
+def _launch_notification(gate, cancelled, work_cutoff, argv):
+    stdout = subprocess.DEVNULL
+    child = _claimed_call(gate, cancelled, argv, lambda args: subprocess.Popen(
+        args, stdin=stdout, stdout=stdout, stderr=stdout, close_fds=True))
+    if isinstance(child, str):
+        return child
+    until = time.monotonic() + 10
+    try:
+        while not cancelled.is_set() and time.monotonic() < until:
+            try:
+                code = child.wait(timeout=min(0.05, max(0, until - time.monotonic())))
+                return 'delivered' if code == 0 else 'unknown'
+            except subprocess.TimeoutExpired:
+                continue
+        return 'unknown'
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            cutoff = work_cutoff[0]
+            grace = 0.1
+            if cancelled.is_set():
+                grace = 0 if cutoff is None else max(0, min(grace, cutoff - time.monotonic()))
+            try:
+                child.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+
+def _custodian(gate, channel_fd, epoch, terminal_notifier):
+    channel = _Control(socket.socket(fileno=channel_fd))
+    try:
+        os.set_inheritable(gate, False)
+        os.set_inheritable(channel_fd, False)
+        status = os.fstat(gate)
+        flags = fcntl.fcntl(gate, fcntl.F_GETFL)
+        if not stat.S_ISFIFO(status.st_mode) or flags & os.O_ACCMODE != os.O_RDONLY or os.get_blocking(gate):
+            return 75
+        return _custody_loop(gate, channel, epoch, terminal_notifier, (status.st_dev, status.st_ino))
+    finally:
+        channel.close()
+        os.close(gate)
+
+
+def _custody_loop(gate, channel, epoch, terminal_notifier, identity):
+    cancelled = threading.Event()
+    work_cutoff = [None]
+    ticket = None
+    launch = None
+    disposition = [None]
+    last_number = 0
+
+    def watch_gate():
+        select.select([gate], [], [])
+        cancelled.set()
+
+    def run(exact_ticket, argv):
+        try:
+            disposition[0] = _launch_notification(gate, cancelled, work_cutoff, argv)
+        except Exception:
+            disposition[0] = 'unknown'
+        try:
+            channel.send({'epoch': epoch, 'ticket': exact_ticket, 'outcome': disposition[0]})
+        except OSError:
+            pass
+
+    threading.Thread(target=watch_gate, daemon=True).start()
+    try:
+        channel.send({'epoch': epoch, 'kind': 'ready', 'gate': list(identity)})
+        while (message := channel.receive()) is not None:
+            if message.get('epoch') != epoch:
+                break
+            kind = message.get('kind')
+            if kind == 'stop':
+                cutoff = message.get('work')
+                now = time.monotonic()
+                if (work_cutoff[0] is None and type(cutoff) in {float, int} and math.isfinite(cutoff)
+                        and cutoff <= now + 3):
+                    work_cutoff[0] = cutoff
+                cancelled.set()
+                continue
+            exact = message.get('ticket')
+            if kind == 'settled' and ticket is not None and exact == ticket:
+                if launch is not None:
+                    launch.join()
+                if disposition[0] in {'delivered', 'refused', 'not_found', 'path_refused'}:
+                    ticket = None
+                else:
+                    break
+                continue
+            argv = message.get('argv')
+            if (kind != 'offer' or ticket is not None or not isinstance(exact, list) or len(exact) != 3
+                    or type(exact[0]) is not int or exact[0] <= last_number
+                    or not isinstance(exact[1], str) or type(exact[2]) is not int
+                    or not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv)):
+                break
+            ticket = exact
+            disposition[0] = None
+            last_number = exact[0]
+            try:
+                program = 'terminal-notifier' if terminal_notifier else _builtin_notifier()
+                if argv[0] != program:
+                    break
+                executable = _notifier_path(program, terminal_notifier or None)
+            except DeliverRefused:
+                # Path refusal precedes a kernel claim.
+                disposition[0] = 'path_refused'
+                launch = None
+                channel.send({'epoch': epoch, 'ticket': exact, 'outcome': 'path_refused'})
+                continue
+            launch = threading.Thread(target=run, args=(exact, [executable, *argv[1:]]))
+            launch.start()
+    except (OSError, ValueError):
+        pass
+    finally:
+        cancelled.set()
+        if launch is not None:
+            launch.join()
+    # A launch that may have had an effect needs an exact receipt acknowledgement.
+    return 0 if ticket is None or disposition[0] in {'refused', 'not_found', 'path_refused'} else 75
+
+
+class _NotifierCustodian:
+    def __init__(self, command, program, gate, receiver, stopping, epoch):
+        self.program = program
+        self._epoch = epoch
+        self._stopping = stopping
+        self._number = 0
+        self._ticket = None
+        self._disabled = True
+        status = os.fstat(receiver)
+        self._read_identity = [status.st_dev, status.st_ino]
+        parent, child = socket.socketpair()
+        self._channel = _Control(parent)
+        try:
+            self._process = subprocess.Popen(
+                [*command, str(receiver), str(child.fileno()), epoch],
+                pass_fds=(receiver, child.fileno()), close_fds=True, start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except BaseException:
+            self._channel.close()
+            raise
+        finally:
+            child.close()
+        self._gate = gate
+
+    def acknowledge(self):
+        self._channel.socket.settimeout(2)
+        try:
+            expected = {'epoch': self._epoch, 'kind': 'ready', 'gate': self._read_identity}
+            self._disabled = self._channel.receive() != expected
+        except (OSError, ValueError):
+            self._disabled = True
+        finally:
+            self._channel.socket.settimeout(None)
+        return not self._disabled
+
+    def offer(self, note, argv):
+        if self._disabled or self._ticket is not None:
+            raise NotifierIssueUnavailable()
+        self._number += 1
+        self._ticket = [self._number, note.item_id, note.revision]
+        if self._stopping():
+            self._ticket = None
+            raise DeliveryCancelled()
+        try:
+            self._channel.send({'epoch': self._epoch, 'kind': 'offer', 'ticket': self._ticket, 'argv': argv})
+            result = self._channel.receive()
+        except (OSError, ValueError):
+            result = None
+        if result and result.get('epoch') == self._epoch and result.get('ticket') == self._ticket:
+            outcome = result.get('outcome')
+            if not isinstance(outcome, str):
+                self._disabled = True
+                raise NotifierIssueUnavailable()
+            if outcome == 'refused':
+                self.settled()
+                self._disabled = True
+                raise DeliveryCancelled()
+            if outcome in {'not_found', 'path_refused'}:
+                if self._stopping():
+                    self.settled()
+                    raise DeliveryCancelled()
+                reason = 'DeliverRefused' if outcome == 'path_refused' else 'FileNotFoundError'
+                raise KnownNotifierFailure(reason)
+            if outcome == 'delivered' and not self._stopping():
+                return
+        self._disabled = True
+        raise NotifierIssueUnavailable()
+
+    def settled(self):
+        try:
+            self._channel.send({'epoch': self._epoch, 'kind': 'settled', 'ticket': self._ticket})
+        except OSError:
+            self._disabled = True
+            return
+        self._ticket = None
+
+    def begin_stop(self, attempt):
+        try:
+            self._channel.send({'epoch': self._epoch, 'kind': 'stop', 'work': attempt.work})
+        except OSError:
+            pass
+
+    def retire(self, deadline):
+        try:
+            try:
+                self._channel.socket.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            try:
+                code = self._process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                return False
+            return code == 0 and self._gate.released and self._ticket is None
+        finally:
+            self._channel.close()
+
+
+def _builtin_notifier():
+    return 'osascript' if sys.platform == 'darwin' else 'notify-send'
+
+
+def _queue_notifier(terminal_notifier, service):
+    # Only the locally qualified host may use the installed issue edge.
+    if (sys.platform, os.uname().machine) not in {('darwin', 'arm64'), ('linux', 'aarch64')}:
+        print('adt engine serve: notifier issue capability unavailable', file=sys.stderr, flush=True)
+        return
+    from relay_engine.api_service import _NotifierGate
+
+    receiver, writer = os.pipe()
+    gate = _NotifierGate(writer)
+    try:
+        os.set_blocking(receiver, False)
+        if not service._foreground.install_notifier_gate(gate):
+            return
+        epoch = uuid.uuid4().hex
+        program = 'terminal-notifier' if terminal_notifier is not None else _builtin_notifier()
+        command = [sys.executable, str(Path(__file__).resolve()), '--private-notifier-custodian',
+                   terminal_notifier or '']
+        try:
+            custodian = _NotifierCustodian(command, program, gate, receiver, service.is_stopping, epoch)
+        except OSError:
+            gate.retire()
+            print('adt engine serve: notifier issue capability unavailable', file=sys.stderr, flush=True)
+            return
+        service._notifier_custodian = custodian
+        if not custodian.acknowledge():
+            print('adt engine serve: notifier issue capability unavailable', file=sys.stderr, flush=True)
+    finally:
+        os.close(receiver)
+
+
+def _report_incomplete_stop(instance, origin, holder, reason):
+    print(f'adt engine serve: provisional stop instance={instance} origin={origin:.6f} '
+          f'holder={holder} outstanding={reason}', file=sys.stderr, flush=True)
+
+
+def console_open(ready_path: str, *, print_only: bool, run: Callable = subprocess.run) -> int:
+    try:
+        ready = read_ready_file(ready_path)
+        path = Path(ready.path).with_name('open.html')
+        status = path.lstat()
+        if not _private_launch_file(status):
+            raise ValueError('unsafe_launch_page')
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        with open(path, 'rb', opener=lambda name, _: os.open(name, flags)) as page:
+            actual = os.fstat(page.fileno())
+            if ((actual.st_dev, actual.st_ino) != (status.st_dev, status.st_ino)
+                    or not _private_launch_file(actual)):
+                raise ValueError('unsafe_launch_page')
+            if print_only:
+                print(_read_launch_url(page.read(1024)))
+                return 0
+        argv = (['/usr/bin/open', '--', str(path)] if sys.platform == 'darwin'
+                else ['xdg-open', str(path)])
+        if run(argv).returncode != 0:
+            raise ValueError('opener_failed')
+    except (LocalRefusal, OSError, ValueError):
+        print('The Console launch page could not be opened.', file=sys.stderr)
+        return 1
+    print('If the page did not open, run adt console open --print and paste the address.')
+    return 0
+
+
+def _console_open_selected(args: argparse.Namespace) -> int:
+    if args.ready is not None:
+        return console_open(args.ready, print_only=args.print_only)
+
+    root = args.store_root if args.store_root is not None else str(store_layout.production_root())
+    target = lifecycle_paths.console_target(root)
+    if isinstance(target, lifecycle_paths.ConsoleTargetUnavailable):
+        remedy = f'adt engine run --store-root {shlex.quote(root)} --project-id PROJECT'
+        print('The selected Store is unavailable for Console. Check the operator launch terminal '
+              f'for the refusal. When the Store is eligible, run {remedy} with its selected project ID.',
+              file=sys.stderr)
+        return 1 if target.reason == 'identity_unavailable' else 75
+    return console_open(target.ready_path, print_only=args.print_only)
+
+
+def console_group(extra: Sequence[Callable[[argparse._SubParsersAction], None]] = ()) -> CommandGroup:
+    def build(commands):
+        console = commands.add_parser('console')
+        nested = console.add_subparsers(dest='console_command', required=True)
+        launch = nested.add_parser('open')
+        target = launch.add_mutually_exclusive_group()
+        target.add_argument('--ready')
+        target.add_argument('--store-root')
+        launch.add_argument('--print', dest='print_only', action='store_true')
+        launch.set_defaults(handler=_console_open_selected)
+        for extend in extra:
+            extend(nested)
+    return CommandGroup('console', build)
+
+
+
+def _operator_run(command, *, input=None, timeout=120):
+    return subprocess.run(command, input=input, capture_output=True, check=False, timeout=timeout,
+                          env={**os.environ, 'LC_ALL': 'C'})
+
+
+def _installed_helper_line():
+    from relay_engine.operator_check_install import CHECK_PATH
+
+    with open(CHECK_PATH, 'rb') as helper:
+        return helper.readline(4096)
+
+
+def probe(run: Callable) -> str:
+    from relay_engine.operator_check_install import CHECK_PATH
+
+    result = run(['/usr/bin/sudo', '-k', '-n', CHECK_PATH, 'probe'], timeout=5)
+    return 'passwordless' if result.returncode == 0 else 'asks'
+
+
+def prove(message: bytes, act_line: str, *, run: Callable, clock: Callable,
+          lstat: Callable, read_helper: Callable = _installed_helper_line) -> bytes:
+    from relay_engine.operator_check_install import CHECK_PATH, chain_failure
+    from relay_engine.operator_check_words import classify_sudo_failure, prompt_text, render_act_line
+    from relay_engine.operator_terminal import OperatorCheckRefused
+
+    deadline = clock() + 120_000_000_000
+    try:
+        line = read_helper().decode('utf-8')
+    except FileNotFoundError as error:
+        raise OperatorCheckRefused('not_installed') from error
+    except (OSError, UnicodeError) as error:
+        raise OperatorCheckRefused('interpreter_unsafe') from error
+    if not line.startswith('#!') or not line.endswith(' -IS\n'):
+        raise OperatorCheckRefused('interpreter_unsafe')
+    interpreter = line[2:-5]
+    unsafe = chain_failure(interpreter, lstat=lstat)
+    if unsafe is not None:
+        raise OperatorCheckRefused('interpreter_unsafe', f'{render_act_line(unsafe)}; run adt operator install-check again')
+    try:
+        if probe(run) == 'passwordless':
+            raise OperatorCheckRefused('passwordless')
+        remaining = (deadline - clock()) / 1_000_000_000
+        if remaining <= 0:
+            raise OperatorCheckRefused('timeout')
+        result = run(['/usr/bin/sudo', '-k', '-p', prompt_text(act_line), CHECK_PATH,
+                      'sign', message.hex()], timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        raise OperatorCheckRefused('timeout') from error
+    except OSError as error:
+        raise OperatorCheckRefused('prove_failed') from error
+    if clock() >= deadline:
+        raise OperatorCheckRefused('timeout')
+    stderr = result.stderr.decode('utf-8', errors='replace')
+    if result.returncode:
+        if result.returncode == 2 and 'unknown purpose' in stderr:
+            raise OperatorCheckRefused('prove_failed',
+                                       'The installed check does not know this act. Run adt operator install-check again.')
+        raise OperatorCheckRefused(classify_sudo_failure(stderr))
+    for line in stderr.splitlines():
+        if line.startswith('Signing: '):
+            print(line, file=sys.stderr)
+    return result.stdout
+
+
+def confirm_locally(purpose: str, args, *, store_id: str):
+    from relay_engine.operator_check_words import describe_act
+    from relay_engine.operator_terminal import require_operator
+
+    act_line = describe_act(purpose, args)
+    return require_operator(
+        purpose, args, store_id=store_id, act_line=act_line,
+        prove=lambda message: prove(message, act_line, run=_operator_run, clock=time.monotonic_ns,
+                                    lstat=os.lstat),
+        show=lambda line: print(line, file=sys.stderr, flush=True),
+    )
+
+
+def confirm_owner_start(selection):
+    from relay_engine.owner_start import NativeIdentity, authorize_owner_start, startup_act
+
+    return authorize_owner_start(
+        selection, NativeIdentity.current(),
+        prove=lambda message: prove(message, startup_act(selection), run=_operator_run,
+                                    clock=time.monotonic_ns, lstat=os.lstat),
+        show=lambda line: print(line, file=sys.stderr, flush=True),
+    )
+
+
+def _engine_owner_group():
+    def build(engine):
+        owner = engine.add_parser('run')
+        owner.add_argument('--store-root', required=True)
+        owner.add_argument('--project-id', required=True)
+        owner.add_argument('--bridge-port', type=_bridge_port)
+        owner.add_argument('--initialize', action='store_true')
+        owner.add_argument('--project-name')
+        owner.set_defaults(handler=_run_selected_owner)
+
+    return CommandGroup('engine-run', build, engine_subcommands=True)
+
+
+def _run_selected_owner(args):
+    from relay_engine import operator_terminal, owner_start
+
+    def launch(command, **options):
+        return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *command],
+                                stdin=subprocess.DEVNULL, **options)
+
+    try:
+        return owner_start.run_owner(
+            args.store_root, args.project_id, initialize=args.initialize, project_name=args.project_name,
+            bridge_port=args.bridge_port, authorize=confirm_owner_start, launch=launch,
+            show=lambda line: print(line, file=sys.stderr, flush=True),
+        )
+    except operator_terminal.OperatorCheckRefused as error:
+        detail = str(error)
+        if error.reason == 'not_installed':
+            detail = 'The operator check is missing. Run adt operator install-check.'
+        print(f'adt engine run: {detail}', file=sys.stderr)
+        return 1
+    except (owner_start.StartupRefused, store_layout.LayoutFault, OSError, ValueError) as error:
+        guidance = {
+            'startup_expired': 'The signed startup expired. Run the same selection for fresh confirmation.',
+            'receipt-missing': 'The selected Store’s verified restart receipt is missing.',
+            'birth-provider-unavailable': 'This package does not contain the checked production Store provider.',
+            'retirement-incomplete': 'The original child’s stop could not be verified. Check the operator terminal.',
+            'retirement-unproved': 'The original child’s retirement receipt could not be verified and retained.',
+        }
+        reason = getattr(error, 'reason', getattr(error, 'cause', 'owner-unavailable'))
+        print('adt engine run: ' + guidance.get(reason, f'The selected Store could not be served ({reason}).'),
+              file=sys.stderr)
+        return 1
+
+
+def _call_interpreter(interpreter, expression):
+    try:
+        result = subprocess.run([interpreter, '-IS', '-c', expression], env={}, capture_output=True,
+                                check=False, timeout=5)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError('interpreter did not answer') from error
+    if result.returncode:
+        raise ValueError('interpreter did not answer')
+    return result.stdout.decode('utf-8').strip()
+
+
+def _operator_check_command(args, *, run: Callable = _operator_run) -> int:
+    import pwd
+
+    from relay_engine import operator_check_install as install
+
+    uninstalling = args.operator_command == 'uninstall-check'
+    helper = Path(__file__).with_name('adt-operator-check')
+    try:
+        interpreter = install.choose_interpreter(
+            sys.platform,
+            read_executable=lambda path: _call_interpreter(path, 'import os, sys; print(os.path.realpath(sys.executable))'),
+            read_version=lambda path: tuple(map(int, _call_interpreter(
+                path, 'import sys; print(*sys.version_info[:2])').split())),
+            lstat=os.lstat,
+        )
+        files = install.install_plan(sys.platform, helper.read_bytes(), interpreter)
+        payload = install.invocation_payload(sys.platform, interpreter, pwd.getpwuid(os.getuid()).pw_name, files)
+        print(f'Operator check interpreter: {interpreter}', file=sys.stderr)
+        for path, _, _, _ in files:
+            print(path, file=sys.stderr)
+        if not uninstalling:
+            print('To remove the terminal check, run adt operator uninstall-check.', file=sys.stderr)
+        sys.stderr.flush()
+
+        def change(action, program):
+            result = run(['/usr/bin/sudo', interpreter, '-IS', '-c', program, action], input=payload)
+            if not result.stdout:
+                raise install.InstallRefused('operator_check_not_installed')
+            report = json.loads(result.stdout)
+            if result.returncode:
+                if report['outcome'] == 'not_permitted':
+                    print('Your account may not run the operator check. Its sudo rule must allow the helper.',
+                          file=sys.stderr)
+                    if report['remaining']:
+                        print('Existing paths left in place:', file=sys.stderr)
+                        for path in report['remaining']:
+                            print(path, file=sys.stderr)
+                        print('After fixing the rule, run adt operator install-check again, '
+                              'or run adt operator uninstall-check to remove those paths.', file=sys.stderr)
+                    else:
+                        print('No operator check paths were installed.', file=sys.stderr)
+                raise install.InstallRefused(report['outcome'], tuple(report['paths']))
+            for path in report['paths']:
+                print(path)
+
+        if uninstalling:
+            change('uninstall', install.UNINSTALLER_SOURCE)
+        else:
+            change('install', install.INSTALLER_SOURCE)
+            if probe(run) == 'passwordless':
+                change('uninstall', install.UNINSTALLER_SOURCE)
+                raise install.InstallRefused('operator_check_passwordless')
+    except (install.InstallRefused, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f'adt operator: {error}', file=sys.stderr)
+        return 1
+    return 0
+
+
+def operator_group() -> CommandGroup:
+    def build(commands):
+        operator = commands.add_parser('operator')
+        nested = operator.add_subparsers(dest='operator_command', required=True)
+        for name in ('install-check', 'uninstall-check'):
+            nested.add_parser(name).set_defaults(handler=_operator_check_command)
+
+    return CommandGroup('operator', build)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
+        _, _, configured, gate_fd, channel_fd, epoch = sys.argv
+        raise SystemExit(_custodian(int(gate_fd), int(channel_fd), epoch, configured))
+    raise SystemExit(main(sys.argv[1:], groups=(console_group(), operator_group(), _engine_owner_group()),
+                          queue_notifier=_queue_notifier, stop_report=_report_incomplete_stop))

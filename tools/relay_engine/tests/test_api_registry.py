@@ -8,6 +8,152 @@ import unittest
 import relay_engine.api_definitions as d
 
 
+def slice_b_rules_graph():
+    from dataclasses import replace
+    graph = d.discovery_definitions()
+    return replace(graph, types=graph.types + (
+        d.TypeDef('DraftBase64', d.String(
+            r'(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?', 0, 174764),
+            (d.CanonicalBase64(d.TypeRef('DraftBase64'), 131072),)),
+        d.TypeDef('SubmissionKey', d.String(r'[^\x00]*', 1, 256),
+            (d.Utf8MaxBytes(d.TypeRef('SubmissionKey'), 256),)),
+    ))
+
+
+class TestSliceBRules(unittest.TestCase):
+    def test_operator_and_service_principals_compile(self):
+        from dataclasses import replace
+        from relay_engine import api_registry as r
+        graph = d.discovery_definitions()
+        for kind in ('operator', 'service'):
+            op = replace(graph.operations[0], name='test.principal', principal=kind,
+                         browser_get='none')
+            try:
+                compiled = self.compile(replace(graph, operations=(op,)))
+            except r.RegistryCompileError as exc:
+                self.fail(f'{kind} principal refused: {exc.reason}')
+            self.assertEqual(compiled.operation('test.principal').principal, kind)
+        with self.assertRaises(r.RegistryCompileError):
+            self.compile(replace(graph, operations=(replace(op, principal='unknown'),)))
+
+    def test_identify_metadata(self):
+        from relay_engine.api_platform import build_platform
+        op = build_platform().registry.operation('seat.identify')
+        self.assertIsNotNone(op)
+        self.assertEqual((op.principal, op.effect, op.retry, op.browser_get),
+                         ('seat_key', 'pure_observation', 'read_repeat', 'none'))
+
+
+    def test_platform_defines_utf8(self):
+        from dataclasses import replace
+        from relay_engine import api_platform, api_compose, api_registry as r, api_protocol as p
+        from relay_engine import api_schema, api_wire, errors
+        platform = api_platform.platform_component()
+        node = api_platform.build_platform().registry.types['Utf8']
+        self.assertEqual(node, d.TypeDef('Utf8', d.String(r'[^\x00]*', 0, 4096)))
+        op = d.OperationDef('test.utf8', d.TypeRef('Utf8Args'), d.TypeRef('Utf8Args'),
+            d.TypeRef('ApiError'), 'unsigned', 'pure_observation', 'read_repeat', 'none')
+        graph = d.DefinitionGraph((d.TypeDef('Utf8Args', d.Record((d.FieldDef('text', d.TypeRef('Utf8')),))),),
+                                  (op,), d.TypeRef('ApiError'))
+        other = api_compose.ApiComponent('other', graph, {'test.utf8': lambda args, principal, port: args},
+                                         lambda ctx: object())
+        for components in ((platform, other), (other, platform)):
+            composition = api_compose.compose_components(components)
+            registry = r.compile_registry(composition.definitions, composition.handlers, (errors.api_error_catalog(),))
+            runtime = p.RuntimeContext('store', 'isolated', 'runtime', '3.0.0', 'a' * 64,
+                                       True, {'3.0': api_schema.export_schema(registry, '3.0')})
+            ports = {'test.utf8': object()}
+            state = p.dispatch_api(p.initial_connection_state(), api_wire.ApiRequest('1', 'protocol.connect',
+                {'supported': {'min': '3.0', 'max': '3.0'}}), runtime, registry, ports).state
+            for number, (value, valid) in enumerate((('', True), ('a', True), ('€' * 4096, True),
+                                                    ('a' * 4097, False), ('a\x00b', False)), 2):
+                with self.subTest(order=components[0].owner, length=len(value)):
+                    result = p.dispatch_api(state, api_wire.ApiRequest(str(number), 'test.utf8', {'text': value}),
+                                            runtime, registry, ports)
+                    state = result.state
+                    if valid:
+                        self.assertEqual(result.response['result'], {'text': value})
+                    else:
+                        self.assertEqual(result.response['error']['cause']['kind'], 'invalid_args')
+        without = replace(platform, definitions=replace(platform.definitions,
+            types=tuple(t for t in platform.definitions.types if t.name != 'Utf8')))
+        composition = api_compose.compose_components((without, other))
+        with self.assertRaises(r.RegistryCompileError) as caught:
+            r.compile_registry(composition.definitions, composition.handlers, (errors.api_error_catalog(),))
+        self.assertEqual(caught.exception.reason, 'dangling_ref')
+        duplicate = replace(other, definitions=replace(graph, types=graph.types + (node,)))
+        with self.assertRaises(api_compose.CompositionError) as caught:
+            api_compose.compose_components((platform, duplicate))
+        self.assertEqual(caught.exception.reason, 'duplicate_type')
+
+    def compile(self, graph=None):
+        from relay_engine import api_registry as r, errors
+        graph = slice_b_rules_graph() if graph is None else graph
+        return r.compile_registry(graph, {op.name: lambda *a: None for op in graph.operations},
+                                  (errors.api_error_catalog(),))
+
+    def test_draft_base64_rule_bounds(self):
+        import base64
+        from relay_engine import api_registry as r
+        compiled = self.compile()
+        for count in (0, 1, 131072, 131073):
+            with self.subTest(count=count):
+                value = base64.b64encode(b'\x00' * count).decode()
+                result = r.validate_type(compiled, d.TypeRef('DraftBase64'), value)
+                if count in (1, 131072): self.assertNotIsInstance(result, r.ValidationFailure)
+                else:
+                    self.assertIsInstance(result, r.ValidationFailure)
+                    self.assertEqual(result.rule, 'canonical_base64')
+
+    def test_draft_base64_rejects_noncanonical(self):
+        from relay_engine import api_registry as r
+        compiled = self.compile()
+        for value in ('AA==\n', ' AA==', '-w==', '_w==', 'AA', 'AA===', 'AB=='):
+            with self.subTest(value=value):
+                self.assertIsInstance(r.validate_type(compiled, d.TypeRef('DraftBase64'), value),
+                                      r.ValidationFailure)
+
+    def test_canonical_base64_instances_are_closed(self):
+        from dataclasses import replace
+        from relay_engine import api_registry as r
+        for name, bound in (('ThirdBase64', 131072), ('DraftBase64', 8388608),
+                            ('CanonicalSchemaBase64', 131072)):
+            graph = d.discovery_definitions()
+            node = d.TypeDef(name, d.String('.*'), (d.CanonicalBase64(d.TypeRef(name), bound),))
+            graph = replace(graph, types=tuple(t for t in graph.types if t.name != name) + (node,))
+            with self.subTest(name=name), self.assertRaises(r.RegistryCompileError) as caught:
+                self.compile(graph)
+            self.assertEqual(caught.exception.reason, 'invalid_rule')
+
+    def test_submission_key_utf8_bound(self):
+        from relay_engine import api_registry as r
+        compiled = self.compile()
+        for value, valid in (('é' * 128, True), ('é' * 128 + 'a', False), ('a\x00b', False)):
+            with self.subTest(length=len(value.encode())):
+                result = r.validate_type(compiled, d.TypeRef('SubmissionKey'), value)
+                self.assertEqual(not isinstance(result, r.ValidationFailure), valid)
+
+    def test_utf8_max_bytes_instances_are_closed(self):
+        from dataclasses import replace
+        from relay_engine import api_registry as r
+        graph = d.discovery_definitions()
+        graph = replace(graph, types=graph.types + (d.TypeDef('ThirdId', d.String('.*'),
+                        (d.Utf8MaxBytes(d.TypeRef('ThirdId'), 256),)),))
+        with self.assertRaises(r.RegistryCompileError) as caught: self.compile(graph)
+        self.assertEqual(caught.exception.reason, 'invalid_rule')
+
+    def test_relay_admission_metadata_accepted(self):
+        from dataclasses import replace
+        from relay_engine import api_registry as r
+        graph = slice_b_rules_graph()
+        op = replace(graph.operations[0], name='test.submit', effect='relay_admission',
+                     retry='submission_key', browser_get='none', rules=())
+        graph = replace(graph, operations=(op,))
+        self.assertEqual(self.compile(graph).operation('test.submit'), op)
+        with self.assertRaises(r.RegistryCompileError):
+            self.compile(replace(graph, operations=(replace(op, effect='unknown_effect'),)))
+
+
 class TestDefinitions(unittest.TestCase):
     def test_descriptors_are_frozen_and_closed(self):
         # A mutable graph could change the advertised contract after compilation.
@@ -104,12 +250,12 @@ class TestDefinitions(unittest.TestCase):
 
 
 class TestErrorCatalog(unittest.TestCase):
-    def test_catalog_has_exact_twenty_pairs(self):
+    def test_catalog_has_exact_pairs(self):
         from relay_engine import errors
         catalog = errors.api_error_catalog()
         pairs = {(v.code, v.api_class, b.cause_kind, b.remedy)
                  for v in catalog.variants for b in v.branches}
-        self.assertEqual(len(catalog.variants), 7)
+        self.assertEqual(len(catalog.variants), 10)
         self.assertEqual(pairs, {
             ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
             ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
@@ -118,6 +264,16 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
             ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
             ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
+            ('E_API_ADMISSION', 'admission', 'client', 'correct_draft'),
+            ('E_API_ADMISSION', 'admission', 'policy', 'change_request'),
+            ('E_API_ADMISSION', 'admission', 'registration', 'check_registration'),
+            ('E_API_ADMISSION', 'admission', 'command', 'check_command'),
+            ('E_API_ADMISSION', 'admission', 'wire', 'correct_draft'),
+            ('E_API_ADMISSION', 'admission', 'integrity', 'report_nonsecret_failure'),
+            ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
+            ('E_API_UNAVAILABLE', 'unavailable', 'authority_unavailable', 'retry_same_submission'),
+            ('E_API_UNAVAILABLE', 'unavailable', 'admission_not_stored', 'retry_same_submission'),
+            ('E_API_UNAVAILABLE', 'unavailable', 'admission_unknown', 'retry_same_submission'),
             ('E_API_PROTOCOL', 'wire', 'malformed_frame', 'resend_valid_request'),
             ('E_API_PROTOCOL', 'wire', 'malformed_json', 'resend_valid_request'),
             ('E_API_PROTOCOL', 'wire', 'invalid_envelope', 'resend_valid_request'),
@@ -131,7 +287,74 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_UNAVAILABLE', 'unavailable', 'runtime_not_ready', 'restore_expected_runtime'),
             ('E_API_UNAVAILABLE', 'unavailable', 'schema_unavailable', 'restore_expected_runtime'),
             ('E_API_INTERNAL', 'internal', 'handler_fault', 'report_nonsecret_failure'),
+            ('E_API_AUTH', 'auth', 'not_operator', 'use_operator_surface'),
+            ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
+            ('E_QUEUE_STATE', 'conflict', 'revision_mismatch', 'refresh_item'),
+            ('E_QUEUE_STATE', 'conflict', 'item_not_pending', 'refresh_item'),
+            ('E_QUEUE_STATE', 'conflict', 'answer_unroutable', 'refresh_item'),
+            ('E_QUEUE_STATE', 'conflict', 'item_not_found', 'refresh_list'),
+            ('E_QUEUE_STATE', 'conflict', 'project_not_active', 'check_subject'),
+            ('E_QUEUE_INVALID', 'wire', 'kind_not_raisable', 'use_permitted_kind'),
+            ('E_QUEUE_INVALID', 'wire', 'surface_not_allowed', 'answer_on_permitted_surface'),
+            ('E_QUEUE_INVALID', 'wire', 'choice_not_allowed', 'refresh_item'),
+            ('E_QUEUE_INVALID', 'wire', 'subject_unresolved', 'check_subject'),
+            ('E_QUEUE_INVALID', 'wire', 'text_too_long', 'shorten_text'),
+            ('E_QUEUE_INVALID', 'wire', 'not_a_notice', 'refresh_item'),
+            ('E_QUEUE_INVALID', 'wire', 'stale_continuation', 'restart_query'),
         })
+
+    def admission_registry(self):
+        from relay_engine import api_protocol as p, api_registry as r, errors
+        return r.compile_registry(d.discovery_definitions(), p.discovery_handlers(),
+                                  (errors.api_error_catalog(),))
+
+    def admission_error(self, kind='policy', engine_code='E-ADDRESS'):
+        remedies = {'client': 'correct_draft', 'policy': 'change_request',
+                    'registration': 'check_registration', 'command': 'check_command',
+                    'wire': 'correct_draft', 'integrity': 'report_nonsecret_failure'}
+        return {'code': 'E_API_ADMISSION', 'class': 'admission',
+                'cause': {'kind': kind, 'engine_code': engine_code}, 'remedy': remedies[kind]}
+
+    def test_admission_arm_is_complete(self):
+        from relay_engine import api_registry as r
+        compiled = self.admission_registry()
+        for kind in ('policy', 'integrity', 'client', 'registration', 'command', 'wire'):
+            error = self.admission_error(kind)
+            with self.subTest(kind=kind):
+                self.assertIsInstance(r.validate_type(compiled, d.TypeRef('ApiError'), error), r.ValidatedValue)
+                del error['cause']['engine_code']
+                self.assertIsInstance(r.validate_type(compiled, d.TypeRef('ApiError'), error), r.ValidationFailure)
+
+    def test_admission_engine_code_pattern(self):
+        from relay_engine import api_registry as r
+        compiled = self.admission_registry()
+        for code, valid in [('E-ADDRESS', True), ('E-' + 'A' * 63, True),
+                            ('E-' + 'A' * 64, False), ('E-address', False), ('ADDRESS', False)]:
+            with self.subTest(code=code):
+                result = r.validate_type(compiled, d.TypeRef('ApiError'), self.admission_error(engine_code=code))
+                self.assertEqual(isinstance(result, r.ValidatedValue), valid)
+
+    def test_admission_cause_rejects_extra_fields(self):
+        from relay_engine import api_registry as r
+        compiled = self.admission_registry()
+        for field in ('params', 'text'):
+            error = self.admission_error(); error['cause'][field] = 'untrusted'
+            with self.subTest(field=field):
+                self.assertIsInstance(r.validate_type(compiled, d.TypeRef('ApiError'), error), r.ValidationFailure)
+
+    def test_conflict_and_unavailable_new_causes(self):
+        from relay_engine import api_registry as r
+        compiled = self.admission_registry()
+        for code, cls, kind, remedy, wrong in [
+                ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key', 'retry_same_submission'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'authority_unavailable', 'retry_same_submission', 'use_new_submission_key'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'admission_not_stored', 'retry_same_submission', 'use_new_submission_key'),
+                ('E_API_UNAVAILABLE', 'unavailable', 'admission_unknown', 'retry_same_submission', 'use_new_submission_key')]:
+            error = {'code': code, 'class': cls, 'cause': {'kind': kind}, 'remedy': remedy}
+            with self.subTest(kind=kind):
+                self.assertIsInstance(r.validate_type(compiled, d.TypeRef('ApiError'), error), r.ValidatedValue)
+                error['remedy'] = wrong
+                self.assertIsInstance(r.validate_type(compiled, d.TypeRef('ApiError'), error), r.ValidationFailure)
 
     def test_auth_and_conflict_arms(self):
         from relay_engine import api_protocol as p, api_registry as r, errors
@@ -144,7 +367,10 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_AUTH', 'auth', 'session_not_current', 'sign_in_again'),
             ('E_API_AUTH', 'auth', 'not_signed_in', 'sign_in_first'),
             ('E_API_AUTH', 'auth', 'already_bound', 'open_new_connection'),
+            ('E_API_AUTH', 'auth', 'not_operator', 'use_operator_surface'),
+            ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
             ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
+            ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
         }
         observed = set()
         for arm in registry.error_arms():
@@ -197,6 +423,11 @@ class TestErrorCatalog(unittest.TestCase):
                     self.assertEqual(payload['required'], 'Digest')
                     self.assertEqual(payload['actual'], 'Digest')
                     self.assertEqual(types[payload['field']].shape.values, ('build_id', 'schema_digest'))
+                elif variant.api_class == 'admission':
+                    self.assertEqual(set(payload), {'engine_code'})
+                elif kind == 'revision_mismatch':
+                    self.assertEqual(payload, {'current_revision': 'QueueInteger',
+                                               'current_state': 'QueueState'})
                 else:
                     self.assertEqual(payload, {})
             self.assertEqual(sorted(kinds), [b.cause_kind for b in variant.branches])
@@ -230,7 +461,7 @@ class TestErrorCatalog(unittest.TestCase):
         }
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        self.assertEqual(digest(value), '38993c7563471efc561754b0128460bb5a2fe9621aff6cb410c5f3bf4a8f73de')
+        self.assertEqual(digest(value), 'c9ff45f0d85cff5db750c51a51c1d6f8d292eb5c94d5cea86d44393129ded6fc')
         self.assertFalse(any(k.startswith('E_API_') for k in errors.ERRORS))
         changed = dict(value, errors=dict(value['errors'], E_API_INTERNAL={}))
         self.assertNotEqual(digest(changed), digest(value))
@@ -277,6 +508,48 @@ class TestCompile(unittest.TestCase):
                 self.assertIs(registry.handlers[op.name], handler)
                 self.assertEqual(registry.capabilities(), ('test.seat',))
         self.assertEqual(self.compile().capabilities(), ('protocol.connect', 'protocol.schema'))
+
+    def test_queue_browser_get_metadata_is_closed(self):
+        from dataclasses import replace
+        from relay_engine import api_schema
+        prototype = self.graph.operations[1]
+        for name, other in (('queue.list', 'queue.get'), ('queue.get', 'queue.list')):
+            op = replace(prototype, name=name, effect='pure_observation',
+                         browser_get=name, rules=())
+            for changes in ({'browser_get': other}, {'name': 'test.read'},
+                            {'browser_get': 'queue.unknown'}, {'browser_get': 'list'},
+                            {'browser_get': 'get'}, {'principal': 'seat_session'},
+                            {'principal': 'operator'}, {'effect': 'session_write'},
+                            {'effect': 'catalogue_write'},
+                            {'retry': 'operation_key'}, {'retry': 'submission_key'}):
+                candidate = replace(op, **changes)
+                with self.subTest(name=name, changes=changes):
+                    graph = replace(self.graph, operations=(candidate,))
+                    with self.assertRaises(self.r.RegistryCompileError) as caught:
+                        self.compile(graph=graph, handlers={candidate.name: lambda args: {}})
+                    self.assertEqual(caught.exception.reason, 'invalid_definition')
+            with self.subTest(name=name):
+                graph = replace(self.graph, operations=(op,))
+                compiled = self.compile(graph=graph, handlers={name: lambda args: {}})
+                artifact = api_schema.export_schema(compiled, '3.0')
+                import json
+                row, = json.loads(artifact.canonical_bytes)['x-adt']['operations']
+                self.assertEqual(compiled.operation(name), op)
+                self.assertEqual((row['name'], row['browser_get']), (name, name))
+
+    def test_catalogue_write_effect_requires_no_browser_get(self):
+        from dataclasses import replace
+        op = replace(self.graph.operations[1], name='test.write',
+                     effect='catalogue_write', browser_get='none', rules=())
+        self.assertEqual(op.retry, 'read_repeat')
+        graph = replace(self.graph, operations=(op,))
+        compiled = self.compile(graph=graph, handlers={op.name: lambda args: {}})
+        self.assertEqual(compiled.operation(op.name), op)
+        discovery_get = replace(self.graph.operations[1], effect='catalogue_write')
+        graph = replace(self.graph, operations=(discovery_get,))
+        with self.assertRaises(self.r.RegistryCompileError) as caught:
+            self.compile(graph=graph, handlers={discovery_get.name: lambda args: {}})
+        self.assertEqual(caught.exception.reason, 'invalid_definition')
 
     def test_unknown_metadata_still_refuses(self):
         from dataclasses import replace
@@ -337,7 +610,7 @@ class TestCompile(unittest.TestCase):
                 with self.assertRaises(self.r.RegistryCompileError) as caught:
                     self.compile(graph)
                 self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
-        self.assertEqual(len(self.compile().error_arms()), 20)
+        self.assertEqual(len(self.compile().error_arms()), 44)
 
     def test_compile_refuses_branch_defects(self):
         from dataclasses import replace
@@ -362,7 +635,7 @@ class TestCompile(unittest.TestCase):
         # Graph-only node: catalogue interning must not mask rule validation.
         ref = d.TypeRef('RuleScopeProbe')
         rules = [d.Utf8MaxBytes(ref, 256), d.CanonicalUInt64(ref),
-                 d.CanonicalBase64(ref), d.SortedUnique(ref),
+                 d.CanonicalBase64(ref, 8388608), d.SortedUnique(ref),
                  d.ProtocolWindowV1(ref), d.SchemaPayloadV1(ref),
                  d.NegotiatedSchemaV1(ref)]
         for rule in rules:
@@ -420,7 +693,7 @@ class TestCompile(unittest.TestCase):
 
     def test_error_arms_are_complete_records(self):
         registry = self.compile()
-        self.assertEqual(len(registry.error_arms()), 20)
+        self.assertEqual(len(registry.error_arms()), 44)
         for arm in registry.error_arms():
             leaf = registry.types[arm.cause_type.name].shape
             kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]

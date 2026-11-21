@@ -9,6 +9,12 @@ fn run(v:&Value)->Result<Value,()>{
   "parse"=>Ok(valid(api::parse_strict_json(string(v,"text")?.as_bytes()).is_ok())),
   "schema"=>Ok(valid(api::supports_schema(string(v,"schema")?))),
   "validate"=>Ok(valid(api::validate_type(string(v,"type")?,v.get("value")?))),
+  "validate_base64_length"=>{
+   let n=string(v,"length")?.parse::<usize>().map_err(|_|())?;
+   let mut encoded="AAAA".repeat(n/3);
+   encoded.push_str(match n%3{1=>"AA==",2=>"AAA=",_=>""});
+   Ok(valid(api::validate_type(string(v,"type")?,&text(&encoded))))
+  },
   "encode"=>{let bytes=api::encode_request(string(v,"operation")?,string(v,"id")?,v.get("value")?)?;Ok(object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]))},
   "encode_checked"=>Ok(match api::encode_request(string(v,"operation")?,string(v,"id")?,v.get("value")?){Ok(bytes)=>object(vec![("hex",text(&bytes.iter().map(|b|format!("{b:02x}")).collect::<String>()))]),Err(())=>object(vec![("invalid",Value::Bool(true))])}),
   "encode_result"=>{
@@ -34,7 +40,7 @@ fn run(v:&Value)->Result<Value,()>{
    let connect=string(v,"connect")?;let observation=if connect.is_empty(){DecodedResponse::Unavailable}else{api::decode_response(&unhex(connect)?,"protocol.connect","1",None)};
    let context=match &observation {DecodedResponse::Connect(_,ctx)=>Some(ctx),_=>None};
    let response=api::decode_response(&unhex(string(v,"frame")?)?,string(v,"operation")?,string(v,"id")?,context);
-   Ok(match response {DecodedResponse::Unavailable=>object(vec![("unavailable",Value::Bool(true))]),DecodedResponse::Error(error)=>object(vec![("error",error.to_value())]),DecodedResponse::Connect(result,_)=>object(vec![("result",result.to_value())]),other=>{let all=other.result_value().ok_or(())?;if string(v,"operation")?!="protocol.schema"{return Ok(object(vec![("result",all)]));}object(vec![("result",object(vec![("protocol",all.get("protocol")?.clone()),("schema_digest",all.get("schema_digest")?.clone()),("schema_byte_count",all.get("schema_byte_count")?.clone())]))])}})
+   Ok(match response {DecodedResponse::Unavailable=>object(vec![("unavailable",Value::Bool(true))]),DecodedResponse::Error(error)=>object(vec![("error",error.to_value())]),DecodedResponse::ConnectionError(error)=>object(vec![("connection_error",error.to_value())]),DecodedResponse::Connect(result,_)=>object(vec![("result",result.to_value())]),other=>{let all=other.result_value().ok_or(())?;if string(v,"operation")?!="protocol.schema"{return Ok(object(vec![("result",all)]));}object(vec![("result",object(vec![("protocol",all.get("protocol")?.clone()),("schema_digest",all.get("schema_digest")?.clone()),("schema_byte_count",all.get("schema_byte_count")?.clone())]))])}})
   },_=>Err(())
  }
 }

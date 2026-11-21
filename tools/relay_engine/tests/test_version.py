@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from relay_engine.version import (
     FingerprintError,
@@ -22,19 +23,27 @@ TOOLS = Path(__file__).parents[2]
 REPO = TOOLS.parent
 GENERATOR = REPO / "tools" / "generate-plugins.py"
 EXPECTED_ROSTER = (
+    "adt",
+    "adt-operator-check",
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
     "relay_engine/addresses.py",
+    "relay_engine/adt_cli.py",
     "relay_engine/api_bridge.py",
+    "relay_engine/api_client.py",
+    "relay_engine/api_compose.py",
     "relay_engine/api_definitions.py",
     "relay_engine/api_keys.py",
+    "relay_engine/api_operator_bridge.py",
     "relay_engine/api_platform.py",
     "relay_engine/api_principals.py",
     "relay_engine/api_protocol.py",
     "relay_engine/api_registry.py",
     "relay_engine/api_schema.py",
+    "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
+    "relay_engine/api_submit.py",
     "relay_engine/api_wire.py",
     "relay_engine/api_writer.py",
     "relay_engine/approval_seal.py",
@@ -45,6 +54,9 @@ EXPECTED_ROSTER = (
     "relay_engine/cli.py",
     "relay_engine/client.py",
     "relay_engine/commission.py",
+    "relay_engine/console_page/index.html",
+    "relay_engine/console_page/page.css",
+    "relay_engine/console_page/page.js",
     "relay_engine/cycles.py",
     "relay_engine/daemon.py",
     "relay_engine/ed25519_verify.py",
@@ -62,9 +74,15 @@ EXPECTED_ROSTER = (
     "relay_engine/jcs.py",
     "relay_engine/judging.py",
     "relay_engine/ledger.py",
+    "relay_engine/lifecycle_lock.py",
     "relay_engine/lifecycle_outbox.py",
+    "relay_engine/lifecycle_paths.py",
+    "relay_engine/lifecycle_state.py",
     "relay_engine/migrate.py",
+    "relay_engine/operator_check_install.py",
+    "relay_engine/operator_check_words.py",
     "relay_engine/operator_queue/__init__.py",
+    "relay_engine/operator_queue/component.py",
     "relay_engine/operator_queue/ingest.py",
     "relay_engine/operator_queue/kinds.py",
     "relay_engine/operator_queue/liveness.py",
@@ -73,6 +91,8 @@ EXPECTED_ROSTER = (
     "relay_engine/operator_queue/operations.py",
     "relay_engine/operator_queue/records.py",
     "relay_engine/operator_queue/saga.py",
+    "relay_engine/operator_terminal.py",
+    "relay_engine/owner_start.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",
@@ -199,7 +219,7 @@ class TestVersion(unittest.TestCase):
         self.assertEqual(str(raised.exception), reason)
 
     def test_kit_version_and_roster_match_canonical_universe(self):
-        actual = {"relay"}
+        actual = {"relay", "adt", "adt-operator-check"}
         for path in (TOOLS / "relay_engine").rglob("*"):
             relative = path.relative_to(TOOLS)
             if "__pycache__" in relative.parts:
@@ -213,6 +233,23 @@ class TestVersion(unittest.TestCase):
         self.assertEqual(KIT_VERSION, "2.9.7")
         self.assertEqual(ROSTER, EXPECTED_ROSTER)
         self.assertEqual(set(ROSTER), actual)
+
+    def test_fingerprint_inventories_adt_launcher(self):
+        from relay_engine import version
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _stage_roster(root)
+            launcher = root / "adt"
+            launcher.write_bytes(b"#!/usr/bin/env python3\n")
+            self.assertRegex(fingerprint(root), r"^[0-9a-f]{64}$")
+            launcher.unlink()
+            self.assert_reason(root, "missing-member")
+            launcher.write_bytes(b"#!/usr/bin/env python3\n")
+            actual_inventory = version._inventory
+            # 68078196's launcher universe contains relay alone.
+            with mock.patch.object(version, "_inventory",
+                                   side_effect=lambda path: actual_inventory(path) - {"adt"}):
+                self.assert_reason(root, "missing-member")
 
     def test_staged_fingerprint_is_deterministic_and_canonically_framed(self):
         with tempfile.TemporaryDirectory() as temporary:

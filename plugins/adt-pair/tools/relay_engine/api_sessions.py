@@ -8,6 +8,7 @@ import sqlite3
 from relay_engine.api_keys import verifier_matches
 from relay_engine.api_protocol import SeatBinding, SessionOutcome, SessionRefusal
 from relay_engine.api_writer import JobOutcome, StoreWriter, WriterUnavailable
+from relay_engine.errors import error_for
 from relay_engine.jcs import jcs_encode
 from relay_engine.queries import end_session_step, record_session_step
 
@@ -65,6 +66,18 @@ def current_binding(conn, session_id: str) -> SeatBinding:
     return _binding(row)
 
 
+def require_current_binding(conn, binding: SeatBinding) -> None:
+    """Recheck a connection's authenticated snapshot inside its submit job."""
+    try:
+        current = current_binding(conn, binding.session_id)
+    except BindingNotCurrent as refused:
+        reason = ('session_not_current' if refused.reason == 'session_unknown'
+                  else refused.reason)
+        raise error_for('E-SENDER-NOT-CURRENT', reason=reason) from None
+    if current != binding:
+        raise error_for('E-SENDER-NOT-CURRENT', reason='session_not_current')
+
+
 def request_digest(operation: str, args: Mapping) -> str:
     """The receipt scope carries the operation; its digest excludes the secret."""
     return hashlib.sha256(jcs_encode({k: v for k, v in args.items() if k != 'key_secret'})).hexdigest()
@@ -74,6 +87,30 @@ def _refuse(kind):
     code = {'operation_key_reused': 'E_API_CONFLICT', 'runtime_not_ready': 'E_API_UNAVAILABLE',
             'handler_fault': 'E_API_INTERNAL'}.get(kind, 'E_API_AUTH')
     return SessionRefusal(code, kind)
+
+
+def seat_address(conn, seat_id: str) -> str:
+    row = _one(conn, 'SELECT t.name,s.role FROM seats s'
+        ' JOIN team_instances t ON t.id=s.team_instance_id'
+        ' WHERE s.id=? AND t.closed_at IS NULL', (seat_id,))
+    if row is None:
+        raise ValueError('seat_address_unavailable')
+    return row[0] + '.' + row[1]
+
+
+def _key_identity(conn, args):
+    row = _one(conn,
+        'SELECT o.id,o.seat_id,o.key_verifier,o.ended_at,s.state'
+        ' FROM seat_occupants o JOIN seats s ON s.id=o.seat_id WHERE o.key_id=?',
+        (args['key_id'],))
+    if row is None or not verifier_matches(row[2], args['key_id'], args['key_secret']):
+        return _refuse('key_rejected')
+    occupant, seat_id, _, ended_at, seat_state = row
+    if ended_at is not None:
+        return _refuse('key_replaced')
+    if seat_state == 'stood-down':
+        return _refuse('seat_stood_down')
+    return occupant, seat_id
 
 
 def _identity(row):
@@ -90,21 +127,28 @@ class _SessionJob:
     args: Mapping
     binding: SeatBinding | None
 
+    @property
+    def files(self) -> frozenset[str]:
+        return frozenset({self.service.writer.ledger_file(self.service.project_id)})
+
     def run(self, conn):
         return self.service._run_job(conn, self.operation, self.args, self.binding)
 
 
 class SessionService:
-    def __init__(self, writer: StoreWriter, clock: Callable[[], int], *,
+    def __init__(self, writer: StoreWriter, clock: Callable[[], int], *, project_id: str,
                  step_hook: Callable[[str], None] | None = None):
         self.writer = writer
+        self.project_id = project_id
         self.clock = clock
         self.step_hook = step_hook
 
     def run(self, operation: str, args: Mapping,
-            binding: SeatBinding | None) -> SessionOutcome | SessionRefusal:
+            binding: SeatBinding | None) -> SessionOutcome | SessionRefusal | Mapping:
         try:
-            outcome = self.writer.submit(_SessionJob(self, operation, dict(args), binding))
+            if operation == 'seat.identify':
+                return self.writer.read(self.project_id, lambda conn: self._identify(conn, args))
+            outcome = self.writer.submit(self.project_id, _SessionJob(self, operation, dict(args), binding))
             if outcome.indeterminate:
                 return _refuse('handler_fault')
             return outcome.value
@@ -113,23 +157,24 @@ class SessionService:
         except Exception:
             return _refuse('handler_fault')
 
+    def _identify(self, conn, args):
+        identity = _key_identity(conn, args)
+        if isinstance(identity, SessionRefusal):
+            return identity
+        _, seat_id = identity
+        return {'seat_id': seat_id, 'seat_address': seat_address(conn, seat_id),
+                'project_id': self.project_id}
+
     def _phase(self, name):
         if self.step_hook is not None:
             self.step_hook(name)
 
     def _run_job(self, conn, operation, args, binding):
         # All authentication and receipt checks run under the writer's write lock.
-        row = _one(conn,
-            'SELECT o.id,o.seat_id,o.key_verifier,o.ended_at,s.state'
-            ' FROM seat_occupants o JOIN seats s ON s.id=o.seat_id WHERE o.key_id=?',
-            (args['key_id'],))
-        if row is None or not verifier_matches(row[2], args['key_id'], args['key_secret']):
-            return JobOutcome(False, _refuse('key_rejected'))
-        occupant, seat_id, _, ended_at, seat_state = row
-        if ended_at is not None:
-            return JobOutcome(False, _refuse('key_replaced'))
-        if seat_state == 'stood-down':
-            return JobOutcome(False, _refuse('seat_stood_down'))
+        identity = _key_identity(conn, args)
+        if isinstance(identity, SessionRefusal):
+            return JobOutcome(False, identity)
+        occupant, seat_id = identity
         self._phase('checked')
         if operation not in {'session.sign-in', 'session.resume', 'session.end'}:
             raise ValueError('unknown_session_operation')

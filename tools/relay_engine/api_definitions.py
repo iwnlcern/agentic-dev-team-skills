@@ -80,6 +80,7 @@ class CanonicalUInt64:
 @dataclass(frozen=True, slots=True)
 class CanonicalBase64:
     type_ref: TypeRef
+    max_decoded: int
     kind: ClassVar[str] = "canonical_base64"
 
 
@@ -192,7 +193,7 @@ def discovery_definitions() -> DefinitionGraph:
         TypeDef("OperationName", String(r"[a-z][a-z0-9.\-]{0,95}", 1, 96)),
         TypeDef("CanonicalSchemaBase64", String(
             r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?",
-            0, MAX_SCHEMA_BASE64_CHARS), (CanonicalBase64(TypeRef("CanonicalSchemaBase64")),)),
+            0, MAX_SCHEMA_BASE64_CHARS), (CanonicalBase64(TypeRef("CanonicalSchemaBase64"), MAX_SCHEMA_BYTES),)),
         TypeDef("ProtocolWindow", Record((
             FieldDef("min", TypeRef("ProtocolVersion")),
             FieldDef("max", TypeRef("ProtocolVersion")),
@@ -257,11 +258,22 @@ def platform_definitions() -> DefinitionGraph:
                      ('project_id', 'team_instance_id', 'seat_id', 'occupant_id', 'session_id'))
     identity += (('generation', 'UInt64'), ('signed_in_at', 'UInt64'))
     types = (
+        TypeDef('Utf8', String(r'[^\x00]*', 0, 4096)),
+        TypeDef('DraftBase64', String(
+            r'(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?', 4, 174764),
+            (CanonicalBase64(TypeRef('DraftBase64'), 131072),)),
+        TypeDef('SubmissionKey', String(r'[^\x00]*', 1, 256),
+            (Utf8MaxBytes(TypeRef('SubmissionKey'), 256),)),
+        record('SubmitArgs', (('draft_base64', 'DraftBase64'), ('submission_key', 'SubmissionKey'))),
+        record('SubmitResult', (('relay_id', 'OpaqueId'), ('handle', 'UInt64'), ('created_at', 'UInt64'))),
         TypeDef('KeyId', String(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 36, 36)),
         TypeDef('KeySecret', String(r'[A-Za-z0-9_-]{43}', 43, 43)),
         TypeDef('SessionHost', LiteralSet(('claude-code', 'codex', 'frank', 'other'))),
         TypeDef('SessionReceipt', LiteralSet(('original', 'replayed'))),
         TypeDef('SessionState', LiteralSet(('open', 'ended'))),
+        record('SeatIdentifyArgs', credentials),
+        record('SeatIdentifyResult', (('seat_id', 'OpaqueId'), ('seat_address', 'OpaqueId'),
+                                     ('project_id', 'OpaqueId'))),
         record('SessionSignInArgs', credentials + (('host', 'SessionHost'),
                ('host_session_id', 'OpaqueId'), ('operation_key', 'OpaqueId'))),
         record('SessionSignInResult', identity + (('receipt', 'SessionReceipt'),
@@ -274,7 +286,10 @@ def platform_definitions() -> DefinitionGraph:
     )
     operations = tuple(OperationDef(name, TypeRef(args), TypeRef(result), TypeRef('ApiError'),
         'seat_key', effect, retry, 'none') for name, args, result, effect, retry in (
+        ('seat.identify', 'SeatIdentifyArgs', 'SeatIdentifyResult', 'pure_observation', 'read_repeat'),
         ('session.sign-in', 'SessionSignInArgs', 'SessionSignInResult', 'session_write', 'operation_key'),
         ('session.resume', 'SessionResumeArgs', 'SessionResumeResult', 'connection_binding', 'read_repeat'),
         ('session.end', 'SessionEndArgs', 'SessionEndResult', 'session_write', 'operation_key')))
-    return DefinitionGraph(base.types + types, base.operations + operations, base.error_ref)
+    return DefinitionGraph(base.types + types, base.operations + operations + (
+        OperationDef('relay.submit', TypeRef('SubmitArgs'), TypeRef('SubmitResult'), TypeRef('ApiError'),
+                     'seat_session', 'relay_admission', 'submission_key', 'none'),), base.error_ref)

@@ -83,6 +83,13 @@ ANSWER_CODES = {
     for code in ('slip-missing', 'slip-invalid', 'lineage-incomplete', 'not-issuer',
                  'plan-changed', 'design-changed', 'verification-pending', 'verification-objected', 'check-unavailable', 'restore-held')
 }
+ANSWER_CODES.update({
+    'authority.' + code: ('held' if code in ('project-stopped', 'session-not-current') else 'deny')
+    for code in ('project-stopped', 'cross-project-commit', 'session-not-current',
+                 'protected-ref-push', 'api-merge-refused', 'merge-head-unpinned',
+                 'merge-flag-refused', 'hook-bypass', 'hook-disable', 'key-file-read',
+                 'operator-endpoint', 'operator-only', 'checkout-unregistered')
+})
 AFTER_ADMIT_WRITES = frozenset({'slips', 'slip_events', 'verification_requests', 'restore_refusals'})
 AFTER_ADMIT_READS_DENIED = frozenset({'bodies'})
 _SLIP_FIELDS = ('id', 'handle', 'project_id', 'seat_id', 'bundle_id', 'repository_id',
@@ -117,6 +124,39 @@ def _orchestrator(conn, project_id):
 def _answer(code, reason, unblocker, slip=None):
     return Answer(ANSWER_CODES['authority.' + code], 'authority.' + code, reason, unblocker,
                   slip['id'] if slip else None, slip['revision'] if slip else None)
+
+
+def project_stopped_answer() -> Answer:
+    return _answer('project-stopped', strings.render('error-authority-project-stopped-cause'),
+                   'operator')
+
+
+UNAVAILABLE_CODES = (
+    'no-service', 'connect-refused', 'deadline', 'fault', 'seat-found-unavailable', 'unanswerable',
+)
+NOT_CURRENT_CAUSES = (
+    'ended', 'not-occupant', 'stood-down', 'team-closed', 'record-other-seat',
+    'record-without-row', 'project-unreadable',
+)
+
+
+def unavailable_words(code: str) -> tuple[str, str]:
+    if code not in UNAVAILABLE_CODES:
+        raise KeyError('authority-unavailable-' + code + '-reason')
+    return tuple(strings.render('authority-unavailable-' + code + '-' + part)
+                 for part in ('reason', 'remedy'))
+
+
+def session_not_current_words(cause: str, project_id: str | None) -> tuple[str, str]:
+    # Unknown causes are never parameter errors.
+    if (cause not in NOT_CURRENT_CAUSES
+            or 'authority-not-current-' + cause + '-reason' not in strings.INVENTORY):
+        raise KeyError(cause)
+    if (cause == 'project-unreadable') != (project_id is not None):
+        raise ValueError('only project-unreadable takes a project id')
+    params = {'project': project_id} if cause == 'project-unreadable' else {}
+    return tuple(strings.render('authority-not-current-' + cause + '-' + part, **params)
+                 for part in ('reason', 'remedy'))
 
 
 def _allow(slip=None):

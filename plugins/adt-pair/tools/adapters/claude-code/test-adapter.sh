@@ -69,11 +69,15 @@ assert_case_engine_json() {
   echo "PASS $name"
 }
 stage_engine_root() {
-  local root="$1" generation="$2"
-  rm -rf "$root/tools"
-  mkdir -p "$root/tools"
-  cp "$TOOLS_DIR/relay" "$root/tools/relay"
-  cp -R "$TOOLS_DIR/relay_engine" "$root/tools/relay_engine"
+  local root="$1" generation="$2" launchers launcher
+  launchers="$(PYTHONPATH="$TOOLS_DIR" python3 -c \
+    'from relay_engine.version import ROSTER; print("\n".join(path for path in ROSTER if "/" not in path))')" || return 1
+  rm -rf "$root/tools" || return 1
+  mkdir -p "$root/tools" || return 1
+  while IFS= read -r launcher; do
+    cp -p "$TOOLS_DIR/$launcher" "$root/tools/$launcher" || return 1
+  done <<< "$launchers"
+  cp -R "$TOOLS_DIR/relay_engine" "$root/tools/relay_engine" || return 1
   # The trace is test-fixture instrumentation in a real roster member: the
   # hook still executes the bundled CLI and rules, while the selected cache
   # prefix becomes observable without replacing it with a mock.
@@ -708,7 +712,10 @@ payload="$(payload_for_command "$bare_patch" Bash "$tmp/work")"
 assert_payload_handler "r12-clean-patch-primary-route-silent" normalizer "$HOOK" "$payload" 0 "" 0 1 "normalizer|$p_clean" || fail=1
 
 # This proves SHIPPED CONFIGURATION, not live host installation.
-if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); expected="bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""; events=("PostToolUse","PostToolUseFailure"); assert all(any(e.get("matcher") == "Bash" and any(h.get("type") == "command" and h.get("command") == expected for h in e.get("hooks", [])) for e in d.get("hooks", {}).get(event, [])) for event in events)' "$SETTINGS"; then
+if python3 -c 'import json,sys
+with open(sys.argv[1]) as settings_file:
+    d=json.load(settings_file)
+expected="bash \"$HOME/.claude/skills/tools/adapters/claude-code/bash-relay-guard.sh\""; events=("PostToolUse","PostToolUseFailure"); assert all(any(e.get("matcher") == "Bash" and any(h.get("type") == "command" and h.get("command") == expected for h in e.get("hooks", [])) for e in d.get("hooks", {}).get(event, [])) for event in events)' "$SETTINGS"; then
   echo "PASS s1-shipped-bash-registration-both-events"
 else
   echo "FAIL s1-shipped-bash-registration-both-events: expected Bash guard under PostToolUse and PostToolUseFailure" >&2
@@ -810,16 +817,39 @@ else
   echo "PASS k3-max-drift-knob-passes-old-stamp"
 fi
 
+check_e3_missing_launcher() {
+  local tools_copy="$tmp/e3-no-launcher-tools" target="$tmp/e3-no-launcher-root"
+  cp -R "$TOOLS_DIR" "$tools_copy" || return 1
+  rm "$tools_copy/adt-operator-check" || return 1
+  if TOOLS_DIR="$tools_copy" stage_engine_root "$target" A 2>"$tmp/e3-staging.err"; then
+    echo "FAIL e3-staging-missing-launcher-fails: staging accepted the missing launcher"
+    return 1
+  fi
+  if ! grep -Fq 'adt-operator-check' "$tmp/e3-staging.err"; then
+    echo "FAIL e3-staging-missing-launcher-fails: expected the launcher copy to fail"
+    cat "$tmp/e3-staging.err" >&2
+    return 1
+  fi
+  echo "PASS e3-staging-missing-launcher-fails"
+}
+check_e3_missing_launcher || fail=1
+
 # E3 activation proves the documented shared-root refresh route with the
 # real bundled engine.  The break this catches is a hook that falls back to
 # standalone lint or a relay executable that reports the wrong install bytes.
 e3_shared_root="$tmp/e3-shared-root"
-stage_engine_root "$e3_shared_root" A
+if ! stage_engine_root "$e3_shared_root" A; then
+  echo "FAIL e3-shared-vA-staging: could not stage the engine roster" >&2
+  exit 1
+fi
 e3_shared_a_fingerprint="$(expected_engine_fingerprint "$e3_shared_root/tools")"
 assert_case_engine_json_origin "e3-shared-vA-hook-engine-json" "$engine_dirty" "$e3_shared_root" "$tmp/home" "$PATH_NORMAL" 2 A || fail=1
 assert_relay_version "e3-shared-vA-version-triad" "$e3_shared_root/tools/relay" "$e3_shared_root/tools" "2.9.7" "$e3_shared_a_fingerprint" || fail=1
 e3_shared_candidate="$tmp/e3-shared-candidate"
-stage_engine_root "$e3_shared_candidate" B
+if ! stage_engine_root "$e3_shared_candidate" B; then
+  echo "FAIL e3-shared-vB-staging: could not stage the engine roster" >&2
+  exit 1
+fi
 e3_shared_b_fingerprint="$(expected_engine_fingerprint "$e3_shared_candidate/tools")"
 printf '%s\n' stale > "$e3_shared_root/tools/stale-sentinel"
 e3_shared_refresh="$(refresh_shared_root "$e3_shared_candidate/tools" "$e3_shared_root")"
@@ -866,8 +896,14 @@ e3_plugin_cache="$tmp/e3-plugin-cache"
 e3_plugin_old="$e3_plugin_cache/adt-master/2.9.0"
 e3_plugin_new="$e3_plugin_cache/adt-master/2.9.1"
 e3_plugin_home="$tmp/e3-plugin-home"
-stage_engine_root "$e3_plugin_old" A
-stage_engine_root "$e3_plugin_new" B
+if ! stage_engine_root "$e3_plugin_old" A; then
+  echo "FAIL e3-plugin-old-staging: could not stage the engine roster" >&2
+  exit 1
+fi
+if ! stage_engine_root "$e3_plugin_new" B; then
+  echo "FAIL e3-plugin-new-staging: could not stage the engine roster" >&2
+  exit 1
+fi
 e3_plugin_old_fingerprint="$(expected_engine_fingerprint "$e3_plugin_old/tools")"
 e3_plugin_new_fingerprint="$(expected_engine_fingerprint "$e3_plugin_new/tools")"
 if [ "$e3_plugin_old_fingerprint" = "$e3_plugin_new_fingerprint" ]; then

@@ -19,11 +19,13 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 # These test modules build requests on scratch ledgers or mock ports; neither
-# signs a host session in. Every call in either file is exempt, so a real client
+# signs a host session in. Every call in these files is exempt, so a real client
 # added there would be invisible to the seat-record obligation check.
 SIGN_IN_STANDINS: frozenset[str] = frozenset({
     "tools/relay_engine/tests/test_api_protocol.py",
     "tools/relay_engine/tests/test_api_sessions.py",
+    "tools/relay_engine/tests/test_api_service.py",
+    "tools/relay_engine/tests/test_api_submit.py",
 })
 # The API handler receives sign-in and forwards it to the session port: it is
 # the operation's callee. Only its own body is exempt, not nested functions.
@@ -33,7 +35,9 @@ SIGN_IN_RECEIVERS: frozenset[tuple[str, str]] = frozenset({
 # Client methods send sign-in for callers; their own bodies are excused.
 # G-B1 counts their callers; until then this census does not see those calls.
 # Slice B's Task 9 adds its one entry.
-SIGN_IN_CLIENT_METHODS: frozenset[tuple[str, str]] = frozenset()
+SIGN_IN_CLIENT_METHODS: frozenset[tuple[str, str]] = frozenset({
+    ("tools/relay_engine/api_client.py", "sign_in"),
+})
 
 
 def sign_in_census(source):
@@ -450,11 +454,15 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
         self.assertEqual(SIGN_IN_STANDINS, frozenset({
             "tools/relay_engine/tests/test_api_protocol.py",
             "tools/relay_engine/tests/test_api_sessions.py",
+            "tools/relay_engine/tests/test_api_service.py",
+            "tools/relay_engine/tests/test_api_submit.py",
         }))
         self.assertEqual(SIGN_IN_RECEIVERS, frozenset({
             ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
         }))
-        self.assertEqual(SIGN_IN_CLIENT_METHODS, frozenset())
+        self.assertEqual(SIGN_IN_CLIENT_METHODS, frozenset({
+            ("tools/relay_engine/api_client.py", "sign_in"),
+        }))
         for rel in SIGN_IN_STANDINS:
             with self.subTest(standin=rel):
                 path = REPO / rel
@@ -510,7 +518,8 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
                                        frozenset({("tools/relay_engine/api_client.py", "sign_in")})):
                     self.assertEqual(sign_in_misses(rel, source), expected)
         with self.subTest(control='g'):
-            self.assertEqual(sign_in_misses("tools/relay_engine/api_client.py", client_method), [2])
+            with mock.patch.object(sys.modules[__name__], 'SIGN_IN_CLIENT_METHODS', frozenset()):
+                self.assertEqual(sign_in_misses("tools/relay_engine/api_client.py", client_method), [2])
         found, bad = [], []
         for path in sorted((REPO / "tools").rglob("*.py")):
             source = path.read_text(encoding="utf-8")

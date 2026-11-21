@@ -90,8 +90,7 @@ class TestGuardrail(unittest.TestCase):
                         "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp; git commit -m x",
                         "GIT_CONFIG_KEY_0=core.hooksPath; GIT_CONFIG_VALUE_0=/tmp; git push origin main",
                         "git --config-env=core.hooksPath=HOOK_DIR commit -m x",
-                        "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp'\" git push origin main",
-                        "git config core.hooksPath /tmp", "git config --unset core.hooksPath"):
+                        "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/tmp'\" git push origin main"):
             self.effect(command, "hook-bypass")
         self.effect("git push -n origin HEAD:main", "protected-push")
         for command in ('git commit -m "docs: mention core.hooksPath"',
@@ -529,7 +528,14 @@ class TestGuardrail(unittest.TestCase):
         self.assertEqual(table["operator_commands"],
                          {"stop": [["adt", "engine", "stop"]],
                           "restart": [["adt", "engine", "restart"]],
-                          "configure": [["adt", "engine", "configure"]]})
+                          "configure": [["adt", "engine", "configure"]],
+                          "start": [["adt", "engine", "start"]],
+                          "update": [["adt", "engine", "update"]],
+                          "install": [["adt", "engine", "install"]],
+                          "checkout_register": [["adt", "checkout", "register"]],
+                          "checkout_unregister": [["adt", "checkout", "unregister"]],
+                          "unseat": [["adt", "seat", "unseat"]],
+                          "seat_claim": [["adt", "seat", "claim"]]})
         for spelling in table["operator_commands"]["stop"]:
             self.effect(" ".join(spelling), "operator-only")
         for spelling in table["operator_commands"]["restart"]:
@@ -553,3 +559,290 @@ class TestGuardrail(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRulesR22(unittest.TestCase):
+    operator_commands = ('adt engine stop', 'adt engine stop --project p',
+                         'adt engine start', 'adt engine start --project p',
+                         'adt engine update', 'adt engine install',
+                         'adt checkout register --project p --repository r',
+                         'adt checkout unregister', 'adt seat unseat s',
+                         'adt engine configure x', 'relay team open', 'relay team open-next')
+
+    def context(self, **values):
+        defaults = dict(hooks_dir=None, git_config_paths=(), host_config_paths=(),
+                        kit_hook_files=(), kit_entry_files={}, resolve=lambda path: path)
+        return g.ClassifierContext(**(defaults | values))
+
+    def classify(self, text, context=None, **kwargs):
+        if context is not None:
+            kwargs['context'] = context
+        return g.classify_tool('Bash', {'command': text}, REFUSED,
+                               cwd=kwargs.pop('cwd', '/r'), home=kwargs.pop('home', '/home/u'),
+                               **kwargs)
+
+    def file(self, path, content, context, tool='Write', **kwargs):
+        if context is not None:
+            kwargs['context'] = context
+        payload = {'file_path': path, 'content': content} if tool == 'Write' else {'file_path': path, **content}
+        return g.classify_tool(tool, payload, REFUSED, home='/home/u', cwd='/r', **kwargs)
+
+    def assert_disable(self, match):
+        self.assertIsNotNone(match)
+        self.assertEqual(match.effect, 'hook-disable')
+
+    def settings(self, command='"$HOME/.adt/bin/adt" hook PreToolUse --host claude-code'):
+        return {'model': 'old', 'hooks': {
+            'PreToolUse': [{'matcher': 'Bash|Edit|Write|MultiEdit', 'hooks': [{'command': command}]}],
+            'UserPromptSubmit': [{'hooks': [{'command': '"$HOME/.adt/bin/adt" hook UserPromptSubmit --host claude-code'}]}]}}
+
+    def test_table_r22(self):
+        table = g.table()
+        self.assertEqual(table['design'], 'DD-v3-authority-20261104-r22')
+        codes = {'commit': [], 'protected-push': ['protected-ref-push'],
+                 'pr-merge': ['merge-head-unpinned', 'merge-flag-refused'],
+                 'api-ref-write': ['api-merge-refused'], 'hook-bypass': ['hook-bypass'],
+                 'hook-disable': ['hook-disable'], 'key-file-read': ['key-file-read'],
+                 'operator-endpoint': ['operator-endpoint'], 'operator-only': ['operator-only'],
+                 'top-seat-init': ['operator-only']}
+        self.assertEqual(set(table['effects']), set(g.EFFECT_CLASSES))
+        self.assertEqual(set(table['effects']), set(codes))
+        for effect, names in codes.items():
+            with self.subTest(effect=effect):
+                self.assertEqual(table['effects'][effect]['hook_codes'], ['authority.' + n for n in names])
+                self.assertEqual(table['effects'][effect]['no_seat'],
+                                 'refuse' if effect in ('hook-disable', 'key-file-read', 'operator-endpoint', 'operator-only') else 'pass')
+        self.assertEqual(table['effects']['commit']['command_shapes'], ['git reference-transaction (prepared)'])
+        self.assertEqual(table['effects']['top-seat-init']['command_shapes'], ['adt seat claim'])
+        self.assertEqual(table['effects']['operator-only']['command_shapes'],
+                         ['adt engine stop', 'adt engine configure', 'relay engine off', 'relay team open',
+                          'adt engine start', 'adt engine update', 'adt engine install',
+                          'adt checkout register', 'adt checkout unregister', 'adt seat unseat'])
+        expected = {name: [text.split()] for name, text in {
+            'stop': 'adt engine stop', 'restart': 'adt engine restart', 'configure': 'adt engine configure',
+            'start': 'adt engine start', 'update': 'adt engine update', 'install': 'adt engine install',
+            'checkout_register': 'adt checkout register', 'checkout_unregister': 'adt checkout unregister',
+            'unseat': 'adt seat unseat', 'seat_claim': 'adt seat claim'}.items()}
+        self.assertEqual(table['operator_commands'], expected)
+
+    def test_operator_only_commands_r22(self):
+        for text in self.operator_commands:
+            with self.subTest(text=text):
+                self.assertEqual(self.classify(text), g.Match('operator-only'))
+        self.assertIsNone(self.classify('adt engine restart'))
+
+    def test_instructed_operator_only_rows_denied(self):
+        for text in ('adt engine stop', 'adt engine stop --project p', 'adt engine start --project p',
+                     'adt checkout register', 'adt checkout unregister', 'adt seat unseat s'):
+            with self.subTest(text=text):
+                self.assertEqual(self.classify(text + ' --instruction R1'), g.Match('operator-only'))
+        self.assertEqual(g.table()['effects']['operator-only']['no_seat'], 'refuse')
+
+    def test_seat_claim_matches_top_seat_init(self):
+        for suffix in ('', ' --parent u'):
+            self.assertEqual(self.classify('adt seat claim planner --project p --team t' + suffix), g.Match('top-seat-init'))
+        self.assertEqual(self.classify('adt seat claim planner --project p --team t; adt engine stop'), g.Match('operator-only'))
+        self.assertEqual(self.classify('relay team open'), g.Match('operator-only'))
+
+    def test_compound_refusal_wins(self):
+        for text in ('git push --no-verify; git config core.hooksPath /tmp/x',
+                     'git config core.hooksPath /tmp/x; git push --no-verify'):
+            self.assertEqual(self.classify(text), g.Match('hook-disable'))
+        self.assertEqual(self.classify('git commit --no-verify && cat ' + REFUSED[0]).effect, 'key-file-read')
+        self.assertEqual(self.classify('git push --no-verify; adt engine stop'), g.Match('operator-only'))
+        self.assertEqual(self.classify('git push --no-verify'), g.Match('hook-bypass'))
+        self.assertEqual(self.classify('gh pr merge 12; gh pr merge 13'),
+                         g.Match('pr-merge', flags=frozenset({'compound', 'unparsed'})))
+
+    def test_persistent_hooks_path_is_disable(self):
+        for text in ('git config core.hooksPath /tmp/x', 'git config --global core.hooksPath x',
+                     'git config --unset core.hooksPath', 'git config --file .git/config core.hooksPath x'):
+            with self.subTest(text=text): self.assertEqual(self.classify(text), g.Match('hook-disable'))
+
+    def test_include_path_is_disable(self):
+        for text in ('git config include.path x', 'git config includeIf.gitdir:/a/.path x'):
+            self.assertEqual(self.classify(text), g.Match('hook-disable'))
+
+    def test_git_config_file_writes_are_disable(self):
+        paths = ('/r/.git/config', '/r/.git/worktrees/w/config.worktree', '/home/u/.gitconfig', '/nondefault/git/config')
+        context = self.context(git_config_paths=paths)
+        for path in paths:
+            for text in ('[core]\n hooksPath = x\n', '[include]\n path = x\n', '[includeIf "gitdir:/a/"]\n path = x\n'):
+                with self.subTest(path=path, text=text):
+                    self.assert_disable(self.file(path, text, context))
+                    self.assert_disable(self.file(path, {'old_string': '', 'new_string': text}, context, tool='Edit'))
+            self.assertIsNone(self.file(path, {'old_string': 'a', 'new_string': 'b'}, context, tool='Edit'))
+        self.assertIsNone(self.file('/other/config', '[core]\n hooksPath = x', context))
+
+    def test_hooks_dir_writes_are_disable(self):
+        for directory in ('/r/.git/hooks', '/r/custom-hooks'):
+            context = self.context(hooks_dir=directory)
+            for text in (f'rm {directory}/pre-push', f'mv {directory}/pre-push /tmp/x',
+                         f'chmod -x {directory}/pre-push', f': > {directory}/pre-push',
+                         'adt hooks remove --checkout /r', f'rm -r {directory}',
+                         f'mv {directory} /tmp/x', f'ln -sfn /tmp/x {directory}'):
+                with self.subTest(text=text): self.assert_disable(self.classify(text, context))
+            self.assert_disable(self.file(directory + '/pre-push', '', context))
+            self.assertIsNone(self.classify('cat ' + directory + '/pre-push', context))
+
+    def test_host_hooks_off_is_disable(self):
+        claude = ('/nondefault/claude/settings.json', '/r/.claude/settings.local.json')
+        codex = ('/nondefault/codex/config.toml', '/nondefault/codex/work.config.toml', '/parent/.codex/config.toml')
+        context = self.context(host_config_paths=claude + codex, kit_hook_files=('/kit/hooks.py',))
+        for path in claude:
+            for text in ('{"disableAllHooks": true}', '{"enabledPlugins": {"adt-orchestrator@agentic-dev-team-skills": false}}'):
+                with self.subTest(path=path, text=text): self.assert_disable(self.file(path, text, context))
+        for path in codex: self.assert_disable(self.file(path, '[features]\nhooks = false\n', context))
+        self.assert_disable(self.file('/kit/hooks.py', 'anything', context))
+
+    def test_kit_entry_removal_is_disable(self):
+        settings = self.settings(); original = json.dumps(settings); path = '/r/.claude/settings.json'
+        context = self.context(kit_entry_files={path: original}, kit_hook_files=('/kit/hooks.py',))
+        kept = self.settings(); del kept['hooks']['PreToolUse']
+        self.assert_disable(self.file(path, json.dumps(kept), context))
+        for old, new in [('Bash|Edit|Write|MultiEdit', 'Read'), ('PreToolUse', 'PostToolUse')]:
+            self.assert_disable(self.file(path, {'old_string': old, 'new_string': new}, context, tool='Edit'))
+        self.assert_disable(self.file(path, {'edits': [
+            {'old_string': 'old', 'new_string': 'new'},
+            {'old_string': '"$HOME/.adt/bin/adt"'.replace('"', '\\"'), 'new_string': '/opt/other', 'replace_all': True}]}, context, tool='MultiEdit'))
+        self.assert_disable(self.file(path, 'not JSON', context))
+        for target in (path, '/kit/hooks.py'):
+            for text in (f'rm {target}', f'mv {target} /tmp/x', f'unlink {target}', f'truncate -s 0 {target}', f': > {target}'):
+                with self.subTest(text=text): self.assert_disable(self.classify(text, context))
+        settings['model'] = 'new'
+        self.assertIsNone(self.file(path, json.dumps(settings), context))
+        self.assertIsNone(self.file(path, {'old_string': 'old', 'new_string': 'new'}, context, tool='Edit'))
+        self.assertIsNone(self.file(path, {'old_string': 'absent', 'new_string': 'not JSON'}, context, tool='Edit'))
+        for text in (f'cat {path}', f'jq . {path}'):
+            self.assertIsNone(self.classify(text, context))
+
+    def test_kit_entries_parse(self):
+        settings = self.settings(); text = json.dumps(settings)
+        expected = frozenset((event, row.get('matcher', ''), hook['command'])
+                             for event, rows in settings['hooks'].items() for row in rows for hook in row['hooks'])
+        self.assertEqual(g.kit_entries(text, '/home/u'), expected)
+        self.assertEqual(g.kit_entries('{}', None), frozenset())
+        for text in ('[]', 'not JSON', 'null'):
+            self.assertIsNone(g.kit_entries(text, None))
+        for launcher in ('"$HOME/.adt/bin/adt"', '$HOME/.adt/bin/adt', '~/.adt/bin/adt',
+                         '"${HOME}/.adt/bin/adt"', '"/home/x y/.adt/bin/adt"'):
+            text = json.dumps(self.settings(launcher + ' hook PreToolUse'))
+            self.assertEqual(len(g.kit_entries(text, '/home/x y')), 2, launcher)
+        for command in ('/opt/adt/bin/adt hook x', '"$HOME/.adt/bin/adt" act x', '"unbalanced'):
+            self.assertEqual(len(g.kit_entries(json.dumps(self.settings(command)), '/home/u')), 1)
+        self.assertEqual(len(g.kit_entries(json.dumps(self.settings('"/home/x y/.adt/bin/adt" hook x')), None)), 1)
+
+    def test_apply_patch_disable(self):
+        context = self.context(hooks_dir='/r/.git/hooks', host_config_paths=('/custom/config.toml',),
+                               git_config_paths=('/r/.git/config',), kit_hook_files=('/kit/hooks.py',))
+        def patch(path, body='', verb='Update File'):
+            return f'*** Begin Patch\n*** {verb}: {path}\n@@\n{body}\n*** End Patch\n'
+        patches = (patch('/custom/config.toml', '+[features]\n+hooks = false'),
+                   patch('.git/hooks/pre-push', '+changed'), patch('/kit/hooks.py', verb='Delete File'),
+                   patch('.git/config', '+[core]\n+hooksPath = /tmp/x'))
+        for text in patches:
+            self.assert_disable(g.classify_tool('apply_patch', {'command': text}, REFUSED, cwd='/r', context=context))
+        self.assert_disable(g.classify_tool('exec_command', {'cmd': "apply_patch <<'EOF'\n" + patches[0] + 'EOF\n'}, REFUSED, cwd='/r', context=context))
+        self.assert_disable(g.classify_tool('apply_patch', {'command': patches[1]}, REFUSED, context=context))
+        for text in (patch('src/app.py', '+print(1)'), patch('/custom/config.toml', '+model = "x"'),
+                     patch('src/app.py', '+git push --no-verify')):
+            self.assertIsNone(g.classify_tool('apply_patch', {'command': text}, REFUSED, cwd='/r', context=context))
+
+    def test_linked_targets_are_resolved(self):
+        paths = {'/home/u/.claude/settings.json': '/home/u/dotfiles/claude-settings.json', '/r/.git/config': '/r/real/config'}
+        context = self.context(host_config_paths=('/home/u/dotfiles/claude-settings.json',),
+                               git_config_paths=('/r/real/config',), resolve=lambda path: paths.get(path, path))
+        self.assert_disable(self.file('~/.claude/settings.json', '{"disableAllHooks": true}', context))
+        command = "printf '[core]\\n\\thooksPath = x\\n' >> /r/.git/config"
+        self.assert_disable(self.classify(command, context))
+        plain = self.context(host_config_paths=context.host_config_paths, git_config_paths=context.git_config_paths)
+        self.assertIsNone(self.file('~/.claude/settings.json', '{"disableAllHooks": true}', plain))
+        self.assertIsNone(self.classify(command, plain))
+
+    def test_missing_context(self):
+        self.assertIsNone(self.classify('rm /r/.git/hooks/pre-push'))
+        self.assertIsNone(self.file('/r/.git/config', '[core]\n hooksPath = x', None))
+        context = self.context(hooks_dir='/r/.git/hooks')
+        self.assert_disable(self.classify('rm .git/hooks/pre-push', context, cwd=None))
+
+    def test_config_reads_pass(self):
+        for text in ('git config --get core.hooksPath', 'git config --get-all core.hooksPath',
+                     'git config --list', 'git config -l', 'git config --show-origin core.hooksPath',
+                     'git config core.hooksPath'):
+            self.assertIsNone(self.classify(text), text)
+
+    def test_one_command_stays_bypass(self):
+        self.assertEqual(self.classify('git -c core.hooksPath=x commit'), g.Match('hook-bypass'))
+        self.assertEqual(self.classify('GIT_CONFIG_KEY_0=core.hooksPath git commit'), g.Match('hook-bypass'))
+
+    def test_settings_edit_keeping_hooks_passes(self):
+        path = '/r/.claude/settings.json'; context = self.context(host_config_paths=(path,))
+        self.assertIsNone(self.file(path, {'old_string': '"model": "old"', 'new_string': '"model": "new"'}, context, tool='Edit'))
+        self.assertIsNone(self.file(path, '{"disableAllHooks": false, "enabledPlugins": {"adt-pair": true}}', context))
+
+    def test_key_spellings_match(self):
+        for text in ('git config CORE.HOOKSPATH x', "git config 'core.hooksPath' x", 'git config --file .git/config core.hooksPath x'):
+            self.assertEqual(self.classify(text), g.Match('hook-disable'))
+
+    def test_f1_symbolic_hook_mutations(self):
+        context = self.context(hooks_dir='/r/custom-hooks')
+        for command in ('chmod u-x /r/custom-hooks/pre-push',
+                        'chmod g-x /r/custom-hooks/pre-push',
+                        'chmod a-x /r/custom-hooks/pre-push',
+                        'cp /dev/null /r/custom-hooks/pre-push'):
+            with self.subTest(command=command):
+                self.assertEqual(self.classify(command, context), g.Match('hook-disable'))
+        self.assertIsNone(self.classify('cat /r/custom-hooks/pre-push', context))
+        linked = self.context(hooks_dir='/r/custom-hooks',
+                              resolve=lambda path: '/r/custom-hooks/pre-push' if path == '/r/linked-hook' else path)
+        self.assertEqual(self.classify('chmod u-x linked-hook', linked), g.Match('hook-disable'))
+        self.assertEqual(self.classify('cp /dev/null linked-hook', linked), g.Match('hook-disable'))
+
+    def test_f2_valid_plugin_edit_fragment(self):
+        path = '/nondefault/claude/settings.json'
+        context = self.context(host_config_paths=(path,))
+        enabled = '{"adt-orchestrator@agentic-dev-team-skills": true}'
+        disabled = '{"adt-orchestrator@agentic-dev-team-skills": false}'
+        self.assertEqual(self.file(path, {'old_string': enabled, 'new_string': disabled}, context, tool='Edit'),
+                         g.Match('hook-disable'))
+        self.assertIsNone(self.file(path, {'old_string': disabled, 'new_string': enabled}, context, tool='Edit'))
+        self.assertIsNone(self.file(path, {'old_string': '{"model": "a"}', 'new_string': '{"model": "b"}'}, context, tool='Edit'))
+
+    def test_f3_absolute_git_fallback(self):
+        command = r'find . -prune -exec /usr/bin/git push origin main \;'
+        self.assertEqual(self.classify(command),
+                         g.Match('protected-push', flags=frozenset({'unparsed'})))
+        self.assertIsNone(self.classify('rm /r/.git/hooks/pre-push'))
+
+    def test_f4_patch_compound_order(self):
+        context = self.context(kit_hook_files=('/kit/hooks.py',))
+        patch = "apply_patch <<'EOF'\n*** Begin Patch\n*** Delete File: /kit/hooks.py\n*** End Patch\nEOF\n"
+        self.assertEqual(self.classify('adt engine stop; ' + patch, context), g.Match('operator-only'))
+        self.assertEqual(self.classify(patch, context), g.Match('hook-disable'))
+        self.assertEqual(self.classify(patch + 'adt engine stop', context), g.Match('hook-disable'))
+
+    def test_f4_substitution_retains_patch_body(self):
+        context = self.context(kit_hook_files=('/kit/hooks.py',))
+        command = "result=$(\napply_patch <<'EOF'\n*** Begin Patch\n*** Delete File: /kit/hooks.py\n*** End Patch\nEOF\n)\n"
+        self.assertEqual(self.classify(command, context), g.Match('hook-disable'))
+        self.assertIsNone(self.classify(command.replace('/kit/hooks.py', '/r/ordinary.py'), context))
+
+    def test_f4_substitution_command_order(self):
+        context = self.context(kit_hook_files=('/kit/hooks.py',))
+        command = "result=$(\napply_patch <<'EOF'\n*** Begin Patch\n*** Delete File: /kit/hooks.py\n*** End Patch\nEOF\n)\n"
+        self.assertEqual(self.classify('adt engine stop; ' + command, context), g.Match('operator-only'))
+        self.assertEqual(self.classify(command + 'adt engine stop', context), g.Match('hook-disable'))
+
+    def test_f4_substitution_occurrence_identity(self):
+        context = self.context(kit_hook_files=('/kit/hooks.py',))
+        command = "result=$(\napply_patch <<'EOF'\n*** Begin Patch\n*** Delete File: /kit/hooks.py\n*** End Patch\nEOF\n)\n"
+        ordinary = "printf '%s' '__adt_'substitution_0__; "
+        genuine = 'result=$(adt engine stop); '
+        cases = ((ordinary + 'adt engine stop; ' + command, g.Match('operator-only')),
+                 (ordinary + command + 'adt engine stop', g.Match('hook-disable')),
+                 (ordinary, None),
+                 (genuine + command, g.Match('operator-only')),
+                 (command + genuine, g.Match('hook-disable')))
+        for text, expected in cases:
+            with self.subTest(command=text):
+                self.assertEqual(self.classify(text, context), expected)

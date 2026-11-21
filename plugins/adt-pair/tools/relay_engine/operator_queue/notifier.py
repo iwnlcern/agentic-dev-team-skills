@@ -25,6 +25,22 @@ class NotifyReport:
     failed: int = 0
 
 
+class DeliveryCancelled(Exception):
+    """Shutdown interrupted a send, leaving its outbox entry eligible to retry."""
+
+
+class NotifierIssueUnavailable(Exception):
+    """No eligible native issue, so the pass must leave outbox and health untouched."""
+
+
+class KnownNotifierFailure(Exception):
+    """An acknowledged failure before any possible external effect."""
+
+    def __init__(self, error_class):
+        self.error_class = error_class
+        super().__init__(error_class)
+
+
 def notification_title(project_name: str | None, actor: str) -> str:
     return f"{project_name if project_name is not None else 'v3'}: {actor}"
 
@@ -115,20 +131,41 @@ def notify_failed(conn, note, error_class, now_ms):
 
 
 def notify_pass(port: JobPort, deliver: Callable[[list[str]], None], now_ms: int, *,
-                notifier: str, limit: int = 5) -> NotifyReport:
+                notifier: str, limit: int = 5, offer=None, settled=None,
+                stopping=lambda: False) -> NotifyReport:
     if notifier == 'none':
         return NotifyReport()
-    notes = port.read_catalogue(lambda conn: due_notifications(conn, now_ms, min(5, max(0, limit))))
     delivered = failed = 0
-    for note in notes:
-        argv = notification_argv(note, notifier)
-        try:
-            deliver(argv)
-        except Exception as exc:
-            error_class = type(exc).__name__
-            port.catalogue(lambda conn: notify_failed(conn, note, error_class, now_ms))
-            failed += 1
-        else:
-            port.catalogue(lambda conn: notify_delivered(conn, note, now_ms))
-            delivered += 1
+    try:
+        notes = port.read_catalogue(lambda conn: due_notifications(conn, now_ms, min(5, max(0, limit))))
+        for note in notes:
+            argv = notification_argv(note, notifier)
+            try:
+                if offer is None:
+                    deliver(argv)
+                else:
+                    offer(note, argv)
+            except (DeliveryCancelled, NotifierIssueUnavailable):
+                break
+            except Exception as exc:
+                if stopping():
+                    break
+                if offer is None:
+                    error_class = type(exc).__name__
+                elif isinstance(exc, KnownNotifierFailure):
+                    error_class = exc.error_class
+                else:
+                    break
+                port.catalogue(lambda conn: notify_failed(conn, note, error_class, now_ms))
+                failed += 1
+            else:
+                if stopping():
+                    break
+                port.catalogue(lambda conn: notify_delivered(conn, note, now_ms))
+                delivered += 1
+            if settled is not None:
+                settled()
+    except records.JobUnavailable as error:
+        if error.reason != 'stopped':
+            raise
     return NotifyReport(delivered, failed)

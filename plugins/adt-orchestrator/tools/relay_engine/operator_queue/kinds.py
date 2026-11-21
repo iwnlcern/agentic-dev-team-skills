@@ -7,6 +7,11 @@ from types import MappingProxyType
 from relay_engine.jcs import jcs_encode
 
 
+INTEGER_PATTERN = r"(?:0|[1-9][0-9]{0,14})"
+INTEGER_MAX = 999_999_999_999_999
+_INTEGER_FIELDS = frozenset({'generation', 'pr', 'expected_allow_revision'})
+
+
 KINDS = frozenset({'question', 'cross_project_permission', 'merge_go_ahead', 'verification_held', 'notice'})
 NOTICE_SUBKINDS = frozenset({
     'seat_registered', 'seat_replaced', 'seat_stood_down', 'seat_unseated',
@@ -144,6 +149,45 @@ def fixed_text(subkind: str, condition_key: str) -> str | None:
 
 def condition_key(kind: str, subkind: str | None, key: Mapping | str) -> str:
     return jcs_encode(dict(key) if isinstance(key, Mapping) else key).decode('utf-8')
+
+
+def _bounded_integer_leaves(value):
+    if type(value) is int:
+        return 0 <= value <= INTEGER_MAX
+    if isinstance(value, Mapping):
+        return all(_bounded_integer_leaves(member) for member in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_bounded_integer_leaves(member) for member in value)
+    return True
+
+
+def _invalid_subject():
+    from relay_engine.operator_queue.records import QueueRefusal
+
+    return QueueRefusal('E_QUEUE_INVALID', 'subject_unresolved')
+
+
+def _subject_value(kind, subkind, value, *, key):
+    if isinstance(value, Mapping) and 'kind' in value:
+        if value['kind'] != (subkind if kind == 'notice' else kind):
+            return _invalid_subject()
+        value = {name: member for name, member in value.items() if name != 'kind'}
+        for name in _INTEGER_FIELDS & value.keys():
+            member = value[name]
+            if type(member) is not str or re.fullmatch(INTEGER_PATTERN, member) is None:
+                return _invalid_subject()
+            value[name] = int(member)
+        if key and set(value) == {'value'}:
+            value = value['value']
+    return value if _bounded_integer_leaves(value) else _invalid_subject()
+
+
+def key_value(kind: str, subkind: str | None, key: Mapping | str):
+    return _subject_value(kind, subkind, key, key=True)
+
+
+def pins_value(kind: str, subkind: str | None, pins: Mapping):
+    return _subject_value(kind, subkind, pins, key=False)
 
 
 def parse_choices(body: bytes) -> tuple[tuple[str, ...], str | None]:

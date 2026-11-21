@@ -91,6 +91,41 @@ class TestQueueNotifier(unittest.TestCase):
         self.conn.close()
         self.conn = store_layout.open_catalogue(self.root)
 
+    def test_completed_native_offer_after_stop_earns_no_receipt(self):
+        item, _, _ = self.raise_it()
+        before = self.row(item)
+        stopped = False
+        settled = mock.Mock()
+        legacy = mock.Mock()
+
+        def offer(note, argv):
+            nonlocal stopped
+            self.assertEqual((note.item_id, note.revision), (item.item_id, 1))
+            stopped = True
+
+        result = notifier.notify_pass(self.port, legacy, 1000, notifier='notify-send',
+                                      offer=offer, settled=settled, stopping=lambda: stopped)
+        self.assertEqual(result, notifier.NotifyReport())
+        self.assertEqual(self.row(item), before)
+        legacy.assert_not_called()
+        settled.assert_not_called()
+
+    def test_issue_refusal_leaves_due_rows_and_health_untouched(self):
+        self.raise_it()
+        self.raise_it()
+        self.conn.execute('INSERT INTO queue_notifier_health VALUES (1,2,7)').close()
+        self.conn.commit()
+
+        def snapshot():
+            return tuple(self.conn.execute('SELECT * FROM ' + table + ' ORDER BY rowid').fetchall()
+                         for table in ('queue_notifications', 'queue_notifier_health'))
+
+        before = snapshot()
+        deliver = mock.Mock(side_effect=notifier.NotifierIssueUnavailable)
+        self.assertEqual(self.run_pass(deliver), notifier.NotifyReport())
+        self.assertEqual(deliver.call_count, 1)
+        self.assertEqual(snapshot(), before)
+
     def test_backup_missed_notice(self):
         with mock.patch.object(api_principals, 'SERVICE_NAMES',
                                (*api_principals.SERVICE_NAMES, 'supervision')):

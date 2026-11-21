@@ -4159,6 +4159,13 @@ class TestRepositoryField(Store):
                     verdict=verdict, needs=needs, subject="s", refs=[], findings=[],
                     fixes=[], resolves=[])
 
+    def test_impl_act_without_repo_refused(self):
+        # Breaks: missing REPO is admitted or refusal writes any non-refusal row.
+        exc = self.refused("E-FIELD-REQUIRED", draft(kind="IMPL", needs="act"))
+        self.assertEqual(exc.params["field"], "REPO")
+        self.assertEqual(exc.params["rule"],
+                         "an IMPL with NEEDS: act names the repository its go-ahead is for")
+
     def test_repo_admits_with_repository_id(self):
         from relay_engine import jcs
         admitted = self.admit_repo(self.repo_draft())

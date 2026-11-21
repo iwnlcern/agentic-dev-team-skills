@@ -405,6 +405,9 @@ def _validate(values, seen, body, header_bytes, validate_address):
                           rule="REPO sits only on an IMPL with NEEDS: act")
         if _REPO.fullmatch(repo) is None:
             _shape(number, "REPO", repo, "[a-z0-9][a-z0-9-]{0,31}")
+    if kind == "IMPL" and needs == "act" and repo is None:
+        raise _refuse("E-FIELD-REQUIRED", field="REPO",
+                      rule="an IMPL with NEEDS: act names the repository its go-ahead is for")
     verdict = _verdict(kind, needs, first.get("VERDICT"))
     refs = tuple(value for _, value in lists["REF"])
     findings = _findings(kind, needs, lists["FINDING"], refs)

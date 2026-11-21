@@ -24,6 +24,20 @@ POLICY_CODES = {
 }
 
 ALL_CODES = POLICY_CODES | {
+    'E-AUTHORITY-PROJECT-STOPPED',
+    'E-AUTHORITY-CROSS-PROJECT-COMMIT',
+    'E-AUTHORITY-SESSION-NOT-CURRENT',
+    'E-AUTHORITY-PROTECTED-REF-PUSH',
+    'E-AUTHORITY-API-MERGE-REFUSED',
+    'E-AUTHORITY-MERGE-HEAD-UNPINNED',
+    'E-AUTHORITY-MERGE-FLAG-REFUSED',
+    'E-AUTHORITY-HOOK-BYPASS',
+    'E-AUTHORITY-HOOK-DISABLE',
+    'E-AUTHORITY-KEY-FILE-READ',
+    'E-AUTHORITY-OPERATOR-ENDPOINT',
+    'E-AUTHORITY-OPERATOR-ONLY',
+    'E-AUTHORITY-CHECKOUT-UNREGISTERED',
+
     "E-SETTING-UNKNOWN",
     "E-SETTING-VALUE",
     "E-AUTHORITY-SLIP-MISSING",
@@ -666,5 +680,60 @@ class TestAdmissionErrors(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     errors.error_for("E-ADMISSION-HOOK", **params)
 
+class TestApiAdmissionCatalog(unittest.TestCase):
+    def test_api_admission_cause_fields(self):
+        from relay_engine import api_definitions as d
+        catalog = errors.api_error_catalog()
+        variants = {variant.code: variant for variant in catalog.variants}
+        self.assertIn('E_API_ADMISSION', variants)
+        variant = variants['E_API_ADMISSION']
+        self.assertEqual(variant.api_class, 'admission')
+        types = {node.name: node for node in catalog.types}
+        cause = types[variant.cause_ref.name].shape
+        self.assertEqual(len(cause.arms), 6)
+        for ref in cause.arms:
+            record = types[ref.name].shape
+            self.assertIsInstance(record, d.Record)
+            self.assertEqual(tuple(field.name for field in record.fields), ('kind', 'engine_code'))
+            self.assertFalse(any(field.optional for field in record.fields))
+    def test_revision_mismatch_has_closed_wire_payload(self):
+        from relay_engine import api_protocol, api_wire
+        registry = api_protocol.discovery_registry()
+        error = api_protocol.api_error(registry, 'revision_mismatch',
+                                       current_revision='2', current_state='retired')
+        self.assertEqual(error, {
+            'code': 'E_QUEUE_STATE', 'class': 'conflict', 'remedy': 'refresh_item',
+            'cause': {'kind': 'revision_mismatch', 'current_revision': '2',
+                      'current_state': 'retired'},
+        })
+        api_wire.encode_api_response({'request_id': '1', 'error': error}, registry, None, None)
+        for extra in ({'current_revision': 2}, {'text': 'private item'}):
+            malformed = dict(error, cause=dict(error['cause'], **extra))
+            with self.assertRaisesRegex(ValueError, 'invalid_response'):
+                api_wire.encode_api_response({'request_id': '1', 'error': malformed},
+                                             registry, None, None)
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAuthorityCatalogueR22(unittest.TestCase):
+    def test_authority_catalogue_r22(self):
+        rows = [['E-AUTHORITY-PROJECT-STOPPED', 'this project is stopped', 'start the project, then commit again', 'while a project is stopped no agent of it commits, whatever its role'], ['E-AUTHORITY-CROSS-PROJECT-COMMIT', 'this session is a seat of another project', 'commit from a seat of this project', "a seat commits only in its own project's checkouts"], ['E-AUTHORITY-SESSION-NOT-CURRENT', 'this session no longer holds its seat', "sign this session in as its seat, or commit from the seat's current session", "the reason names why: a newer sign-in, the operator's unseat, a sign-in that never committed, a replaced occupant, a stood-down seat, a closed team, or a project that could not be read"], ['E-AUTHORITY-PROTECTED-REF-PUSH', 'a seat may not push to a protected branch', 'merge through the pinned PR merge', 'protected branches change only by a pinned merge'], ['E-AUTHORITY-API-MERGE-REFUSED', 'a seat may not write a protected branch through the API', 'use the pinned PR merge', 'protected branches change only by a pinned merge'], ['E-AUTHORITY-MERGE-HEAD-UNPINNED', "this merge does not pin the pull request's head", 'merge with the head your merge slip names', 'a merge slip allows one head'], ['E-AUTHORITY-MERGE-FLAG-REFUSED', '--auto and --admin merges are refused', 'merge without the flag, under your merge slip', 'a flagged merge lands at a time or head no slip checked'], ['E-AUTHORITY-HOOK-BYPASS', "a seat may not skip the kit's hooks for a command", 'run the command without the bypass', "the hooks check every seat's commit and push"], ['E-AUTHORITY-HOOK-DISABLE', "this would switch the kit's hooks off for every session that works here later", 'if you mean to, do it from your own terminal, which the hooks never check', "the hooks check every agent's commits, pushes and merges, so only the operator's terminal changes them"], ['E-AUTHORITY-KEY-FILE-READ', 'an agent session may not read this key file', "give the key's path to the command that signs, which reads the key itself; never open the file", "a key's contents never enter an agent's conversation, and no agent reads the operator's or another seat's key"], ['E-AUTHORITY-OPERATOR-ENDPOINT', "only the operator answers the kit's questions and records prompts", 'ask the operator; they answer from their own page or terminal', 'an agent cannot answer for the operator'], ['E-AUTHORITY-OPERATOR-ONLY', "this command is the operator's alone", 'ask the operator to run it from their own terminal', 'stopping, starting, updating or installing the engine, registering or unregistering a checkout, unseating a session, claiming a seat from a session that is already one, and opening the next team decide what every agent may do'], ['E-AUTHORITY-CHECKOUT-UNREGISTERED', 'this checkout is not registered with the engine', 'register the checkout, or remove its hooks', 'only the operator registers a checkout, with adt checkout register --project NAME --repository NAME from their own terminal, or removes its hooks with adt checkout unregister']]
+        for code, cause, remedy, explain in rows:
+            with self.subTest(code=code):
+                self.assertIn(code, errors.ERRORS)
+                error = errors.error_for(code)
+                self.assertEqual((error.cls, error.cause, error.remedy),
+                                 ('command', cause, remedy))
+                self.assertEqual(errors.explain_for(code), (explain, remedy))
+
+    def test_every_code_has_text(self):
+        from relay_engine.slips import ANSWER_CODES
+        for code in ANSWER_CODES:
+            with self.subTest(code=code):
+                key = 'E-AUTHORITY-' + code.removeprefix('authority.').upper()
+                self.assertIn(key, errors.ERRORS)
+                self.assertTrue(errors.error_for(key).cause)
+                self.assertTrue(errors.error_for(key).remedy)
+                self.assertTrue(errors.explain_for(key)[0])

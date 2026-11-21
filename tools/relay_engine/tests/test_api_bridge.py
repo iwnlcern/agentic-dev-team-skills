@@ -148,11 +148,19 @@ class TestBridge(unittest.TestCase):
                 self.assertEqual(envelope, {'request_id': '1', 'error': error})
                 self.assertEqual(self.backends[-1].closed, 1)
 
+        error = {'code': 'E_API_ADMISSION', 'class': 'admission',
+                 'cause': {'kind': 'policy', 'engine_code': 'E-ADDRESS'}, 'remedy': 'change_request'}
+        self.override = lambda req, _response: {'request_id': req.request_id, 'error': error}
+        result, envelope = self.exchange()
+        self.assertEqual(result.status, 422)
+        self.assertEqual(envelope, {'request_id': '1', 'error': error})
+        self.assertEqual(self.backends[-1].closed, 1)
+
     def test_status_by_class_covers_catalogue(self):
         from relay_engine import errors
         self.assertEqual(self.b.STATUS_BY_CLASS, {
             'wire': 400, 'auth': 401, 'version': 409, 'conflict': 409,
-            'internal': 500, 'unavailable': 503})
+            'internal': 500, 'unavailable': 503, 'admission': 422})
 
         def covered():
             for variant in errors.api_error_catalog().variants:

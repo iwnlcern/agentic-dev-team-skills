@@ -3,12 +3,15 @@ import base64
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import cache
+import re
 from types import MappingProxyType
 from typing import Protocol
 
 from relay_engine import api_definitions as d, api_registry as r, api_schema, api_wire as w, errors, strings
+from relay_engine.api_principals import OperatorPrincipal, ServicePrincipal
 
 IMPLEMENTED_PROTOCOLS = ('3.0',)
+DECODER_REFUSAL_KINDS = frozenset({'malformed_frame', 'malformed_json', 'invalid_envelope'})
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +25,14 @@ class RuntimeContext:
     schemas: Mapping[str, api_schema.SchemaArtifact]
 
     def __post_init__(self):
-        object.__setattr__(self, 'schemas', MappingProxyType(dict(self.schemas)))
+        schemas = dict(self.schemas)
+        def digest_shape(value):
+            return type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+        if (not digest_shape(self.build_id) or any(
+                protocol != artifact.protocol or not digest_shape(artifact.digest)
+                for protocol, artifact in schemas.items())):
+            raise ValueError('invalid_runtime_context')
+        object.__setattr__(self, 'schemas', MappingProxyType(schemas))
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +53,17 @@ class SessionRefusal:
 
 
 @dataclass(frozen=True, slots=True)
+class ComponentRefusal:
+    code: str
+    cause_kind: str
+    payload: Mapping | None = None
+
+
+PLATFORM_SESSION_OPERATIONS = frozenset({'session.sign-in', 'session.resume', 'session.end'})
+CLEARING_AUTH_CAUSES = frozenset({'key_replaced', 'seat_stood_down', 'session_not_current'})
+
+
+@dataclass(frozen=True, slots=True)
 class SessionOutcome:
     result: Mapping
     binding_action: str
@@ -51,10 +72,14 @@ class SessionOutcome:
 
 class SessionPort(Protocol):
     def run(self, operation: str, args: Mapping,
-            binding: SeatBinding | None) -> SessionOutcome | SessionRefusal: ...
+            binding: SeatBinding | None) -> SessionOutcome | SessionRefusal | Mapping: ...
 
 
-SessionHandler = Callable[[Mapping, SeatBinding | None, SessionPort], SessionOutcome | SessionRefusal]
+class SubmitPort(Protocol):
+    def run(self, args: Mapping, binding: SeatBinding) -> Mapping | ComponentRefusal: ...
+
+
+SessionHandler = Callable[[Mapping, SeatBinding | None, SessionPort], SessionOutcome | SessionRefusal | Mapping]
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +171,11 @@ def dispatch_discovery(state: ConnectionState, request: w.ApiRequest | w.Protoco
         return ResponseAndConnectionState(response, replace(current, phase='closed') if close else current, close)
 
     if isinstance(request, w.ProtocolRefusal):
+        if request.cause_kind not in DECODER_REFUSAL_KINDS:
+            request_id = request.request_id
+            if isinstance(r.validate_type(registry, d.TypeRef('RequestId'), request_id), r.ValidationFailure):
+                request_id = None
+            return refuse('handler_fault', request_id, True)
         return refuse(request.cause_kind, request.request_id, request.close)
     if not isinstance(request, w.ApiRequest):
         return refuse('invalid_envelope', None, True)
@@ -207,27 +237,44 @@ def dispatch_discovery(state: ConnectionState, request: w.ApiRequest | w.Protoco
     return ResponseAndConnectionState(response, candidate, False)
 
 
+def _seat_identify(args, principal, port):
+    return port.sessions.run('seat.identify', args, None)
+
+
 def _session_end(args, binding, port):
-    return port.run('session.end', args, binding)
+    return port.sessions.run('session.end', args, binding)
 
 
 def _session_resume(args, binding, port):
-    return port.run('session.resume', args, binding)
+    return port.sessions.run('session.resume', args, binding)
 
 
 def _session_sign_in(args, binding, port):
-    return port.run('session.sign-in', args, binding)
+    return port.sessions.run('session.sign-in', args, binding)
 
 
 def session_handlers() -> Mapping[str, SessionHandler]:
     """Stable handler objects shared by dispatch and registry generation."""
-    return {'session.end': _session_end, 'session.resume': _session_resume,
+    return {'seat.identify': _seat_identify, 'session.end': _session_end, 'session.resume': _session_resume,
             'session.sign-in': _session_sign_in}
+
+
+def _relay_submit(args, binding, port):
+    return port.submit.run(args, binding)
+
+
+def submit_handlers() -> Mapping[str, Callable]:
+    return {'relay.submit': _relay_submit}
 
 
 def dispatch_api(state: ConnectionState, request: w.ApiRequest | w.ProtocolRefusal,
                  runtime: RuntimeContext, registry: r.FrozenApiRegistry,
-                 sessions: SessionPort) -> ResponseAndConnectionState:
+                 operation_ports: Mapping[str, object], *,
+                 principal: OperatorPrincipal | ServicePrincipal | None = None) -> ResponseAndConnectionState:
+    if principal is not None and isinstance(request, w.ApiRequest):
+        operation = registry.operation(request.op)
+        if operation is not None and operation.principal in {'unsigned', 'seat_key', 'seat_session'}:
+            raise ValueError('invalid_in_process_principal')
     if (not isinstance(request, w.ApiRequest)
             or request.op in ('protocol.connect', 'protocol.schema')):
         return dispatch_discovery(state, request, runtime, registry)
@@ -259,37 +306,46 @@ def dispatch_api(state: ConnectionState, request: w.ApiRequest | w.ProtocolRefus
             or artifact.protocol != current.negotiated_protocol
             or artifact.digest != current.negotiated_schema_digest):
         return refuse('runtime_not_ready', request.request_id, True, current)
-    if op.principal == 'unsigned':
-        return dispatch_discovery(state, request, runtime, registry)
     if op.principal == 'seat_session' and current.binding is None:
+        return refuse('not_signed_in', request.request_id, current=current)
+    if ((op.principal == 'operator' and not isinstance(principal, OperatorPrincipal))
+            or (op.principal == 'service' and not isinstance(principal, ServicePrincipal))):
         return refuse('not_signed_in', request.request_id, current=current)
     if request.op == 'session.resume' and current.binding is not None:
         return refuse('already_bound', request.request_id, current=current)
     try:
-        outcome = registry.handlers[request.op](request.args, current.binding, sessions)
-        if isinstance(outcome, SessionRefusal):
-            error = api_error(registry, outcome.cause_kind)
+        handler_principal = (principal if op.principal in {'operator', 'service'}
+                             else None if op.principal == 'unsigned' else current.binding)
+        outcome = registry.handlers[request.op](request.args, handler_principal, operation_ports[request.op])
+        if isinstance(outcome, (SessionRefusal, ComponentRefusal)):
+            payload = outcome.payload if isinstance(outcome, ComponentRefusal) else None
+            error = api_error(registry, outcome.cause_kind, **({} if payload is None else payload))
             if (error['code'] != outcome.code or
                     isinstance(r.validate_type(registry, op.error_ref, error), r.ValidationFailure)):
-                raise ValueError('invalid_session_refusal')
-            candidate = replace(current, binding=None) if outcome.cause_kind in {
-                'key_replaced', 'seat_stood_down', 'session_not_current'} else current
+                raise ValueError('invalid_component_refusal')
+            candidate = replace(current, binding=None) if (
+                request.op != 'seat.identify' and error['code'] == 'E_API_AUTH'
+                and outcome.cause_kind in CLEARING_AUTH_CAUSES) else current
             response = {'request_id': request.request_id, 'error': error}
             w.encode_api_response(response, registry, None, None)
             return ResponseAndConnectionState(response, candidate, False)
-        if not isinstance(outcome, SessionOutcome) or isinstance(
-                r.validate_operation_result(registry, request.op, outcome.result, None),
-                r.ValidationFailure):
-            raise ValueError('invalid_session_result')
-        if outcome.binding_action == 'set' and isinstance(outcome.binding, SeatBinding):
-            candidate = replace(current, binding=outcome.binding)
-        elif outcome.binding_action == 'clear':
-            candidate = replace(current, binding=None)
-        elif outcome.binding_action == 'keep':
-            candidate = current
+        candidate = current
+        if isinstance(outcome, SessionOutcome):
+            if request.op not in PLATFORM_SESSION_OPERATIONS:
+                raise ValueError('foreign_session_outcome')
+            result = outcome.result
+            if outcome.binding_action == 'set' and isinstance(outcome.binding, SeatBinding):
+                candidate = replace(current, binding=outcome.binding)
+            elif outcome.binding_action == 'clear':
+                candidate = replace(current, binding=None)
+            elif outcome.binding_action != 'keep':
+                raise ValueError('invalid_binding_action')
         else:
-            raise ValueError('invalid_binding_action')
-        response = {'request_id': request.request_id, 'result': outcome.result}
+            result = outcome
+        if isinstance(r.validate_operation_result(registry, request.op, result, None),
+                      r.ValidationFailure):
+            raise ValueError('invalid_component_result')
+        response = {'request_id': request.request_id, 'result': result}
         w.encode_api_response(response, registry, request.op, None)
         return ResponseAndConnectionState(response, candidate, False)
     except Exception:

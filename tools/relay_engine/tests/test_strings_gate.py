@@ -14,6 +14,22 @@ FORBIDDEN_ATTRS = {"__closure__", "__globals__", "__dict__", "__wrapped__",
 FORBIDDEN_IMPORTS = {"logging", "subprocess", "inspect"}
 SINK_ATTRS = {"stdout", "stderr", "__stdout__", "__stderr__"}
 
+PRIVATE_DESCRIPTOR_SITES = frozenset({
+    ('api_service', '_read_idle_receipt', 'fdopen', 'fd'),
+    ('api_service', '_write_private_frame', 'fdopen', 'fd'),
+    ('api_service', '_write_private_frame', 'write', 'fd'),
+    ('api_service', '_publish_locator', 'fdopen', 'fd'),
+    ('api_operator_bridge', '_publish', 'fdopen', 'descriptor'),
+    ('owner_start', '_read_receipt', 'fdopen', 'fd'),
+    ('owner_start', '_stage_receipt', 'fdopen', 'fd'),
+    ('owner_start', '_run_child', 'fdopen', 'idle_read'),
+    ('owner_start', '_run_child', 'fdopen', 'idle_write'),
+    ('owner_start', '_run_child', 'fdopen', 'retire_read'),
+    ('owner_start', '_run_child', 'fdopen', 'retire_write'),
+    ('store_layout', '_read_frame', 'fdopen', 'fd'),
+    ('store_layout', '_replace', 'fdopen', 'fd'),
+})
+
 
 def storage_term_matches(readme_text=None, inventory=None, parser=None):
     expression = re.compile(r"sqlite|database|ledger", re.IGNORECASE)
@@ -48,6 +64,20 @@ def storage_term_matches(readme_text=None, inventory=None, parser=None):
     visit(parser)
     return [(name, match.group(0)) for name, value in surface
             for match in expression.finditer(value)]
+
+
+def _slips_family_key(module, function, key):
+    stem = {
+        "unavailable_words": "authority-unavailable-",
+        "session_not_current_words": "authority-not-current-",
+    }.get(function)
+    if module != "slips" or stem is None:
+        return False
+    if not isinstance(key, ast.BinOp) or not isinstance(key.op, ast.Add):
+        return False
+    while isinstance(key, ast.BinOp) and isinstance(key.op, ast.Add):
+        key = key.left
+    return isinstance(key, ast.Constant) and key.value == stem
 
 
 def gate_violations(paths):
@@ -157,12 +187,16 @@ def gate_violations(paths):
                         isinstance(node.args[0].func.value, ast.Name) and
                         node.args[0].func.value.id == "stream" and
                         not node.args[0].args and not node.args[0].keywords)
+                    operand = node.args[0] if node.args else None
+                    private_descriptor = (
+                        isinstance(operand, ast.Name) and
+                        (module, fn, node.func.attr, operand.id) in PRIVATE_DESCRIPTOR_SITES)
                     if (isinstance(base, ast.Name) and
                             base.id in os_aliases and
                             node.func.attr in {"write", "fdopen"} and
                             not (module == "daemon" and
                                  fn == "_log_diagnostic") and not git_pipe_write and
-                            not snapshot_file_write):
+                            not snapshot_file_write and not private_descriptor):
                         violations.append((module, node.lineno,
                                            "raw os sink"))
                     if (isinstance(base, ast.Name) and
@@ -194,7 +228,9 @@ def gate_violations(paths):
                                       node.func.attr == "render" and
                                       isinstance(node.func.value, ast.Name) and
                                       node.func.value.id == "addresses")
-                    if (not internal_dispatch and not address_render and
+                    slips_family = (call_name == "render" and node.args and
+                                    _slips_family_key(module, fn, node.args[0]))
+                    if (not internal_dispatch and not address_render and not slips_family and
                             (len(node.args) <= key_index or
                             not isinstance(node.args[key_index], ast.Constant) or
                             not isinstance(node.args[key_index].value, str) or
@@ -268,6 +304,62 @@ class TestGate(unittest.TestCase):
                     path.write_text(source)
                     self.assertEqual(gate_violations([str(path)]),
                                      [("probe", line, "non-inventory emission key")])
+
+    def test_slips_render_key_allowance_is_site_and_stem_bound(self):
+        cases = (
+            ("slips", "unavailable_words", "'authority-unavailable-' + code + '-' + part", False),
+            ("slips", "session_not_current_words", "'authority-not-current-' + code + '-' + part", False),
+            ("slips", "unavailable_words", "stem + part", True),
+            ("slips", "session_not_current_words", "stem + part", True),
+            ("probe", "unavailable_words", "'authority-unavailable-' + code + '-' + part", True),
+            ("slips", "other", "'authority-unavailable-' + code + '-' + part", True),
+            ("slips", "unavailable_words", "'authority-not-current-' + code + '-' + part", True),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for module, function, key, refused in cases:
+                with self.subTest(module=module, function=function, key=key):
+                    path = Path(temporary) / (module + ".py")
+                    path.write_text(f"def {function}():\n    return strings.render({key})\n",
+                                    encoding="utf-8")
+                    expected = [(module, 2, "non-inventory emission key")] if refused else []
+                    self.assertEqual(gate_violations([path]), expected)
+
+    def test_private_descriptor_sites_are_exact(self):
+        self.assertIn("PRIVATE_DESCRIPTOR_SITES", globals())
+        self.assertEqual(PRIVATE_DESCRIPTOR_SITES, {
+            ('api_service', '_read_idle_receipt', 'fdopen', 'fd'),
+            ('api_service', '_write_private_frame', 'fdopen', 'fd'),
+            ('api_service', '_write_private_frame', 'write', 'fd'),
+            ('api_service', '_publish_locator', 'fdopen', 'fd'),
+            ('api_operator_bridge', '_publish', 'fdopen', 'descriptor'),
+            ('owner_start', '_read_receipt', 'fdopen', 'fd'),
+            ('owner_start', '_stage_receipt', 'fdopen', 'fd'),
+            ('owner_start', '_run_child', 'fdopen', 'idle_read'),
+            ('owner_start', '_run_child', 'fdopen', 'idle_write'),
+            ('owner_start', '_run_child', 'fdopen', 'retire_read'),
+            ('owner_start', '_run_child', 'fdopen', 'retire_write'),
+            ('store_layout', '_read_frame', 'fdopen', 'fd'),
+            ('store_layout', '_replace', 'fdopen', 'fd'),
+        })
+
+    def test_private_descriptor_allowance_keeps_other_raw_sinks_blocked(self):
+        cases = (
+            ("api_service", "_write_private_frame", "os.write(fd, b'x')", []),
+            ("api_service", "_write_private_frame", "os.write(1, b'x')", ["raw os sink"]),
+            ("api_service", "_write_private_frame", "os.fdopen(2, 'wb')", ["raw os sink"]),
+            ("api_service", "_write_private_frame", "os.write(other_fd, b'x')", ["raw os sink"]),
+            ("api_service", "another_function", "os.write(fd, b'x')", ["raw os sink"]),
+            ("probe", "_write_private_frame", "os.write(fd, b'x')", ["raw os sink"]),
+            ("api_service", "_write_private_frame", "sys.stdout.write('x')", ["raw sys sink"]),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for module, function, call, violations in cases:
+                with self.subTest(module=module, function=function, call=call):
+                    path = Path(temporary) / (module + ".py")
+                    path.write_text(f"def {function}():\n    {call}\n", encoding="utf-8")
+                    self.assertEqual(gate_violations([path]), [
+                        (module, 2, violation) for violation in violations
+                    ])
 
     def test_production_tree_uses_only_keyed_output(self):
         self.assertEqual(gate_violations(self.production_paths()), [])

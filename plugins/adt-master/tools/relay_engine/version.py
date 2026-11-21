@@ -6,19 +6,27 @@ import stat
 
 KIT_VERSION = "2.9.7"
 ROSTER = (
+    "adt",
+    "adt-operator-check",
     "relay",
     "relay_engine/README.md",
     "relay_engine/__init__.py",
     "relay_engine/addresses.py",
+    "relay_engine/adt_cli.py",
     "relay_engine/api_bridge.py",
+    "relay_engine/api_client.py",
+    "relay_engine/api_compose.py",
     "relay_engine/api_definitions.py",
     "relay_engine/api_keys.py",
+    "relay_engine/api_operator_bridge.py",
     "relay_engine/api_platform.py",
     "relay_engine/api_principals.py",
     "relay_engine/api_protocol.py",
     "relay_engine/api_registry.py",
     "relay_engine/api_schema.py",
+    "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
+    "relay_engine/api_submit.py",
     "relay_engine/api_wire.py",
     "relay_engine/api_writer.py",
     "relay_engine/approval_seal.py",
@@ -29,6 +37,9 @@ ROSTER = (
     "relay_engine/cli.py",
     "relay_engine/client.py",
     "relay_engine/commission.py",
+    "relay_engine/console_page/index.html",
+    "relay_engine/console_page/page.css",
+    "relay_engine/console_page/page.js",
     "relay_engine/cycles.py",
     "relay_engine/daemon.py",
     "relay_engine/ed25519_verify.py",
@@ -46,9 +57,15 @@ ROSTER = (
     "relay_engine/jcs.py",
     "relay_engine/judging.py",
     "relay_engine/ledger.py",
+    "relay_engine/lifecycle_lock.py",
     "relay_engine/lifecycle_outbox.py",
+    "relay_engine/lifecycle_paths.py",
+    "relay_engine/lifecycle_state.py",
     "relay_engine/migrate.py",
+    "relay_engine/operator_check_install.py",
+    "relay_engine/operator_check_words.py",
     "relay_engine/operator_queue/__init__.py",
+    "relay_engine/operator_queue/component.py",
     "relay_engine/operator_queue/ingest.py",
     "relay_engine/operator_queue/kinds.py",
     "relay_engine/operator_queue/liveness.py",
@@ -57,6 +74,8 @@ ROSTER = (
     "relay_engine/operator_queue/operations.py",
     "relay_engine/operator_queue/records.py",
     "relay_engine/operator_queue/saga.py",
+    "relay_engine/operator_terminal.py",
+    "relay_engine/owner_start.py",
     "relay_engine/paths.py",
     "relay_engine/queries.py",
     "relay_engine/reconcile.py",
@@ -93,15 +112,16 @@ class FingerprintError(RuntimeError):
 
 def _inventory(tools_dir):
     members = set()
-    launcher = tools_dir / "relay"
-    try:
-        launcher.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        raise FingerprintError("unreadable-member") from error
-    else:
-        members.add("relay")
+    for name in ("relay", "adt", "adt-operator-check"):
+        launcher = tools_dir / name
+        try:
+            launcher.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise FingerprintError("unreadable-member") from error
+        else:
+            members.add(name)
 
     engine_dir = tools_dir / "relay_engine"
     try:

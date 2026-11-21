@@ -617,6 +617,18 @@ class TestRepositoryField(Refused):
             lines.append("REPO: " + repo)
         return draft(lines)
 
+    def test_repo_required_on_impl_act(self):
+        # Breaks: missing REPO admits, NEEDS none is required, or refusal is misidentified.
+        exc = self.refused(self.impl(), "E-FIELD-REQUIRED")
+        self.assertEqual(exc.params["field"], "REPO")
+        self.assertEqual(exc.params["rule"],
+                         "an IMPL with NEEDS: act names the repository its go-ahead is for")
+        try:
+            parsed = header.parse(self.impl(needs="none"))
+        except errors.EngineError as error:
+            self.fail("IMPL with NEEDS none must parse without REPO: " + error.code)
+        self.assertIsNone(parsed.repo)
+
     def test_repo_parsed_on_impl_act(self):
         try:
             parsed = header.parse(self.impl("bivpak"))

@@ -5,10 +5,21 @@
 FROM python:3.11-slim@sha256:db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893
 
 # git: engine tests and the preflight read history; bash: test-adapter.sh;
-# zsh: test_relay_monitor's shell-inertness tests run hints in zsh (early run, 2026-11-04).
+# zsh: test_relay_monitor's shell-inertness tests run hints in zsh (early run, 2026-11-04);
+# openssh-client: ssh-keygen for the owner-start and daemon-join signing tests (Batch 15 P7).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git bash zsh \
+    && apt-get install -y --no-install-recommends git bash zsh openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# The runner passes the host's UID:GID with --user; the engine reads the home from the
+# password database, never $HOME. Batch 15 P6: one static entry for 501:20, home at the
+# runner's /scratch tmpfs; /etc/passwd stays root-owned 0644 at run time.
+# Limit: the Linux leg resolves a home only for UID 501. On a host whose user has another
+# UID, the modules that create a Store fail with the uid lookup error. Open Tests row U
+# replaces this entry with a runner-supplied read-only mapping for the runtime UID.
+RUN getent passwd 501 >/dev/null && exit 1; \
+    printf 'adt-test:x:501:20::/scratch:/bin/sh\n' >>/etc/passwd \
+    && test "$(getent passwd 501)" = 'adt-test:x:501:20::/scratch:/bin/sh'
 
 ENV ADT_TOOLCHAINS=/opt/adt-toolchains
 RUN set -eu; \
@@ -42,3 +53,4 @@ RUN set -eu; \
     cd /; rm -rf "$downloads"; \
     test "$("$ADT_TOOLCHAINS/rust-1.99.1/bin/rustc" --version)" = 'rustc 1.99.1 (58cf8f9c3 2026-10-13)'; \
     test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" --version)" = 'v26.13.0'
+RUN test "$("$ADT_TOOLCHAINS/node-v26.13.0/bin/node" "$ADT_TOOLCHAINS/typescript-7.0.2/node_modules/typescript/bin/tsc" --version)" = 'Version 7.0.2'

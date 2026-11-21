@@ -9,6 +9,11 @@ async function run(value: Json): Promise<unknown> {
     if (action === 'parse') { try { parseStrictJson(str(v['text'])); return { valid: true }; } catch { return { valid: false }; } }
     if (action === 'schema') return { valid: supportsSchema(str(v['schema'])) };
     if (action === 'validate') return { valid: await validateType(str(v['type']) as keyof Types, v['value']) };
+    if (action === 'validate_base64_length') {
+        const n = Number(str(v['length']));
+        const encoded = 'AAAA'.repeat(Math.floor(n / 3)) + (n % 3 === 1 ? 'AA==' : n % 3 === 2 ? 'AAA=' : '');
+        return { valid: await validateType(str(v['type']) as keyof Types, encoded) };
+    }
     if (action === 'encode') { const bytes = await encodeRequest(str(v['operation']), str(v['id']), v['value']); return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') }; }
     if (action === 'encode_checked') {
         try { const bytes = await encodeRequest(str(v['operation']), str(v['id']), v['value']); return { hex: Array.from(bytes).map(x => x.toString(16).padStart(2, '0')).join('') }; }
@@ -40,6 +45,7 @@ async function run(value: Json): Promise<unknown> {
         const result = await decodeResponse(unhex(str(v['frame'])), str(v['operation']), str(v['id']), context);
         if (result.kind === 'unavailable') return { unavailable: true };
         if (result.kind === 'error') return { error: result.error };
+        if (result.kind === 'connection_error') return { connection_error: result.error };
         if (result.kind !== 'schema') return { result: result.result };
         return { result: { protocol: result.result.protocol, schema_digest: result.result.schema_digest, schema_byte_count: result.result.schema_byte_count } };
     }

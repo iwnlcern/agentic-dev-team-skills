@@ -11,6 +11,7 @@ SERVICE_NAMES: tuple[str, ...] = (
     "authority_service",
     "console_queue",
     "engine_liveness",
+    "supervision",
     "xproject_transfer",
 )
 
