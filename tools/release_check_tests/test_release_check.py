@@ -1397,6 +1397,9 @@ class DockerArgs(unittest.TestCase):
         self.assertEqual(args[args.index("--tmpfs") + 1], "/scratch:rw,exec,mode=1777")
         self.assertEqual(args[args.index("--platform") + 1], "linux/arm64")
         self.assertIn("ADT_EXPECTED_HEAD=abc123", args)
+        environ = [value for flag, value in zip(args, args[1:]) if flag == "-e"]
+        self.assertEqual(environ.count("HOME=/scratch"), 1, args)
+        self.assertEqual(environ.count("TMPDIR=/scratch"), 1, args)
         self.assertEqual(args[args.index("-w") + 1], str(worktree))
 
     def test_linux_leg_names_the_acl_folder(self):
