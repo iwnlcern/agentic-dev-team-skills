@@ -127,24 +127,39 @@ class ResolveFailure:
 
 
 _STUB_INPUT = r'''
-input=$(mktemp "${TMPDIR:-/tmp}/adt-hook.XXXXXXXXXX") || exit 1
-trap 'rm -f "$input"' 0
-trap 'exit 1' HUP INT TERM
-cat > "$input" || exit 1
-
 saved="$0.adt-local"
-if [ -x "$saved" ]; then
-    "$saved" "$@" < "$input" || exit "$?"
+if [ -z "${CLAUDECODE+x}${CLAUDE_CODE_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_SESSION_ID+x}" ]; then
+    if [ -x "$saved" ]; then
+        exec "$saved" "$@"
+    fi
+    exit 0
 fi
 
-if [ -z "${CLAUDECODE+x}${CLAUDE_CODE_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_SESSION_ID+x}" ]; then
-    exit 0
+stub_fault() {
+    printf '%s\n' @FAULT_REASON@ @FAULT_REMEDY@ >&2
+    exit 1
+}
+
+input=$(mktemp "${TMPDIR:-/tmp}/adt-hook.XXXXXXXXXX" 2>/dev/null) || stub_fault
+trap 'rm -f "$input"' 0
+trap 'exit 1' HUP INT TERM
+cat 2>/dev/null > "$input" || stub_fault
+
+if [ -x "$saved" ]; then
+    "$saved" "$@" < "$input" || exit "$?"
 fi
 '''
 
 _STUB_LAUNCH = r'''
+home_is_absolute() {
+    case "${HOME:-}" in
+        /*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 status=126
-if [ -n "${HOME:-}" ] && [ -x "$HOME/.adt/bin/adt" ]; then
+if home_is_absolute && [ -x "$HOME/.adt/bin/adt" ]; then
     # Preserve stdout and the refusal on stderr, suppressing shell diagnostics
     # and any partial stderr output from a launcher that failed.
     exec 3>&1
@@ -165,6 +180,7 @@ esac
 
 record_or_hash_fault() {
     [ -n "$2" ] || return 1
+    home_is_absolute || return 0
     if command -v shasum >/dev/null 2>&1; then
         digest=$(printf '%s' "$2" | shasum -a 256) || return 0
     elif command -v sha256sum >/dev/null 2>&1; then
@@ -173,15 +189,13 @@ record_or_hash_fault() {
         return 0
     fi
     digest=${digest%% *}
-    [ -n "${HOME:-}" ] || return 1
     record="$HOME/.adt/sessions/$1-$digest"
     [ -e "$record" ] || [ -L "$record" ]
 }
 
 if record_or_hash_fault claude-code "${CLAUDE_CODE_SESSION_ID:-}" ||
    record_or_hash_fault codex "${CODEX_SESSION_ID:-}"; then
-    printf '%s\n' @FAULT_REASON@ @FAULT_REMEDY@ >&2
-    exit 1
+    stub_fault
 fi
 exit 0
 '''
@@ -191,11 +205,12 @@ def stub_text(name: str) -> bytes:
     if name not in HOOK_NAMES:
         raise ValueError(f"unknown hook: {name}")
     reason, remedy = slips.unavailable_words("fault")
-    launch = (_STUB_LAUNCH.replace("@NAME@", name)
-              .replace("@FAULT_REASON@", shlex.quote(f"refused: {reason} (fault)"))
-              .replace("@FAULT_REMEDY@", shlex.quote(f"next: {remedy}; ask operator if you cannot")))
     state_check = '[ "${1:-}" = prepared ] || exit 0\n' if name == "reference-transaction" else ""
-    return _SHEBANG + _CURRENT_MARKER + (_STUB_INPUT + state_check + launch).encode("utf-8")
+    body = _STUB_INPUT + state_check + _STUB_LAUNCH
+    body = (body.replace("@NAME@", name)
+                .replace("@FAULT_REASON@", shlex.quote(f"refused: {reason} (fault)"))
+                .replace("@FAULT_REMEDY@", shlex.quote(f"next: {remedy}; ask operator if you cannot")))
+    return _SHEBANG + _CURRENT_MARKER + body.encode("utf-8")
 
 
 _ANCHORED_GIT = """

@@ -362,7 +362,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/hook_files.py",
-    "sha256": "89845a33bf48007b020093dbd4c885a5950c8a60896257c3577ffea11b7cce53",
+    "sha256": "2269d3a837cd53f53d5302f8809d0b0f7858b62388ac44050bb97021de7f676f",
     "source": "tools/adapters/hook_files.py"
   },
   {
@@ -506,7 +506,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_hook_files.py",
-    "sha256": "b4a787ab5467ca1c493e43848d1606fcbcfb11643443aeea0f6b6a4a4d807ad9",
+    "sha256": "2abd75e6bdf01efed20f3731600afd3bec31139f07c1d33d60060d3ba8c99ade",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -11510,7 +11510,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/hook_files.py",
-    "sha256": "89845a33bf48007b020093dbd4c885a5950c8a60896257c3577ffea11b7cce53",
+    "sha256": "2269d3a837cd53f53d5302f8809d0b0f7858b62388ac44050bb97021de7f676f",
     "source": "tools/adapters/hook_files.py"
   },
   {
@@ -11654,7 +11654,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_hook_files.py",
-    "sha256": "b4a787ab5467ca1c493e43848d1606fcbcfb11643443aeea0f6b6a4a4d807ad9",
+    "sha256": "2abd75e6bdf01efed20f3731600afd3bec31139f07c1d33d60060d3ba8c99ade",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -22574,7 +22574,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/hook_files.py",
-    "sha256": "89845a33bf48007b020093dbd4c885a5950c8a60896257c3577ffea11b7cce53",
+    "sha256": "2269d3a837cd53f53d5302f8809d0b0f7858b62388ac44050bb97021de7f676f",
     "source": "tools/adapters/hook_files.py"
   },
   {
@@ -22718,7 +22718,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_hook_files.py",
-    "sha256": "b4a787ab5467ca1c493e43848d1606fcbcfb11643443aeea0f6b6a4a4d807ad9",
+    "sha256": "2abd75e6bdf01efed20f3731600afd3bec31139f07c1d33d60060d3ba8c99ade",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {

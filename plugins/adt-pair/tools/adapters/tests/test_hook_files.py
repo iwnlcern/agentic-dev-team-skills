@@ -46,12 +46,13 @@ class HookFileTests(unittest.TestCase):
         self.held = os.open(self.common, os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, self.held)
 
-    def git(self, *args, repo=None):
+    def git(self, *args, repo=None, data=None):
         command = [GIT]
         if repo is not None:
             command.extend(("-C", str(repo)))
         return subprocess.run(
-            [*command, *args], env=self.env, stdin=subprocess.DEVNULL,
+            [*command, *args], env=self.env, input=data,
+            stdin=subprocess.DEVNULL if data is None else None,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
         ).stdout
 
@@ -427,7 +428,7 @@ exec {shlex.quote(GIT)} "$@"
         record.touch()
         return record
 
-    def run_stub(self, name, *args, data=b"", command=(), **environment):
+    def run_stub(self, name, *args, data=b"", command=(), cwd=None, **environment):
         env = dict(self.env)
         for key, value in environment.items():
             if value is None:
@@ -436,7 +437,7 @@ exec {shlex.quote(GIT)} "$@"
                 env[key] = str(value)
         return subprocess.run(
             [*command, str(self.folder / name), *args], input=data, env=env,
-            capture_output=True, timeout=5,
+            cwd=cwd, capture_output=True, timeout=5,
         )
 
     def fault_lines(self):
@@ -469,6 +470,43 @@ exec {shlex.quote(GIT)} "$@"
         self.executable(self.folder / "pre-push.adt-local", 'echo local; exit 19')
         result = self.run_stub("pre-push")
         self.assertEqual((result.returncode, result.stdout), (19, b"local\n"))
+        local = self.folder / "pre-push.adt-local"
+        missing_tmp = self.scratch / "missing tmp"
+        data = b"first line\nsecond line\n"
+        for status in (0, 1, None):
+            with self.subTest(missing_tmp=True, saved_status=status):
+                if status is None:
+                    local.unlink()
+                    expected_input = b""
+                else:
+                    self.executable(local, f"cat\nexit {status}")
+                    expected_input = data
+                result = self.run_stub("pre-push", data=data, TMPDIR=missing_tmp)
+                expected_status = 0 if status is None else status
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (expected_status, expected_input, b""),
+                )
+
+        with self.subTest(preservation="large input"):
+            result = self.run_stub("pre-push", data=b"ref update\n" * 20_000)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+
+        with self.subTest(preservation="real Git"):
+            self.assertFalse(local.exists())
+            self.assertFalse((self.folder / "reference-transaction.adt-local").exists())
+            self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                     "commit", "--allow-empty", "-m", "fixture", repo=self.repo)
+            oid = self.git("rev-parse", "HEAD", repo=self.repo).strip().decode()
+            refs = {f"refs/heads/test-{index:04d}" for index in range(2_000)}
+            updates = "".join(f"create {ref} {oid}\n" for ref in sorted(refs)).encode()
+            self.git("update-ref", "--stdin", repo=self.repo, data=updates)
+            remote = self.scratch / "bare remote"
+            self.git("init", "--bare", "--template=", str(remote))
+            self.git("-c", "protocol.allow=never", "-c", "protocol.file.allow=always",
+                     "push", "--all", str(remote), repo=self.repo)
+            received = self.git("for-each-ref", "--format=%(refname)", "refs/heads", repo=remote)
+            self.assertEqual(set(received.decode().splitlines()) & refs, refs)
 
     def test_stub_fault_by_record(self):
         self.install()
@@ -534,10 +572,53 @@ exec {shlex.quote(GIT)} "$@"
     def test_stub_home_unset(self):
         self.install()
         self.record("codex", "agent")
-        self.launcher("exit 10")
-        result = self.run_stub("pre-push", command=("/bin/sh", "-u"), HOME=None,
-                               CODEX_SESSION_ID="agent")
-        self.assertEqual((result.returncode, result.stderr), (0, b""))
+        command = ("/bin/sh", "-u")
+        for home in (None, "", "relative/home"):
+            with self.subTest(marked=True, home=home):
+                result = self.run_stub("pre-push", command=command, cwd=self.scratch,
+                                       HOME=home, CODEX_SESSION_ID="agent")
+                self.assertEqual((result.returncode, result.stderr), (1, self.fault_lines()))
+
+        with self.subTest(marked=True, decoy=True):
+            marker = self.scratch / "decoy started"
+            self.executable(self.scratch / "relative/home/.adt/bin/adt",
+                            f"touch {shlex.quote(str(marker))}")
+            result = self.run_stub("pre-push", command=command, cwd=self.scratch,
+                                   HOME="relative/home", CODEX_SESSION_ID="agent")
+            self.assertFalse(marker.exists(), "relative HOME launched the decoy")
+            self.assertEqual((result.returncode, result.stderr), (1, self.fault_lines()))
+
+        local = self.folder / "pre-push.adt-local"
+        for status in (0, 1):
+            with self.subTest(preservation="unmarked HOME", saved_status=status):
+                self.executable(local, f"printf 'saved once\\n'\nexit {status}")
+                result = self.run_stub("pre-push", command=command, HOME=None)
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (status, b"saved once\n", b""),
+                )
+
+    def test_stub_staging_failure_is_a_fault(self):
+        marker = self.scratch / "saved started"
+        self.executable(self.folder / "pre-push", f"touch {shlex.quote(str(marker))}")
+        self.install()
+        tmp = self.scratch / "valid tmp"
+        tmp.mkdir()
+        fake_bin = self.scratch / "bin"
+        self.executable(fake_bin / "cat", "printf 'copy failed\\n' >&2\nexit 1")
+        copy_path = str(fake_bin) + os.pathsep + self.env["PATH"]
+        for has_record in (False, True):
+            if has_record:
+                self.record("codex", "agent")
+            for failure, environment in (
+                ("mktemp", {"TMPDIR": self.scratch / "missing tmp"}),
+                ("copy", {"TMPDIR": tmp, "PATH": copy_path}),
+            ):
+                with self.subTest(has_record=has_record, failure=failure):
+                    result = self.run_stub("pre-push", data=b"ref update\n",
+                                           CODEX_SESSION_ID="agent", **environment)
+                    self.assertFalse(marker.exists(), "saved hook ran without a complete copy")
+                    self.assertEqual((result.returncode, result.stderr), (1, self.fault_lines()))
 
     def test_saved_hook_ignoring_input_does_not_hang(self):
         self.executable(self.folder / "pre-push", "exit 0")
