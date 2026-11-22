@@ -1083,15 +1083,19 @@ class ImageResolution(unittest.TestCase):
     IMAGE = "sha256:" + "a" * 64
     OTHER = "sha256:" + "b" * 64
     THIRD = "sha256:" + "c" * 64
-    MISS = (0, 1, "", f"Error response from daemon: No such image: {TAG}")
+    MISS = (
+        0, 1, "\n",
+        f'Error response from daemon: {{"message":"No such image: {TAG}"}}\n',
+    )
+    MISS_PLAIN = (0, 1, "\n", f"Error response from daemon: No such image: {TAG}\n")
 
-    def stub(self, *, inspect=None, wake=(0, 0, "", ""), info=(0, 0, "arm64", ""),
+    def stub(self, *, inspect=None, wake=(0, 0, "", ""), info=(0, 0, "aarch64\n", ""),
              build=(0, 0, "", "")):
         fixture = LinuxFixture(self).finish()
         log = fixture.pids / "argv"
         before = fixture.out / "before.json"
         if inspect is None:
-            inspect = [(0, 0, self.IMAGE + " linux/arm64", "")]
+            inspect = [(0, 0, self.IMAGE + " linux/arm64\n", "")]
         source = f"""#!{sys.executable}
 import json
 import os
@@ -1114,24 +1118,29 @@ if command == "inspect":
     offset = sum(row["command"] == command for row in prior)
     delay, code, out, err = rows[min(offset, len(rows) - 1)]
     if code == 0 and "{{{{.Architecture}}}}" in argv and out.startswith("sha256:"):
-        out = out.split()[-1]
+        out = out.split()[-1] + "\\n"
     if code == 0 and "{{{{.Id}}}}" in argv and out.startswith("sha256:"):
-        out = out.split()[0]
+        out = out.split()[0] + "\\n"
 else:
     delay, code, out, err = {{
         "info": {info!r}, "ps": {wake!r}, "build": {build!r}, "run": (0, 2, "", ""),
-    }}.get(command, (0, 2, "", "unexpected Docker command"))
+    }}.get(command, (0, 2, "", "unexpected Docker command\\n"))
 time.sleep(delay)
-if out:
-    print(out)
-if err:
-    print(err, file=sys.stderr)
+sys.stdout.write(out)
+sys.stderr.write(err)
 raise SystemExit(code)
 """
         docker = fixture.pids / "docker"
         with open(docker, "x", opener=lambda name, flags: os.open(name, flags, 0o755)) as stream:
             stream.write(source)
+        self.warm_stub(docker)
         return fixture, docker, log
+
+    def warm_stub(self, docker):
+        result = subprocess.run([str(docker), "version"], capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result)
+        self.assertEqual(result.stderr, b'unexpected Docker command\n')
+        docker.with_name("argv").unlink()
 
     def rows(self, log):
         if not log.exists():
@@ -1178,8 +1187,26 @@ raise SystemExit(code)
         self.assertTrue(all(row["class"] == "not-found" for row in inspects[:-1]), record)
         self.assertIn(inspects[-1]["class"], ("not-found", "cut"), record)
 
+    def test_real_miss_forms_are_not_found(self):
+        for form, miss in (("json", self.MISS), ("plain", self.MISS_PLAIN)):
+            with self.subTest(form=form):
+                fixture, docker, log = self.stub(inspect=[miss])
+                status, error = self.full(fixture, docker, timings=(2.0, 1.5, 0.05))
+                self.assertEqual(status, 2, error)
+                self.assertIn(self.TAG, error)
+                self.assertIn("all not-found", error)
+                record = self.image_record(fixture)
+                self.assertEqual(record["result"], "unresolved")
+                wake, *inspects = record["probes"]
+                self.assertEqual((wake["kind"], wake["class"]), ("wake", "woke"))
+                self.assertTrue(inspects, record)
+                self.assertTrue(all(row["kind"] == "inspect" for row in inspects), record)
+                self.assertTrue(all(row["class"] == "not-found" for row in inspects[:-1]), record)
+                self.assertIn(inspects[-1]["class"], ("not-found", "cut"), record)
+                self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
+
     def test_idle_miss_then_answer_runs_by_id(self):
-        fixture, docker, log = self.stub(inspect=[self.MISS, (0, 0, self.IMAGE + " linux/arm64", "")])
+        fixture, docker, log = self.stub(inspect=[self.MISS, (0, 0, self.IMAGE + " linux/arm64\n", "")])
         self.full(fixture, docker)
         self.assertEqual(self.commands(log), ["info", "ps", "inspect", "inspect", "run"], self.rows(log))
         argv = self.rows(log)[-1]["argv"]
@@ -1193,15 +1220,15 @@ raise SystemExit(code)
 
     def test_inconclusive_lookups_stop_without_building(self):
         for case, kwargs, message in [
-            ("wake", {"wake": (0, 1, "", "wake refused"), "inspect": [self.MISS]},
+            ("wake", {"wake": (0, 1, "", "wake refused\n"), "inspect": [self.MISS]},
              "wake failed: wake refused"),
             ("transport", {"inspect": [(0, 1, "", "Cannot connect to the Docker daemon at "
-                                       "unix:///var/run/docker.sock. Is the docker daemon running?")]},
+                                       "unix:///var/run/docker.sock. Is the docker daemon running?\n")]},
              "unresolved"),
             ("timeout", {"inspect": [(2.0, 1, "", "")]}, "inspect timeout"),
-            ("malformed", {"inspect": [(0, 0, "not an image record", "")]}, "unresolved"),
-            ("foreign", {"inspect": [(0, 0, self.OTHER + " linux/amd64", "")]}, "foreign"),
-            ("info", {"info": (1.05, 0, "arm64", ""), "inspect": [self.MISS]}, "platform"),
+            ("malformed", {"inspect": [(0, 0, "not an image record\n", "")]}, "unresolved"),
+            ("foreign", {"inspect": [(0, 0, self.OTHER + " linux/amd64\n", "")]}, "foreign"),
+            ("info", {"info": (1.05, 0, "aarch64\n", ""), "inspect": [self.MISS]}, "platform"),
         ]:
             with self.subTest(case=case):
                 fixture, docker, log = self.stub(**kwargs)
@@ -1241,7 +1268,7 @@ raise SystemExit(code)
         for case, inspect, statement, expected in [
             ("no-statement", None, False, 2),
             ("present", None, True, 2),
-            ("foreign", [(0, 0, self.OTHER + " linux/amd64", "")], True, 2),
+            ("foreign", [(0, 0, self.OTHER + " linux/amd64\n", "")], True, 2),
             ("unresolved", [self.MISS], True, 0),
         ]:
             with self.subTest(case=case):
@@ -1277,6 +1304,7 @@ raise SystemExit(code)
             f'    print({answer!r})\n    raise SystemExit(0)\nif command == "inspect":',
         )
         docker.write_text(script)
+        self.warm_stub(docker)
         yield
 
     def test_docker_args_run_by_immutable_id(self):
@@ -1327,7 +1355,7 @@ raise SystemExit(code)
 
     def test_resolution_stops_on_interrupt(self):
         resolve_image = rc.resolve_image
-        _, docker, log = self.stub(inspect=[(5, 0, self.IMAGE + " linux/arm64", "")])
+        _, docker, log = self.stub(inspect=[(5, 0, self.IMAGE + " linux/arm64\n", "")])
         with self.timings(window=5, probe=4), self.stop_on(log, "inspect"):
             start = time.monotonic()
             with self.assertRaises(rc.Stopped):
@@ -1340,7 +1368,7 @@ raise SystemExit(code)
             with self.subTest(case=case):
                 fixture, docker, log = self.stub(
                     inspect=[self.MISS],
-                    build=(5 if case == "stopped" else 0, int(case == "build-failed"), "", "build stderr"),
+                    build=(5 if case == "stopped" else 0, int(case == "build-failed"), "", "build stderr\n"),
                 )
                 with contextlib.ExitStack() as stack:
                     if case == "foreign":
@@ -1367,7 +1395,7 @@ raise SystemExit(code)
                     self.assertEqual(after["record"]["result"], case)
 
     def test_shared_window_cuts_a_late_inspect(self):
-        fixture, docker, log = self.stub(inspect=[self.MISS, (1.3, 0, self.IMAGE + " linux/arm64", "")])
+        fixture, docker, log = self.stub(inspect=[self.MISS, (1.3, 0, self.IMAGE + " linux/arm64\n", "")])
         status, err = self.full(fixture, docker, timings=(2.0, 1.6, 1.0))
         self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
         self.assertEqual(status, 2, err)

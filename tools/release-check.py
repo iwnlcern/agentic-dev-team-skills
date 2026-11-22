@@ -843,7 +843,7 @@ def resolve_image(docker, platform):
             classification = "answer"
         elif response.timed_out:
             classification = "cut" if end < probe_deadline else "timeout"
-        elif response.exit == 1 and not response.stdout and err in misses:
+        elif response.exit == 1 and not out and err in misses:
             classification = "not-found"
         else:
             classification = "other"
