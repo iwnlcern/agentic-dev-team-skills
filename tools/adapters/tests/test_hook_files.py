@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -22,6 +23,8 @@ from tools.adapters import hook_files as hooks
 
 MARKERS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
 GIT = shutil.which("git")
+HANG_CEILING_S = 60.0
+REAP_S = 10.0
 
 
 class HookFileTests(unittest.TestCase):
@@ -428,6 +431,38 @@ exec {shlex.quote(GIT)} "$@"
         record.touch()
         return record
 
+    def stop_stub(self, child: subprocess.Popen) -> bool:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            if pipe is not None:
+                pipe.close()
+        try:
+            child.wait(timeout=REAP_S)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+    def wait_or_fail(self, child: subprocess.Popen, launched: float, *,
+                     data: bytes | None) -> tuple[bytes, bytes]:
+        try:
+            return child.communicate(
+                input=data, timeout=HANG_CEILING_S - (time.monotonic() - launched),
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - launched
+            load = os.getloadavg()
+            reaped = self.stop_stub(child)
+            reap_note = "" if reaped else f"; direct child reap exceeded {REAP_S:.1f}s"
+            self.fail(f"Stub {child.args!r} exceeded its hang ceiling after {elapsed:.3f}s "
+                      f"from launch (load averages {load!r}): host delay or hang, "
+                      f"not a verdict on the test's subject{reap_note}")
+        except BaseException:
+            self.stop_stub(child)
+            raise
+
     def run_stub(self, name, *args, data=b"", command=(), cwd=None, **environment):
         env = dict(self.env)
         for key, value in environment.items():
@@ -435,10 +470,40 @@ exec {shlex.quote(GIT)} "$@"
                 env.pop(key, None)
             else:
                 env[key] = str(value)
-        return subprocess.run(
-            [*command, str(self.folder / name), *args], input=data, env=env,
-            cwd=cwd, capture_output=True, timeout=5,
+        launched = time.monotonic()
+        child = subprocess.Popen(
+            [*command, str(self.folder / name), *args], env=env, cwd=cwd,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
         )
+        stdout, stderr = self.wait_or_fail(child, launched, data=data)
+        return subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+
+    def run_stub_with_failed_cleanup(self, name, **environment):
+        with tempfile.TemporaryDirectory(dir=self.scratch) as directory:
+            scratch = Path(directory)
+            receipt = scratch / "cleanup.args"
+            fake_bin = scratch / "bin"
+            self.executable(
+                fake_bin / "rm",
+                f"printf '%s %s\\n' \"$@\" >> {shlex.quote(str(receipt))}\n"
+                "printf 'rm stand-in failed\\n' >&2\n"
+                "exit 1",
+            )
+            path = environment.get("PATH", self.env["PATH"])
+            environment["PATH"] = str(fake_bin) + os.pathsep + path
+            result = self.run_stub(name, TMPDIR=scratch, **environment)
+
+            self.assertTrue(receipt.is_file(), "cleanup trap did not record an attempt")
+            lines = receipt.read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertTrue(lines[0].startswith("-f "))
+            staged = Path(lines[0][3:])
+            self.assertEqual(staged.parent, scratch)
+            self.assertTrue(staged.name.startswith("adt-hook."))
+            self.assertTrue(staged.is_file(), "staging file should survive the cleanup failure")
+            staged.unlink()
+            return result
 
     def fault_lines(self):
         reason, remedy = slips.unavailable_words("fault")
@@ -533,6 +598,10 @@ exec {shlex.quote(GIT)} "$@"
         self.launcher("echo 'its refusal' >&2; exit 10")
         result = self.run_stub("pre-push", CLAUDE_CODE_SESSION_ID="agent")
         self.assertEqual((result.returncode, result.stderr), (1, b"its refusal\n"))
+        with self.subTest(cleanup_failure=True):
+            self.launcher("printf '%s\\n' 'its refusal' 'its next step' >&2\nexit 10")
+            result = self.run_stub_with_failed_cleanup("pre-push", CLAUDE_CODE_SESSION_ID="agent")
+            self.assertEqual((result.returncode, result.stderr), (1, b"its refusal\nits next step\n"))
 
     def test_stub_marks_by_four_variables(self):
         self.install()
@@ -620,6 +689,13 @@ exec {shlex.quote(GIT)} "$@"
                     self.assertFalse(marker.exists(), "saved hook ran without a complete copy")
                     self.assertEqual((result.returncode, result.stderr), (1, self.fault_lines()))
 
+            with self.subTest(has_record=has_record, cleanup_failure=True):
+                result = self.run_stub_with_failed_cleanup(
+                    "pre-push", data=b"ref update\n", CODEX_SESSION_ID="agent", PATH=copy_path,
+                )
+                self.assertFalse(marker.exists(), "saved hook ran without a complete copy")
+                self.assertEqual((result.returncode, result.stderr), (1, self.fault_lines()))
+
     def test_saved_hook_ignoring_input_does_not_hang(self):
         self.executable(self.folder / "pre-push", "exit 0")
         self.launcher("cat")
@@ -658,19 +734,29 @@ exec {shlex.quote(GIT)} "$@"
         # Use disk-backed, independent pipes for output to avoid serial pipe drains.
         with contextlib.ExitStack() as stack:
             runs = []
+            unwaited = set()
+
+            def stop_if_unwaited(child):
+                if child in unwaited:
+                    self.stop_stub(child)
+
             for worktree, data in ((first, b"first\n" * 20_000), (second, b"second\n" * 20_000)):
                 source = stack.enter_context(tempfile.TemporaryFile())
                 destination = stack.enter_context(tempfile.TemporaryFile())
                 source.write(data)
                 source.seek(0)
-                proc = stack.enter_context(subprocess.Popen(
+                launched = time.monotonic()
+                proc = subprocess.Popen(
                     [str(self.folder / "pre-push")], cwd=worktree, env=env,
                     stdin=source, stdout=destination, stderr=subprocess.PIPE,
-                ))
-                stack.callback(lambda child: child.kill() if child.poll() is None else None, proc)
-                runs.append((proc, worktree, data, destination))
-            for proc, worktree, data, destination in runs:
-                _, stderr = proc.communicate(timeout=5)
+                    start_new_session=True,
+                )
+                unwaited.add(proc)
+                stack.callback(stop_if_unwaited, proc)
+                runs.append((proc, launched, worktree, data, destination))
+            for proc, launched, worktree, data, destination in runs:
+                unwaited.remove(proc)
+                _, stderr = self.wait_or_fail(proc, launched, data=None)
                 self.assertEqual((proc.returncode, stderr), (0, b""))
                 destination.seek(0)
                 self.assertEqual(destination.read(), data)

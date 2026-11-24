@@ -141,7 +141,7 @@ stub_fault() {
 }
 
 input=$(mktemp "${TMPDIR:-/tmp}/adt-hook.XXXXXXXXXX" 2>/dev/null) || stub_fault
-trap 'rm -f "$input"' 0
+trap 'rm -f "$input" 2>/dev/null' 0
 trap 'exit 1' HUP INT TERM
 cat 2>/dev/null > "$input" || stub_fault
 
