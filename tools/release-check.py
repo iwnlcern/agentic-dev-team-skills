@@ -73,6 +73,7 @@ STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 DOCKER_PLATFORMS = {"aarch64": "linux/arm64", "arm64": "linux/arm64",
                     "x86_64": "linux/amd64", "amd64": "linux/amd64"}
 PROBE_SECONDS = 5
+FINAL_POLL_LEAD_SECONDS = 0.01
 WINDOW_SECONDS = 15
 PROBE_INTERVAL_SECONDS = 0.5
 WAKE_LABEL = "adt.release-check.wake"
@@ -762,25 +763,38 @@ def _docker_child(argv, deadline=None, *, stdin=subprocess.DEVNULL):
             if deadline is not None and time.monotonic() >= deadline:
                 return DockerChild(None, b"", b"", timed_out=True)
             with subprocess.Popen(argv, stdin=stdin, stdout=stdout, stderr=stderr) as proc:
-                while True:
-                    remaining = None if deadline is None else deadline - time.monotonic()
-                    stopped = STOP.is_set()
-                    timed_out = remaining is not None and remaining <= 0
-                    if stopped or timed_out:
-                        if deadline is None:
-                            # An explicit build gets a graceful client shutdown first.
-                            proc.terminate()
-                            try:
-                                proc.wait(timeout=1)
-                            except subprocess.TimeoutExpired:
-                                proc.kill()
-                        else:
+                if deadline is None:
+                    while not (stopped := STOP.is_set()) and proc.poll() is None:
+                        STOP.wait(POLL_SECONDS)
+                    if stopped:
+                        # An explicit build gets a graceful client shutdown first.
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
                             proc.kill()
                         proc.wait()
-                        break
-                    if proc.poll() is not None:
-                        break
-                    STOP.wait(POLL_SECONDS if remaining is None else min(POLL_SECONDS, remaining))
+                else:
+                    final_poll_at = deadline - FINAL_POLL_LEAD_SECONDS
+                    while not (stopped := STOP.is_set()):
+                        exit_code = proc.poll()
+                        now = time.monotonic()
+                        stopped = STOP.is_set()
+                        if stopped or (exit_code is not None and now <= deadline):
+                            break
+                        if now >= deadline:
+                            timed_out = True
+                            break
+                        if now >= final_poll_at:
+                            # The last poll was inconclusive. Wait without polling again.
+                            STOP.wait(deadline - now)
+                            stopped = STOP.is_set()
+                            timed_out = not stopped
+                            break
+                        STOP.wait(min(POLL_SECONDS, final_poll_at - now))
+                    if stopped or timed_out:
+                        proc.kill()
+                        proc.wait()
         except OSError as error:
             raise SetupError(f"Docker could not run ({argv[0]}): {error}") from error
         stdout.seek(0)

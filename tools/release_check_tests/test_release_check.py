@@ -18,6 +18,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1393,6 +1394,130 @@ raise SystemExit(code)
                 else:
                     self.assertEqual(after["build_exit"], 0)
                     self.assertEqual(after["record"]["result"], case)
+
+    def test_final_poll_lands_before_the_deadline(self):
+        REFERENCE_LEAD = 0.01
+
+        class FakeClock:
+            def __init__(self):
+                self.seconds = 0.0
+
+            def now(self):
+                return self.seconds
+
+            def advance(self, seconds):
+                self.seconds += seconds
+
+        class FakeChild:
+            def __init__(self, clock, exits_at, code, poll_cost=0.001):
+                self.clock = clock
+                self.exits_at = exits_at
+                self.code = code
+                self.poll_cost = poll_cost
+                self.poll_times = []
+                self.killed = False
+                self.waited = False
+                self.returncode = None
+                self.pid = 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def poll(self):
+                self.poll_times.append(self.clock.now())
+                self.clock.advance(self.poll_cost)
+                if self.clock.now() >= self.exits_at:
+                    self.returncode = self.code
+                return self.returncode
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self):
+                self.waited = True
+                self.returncode = -signal.SIGKILL if self.killed else self.code
+                return self.returncode
+
+        class FakeStop:
+            def __init__(self, clock, deadline, wake_late=0.0, set_at=None):
+                self.clock = clock
+                self.deadline = deadline
+                self.wake_late = wake_late
+                self.set_at = set_at
+
+            def is_set(self):
+                return self.set_at is not None and self.clock.now() >= self.set_at
+
+            def wait(self, timeout):
+                if self.is_set():
+                    return True
+                now = self.clock.now()
+                end = now + timeout
+                lead = getattr(rc, "FINAL_POLL_LEAD_SECONDS", REFERENCE_LEAD)
+                if self.deadline is not None and self.wake_late and end >= self.deadline - lead:
+                    end += self.wake_late
+                    self.wake_late = 0.0
+                if self.set_at is not None and self.set_at <= end:
+                    end = self.set_at
+                self.clock.advance(end - now)
+                return self.is_set()
+
+        def run(exits_at, *, deadline=1.0, poll_cost=0.001, wake_late=0.0, set_at=None):
+            clock = FakeClock()
+            child = FakeChild(clock, exits_at, 0, poll_cost)
+            stop = FakeStop(clock, deadline, wake_late, set_at)
+            fake_subprocess = SimpleNamespace(DEVNULL=subprocess.DEVNULL, Popen=mock.Mock(return_value=child))
+            with (mock.patch.object(rc, "time", SimpleNamespace(monotonic=clock.now)),
+                  mock.patch.object(rc, "subprocess", fake_subprocess),
+                  mock.patch.object(rc, "STOP", stop)):
+                result = rc._docker_child(["fake-docker"], deadline)
+            return result, child
+
+        with self.subTest(case="exit-before-lead"):
+            result, child = run(0.98)
+            self.assertFalse(result.timed_out)
+            self.assertEqual(result.exit, 0)
+            self.assertFalse(child.killed)
+
+        with self.subTest(case="exit-inside-lead"):
+            for poll_cost in (0.001, 0.0):
+                with self.subTest(poll_cost=poll_cost):
+                    result, child = run(0.995, poll_cost=poll_cost)
+                    final_poll_at = 1.0 - getattr(rc, "FINAL_POLL_LEAD_SECONDS", REFERENCE_LEAD)
+                    self.assertLessEqual(sum(at >= final_poll_at for at in child.poll_times), 1)
+                    self.assertTrue(result.timed_out)
+                    self.assertTrue(child.killed)
+
+        with self.subTest(case="final-poll-late"):
+            result, _ = run(0.98, wake_late=0.015)
+            self.assertTrue(result.timed_out)
+
+        with self.subTest(case="exit-after-deadline"):
+            result, child = run(1.02)
+            self.assertTrue(result.timed_out)
+            self.assertTrue(child.killed)
+
+        with self.subTest(case="stop-wins"):
+            result, child = run(0.98, set_at=0.985)
+            self.assertTrue(result.stopped)
+            self.assertTrue(child.killed)
+
+        with self.subTest(case="stop-after-final"):
+            result, child = run(1.02, set_at=0.995)
+            self.assertTrue(result.stopped)
+            self.assertTrue(child.killed)
+            self.assertTrue(child.waited)
+            self.assertFalse(any(at >= 0.995 for at in child.poll_times))
+
+        with self.subTest(case="no-deadline"):
+            result, child = run(3.0, deadline=None)
+            self.assertFalse(result.timed_out)
+            self.assertFalse(result.stopped)
+            self.assertEqual(result.exit, 0)
+            self.assertFalse(child.killed)
 
     def test_shared_window_cuts_a_late_inspect(self):
         fixture, docker, log = self.stub(inspect=[self.MISS, (1.3, 0, self.IMAGE + " linux/arm64\n", "")])
