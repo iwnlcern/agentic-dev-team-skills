@@ -1749,6 +1749,9 @@ def foreground_fixture_main():
 class ForegroundOwnerTests(unittest.TestCase):
     def setUp(self):
         self.base = Path(self.enterContext(tempfile.TemporaryDirectory(dir='/tmp'))).resolve()
+        self.temp = self.base / 'tmp'
+        self.temp.mkdir(mode=0o700)
+        self.enterContext(patch.dict(os.environ, TMPDIR=str(self.temp)))
         self.root = self.base / '.adt'
         self.receipts = self.base / '.adt-owner' / 'receipts'
         self.receipts.parent.mkdir(mode=0o700)
@@ -1896,6 +1899,7 @@ class ForegroundOwnerTests(unittest.TestCase):
         with self._owner('normal') as owner:
             ready = self._ready(owner)
             self.assertTrue(ready.exists())
+            self.assertEqual(ready.parent.parent, self.temp)
             arm = self._arm()
             prior = self._receipt()
             os.kill(self._child_pid(), signal.SIGKILL)
