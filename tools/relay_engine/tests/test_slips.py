@@ -394,6 +394,61 @@ class TestStanding(SlipStore):
             self.standing(BrokenRead(self.conn))
 
 
+class TestScope(SlipStore):
+    def scope(self, repository='repo-1', **target):
+        return slips.scope(self.conn, IMPL.seat_id, repository, **target)
+
+    def test_scope_ref_bound_to_seat(self):
+        _, _, older = self.build(bundle='older', design=False)
+        self.assertEqual(self.act(branch='older').slip_id, self.issued(older))
+        _, _, newer = self.build(bundle='newer', design=False)
+        self.issued(newer)
+        self.assertEqual(self.scope(ref='older'), (self.issued(older), 1))
+
+    def test_scope_matches_act_binding(self):
+        _, _, older = self.build(bundle='older', design=False)
+        _, _, newer = self.build(bundle='newer', design=False)
+        self.issued(older)
+        covered = self.scope(ref='not-yet-bound')
+        self.assertEqual(covered, (self.issued(newer), 1))
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM branch_bindings WHERE branch = 'not-yet-bound'").fetchone())
+        answer = self.act(branch='not-yet-bound')
+        self.assertEqual((answer.slip_id, answer.revision), covered)
+
+    def test_scope_ref_bound_to_other_seat(self):
+        _, _, ours = self.build(bundle='shared', design=False)
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        theirs = self.submit(with_repo(draft(kind='IMPL', needs='act', bundle='shared',
+                                            to=SECOND.address)), operator)
+        self.assertEqual(self.act(seat=SECOND, branch='theirs').slip_id, self.issued(theirs))
+        self.assertEqual(self.scope(ref='open'), (self.issued(ours), 1))
+        self.assertIsNone(self.scope(ref='theirs'))
+
+    def test_scope_path_in_repository(self):
+        _, _, issued = self.build()
+        self.assertEqual(self.scope(path='src/sample.py'), (self.issued(issued), 1))
+        self.assertIsNone(self.scope('repo-2', path='src/sample.py'))
+
+    def test_scope_rejects_unsafe_paths(self):
+        self.build()
+        for path in ('/src/file', 'src/../file', ''):
+            with self.subTest(path=path):
+                self.assertIsNone(self.scope(path=path))
+
+    def test_scope_needs_exactly_one_target(self):
+        with self.assertRaises(ValueError):
+            self.scope()
+        with self.assertRaises(ValueError):
+            self.scope(ref='work', path='src/file')
+
+    def test_scope_ignores_ended_slips(self):
+        _, _, issued = self.build()
+        self.assertEqual(slips.revoke(self.conn, self.issued(issued), 'operator', 'stop',
+                                     self.clock).outcome, 'allow')
+        self.assertIsNone(self.scope(ref='work'))
+        self.assertIsNone(self.scope(path='src/file'))
+
+
 class TestQueries(SlipStore):
     def test_planner_issues_after_approved_plan(self):
         _, _, impl = self.build()

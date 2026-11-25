@@ -640,6 +640,31 @@ def standing(conn, seat_id: str, now_ms: int) -> Standing:
 
 
 
+def scope(conn, seat_id: str, repository_id: str, *,
+          ref: str | None = None, path: str | None = None) -> tuple[str, int] | None:
+    """Report live implement-slip coverage, not whether a particular act would allow."""
+    if (ref is None) == (path is None):
+        raise ValueError('scope needs exactly one ref or path')
+    if path is not None and (not path or Path(path).is_absolute() or '..' in Path(path).parts):
+        return None
+    if ref == '':
+        return None
+    with _read_query(conn):
+        binding = None if ref is None else conn.execute(
+            'SELECT seat_id, bundle_id FROM branch_bindings WHERE repository_id = ? AND branch = ?',
+            (repository_id, ref)).fetchone()
+        sql = ("SELECT id, revision FROM slips WHERE seat_id = ? AND repository_id = ?"
+               " AND kind = 'implement' AND state = 'live'")
+        params = [seat_id, repository_id]
+        if binding is not None:
+            if binding[0] != seat_id:
+                return None
+            sql += ' AND bundle_id = ?'
+            params.append(binding[1])
+        row = conn.execute(sql + ' ORDER BY issued_at DESC, handle DESC LIMIT 1', params).fetchone()
+        return tuple(row) if row is not None else None
+
+
 def _act(conn, seat_id, effect, now_ms, digest):
     seat = _seat(conn, seat_id)
     if seat is None:
