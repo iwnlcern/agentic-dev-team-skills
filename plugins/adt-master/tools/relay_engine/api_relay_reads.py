@@ -6,6 +6,9 @@ from relay_engine import api_definitions as d
 from relay_engine.api_protocol import ComponentRefusal, SeatBinding
 
 
+MAX_RELAY_BODY_BYTES = 8_388_608
+
+
 class RelayReadsPort(Protocol):
     def read(self, args: Mapping, binding: SeatBinding) -> Mapping | ComponentRefusal: ...
 
@@ -16,7 +19,41 @@ def reads_definitions() -> d.DefinitionGraph:
     ref = d.TypeRef
     field = d.FieldDef
     error = ref('ApiError')
+    def record(name, columns):
+        return d.TypeDef(name, d.Record(tuple(field(key, ref(type_name)) for key, type_name in columns)))
+
     types = (
+        d.TypeDef('NullableUInt64', d.Nullable(ref('UInt64'))),
+        d.TypeDef('NullableOpaqueId', d.Nullable(ref('OpaqueId'))),
+        d.TypeDef('RelayParties', d.Array(ref('OpaqueId'), 2048)),
+        d.TypeDef('RelayBodyBase64', d.String(
+            r'(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?',
+            0, 4 * ((MAX_RELAY_BODY_BYTES + 2) // 3)),
+            (d.CanonicalBase64(ref('RelayBodyBase64'), MAX_RELAY_BODY_BYTES),)),
+        record('RelayReadArgs', (('relay_id', 'OpaqueId'),)),
+        record('RelayEnvelope', (
+            ('handle', 'UInt64'), ('kind', 'OpaqueId'), ('sender', 'OpaqueId'),
+            ('to', 'RelayParties'), ('cc', 'RelayParties'), ('subject', 'RelaySubject'),
+            ('parent', 'NullableUInt64'), ('parent_id', 'NullableOpaqueId'),
+            ('verdict', 'NullableOpaqueId'), ('needs', 'OpaqueId'), ('created_at', 'UInt64'),
+            ('imported', 'InboxFlag'),
+        )),
+        record('RelayPointer', (('relay_id', 'OpaqueId'), ('handle', 'UInt64'))),
+        d.TypeDef('RelayPointers', d.Array(ref('RelayPointer'), 255)),
+        d.TypeDef('RefSpelling', d.String(r'[^\x00]*', 0, 8192)),
+        record('RefLine', (('ordinal', 'UInt64'), ('spelling', 'RefSpelling'))),
+        d.TypeDef('RefLines', d.Array(ref('RefLine'), 1024)),
+        d.TypeDef('FindingSeverity', d.LiteralSet(('blocking', 'advisory'))),
+        d.TypeDef('FindingStatus', d.LiteralSet(('open', 'fixed', 'fix-accepted', 'withdrawn'))),
+        record('RaisedFinding', (
+            ('handle', 'UInt64'), ('severity', 'FindingSeverity'), ('status', 'FindingStatus'),
+            ('summary', 'Utf8'), ('check', 'NullableUInt64'),
+        )),
+        d.TypeDef('RaisedFindings', d.Array(ref('RaisedFinding'), 409)),
+        record('RelayReadResult', (
+            ('relay_id', 'OpaqueId'), ('envelope', 'RelayEnvelope'), ('body_base64', 'RelayBodyBase64'),
+            ('unopened', 'RelayPointers'), ('refs', 'RefLines'), ('findings', 'RaisedFindings'),
+        )),
         d.TypeDef('InboxLimit', d.String(r'(?:[1-9][0-9]?|[1-4][0-9]{2}|500)', 1, 3)),
         d.TypeDef('InboxState', d.LiteralSet(('answered', 'unanswered', 'imported'))),
         d.TypeDef('InboxFlag', d.LiteralSet(('false', 'true'))),
@@ -48,14 +85,22 @@ def reads_definitions() -> d.DefinitionGraph:
             field('rows', ref('InboxRows')),
         ))),
     )
-    operation = d.OperationDef('relay.inbox', ref('RelayInboxArgs'), ref('RelayInboxResult'),
-                               error, 'unsigned', 'pure_observation', 'read_repeat', 'none')
-    return d.DefinitionGraph(types, (operation,), error)
+    operations = (
+        d.OperationDef('relay.inbox', ref('RelayInboxArgs'), ref('RelayInboxResult'),
+                       error, 'unsigned', 'pure_observation', 'read_repeat', 'none'),
+        d.OperationDef('relay.read', ref('RelayReadArgs'), ref('RelayReadResult'),
+                       error, 'seat_session', 'relay_open', 'read_repeat', 'none'),
+    )
+    return d.DefinitionGraph(types, operations, error)
 
 
 def _inbox(args, principal, port):
     return port.reads.inbox(args)
 
 
+def _read(args, binding, port):
+    return port.reads.read(args, binding)
+
+
 def reads_handlers() -> Mapping[str, Callable]:
-    return {'relay.inbox': _inbox}
+    return {'relay.inbox': _inbox, 'relay.read': _read}

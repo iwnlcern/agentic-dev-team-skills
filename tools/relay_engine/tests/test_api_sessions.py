@@ -157,6 +157,12 @@ class SessionTests(unittest.TestCase):
         self.reads = SimpleNamespace(inbox=lambda args: {
             **dict.fromkeys(('total', 'answered', 'unanswered', 'imported'), '0'),
             'truncated': 'false', 'rows': [],
+        }, read=lambda args, binding: {
+            'relay_id': args['relay_id'],
+            'envelope': dict(handle='1', kind='SITREP', sender='operator', to=[], cc=[],
+                             subject='', parent=None, parent_id=None, verdict=None, needs='none',
+                             created_at='1', imported='true'),
+            'body_base64': '', 'unopened': [], 'refs': [], 'findings': [],
         })
         port = platform.PlatformPort(self.service, None, self.reads)
         self.ports = dict.fromkeys(self.registry.handlers, port)
@@ -335,7 +341,7 @@ class SessionTests(unittest.TestCase):
             self.assertEqual((op.principal, op.effect, op.retry, op.browser_get), row)
 
     def test_capabilities_are_exactly_the_handled_operations(self):
-        names = ('protocol.connect', 'protocol.schema', 'relay.inbox', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
+        names = ('protocol.connect', 'protocol.schema', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
         queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
                  'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
         self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue)))
@@ -356,6 +362,11 @@ class SessionTests(unittest.TestCase):
             result = self.success(self.call('relay.inbox', args))
             self.assertEqual(result['rows'], [])
             inbox.assert_called_once_with(args)
+        read_args = {'relay_id': 'sample'}
+        with patch.object(self.reads, 'read', wraps=self.reads.read) as read:
+            result = self.success(self.call('relay.read', read_args, state=signed.state))
+            self.assertEqual(result['relay_id'], 'sample')
+            read.assert_called_once_with(read_args, signed.state.binding)
 
     def test_generation_import_boundary_fresh_process(self):
         probe = '''import sys,json

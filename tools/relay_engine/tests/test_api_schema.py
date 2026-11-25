@@ -743,6 +743,16 @@ class TestGeneratedConsumers(unittest.TestCase):
                         dict(relay_id='relay-7', handle='7', created_at='99',
                              sender='team.implementer@project', subject='notice',
                              subject_over_bound='false', needs='none', state='imported')])),
+            ('relay.read', 'RelayReadArgs', 'RelayReadResult', dict(relay_id='relay-8'),
+             dict(relay_id='relay-8', envelope=dict(
+                  handle='8', kind='REVIEW', sender='team.planner@project',
+                  to=['team.implementer@project'], cc=['operator'], subject='notice',
+                  parent='7', parent_id='relay-7', verdict=None, needs='review',
+                  created_at='100', imported='false'),
+                  body_base64='YQ==', unopened=[dict(relay_id='relay-7', handle='7')],
+                  refs=[dict(ordinal='1', spelling='#7')],
+                  findings=[dict(handle='1', severity='advisory', status='open',
+                                 summary='notice', check=None)])),
         ]
         cases = []
         for operation, args_type, result_type, args, result in rows:
@@ -847,7 +857,7 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['operations'], [
             'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
             'queue.dismiss-all', 'queue.get', 'queue.list', 'queue.open', 'queue.raise',
-            'queue.withdraw', 'relay.inbox', 'relay.submit', 'seat.identify', 'session.end',
+            'queue.withdraw', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end',
             'session.resume', 'session.sign-in',
         ])
         self.assertEqual(set(manifest['bindings']), {'api_3_0.rs', 'api_3_0.ts'})
