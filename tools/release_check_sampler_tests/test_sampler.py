@@ -6,10 +6,14 @@ import io
 import json
 import os
 import re
+import select
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
+from math import ceil, floor
 from pathlib import Path
 from unittest import mock
 
@@ -25,7 +29,8 @@ def proc_stat(pid, tick, group, name=b"process ) name"):
         [b"S", b"1", str(group).encode()] + [b"0"] * 16 + [str(tick).encode()])
 
 
-def independent_tick(pid):
+def proc_field_tick(pid):
+    # Literal field comparison for the live join and its PID-reuse cleanup guard.
     fields = re.fullmatch(rb"\d+ \(.*\) (.*)\n?", Path(f"/proc/{pid}/stat").read_bytes(), re.S)
     return int(fields[1].split()[19])
 
@@ -111,9 +116,39 @@ class SamplerTests(unittest.TestCase):
         self.assertEqual(self.join([4096], snapshot["instances"].items())["summary"], "unnamed")
 
     def test_tick_index(self):
-        got = {}
-        rc._listing(got.__setitem__)
-        self.assertEqual(got[os.getpid()], independent_tick(os.getpid()))
+        uptime = Path("/proc/uptime")
+        hz = os.sysconf("SC_CLK_TCK")
+        cmd = [sys.executable, "-c", "import sys; print('ready', flush=True); sys.stdin.buffer.read(1)"]
+        before = Decimal(uptime.read_text().split()[0])
+        with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as child:
+            try:
+                after = Decimal(uptime.read_text().split()[0])
+                # /proc/uptime truncates to hundredths; include the final partial tick.
+                lo = floor(before * hz)
+                hi = ceil((after + Decimal("0.01")) * hz)
+                self.assertTrue(select.select([child.stdout], [], [], 5)[0], "child not ready")
+                self.assertEqual(child.stdout.readline(), b"ready\n")
+                proc = Path("/proc", str(child.pid))
+                # Field 21 (itrealvalue) is zero on Linux. Field 23 (vsize) is
+                # the virtual page count from statm, expressed in bytes.
+                vsize = int((proc / "statm").read_text().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+                self.assertGreater(lo, 0)
+                self.assertFalse(lo <= vsize <= hi, f"vsize {vsize} overlaps {lo}..{hi}")
+                print(f"tick oracle: hz={hz} window={lo}..{hi} width_ticks={hi-lo} "
+                      f"itrealvalue=0 vsize_bytes={vsize}", file=sys.stderr)
+                got = {}
+                rc._listing(got.__setitem__)
+                for seam, tick in (("listing", got[child.pid]), ("sampler", rc._sample_stat(proc)[1])):
+                    with self.subTest(seam=seam):
+                        self.assertTrue(lo <= tick <= hi, f"start tick {tick} outside {lo}..{hi}")
+            finally:
+                # EOF releases this test's live child, including on an assertion failure.
+                child.stdin.close()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
 
     def test_named_real_child(self):
         self.assertTrue(hasattr(rc, "_Sampler"), "No live sampler on the base")
@@ -149,7 +184,7 @@ class SamplerTests(unittest.TestCase):
                 if ready.exists():
                     pid, tick = map(int, ready.read_text().split())
                     with contextlib.suppress(ProcessLookupError, FileNotFoundError):
-                        if independent_tick(pid) == tick:
+                        if proc_field_tick(pid) == tick:
                             os.kill(pid, signal.SIGKILL)
 
     def test_no_environment_kept(self):
