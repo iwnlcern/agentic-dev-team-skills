@@ -1,5 +1,7 @@
 import ast
 import argparse
+from contextlib import redirect_stdout
+import io
 import os
 from pathlib import Path
 import re
@@ -260,7 +262,8 @@ def gate_violations(paths):
                         node.attr in SINK_ATTRS and
                         not ((module == "strings" and
                               fn in {"_make_emitter", "emit"}) or
-                             (module == "cli" and fn == "cmd_show"))):
+                             (module == "cli" and fn == "cmd_show") or
+                             (module == "adt_cli" and fn == "read_command"))):
                     violations.append((module, node.lineno, "raw sys sink"))
     return violations
 
@@ -513,6 +516,21 @@ class TestGate(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             strings._make_emitter()
 
+    def test_emit_selector_is_positional(self):
+        with self.subTest(case="template key"):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                strings.emit("stdout", "adt-read-field", key="subject", value="example")
+            self.assertEqual(out.getvalue(), "subject: example\n")
+        # The existing zero-field row is valid on both baseline and staged
+        # trees. Only Python binding can refuse these calls with TypeError.
+        with self.subTest(case="stream selector by name"), redirect_stdout(io.StringIO()):
+            with self.assertRaises(TypeError):
+                strings.emit(stream_name="stdout", key="unexpected-error")
+        with self.subTest(case="inventory selector by name"), redirect_stdout(io.StringIO()):
+            with self.assertRaises(TypeError):
+                strings.emit("stdout", key="unexpected-error")
+
     def test_emit_verbatim_single_reference(self):
         refs = []
         for path in self.production_paths():
@@ -522,8 +540,9 @@ class TestGate(unittest.TestCase):
                 if (isinstance(node, ast.Attribute) and
                         node.attr == "emit_verbatim"):
                     refs.append(path)
-        self.assertEqual(refs, [os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "cli.py")])
+        root = os.path.dirname(os.path.dirname(__file__))
+        self.assertEqual(sorted(refs), sorted(os.path.join(root, name)
+                                             for name in ("cli.py", "adt_cli.py")))
 
     def test_diagnostic_sink_binding_site_is_unique(self):
         bindings = []

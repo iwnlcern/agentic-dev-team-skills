@@ -299,6 +299,8 @@ class AdtTests(unittest.TestCase):
 
     def test_exit_statuses(self):
         self.begin(); self.assertEqual(self.submit()[0], 0)
+        self.assertEqual(self.run_command(['inbox', 'platform.implementer@service',
+                                          '--ready', str(self.ready)])[0], 3)
         for command in (['submit', str(self.draft), *self.flags, '--submission-key', ''],
                         ['sign-out', *self.flags, '--operation-key', '']):
             with self.subTest(empty_explicit=command[0]):

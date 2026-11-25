@@ -54,6 +54,26 @@ INVENTORY = {
     "adt-refusal": "{result}",
     "adt-local-refusal": "{result}",
     "adt-unknown-outcome": "{result}",
+    "adt-read-field": "{key}: {value}",
+    "adt-read-unopened": "unopened: {relay_id} (#{handle})",
+    "adt-read-ref": "ref: {ordinal} {spelling}",
+    "adt-read-finding": "finding: F{handle} {severity} {status} check {check} {summary}",
+    "adt-read-finding-unchecked": "finding: F{handle} {severity} {status} - {summary}",
+    "adt-read-body-start": "",
+    "adt-inbox-counts": ("{seat_address}: {total} relays TO it; "
+                         "{answered} answered, {unanswered} unanswered, {imported} imported"),
+    "adt-inbox-counts-range": ("{seat_address}: {total} relays TO it in this range; "
+                               "{answered} answered, {unanswered} unanswered, {imported} imported"),
+    "adt-inbox-counts-more": ("{seat_address}: {total} relays TO it; "
+                              "{answered} answered, {unanswered} unanswered, {imported} imported; "
+                              "{shown} shown; next: --before-handle {lowest}"),
+    "adt-inbox-counts-range-more": (
+        "{seat_address}: {total} relays TO it in this range; "
+        "{answered} answered, {unanswered} unanswered, {imported} imported; "
+        "{shown} shown; next: --before-handle {lowest}"),
+    "adt-inbox-row": "#{handle} {relay_id} {state} {needs} {sender} {stamp} {subject}",
+    "adt-inbox-row-hidden": ("#{handle} {relay_id} {state} {needs} {sender} {stamp} "
+                             "(subject not shown: over 16,384 characters or holding a character v3 cannot send)"),
     "adt-ready": "{path}",
     "serve-no-folder": "adt engine serve: no store at {path}: there is no folder there",
     "serve-no-catalogue": "adt engine serve: no store at {path}: the folder has no store catalogue",
@@ -362,6 +382,29 @@ _VALIDATORS.update({('engine-root-admission-summary', field): _is_count
                     for field in ('judged', 'with_findings', 'failed', 'unevaluated', 'exempt')})
 
 
+_VALIDATORS.update({
+    (key, field): lambda value: isinstance(value, str) and (not value or value.splitlines() == [value])
+    for key, fields in (
+        ("adt-read-field", "value"),
+        ("adt-read-unopened", "relay_id handle"),
+        ("adt-read-ref", "ordinal spelling"),
+        ("adt-read-finding", "handle severity status check summary"),
+        ("adt-read-finding-unchecked", "handle severity status summary"),
+        ("adt-inbox-counts", "seat_address total answered unanswered imported"),
+        ("adt-inbox-counts-range", "seat_address total answered unanswered imported"),
+        ("adt-inbox-counts-more", "seat_address total answered unanswered imported shown lowest"),
+        ("adt-inbox-counts-range-more", "seat_address total answered unanswered imported shown lowest"),
+        ("adt-inbox-row", "handle relay_id state needs sender stamp subject"),
+        ("adt-inbox-row-hidden", "handle relay_id state needs sender stamp"),
+    )
+    for field in fields.split()
+})
+_VALIDATORS[("adt-read-field", "key")] = lambda value: isinstance(value, str) and value in {
+    "handle", "kind", "sender", "to", "cc", "subject", "parent", "parent_id",
+    "verdict", "needs", "created_at", "imported",
+}
+
+
 def register_inventory(entries, validators):
     for key in entries:
         if key in INVENTORY:
@@ -447,7 +490,7 @@ def _make_emitter():
     _FACTORY_CALLED = True
     diagnostic_sink = None
 
-    def emit(stream_name, key, **params):
+    def emit(stream_name, key, /, **params):
         if stream_name == "stdout":
             stream = sys.stdout
         elif stream_name == "stderr":
