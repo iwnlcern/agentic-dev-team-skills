@@ -550,13 +550,14 @@ class SubmitServiceTests(unittest.TestCase):
     def test_platform_is_one_component(self):
         self.assertCountEqual([component.owner for component in api_platform.platform_components()],
                               ['platform', 'console'])
-        platform = ('protocol.connect', 'protocol.schema', 'relay.submit', 'seat.identify',
+        platform = ('protocol.connect', 'protocol.schema', 'relay.inbox', 'relay.submit', 'seat.identify',
                     'session.end', 'session.resume', 'session.sign-in')
         queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
                  'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
         owners = dict.fromkeys(platform, 'platform') | dict.fromkeys(queue, 'console')
         self.assertEqual(self.build.composition.owners, owners)
         self.assertIs(self.ports['relay.submit'], self.ports['session.sign-in'])
+        self.assertIs(self.ports['relay.inbox'], self.ports['relay.submit'])
         op = d.OperationDef('test.echo', d.TypeRef('EchoArgs'), d.TypeRef('EchoArgs'),
             d.TypeRef('ApiError'), 'unsigned', 'pure_observation', 'read_repeat', 'none')
         graph = d.DefinitionGraph((d.TypeDef('EchoArgs', d.Record(())),), (op,), d.TypeRef('ApiError'))

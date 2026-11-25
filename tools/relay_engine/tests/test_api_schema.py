@@ -709,7 +709,7 @@ class TestGeneratedConsumers(unittest.TestCase):
                 with self.subTest(field=field, emitter=emit.__name__), self.assertRaises(ValueError):
                     emit(compiled, altered)
 
-    def test_session_request_and_result_consumer_vectors(self):
+    def test_session_and_inbox_request_and_result_consumer_vectors(self):
         from relay_engine import api_platform, api_protocol as p, api_schema, api_wire as w
         compiled = api_platform.build_platform().registry
         artifact = api_schema.export_schema(compiled, '3.0')
@@ -734,6 +734,15 @@ class TestGeneratedConsumers(unittest.TestCase):
             ('session.end', 'SessionEndArgs', 'SessionEndResult',
              dict(key, session_id='session', operation_key='op'),
              dict(session_id='session', ended_at='2001', receipt='original')),
+            ('relay.inbox', 'RelayInboxArgs', 'RelayInboxResult',
+             dict(seat_address='team.planner@project', limit='500', since_ms='0', before_handle='9'),
+             dict(total='2', answered='0', unanswered='1', imported='1', truncated='false',
+                  rows=[dict(relay_id='relay-8', handle='8', created_at='100',
+                             sender='operator', subject=None, subject_over_bound='true',
+                             needs='act', state='unanswered'),
+                        dict(relay_id='relay-7', handle='7', created_at='99',
+                             sender='team.implementer@project', subject='notice',
+                             subject_over_bound='false', needs='none', state='imported')])),
         ]
         cases = []
         for operation, args_type, result_type, args, result in rows:
@@ -838,7 +847,7 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['operations'], [
             'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
             'queue.dismiss-all', 'queue.get', 'queue.list', 'queue.open', 'queue.raise',
-            'queue.withdraw', 'relay.submit', 'seat.identify', 'session.end',
+            'queue.withdraw', 'relay.inbox', 'relay.submit', 'seat.identify', 'session.end',
             'session.resume', 'session.sign-in',
         ])
         self.assertEqual(set(manifest['bindings']), {'api_3_0.rs', 'api_3_0.ts'})

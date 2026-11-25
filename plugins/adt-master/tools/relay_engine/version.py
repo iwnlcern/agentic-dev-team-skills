@@ -23,6 +23,8 @@ ROSTER = (
     "relay_engine/api_principals.py",
     "relay_engine/api_protocol.py",
     "relay_engine/api_registry.py",
+    "relay_engine/api_relay_reads.py",
+    "relay_engine/api_relay_reads_service.py",
     "relay_engine/api_schema.py",
     "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
