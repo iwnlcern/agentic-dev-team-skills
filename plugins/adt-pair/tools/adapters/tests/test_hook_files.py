@@ -40,6 +40,9 @@ class HookFileTests(unittest.TestCase):
             if key not in MARKERS and not key.startswith("GIT_")
         }
         self.env.update(HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / ".config"))
+        stub_tmp = self.scratch / "stub-tmp"
+        stub_tmp.mkdir()
+        self.env["TMPDIR"] = str(stub_tmp)
         env = mock.patch.dict(os.environ, self.env, clear=True)
         env.start()
         self.addCleanup(env.stop)
@@ -763,6 +766,8 @@ exec {shlex.quote(GIT)} "$@"
                 self.assertEqual((worktree / "saved-input").read_bytes(), data)
         paths = receipt.read_text().splitlines()
         self.assertEqual(len(set(paths)), 2)
+        self.assertTrue(all(Path(path).parent == self.scratch / "stub-tmp" for path in paths),
+                        "staged inputs must be inside stub-tmp")
         self.assertTrue(all(not Path(path).exists() for path in paths))
 
     def test_resolve_absolute_and_relative_common_dir(self):

@@ -506,7 +506,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_hook_files.py",
-    "sha256": "ac3cb6a29ccb14574a9dd95318ccb72bf0b213ac7b5796b471d15307dfd2c020",
+    "sha256": "5fc14bcb5e57515a121d1ffc80a27fc17209a39245724ffb3c3b29c14bd57ff2",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -11654,7 +11654,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_hook_files.py",
-    "sha256": "ac3cb6a29ccb14574a9dd95318ccb72bf0b213ac7b5796b471d15307dfd2c020",
+    "sha256": "5fc14bcb5e57515a121d1ffc80a27fc17209a39245724ffb3c3b29c14bd57ff2",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -22718,7 +22718,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_hook_files.py",
-    "sha256": "ac3cb6a29ccb14574a9dd95318ccb72bf0b213ac7b5796b471d15307dfd2c020",
+    "sha256": "5fc14bcb5e57515a121d1ffc80a27fc17209a39245724ffb3c3b29c14bd57ff2",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
