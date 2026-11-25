@@ -298,6 +298,102 @@ class SlipStore(ClaimStore):
         return answer
 
 
+class TestStanding(SlipStore):
+    def standing(self, conn=None):
+        return slips.standing(self.conn if conn is None else conn, IMPL.seat_id, self.clock)
+
+    def test_standing_answer(self):
+        _, _, old = self.build(bundle='replaced', design=False)
+        _, _, revoked = self.build(bundle='revoked', design=False)
+        self.assertEqual(slips.revoke(self.conn, self.issued(revoked), 'operator', 'stop',
+                                     self.clock).outcome, 'allow')
+        _, _, live = self.build(bundle='replaced', design=False)
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        other = self.submit(with_repo(draft(kind='IMPL', needs='act', bundle='another',
+                                           to=SECOND.address)), operator)
+        self.issued(other)
+        self.assertEqual(self.conn.execute('SELECT state FROM slips WHERE id = ?',
+                                          (self.issued(old),)).fetchone(), ('ended',))
+        answer = self.standing()
+        self.assertEqual([(slip.slip_id, slip.state, slip.kind, slip.repository_id)
+                          for slip in answer.slips],
+                         [(self.issued(live), 'live', 'implement', 'repo-1')])
+        self.assertIsNone(answer.hold)
+
+    def test_standing_empty_seat(self):
+        answer = self.standing()
+        self.assertEqual((answer.slips, answer.hold), ((), None))
+
+    def test_standing_claim_hold_matches_act(self):
+        dc, pc, _ = self.build(verified=False)
+        self.verify(dc)
+        pending = self.code('verification-pending')
+        self.assertEqual(self.standing().slips[0].held, pending)
+        self.verify(pc)
+        self.assertIsNone(self.standing().slips[0].held)
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_standing_lineage_hold(self):
+        """Construct loss of delegation after issuance using only a lineage read double.
+
+        Ordinary submissions do not remove delegation, and the authority-row
+        fixture guard forbids editing its recipients directly.
+        """
+        delegation = self.go()
+        plan = self.approved('plan', parent=delegation.relay_id)
+        self.verify(plan)
+        issued = self.issue(plan)
+        sid = self.issued(issued)
+        before = self.standing().slips
+        self.assertEqual([(entry.slip_id, entry.state) for entry in before], [(sid, 'live')])
+        self.assertIsNone(before[0].held)
+
+        # Change only the observed delegation in this issuance's real walk.
+        real_lineage = queries.lineage
+
+        def without_delegation(conn, relay_id, *args, **kwargs):
+            rows = real_lineage(conn, relay_id, *args, **kwargs)
+            if relay_id == issued.relay_id:
+                return [replace(row, needs='read') if row.id == delegation.relay_id else row
+                        for row in rows]
+            return rows
+
+        with mock.patch.object(queries, 'lineage', side_effect=without_delegation):
+            entry, = self.standing().slips
+            self.assertEqual((entry.slip_id, entry.state), (sid, 'live'))
+            self.assertIsNotNone(entry.held, 'expected a lineage hold after delegation is removed')
+            self.assertEqual(entry.held, self.code('lineage-incomplete'))
+
+    def test_standing_restore_hold_not_empty(self):
+        from relay_engine import restore_cancel
+
+        self.build()
+        restore_cancel.cancel_all(self.conn, 'p', 'fixture-job-7', self.clock)
+        answer = self.standing()
+        self.assertEqual(answer.slips, ())
+        self.assertIsNotNone(answer.hold)
+        self.assertEqual((answer.hold.outcome, answer.hold.code, answer.hold.unblocker),
+                         ('held', 'authority.restore-held', 'operator'))
+        self.assertIn('fixture-job-7', answer.hold.reason)
+
+    def test_act_path_mismatch_outranks_pending_claim(self):
+        # Preservation: this precedence already holds before standing exists.
+        self.build(verified=False)
+        self.code('verification-pending')
+        self.plan.write_bytes(b'changed plan\n')
+        self.code('plan-changed')
+
+    def test_standing_fault_raises_unavailable(self):
+        class BrokenRead(CommitFault):
+            def execute(self, sql, parameters=()):
+                if 'FROM slips' in sql:
+                    raise sqlite3.DatabaseError('read fault')
+                return self.conn.execute(sql, parameters)
+
+        with self.assertRaises(getattr(slips, 'QueryUnavailable', RuntimeError)):
+            self.standing(BrokenRead(self.conn))
+
+
 class TestQueries(SlipStore):
     def test_planner_issues_after_approved_plan(self):
         _, _, impl = self.build()

@@ -11174,7 +11174,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/slips.py",
-    "sha256": "808adb6351953c58b3d1f10cba10dd8192d7a4be143d7b304a621e9c9f6e7a84",
+    "sha256": "15d65cd6d506cc9d95143e4098d27cb5b7d9338e8f30916fe9962241ea284309",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -22322,7 +22322,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/slips.py",
-    "sha256": "808adb6351953c58b3d1f10cba10dd8192d7a4be143d7b304a621e9c9f6e7a84",
+    "sha256": "15d65cd6d506cc9d95143e4098d27cb5b7d9338e8f30916fe9962241ea284309",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -33386,7 +33386,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/slips.py",
-    "sha256": "808adb6351953c58b3d1f10cba10dd8192d7a4be143d7b304a621e9c9f6e7a84",
+    "sha256": "15d65cd6d506cc9d95143e4098d27cb5b7d9338e8f30916fe9962241ea284309",
     "source": "tools/relay_engine/slips.py"
   },
   {
