@@ -69,6 +69,7 @@ class Effect:
         if self.kind not in EFFECT_CLASSES:
             raise ValueError("unknown effect kind")
 
+from hashlib import sha256
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -624,9 +625,14 @@ def standing(conn, seat_id: str, now_ms: int) -> Standing:
             raise LookupError('unknown seat')
         restore = restore_cancel.held(conn, seat[1])
         if restore is not None:
-            return Standing((), _answer('restore-held',
-                                       f'a restore (job {restore.job_id}) holds this project',
-                                       'operator'))
+            job = restore.job_id
+            try:
+                reason = strings.render('authority-restore-standing', job=job)
+            except ValueError:
+                raw = job.encode('utf-8', 'surrogatepass')
+                token = strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw))
+                reason = strings.render('authority-restore-standing', job=str(token))
+            return Standing((), _answer('restore-held', reason, 'operator'))
         rows = conn.execute('SELECT ' + _SLIP_COLUMNS + ', kind FROM slips'
                             " WHERE seat_id = ? AND state = 'live' ORDER BY issued_at, handle", (seat_id,))
         planner = _planner(conn, seat_id)

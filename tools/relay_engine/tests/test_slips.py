@@ -376,6 +376,27 @@ class TestStanding(SlipStore):
                          ('held', 'authority.restore-held', 'operator'))
         self.assertIn('fixture-job-7', answer.hold.reason)
 
+        from hashlib import sha256
+        from relay_engine import strings
+
+        with self.subTest(witness='sentinel'):
+            with mock.patch.dict(strings.INVENTORY,
+                                 {'authority-restore-standing': 'restore probe {job}'}):
+                self.assertEqual(self.standing().hold.reason, 'restore probe fixture-job-7')
+
+        for job_id in ('', '\n', 'a\u2028b'):
+            with self.subTest(witness='refused-job', job_id=job_id):
+                restore_cancel.cancel_all(self.conn, 'p', job_id, self.clock)
+                answer = self.standing()
+                self.assertEqual(answer.slips, ())
+                self.assertIsNotNone(answer.hold)
+                self.assertEqual((answer.hold.outcome, answer.hold.code, answer.hold.unblocker),
+                                 ('held', 'authority.restore-held', 'operator'))
+                raw = job_id.encode('utf-8', 'surrogatepass')
+                token = str(strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw)))
+                self.assertEqual(answer.hold.reason,
+                                 'a restore (job ' + token + ') holds this project')
+
     def test_act_path_mismatch_outranks_pending_claim(self):
         # Preservation: this precedence already holds before standing exists.
         self.build(verified=False)
