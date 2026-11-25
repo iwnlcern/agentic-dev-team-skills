@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 
-from . import authority, restore_cancel, schema, slips
+from . import authority, restore_cancel, schema, slips, strings
 
 
 _GIB = 1024 ** 3
@@ -549,7 +549,10 @@ def main(argv: list[str]) -> int:
                            'measure_ns': run_ns, 'free_bytes_before': before,
                            'free_bytes_after': _available_bytes(store)})
     except (OSError, ValueError, sqlite3.Error) as exc:
-        print(str(exc), file=sys.stderr)
+        message = str(exc)
+        detail = type(exc).__name__ + (f': {message}' if message else '')
+        detail = ''.join(char if strings._is_show_text(char) else '?' for char in detail)
+        strings.emit('stderr', 'authority-bench-stopped', detail=detail)
         return 2
     return {'within-bound': 0, 'over-bound': 1, 'inconclusive': 3}[result.verdict]
 

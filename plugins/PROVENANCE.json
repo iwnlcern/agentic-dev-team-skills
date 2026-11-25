@@ -10814,7 +10814,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/authority_bench.py",
-    "sha256": "9187f4b306b618124bb2bed6902a19c279af28663592ed5e11c5323f1ffb85e1",
+    "sha256": "87e720aead25f6095e52e58355d475014be868cb7c344b1b387b8b062d44c02d",
     "source": "tools/relay_engine/authority_bench.py"
   },
   {
@@ -11228,7 +11228,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/strings.py",
-    "sha256": "cc751119a628a4980c6e59b6b6cbf602f981279b3fd69e608edbf9bbe7d13ade",
+    "sha256": "90cfd8ba7a5b8e354f1800891978c2ac28091490a8bc5e9e90087235a19b97be",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -21968,7 +21968,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/authority_bench.py",
-    "sha256": "9187f4b306b618124bb2bed6902a19c279af28663592ed5e11c5323f1ffb85e1",
+    "sha256": "87e720aead25f6095e52e58355d475014be868cb7c344b1b387b8b062d44c02d",
     "source": "tools/relay_engine/authority_bench.py"
   },
   {
@@ -22382,7 +22382,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/strings.py",
-    "sha256": "cc751119a628a4980c6e59b6b6cbf602f981279b3fd69e608edbf9bbe7d13ade",
+    "sha256": "90cfd8ba7a5b8e354f1800891978c2ac28091490a8bc5e9e90087235a19b97be",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -33038,7 +33038,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/authority_bench.py",
-    "sha256": "9187f4b306b618124bb2bed6902a19c279af28663592ed5e11c5323f1ffb85e1",
+    "sha256": "87e720aead25f6095e52e58355d475014be868cb7c344b1b387b8b062d44c02d",
     "source": "tools/relay_engine/authority_bench.py"
   },
   {
@@ -33452,7 +33452,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/strings.py",
-    "sha256": "cc751119a628a4980c6e59b6b6cbf602f981279b3fd69e608edbf9bbe7d13ade",
+    "sha256": "90cfd8ba7a5b8e354f1800891978c2ac28091490a8bc5e9e90087235a19b97be",
     "source": "tools/relay_engine/strings.py"
   },
   {

@@ -72,6 +72,7 @@ INVENTORY = {
 
 INVENTORY.update({
     "authority-missing": "no implement slip exists for this seat",
+    "authority-bench-stopped": "authority benchmark stopped: {detail}",
     "authority-missing-repo": "no implement slip was issued because the IMPL names no repository; an IMPL imported from 2.9.7 never issues one",
     "authority-missing-repository": "no implement slip was issued because the IMPL's repository is outside this project",
     "authority-missing-target": "no implement slip was issued because TO did not name exactly one implementer",

@@ -1,9 +1,10 @@
 """Small isolated witness for the seeded Authority query workloads."""
 import ast
 from collections import Counter
-from contextlib import closing
+from contextlib import closing, redirect_stderr, redirect_stdout
 import hashlib
 import importlib
+import io
 import json
 from pathlib import Path
 import sqlite3
@@ -11,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from relay_engine import authority
+from relay_engine import authority, strings
 
 
 class TestBench(unittest.TestCase):
@@ -180,6 +181,26 @@ class TestBench(unittest.TestCase):
         with mock.patch.object(self.bench, '_available_bytes', return_value=4 * 1024 ** 3):
             self.assertEqual(self.bench.main(self.argv()), 2)
         self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_main_failure_is_keyed(self):
+        def check_failure(fault, detail):
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with fault, redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(self.bench.main(self.argv()), 2)
+            self.assertEqual(stdout.getvalue(), '')
+            self.assertTrue(stderr.getvalue().startswith('authority benchmark stopped: '),
+                            repr(stderr.getvalue()))
+            self.assertEqual(stderr.getvalue(),
+                             strings.render('authority-bench-stopped', detail=detail) + '\n')
+
+        free = 4 * 1024 ** 3
+        check_failure(mock.patch.object(self.bench, '_available_bytes', return_value=free),
+                      f'ValueError: {free} bytes free at {self.root.resolve() / "store"}; need 5 GiB')
+        check_failure(mock.patch.object(self.bench, 'seed', side_effect=OSError('a\nb')),
+                      'OSError: a?b')
+        check_failure(mock.patch.object(self.bench, 'seed', side_effect=OSError('a\rb\x85c\u2028d')),
+                      'OSError: a?b?c?d')
 
     def test_main_writes_result_only_at_end(self):
         def interrupted(*args, **kwargs):
