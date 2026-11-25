@@ -180,6 +180,24 @@ class AdtReadsTests(unittest.TestCase):
             launch.assert_not_called()
         self.assertFalse(absent.exists())
 
+    def test_present_invalid_ready_file_exit_1(self):
+        self.store.start()
+        _, row = self.store.simple()
+        for command in ('read', 'inbox'):
+            with self.subTest(command=command):
+                ready = Path(self.store.ready.path).with_name(f'invalid-{command}.json')
+                fixtures.f._private_file(ready, b'{')
+                with patch.object(subprocess, 'Popen',
+                                  side_effect=AssertionError('read commands must not launch')) as launch:
+                    if command == 'read':
+                        status, out, err = self.read(row['relay_id'], ready=str(ready))
+                    else:
+                        status, out, err = self.inbox(ready=str(ready))
+                    launch.assert_not_called()
+                self.assertEqual(ready.read_bytes(), b'{')
+                self.assertEqual((status, out), (1, b''), err)
+                self.assertEqual(err, '{"local":"ready_file_invalid"}\n')
+
     def test_adt_inbox_walk_printed_next(self):
         expected = self.seed_live(5)
         opts = ('--limit', '2')
