@@ -60,6 +60,15 @@ class ConsoleTargetUnavailable:
             raise ValueError('unexpected_console_identity_fault')
 
 
+@dataclass(frozen=True, slots=True)
+class ReadyFileInvalid:
+    fault: Exception = field(repr=False, compare=False)
+
+    def __post_init__(self):
+        if not isinstance(self.fault, Exception):
+            raise ValueError('missing_ready_file_fault')
+
+
 class HeldMetadataUnavailable(Exception):
     def __init__(self, reason: str):
         self.reason = reason
@@ -486,3 +495,28 @@ def console_target(root: str) -> ConsoleTarget | ConsoleTargetUnavailable:
     except (HeldMetadataUnavailable, store_layout.LayoutFault, api_client.LocalRefusal, api_client.EndpointUnavailable,
             OSError, ValueError, TypeError, IndexError) as fault:
         return ConsoleTargetUnavailable('identity_unavailable', fault)
+
+
+def ready_target(ready_path: str) -> ConsoleTarget | ConsoleTargetUnavailable | ReadyFileInvalid:
+    """Resolve an explicit ready file by checking its peer PID and discovery identity."""
+    from relay_engine import api_client, store_layout
+
+    try:
+        ready = api_client.read_ready_file(ready_path)
+    except api_client.LocalRefusal as fault:
+        return ReadyFileInvalid(fault)
+    try:
+        registry, digest = api_client._registry_and_digest()
+        if ready.schema_digest != digest:
+            return ReadyFileInvalid(api_client.LocalRefusal('ready_file_mismatch'))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+            deadline = time.monotonic() + 0.5
+            peer.settimeout(0.5)
+            peer.connect(ready.socket)
+            if _peer_pid(peer) != ready.pid:
+                raise ValueError('wrong ready endpoint')
+            api_client.ApiClient(peer, registry, digest)._discover(ready, deadline=deadline)
+    except (HeldMetadataUnavailable, store_layout.LayoutFault, api_client.LocalRefusal, api_client.EndpointUnavailable,
+            OSError, ValueError, TypeError, IndexError) as fault:
+        return ConsoleTargetUnavailable('identity_unavailable', fault)
+    return ConsoleTarget(ready.path)
