@@ -1108,6 +1108,11 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
             ("admission_not_stored", "retry_same_submission"),
             ("admission_unknown", "retry_same_submission"),
         )),
+        ("E_API_NOT_FOUND", "lookup", "ApiLookupCause", (
+            ("relay_unknown", "check_relay_id"),
+            ("project_unknown", "check_seat_address"),
+            ("seat_unknown", "check_seat_address"),
+        )),
         ("E_API_INTERNAL", "internal", "ApiInternalCause", (
             ("handler_fault", "report_nonsecret_failure"),
         )),

@@ -113,6 +113,42 @@ class TestSliceBRules(unittest.TestCase):
                 self.assertIsInstance(r.validate_type(compiled, d.TypeRef('DraftBase64'), value),
                                       r.ValidationFailure)
 
+    def test_relay_body_base64_rule_bounds(self):
+        import base64
+        from dataclasses import replace
+        from relay_engine import api_registry as r
+        graph = d.discovery_definitions()
+        ref = d.TypeRef('RelayBodyBase64')
+        body = d.TypeDef(ref.name, d.String('.*'),
+                         (d.CanonicalBase64(ref, 8388608),))
+        compiled = self.compile(replace(graph, types=graph.types + (body,)))
+        for count in (0, 1, 8388608, 8388609):
+            with self.subTest(count=count):
+                value = base64.b64encode(b'\x00' * count).decode('ascii')
+                result = r.validate_type(compiled, ref, value)
+                if count <= 8388608:
+                    self.assertNotIsInstance(result, r.ValidationFailure)
+                else:
+                    self.assertIsInstance(result, r.ValidationFailure)
+                    self.assertEqual(result.rule, 'canonical_base64')
+        for value in ('AA==\n', '-w==', 'AB=='):
+            with self.subTest(value=value):
+                result = r.validate_type(compiled, ref, value)
+                self.assertIsInstance(result, r.ValidationFailure)
+                self.assertEqual(result.rule, 'canonical_base64')
+
+    def test_relay_open_metadata_accepted(self):
+        from dataclasses import replace
+        from relay_engine import api_registry as r
+        graph = d.discovery_definitions()
+        op = replace(graph.operations[0], name='test.read', effect='relay_open',
+                     principal='seat_session', retry='read_repeat',
+                     browser_get='none', rules=())
+        graph = replace(graph, operations=(op,))
+        self.assertEqual(self.compile(graph).operation(op.name), op)
+        with self.assertRaises(r.RegistryCompileError):
+            self.compile(replace(graph, operations=(replace(op, effect='unknown_effect'),)))
+
     def test_canonical_base64_instances_are_closed(self):
         from dataclasses import replace
         from relay_engine import api_registry as r
@@ -255,8 +291,11 @@ class TestErrorCatalog(unittest.TestCase):
         catalog = errors.api_error_catalog()
         pairs = {(v.code, v.api_class, b.cause_kind, b.remedy)
                  for v in catalog.variants for b in v.branches}
-        self.assertEqual(len(catalog.variants), 10)
+        self.assertEqual(len(catalog.variants), 11)
         self.assertEqual(pairs, {
+            ('E_API_NOT_FOUND', 'lookup', 'relay_unknown', 'check_relay_id'),
+            ('E_API_NOT_FOUND', 'lookup', 'project_unknown', 'check_seat_address'),
+            ('E_API_NOT_FOUND', 'lookup', 'seat_unknown', 'check_seat_address'),
             ('E_API_AUTH', 'auth', 'key_rejected', 'check_key_file'),
             ('E_API_AUTH', 'auth', 'key_replaced', 'obtain_current_key'),
             ('E_API_AUTH', 'auth', 'seat_stood_down', 'ask_top_seat'),
@@ -394,6 +433,29 @@ class TestErrorCatalog(unittest.TestCase):
                                       (errors.api_error_catalog(),))
         self.assertEqual(registry.capabilities(), ('protocol.connect', 'protocol.schema'))
         self.assertIsNone(registry.operation('seat.sign_in'))
+
+    def test_lookup_arm_is_complete(self):
+        from relay_engine import api_protocol as p, api_registry as r, errors
+        catalogue = errors.api_error_catalog()
+        variants = [v for v in catalogue.variants if v.code == 'E_API_NOT_FOUND']
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].api_class, 'lookup')
+        expected = {'relay_unknown': 'check_relay_id', 'project_unknown': 'check_seat_address',
+                    'seat_unknown': 'check_seat_address'}
+        self.assertEqual({b.cause_kind: b.remedy for b in variants[0].branches}, expected)
+        registry = p.discovery_registry()
+        ref = d.TypeRef('ApiError')
+        for kind, remedy in expected.items():
+            with self.subTest(kind=kind):
+                answer = {'code': 'E_API_NOT_FOUND', 'class': 'lookup',
+                          'cause': {'kind': kind}, 'remedy': remedy}
+                self.assertEqual(p.api_error(registry, kind), answer)
+                self.assertNotIsInstance(r.validate_type(registry, ref, answer), r.ValidationFailure)
+                wrong = next(x for x in expected.values() if x != remedy)
+                self.assertIsInstance(r.validate_type(registry, ref, dict(answer, remedy=wrong)),
+                                      r.ValidationFailure)
+                extra = dict(answer, cause={'kind': kind, 'relay_id': 'not-a-payload'})
+                self.assertIsInstance(r.validate_type(registry, ref, extra), r.ValidationFailure)
 
     def test_catalog_cause_payloads_match_base(self):
         from relay_engine import errors
@@ -610,7 +672,7 @@ class TestCompile(unittest.TestCase):
                 with self.assertRaises(self.r.RegistryCompileError) as caught:
                     self.compile(graph)
                 self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
-        self.assertEqual(len(self.compile().error_arms()), 44)
+        self.assertEqual(len(self.compile().error_arms()), 47)
 
     def test_compile_refuses_branch_defects(self):
         from dataclasses import replace
@@ -693,7 +755,7 @@ class TestCompile(unittest.TestCase):
 
     def test_error_arms_are_complete_records(self):
         registry = self.compile()
-        self.assertEqual(len(registry.error_arms()), 44)
+        self.assertEqual(len(registry.error_arms()), 47)
         for arm in registry.error_arms():
             leaf = registry.types[arm.cause_type.name].shape
             kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]

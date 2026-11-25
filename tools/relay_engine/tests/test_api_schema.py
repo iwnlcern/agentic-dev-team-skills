@@ -63,7 +63,7 @@ class TestExport(unittest.TestCase):
         old_digest = '9445baeef11240763072427eee4f9f629979f0a3cc03a6951428dc005784044a'
         artifact = self.export()
         self.assertNotEqual(artifact.digest, old_digest)
-        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 44)
+        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 47)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(load_generator().main(['--check']), 0)
 
@@ -87,7 +87,7 @@ class TestExport(unittest.TestCase):
             'protocol_window_v1', 'schema_payload_v1', 'negotiated_schema_v1'})
         scopes = [(rule.get('type_ref', rule.get('array_ref', rule.get('operation'))), rule['kind']) for rule in rules]
         self.assertEqual(scopes, sorted(set(scopes)))
-        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 44)
+        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 47)
         for item in doc['$defs'].values():
             if item.get('type') == 'object':
                 self.assertIs(item['additionalProperties'], False)
@@ -801,6 +801,31 @@ class TestGeneratedConsumers(unittest.TestCase):
                                                        cases[0][0]['value']})})
                 with self.assertRaises(AssertionError):
                     self.run_consumer(language, cases=control, controls=False)
+
+    def test_lookup_consumer_vectors(self):
+        rows = (('relay_unknown', 'check_relay_id'), ('project_unknown', 'check_seat_address'),
+                ('seat_unknown', 'check_seat_address'))
+
+        def frame(error):
+            raw = jcs.jcs_encode({'request_id': '1', 'error': error})
+            return (len(raw).to_bytes(4, 'big') + raw).hex()
+
+        cases = []
+        for kind, remedy in rows:
+            error = {'code': 'E_API_NOT_FOUND', 'class': 'lookup',
+                     'cause': {'kind': kind}, 'remedy': remedy}
+            bad = dict(error, remedy=next(other for _, other in rows if other != remedy))
+            cases.extend([
+                ({'action': 'encode_error', 'id': '1', 'value': error}, {'hex': frame(error)}),
+                ({'action': 'encode_error', 'id': '1', 'value': bad}, {'invalid': True}),
+                ({'action': 'decode', 'id': '1', 'operation': 'protocol.connect', 'connect': '',
+                  'frame': frame(error)}, {'error': error}),
+                ({'action': 'decode', 'id': '1', 'operation': 'protocol.connect', 'connect': '',
+                  'frame': frame(bad)}, {'unavailable': True}),
+            ])
+        for language in ('rs', 'ts'):
+            with self.subTest(language=language):
+                self.run_consumer(language, cases=cases, controls=False)
 
     def test_manifest_matches_artifacts(self):
         from relay_engine import api_schema
