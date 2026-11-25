@@ -13,10 +13,12 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
@@ -1037,8 +1039,9 @@ def docker_binary():
 class LinuxFixture(FixtureRepo):
     """A committed fixture repository the linux leg can run: it carries the runner itself."""
 
-    def __init__(self, test_case, linked=False):
+    def __init__(self, test_case, linked=False, image=None):
         super().__init__(test_case)
+        self.image = image
         (self.root / "tools" / "release-check.py").write_text(SCRIPT.read_text())
         (self.root / "AGENTS.md").write_text("fixture\n")
         self.passing("test_a_ok")
@@ -1058,6 +1061,8 @@ class LinuxFixture(FixtureRepo):
 
     def run_legs(self, leg, environ=None, history=(), extra=()):
         argv = ["full", "--leg", leg, "--out", str(self.out), "--workers", "2", *extra]
+        if self.image is not None:
+            argv += ["--image", self.image]
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = rc.main(argv, repo=self.repo,
@@ -1073,12 +1078,467 @@ class LinuxFixture(FixtureRepo):
                               stdin=subprocess.DEVNULL)
 
 
+
+class ImageResolution(unittest.TestCase):
+    TAG = "adt-release-check:5ac9796fa9ca"
+    IMAGE = "sha256:" + "a" * 64
+    OTHER = "sha256:" + "b" * 64
+    THIRD = "sha256:" + "c" * 64
+    MISS = (
+        0, 1, "\n",
+        f'Error response from daemon: {{"message":"No such image: {TAG}"}}\n',
+    )
+    MISS_PLAIN = (0, 1, "\n", f"Error response from daemon: No such image: {TAG}\n")
+
+    def stub(self, *, inspect=None, wake=(0, 0, "", ""), info=(0, 0, "aarch64\n", ""),
+             build=(0, 0, "", "")):
+        fixture = LinuxFixture(self).finish()
+        log = fixture.pids / "argv"
+        before = fixture.out / "before.json"
+        if inspect is None:
+            inspect = [(0, 0, self.IMAGE + " linux/arm64\n", "")]
+        source = f"""#!{sys.executable}
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+argv = sys.argv[1:]
+command = argv[0]
+if command == "image":
+    command = argv[1]
+log = Path({str(log)!r})
+prior = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+before = Path({str(before)!r})
+with log.open("a") as stream:
+    stream.write(json.dumps({{"seq": len(prior) + 1, "argv": argv, "command": command,
+                              "pid": os.getpid(), "before": before.is_file()}}) + "\\n")
+if command == "inspect":
+    rows = {inspect!r}
+    offset = sum(row["command"] == command for row in prior)
+    delay, code, out, err = rows[min(offset, len(rows) - 1)]
+    if code == 0 and "{{{{.Architecture}}}}" in argv and out.startswith("sha256:"):
+        out = out.split()[-1] + "\\n"
+    if code == 0 and "{{{{.Id}}}}" in argv and out.startswith("sha256:"):
+        out = out.split()[0] + "\\n"
+else:
+    delay, code, out, err = {{
+        "info": {info!r}, "ps": {wake!r}, "build": {build!r}, "run": (0, 2, "", ""),
+    }}.get(command, (0, 2, "", "unexpected Docker command\\n"))
+time.sleep(delay)
+sys.stdout.write(out)
+sys.stderr.write(err)
+raise SystemExit(code)
+"""
+        docker = fixture.pids / "docker"
+        with open(docker, "x", opener=lambda name, flags: os.open(name, flags, 0o755)) as stream:
+            stream.write(source)
+        self.warm_stub(docker)
+        return fixture, docker, log
+
+    def warm_stub(self, docker):
+        result = subprocess.run([str(docker), "version"], capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 2, result)
+        self.assertEqual(result.stderr, b'unexpected Docker command\n')
+        docker.with_name("argv").unlink()
+
+    def rows(self, log):
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    def commands(self, log):
+        return [row["command"] for row in self.rows(log)]
+
+    @contextlib.contextmanager
+    def timings(self, window=0.8, probe=0.35, interval=0.05):
+        with mock.patch.object(rc, "WINDOW_SECONDS", window, create=True), \
+                mock.patch.object(rc, "PROBE_SECONDS", probe, create=True), \
+                mock.patch.object(rc, "PROBE_INTERVAL_SECONDS", interval, create=True):
+            yield
+
+    def full(self, fixture, docker, *args, timings=()):
+        with self.timings(*timings):
+            return fixture.run_legs("linux", environ={**os.environ, "DOCKER": str(docker)}, extra=args)
+
+    def image_build(self, fixture, docker, *, statement=True):
+        argv = ["image", "build", "--out", str(fixture.out)]
+        if statement:
+            argv += ["--operator-verified-absent"]
+        with self.timings(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return rc.main(argv, repo=fixture.repo, environ={**os.environ, "DOCKER": str(docker)})
+
+    def image_record(self, fixture):
+        return json.loads((fixture.out / "linux" / "image.json").read_text())
+
+    def test_unanswered_lookup_stops_without_building(self):
+        fixture, docker, log = self.stub(inspect=[self.MISS])
+        status, err = self.full(fixture, docker, timings=(2.0, 1.5, 0.05))
+        self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
+        self.assertEqual(status, 2, err)
+        self.assertIn(self.TAG, err)
+        self.assertIn("all not-found", err)
+        record = self.image_record(fixture)
+        self.assertEqual(record["result"], "unresolved")
+        wake, *inspects = record["probes"]
+        self.assertEqual((wake["kind"], wake["class"]), ("wake", "woke"))
+        self.assertTrue(inspects, record)
+        self.assertTrue(all(row["kind"] == "inspect" for row in inspects), record)
+        self.assertTrue(all(row["class"] == "not-found" for row in inspects[:-1]), record)
+        self.assertIn(inspects[-1]["class"], ("not-found", "cut"), record)
+
+    def test_real_miss_forms_are_not_found(self):
+        for form, miss in (("json", self.MISS), ("plain", self.MISS_PLAIN)):
+            with self.subTest(form=form):
+                fixture, docker, log = self.stub(inspect=[miss])
+                status, error = self.full(fixture, docker, timings=(2.0, 1.5, 0.05))
+                self.assertEqual(status, 2, error)
+                self.assertIn(self.TAG, error)
+                self.assertIn("all not-found", error)
+                record = self.image_record(fixture)
+                self.assertEqual(record["result"], "unresolved")
+                wake, *inspects = record["probes"]
+                self.assertEqual((wake["kind"], wake["class"]), ("wake", "woke"))
+                self.assertTrue(inspects, record)
+                self.assertTrue(all(row["kind"] == "inspect" for row in inspects), record)
+                self.assertTrue(all(row["class"] == "not-found" for row in inspects[:-1]), record)
+                self.assertIn(inspects[-1]["class"], ("not-found", "cut"), record)
+                self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
+
+    def test_idle_miss_then_answer_runs_by_id(self):
+        fixture, docker, log = self.stub(inspect=[self.MISS, (0, 0, self.IMAGE + " linux/arm64\n", "")])
+        self.full(fixture, docker)
+        self.assertEqual(self.commands(log), ["info", "ps", "inspect", "inspect", "run"], self.rows(log))
+        argv = self.rows(log)[-1]["argv"]
+        self.assertEqual(argv[argv.index("python3") - 1], self.IMAGE)
+        self.assertIn("ADT_IMAGE_ID=" + self.IMAGE, argv)
+        self.assertEqual(argv.count("--pull=never"), 1)
+        self.assertNotIn(self.TAG, argv)
+        record = self.image_record(fixture)
+        self.assertEqual(record["result"], "present")
+        self.assertEqual([row["class"] for row in record["probes"]], ["woke", "not-found", "answer"])
+
+    def test_inconclusive_lookups_stop_without_building(self):
+        for case, kwargs, message in [
+            ("wake", {"wake": (0, 1, "", "wake refused\n"), "inspect": [self.MISS]},
+             "wake failed: wake refused"),
+            ("transport", {"inspect": [(0, 1, "", "Cannot connect to the Docker daemon at "
+                                       "unix:///var/run/docker.sock. Is the docker daemon running?\n")]},
+             "unresolved"),
+            ("timeout", {"inspect": [(2.0, 1, "", "")]}, "inspect timeout"),
+            ("malformed", {"inspect": [(0, 0, "not an image record\n", "")]}, "unresolved"),
+            ("foreign", {"inspect": [(0, 0, self.OTHER + " linux/amd64\n", "")]}, "foreign"),
+            ("info", {"info": (1.05, 0, "aarch64\n", ""), "inspect": [self.MISS]}, "platform"),
+        ]:
+            with self.subTest(case=case):
+                fixture, docker, log = self.stub(**kwargs)
+                timings = (3.0, 0.5, 0.05) if case == "timeout" else ()
+                status, err = self.full(fixture, docker, timings=timings)
+                self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
+                self.assertEqual(status, 2, err)
+                self.assertIn(message, err)
+                if case == "wake":
+                    self.assertEqual(self.commands(log), ["info", "ps"])
+                    probes = self.image_record(fixture)["probes"]
+                    self.assertEqual([(row["kind"], row["class"]) for row in probes],
+                                     [("wake", "failed")])
+                elif case == "timeout":
+                    _, first, *later = self.image_record(fixture)["probes"]
+                    self.assertEqual((first["kind"], first["class"]), ("inspect", "timeout"))
+                    self.assertTrue(all(row["class"] in ("timeout", "cut") for row in later), later)
+
+    def test_image_pin_mismatch_stops_before_any_container(self):
+        fixture, docker, log = self.stub()
+        status, err = self.full(fixture, docker, "--image", self.OTHER)
+        self.assertEqual(status, 2, err)
+        self.assertIn(self.IMAGE, err)
+        self.assertIn(self.OTHER, err)
+        self.assertNotIn("run", self.commands(log))
+        rc.STOP.clear()
+        with self.timings():
+            for state in ("present", "unresolved"):
+                inspected = None if state == "present" else [self.MISS]
+                _, probe, _ = self.stub(inspect=inspected)
+                record = rc.resolve_image(str(probe), "linux/arm64")
+                self.assertEqual(record.result, state)
+                with self.assertRaises(rc.SetupError):
+                    rc.pinned(record, self.OTHER)
+
+    def test_image_build_needs_the_statement_and_refuses_a_resolving_tag(self):
+        for case, inspect, statement, expected in [
+            ("no-statement", None, False, 2),
+            ("present", None, True, 2),
+            ("foreign", [(0, 0, self.OTHER + " linux/amd64\n", "")], True, 2),
+            ("unresolved", [self.MISS], True, 0),
+        ]:
+            with self.subTest(case=case):
+                fixture, docker, log = self.stub(inspect=inspect)
+                if case == "unresolved":
+                    with self.post_build_answer(docker, self.IMAGE + " linux/arm64"):
+                        status = self.image_build(fixture, docker)
+                else:
+                    status = self.image_build(fixture, docker, statement=statement)
+                self.assertEqual(status, expected)
+                commands = self.commands(log)
+                if not statement:
+                    self.assertEqual(commands, [])
+                else:
+                    before = json.loads((fixture.out / "before.json").read_text())
+                    self.assertEqual(before["record"]["result"], case)
+                builds = [row for row in self.rows(log) if row["command"] == "build"]
+                if expected == 0:
+                    self.assertEqual(len(builds), 1)
+                    self.assertEqual(builds[0]["argv"],
+                                     ["build", "-q", "--platform", "linux/arm64", "-t", self.TAG, "-"])
+                    self.assertTrue(builds[0]["before"])
+                    after = json.loads((fixture.out / "after.json").read_text())
+                    self.assertEqual((after["build_exit"], after["record"]["result"]), (0, "present"))
+                else:
+                    self.assertEqual(builds, [])
+
+    @contextlib.contextmanager
+    def post_build_answer(self, docker, answer):
+        script = docker.read_text().replace(
+            'if command == "inspect":',
+            f'if command == "inspect" and any(row["command"] == "build" for row in prior):\n'
+            f'    print({answer!r})\n    raise SystemExit(0)\nif command == "inspect":',
+        )
+        docker.write_text(script)
+        self.warm_stub(docker)
+        yield
+
+    def test_docker_args_run_by_immutable_id(self):
+        repo = Path("/Users/fixture/worktree")
+        args = rc.docker_args(repo, repo / ".git", repo / "out", self.IMAGE, "abc123")
+        self.assertEqual(args.count("--pull=never"), 1)
+        self.assertEqual(args[args.index("python3") - 1], self.IMAGE)
+        with self.assertRaises(ValueError):
+            rc.docker_args(repo, repo / ".git", repo / "out", self.TAG, "abc123")
+
+    def test_testing_md_states_the_image_rule(self):
+        doc = (REPO / "tools" / "TESTING.md").read_text()
+        self.assertIn("image build --operator-verified-absent", doc)
+        self.assertIn("check never builds", doc)
+
+    def test_full_owns_the_pin_in_mac_leg_steps(self):
+        for args, wanted in [(("--image", self.IMAGE), self.IMAGE), ((), None)]:
+            with self.subTest(args=args):
+                fixture = FixtureRepo(self)
+                fixture.module("test_pin", f"""
+                    class T(unittest.TestCase):
+                        def test_pin(self):
+                            self.assertEqual(os.environ.get("ADT_RELEASE_CHECK_IMAGE"), {wanted!r})
+                """)
+                status, err = fixture.run(*args, environ={**os.environ, "ADT_RELEASE_CHECK_IMAGE": self.THIRD})
+                self.assertEqual(status, 0, (err, fixture.results()))
+
+    @contextlib.contextmanager
+    def stop_on(self, log, command):
+        finished = threading.Event()
+
+        def stop():
+            deadline = time.monotonic() + 3
+            while not finished.is_set() and time.monotonic() < deadline:
+                if command in self.commands(log):
+                    rc.STOP.set()
+                    return
+                finished.wait(0.02)
+
+        watcher = threading.Thread(target=stop)
+        watcher.start()
+        try:
+            yield
+        finally:
+            finished.set()
+            watcher.join()
+            rc.STOP.clear()
+
+    def test_resolution_stops_on_interrupt(self):
+        resolve_image = rc.resolve_image
+        _, docker, log = self.stub(inspect=[(5, 0, self.IMAGE + " linux/arm64\n", "")])
+        with self.timings(window=5, probe=4), self.stop_on(log, "inspect"):
+            start = time.monotonic()
+            with self.assertRaises(rc.Stopped):
+                resolve_image(str(docker), "linux/arm64")
+            self.assertLess(time.monotonic() - start, 1)
+        self.assertFalse(alive(self.rows(log)[-1]["pid"]))
+
+    def test_image_build_keeps_its_record_when_the_write_goes_wrong(self):
+        for case in ("build-failed", "unresolved", "foreign", "stopped"):
+            with self.subTest(case=case):
+                fixture, docker, log = self.stub(
+                    inspect=[self.MISS],
+                    build=(5 if case == "stopped" else 0, int(case == "build-failed"), "", "build stderr\n"),
+                )
+                with contextlib.ExitStack() as stack:
+                    if case == "foreign":
+                        stack.enter_context(self.post_build_answer(docker, self.OTHER + " linux/amd64"))
+                    elif case == "stopped":
+                        stack.enter_context(self.stop_on(log, "build"))
+                    status = self.image_build(fixture, docker)
+                self.assertEqual(status, 1)
+                before = json.loads((fixture.out / "before.json").read_text())
+                self.assertTrue(before["operator_verified_absent"])
+                self.assertEqual(before["record"]["result"], "unresolved")
+                after = json.loads((fixture.out / "after.json").read_text())
+                builds = [row for row in self.rows(log) if row["command"] == "build"]
+                self.assertEqual(len(builds), 1)
+                self.assertTrue(builds[0]["before"])
+                if case == "stopped":
+                    self.assertEqual(after["stopped"], "build")
+                    self.assertFalse(alive(builds[0]["pid"]))
+                elif case == "build-failed":
+                    self.assertEqual(after["build_exit"], 1)
+                    self.assertIn("build stderr", after["build_stderr"])
+                else:
+                    self.assertEqual(after["build_exit"], 0)
+                    self.assertEqual(after["record"]["result"], case)
+
+    def test_final_poll_lands_before_the_deadline(self):
+        REFERENCE_LEAD = 0.01
+
+        class FakeClock:
+            def __init__(self):
+                self.seconds = 0.0
+
+            def now(self):
+                return self.seconds
+
+            def advance(self, seconds):
+                self.seconds += seconds
+
+        class FakeChild:
+            def __init__(self, clock, exits_at, code, poll_cost=0.001):
+                self.clock = clock
+                self.exits_at = exits_at
+                self.code = code
+                self.poll_cost = poll_cost
+                self.poll_times = []
+                self.killed = False
+                self.waited = False
+                self.returncode = None
+                self.pid = 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def poll(self):
+                self.poll_times.append(self.clock.now())
+                self.clock.advance(self.poll_cost)
+                if self.clock.now() >= self.exits_at:
+                    self.returncode = self.code
+                return self.returncode
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self):
+                self.waited = True
+                self.returncode = -signal.SIGKILL if self.killed else self.code
+                return self.returncode
+
+        class FakeStop:
+            def __init__(self, clock, deadline, wake_late=0.0, set_at=None):
+                self.clock = clock
+                self.deadline = deadline
+                self.wake_late = wake_late
+                self.set_at = set_at
+
+            def is_set(self):
+                return self.set_at is not None and self.clock.now() >= self.set_at
+
+            def wait(self, timeout):
+                if self.is_set():
+                    return True
+                now = self.clock.now()
+                end = now + timeout
+                lead = getattr(rc, "FINAL_POLL_LEAD_SECONDS", REFERENCE_LEAD)
+                if self.deadline is not None and self.wake_late and end >= self.deadline - lead:
+                    end += self.wake_late
+                    self.wake_late = 0.0
+                if self.set_at is not None and self.set_at <= end:
+                    end = self.set_at
+                self.clock.advance(end - now)
+                return self.is_set()
+
+        def run(exits_at, *, deadline=1.0, poll_cost=0.001, wake_late=0.0, set_at=None):
+            clock = FakeClock()
+            child = FakeChild(clock, exits_at, 0, poll_cost)
+            stop = FakeStop(clock, deadline, wake_late, set_at)
+            fake_subprocess = SimpleNamespace(DEVNULL=subprocess.DEVNULL, Popen=mock.Mock(return_value=child))
+            with (mock.patch.object(rc, "time", SimpleNamespace(monotonic=clock.now)),
+                  mock.patch.object(rc, "subprocess", fake_subprocess),
+                  mock.patch.object(rc, "STOP", stop)):
+                result = rc._docker_child(["fake-docker"], deadline)
+            return result, child
+
+        with self.subTest(case="exit-before-lead"):
+            result, child = run(0.98)
+            self.assertFalse(result.timed_out)
+            self.assertEqual(result.exit, 0)
+            self.assertFalse(child.killed)
+
+        with self.subTest(case="exit-inside-lead"):
+            for poll_cost in (0.001, 0.0):
+                with self.subTest(poll_cost=poll_cost):
+                    result, child = run(0.995, poll_cost=poll_cost)
+                    final_poll_at = 1.0 - getattr(rc, "FINAL_POLL_LEAD_SECONDS", REFERENCE_LEAD)
+                    self.assertLessEqual(sum(at >= final_poll_at for at in child.poll_times), 1)
+                    self.assertTrue(result.timed_out)
+                    self.assertTrue(child.killed)
+
+        with self.subTest(case="final-poll-late"):
+            result, _ = run(0.98, wake_late=0.015)
+            self.assertTrue(result.timed_out)
+
+        with self.subTest(case="exit-after-deadline"):
+            result, child = run(1.02)
+            self.assertTrue(result.timed_out)
+            self.assertTrue(child.killed)
+
+        with self.subTest(case="stop-wins"):
+            result, child = run(0.98, set_at=0.985)
+            self.assertTrue(result.stopped)
+            self.assertTrue(child.killed)
+
+        with self.subTest(case="stop-after-final"):
+            result, child = run(1.02, set_at=0.995)
+            self.assertTrue(result.stopped)
+            self.assertTrue(child.killed)
+            self.assertTrue(child.waited)
+            self.assertFalse(any(at >= 0.995 for at in child.poll_times))
+
+        with self.subTest(case="no-deadline"):
+            result, child = run(3.0, deadline=None)
+            self.assertFalse(result.timed_out)
+            self.assertFalse(result.stopped)
+            self.assertEqual(result.exit, 0)
+            self.assertFalse(child.killed)
+
+    def test_shared_window_cuts_a_late_inspect(self):
+        fixture, docker, log = self.stub(inspect=[self.MISS, (1.3, 0, self.IMAGE + " linux/arm64\n", "")])
+        status, err = self.full(fixture, docker, timings=(2.0, 1.6, 1.0))
+        self.assertTrue({"build", "pull", "run"}.isdisjoint(self.commands(log)), self.rows(log))
+        self.assertEqual(status, 2, err)
+        self.assertEqual(self.commands(log), ["info", "ps", "inspect", "inspect"])
+        record = self.image_record(fixture)
+        self.assertEqual(record["result"], "unresolved")
+        self.assertFalse(alive(self.rows(log)[-1]["pid"]))
+        self.assertEqual([(row["kind"], row["class"]) for row in record["probes"]],
+                         [("wake", "woke"), ("inspect", "not-found"), ("inspect", "cut")], err)
+        self.assertIn("all not-found; last inspect cut at the window's end", err)
+
+
 class DockerArgs(unittest.TestCase):
 
     def test_mount_args_are_readonly_binds(self):
         worktree = Path("/Users/someone/worktrees/w")
         common = Path("/Users/someone/repo/.git")
-        args = rc.docker_args(worktree, common, Path("/Users/someone/out"), "img:tag", "abc123",
+        args = rc.docker_args(worktree, common, Path("/Users/someone/out"), "sha256:" + "a" * 64, "abc123",
                               platform="linux/arm64")
         self.assertNotIn("-v", args)
         self.assertNotIn("--volume", args)
@@ -1090,12 +1550,15 @@ class DockerArgs(unittest.TestCase):
         self.assertEqual(args[args.index("--tmpfs") + 1], "/scratch:rw,exec,mode=1777")
         self.assertEqual(args[args.index("--platform") + 1], "linux/arm64")
         self.assertIn("ADT_EXPECTED_HEAD=abc123", args)
+        environ = [value for flag, value in zip(args, args[1:]) if flag == "-e"]
+        self.assertEqual(environ.count("HOME=/scratch"), 1, args)
+        self.assertEqual(environ.count("TMPDIR=/scratch"), 1, args)
         self.assertEqual(args[args.index("-w") + 1], str(worktree))
 
     def test_linux_leg_names_the_acl_folder(self):
         # Breaks: a Linux leg whose ACL tests have no folder that accepts a default ACL.
         args = rc.docker_args(Path("/Users/someone/worktrees/w"), Path("/Users/someone/repo/.git"),
-                              Path("/Users/someone/out"), "img:tag", "abc123", platform="linux/arm64")
+                              Path("/Users/someone/out"), "sha256:" + "a" * 64, "abc123", platform="linux/arm64")
         values = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "-e"]
         self.assertEqual(values.count("RELAY_ENGINE_ACL_DIR=/var/tmp"), 1, args)
         self.assertEqual(args.count("RELAY_ENGINE_ACL_DIR=/var/tmp"), 1, args)
@@ -1128,15 +1591,23 @@ class LinuxLeg(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.image = rc.ensure_image(docker_binary())
+        docker = docker_binary()
+        if not docker:
+            raise rc.SetupError("docker not found")
+        cls.platform = rc.native_platform(docker)
+        record = rc.resolve_image(docker, cls.platform)
+        cls.image = rc.pinned(record, os.environ.get(rc.PIN_ENV))
+
+    def fixture(self, *, linked=False):
+        return LinuxFixture(self, linked=linked, image=self.image)
 
     def readonly_args(self, fixture, expected_head=None):
         common = rc.common_git_dir(fixture.repo)
         return rc.docker_args(fixture.repo, common, fixture.out, self.image,
-                              expected_head or fixture.head, platform=rc.native_platform(docker_binary()))
+                              expected_head or fixture.head, platform=self.platform)
 
     def test_preflight_rejects_writable_mount(self):
-        fixture = LinuxFixture(self).finish()
+        fixture = self.fixture().finish()
         args = self.readonly_args(fixture)
         writable = [a.replace(f"dst={fixture.repo},readonly", f"dst={fixture.repo}") for a in args]
         result = fixture.container(writable)
@@ -1144,9 +1615,10 @@ class LinuxLeg(unittest.TestCase):
         self.assertIn(f"source mount {fixture.repo} accepts a write", result.stdout + result.stderr)
         control = fixture.container(args)
         self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+        self.assertIn("preflight: clean", control.stdout)
 
     def test_preflight_rejects_missing_history(self):
-        fixture = LinuxFixture(self).finish()
+        fixture = self.fixture().finish()
         code, err = fixture.run_legs("linux", history=("0123abc",))
         self.assertEqual(code, 2, err)
         self.assertIn("git show 0123abc: fails in the container",
@@ -1157,7 +1629,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_container_runs_as_host_uid(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_refused", '''
             import tempfile
             class T(unittest.TestCase):
@@ -1173,7 +1645,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_scratch_env_in_container(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_scratch", '''
             import tempfile
             class T(unittest.TestCase):
@@ -1187,7 +1659,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_preflight_rejects_head_mismatch(self):
-        fixture = LinuxFixture(self).finish()
+        fixture = self.fixture().finish()
         result = fixture.container(self.readonly_args(fixture, expected_head="0" * 40))
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("HEAD", result.stdout + result.stderr)
@@ -1214,7 +1686,7 @@ class LinuxLeg(unittest.TestCase):
     '''
 
     def test_orphan_is_reaped_on_linux(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_orphan", self.ORPHAN)
         fixture.finish()
         args = self.readonly_args(fixture)
@@ -1225,9 +1697,12 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(step["outcome"], "pass")
         control = fixture.container([a for a in args if a != "--init"])
         self.assertEqual(control.returncode, 1, control.stdout + control.stderr)
+        linux = json.loads((fixture.out / "linux" / "results.json").read_text())
+        step = next(s for s in linux["steps"] if s["id"] == "relay_engine.tests.test_b_orphan")
+        self.assertEqual(step["outcome"], "fail")
 
     def test_scratch_is_executable_on_linux(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_exec", '''
             import subprocess, tempfile
             class T(unittest.TestCase):
@@ -1244,7 +1719,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual(code, 0, err)
 
     def test_linux_leg_runs_native_platform(self):
-        fixture = LinuxFixture(self).finish()
+        fixture = self.fixture().finish()
         code, err = fixture.run_legs("linux")
         self.assertEqual(code, 0, err)
         native = subprocess.run([docker_binary(), "info", "--format", "{{.Architecture}}"],
@@ -1254,7 +1729,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertTrue(linux["image"].startswith("sha256:"), linux["image"])
 
     def test_linux_sweep_stops_setsid_daemon(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_daemon", '''
             class T(unittest.TestCase):
                 def test_daemon(self):
@@ -1277,12 +1752,12 @@ class LinuxLeg(unittest.TestCase):
 
     def interrupted_linux_leg(self, modules):
         """Interrupt a linux leg once every named module has started; return its records."""
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         for name, body in modules.items():
             fixture.module(name, body)
         fixture.finish()
         driver = start_driver(fixture, "full", "--leg", "linux", "--workers", str(len(modules)),
-                              "--out", str(fixture.out))
+                              "--out", str(fixture.out), "--image", self.image)
         self.addCleanup(stop_driver, driver)
         label = self.run_label(fixture)
         self.addCleanup(self.remove_labelled, label)
@@ -1307,9 +1782,12 @@ class LinuxLeg(unittest.TestCase):
     def test_interrupt_kills_the_container(self):
         # Another container of the same image (another worktree's check) must not be taken for
         # this run's: containers are found by this run's label (plan r4 T11).
-        bystander = subprocess.run([docker_binary(), "run", "-d", "--rm", "--label",
-                                    f"{rc.RUN_LABEL}=bystander-{os.getpid()}", self.image, "sleep", "300"],
-                                   capture_output=True, text=True, check=True).stdout.strip()
+        argv = [docker_binary(), "run", "-d", "--rm", "--pull=never", "--label",
+                f"{rc.RUN_LABEL}=bystander-{os.getpid()}", self.image, "sleep", "300"]
+        self.assertEqual(argv.count("--pull=never"), 1)
+        self.assertEqual(argv[argv.index("--label") + 2], self.image)
+        self.assertNotIn(rc.image_tag(), argv)
+        bystander = subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip()
         self.addCleanup(subprocess.run, [docker_binary(), "rm", "-f", bystander], capture_output=True)
         linux = self.interrupted_linux_leg({"test_b_slow": self.STARTS.format(name="test_b_slow")})
         running = subprocess.run([docker_binary(), "ps", "-q", "--no-trunc", "--filter", f"id={bystander}"],
@@ -1337,13 +1815,13 @@ class LinuxLeg(unittest.TestCase):
         return script
 
     def test_interrupt_during_docker_setup(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_slow", self.STARTS.format(name="test_b_slow"))
         fixture.finish()
         mark = fixture.pids / "docker-run-called"
         docker = self.fake_docker(fixture, f": > {mark}\nsleep 3")
         driver = start_driver(fixture, "full", "--leg", "linux", "--out", str(fixture.out),
-                              env={**os.environ, "DOCKER": str(docker)})
+                              "--image", self.image, env={**os.environ, "DOCKER": str(docker)})
         self.addCleanup(stop_driver, driver)
         label = self.run_label(fixture)
         self.addCleanup(self.remove_labelled, label)
@@ -1359,7 +1837,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertTrue(summary["interrupted"])
 
     def test_empty_module_fails_on_linux(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_empty", '''
             HELPER = 1
         ''')
@@ -1372,7 +1850,7 @@ class LinuxLeg(unittest.TestCase):
         self.assertEqual((step["outcome"], step["reason"], step["exit_code"]), ("fail", "no-tests", 0))
 
     def test_summary_records_release_legs_cap(self):
-        fixture = LinuxFixture(self).finish()
+        fixture = self.fixture().finish()
         code, err = fixture.run_legs("mac")
         self.assertEqual(code, 0, err)
         summary = json.loads((fixture.out / "release-check.json").read_text())
@@ -1389,10 +1867,11 @@ class LinuxLeg(unittest.TestCase):
                          (True, 1800, {"mac", "linux"}))
 
     def test_sigkill_cleanup_finds_leftovers(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_slow", self.STARTS.format(name="test_b_slow"))
         fixture.finish()
-        driver = start_driver(fixture, "full", "--leg", "both", "--workers", "2", "--out", str(fixture.out))
+        driver = start_driver(fixture, "full", "--leg", "both", "--workers", "2",
+                              "--out", str(fixture.out), "--image", self.image)
         self.addCleanup(stop_driver, driver)
         label = self.run_label(fixture)
         self.addCleanup(self.remove_labelled, label)
@@ -1419,17 +1898,24 @@ class LinuxLeg(unittest.TestCase):
         self.assertIn(str(step["pid"]), marked.split())
 
     def test_container_kill_is_not_green(self):
-        fixture = LinuxFixture(self).finish()
+        fixture = self.fixture().finish()
         base = fixture.out
-        for name, lines in (("killed", "exit 137"), ("daemon-error", "exit 125"),
-                            ("no-results", "exit 0")):
-            fixture.out = base.parent / f"{base.name}-{name}"
-            self.addCleanup(shutil.rmtree, fixture.out, True)
-            docker = self.fake_docker(fixture, lines)
-            code, err = fixture.run_legs("linux", environ={**os.environ, "DOCKER": str(docker)})
-            self.assertEqual(code, 2, f"{name}: {err}")
-            summary = json.loads((fixture.out / "release-check.json").read_text())
-            self.assertEqual(summary["legs"]["linux"], {"exit": 2, "results": None}, name)
+        for name, exit_code, message in (
+            ("killed", 137, "container exited 137, not the runner's 0, 1 or 2"),
+            ("daemon-error", 125, "container exited 125, not the runner's 0, 1 or 2"),
+            ("no-results", 0, "exited 0 but wrote no"),
+        ):
+            with self.subTest(name=name):
+                fixture.out = base.parent / f"{base.name}-{name}"
+                self.addCleanup(shutil.rmtree, fixture.out, True)
+                log = fixture.pids / f"{name}-runs"
+                docker = self.fake_docker(fixture, f'echo run >> "{log}"\nexit {exit_code}')
+                code, err = fixture.run_legs("linux", environ={**os.environ, "DOCKER": str(docker)})
+                self.assertEqual(code, 2, err)
+                summary = json.loads((fixture.out / "release-check.json").read_text())
+                self.assertEqual(summary["legs"]["linux"], {"exit": 2, "results": None})
+                self.assertEqual(log.read_text().splitlines(), ["run"])
+                self.assertIn(message, err)
 
     def run_label(self, fixture, seconds=60.0):
         record = fixture.out / "linux" / "container.json"
@@ -1446,14 +1932,14 @@ class LinuxLeg(unittest.TestCase):
             subprocess.run([docker_binary(), "rm", "-f", container], capture_output=True)
 
     def test_git_works_in_linked_worktree(self):
-        fixture = LinuxFixture(self, linked=True).finish(linked=True)
+        fixture = self.fixture(linked=True).finish(linked=True)
         self.assertNotEqual(rc.common_git_dir(fixture.repo), fixture.repo / ".git")
         result = fixture.container(self.readonly_args(fixture))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("preflight: clean", result.stdout + result.stderr)
 
     def test_linux_only_failure_fails_whole_check(self):
-        fixture = LinuxFixture(self)
+        fixture = self.fixture()
         fixture.module("test_b_linux_only", '''
             class T(unittest.TestCase):
                 def test_platform(self):

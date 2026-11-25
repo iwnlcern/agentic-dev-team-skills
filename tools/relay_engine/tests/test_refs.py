@@ -19,6 +19,7 @@ from relay_engine.tests.xroot_test_stops import stop
 
 
 ODD = "range-@@ -01 +1 @@.diff"
+READY_CEILING_SECONDS = 20
 _GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
@@ -676,12 +677,21 @@ class TestOneShotGit(unittest.TestCase):
                 children = []
                 stream_fds = set()
                 eof_fds = set()
+                started = None
 
                 def remember_child(*args, **kwargs):
+                    nonlocal started
                     child = start(*args, **kwargs)
                     children.append(child)
                     self.addCleanup(self.close_child, child)
                     stream_fds.update((child.stdout.fileno(), child.stderr.fileno()))
+                    if closed_streams:
+                        ready_deadline = time.monotonic() + READY_CEILING_SECONDS
+                        while not ready.is_file():
+                            if time.monotonic() >= ready_deadline:
+                                self.fail("Host startup delay: stand-in never became ready; no deadline verdict")
+                            time.sleep(0.01)
+                    started = time.monotonic()
                     return child
 
                 class ObserveEof(selector_type):
@@ -701,12 +711,11 @@ class TestOneShotGit(unittest.TestCase):
                      mock.patch.object(rules, "_xroot_start_git", side_effect=remember_child), \
                      mock.patch.object(rules, "XROOT_GIT_TIMEOUT_SECONDS", 1), \
                      mock.patch.object(selectors, "DefaultSelector", ObserveEof):
-                    started = time.monotonic()
                     with self.assertRaises(rules.XrootAxisError) as caught:
                         rules.xroot_git(self.repo.path, "cat-file", "blob", oid)
                 self.assertEqual(len(children), 1)
                 self.assert_reaped(children[0])
-                self.assertGreaterEqual(time.monotonic() - started, 1)
+                self.assertGreaterEqual(caught.exception.established_at - started, 1)
                 self.assertEqual(caught.exception.axis, "capacity")
                 self.assertEqual(
                     caught.exception.detail,

@@ -918,6 +918,25 @@ assert_relay_version "e3-plugin-update-keeps-old-version-triad" "$e3_plugin_old/
 assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine_dirty" "$e3_plugin_new" "$e3_plugin_home" "$PATH_WITH_DECOY" 2 B || fail=1
 assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.7" "$e3_plugin_new_fingerprint" || fail=1
 
+hook_files_log="$tmp/hook-files-unittest.log"
+if (cd "$ROOT" && PYTHONPATH="$ROOT/tools" python3 -m unittest tools.adapters.tests.test_hook_files >"$hook_files_log" 2>&1) &&
+  awk '
+    /^Ran / {
+      waiting = ran = ($0 ~ /^Ran [1-9][0-9]* tests? in [0-9]+([.][0-9]+)?s$/)
+      ok = 0
+      next
+    }
+    /skipped=/ { skipped = 1 }
+    waiting && NF { ok = ($0 == "OK"); waiting = 0 }
+    END { exit !(ran && ok && !skipped) }
+  ' "$hook_files_log"; then
+  echo "PASS hook-files unittest"
+else
+  echo "FAIL hook-files unittest" >&2
+  fail=1
+fi
+cat "$hook_files_log" >&2
+
 if ! (cd "$ROOT" && python3 -m unittest tools.adapters.tests.test_relay_monitor tools.adapters.tests.test_shell_lex tools.adapters.tests.test_scope_proof tools.adapters.tests.test_window tools.adapters.tests.test_hostlogs tools.adapters.tests.test_seat_record tools.adapters.tests.test_delivery_interface tools.adapters.tests.test_window_record tools.adapters.tests.test_pending_ends 2>"$tmp/unittest.err"); then
   echo "FAIL relay-monitor unittest" >&2; cat "$tmp/unittest.err" >&2; fail=1
 else

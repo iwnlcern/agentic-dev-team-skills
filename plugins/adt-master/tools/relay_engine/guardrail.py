@@ -8,6 +8,10 @@ import re
 import shlex
 
 
+BRIDGE_OPERATION_PREFIX: str = "/api/op/"
+LAUNCH_FRAGMENT: str = "#launch="
+LAUNCH_PAGE: str = "open.html"
+
 EFFECT_CLASSES = (
     "commit", "protected-push", "pr-merge", "api-ref-write", "hook-bypass",
     "key-file-read", "operator-endpoint", "operator-only", "hook-disable", "top-seat-init",
@@ -25,14 +29,28 @@ _SHAPES = {
     "hook-bypass": ("git --no-verify", "git core.hooksPath", "GIT_CONFIG_* core.hooksPath"),
     "key-file-read": ("tool string or list input naming a refused path",
                       "content reader naming an ancestor directory",
-                      "command naming refused path"),
-    "operator-endpoint": ("relay answer", "relay prompt-record"),
+                      "command naming refused path",
+                      "console launch page shape under runtime bases"),
+    "operator-endpoint": ("relay answer", "relay prompt-record", "adt console open --print",
+                          "bridge call address in command text or url input"),
     "operator-only": ("adt engine stop", "adt engine configure", "relay engine off", "relay team open",
                       "adt engine start", "adt engine update", "adt engine install",
                       "adt checkout register", "adt checkout unregister", "adt seat unseat"),
     "hook-disable": ("persistent kit hook disabling write",),
     "top-seat-init": ("adt seat claim",),
 }
+_BRIDGE_ADDRESS = re.compile(
+    r"(?:http://|(?<![A-Za-z0-9.-]))(?:127[.]0[.]0[.]1|localhost):[0-9]{1,5}"
+    rf"(?:{re.escape(BRIDGE_OPERATION_PREFIX)}|/{re.escape(LAUNCH_FRAGMENT)})"
+)
+_RUNTIME_ID = re.compile(r"[0-9a-f]{16}")
+_HOME_PREFIX = re.compile(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)")
+_CONSOLE_PRINT_OPTIONS = frozenset(("--p", "--pr", "--pri", "--prin", "--print"))
+_CONSOLE_VALUE_OPTIONS = frozenset(
+    option[:size]
+    for option in ("--ready", "--store-root", "--item")
+    for size in range(3, len(option) + 1)
+)
 _SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _CONFIGURE = re.compile(r"(?<![\w.-])adt['\"]*\s+['\"]*engine['\"]*\s+['\"]*configure(?![\w./-])")
@@ -73,11 +91,13 @@ def table() -> dict:
     ``refused_paths`` names symbolic key roles, not filesystem locations.
     Consumers must resolve those roles to their installed key paths before
     supplying ``classify_tool``'s refused_paths; labels alone protect no files.
+    The launch page is described separately and uses supplied runtime bases.
     """
     return {
         "design": "DD-v3-authority-20261104-r22",
         "protected_refs": ["refs/heads/main"],
         "refused_paths": ["frank operator key", "Jev key", "prompt-hook key", "other seat keys"],
+        "refused_path_shapes": {"console launch page": f"<base>/<16 lowercase hex>/{LAUNCH_PAGE}"},
         "flags": {"values": ["pinned", "auto", "admin", "unparsed", "compound"],
                   "unresolved_target": "refuse-or-resolve"},
         # Platform's final names retain distinct stop and restart-request semantics.
@@ -423,7 +443,7 @@ def _path_match(value: str, paths: Sequence[str], home: str | None = None,
     """Compare lexical paths only; unknown roots refuse possible key suffixes."""
     if not value:
         return None
-    prefix = re.match(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)", value)
+    prefix = _HOME_PREFIX.match(value)
     unresolved = bool(prefix and home is None)
     remainder = value[prefix.end():].lstrip("/") if prefix else value
     candidate = _expand_home(value, home)
@@ -451,6 +471,50 @@ def _path_match(value: str, paths: Sequence[str], home: str | None = None,
         elif candidate == target or (content_reader and target.startswith(candidate.rstrip("/") + "/")):
             return Match("key-file-read", path=path)
     return None
+
+
+def _launch_page_match(value: str, bases: Sequence[str], home: str | None,
+                       cwd: str | None, content_reader: bool = False) -> Match | None:
+    if not value or not bases:
+        return None
+    needs_home = home is None and _HOME_PREFIX.match(value) is not None
+    candidate = _expand_home(value, home)
+    relative = not os.path.isabs(candidate)
+    unresolved = needs_home or (relative and cwd is None)
+    if relative and not unresolved:
+        candidate = os.path.join(cwd, candidate)
+    candidate = os.path.normpath(candidate)
+    path = candidate.casefold()
+    parent, leaf = os.path.split(path)
+    base, folder = os.path.split(parent)
+    page = leaf == LAUNCH_PAGE and _RUNTIME_ID.fullmatch(folder) is not None
+    if unresolved:
+        if page:
+            return Match("key-file-read", path=candidate, flags=frozenset({"unparsed"}))
+        return None
+    for supplied in bases:
+        runtime_base = os.path.normpath(supplied).casefold()
+        directory = content_reader and (
+            path == runtime_base or (parent == runtime_base and _RUNTIME_ID.fullmatch(leaf))
+        )
+        if (page and base == runtime_base) or directory:
+            return Match("key-file-read", path=candidate)
+    return None
+
+
+def _prints_console_address(args: Sequence[str]) -> bool:
+    """Find a print switch among open options, consuming known option values."""
+    options = iter(args)
+    for token in options:
+        if token == "--":
+            return False
+        name, separator, _ = token.partition("=")
+        if name in _CONSOLE_VALUE_OPTIONS:
+            if not separator:
+                next(options, None)
+        elif token in _CONSOLE_PRINT_OPTIONS:
+            return True
+    return False
 
 
 def _leading_options(words: list[str], values: Mapping[str, str]) -> tuple[dict[str, list[str]], list[str]]:
@@ -546,7 +610,8 @@ def _unwrap(words: list[str], depth: int) -> tuple[list[str], list[str], int]:
 
 def _command(words: list[str], paths: Sequence[str], depth: int,
              inherited: Sequence[str], cwd: str | None = None,
-             context: ClassifierContext | None = None, home: str | None = None) -> Match | None:
+             context: ClassifierContext | None = None, home: str | None = None,
+             runtime_bases: Sequence[str] = ()) -> Match | None:
     original = words
     try:
         words, assignments, depth = _unwrap(words, depth)
@@ -556,7 +621,8 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
     if not words:
         return None
     for word in words:
-        match = _path_match(word, paths, cwd=cwd)
+        match = _path_match(word, paths, cwd=cwd) or _launch_page_match(
+            word, runtime_bases, home, cwd)
         if match:
             return match
     disabling = _command_disable(words, context, home, cwd)
@@ -564,8 +630,10 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
         return disabling
     program = os.path.basename(words[0])
     args = words[1:]
+    if program == "adt" and args[:2] == ["console", "open"] and _prints_console_address(args[2:]):
+        return Match("operator-endpoint")
     if program == "eval":
-        return _shell(" ".join(args), paths, depth + 1, configuration, cwd, context, home)
+        return _shell(" ".join(args), paths, depth + 1, configuration, cwd, context, home, runtime_bases)
     if program in ("bash", "sh", "zsh", "dash", "ksh"):
         index = 0
         while index < len(args):
@@ -576,11 +644,14 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
             elif arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
                 if index < len(args) and args[index] == "--":
                     index += 1
-                return _shell(args[index], paths, depth + 1, configuration, cwd, context, home) if index < len(args) else _unparsed(" ".join(words), paths)
+                if index < len(args):
+                    return _shell(args[index], paths, depth + 1, configuration, cwd,
+                                  context, home, runtime_bases)
+                return _unparsed(" ".join(words), paths)
         if "<<<" in args:
             index = args.index("<<<")
             if index + 1 < len(args):
-                return _shell(args[index + 1], paths, depth + 1, configuration, cwd, context, home)
+                return _shell(args[index + 1], paths, depth + 1, configuration, cwd, context, home, runtime_bases)
         return _unparsed(" ".join(words), paths)
     if program == "git":
         global_options, command = _leading_options(args, {name: name for name in
@@ -656,9 +727,9 @@ def _command(words: list[str], paths: Sequence[str], depth: int,
                 return Match("api-ref-write", repository=repository)
     if program.startswith("python") and args:
         if os.path.basename(args[0]) in ("relay", "relay.py"):
-            return _command(args, paths, depth + 1, configuration, cwd, context, home)
+            return _command(args, paths, depth + 1, configuration, cwd, context, home, runtime_bases)
         if args[:2] == ["-m", "relay_engine"]:
-            return _command(["relay", *args[2:]], paths, depth + 1, configuration, cwd, context, home)
+            return _command(["relay", *args[2:]], paths, depth + 1, configuration, cwd, context, home, runtime_bases)
     if program in ("relay", "relay.py"):
         _, args = _leading_options(args, {"--root": "root", "--key": "key"})
         if args[:1] in (["answer"], ["prompt-record"]) or args[:2] in (["authority", "prompt-record"], ["operator", "answer"], ["prompt", "record"]):
@@ -844,7 +915,8 @@ def _shell_parts(text: str, source: str | None = None) -> tuple[str, list[tuple[
 
 def _shell(text: str, paths: Sequence[str], depth: int = 0,
            inherited: Sequence[str] = (), cwd: str | None = None,
-           context: ClassifierContext | None = None, home: str | None = None) -> Match | None:
+           context: ClassifierContext | None = None, home: str | None = None,
+           runtime_bases: Sequence[str] = ()) -> Match | None:
     if depth > 10:
         return _unparsed(text, paths)
     try:
@@ -874,7 +946,7 @@ def _shell(text: str, paths: Sequence[str], depth: int = 0,
             while next_substitution < len(substitutions) and substitutions[next_substitution][0] < boundary:
                 _, command = substitutions[next_substitution]
                 next_substitution += 1
-                match = _shell(command, paths, depth + 1, environment, directory, context, home)
+                match = _shell(command, paths, depth + 1, environment, directory, context, home, runtime_bases)
                 if match is not None:
                     matches.append(match)
             if segment[:1] in (["export"], ["declare"], ["typeset"]):
@@ -889,9 +961,9 @@ def _shell(text: str, paths: Sequence[str], depth: int = 0,
                         if not item.startswith("-") and os.path.normpath(os.path.join(directory, item)) == os.path.normpath(path):
                             matches.append(Match("key-file-read", path=path))
             if piped is not None and segment and os.path.basename(segment[0]) in ("bash", "sh", "zsh", "dash", "ksh"):
-                match = _shell(piped, paths, depth + 1, environment, directory, context, home)
+                match = _shell(piped, paths, depth + 1, environment, directory, context, home, runtime_bases)
             else:
-                match = _command(segment, paths, depth, environment, directory, context, home)
+                match = _command(segment, paths, depth, environment, directory, context, home, runtime_bases)
             # A patch contributes at this command's position, never before
             # earlier refused segments. Consume other heredocs as data too.
             try:
@@ -972,12 +1044,17 @@ def _mcp_match(tool_name: str, tool_input: Mapping[str, object],
 def classify_tool(tool_name: str, tool_input: Mapping[str, object], refused_paths: Sequence[str],
                   home: str | None = None, cwd: str | None = None,
                   protected_refs: Mapping[str, Sequence[str]] | None = None,
-                  context: ClassifierContext | None = None) -> Match | None:
+                  context: ClassifierContext | None = None,
+                  runtime_bases: Sequence[str] = ()) -> Match | None:
     """Classify with hook-supplied context only; do not read environment or files."""
     name = tool_name.lower().split("__")[-1]
+    url = tool_input.get("url")
     if name == 'apply_patch':
         patch = tool_input.get('command', '')
-        return _patch_disable(patch, context, home, cwd) if isinstance(patch, str) else None
+        disabling = _patch_disable(patch, context, home, cwd) if isinstance(patch, str) else None
+        if disabling is None and isinstance(url, str) and _BRIDGE_ADDRESS.search(url):
+            return Match("operator-endpoint")
+        return disabling
     disabling = _file_disable(name, tool_input, context, home, cwd)
     if disabling is not None:
         return disabling
@@ -985,6 +1062,7 @@ def classify_tool(tool_name: str, tool_input: Mapping[str, object], refused_path
     content_reader = ((name == "grep" and tool_input.get("output_mode") == "content")
                       or (name not in ("glob", "list_directory") and name != "grep"
                           and any(part in name for part in ("search", "read_directory"))))
+    launch_bases = () if name in ("glob", "list_directory") else runtime_bases
     for value in tool_input.values():
         values = value if isinstance(value, list) else [value]
         for item in values:
@@ -992,7 +1070,15 @@ def classify_tool(tool_name: str, tool_input: Mapping[str, object], refused_path
                 key = _path_match(item, refused_paths, home, cwd, content_reader)
                 if key:
                     return key
+                page = _launch_page_match(item, launch_bases, home, cwd, content_reader)
+                if page:
+                    return page
     command = tool_input.get("command", tool_input.get("cmd"))
+    bridge = any(isinstance(value, str) and _BRIDGE_ADDRESS.search(value)
+                 for value in (command, url))
     if isinstance(command, str):
-        return _shell(_expand_home(command, home), refused_paths, cwd=cwd, context=context, home=home)
+        match = _shell(_expand_home(command, home), refused_paths, cwd=cwd, context=context,
+                       home=home, runtime_bases=runtime_bases)
+    if bridge and (match is None or table()["effects"][match.effect]["no_seat"] == "pass"):
+        return Match("operator-endpoint")
     return match

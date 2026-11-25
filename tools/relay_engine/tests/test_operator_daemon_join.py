@@ -33,6 +33,9 @@ from relay_engine.tests.test_api_service import P
 from relay_engine.tests.test_submit import draft
 
 
+ADMISSION_CEILING_SECONDS = 20
+
+
 class OperatorDaemonJoinTests(unittest.TestCase):
     start = service_fixture.ApiServiceTests.start
     connect = service_fixture.ApiServiceTests.connect
@@ -63,6 +66,48 @@ class OperatorDaemonJoinTests(unittest.TestCase):
             return response.status, dict(response.getheaders()), response.read()
         finally:
             connection.close()
+
+    def admitted_request(self, origin, path, daemon, root) -> tuple:
+        # ready.json can be published before the bridge admits requests.
+        # Until then the bridge closes connections without answering.
+        started = time.monotonic()
+        deadline = started + ADMISSION_CEILING_SECONDS
+        closed_unanswered = 0
+
+        def observation(outcome):
+            return json.dumps({
+                'path': path,
+                'outcome': outcome,
+                'closed_unanswered': closed_unanswered,
+                'elapsed_seconds': time.monotonic() - started,
+                'service_exit': daemon.poll(),
+                'locator_exists': (root / lifecycle_paths._LIVE_LOCATOR).exists(),
+            })
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.fail(observation('no response before the ceiling'))
+            connection = HTTPConnection(urlsplit(origin).netloc, timeout=min(4, remaining))
+            try:
+                try:
+                    connection.request('GET', path)
+                    response = connection.getresponse()
+                except (ConnectionResetError, BrokenPipeError):
+                    closed_unanswered += 1
+                except TimeoutError:
+                    if time.monotonic() >= deadline:
+                        self.fail(observation('attempt timed out at the ceiling'))
+                    raise
+                else:
+                    with response:
+                        if time.monotonic() >= deadline:
+                            self.fail(observation('response after the ceiling'))
+                        print(observation('response'))
+                        return response.status, dict(response.getheaders()), response.read()
+            finally:
+                connection.close()
+            time.sleep(max(0, min(0.05, deadline - time.monotonic())))
 
     def wait_until(self, observe):
         deadline = time.monotonic() + 6
@@ -488,7 +533,8 @@ runpy.run_path(sys.argv[0], run_name='__main__')
                 self.wait_until(ready.exists)
                 data = json.loads(ready.read_bytes())
                 origin = data['bridge_origin']
-                discovery = self.request(origin, '/api/connect?min_protocol=3.0&max_protocol=3.0')
+                discovery = self.admitted_request(
+                    origin, '/api/connect?min_protocol=3.0&max_protocol=3.0', daemon, root)
                 self.assertEqual(discovery[0], 200)
                 self.assertEqual(json.loads(discovery[2])['result']['schema_digest'], data['schema_digest'])
                 peer = self.connect(data)
@@ -1749,6 +1795,9 @@ def foreground_fixture_main():
 class ForegroundOwnerTests(unittest.TestCase):
     def setUp(self):
         self.base = Path(self.enterContext(tempfile.TemporaryDirectory(dir='/tmp'))).resolve()
+        self.temp = self.base / 'tmp'
+        self.temp.mkdir(mode=0o700)
+        self.enterContext(patch.dict(os.environ, TMPDIR=str(self.temp)))
         self.root = self.base / '.adt'
         self.receipts = self.base / '.adt-owner' / 'receipts'
         self.receipts.parent.mkdir(mode=0o700)
@@ -1896,6 +1945,7 @@ class ForegroundOwnerTests(unittest.TestCase):
         with self._owner('normal') as owner:
             ready = self._ready(owner)
             self.assertTrue(ready.exists())
+            self.assertEqual(ready.parent.parent, self.temp)
             arm = self._arm()
             prior = self._receipt()
             os.kill(self._child_pid(), signal.SIGKILL)

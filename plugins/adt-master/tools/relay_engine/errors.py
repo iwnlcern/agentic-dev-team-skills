@@ -650,15 +650,22 @@ _AUTHORITY_TEXT = {
     'error-authority-hook-bypass-explain': "the hooks check every seat's commit and push",
     'error-authority-hook-disable-cause': "this would switch the kit's hooks off for every session that works here later",
     'error-authority-hook-disable-remedy': 'if you mean to, do it from your own terminal, which the hooks never check',
+    'error-authority-hook-disable-unblocker': "Only the operator changes the kit's hooks, from their own terminal; tell them what you wanted to change and why.",
+    'error-authority-hook-disable-hook-remedy': "Leave the hooks as they are; changing them is the operator's to do.",
     'error-authority-hook-disable-explain': "the hooks check every agent's commits, pushes and merges, so only the operator's terminal changes them",
     'error-authority-key-file-read-cause': 'an agent session may not read this key file',
     'error-authority-key-file-read-remedy': "give the key's path to the command that signs, which reads the key itself; never open the file",
+    'error-authority-key-file-read-unblocker': 'No agent reads this file; tell the operator what your task needs from it, and they do that step themselves.',
+    'error-authority-key-file-read-hook-remedy': 'Leave the file unopened, and carry on with work that does not need it.',
     'error-authority-key-file-read-explain': "a key's contents never enter an agent's conversation, and no agent reads the operator's or another seat's key",
     'error-authority-operator-endpoint-cause': "only the operator answers the kit's questions and records prompts",
     'error-authority-operator-endpoint-remedy': 'ask the operator; they answer from their own page or terminal',
+    'error-authority-operator-endpoint-unblocker': 'The operator answers pending decisions themselves, on the decision page; tell them a decision is waiting there.',
+    'error-authority-operator-endpoint-hook-remedy': 'Stop and leave the decision to the operator; do not try to answer it another way.',
     'error-authority-operator-endpoint-explain': 'an agent cannot answer for the operator',
     'error-authority-operator-only-cause': "this command is the operator's alone",
     'error-authority-operator-only-remedy': 'ask the operator to run it from their own terminal',
+    'error-authority-operator-only-unblocker': 'The operator runs this command themselves, in their own terminal; tell them which command you need run and why.',
     'error-authority-operator-only-explain': 'stopping, starting, updating or installing the engine, registering or unregistering a checkout, unseating a session, claiming a seat from a session that is already one, and opening the next team decide what every agent may do',
     'error-authority-checkout-unregistered-cause': 'this checkout is not registered with the engine',
     'error-authority-checkout-unregistered-remedy': 'register the checkout, or remove its hooks',
@@ -1027,6 +1034,21 @@ def error_for(code, *, variant=None, **params):
             params["hook"] = _rejected(hook)
     return EngineError(code, spec.cause_key, spec.remedy_key, spec.cls,
                        **params)
+
+
+_HOOK_REMEDIES = {
+    "authority.operator-endpoint": "error-authority-operator-endpoint-hook-remedy",
+    "authority.operator-only": "error-authority-operator-only-remedy",
+    "authority.hook-disable": "error-authority-hook-disable-hook-remedy",
+    "authority.key-file-read": "error-authority-key-file-read-hook-remedy",
+}
+
+
+def hook_words(code: str) -> tuple[str, str, str]:
+    """Return the catalogue words for a refusal composed by the hook."""
+    remedy = _HOOK_REMEDIES[code]
+    stem = "error-authority-" + code.removeprefix("authority.")
+    return strings.render(stem + "-cause"), strings.render(remedy), strings.render(stem + "-unblocker")
 
 
 def explain_for(code):

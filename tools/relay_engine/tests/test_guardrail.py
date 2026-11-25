@@ -1,12 +1,16 @@
 """Pure effect classification controls for the host guardrail."""
 
+import ast
 import json
 import os
 import shlex
+import tempfile
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
 from unittest import mock
 
+from relay_engine import api_operator_bridge, lifecycle_paths
 from relay_engine import guardrail as g
 
 
@@ -846,3 +850,154 @@ class TestRulesR22(unittest.TestCase):
         for text, expected in cases:
             with self.subTest(command=text):
                 self.assertEqual(self.classify(text, context), expected)
+
+
+class TestAnswerRouteRules(unittest.TestCase):
+    def test_bridge_call_shapes_refused(self):
+        address = "http://localhost:8765/api/op/queue.answer"
+        commands = (
+            "curl -X POST http://127.0.0.1:8765/api/op/queue.answer -d '{}'",
+            f"""python3 -c "import urllib.request; urllib.request.urlopen('{address}')""",
+            "adt console open --print",
+            "adt console open --ready PATH --pri",
+            "adt console open --p",
+            "adt console open --item ITEM --prin",
+            "adt console open --pr --item ITEM",
+        )
+        calls = [("Bash", {"command": command}) for command in commands]
+        calls.append(("navigate", {"url": "http://127.0.0.1:8765/#launch=" + "a" * 43}))
+        for tool, payload in calls:
+            with self.subTest(tool=tool, payload=payload):
+                self.assertEqual(g.classify_tool(tool, payload, ()), g.Match("operator-endpoint"))
+
+    def test_bridge_mentions_pass(self):
+        address = "http://127.0.0.1:8765/api/op/queue.answer"
+        text = f"/api/op/queue.answer {address}"
+        bridge = "tools/relay_engine/api_operator_bridge.py"
+        commands = (
+            "git grep -n '/api/op/'",
+            f"grep -n '/api/op/queue.answer' {bridge}",
+            f"grep -n _PAGE_OPERATION_PREFIX {bridge}",
+            "adt console open",
+            "adt console open --ready=--print",
+            "adt console open --ready /tmp/--pri",
+            "curl http://notlocalhost:8765/api/op/queue.answer",
+            "curl http://my-localhost:8765/api/op/queue.answer",
+            "curl http://127.0.0.1:8765/api/read/queue.list",
+            "curl http://127.0.0.1:3000/api/session",
+            "curl http://localhost:5173/api/users",
+        )
+        calls = [("Bash", {"command": command}) for command in commands]
+        calls.extend((
+            ("Edit", {"new_string": text}),
+            ("Write", {"content": text}),
+            ("Edit", {"new_string": "Reference /home/operator/.adt/run/0123456789abcdef/open.html only"}),
+            ("Grep", {"pattern": "/api/op/"}),
+        ))
+        for tool, payload in calls:
+            with self.subTest(tool=tool, payload=payload):
+                self.assertIsNone(g.classify_tool(
+                    tool, payload, (), runtime_bases=("/home/operator/.adt/run",)))
+
+    def test_launch_page_role_refused(self):
+        home = "/home/operator"
+        base = f"{home}/.adt/run"
+        xdg = "/run/user/501/adt"
+        runtime = "0123456789abcdef"
+        positive = (
+            ("Read", {"path": f"{base}/{runtime}/open.html"}),
+            ("Read", {"path": f"{base}/{runtime.upper()}/OPEN.HTML"}),
+            ("Read", {"path": f"{base.upper()}/{runtime}/open.html"}),
+            ("NotebookRead", {"notebook_path": f"{base}/{runtime}/open.html"}),
+            ("mcp__filesystem__read_file", {"uri": f"{base}/{runtime}/open.html"}),
+            ("mcp__filesystem__read_text_file", {"source": f"{base}/{runtime}/open.html"}),
+            ("Bash", {"command": f"cat {xdg}/{runtime}/open.html"}),
+            ("Grep", {"path": base, "output_mode": "content"}),
+            ("Grep", {"path": f"{base}/{runtime}", "output_mode": "content"}),
+        )
+        negative = (
+            ("Grep", {"path": home, "output_mode": "content"}),
+            ("Grep", {"path": f"{home}/.adt", "output_mode": "content"}),
+            ("Glob", {"path": base}),
+            ("list_directory", {"path": base}),
+            ("Read", {"path": f"{base}/{runtime[:-1]}/open.html"}),
+            ("Read", {"path": f"{base}/{runtime}/x/open.html"}),
+            ("Read", {"path": f"{base}/{runtime}/ready.json"}),
+            ("Read", {"path": f"{home}/open.html"}),
+        )
+        for tool, payload in positive:
+            with self.subTest(tool=tool, payload=payload):
+                match = g.classify_tool(tool, payload, (), runtime_bases=(base, xdg))
+                self.assertIsNotNone(match)
+                self.assertEqual(match.effect, "key-file-read")
+        for tool, payload in negative:
+            with self.subTest(tool=tool, payload=payload):
+                self.assertIsNone(g.classify_tool(tool, payload, (), runtime_bases=(base, xdg)))
+        for path, context in (
+            (f"{runtime}/open.html", {"home": home}),
+            (f"~/.adt/run/{runtime}/open.html", {"cwd": "/work"}),
+        ):
+            with self.subTest(unresolved_path=path):
+                match = g.classify_tool("Read", {"path": path}, (), runtime_bases=(base, xdg),
+                                        **context)
+                self.assertIsNotNone(match)
+                self.assertEqual(match.effect, "key-file-read")
+                self.assertIn("unparsed", match.flags)
+        for tool, payload in positive + negative:
+            with self.subTest(tool=tool, payload=payload, bases=()):
+                self.assertIsNone(g.classify_tool(tool, payload, (), runtime_bases=()))
+
+    def test_bridge_literals_pinned(self):
+        self.assertEqual(g.BRIDGE_OPERATION_PREFIX, api_operator_bridge._PAGE_OPERATION_PREFIX)
+        self.assertIn(b"/" + g.LAUNCH_FRAGMENT.encode(), api_operator_bridge._PAGE_URL.pattern)
+        self.assertEqual(g.LAUNCH_PAGE, api_operator_bridge._LAUNCH_PAGE)
+        store_id = "0123456789abcdef0123456789abcdef"
+        home = "/home/operator"
+        with tempfile.TemporaryDirectory() as xdg:
+            for environ, index in (({}, 0), ({"XDG_RUNTIME_DIR": xdg}, 1)):
+                context = dict(platform="linux", environ=environ, home=home)
+                with self.subTest(index=index):
+                    base = lifecycle_paths.runtime_bases(**context)[index]
+                    self.assertEqual(lifecycle_paths.runtime_dir(store_id, **context),
+                                     f"{base}/{store_id[:16]}")
+        tree = ast.parse(Path(g.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                self.assertFalse(any(alias.name.split(".")[0] == "relay_engine"
+                                     for alias in node.names))
+            elif isinstance(node, ast.ImportFrom):
+                self.assertFalse(node.level or (node.module or "").split(".")[0] == "relay_engine")
+
+    def test_runtime_bases_candidates(self):
+        home = "/home/operator"
+        fallback = (f"{home}/.adt/run",)
+        xdg = "/run/user/501"
+        for platform, raw, expected in (
+            ("darwin", xdg, fallback),
+            ("linux", xdg, (*fallback, f"{xdg}/adt")),
+            ("linux", "relative", fallback),
+            ("linux", "", fallback),
+        ):
+            with self.subTest(platform=platform, xdg=raw):
+                self.assertEqual(lifecycle_paths.runtime_bases(
+                    platform=platform, environ={"XDG_RUNTIME_DIR": raw}, home=home), expected)
+        with self.assertRaisesRegex(ValueError, "^unsupported_platform$"):
+            lifecycle_paths.runtime_bases(platform="win32", environ={}, home=home)
+
+    def test_table_answer_route_shapes(self):
+        table = g.table()
+        self.assertEqual(table.get("refused_path_shapes"),
+                         {"console launch page": "<base>/<16 lowercase hex>/open.html"})
+        self.assertEqual(table["effects"]["operator-endpoint"]["command_shapes"], [
+            "relay answer", "relay prompt-record", "adt console open --print",
+            "bridge call address in command text or url input",
+        ])
+        self.assertEqual(table["effects"]["key-file-read"]["command_shapes"], [
+            "tool string or list input naming a refused path",
+            "content reader naming an ancestor directory",
+            "command naming refused path",
+            "console launch page shape under runtime bases",
+        ])
+        self.assertEqual(table["refused_paths"],
+                         ["frank operator key", "Jev key", "prompt-hook key", "other seat keys"])
+        self.assertEqual(table["design"], "DD-v3-authority-20261104-r22")
