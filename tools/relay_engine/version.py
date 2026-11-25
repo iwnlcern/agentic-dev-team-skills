@@ -31,6 +31,7 @@ ROSTER = (
     "relay_engine/api_writer.py",
     "relay_engine/approval_seal.py",
     "relay_engine/authority.py",
+    "relay_engine/authority_bench.py",
     "relay_engine/catalogue.py",
     "relay_engine/checkout_store.py",
     "relay_engine/claims.py",
