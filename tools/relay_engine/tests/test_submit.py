@@ -12,6 +12,7 @@ import threading
 import traceback
 import unittest
 import multiprocessing
+from multiprocessing import resource_tracker
 from pathlib import Path
 from unittest import mock
 
@@ -846,12 +847,37 @@ class TestConcurrency(Store):  # PR-3 fold S2, S3
             barrier, queue = spawn.Barrier(2), spawn.Queue()
             workers = [spawn.Process(target=_hammer, args=(path, address, 300, barrier, queue))
                        for address in ("v3-engine.planner", "v3-engine.implementer")]
+            def cleanup_spawn():
+                nonlocal barrier, queue
+                active = [process for process in workers if process.pid is not None]
+                for process in active:
+                    if process.exitcode is None:
+                        process.terminate()
+                        process.join(5)
+                    if process.exitcode is None:
+                        process.kill()
+                        process.join(5)
+                survivors = [process.pid for process in active if process.exitcode is None]
+                self.assertEqual(survivors, [], "spawn workers survived cleanup")
+                # Drop the worker and semaphore owners before closing the
+                # tracker's pipe. Its wait is unsafe with a live worker.
+                queue.close()
+                queue.join_thread()
+                active.clear()
+                workers.clear()
+                barrier = queue = None
+                tracker = resource_tracker._resource_tracker
+                tracker._stop()
+                self.assertIsNone(tracker._pid)
+
+            self.addCleanup(cleanup_spawn)
             for worker in workers:
                 worker.start()
             results = {address: (seen, resends) for address, seen, resends
                        in (queue.get(timeout=120) for _ in workers)}
             for worker in workers:
                 worker.join(30)
+            self.assertEqual([worker.exitcode for worker in workers], [0, 0])
             report = _resend_report(results)
             print(report, file=sys.stderr)
             self.assertEqual({address: value[0] for address, value in results.items()},
@@ -1035,7 +1061,9 @@ class TestDigest(Store):
         other = self.submit(draft(to="v3-engine.planner, v3-other.planner"))
         copied = self.submit(draft(to="v3-engine.planner,v3-engine.implementer",
                                    cc="v3.orchestrator-planner"))
-        digest = lambda a: self.relay(a.relay_id)["meta_sha256"]
+        def digest(a):
+            return self.relay(a.relay_id)["meta_sha256"]
+
         self.assertEqual(digest(tight), digest(spaced))
         self.assertNotEqual(digest(tight), digest(other))
         self.assertNotEqual(digest(tight), digest(copied))  # CC is a field of the digest
@@ -1044,7 +1072,9 @@ class TestDigest(Store):
     def test_digest_over_resolved_targets(self):
         clean_git_environment(self)  # PR-3 fold S10, DD § 5
         root = self.submit(draft())
-        digest = lambda a: self.relay(a.relay_id)["meta_sha256"]
+        def digest(a):
+            return self.relay(a.relay_id)["meta_sha256"]
+
         by_handle = self.submit(draft(parent="#1", refs=("#1",)))
         by_id = self.submit(draft(parent=root.relay_id, refs=("#1@p",)))
         self.assertEqual(digest(by_handle), digest(by_id))
@@ -3721,8 +3751,9 @@ class TestImportStep(Store):
         except ModuleNotFoundError as error:
             self.fail(str(error))
         relay = self.imported(imports, created_at=self.clock + 10)
-        call = lambda: imports.import_relay_step(self.conn, PROJECT, relay,
-                                                 marked_at_ms=self.clock + 20)
+        def call():
+            return imports.import_relay_step(self.conn, PROJECT, relay, marked_at_ms=self.clock + 20)
+
         _, error = self.attempt(call)
         self.assertIsInstance(error, ValueError, repr(error))
         self.assertFalse(self.conn.in_transaction)
