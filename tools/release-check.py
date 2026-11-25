@@ -473,14 +473,19 @@ class _Sampler:
         self.pass_number = 0
         self.instance_cap = False
 
-    def fault(self, point, kind):
-        self.faults.append({"point": point, "type": kind, "steps": sorted(self.active)})
+    def fault(self, point, kind, *, step=None):
+        self.faults.append({"point": point, "type": kind,
+                            "steps": [step] if step is not None else sorted(self.active)})
 
     def optional(self, point, operation, *args):
         try:
             return operation(*args)
         except Exception as error:  # Diagnostic work must not enter the runner stop path.
-            self.fault(point, type(error).__name__)
+            if point == "history":
+                # Every history operation takes its own step ID first.
+                self.fault(point, type(error).__name__, step=args[0])
+            else:
+                self.fault(point, type(error).__name__)
             return None
 
     def activate(self, step, marker, pgid):
@@ -608,7 +613,7 @@ def _new_sampler():
     return _Sampler()
 
 
-def _name_leaked(leaked, history, instances):
+def _name_leaked(leaked, history, instances, *, history_incomplete=False):
     by_pid = {}
     for (pid, _), detail in instances.items():
         by_pid.setdefault(pid, []).append(detail)
@@ -618,7 +623,8 @@ def _name_leaked(leaked, history, instances):
         observations = []
         for tick in sorted(ticks - {None}):
             detail = instances.get((pid, tick))
-            named = bool(detail and detail.get("last_sampled_command") is not None)
+            named = bool(not history_incomplete and detail
+                         and detail.get("last_sampled_command") is not None)
             observation = {"start_tick": tick, "status": "named" if named else "unnamed"}
             if named:
                 observation["instance"] = detail
@@ -628,7 +634,11 @@ def _name_leaked(leaked, history, instances):
         summary = "ambiguous" if len(ticks) > 1 else (
             "named" if observations[0]["status"] == "named" else "unnamed")
         row = {"pid": pid, "summary": summary, "observations": observations}
-        if ticks == {None} and len(by_pid.get(pid, ())) == 1:
+        if history_incomplete:
+            row.update(summary="unnamed", reason="history-incomplete")
+            for observation in observations:
+                observation["reason"] = "history-incomplete"
+        elif ticks == {None} and len(by_pid.get(pid, ())) == 1:
             row["pid_joined_unconfirmed"] = by_pid[pid][0]
         rows.append(row)
     return rows
@@ -643,11 +653,14 @@ def _add_sampler_results(sampler, results):
         return
     try:
         named = []
+        incomplete_steps = {step for fault in sampler.faults if fault["point"] == "history"
+                            for step in fault["steps"]}
         for row in results["steps"]:
             ticks = sampler.history.get(row["id"], {})
             history = {pid: [(at, tick) for tick, at in passes.items()]
                        for pid, passes in ticks.items()}
-            named.append(_name_leaked(row["leaked"], history, snapshot["instances"]))
+            named.append(_name_leaked(row["leaked"], history, snapshot["instances"],
+                                      history_incomplete=row["id"] in incomplete_steps))
         metrics = {**snapshot["metrics"], "sampler-incomplete": list(sampler.faults)}
         # Validate the complete optional addition before publishing any of it.
         json.dumps((named, metrics))
@@ -785,6 +798,42 @@ class LegResult:
     results_path: Path = None
 
 
+def _publish_leg_result(path, results, sampler, sampler_note):
+    # This is exactly the old write_text payload. Prepare it before optional work.
+    legacy = json.dumps(results, indent=2) + "\n"
+    if sampler is not None or sampler_note is not None:
+        stage = path.with_name("results.json.sampler-tmp")
+        try:
+            if sampler is not None:
+                sampler.optional("serialize", _add_sampler_results, sampler, results)
+                if "sampler" not in results:
+                    results["sampler"] = {"sampler-incomplete": list(sampler.faults)}
+            else:
+                results["sampler"] = sampler_note
+            augmented = (json.dumps(results, indent=2) + "\n").encode("utf-8")
+            if stage.write_bytes(augmented) != len(augmented):
+                raise OSError("short sampler result write")
+            os.replace(stage, path)
+            return
+        except Exception as error:
+            try:
+                stage.unlink(missing_ok=True)
+            except Exception:
+                pass  # The optional cleanup must not block the legacy write.
+            kind = type(error).__name__
+            try:
+                if sampler is not None:
+                    sampler.fault("publish", kind)
+                else:
+                    sampler_note.setdefault("sampler-incomplete", []).append(
+                        {"point": "publish", "type": kind, "steps": []})
+                print(f"release-check: {results['leg']}: sampler output not published ({kind})",
+                      file=sys.stderr)
+            except Exception:
+                pass  # Losing the diagnostic must not skip the required write.
+    path.write_text(legacy)
+
+
 def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, exclusions=EXCLUSIONS,
             leg_dir=None, exact_exclusions=False):
     """Run one leg's steps under the cap; write out/<leg>/results.json and one log per step."""
@@ -823,17 +872,18 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
         "steps": [], "exit": None,
     }
     sampler = None
+    sampler_note = None
     if leg == "linux":
         try:
             sampler = _new_sampler()
             if sampler is not None:
                 sampler.start()
         except Exception as error:
-            results["sampler"] = {"sampler-incomplete": [
+            sampler_note = {"sampler-incomplete": [
                 {"point": "start", "type": type(error).__name__, "steps": []}]}
             sampler = None
     elif leg == "mac":
-        results["sampler"] = {"platform": "not-sampled"}
+        sampler_note = {"platform": "not-sampled"}
     rows = {}
     for index, step in enumerate(active):
         log = logs / f"{index:03d}-{step.id.replace('/', '_').replace(' ', '_')}.log"
@@ -876,13 +926,8 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     results["finished"] = _now()
     exit_code = 2 if errors else 0 if all(r["outcome"] == "pass" for r in results["steps"]) else 1
     results["exit"] = exit_code
-    if sampler is not None:
-        # All optional fields can be discarded without changing the selected legacy exit.
-        sampler.optional("serialize", _add_sampler_results, sampler, results)
-        if "sampler" not in results:
-            results["sampler"] = {"sampler-incomplete": list(sampler.faults)}
     results_path = leg_out / "results.json"
-    results_path.write_text(json.dumps(results, indent=2) + "\n")
+    _publish_leg_result(results_path, results, sampler, sampler_note)
     failed = [r["id"] for r in results["steps"] if r["outcome"] != "pass"]
     print(f"release-check: {leg} leg exit {exit_code}; {len(failed)} of {len(active)} steps not green"
           + (" (interrupted)" if results["interrupted"] else "")

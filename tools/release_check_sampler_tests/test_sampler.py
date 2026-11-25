@@ -192,7 +192,7 @@ class SamplerTests(unittest.TestCase):
         value = "SAMPLER-WITNESS-SYNTHETIC-SECRET"
         self.assertNotIn(value, self._real_child_result({"SAMPLE_TEST_SECRET": value}))
 
-    def scripted_leg(self, leaky, mode, *, stop=False, fault=None):
+    def scripted_leg(self, leaky, mode, *, stop=False, fault=None, out=None, at_write=None):
         self.assertTrue(hasattr(rc, "_Sampler"), "No sampler modes on the base")
         rc.STOP.clear()
         self.addCleanup(rc.STOP.clear)
@@ -200,7 +200,8 @@ class SamplerTests(unittest.TestCase):
         child = mock.Mock(pid=410)
         child.poll.side_effect = ([None, None, 0] if stop else [0])
         child.returncode = 0
-        listed = iter([[(411, 410, frozenset())], []] if leaky else [[]])
+        leak = [(411, 410, frozenset())]
+        listed = iter([leak, leak, []] if fault == "history-once" else [leak, []] if leaky else [[]])
         signals = []
 
         def listing(collector=None):
@@ -226,7 +227,8 @@ class SamplerTests(unittest.TestCase):
                 rc.STOP.set()
 
         original = rc._schedule
-        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+        with contextlib.ExitStack() as stack:
+            tmp = out if out is not None else stack.enter_context(tempfile.TemporaryDirectory())
             stack.enter_context(mock.patch.object(rc, "_listing", listing))
             stack.enter_context(mock.patch.object(rc, "_signal", send))
             stack.enter_context(mock.patch.object(rc, "_commit", return_value="candidate"))
@@ -251,7 +253,25 @@ class SamplerTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(rc, "_name_leaked", side_effect=TypeError("name")))
             if fault == "history":
                 stack.enter_context(mock.patch.object(rc._Sampler, "observe", side_effect=ValueError("history")))
+            if fault == "history-once":
+                observe = rc._Sampler.observe
+                seen = False
+
+                def observe_after_fault(sampler, step_id, pids, ticks):
+                    nonlocal seen
+                    if pids and not seen:
+                        seen = True
+                        raise ValueError("history")
+                    observe(sampler, step_id, pids, ticks)
+
+                stack.enter_context(mock.patch.object(rc._Sampler, "observe", observe_after_fault))
+                stack.enter_context(mock.patch.object(rc._Sampler, "snapshot", return_value={
+                    "instances": {(411, 43): {"last_sampled_command": "same key"}},
+                    "metrics": {},
+                }))
             stderr = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            if at_write is not None:
+                at_write(stack)
             result = rc.run_leg("linux", [step], 1, 1, tmp, exclusions=())
             data = json.loads(result.results_path.read_bytes())
         out = data.pop("sampler", None)
@@ -293,3 +313,129 @@ class SamplerTests(unittest.TestCase):
         got, sampler = self.scripted_leg(True, "on", stop=True, fault="history")
         self.assertEqual(got, baseline)
         self.assertIn("history", {entry["point"] for entry in sampler["sampler-incomplete"]})
+
+    def publication_faults(self, fault, events, *, legacy_error=None):
+        dumps, write, replace, write_text = json.dumps, Path.write_bytes, os.replace, Path.write_text
+        tmp_name = "results.json.sampler-tmp"
+
+        def encode(value, *args, **kwargs):
+            if isinstance(value, dict) and "steps" in value:
+                if "sampler" in value:
+                    events.append("augmented-encode")
+                    if fault == "encode":
+                        raise TypeError("augmented encoding")
+                else:
+                    events.append("legacy-encode")
+            text = dumps(value, *args, **kwargs)
+            if isinstance(value, dict) and "sampler" in value and "steps" in value:
+                events.append((text + "\n").encode("utf-8"))
+            return text
+
+        def stage(path, data):
+            if path.name == tmp_name:
+                events.append("stage-write")
+                if fault == "write":
+                    with path.open("wb") as stream:
+                        stream.write(data[:12])
+                    self.assertEqual(path.read_bytes(), data[:12])
+                    raise OSError("after partial write")
+            return write(path, data)
+
+        def publish(src, dst):
+            if Path(src).name == tmp_name:
+                self.assertEqual(Path(dst).name, "results.json")
+                events.append("replace")
+                if fault == "replace":
+                    self.assertGreater(Path(src).stat().st_size, 0)
+                    raise OSError("replace")
+            return replace(src, dst)
+
+        def required(path, data, *args, **kwargs):
+            if path.name == "results.json" and "sampler" not in json.loads(data):
+                events.append("legacy-write")
+                if legacy_error is not None:
+                    raise legacy_error
+            return write_text(path, data, *args, **kwargs)
+
+        def install(stack):
+            stack.enter_context(mock.patch.object(json, "dumps", encode))
+            stack.enter_context(mock.patch.object(Path, "write_bytes", stage))
+            stack.enter_context(mock.patch.object(os, "replace", publish))
+            stack.enter_context(mock.patch.object(Path, "write_text", required))
+
+        return install
+
+    def assert_legacy_fallback(self, fault, operations, warning):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp, "linux", "results.json")
+            baseline, _ = self.scripted_leg(True, "off", out=tmp)
+            legacy = results.read_bytes()
+            results.unlink()
+            events = []
+            got, sampler = self.scripted_leg(True, "on", out=tmp,
+                                              at_write=self.publication_faults(fault, events))
+            self.assertEqual([event for event in events if isinstance(event, str)], operations)
+            self.assertEqual(results.read_bytes(), legacy)
+            self.assertEqual(got[2], warning + baseline[2])
+            self.assertEqual(got[:2] + got[3:], baseline[:2] + baseline[3:])
+            self.assertIsNone(sampler)
+            self.assertFalse(results.with_name("results.json.sampler-tmp").exists())
+
+    def test_publication_fallback(self):
+        for fault, operations in (
+            ("write", ["legacy-encode", "augmented-encode", "stage-write", "legacy-write"]),
+            ("replace", ["legacy-encode", "augmented-encode", "stage-write", "replace", "legacy-write"]),
+        ):
+            with self.subTest(fault=fault):
+                self.assert_legacy_fallback(fault, operations,
+                                            "release-check: linux: sampler output not published (OSError)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            events = []
+            got, sampler = self.scripted_leg(True, "on", out=tmp,
+                                              at_write=self.publication_faults(None, events))
+            self.assertEqual([event for event in events if isinstance(event, str)],
+                             ["legacy-encode", "augmented-encode", "stage-write", "replace"])
+            expected, = (event for event in events if isinstance(event, bytes))
+            results = Path(tmp, "linux", "results.json")
+            self.assertEqual(results.read_bytes(), expected)
+            self.assertFalse(results.with_name("results.json.sampler-tmp").exists())
+            self.assertEqual(got[0], 0)
+            self.assertIsNotNone(sampler)
+
+    def test_publication_encode_fault(self):
+        self.assert_legacy_fallback("encode", ["legacy-encode", "augmented-encode", "legacy-write"],
+                                    "release-check: linux: sampler output not published (TypeError)\n")
+
+    def test_legacy_write_failure_propagates(self):
+        events = []
+        legacy_error = PermissionError("required legacy write")
+        original_fault = rc._Sampler.fault
+        recorded_kinds = []
+
+        def note(sampler, point, kind, **kwargs):
+            recorded_kinds.append(kind)
+            return original_fault(sampler, point, kind, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(rc._Sampler, "fault", note):
+            with self.assertRaises(PermissionError) as caught:
+                self.scripted_leg(True, "on", out=tmp,
+                                  at_write=self.publication_faults("replace", events, legacy_error=legacy_error))
+            self.assertIs(caught.exception, legacy_error)
+            self.assertEqual(recorded_kinds, ["OSError"])
+            self.assertFalse(Path(tmp, "linux", "results.json").exists())
+        self.assertEqual([event for event in events if isinstance(event, str)],
+                         ["legacy-encode", "augmented-encode", "stage-write", "replace", "legacy-write"])
+
+    def test_history_fault_withholds_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, sampler = self.scripted_leg(True, "on", out=tmp, fault="history-once")
+            self.assertTrue(any(row["point"] == "history" and row["steps"] == ["step"]
+                                for row in sampler["sampler-incomplete"]))
+            data = json.loads(Path(tmp, "linux", "results.json").read_bytes())
+            step, = data["steps"]
+            self.assertEqual(step["leaked"], [411])
+            entry, = step["leaked_named"]
+            self.assertEqual((entry["summary"], entry.get("reason")), ("unnamed", "history-incomplete"))
+            self.assertEqual(entry["observations"], [{
+                "start_tick": 43, "status": "unnamed", "reason": "history-incomplete",
+            }])
