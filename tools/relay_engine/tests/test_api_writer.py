@@ -2059,3 +2059,174 @@ class StartHookTests(ProjectWriterFixture):
         with self.assertRaises(ValueError):
             writer.start(before_joins=lambda _: None)
         self.assertIsNone(writer._worker)
+
+
+class GuardedWriterFixture(unittest.TestCase):
+    def setUp(self):
+        from uuid import uuid4
+        from relay_engine.tests.test_store_lifecycle import (
+            _INCUMBENT_STORE_ID, _incumbent_birth, _incumbent_boot,
+            _materialize_incumbent_store,
+        )
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / 'store'
+        self.guard, birth = store_layout.IncumbentGuard._create_new(
+            self.root, _INCUMBENT_STORE_ID, P)
+        self.addCleanup(self.guard.close)
+        idle, _ = self.guard.enroll_new(birth)
+        owner = store_layout._IncumbentOwner(
+            str(uuid4()), os.getpid(), _incumbent_birth(os.getpid()), _incumbent_boot(),
+            'fixture-runtime', 'off')
+        self.arm = self.guard.arm(idle, owner)
+        _materialize_incumbent_store(self.root)
+        self.writer = api_writer.StoreWriter(self.root, runtime_instance_id='fixture-runtime')
+        self.writer.bind_store_arm(self.guard, self.arm, lambda: False,
+                                   self.guard._admit_members(self.arm))
+        self.writer.start()
+        self.addCleanup(self.writer.close)
+        self.writer.open_project(P)
+        self.catalogue_conn = store_layout.open_catalogue(self.root)
+        self.addCleanup(self.catalogue_conn.close)
+
+    def admit_second(self):
+        with closing(store_layout.open_ledger(self.root, Q, create=True)) as conn:
+            conn.execute("INSERT INTO projects (id,name,created_at) VALUES (?, 'second', 1)",
+                         (Q,)).close()
+            conn.commit()
+        store_layout.ledger_path(self.root, Q).chmod(0o600)
+        store_layout.reserve_project(self.catalogue_conn, Q, 'second', 1)
+        store_layout.activate_project(self.catalogue_conn, Q)
+        self.catalogue_conn.commit()
+
+    def fault(self, cause, fn):
+        with self.assertRaises(store_layout.LayoutFault) as error:
+            fn()
+        self.assertEqual(error.exception.cause, cause)
+        return error.exception
+
+    def unavailable(self, reason, fn):
+        with self.assertRaises(api_writer.WriterUnavailable) as error:
+            fn()
+        self.assertEqual(error.exception.reason, reason)
+        return error.exception
+
+    @contextmanager
+    def ledger_connects(self, project, *, swap_on_first=False, fail_close_once=False):
+        path = store_layout.ledger_path(self.root, project)
+        handles, closed = [], []
+        real_connect = sqlite3.connect
+
+        class Probe(sqlite3.Connection):
+            def close(self):
+                if fail_close_once and not getattr(self, 'close_attempted', False):
+                    self.close_attempted = True
+                    raise sqlite3.OperationalError('fixture close failed')
+                super().close()
+                closed.append(self)
+
+        def connect(database, *args, **kwargs):
+            if os.fspath(database) not in (str(path), path.as_uri() + '?mode=rw'):
+                return real_connect(database, *args, **kwargs)
+            conn = real_connect(database, *args, factory=Probe, check_same_thread=False, **kwargs)
+            handles.append(conn)
+            if swap_on_first and len(handles) == 1:
+                replacement = path.with_suffix('.replacement')
+                replacement.write_bytes(path.read_bytes())
+                replacement.chmod(0o600)
+                replacement.replace(path)
+            return conn
+
+        def retire_test_handles():
+            self.writer.close()
+            retained = store_layout._UNOWNED_CLOSES
+            for entry in tuple(retained):
+                if entry[1] in handles:
+                    retained.remove(entry)
+            for conn in handles:
+                if conn not in closed:
+                    if fail_close_once and not getattr(conn, 'close_attempted', False):
+                        conn.close_attempted = True
+                    conn.close()
+
+        self.addCleanup(retire_test_handles)
+        with mock.patch.object(sqlite3, 'connect', side_effect=connect):
+            yield handles, closed
+
+
+class GuardedOpenTests(GuardedWriterFixture):
+    def test_second_admitted_project_opens(self):
+        self.admit_second()
+        self.writer.open_project(Q)
+        self.assertIn(Q, self.writer.served_projects())
+
+    def test_project_with_wal_stop_row_refused_join(self):
+        self.admit_second()
+        self.catalogue_conn.execute('PRAGMA wal_autocheckpoint=0').close()
+        with closing(self.catalogue_conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')) as cursor:
+            self.assertEqual(cursor.fetchone()[0], 0)
+        store_layout.record_stop(self.catalogue_conn, 'project', Q, 'test')
+        self.catalogue_conn.commit()
+        with closing(store_layout._immutable_incumbent_read(
+                store_layout.catalogue_path(self.root))) as snapshot:
+            self.assertFalse(any(s.project_id == Q for s in store_layout.open_stops(snapshot)))
+        with self.ledger_connects(Q) as (handles, _):
+            self.fault('incumbent-hold', lambda: self.writer.open_project(Q))
+            self.assertEqual(handles, [])
+        self.assertNotIn(Q, self.writer.served_projects())
+
+    def test_hold_refuses_open(self):
+        self.admit_second()
+        job_id = '019a7850-0000-7000-8000-000000000001'
+        store_layout.take_holds(self.catalogue_conn, job_id, 'cutover',
+                                [store_layout.project_scope(Q)], 1)
+        self.catalogue_conn.commit()
+        with self.ledger_connects(Q) as (handles, _):
+            self.fault('incumbent-hold', lambda: self.writer.open_project(Q))
+            self.assertEqual(handles, [])
+
+    def test_swap_after_proof_refused_and_closed(self):
+        self.admit_second()
+        with self.ledger_connects(Q, swap_on_first=True) as (handles, closed):
+            self.fault('member-changed', lambda: self.writer.open_project(Q))
+            self.assertEqual(len(handles), 1)
+            self.assertEqual(closed, handles)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                handles[0].execute('SELECT 1').close()
+        self.assertNotIn(Q, self.writer.served_projects())
+
+    def test_failed_cleanup_close_blocks_reopen(self):
+        self.admit_second()
+        with self.ledger_connects(Q, swap_on_first=True, fail_close_once=True) as (handles, _):
+            self.fault('member-changed', lambda: self.writer.open_project(Q))
+            error = self.unavailable('rollback_failed', lambda: self.writer.open_project(Q))
+            self.assertIsInstance(error.__cause__, sqlite3.OperationalError)
+            self.assertEqual(len(handles), 1)
+
+    def test_unowned_close_refuses_open(self):
+        self.admit_second()
+        real_open = store_layout.open_ledger_runtime
+
+        def refused_handoff(*args, **kwargs):
+            def reject(_conn, _error):
+                raise RuntimeError('handoff before recording')
+            return real_open(*args, **dict(kwargs, on_failed_close=reject))
+
+        with (self.ledger_connects(Q, swap_on_first=True, fail_close_once=True) as (handles, _),
+              mock.patch.object(store_layout, 'open_ledger_runtime', side_effect=refused_handoff)):
+            self.fault('member-changed', lambda: self.writer.open_project(Q))
+            self.assertNotIn(Q, self.writer._rollback_errors)
+            with self.assertRaises(api_writer.WriterUnavailable) as error:
+                self.writer.open_project(Q)
+            self.assertEqual(len(handles), 1)
+            self.assertEqual(error.exception.reason, 'rollback_failed')
+            self.assertIsInstance(error.exception.__cause__, store_layout.LayoutFault)
+            self.assertEqual(error.exception.__cause__.cause, 'close-unresolved')
+
+    def test_wrong_project_refusal_removed(self):
+        self.admit_second()
+        with self.ledger_connects(Q) as (handles, _):
+            self.writer.open_project(Q)
+            self.assertEqual(len(handles), 1)
+            self.assertEqual(self.writer.served_projects(), frozenset({P, Q}))

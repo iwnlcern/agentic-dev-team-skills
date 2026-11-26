@@ -22,7 +22,7 @@ from contextlib import closing, contextmanager
 from types import MappingProxyType
 from typing import Literal, Protocol, TypeVar
 
-from relay_engine import store_layout, store_steps, strings
+from relay_engine import restore_cancel, store_layout, store_steps, strings
 
 
 @dataclass(frozen=True)
@@ -174,6 +174,7 @@ class StoreWriter:
         self._holder = None
         self._store_guard = None
         self._store_arm = None
+        self._project_members = {}
         self._stop_pending = None
         self._checkpoint_only = False
         self._checkpoint_reentry = False
@@ -216,12 +217,16 @@ class StoreWriter:
         self._store_guard, self._store_arm, self._stop_pending = guard, arm, stopping
         self._admitted_members = members
 
-    def _check_writer_admission(self):
+    def _check_writer_admission(self, project_id=None):
         self._check_store_open()
-        self._store_guard._check_admitted_members(self._store_arm, self._admitted_members)
-        if self._catalogue is not None:
-            store_layout._require_admission_identity(self._catalogue, self._store_arm.store,
-                                                     self._store_arm.project)
+        if project_id is None:
+            self._store_guard._check_admitted_members(self._store_arm, self._admitted_members)
+            if self._catalogue is not None:
+                store_layout._require_admission_identity(self._catalogue, self._store_arm.store,
+                                                         self._store_arm.project)
+        elif self._store_guard.runtime_members(
+                self._store_arm, project_id, phase='connected') != self._project_members[project_id]:
+            raise store_layout.LayoutFault('member-changed')
         self._check_store_open()
 
     def _check_store_open(self):
@@ -342,7 +347,14 @@ class StoreWriter:
             self._require_served(project_id)
             self._check_binding(project_id, binding)
 
-        with self._reader(lambda: store_layout.open_ledger_readonly(self._root, project_id), check) as conn:
+        def open_connection():
+            if self._store_guard is not None:
+                with self._lock:
+                    check()
+                    self._check_writer_admission(project_id)
+            return store_layout.open_ledger_readonly(self._root, project_id)
+
+        with self._reader(open_connection, check) as conn:
             was_reading = getattr(self._local, 'reader', False)
             self._local.reader = True
             try:
@@ -810,12 +822,52 @@ class StoreWriter:
             self._phase('commit_permitted')
         return True
 
+    def _guarded_failed_close(self, project_id, conn, failure):
+        with self._lock:
+            self._failed_closes.append(conn)
+            self._rollback_errors[project_id] = failure
+
+    def _close_guarded_open(self, project_id, conn, original):
+        try:
+            conn.close()
+        except BaseException as failure:
+            self._guarded_failed_close(project_id, conn, failure)
+            original.add_note('cleanup close failed: ' + type(failure).__name__)
+
+    def _open_guarded(self, project_id, *, purpose):
+        guard, arm = self._store_guard, self._store_arm
+        self._check_store_open()
+        members = guard.runtime_members(arm, project_id, phase='initial')
+        guard.runtime_admission(arm, project_id, self._catalogue, purpose=purpose)
+
+        def check():
+            self._check_store_open()
+            if guard.runtime_members(arm, project_id, phase='connected') != members:
+                raise store_layout.LayoutFault('member-changed')
+            guard.runtime_admission(arm, project_id, self._catalogue, purpose=purpose)
+
+        def on_failed_close(conn, failure):
+            self._guarded_failed_close(project_id, conn, failure)
+
+        conn = store_layout.open_ledger_runtime(self._root, project_id, check=check,
+                                                on_failed_close=on_failed_close)
+        try:
+            if restore_cancel.held(conn, project_id) is not None:
+                raise store_layout.LayoutFault('incumbent-hold')
+            conn.isolation_level = None
+            self._check_store_open()
+        except BaseException as original:
+            self._close_guarded_open(project_id, conn, original)
+            raise
+        return conn, members
+
     def _open(self, project_id):
         with self._lock:
             if project_id in self._rollback_errors:
                 raise _unavailable('rollback_failed', self._rollback_errors[project_id])
-        if any(row.scope == 'store' or row.project_id == project_id
-               for row in store_layout.open_stops(self._catalogue)):
+        guarded = self._store_guard is not None
+        if not guarded and any(row.scope == 'store' or row.project_id == project_id
+                               for row in store_layout.open_stops(self._catalogue)):
             with self._lock:
                 self._project_admission[project_id] = 'stopping'
             return
@@ -824,32 +876,45 @@ class StoreWriter:
                 raise WriterUnavailable('project_not_served')
         if project_id not in self._connections:
             path = self._file_path(project_id)
-            try:
-                identity = _identity(path)
-            except FileNotFoundError:
-                raise store_layout.LayoutFault('missing') from None
+            members = None
             self._check_store_open()
-            if self._store_guard is None:
-                conn = store_layout.open_ledger(self._root, project_id)
+            if guarded:
+                try:
+                    conn, members = self._open_guarded(project_id, purpose='join')
+                except store_layout.LayoutFault as failure:
+                    if failure.cause == 'close-unresolved':
+                        raise _unavailable('rollback_failed', failure) from failure
+                    raise
+                identity = members[-1]
             else:
-                if project_id != self._store_arm.project:
-                    raise store_layout.LayoutFault('wrong-project')
-                conn = store_layout.open_ledger(self._root, project_id,
-                                                _check_admission=self._check_writer_admission)
+                try:
+                    identity = _identity(path)
+                except FileNotFoundError:
+                    raise store_layout.LayoutFault('missing') from None
+                conn = store_layout.open_ledger(self._root, project_id)
             try:
                 conn.isolation_level = None
                 _require_identity(path, identity)
                 path = os.path.realpath(path)
-            except BaseException:
-                self._close_handle(conn)
+            except BaseException as original:
+                if guarded:
+                    self._close_guarded_open(project_id, conn, original)
+                else:
+                    self._close_handle(conn)
                 raise
             with self._lock:
                 if self._project_available(project_id):
                     self._connections[project_id] = conn
                     self._ledger_files[project_id] = path
                     self._bindings[project_id] = _FileBinding(conn, identity)
+                    if members is not None:
+                        self._project_members[project_id] = members
                     self._served.add(project_id)
                     return
+            if guarded:
+                refusal = WriterUnavailable('project_not_served')
+                self._close_guarded_open(project_id, conn, refusal)
+                raise refusal
             try:
                 self._close_handle(conn)
             except BaseException as error:
