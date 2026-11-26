@@ -2230,3 +2230,288 @@ class GuardedOpenTests(GuardedWriterFixture):
             self.writer.open_project(Q)
             self.assertEqual(len(handles), 1)
             self.assertEqual(self.writer.served_projects(), frozenset({P, Q}))
+
+
+class StoppedReadTests(GuardedWriterFixture):
+    def read_set(self, project=P):
+        return store_steps.Declared('read', {project: 'read'})
+
+    def flush(self):
+        self.writer.submit_declared(api_writer.DeclaredJob(
+            store_steps.Declared('written', {}), lambda _: api_writer.JobOutcome(False, None)))
+
+    def stop(self):
+        self.assertEqual(self.writer.request_project_stop(P, 'test'), 'stopped')
+        self.flush()
+        self.assertNotIn(P, self.writer._served)
+
+    def pause_stop_close(self, entered, release, *, fail=False):
+        return ProjectWriterFixture.pause_close(self, self.writer, entered, release, fail=fail)
+
+    def test_read_refuses_writes(self):
+        read = self.writer.read_declared
+        with tempfile.TemporaryDirectory() as tmp:
+            isolated = Path(tmp) / 'isolated'
+            with closing(store_layout.open_catalogue(isolated, kind='isolated')):
+                pass
+            with closing(store_layout.open_ledger(isolated, P, create=True)) as conn:
+                conn.execute('INSERT INTO projects (id, name, created_at) VALUES (?, ?, 1)',
+                             (P, 'test')).close()
+                conn.commit()
+            with closing(api_writer.StoreWriter(isolated, runtime_instance_id='test')) as served:
+                served.start()
+                serve_for_test(served, P)
+                self.check_readonly(served.read_declared)
+        self.stop()
+        self.check_readonly(read)
+
+    def check_readonly(self, read):
+        for label in ('catalogue', P):
+            with self.subTest(label=label):
+                def try_insert(conns):
+                    self.assertEqual(list(conns), ['catalogue', P])
+                    self.assertTrue(all(conn.in_transaction for conn in conns.values()))
+                    if label == 'catalogue':
+                        conns[label].execute('INSERT INTO project_routes '
+                                             '(project_id,name,state,created_at) '
+                                             "VALUES (?, 'probe', 'active', 1)", (Q,)).close()
+                    else:
+                        conns[label].execute('INSERT INTO projects (id,name,created_at) '
+                                             "VALUES (?, 'probe', 1)", (Q,)).close()
+
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'readonly'):
+                    read(self.read_set(), try_insert)
+
+        def check(conns):
+            for label, table, col in (('catalogue', 'project_routes', 'project_id'),
+                                      (P, 'projects', 'id')):
+                with closing(conns[label].execute(
+                        f'SELECT count(*) FROM {table} WHERE {col}=?', (Q,))) as cursor:
+                    self.assertEqual(cursor.fetchone(), (0,))
+
+        read(self.read_set(), check)
+
+    def test_read_after_fence_before_project_stop_refused(self):
+        read = self.writer.read_declared
+        entered, release = threading.Event(), threading.Event()
+        actual = self.writer._record_project
+
+        def pause(*args):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            return actual(*args)
+
+        with mock.patch.object(self.writer, '_record_project', side_effect=pause):
+            with ProjectWriterFixture.pool(self, 1, release) as pool:
+                stop = pool.submit(self.writer.request_project_stop, P, 'test')
+                self.assertTrue(entered.wait(3))
+                self.unavailable('project_not_served', lambda: read(self.read_set(), self.unexpected))
+                release.set()
+                self.assertEqual(stop.result(3), 'stopped')
+
+    def test_stopped_read_refused_when_served_again(self):
+        read = self.writer.read_declared
+        self.stop()
+        before_worker, resume = threading.Event(), threading.Event()
+
+        def phase(name):
+            if name == 'dequeued':
+                before_worker.set()
+                self.assertTrue(resume.wait(3))
+
+        self.writer._phase_hook = phase
+        with ProjectWriterFixture.pool(self, 1, resume) as pool:
+            pending = pool.submit(read, self.read_set(), lambda _: 'ran')
+            self.assertTrue(before_worker.wait(3))
+            # Change the routing signal at the worker boundary while keeping the
+            # stop row readable, so the worker's reclassification is decisive.
+            with self.writer._lock:
+                self.writer._served.add(P)
+            resume.set()
+            self.unavailable('project_not_served', lambda: pending.result(3))
+
+    def unexpected(self, _):
+        self.fail('refused read ran')
+
+    def test_read_of_other_project_refused(self):
+        read = self.writer.read_declared
+        with self.ledger_connects(Q) as (handles, _):
+            self.unavailable('project_not_served', lambda: read(self.read_set(Q), self.unexpected))
+            self.assertFalse(handles)
+
+    def test_stopped_read_needs_stop_row(self):
+        read = self.writer.read_declared
+        with self.writer._lock:
+            self.writer._project_admission[Q] = 'stopping'
+        self.admit_second()
+        with self.ledger_connects(Q) as (handles, _):
+            self.unavailable('project_not_served', lambda: read(self.read_set(Q), self.unexpected))
+            self.assertFalse(handles)
+        store_layout.record_stop(self.catalogue_conn, 'project', P, 'test')
+        self.catalogue_conn.commit()
+        with mock.patch.object(store_layout, 'record_stop', side_effect=ValueError('no write')):
+            self.assertEqual(self.writer.request_project_stop(P, 'test'), 'already_stopped')
+        self.flush()
+        self.assertNotIn(P, self.writer._served)
+        self.assertEqual(read(self.read_set(), lambda conns: tuple(conns)), ('catalogue', P))
+
+    def test_no_transient_handle_left(self):
+        read = self.writer.read_declared
+        def capture(conns):
+            return self.writer._active_request, conns[P]
+
+        served, _ = read(self.read_set(), capture)
+        self.assertIsNone(served.transient)
+        self.stop()
+        with self.ledger_connects(P) as (handles, closed):
+            stopped, conn = read(self.read_set(), capture)
+            self.assertEqual(handles, [conn])
+            self.assertEqual(closed, handles)
+            self.assertIsNone(stopped.transient)
+
+    def test_transient_close_failure_blocks_reopen(self):
+        read = self.writer.read_declared
+        self.stop()
+        with self.ledger_connects(P, fail_close_once=True) as (handles, _):
+            error = self.unavailable('rollback_failed', lambda: read(self.read_set(), lambda _: 73))
+            self.assertIsInstance(error.__cause__, sqlite3.OperationalError)
+            self.unavailable('rollback_failed', lambda: read(self.read_set(), self.unexpected))
+            self.unavailable('rollback_failed', lambda: self.writer.open_project(P))
+            self.assertEqual(len(handles), 1)
+
+    def test_stopped_read_during_project_stop_close(self):
+        read = self.writer.read_declared
+        entered, release = threading.Event(), threading.Event()
+        with (self.pause_stop_close(entered, release),
+              self.ledger_connects(P) as (handles, _)):
+            try:
+                self.assertEqual(self.writer.request_project_stop(P, 'test'), 'stopped')
+                self.assertTrue(entered.wait(3))
+                self.unavailable('project_not_served', lambda: read(self.read_set(), self.unexpected))
+                self.assertFalse(handles)
+            finally:
+                release.set()
+
+    def test_fence_reaches_transient_handle(self):
+        from time import monotonic
+        from types import SimpleNamespace
+
+        read = self.writer.read_declared
+        self.stop()
+        querying, interrupted = threading.Event(), threading.Event()
+        handles = []
+
+        def work(conns):
+            conn = conns[P]
+            handles.append(conn)
+
+            def progress():
+                querying.set()
+                self.assertTrue(interrupted.wait(3))
+                return 0
+
+            conn.set_progress_handler(progress, 1)
+            try:
+                with closing(conn.execute('SELECT id FROM projects')) as cursor:
+                    return cursor.fetchall()
+            finally:
+                conn.set_progress_handler(None, 0)
+
+        real_interrupt = self.writer._interrupt
+
+        def interrupt(conns):
+            try:
+                self.assertIn(handles[0], conns)
+                real_interrupt(conns)
+            finally:
+                interrupted.set()
+
+        with mock.patch.object(self.writer, '_interrupt', side_effect=interrupt):
+            with ProjectWriterFixture.pool(self, 1, interrupted) as pool:
+                pending = pool.submit(read, self.read_set(), work)
+                self.assertTrue(querying.wait(3))
+                now = monotonic()
+                attempt = SimpleNamespace(active=now + 2, work=now + 2.5)
+                self.assertTrue(self.writer.fence_for_stop(attempt))
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'interrupted'):
+                    pending.result(max(0, attempt.work - monotonic()))
+                self.assertLess(monotonic(), attempt.work)
+
+    def test_unowned_close_refuses_stopped_read(self):
+        read = self.writer.read_declared
+        self.stop()
+        real_open = store_layout.open_ledger_runtime
+
+        def refused_handoff(*args, **kwargs):
+            def reject(_conn, _error):
+                raise RuntimeError('handoff before recording')
+            return real_open(*args, **dict(kwargs, on_failed_close=reject))
+
+        with (self.ledger_connects(P, swap_on_first=True, fail_close_once=True) as (handles, _),
+              mock.patch.object(store_layout, 'open_ledger_runtime', side_effect=refused_handoff)):
+            self.unavailable('project_not_served', lambda: read(self.read_set(), self.unexpected))
+            self.assertNotIn(P, self.writer._rollback_errors)
+            try:
+                error = self.unavailable('rollback_failed', lambda: read(self.read_set(), self.unexpected))
+            finally:
+                self.assertEqual(len(handles), 1)
+            self.assertIsInstance(error.__cause__, store_layout.LayoutFault)
+            self.assertEqual(error.__cause__.cause, 'close-unresolved')
+
+    def test_failed_project_stop_close_refuses_read(self):
+        read = self.writer.read_declared
+        entered, release = threading.Event(), threading.Event()
+        old = self.writer._connections[P]
+        with (self.pause_stop_close(entered, release, fail=True),
+              self.ledger_connects(P) as (handles, _)):
+            try:
+                self.assertEqual(self.writer.request_project_stop(P, 'test'), 'stopped')
+                self.assertTrue(entered.wait(3))
+            finally:
+                release.set()
+            self.flush()
+            self.assertIn(P, self.writer._closing_projects)
+            self.assertIs(self.writer._connections[P], old)
+            self.unavailable('rollback_failed', lambda: read(self.read_set(), self.unexpected))
+            self.assertFalse(handles)
+
+    def test_stopped_admission_refusal_not_served(self):
+        read = self.writer.read_declared
+        with self.writer._lock:
+            self.writer._project_admission[P] = 'stopping'
+            self.writer._post_project_stop(P)
+        self.flush()
+        self.assertNotIn(P, self.writer._served)
+        with self.ledger_connects(P) as (handles, _):
+            error = self.unavailable('project_not_served', lambda: read(self.read_set(), self.unexpected))
+            self.assertIsInstance(error.__cause__, store_layout.LayoutFault)
+            self.assertFalse(handles)
+
+    def test_queued_declared_read_not_rerouted(self):
+        read = self.writer.read_declared
+        busy, queued, finish = (threading.Event() for _ in range(3))
+
+        def block(_):
+            busy.set()
+            self.assertTrue(finish.wait(3))
+            return api_writer.JobOutcome(False, None)
+
+        def phase(name):
+            if name == 'queued' and busy.is_set():
+                queued.set()
+
+        with ProjectWriterFixture.pool(self, 3, finish) as pool:
+            turn = api_writer.DeclaredJob(store_steps.Declared('written', {}), block)
+            active = pool.submit(self.writer.submit_declared, turn)
+            self.assertTrue(busy.wait(3))
+            self.writer._phase_hook = phase
+            pending = pool.submit(read, self.read_set(), self.unexpected)
+            self.assertTrue(queued.wait(3))
+            with mock.patch.object(store_layout, 'record_stop', side_effect=ValueError('no write')):
+                stop = pool.submit(self.writer.request_project_stop, P, 'test')
+                self.unavailable('project_not_served', lambda: pending.result(2))
+                finish.set()
+                active.result(3)
+                self.assertEqual(stop.result(3), 'not_recorded')
+            self.assertIn(P, self.writer.served_projects())
+            self.assertEqual(read(self.read_set(), lambda _: 73), 73)

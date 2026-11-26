@@ -58,6 +58,8 @@ class StorePort(Protocol):
     def submit(self, project_id: str, job: WriterJob) -> JobOutcome: ...
     def submit_callee(self, project_id: str, job: CalleeJob) -> JobOutcome: ...
     def submit_declared(self, job: DeclaredJob) -> JobOutcome: ...
+    def read_declared(self, declared: store_steps.Declared,
+                      fn: Callable[[Mapping[str, sqlite3.Connection]], T]) -> T: ...
     def read(self, project_id: str, fn: Callable[[sqlite3.Connection], T]) -> T: ...
     def read_catalogue(self, fn: Callable[[sqlite3.Connection], T]) -> T: ...
     def ledger_file(self, project_id: str) -> str: ...
@@ -88,6 +90,11 @@ class _HeldPort:
         if job.declared.ledgers:
             raise WriterUnavailable('store_held')
         return self._writer.submit_declared(job)
+
+    def read_declared(self, declared, fn):
+        if declared.ledgers:
+            raise WriterUnavailable('store_held')
+        return self._writer.read_declared(declared, fn)
 
     def _refuse(self, *_args, **_kwargs):
         raise WriterUnavailable('store_held')
@@ -152,6 +159,10 @@ class _Request:
     error: BaseException | None = None
     withdrawn: bool = False
     committing: bool = False
+    read_fn: Callable[[Mapping[str, sqlite3.Connection]], object] | None = None
+    read_route: Literal['served', 'stopped'] | None = None
+    read_catalogue: bool = False
+    transient: sqlite3.Connection | None = None
 
 
 def _unavailable(reason, cause):
@@ -516,11 +527,21 @@ class StoreWriter:
                     if request.job.declared.ledgers:
                         self._require_project_startup()
                     request.bindings = self._admit_declared(request.job)
+                elif request.kind == 'read':
+                    project = request.project_id
+                    request.read_route = self._declared_read_route(project)
+                    if project is not None:
+                        self._require_project_startup()
+                    if request.read_catalogue:
+                        request.bindings['catalogue'] = self._require_catalogue()
+                    if project is not None and request.read_route == 'served':
+                        request.bindings[project] = self._bindings[project]
+                    self._require_declared_bindings(request.bindings)
                 self._require_running()
                 self._requests[id(request)] = request
                 self._queue.put(request)
             try:
-                if request.kind in {'job', 'callee', 'declared'}:
+                if request.kind in {'job', 'callee', 'declared', 'read'}:
                     self._phase('queued')
             except BaseException:
                 request.withdrawn = True
@@ -555,6 +576,36 @@ class StoreWriter:
     def submit_declared(self, job: DeclaredJob) -> JobOutcome:
         return self._call(_Request('declared', job=job))
 
+    def read_declared(self, declared: store_steps.Declared,
+                      fn: Callable[[Mapping[str, sqlite3.Connection]], T]) -> T:
+        try:
+            ledgers = dict(declared.ledgers)
+            if (declared.catalogue not in (None, 'read') or len(ledgers) > 1
+                    or any(mode != 'read' for mode in ledgers.values())):
+                raise UndeclaredFile()
+            projects = store_layout.declared_order(False, ledgers)
+        except (TypeError, ValueError) as error:
+            if isinstance(error, UndeclaredFile):
+                raise
+            raise UndeclaredFile() from error
+        project = projects[0] if projects else None
+        return self._call(_Request('read', project, read_fn=fn,
+                                   read_catalogue=declared.catalogue == 'read'))
+
+    def _declared_read_route(self, project):
+        if project is None:
+            return 'served'
+        if project in self._rollback_errors:
+            raise _unavailable('rollback_failed', self._rollback_errors[project])
+        if project in self._served and self._project_available(project):
+            return 'served'
+        if (self._store_guard is not None and project not in self._served
+                and self._project_admission.get(project) == 'stopping'
+                and project not in self._pending_project_stop
+                and project not in self._closing_projects):
+            return 'stopped'
+        raise WriterUnavailable('project_not_served')
+
     def _project_available(self, project):
         return (self._project_admission.get(project, 'open') == 'open'
                 and project not in self._closing_projects)
@@ -570,7 +621,7 @@ class StoreWriter:
         for request in self._requests.values():
             if request is self._active_request or request.done.is_set():
                 continue
-            direct = request.kind in {'job', 'callee', 'open'} and request.project_id == project
+            direct = request.kind in {'job', 'callee', 'open', 'read'} and request.project_id == project
             declared = request.kind == 'declared' and project in request.bindings
             if direct or declared:
                 request.withdrawn = True
@@ -745,8 +796,10 @@ class StoreWriter:
                     request.ready.set()
             self._request_close()
             connections = [conn for conn in self._readers.values() if conn is not None]
-            if active is not None and active.kind == 'declared':
+            if active is not None and active.kind in {'declared', 'read'}:
                 connections.extend(binding.conn for binding in active.bindings.values())
+                if active.transient is not None:
+                    connections.append(active.transient)
             elif active is not None:
                 conn = self._connections.get(active.project_id)
                 if conn is not None:
@@ -1120,6 +1173,72 @@ class StoreWriter:
             raise _unavailable('rollback_failed', failure) from failure
         return outcome
 
+    def _read_transient(self, request):
+        project = request.project_id
+        try:
+            conn, members = self._open_guarded(project, purpose='stopped_read')
+        except store_layout.LayoutFault as error:
+            reason = 'rollback_failed' if error.cause == 'close-unresolved' else 'project_not_served'
+            raise _unavailable(reason, error) from error
+        with self._lock:
+            request.transient = conn
+        _require_identity(self._file_path(project), members[-1])
+        return conn
+
+    def _finish_declared_read(self, request, conns, original):
+        failures = dict(store_layout.rollback_declared(conns))
+        for label, binding in request.bindings.items():
+            if label in failures or label not in conns:
+                continue
+            try:
+                binding.conn.execute('PRAGMA query_only=OFF').close()
+            except BaseException as error:
+                failures[label] = error
+        for label, failure in failures.items():
+            if label in request.bindings:
+                self._retire_declared_file(label, conns[label], failure)
+            if original is not None:
+                original.add_note(f'{label}: declared read cleanup failed: {type(failure).__name__}')
+        if request.transient is not None:
+            try:
+                self._close_handle(request.transient)
+            except BaseException as error:
+                with self._lock:
+                    self._rollback_errors[request.project_id] = error
+                raise _unavailable('rollback_failed', error) from error
+            finally:
+                with self._lock:
+                    request.transient = None
+        if failures:
+            error = next(iter(failures.values()))
+            raise _unavailable('rollback_failed', error) from error
+
+    def _run_declared_read(self, request):
+        self._phase('dequeued')
+        with self._lock:
+            if self._declared_read_route(request.project_id) != request.read_route:
+                raise WriterUnavailable('project_not_served')
+            self._require_declared_bindings(request.bindings)
+        conns = {label: binding.conn for label, binding in request.bindings.items()}
+        original = None
+        try:
+            if request.read_route == 'stopped':
+                conns[request.project_id] = self._read_transient(request)
+            with self._lock:
+                self._require_running()
+            for conn in conns.values():
+                conn.execute('PRAGMA query_only=ON').close()
+            for conn in conns.values():
+                conn.execute('BEGIN').close()
+            self._phase('began')
+            self._require_declared_bindings(request.bindings)
+            return request.read_fn(MappingProxyType(conns))
+        except BaseException as error:
+            original = error
+            raise
+        finally:
+            self._finish_declared_read(request, conns, original)
+
     def _work(self):
         try:
             path = store_layout.catalogue_path(self._root)
@@ -1171,6 +1290,8 @@ class StoreWriter:
                     self._project_stop(request.project_id)
                 elif request.kind == 'declared':
                     result = self._run_declared(request)
+                elif request.kind == 'read':
+                    result = self._run_declared_read(request)
                 else:
                     self._active_project = request.project_id
                     self._conn = self._connections.get(request.project_id)
