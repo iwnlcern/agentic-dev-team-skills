@@ -127,7 +127,7 @@ class TestReservedNames(Store):
         return None
 
     def test_lookalike_objects_refuse(self):
-        # Breaks: _definitions hides user objects after an unescaped sqlite_ prefix.
+        # Breaks: the catalogue skips a user object whose name only begins like SQLite's own.
         cases = (
             ("table", "sqliteX", "CREATE TABLE sqliteX (value TEXT)"),
             ("index", "sqlite1", "CREATE INDEX sqlite1 ON relays (subject)"),
@@ -168,7 +168,7 @@ class TestReservedNames(Store):
         self.assertFalse(conn.in_transaction)
 
     def test_sqlite_owned_objects_still_ignored(self):
-        # Breaks: a literal backslash without ESCAPE exposes sqlite_stat1 as drift.
+        # Breaks: _SQLITE_OWNED loses SQLite's own sqlite_stat1 or sqlite_stat4 row, so ANALYZE reads as drift.
         for analysed in (False, True):
             with self.subTest(analysed=analysed):
                 conn = self.connect(init=False)
@@ -221,6 +221,110 @@ class TestReservedNames(Store):
         self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
         self.assertIn("1 table and no v3 version record", error.cause)
         self.assertEqual(self.catalogue(conn), before)
+        self.assertFalse(conn.in_transaction)
+
+
+    def _reserved_catalogue_file(self, setup=(), *, initialize=True):
+        from contextlib import closing
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = os.path.join(folder.name, "store.db")
+        with closing(sqlite3.connect(path)) as conn:
+            if initialize:
+                schema.init_v3(conn)
+            for statement in setup:
+                conn.execute(statement)
+            conn.commit()
+        return path
+
+    def _reopen_catalogue_fixture(self, path, statement, params):
+        from contextlib import closing
+
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("PRAGMA writable_schema = ON")
+            try:
+                self.assertEqual(conn.execute(statement, params).rowcount, 1)
+                conn.commit()
+            finally:
+                conn.execute("PRAGMA writable_schema = OFF")
+        conn = sqlite3.connect(path)
+        self.addCleanup(conn.close)
+        return conn
+
+    @staticmethod
+    def _catalogue_with_pages(conn):
+        return conn.execute(
+            "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_master "
+            "ORDER BY type, name").fetchall()
+
+    def test_internal_name_trigger_refused(self):
+        # Breaks: a reserved-looking, inert object is skipped during comparison.
+        path = self._reserved_catalogue_file()
+        conn = self._reopen_catalogue_fixture(
+            path, "INSERT INTO sqlite_master VALUES (?, ?, ?, ?, ?)",
+            ("trigger", "sqlite_x", "projects", 0,
+             "CREATE TRIGGER sqlite_x AFTER INSERT ON projects BEGIN SELECT 1; END"))
+        before = self._catalogue_with_pages(conn)
+        version = conn.execute("SELECT * FROM schema_version").fetchall()
+        error = self.opening_error(conn)
+        self.assertIsNotNone(error)
+        self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
+        self.assertIn("an extra trigger sqlite_x", error.cause)
+        self.assertEqual(self._catalogue_with_pages(conn), before)
+        self.assertEqual(conn.execute("SELECT * FROM schema_version").fetchall(), version)
+        self.assertFalse(conn.in_transaction)
+
+    def test_internal_name_objects_refused(self):
+        # Breaks: a partial row match hides a noncanonical catalogue object.
+        rename = "UPDATE sqlite_master SET name=?, tbl_name=?, sql=? WHERE name=?"
+        insert = "INSERT INTO sqlite_master VALUES (?, ?, ?, ?, ?)"
+        cases = (
+            (("CREATE TABLE y (a)",), rename,
+             ("sqlite_future", "sqlite_future", "CREATE TABLE sqlite_future(a)", "y"),
+             "an extra table sqlite_future"),
+            ((), insert, ("view", "sqlite_v", "sqlite_v", 0,
+                          "CREATE VIEW sqlite_v AS SELECT id FROM projects"),
+             "an extra view sqlite_v"),
+            (("CREATE TABLE x (tbl, idx, sampleno, sample)",), rename,
+             ("sqlite_stat2", "sqlite_stat2", "CREATE TABLE sqlite_stat2(tbl,idx,sampleno,sample)", "x"),
+             "an extra table sqlite_stat2"),
+            ((), insert, ("trigger", "sqlite_stat1", "projects", 0,
+                          "CREATE TRIGGER sqlite_stat1 AFTER INSERT ON projects BEGIN SELECT 1; END"),
+             "an extra trigger sqlite_stat1"),
+            (("ANALYZE",), "UPDATE sqlite_master SET sql=? WHERE name=?",
+             ("CREATE TABLE sqlite_stat1(tbl,idx,stat,extra)", "sqlite_stat1"),
+             "an extra table sqlite_stat1"),
+            ((), "UPDATE sqlite_master SET tbl_name=? WHERE name=?",
+             ("relays", "sqlite_autoindex_projects_1"),
+             "a changed index sqlite_autoindex_projects_1"),
+        )
+        for setup, statement, params, cause in cases:
+            with self.subTest(cause=cause):
+                path = self._reserved_catalogue_file(setup)
+                conn = self._reopen_catalogue_fixture(path, statement, params)
+                before = self._catalogue_with_pages(conn)
+                error = self.opening_error(conn)
+                self.assertIsNotNone(error)
+                self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
+                self.assertIn(cause, error.cause)
+                self.assertEqual(self._catalogue_with_pages(conn), before)
+                self.assertFalse(conn.in_transaction)
+
+    def test_internal_only_file_refused(self):
+        # Breaks: an unrecognized SQLite-like table makes a nonempty file look empty.
+        path = self._reserved_catalogue_file(
+            ("CREATE TABLE x (tbl, idx, sampleno, sample)",), initialize=False)
+        conn = self._reopen_catalogue_fixture(
+            path, "UPDATE sqlite_master SET name=?, tbl_name=?, sql=? WHERE name=?",
+            ("sqlite_stat2", "sqlite_stat2", "CREATE TABLE sqlite_stat2(tbl,idx,sampleno,sample)", "x"))
+        before = self._catalogue_with_pages(conn)
+        error = self.opening_error(conn)
+        self.assertIsNotNone(error)
+        self.assertEqual(error.code, "E-SCHEMA-MISMATCH")
+        self.assertIn("1 table and no v3 version record", error.cause)
+        self.assertEqual(self._catalogue_with_pages(conn), before)
+        self.assertNotIn("schema_version", {row[1] for row in before})
         self.assertFalse(conn.in_transaction)
 
 
