@@ -475,7 +475,7 @@ def on_admitted(conn, admitted, draft, ctx):
     if repo is None or conn.execute('SELECT 1 FROM repositories WHERE id = ? AND project_id = ?',
                                     (repo, ctx.sender.project_id)).fetchone() is None:
         return
-    bundle = conn.execute('SELECT bundle_id FROM relays WHERE id = ?', (admitted.relay_id,)).fetchone()[0]
+    bundle = claims.relay_bundle(conn, admitted.relay_id)[0]
     hold = restore_cancel.held(conn, ctx.sender.project_id)
     if hold is not None and _issuer(conn, ctx.sender.seat_id, target) != 'operator':
         restore_cancel.record_refusal(conn, admitted.relay_id, ctx.sender.project_id,

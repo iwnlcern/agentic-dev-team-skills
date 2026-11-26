@@ -709,6 +709,9 @@ _AUTHORITY_TEXT = {
     'error-authority-restore-held-cause': "a restore holds this project, so no planner's go-ahead is issued",
     'error-authority-restore-held-remedy': 'ask the operator to end the restore hold at their terminal, then ask your planner for a new go-ahead',
     'error-authority-restore-held-explain': 'a restore cancels every go-ahead and approval, and only the operator ends its hold',
+    'error-authority-no-bundle-cause': "this relay's chain has no bundle, so no approval or go-ahead is recorded on it",
+    'error-authority-no-bundle-remedy': 'ask your planner to file the plan again with NEEDS review and a new BUNDLE beside its PARENT, then review or act on that plan',
+    'error-authority-no-bundle-explain': 'a reply to imported history stays outside every bundle until a plan opens one',
 
     'error-authority-slip-missing-cause': 'this seat has no implement slip for the requested effect',
     'error-authority-slip-missing-remedy': 'ask the pair Planner for an IMPL naming this implementer and its approved lineage',
@@ -773,6 +776,7 @@ ERRORS = {
     "E-AUTHORITY-VERIFICATION-OBJECTED": _spec("authority-verification-objected", "command"),
     "E-AUTHORITY-CHECK-UNAVAILABLE": _spec("authority-check-unavailable", "command"),
     "E-AUTHORITY-RESTORE-HELD": _spec("authority-restore-held", "command"),
+    "E-AUTHORITY-NO-BUNDLE": _spec("authority-no-bundle", "command"),
 
     "E-SNAPSHOT-STALE": _spec("snapshot-stale", "integrity"),
     "E-SNAPSHOT-NOT-TO": _spec("snapshot-not-to", "integrity"),
