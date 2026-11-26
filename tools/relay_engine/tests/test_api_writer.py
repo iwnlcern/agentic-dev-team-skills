@@ -1851,3 +1851,211 @@ class ProjectStopTests(ProjectWriterFixture):
         self.assertEqual(order, ['stop', 'start'])
         self.assertEqual(writer._project_admission.get(P, 'open'), 'open')
         self.assertIn(P, writer.served_projects())
+
+
+class StartHookTests(ProjectWriterFixture):
+    def service_writer(self, *, root=None, **hooks):
+        writer = api_writer.StoreWriter(self.root if root is None else root,
+                                       runtime_instance_id='r1')
+        self.addCleanup(writer.close)
+        writer.start(mode='service', **hooks)
+        return writer
+
+    @staticmethod
+    def fail_ingest(_port):
+        raise ValueError('ingest failed')
+
+    def test_open_refused_while_catalogue_opens(self):
+        entered, release = threading.Event(), threading.Event()
+        open_catalogue = store_layout.open_catalogue
+
+        def paused(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            return open_catalogue(*args, **kwargs)
+
+        with mock.patch.object(store_layout, 'open_catalogue', paused):
+            writer = self.service_writer()
+            try:
+                self.assertTrue(entered.wait(3))
+                self.assertFalse(writer._started.is_set())
+                # A missing gate must fail without waiting on the paused opener.
+                with mock.patch.object(writer._queue, 'put',
+                                       side_effect=AssertionError('queued before catalogue opened')):
+                    self.assert_unavailable(lambda: writer.open_project(P), 'store_held')
+                self.assertTrue(writer._queue.empty())
+                self.assertEqual(writer._requests, {})
+            finally:
+                release.set()
+            self.assertEqual(writer.wait_started().state, 'serving')
+
+    def test_open_refused_while_hook_runs(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def hook(port):
+            self.assertTrue(port.submit_declared(self.declared(
+                lambda _: api_writer.JobOutcome(True, 'ingest'))).commit)
+            calls.append(threading.current_thread().name)
+            entered.set()
+            self.assertTrue(release.wait(3))
+
+        writer = self.service_writer(before_joins=hook)
+        try:
+            self.assertTrue(entered.wait(3))
+            self.assert_unavailable(lambda: writer.open_project(P), 'store_held')
+            self.assert_unavailable(lambda: writer.submit(P, self.job(self.success)), 'store_held')
+            self.assert_unavailable(lambda: writer.submit_callee(P, self.job(self.success)), 'store_held')
+            self.assertEqual(writer._requests, {})
+            self.assertEqual(writer.served_projects(), frozenset())
+        finally:
+            release.set()
+        self.assertEqual(writer.wait_started().state, 'serving')
+        self.assertEqual(calls, ['store-writer-start-hook'])
+
+    def test_failed_first_ingest_holds(self):
+        writer = self.service_writer(before_joins=self.fail_ingest)
+        outcome = writer.wait_started()
+        self.assertEqual((outcome.state, outcome.causes), ('held', ('ingest_fault',)))
+        self.assertEqual(writer.served_projects(), frozenset())
+        self.assert_unavailable(lambda: writer.open_project(P), 'store_held')
+
+    def test_held_port_allows_catalogue_only(self):
+        writer = self.service_writer(before_joins=self.fail_ingest)
+        port = writer.wait_started().port
+        self.assertIsNot(port, writer)
+        self.assertEqual(port.read_catalogue(store_layout.open_stops), [])
+        self.assertEqual(port.store_id(), writer.store_id())
+        self.assertTrue(port.submit_declared(self.declared(
+            lambda _: api_writer.JobOutcome(True, None))).commit)
+        self.assert_unavailable(lambda: port.submit(P, self.job(self.success)), 'store_held')
+        self.assert_unavailable(lambda: port.submit_declared(self.declared(lambda _: None, P)),
+                                'store_held')
+        self.assert_unavailable(lambda: port.request_project_start(P, self.principal), 'store_held')
+
+    def test_hook_runs_once(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def hook(port):
+            calls.append(port)
+            entered.set()
+            self.assertTrue(release.wait(3))
+
+        writer = self.service_writer(before_joins=hook)
+        with self.pool(2, release) as pool:
+            self.assertTrue(entered.wait(3))
+            first = pool.submit(writer.wait_started)
+            second = pool.submit(writer.wait_started)
+            release.set()
+            self.assertEqual(first.result(2), second.result(2))
+            self.assertEqual(first.result(2).state, 'serving')
+        self.assertEqual(calls, [writer])
+        with self.assertRaises(RuntimeError):
+            writer.start(mode='service', before_joins=hook)
+
+    def test_project_start_runs_callable_before_open(self):
+        calls = []
+        caller = threading.get_ident()
+
+        def hook(port):
+            calls.append(('hook', threading.get_ident(), self.stops(port)))
+            self.assertTrue(port.submit_declared(self.declared(
+                lambda _: api_writer.JobOutcome(True, None))).commit)
+
+        writer = self.service_writer(before_project_join=hook)
+        writer.wait_started()
+        writer.open_project(P)
+        self.assertEqual(writer.request_project_stop(P, self.principal), 'stopped')
+        original = writer._post_project_request
+
+        def post(kind, project):
+            if kind == 'open':
+                calls.append(('post', project))
+            original(kind, project)
+
+        with mock.patch.object(writer, '_post_project_request', side_effect=post):
+            self.assertEqual(writer.request_project_start(P, self.principal), 'started')
+            self.flush(writer)
+        self.assertEqual(calls, [('hook', caller, []), ('post', P)])
+        self.assertIn(P, writer.served_projects())
+
+    def test_project_start_callable_retries(self):
+        seen = []
+
+        def hook(port):
+            seen.append(self.stops(port))
+            if len(seen) == 1:
+                raise ValueError('join did not run')
+
+        writer = self.service_writer(before_project_join=hook)
+        writer.wait_started()
+        writer.open_project(P)
+        self.assertEqual(writer.request_project_stop(P, self.principal), 'stopped')
+        self.assertEqual(writer.request_project_start(P, self.principal), 'started_not_served')
+        self.assertNotIn(P, writer.served_projects())
+        self.assertEqual(writer._project_admission[P], 'starting')
+        self.assertEqual(writer.request_project_start(P, self.principal), 'started')
+        self.flush(writer)
+        self.assertEqual(seen, [[], []])
+        self.assertIn(P, writer.served_projects())
+
+    def test_project_start_in_held(self):
+        self.row()
+        writer = self.service_writer(before_joins=self.fail_ingest)
+        self.assertEqual(writer.wait_started().state, 'held')
+        self.assertEqual(writer.request_project_start(P, self.principal), 'started_not_served')
+        self.flush(writer)
+        self.assertEqual(self.stops(writer), [])
+        self.assertNotIn(P, writer.served_projects())
+
+    def test_waiters_end_closed(self):
+        for state_change in (False, True):
+            with self.subTest(state_change=state_change):
+                entered, release, waiting = (threading.Event() for _ in range(3))
+
+                def hook(_port):
+                    entered.set()
+                    self.assertTrue(release.wait(3))
+
+                writer = self.service_writer(before_joins=None if state_change else hook)
+                if state_change:
+                    since = writer.wait_started()
+                    def wait():
+                        return writer.wait_state_change(since)
+                else:
+                    self.assertTrue(entered.wait(3))
+                    wait = writer.wait_started
+                original = writer._changed.wait
+
+                def signal_wait(timeout=None):
+                    waiting.set()
+                    return original(timeout)
+
+                with mock.patch.object(writer._changed, 'wait', side_effect=signal_wait):
+                    with self.pool(2, release) as pool:
+                        waiter = pool.submit(wait)
+                        self.assertTrue(waiting.wait(2))
+                        closing_writer = pool.submit(writer.close)
+                        self.assert_unavailable(lambda: waiter.result(2), 'closed')
+                        release.set()
+                        closing_writer.result(2)
+
+    def test_service_catalogue_open_error_wakes_waiters(self):
+        calls = []
+        writer = self.service_writer(root=Path(self.tmp.name) / 'missing',
+                                     before_joins=calls.append)
+        with self.pool(2) as pool:
+            waiters = [pool.submit(writer.wait_started) for _ in range(2)]
+            for waiter in waiters:
+                with self.assertRaises(store_layout.LayoutFault) as error:
+                    waiter.result(2)
+                self.assertEqual(error.exception.cause, 'missing')
+        self.assertEqual(calls, [])
+
+    def test_callables_need_service_mode(self):
+        writer = api_writer.StoreWriter(self.root, runtime_instance_id='r1')
+        self.addCleanup(writer.close)
+        with self.assertRaises(ValueError):
+            writer.start(before_joins=lambda _: None)
+        self.assertIsNone(writer._worker)

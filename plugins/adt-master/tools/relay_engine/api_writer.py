@@ -67,6 +67,35 @@ class StorePort(Protocol):
     def request_project_start(self, project_id: str, principal: str) -> ProjectStartResult: ...
 
 
+@dataclass(frozen=True)
+class StartResult:
+    state: Literal['serving', 'held']
+    causes: tuple[str, ...]
+    port: StorePort
+
+
+class _HeldPort:
+    def __init__(self, writer):
+        self._writer = writer
+
+    def read_catalogue(self, fn):
+        return self._writer.read_catalogue(fn)
+
+    def store_id(self):
+        return self._writer.store_id()
+
+    def submit_declared(self, job):
+        if job.declared.ledgers:
+            raise WriterUnavailable('store_held')
+        return self._writer.submit_declared(job)
+
+    def _refuse(self, *_args, **_kwargs):
+        raise WriterUnavailable('store_held')
+
+    submit = submit_callee = read = ledger_file = served_projects = _refuse
+    request_project_stop = request_project_start = _refuse
+
+
 class CalleeLeftTransaction(Exception):
     """A callee returned without closing its transaction."""
 
@@ -171,6 +200,9 @@ class StoreWriter:
         self._bindings: dict[str, _FileBinding] = {}
         self._started = threading.Event()
         self._start_error = None
+        self._startup_state = None
+        self._start_result = None
+        self._before_project_join = None
 
     @property
     def runtime_instance_id(self) -> str:
@@ -227,8 +259,13 @@ class StoreWriter:
                 self._checkpoint_reentry = True
             raise WriterUnavailable('closed')
 
+    def _require_project_startup(self):
+        if self._startup_state in {'opening', 'hooking', 'held'}:
+            raise WriterUnavailable('store_held')
+
     def _require_served(self, project_id):
         self._require_running()
+        self._require_project_startup()
         if project_id not in self._served or not self._project_available(project_id):
             raise WriterUnavailable('project_not_served')
 
@@ -328,6 +365,8 @@ class StoreWriter:
         self._require_running()
         if self._catalogue_fault is not None:
             raise _unavailable('catalogue_faulted', self._catalogue_fault)
+        if self._startup_state == 'opening' and not self._started.is_set():
+            raise WriterUnavailable('store_held')
         return self._bindings['catalogue']
 
     def read_catalogue(self, fn: Callable[[sqlite3.Connection], T]) -> T:
@@ -372,21 +411,74 @@ class StoreWriter:
             self._check_binding(label, binding)
         return bindings
 
-    def start(self) -> None:
+    def start(self, *, mode: Literal['service'] | None = None,
+              before_joins: Callable[[StorePort], None] | None = None,
+              before_project_join: Callable[[StorePort], None] | None = None) -> None:
+        if mode not in (None, 'service'):
+            raise ValueError('unsupported startup mode')
+        if mode is None and (before_joins is not None or before_project_join is not None):
+            raise ValueError('start hooks require service mode')
         with self._lock:
+            if self._worker is not None and (mode == 'service' or self._startup_state is not None):
+                raise RuntimeError('writer already started')
             if self._admission_closed():
                 raise WriterUnavailable('stopped')
             if self._closed:
                 raise WriterUnavailable('closed')
             if self._worker is None:
+                if mode == 'service':
+                    self._startup_state = 'opening'
+                    self._before_project_join = before_project_join
                 self._worker = threading.Thread(target=self._work, name='store-writer')
                 self._worker.start()
+                if mode == 'service':
+                    hook = threading.Thread(target=self._run_start_hook, args=(before_joins,),
+                                            name='store-writer-start-hook')
+                    hook.start()
+                    return
         self._started.wait()
         if self._start_error is not None:
             with self._lock:
                 self._closed = True
             self._worker.join()
             raise self._start_error
+
+    def _run_start_hook(self, before_joins):
+        self._started.wait()
+        with self._changed:
+            if self._closed or self._admission_closed() or self._start_error is not None:
+                return
+            self._startup_state = 'hooking'
+        try:
+            if before_joins is not None:
+                before_joins(self)
+        except BaseException:
+            result = StartResult('held', ('ingest_fault',), _HeldPort(self))
+        else:
+            result = StartResult('serving', (), self)
+        with self._changed:
+            self._startup_state = result.state
+            self._start_result = result
+            self._changed.notify_all()
+
+    def _wait_start_result(self, since):
+        with self._changed:
+            while True:
+                if self._closed or self._admission_closed() or self._startup_state is None:
+                    raise WriterUnavailable('closed')
+                if self._start_error is not None:
+                    raise self._start_error
+                result = self._start_result
+                if result is not None and (since is None
+                                           or (result.state, result.causes) != (since.state, since.causes)):
+                    return result
+                self._changed.wait()
+
+    def wait_started(self) -> StartResult:
+        return self._wait_start_result(None)
+
+    def wait_state_change(self, since: StartResult) -> StartResult:
+        return self._wait_start_result(since)
 
     def _nested(self):
         return (threading.current_thread() is self._worker
@@ -406,7 +498,11 @@ class StoreWriter:
                 if request.kind in {'job', 'callee'}:
                     self._require_served(request.project_id)
                     self._check_files(request.project_id, request.job)
+                elif request.kind == 'open':
+                    self._require_project_startup()
                 elif request.kind == 'declared':
+                    if request.job.declared.ledgers:
+                        self._require_project_startup()
                     request.bindings = self._admit_declared(request.job)
                 self._require_running()
                 self._requests[id(request)] = request
@@ -555,13 +651,25 @@ class StoreWriter:
                         self._pending_project_start.discard(project_id)
                     self._project_admission[project_id] = 'stopping'
                     return 'still_stopped'
-                if self._closed or self._admission_closed():
-                    self._project_admission[project_id] = 'starting'
+                self._project_admission[project_id] = 'starting'
+                if not self._can_publish_start():
+                    return 'started_not_served'
+            if self._before_project_join is not None:
+                try:
+                    self._before_project_join(self)
+                except BaseException:
+                    return 'started_not_served'
+            with self._lock:
+                if not self._can_publish_start():
                     return 'started_not_served'
                 self._pending_project_start.discard(project_id)
                 self._project_admission[project_id] = 'open'
                 self._post_project_request('open', project_id)
             return 'started'
+
+    def _can_publish_start(self):
+        return (not self._closed and not self._admission_closed()
+                and self._startup_state in (None, 'serving'))
 
     def _project_stop(self, project):
         self._phase('project_stop')
@@ -588,6 +696,7 @@ class StoreWriter:
     def _request_close(self):
         if not self._closed:
             self._closed = True
+            self._changed.notify_all()
             if self._worker is not None:
                 request = _Request('close')
                 request.ready.set()
@@ -970,7 +1079,9 @@ class StoreWriter:
             self._start_error = error
             return
         finally:
-            self._started.set()
+            with self._changed:
+                self._started.set()
+                self._changed.notify_all()
         while True:
             request = self._queue.get()
             request.ready.wait()
