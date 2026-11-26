@@ -378,6 +378,47 @@ class TestProjection(test_schema.Store):
                              (held_relays.InboxRow('p', 'relay', 'q', 'q-b', 'cc', 1),), (stale,),
                          ))
 
+    def test_inbox_plan_rewrites_changed_row(self):
+        existing = held_relays.InboxRow('p', 'relay', 'q', 'q-a', 'to', 1)
+        other = held_relays.InboxRow('other', 'relay', 'q', 'q-a', 'to', 1)
+        cases = (('time only', 'to', 2, True), ('role only', 'cc', 1, True),
+                 ('equal', 'to', 1, False))
+        for case, role, delivered_at, changed in cases:
+            with self.subTest(case=case):
+                recipient = held_relays.DeliveredRecipient('relay', 'q', 'q-a', role, delivered_at)
+                desired = held_relays.InboxRow('p', 'relay', 'q', 'q-a', role, delivered_at)
+                plan = held_relays.plan_inbox('p', (recipient,), (existing, other))
+                self.assertEqual(plan.deletes, (existing,) if changed else ())
+                self.assertEqual(plan.inserts, (desired,) if changed else ())
+                self.assertNotIn(other, plan.deletes)
+                self.assertNotIn(other, plan.inserts)
+
+    def test_inbox_restore_redelivery(self):
+        cat = sqlite3.connect(':memory:')
+        self.addCleanup(cat.close)
+        catalogue.init_catalogue(cat)
+        t1 = ('p', 'relay', 'q', 'q-a', 'to', 1)
+        t2 = ('p', 'relay', 'q', 'q-a', 'to', 2)
+        other = ('other', 'relay', 'q', 'q-a', 'to', 1)
+        with cat:
+            cat.executemany('INSERT INTO xproject_inbox VALUES (?,?,?,?,?,?)', (t1, other)).close()
+        with cat:
+            cat.execute('BEGIN IMMEDIATE').close()
+            with closing(cat.execute('SELECT * FROM xproject_inbox ORDER BY source_project_id')) as cursor:
+                before = cursor.fetchall()
+            plan = held_relays.plan_inbox(
+                'p', (held_relays.DeliveredRecipient(*t2[1:]),),
+                tuple(held_relays.InboxRow(*row) for row in before),
+            )
+            self.assertEqual(plan.deletes, (held_relays.InboxRow(*t1),))
+            self.assertEqual(plan.inserts, (held_relays.InboxRow(*t2),))
+            held_relays.apply_inbox(cat, 'p', plan)
+            self.assertTrue(cat.in_transaction)
+        with closing(cat.execute('SELECT * FROM xproject_inbox ORDER BY source_project_id')) as cursor:
+            after = cursor.fetchall()
+        self.assertEqual(after, [other, t2])
+        self.assertEqual(len(after), len(before))
+
     def test_apply_rows(self):
         cat = sqlite3.connect(':memory:')
         self.addCleanup(cat.close)

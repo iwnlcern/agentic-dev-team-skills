@@ -331,9 +331,10 @@ def plan_inbox(source_project_id: str, delivered: Sequence[DeliveredRecipient],
         row = InboxRow(source_project_id, recipient.relay_id, recipient.receiver_project_id,
                        recipient.seat_id, recipient.role, recipient.delivered_at)
         desired[row.key()] = row
+    changed = {key for key in desired.keys() & existing.keys() if desired[key] != existing[key]}
     return InboxPlan(
-        tuple(desired[key] for key in sorted(desired.keys() - existing.keys())),
-        tuple(existing[key] for key in sorted(existing.keys() - desired.keys())),
+        tuple(desired[key] for key in sorted((desired.keys() - existing.keys()) | changed)),
+        tuple(existing[key] for key in sorted((existing.keys() - desired.keys()) | changed)),
     )
 
 
