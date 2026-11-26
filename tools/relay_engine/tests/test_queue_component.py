@@ -549,6 +549,40 @@ class WriterPortTests(unittest.TestCase):
                         self.port.catalogue(lambda c: None)
                     submit.assert_called_once()
 
+    def test_callbacks_keep_the_writer_outcome(self):
+        from relay_engine.operator_queue import ingest
+
+        log = Path(self.context.store_root).parent / 'lifecycle.jsonl'
+        log.write_bytes(b'')
+        for outcome, adapter_error, callback_error in (
+            (api_writer.JobOutcome(False, None, True, 'x'),
+             api_writer.TurnIndeterminate, api_writer.TurnIndeterminate),
+            (api_writer.JobOutcome(False, None, False, 'stop_unwritten'),
+             records.JobUnavailable, ingest.StartupIngestIncomplete),
+        ):
+            read_catalogue = self.writer.read_catalogue
+            port = SimpleNamespace(submit_declared=lambda job: outcome,
+                                   read_catalogue=read_catalogue)
+            ctx = replace(self.context, port=port)
+            adapters = (self.component.PlatformJobPort.over_port(port),
+                        self.component.PlatformJobPort(ctx))
+            for adapter in adapters:
+                with self.assertRaises(adapter_error) as caught:
+                    adapter.catalogue(lambda c: self.fail('scripted outcome executed the job'))
+                if outcome.indeterminate:
+                    self.assertEqual(caught.exception.args, ('x',))
+                else:
+                    self.assertEqual(caught.exception.reason, 'stopped')
+            for callback, source in ((ingest.startup_callback(log), 'lifecycle_log'),
+                                     (ingest.project_start_callback(), 'stop_events')):
+                with self.assertRaises(callback_error) as caught:
+                    callback(port)
+                if outcome.indeterminate:
+                    self.assertEqual(caught.exception.args, ('x',))
+                else:
+                    self.assertEqual((caught.exception.source, caught.exception.cause),
+                                     (source, 'job_unavailable'))
+
     def test_post_commit_cleanup_fault_preserves_receipt(self):
         original = self.writer.submit_declared
         def with_cleanup_fault(job):

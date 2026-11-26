@@ -3,9 +3,9 @@ import json
 import unittest
 from unittest import mock
 
-from relay_engine import store_layout
+from relay_engine import api_writer, store_layout, store_steps
 from relay_engine.jcs import jcs_encode
-from relay_engine.operator_queue import ingest, notice_text, records
+from relay_engine.operator_queue import component, ingest, notice_text, records
 from relay_engine.tests.test_catalogue import P
 from relay_engine.tests.test_queue_ingest import QueueFixture, Port
 
@@ -13,6 +13,37 @@ from relay_engine.tests.test_queue_ingest import QueueFixture, Port
 class StorePort(Port):
     def read_ledger(self, project, fn):
         raise AssertionError('store-level ingest opened a project ledger')
+
+
+class DeclaredStorePort(StorePort):
+    def __init__(self, fixture):
+        super().__init__(fixture)
+        self.calls = []
+        self.outcomes = []
+        self.before_submit = None
+        self.unavailable = False
+
+    def read_catalogue(self, fn):
+        self.calls.append(('read_catalogue',))
+        return super().read_catalogue(fn)
+
+    def submit_declared(self, job):
+        self.calls.append(('submit_declared', job.declared))
+        if self.unavailable:
+            raise api_writer.WriterUnavailable('store_held')
+        if self.before_submit is not None:
+            before, self.before_submit = self.before_submit, None
+            before()
+        conn = self.f.catalogue
+        conn.execute('BEGIN IMMEDIATE').close()
+        try:
+            outcome = job.run({'catalogue': conn})
+            self.outcomes.append(outcome)
+            (conn.commit if outcome.commit else conn.rollback)()
+            return outcome
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 class TestStoreIngest(unittest.TestCase):
@@ -320,3 +351,80 @@ class TestStoreIngest(unittest.TestCase):
             with self.assertRaisesRegex(OSError, 'catalogue fault'):
                 ingest.store_ingest_pass(self.port, self.log, self.f.clock)
         self.assertEqual(self.f.snapshot(), before)
+
+    def test_startup_callback_adapts_the_store_port(self):
+        self.stop()
+        self.write(self.line(1))
+        port = DeclaredStorePort(self.f)
+        callback = ingest.startup_callback(self.log)
+        self.assertIsNone(callback(port))
+        self.assertEqual([row[0] for row in self.items()], ['engine_was_down', 'engine_stopped'])
+        submissions = [args for kind, *args in port.calls if kind == 'submit_declared']
+        self.assertTrue(submissions)
+        self.assertTrue(all(args == [store_steps.Declared('written', {})] for args in submissions))
+        self.assertEqual({call[0] for call in port.calls}, {'submit_declared', 'read_catalogue'})
+        self.assertTrue(all(outcome.commit for outcome in port.outcomes))
+        port.unavailable = True
+        with self.assertRaises(ingest.StartupIngestIncomplete) as caught:
+            callback(port)
+        self.assertEqual(caught.exception.cause, 'job_unavailable')
+        wrapped = component.catalogue_only(component.PlatformJobPort.over_port(port))
+        before = port.calls[:]
+        for forbidden in (lambda: wrapped.read_ledger(P, lambda c: None),
+                          lambda: wrapped.callee_ledger(P, lambda c: None),
+                          lambda: wrapped.catalogue_with_ledger_read(P, lambda c, l: None)):
+            with self.assertRaises(records.JobUnavailable):
+                forbidden()
+        self.assertEqual(port.calls, before)
+
+    def test_project_start_callback_raises_the_start(self):
+        self.stop('project', P)
+        self.assertEqual(self.run_pass(), 1)
+        self.start('project', P)
+        self.write(self.line(1))
+        port = DeclaredStorePort(self.f)
+        self.assertIsNone(ingest.project_start_callback()(port))
+        self.assertEqual(port.calls, [('submit_declared', store_steps.Declared('written', {}))])
+        self.assertEqual([row[:2] for row in self.items()],
+                         [('project_stopped', P), ('project_started', P)])
+        self.assertEqual(self.run_pass(), 1)
+        self.assertEqual([r[0] for r in self.items()].count('project_started'), 1)
+        self.assertIn('engine_was_down', [r[0] for r in self.items()])
+
+    def test_project_start_callback_after_a_periodic_pass(self):
+        self.stop('project', P)
+        self.assertEqual(self.run_pass(), 1)
+        self.start('project', P)
+        self.assertEqual(self.run_pass(), 1)
+        port = DeclaredStorePort(self.f)
+        before = self.items(), self.cursor('stop_events')
+        self.assertIsNone(ingest.project_start_callback()(port))
+        self.assertEqual((self.items(), self.cursor('stop_events')), before)
+        self.assertEqual([r[0] for r in self.items()].count('project_started'), 1)
+        self.write(self.line(1))
+        port.before_submit = self.run_pass
+        with self.assertRaises(ingest.StartupIngestIncomplete) as caught:
+            ingest.startup_callback(self.log)(port)
+        self.assertEqual((caught.exception.source, caught.exception.cause),
+                         ('lifecycle_log', 'stale'))
+
+    def test_project_start_callback_refused(self):
+        self.stop('project', P)
+        self.assertEqual(self.run_pass(), 1)
+        self.start('project', P)
+        port = DeclaredStorePort(self.f)
+        port.unavailable = True
+        callback = ingest.project_start_callback()
+        for start_seen in (False, True):
+            with self.subTest(start_seen=start_seen):
+                if start_seen:
+                    self.assertEqual(self.run_pass(), 1)
+                before = self.f.snapshot(), self.cursor('stop_events')
+                with self.assertRaises(ingest.StartupIngestIncomplete) as caught:
+                    callback(port)
+                self.assertEqual((caught.exception.source, caught.exception.cause),
+                                 ('stop_events', 'job_unavailable'))
+                self.assertEqual((self.f.snapshot(), self.cursor('stop_events')), before)
+                self.assertEqual([r[0] for r in self.items()].count('project_started'),
+                                 int(start_seen))
+        self.assertEqual(self.run_pass(), 0)
