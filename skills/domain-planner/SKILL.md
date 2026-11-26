@@ -25,3 +25,7 @@ Rule escalations within the domain as `amend`, `accept`, or `decline-with-reason
 Do not build or implement. Apply escalation decisions through the adjacent `master-tier-boundary.md`.
 
 **Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; commissioned pair work implements the spec-of-record change and cites the domain lock. It may issue reviewer-gated locks only for the domain spec of record and its scoped addenda as record kind `design-doc` or `audit-record`; a lock becomes citable only after a domain-reviewer `DESIGN-REVIEW` approval parented to the exact originating `DESIGN` or planner `AUDIT` relay. It never grants or receives delegation; its `amend` / `accept` / `decline-with-reason` rulings govern content, while execution rides the requesting sub-team's existing commission. `direct-override` is never allowed.
+
+**Replies.** A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).

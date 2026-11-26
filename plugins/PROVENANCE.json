@@ -50,7 +50,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/domain-planner/SKILL.md",
-    "sha256": "07d92171bf111358ff234724a786ac3a2a0a9520a4cbb69aafe842b9e72b3a3e",
+    "sha256": "b726baa909ad0bcc6a0dc3bafb1eba0c62e8a1b7ba9e3150034ea9c3a1016991",
     "source": "skills/domain-planner/SKILL.md"
   },
   {
@@ -74,7 +74,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/domain-reviewer/SKILL.md",
-    "sha256": "8ff997bdde211ad2dacdb930de293aa5a78c89c7c87c8d30cd57a72e7a90bea7",
+    "sha256": "b085c1365a218b12d43d2aba4dc4f85fa4c263b4609e9256d36ed0f9daeade34",
     "source": "skills/domain-reviewer/SKILL.md"
   },
   {
@@ -98,7 +98,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-planner/SKILL.md",
-    "sha256": "0de4b4b2f42cf1c97c1f5de7fddbceeb218d2af0375e204738f04afc1f4b13ed",
+    "sha256": "0cde62c9341d8b98a80ef3aa44d6b6e64beb653f8efe3fb8d6532f19dd8f8c3c",
     "source": "skills/master-planner/SKILL.md"
   },
   {
@@ -128,7 +128,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/master-reviewer/SKILL.md",
-    "sha256": "6f0dd93b29ef8bc19a1d8c05602b80fe21eb18596e038a2d9ed63e877dee85ce",
+    "sha256": "2d051ff43ecd51292506dd3013a5eb18d6204ffb6ae804cb5cdc4fc5b3b8cd88",
     "source": "skills/master-reviewer/SKILL.md"
   },
   {
@@ -164,7 +164,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-planner/SKILL.md",
-    "sha256": "6b9ef7c01b0bc38c52784ac2feffe38af3239a1e0ad729e090551e4f639327a1",
+    "sha256": "b2f4bfbe7bd3054ea9905463311f3f95c4a36910501af31379137a42206d3c21",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -218,7 +218,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "324805eee8be7622d6ef4ba508ee76538351fe3b5b00c8f0a1a7a30e0864af05",
+    "sha256": "02d0ba8ca1d8b07b8fff12ca0be045ab17aff2fdc50533b0166f5e6ede5a9641",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -248,7 +248,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-implementer/SKILL.md",
-    "sha256": "1ca3e5cd475eb5e1b7540427e5ff650bcbaa5b0c80c129f7ebbb455e11e746a8",
+    "sha256": "7219bd4516b844865a5736639146146d715b22fb4f5b022b446aac8d5ff5756a",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
@@ -266,7 +266,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/skills/pair-planner/SKILL.md",
-    "sha256": "c6388378a9d485b62cde3288432fe793c794b6f8b9b8e0762de12f5dab30e5e2",
+    "sha256": "a998bc4097f401ab1ce866c3bb32343c7b278e86b658ace7e16cc7bb9047e61c",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -11330,7 +11330,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-planner/SKILL.md",
-    "sha256": "6b9ef7c01b0bc38c52784ac2feffe38af3239a1e0ad729e090551e4f639327a1",
+    "sha256": "b2f4bfbe7bd3054ea9905463311f3f95c4a36910501af31379137a42206d3c21",
     "source": "skills/orchestrator-planner/SKILL.md"
   },
   {
@@ -11384,7 +11384,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/orchestrator-reviewer/SKILL.md",
-    "sha256": "324805eee8be7622d6ef4ba508ee76538351fe3b5b00c8f0a1a7a30e0864af05",
+    "sha256": "02d0ba8ca1d8b07b8fff12ca0be045ab17aff2fdc50533b0166f5e6ede5a9641",
     "source": "skills/orchestrator-reviewer/SKILL.md"
   },
   {
@@ -11414,7 +11414,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-implementer/SKILL.md",
-    "sha256": "1ca3e5cd475eb5e1b7540427e5ff650bcbaa5b0c80c129f7ebbb455e11e746a8",
+    "sha256": "7219bd4516b844865a5736639146146d715b22fb4f5b022b446aac8d5ff5756a",
     "source": "skills/variants/pair-implementer/SKILL.md"
   },
   {
@@ -11432,7 +11432,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/skills/pair-planner/SKILL.md",
-    "sha256": "c6388378a9d485b62cde3288432fe793c794b6f8b9b8e0762de12f5dab30e5e2",
+    "sha256": "a998bc4097f401ab1ce866c3bb32343c7b278e86b658ace7e16cc7bb9047e61c",
     "source": "skills/variants/pair-planner/SKILL.md"
   },
   {
@@ -22496,7 +22496,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-implementer/SKILL.md",
-    "sha256": "169a102b91f638288ffa20cf3b587fac0ac9dab668ae94b9f5939625ab812f76",
+    "sha256": "189acdb0efd89481d6a11c401741c65d298e9807c755e534f5ce572f8256225b",
     "source": "skills/pair-implementer/SKILL.md"
   },
   {
@@ -22514,7 +22514,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/skills/pair-planner/SKILL.md",
-    "sha256": "faf681f7e242bdebf8da7e31a9f81e380616e2481571fc63aea659125d683343",
+    "sha256": "e94f35139ab985ed61a87cd5c846d9364f53ba23df526a2774ebd7a031c06a59",
     "source": "skills/pair-planner/SKILL.md"
   },
   {

@@ -86,6 +86,12 @@ See `protocol.md` § Authority check before acting for continuations.
 11. **REVIEW-FOLD loop** — send blockers/must-haves to the Implementer. Optional findings are Implementer-discretion unless human-directed. After fold-in, run a quick targeted check; do not rerun the full panel unless design/blast radius changed.
 12. **MERGE/LIVE-VERIFY gate** — recommend one verdict from `protocol.md`. Treat merge, deploy, and live verification as separate evidence levels.
 
+## Replies
+
+A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
+
 ## Silent counterpart
 
 When a relay you are waiting on from another seat is well past when it was due by your pair's own pace, send that seat one short relay saying what you are waiting for and the last relay you saw from it, and asking it to report or to say it cannot go on.

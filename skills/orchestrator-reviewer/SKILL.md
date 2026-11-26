@@ -36,6 +36,10 @@ You do **not** implement, edit source/tests, create branches, open PRs, merge, o
 Do not proxy-author the Orchestrator Planner's relay or downstream pair relays; keep `FROM` as your own reviewer seat.
 Do not replace a missing relay with a review panel; require the relay to be written, then review it.
 
+**Replies.** A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
+
 ## Orchestrator-review visibility gate
 
 You are booted at orchestrator `init`; follow the protocol's same-run reviewer CC convention for orchestrator-planner authority-bearing relays in the broad SET.
