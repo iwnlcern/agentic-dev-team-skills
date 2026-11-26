@@ -19,6 +19,8 @@ from unittest import mock
 from relay_engine import addresses
 from relay_engine import errors
 from relay_engine import header
+from relay_engine import imports
+from relay_engine import jcs
 from relay_engine import refs
 from relay_engine import schema
 from relay_engine import submit
@@ -3564,6 +3566,249 @@ class TestAdmissionOutcome(Store):
                     self.assertNotIn("reservation-1", r.open)
                     self.assertEqual(r.open, {})
                 self.assertEqual(self.outcome(conn, ctx, data), retried)
+
+
+class TestImportedParentBundle(Snapshots):
+    def setUp(self):
+        super().setUp()
+        self.fixture_bytes = b"plan fixture\n"
+        self.reference = self.artifact("imported-plan.md", self.fixture_bytes)
+        self.conn.execute("BEGIN IMMEDIATE")
+        request = imports.ImportedRelay(
+            created_at=100, kind="PLAN", verdict=None, subject="old plan",
+            sender=PLANNER.seat_id, sender_role=PLANNER.role, team_instance_id="t1",
+            to=(IMPL.seat_id,), cc=(), parent_id=None, parent_spelling=None,
+            body=b"historic plan\n", header_bytes=77, header_sha256="a" * 64,
+        )
+        self.old_plan = imports.import_relay_step(self.conn, PROJECT, request, marked_at_ms=200)
+        review = replace(
+            request, created_at=101, kind="PLAN-REVIEW", verdict="approve", subject="old review",
+            sender=IMPL.seat_id, sender_role=IMPL.role, to=(PLANNER.seat_id,),
+            cc=(ORCH.seat_id,), parent_id=self.old_plan, parent_spelling="#1",
+            body=b"historic approval\n", header_sha256="b" * 64,
+        )
+        self.old_review = imports.import_relay_step(self.conn, PROJECT, review, marked_at_ms=200)
+        self.conn.executemany(
+            "INSERT INTO imported_relays"
+            " (relay_id, root_uuid, seq, stamp, zone, utc_offset_s, rendered_path, origin,"
+            " headers_json, source_sha256, original_phase, foreign_to_json, delivery_marked_at)"
+            " VALUES (?, '01000000-0000-4000-8000-000000000000', ?, '20261118-190000', 'UTC',"
+            " 0, ?, 'engine', '{}', ?, ?, NULL, 200)",
+            [(self.old_plan, 1, "engine/plan.md", "a" * 64, "PLAN"),
+             (self.old_review, 2, "engine/review.md", "b" * 64, "PLAN-REVIEW")],
+        )
+        self.conn.commit()
+
+    def combined(self, parent=None, bundle="imported-review", subject="native plan"):
+        data = draft(kind="PLAN", needs="review", to=IMPL.address, subject=subject,
+                     parent=self.old_review if parent is None else parent, refs=(self.reference,))
+        return data.replace(b"\nNEEDS:", b"\nBUNDLE: " + bundle.encode("ascii") + b"\nNEEDS:", 1)
+
+    def ledger(self, conn):
+        tables = ("bundles", "relays", "bodies", "edges", "recipients", "snapshots",
+                  "git_states", "seat_activity", "imported_relays")
+        return {table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                for table in tables}
+
+    def test_open_and_inherit(self):
+        history = self.ledger(self.conn)
+        observed = []
+
+        def see_opening(conn, admitted, parsed, ctx):
+            observed.extend(conn.execute(
+                "SELECT bundle_id, parent_id, target_relay_id FROM relays"
+                " JOIN edges ON edges.from_relay_id=relays.id AND edges.kind='parent'"
+                " WHERE relays.id=?", (admitted.relay_id,),
+            ).fetchall())
+
+        result = submit.submit(self.conn, replace(self.ctx(), after_admit=see_opening),
+                               self.combined(parent="#2"))
+        row = self.relay(result.relay_id)
+        bundle = row["bundle_id"]
+        self.assertIsNotNone(bundle)
+        self.assertEqual(row["parent_id"], self.old_review)
+        self.assertEqual(observed, [(bundle, self.old_review, self.old_review)])
+        self.assertEqual(self.conn.execute(
+            "SELECT project_id, name, team_instance_id, opened_by_seat_id, opened_by_special"
+            " FROM bundles WHERE id=?", (bundle,)).fetchone(),
+            (PROJECT, "imported-review", "t1", PLANNER.seat_id, None))
+        self.assertEqual(self.conn.execute(
+            "SELECT spelling, target_relay_id FROM edges WHERE from_relay_id=? AND kind='parent'",
+            (result.relay_id,)).fetchall(), [("#2", self.old_review)])
+        path = self.reference.removeprefix("file:")
+        digest = hashlib.sha256(self.fixture_bytes).hexdigest()
+        self.assertEqual(self.conn.execute(
+            "SELECT artifact, content_sha256, bytes_len, locked_by FROM snapshots WHERE relay_id=?",
+            (result.relay_id,)).fetchall(), [(path, digest, len(self.fixture_bytes), None)])
+        meta = {
+            "kind": "PLAN", "to": [IMPL.address], "cc": [], "parent": self.old_review,
+            "bundle": "imported-review", "verdict": None, "needs": "review", "subject": "native plan",
+            "refs": [{"type": "path", "target_path": path}],
+            "findings": [], "fixes": [], "resolves": [],
+        }
+        self.assertEqual(row["meta_sha256"], hashlib.sha256(jcs.jcs_encode(meta)).hexdigest())
+        child = self.submit(draft(parent=result.relay_id, to=PLANNER.address), sender=IMPL)
+        self.assertEqual(self.relay(child.relay_id)["bundle_id"], bundle)
+        after = self.ledger(self.conn)
+        for table in ("relays", "bodies", "edges", "imported_relays"):
+            self.assertEqual(after[table][:len(history[table])], history[table], table)
+        columns = [item[1] for item in self.conn.execute("PRAGMA table_info(recipients)")]
+        expected = [dict(zip(columns, entry)) for entry in history["recipients"]]
+        for recipient in expected:
+            if recipient["relay_id"] == self.old_review and recipient["seat_id"] == PLANNER.seat_id:
+                self.assertIsNone(recipient["answered_by"])
+                recipient["answered_by"] = result.relay_id
+        self.assertEqual(after["recipients"][:len(expected)],
+                         [tuple(recipient.values()) for recipient in expected])
+
+    def test_eligibility_refusals(self):
+        bundled = self.submit(draft(bundle="imported-review", to=IMPL.address))
+        foreign = self.submit(draft(bundle="foreign", to=FOREIGN.address), sender=FOREIGN)
+        native_null = self.submit(draft(parent=self.old_review, to=IMPL.address))
+        self.assertIsNone(self.relay(native_null.relay_id)["bundle_id"])
+        for parent, sender, code in (
+            ("#9999", PLANNER, "E-PARENT-UNKNOWN"),
+            (foreign.relay_id, PLANNER, "E-PARENT-UNKNOWN"),
+            (self.old_review, OTHER, "E-PARENT-NOT-MEMBER"),
+            (bundled.relay_id, PLANNER, "E-BUNDLE-PARENT-HAS-BUNDLE"),
+            (native_null.relay_id, PLANNER, "E-BUNDLE-PARENT-NOT-IMPORTED"),
+        ):
+            with self.subTest(code=code, parent=parent):
+                before = self.ledger(self.conn)
+                error = self.refused(code, self.combined(parent=parent), sender, line=3)
+                self.assertEqual(error.params["value"], parent)
+                self.assertEqual(self.ledger(self.conn), before)
+
+    def test_name_scope_and_ordinary_inheritance(self):
+        foreign = self.submit(draft(bundle="imported-review", to=FOREIGN.address), sender=FOREIGN)
+        result = self.submit(self.combined())
+        bundle = self.relay(result.relay_id)["bundle_id"]
+        self.assertNotEqual(bundle, self.relay(foreign.relay_id)["bundle_id"])
+        self.conn.execute("UPDATE bundles SET closed_at=200 WHERE id=?", (bundle,))
+        self.conn.commit()
+        error = self.refused("E-BUNDLE-NAME-TAKEN", self.combined(), line=4)
+        self.assertEqual(error.params["value"], "imported-review")
+        joined = self.submit(draft(bundle="imported-review", to=IMPL.address))
+        self.assertEqual(self.relay(joined.relay_id)["bundle_id"], bundle)
+        for parent, expected in ((result.relay_id, bundle), (self.old_review, None)):
+            child = self.submit(draft(parent=parent, to=IMPL.address))
+            self.assertEqual(self.relay(child.relay_id)["bundle_id"], expected)
+
+    def test_internal_filing_refused(self):
+        witnessed = []
+
+        def hook(conn, admitted, parsed, ctx):
+            def state():
+                return {table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+                        for table in ("relays", "bundles", "recipients", "edges", "snapshots")}
+
+            before = state()
+            try:
+                submit.file_system_relay(conn, ctx, self.combined())
+            except errors.EngineError as error:
+                witnessed.append((error.code, error.params, before == state()))
+
+        outer = submit.submit(self.conn, replace(self.ctx(), after_admit=hook),
+                              draft(bundle="outer", to=IMPL.address))
+        self.assertEqual(witnessed, [("E-FIELD-FORBIDDEN", {
+            "line": 4, "field": "BUNDLE",
+            "rule": "BUNDLE with PARENT requires a live PLAN with NEEDS review",
+        }, True)])
+        self.assertEqual(self.relay(outer.relay_id)["kind"], "SITREP")
+        self.assertEqual(self.conn.execute("SELECT name FROM bundles").fetchall(), [("outer",)])
+
+    def test_replay_and_competing_keys(self):
+        class ScheduledWriter(sqlite3.Connection):
+            before_begin = None
+
+            def execute(self, sql, parameters=()):
+                if sql == "BEGIN IMMEDIATE" and self.before_begin is not None:
+                    callback, self.before_begin = self.before_begin, None
+                    callback()
+                return super().execute(sql, parameters)
+
+        for mode, code in (("exact", None), ("changed", "E-SUBMISSION-KEY-REUSED"),
+                           ("competing", "E-BUNDLE-NAME-TAKEN")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "race.sqlite"
+                first = sqlite3.connect(path, factory=ScheduledWriter)
+                second = None
+                try:
+                    self.conn.backup(first)
+                    first.execute("PRAGMA foreign_keys=ON")
+                    self.assertEqual(first.execute("PRAGMA journal_mode=WAL").fetchone(), ("wal",))
+                    second = submit.open_store(path)
+                    receipts, winner_state, hook_calls = [], [], []
+
+                    def hook(conn, admitted, parsed, ctx):
+                        hook_calls.append(admitted.relay_id)
+
+                    data = self.combined()
+                    incoming = self.combined(subject="changed") if mode == "changed" else data
+                    winner = replace(self.ctx(submission_key="winner"), after_admit=hook)
+                    contender = replace(winner, submission_key="other") if mode == "competing" else winner
+
+                    def commit_winner():
+                        receipts.append(submit.submit(second, winner, data))
+                        winner_state.append(self.ledger(second))
+
+                    first.before_begin = commit_winner
+                    if code is None:
+                        actual = submit.submit(first, contender, incoming)
+                        self.assertEqual(actual, receipts[0])
+                    else:
+                        with self.assertRaises(errors.EngineError) as caught:
+                            submit.submit(first, contender, incoming)
+                        self.assertEqual(caught.exception.code, code)
+                    self.assertFalse(first.in_transaction)
+                    self.assertEqual(self.ledger(first), winner_state[0])
+                    self.assertEqual(hook_calls, [receipts[0].relay_id])
+                    self.assertEqual(first.execute("SELECT name FROM bundles").fetchall(),
+                                     [("imported-review",)])
+                    self.assertEqual(first.execute("SELECT code FROM refusals").fetchall(),
+                                     [] if code is None else [(code,)])
+                finally:
+                    if second is not None:
+                        second.close()
+                    first.close()
+
+    def test_post_allocation_rollback_and_retry(self):
+        self.conn.execute("CREATE TABLE imported_bundle_fixture (relay_id TEXT NOT NULL)")
+        self.conn.commit()
+        before = self.ledger(self.conn)
+        observed = []
+
+        def record(conn, admitted, parsed, ctx):
+            observed.append(conn.execute(
+                "SELECT bundle_id, parent_id FROM relays WHERE id=?", (admitted.relay_id,)
+            ).fetchone())
+            conn.execute("INSERT INTO imported_bundle_fixture VALUES (?)", (admitted.relay_id,))
+
+        def fail(conn, admitted, parsed, ctx):
+            record(conn, admitted, parsed, ctx)
+            raise RuntimeError("controlled after-allocation failure")
+
+        with mock.patch.dict(schema.TABLE_OWNERS, {"imported_bundle_fixture": "authority"}):
+            ctx = replace(self.ctx(submission_key="retry"), after_admit=fail,
+                          after_admit_writes=frozenset({"imported_bundle_fixture"}))
+            data = self.combined()
+            with self.assertRaises(errors.EngineError) as caught:
+                submit.submit(self.conn, ctx, data)
+            self.assertEqual(caught.exception.code, "E-ADMISSION-HOOK")
+            self.assertIsNotNone(observed[0][0])
+            self.assertEqual(observed[0][1], self.old_review)
+            self.assertFalse(self.conn.in_transaction)
+            self.assertEqual(self.ledger(self.conn), before)
+            self.assertEqual(self.conn.execute("SELECT * FROM imported_bundle_fixture").fetchall(), [])
+            self.assertEqual(self.conn.execute("SELECT code FROM refusals").fetchall(),
+                             [("E-ADMISSION-HOOK",)])
+
+            result = submit.submit(self.conn, replace(ctx, after_admit=record), data)
+        self.assertEqual(self.conn.execute("SELECT name FROM bundles").fetchall(), [("imported-review",)])
+        self.assertEqual(self.conn.execute("SELECT * FROM imported_bundle_fixture").fetchall(),
+                         [(result.relay_id,)])
+        self.assertEqual(len(observed), 2)
+        self.assertFalse(self.conn.in_transaction)
 
 
 class TestImportStep(Store):

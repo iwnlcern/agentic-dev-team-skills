@@ -60,6 +60,9 @@ ALL_CODES = POLICY_CODES | {
     "E-OUTPUT-OWNERSHIP",
 
     "E-SUBMISSION-KEY-REUSED",
+    "E-BUNDLE-PARENT-HAS-BUNDLE",
+    "E-BUNDLE-PARENT-NOT-IMPORTED",
+    "E-BUNDLE-NAME-TAKEN",
     "E-ADMISSION-HOOK",
     "E-ADMISSION-COMMIT",
     "E-ADMISSION-UNKNOWN",
@@ -586,6 +589,31 @@ class TestExplainCLI(unittest.TestCase):
 
 class TestAdmissionErrors(unittest.TestCase):
     """Breaks: unregistered replay refusal or changed legacy error envelope."""
+
+    def test_imported_parent_bundle_error_catalog(self):
+        cases = (
+            ("E-BUNDLE-PARENT-HAS-BUNDLE", 3, "#2", "line 3: parent #2 already has a bundle",
+             "remove BUNDLE to inherit the parent's bundle"),
+            ("E-BUNDLE-PARENT-NOT-IMPORTED", 3, "#2",
+             "line 3: parent #2 has no committed import provenance",
+             "remove BUNDLE or name a selectable imported relay"),
+            ("E-BUNDLE-NAME-TAKEN", 4, "imported-review",
+             "line 4: bundle imported-review already exists in this project",
+             "choose a fresh BUNDLE name and submit using the normal submission-key rules"),
+        )
+        for code, line, value, cause, remedy in cases:
+            with self.subTest(code=code):
+                error = errors.error_for(code, line=line, value=value)
+                self.assertEqual((error.code, error.cls, error.cause, error.remedy),
+                                 (code, "integrity", cause, remedy))
+                self.assertEqual(error.params, {"line": line, "value": value})
+                explanation, explained_remedy = errors.explain_for(code)
+                self.assertTrue(explanation)
+                self.assertEqual(explained_remedy, remedy)
+                self.assertIn(code, strings._CODE_VALUES)
+                self.assertNotIn(code, errors.POLICY_CODES)
+                with self.assertRaisesRegex(ValueError, "invalid inventory parameter"):
+                    errors.error_for(code, line=line, value="raw\nprivate text")
 
     def test_admission_outcome_codes(self):
         self.assertTrue({"E-ADMISSION-COMMIT", "E-ADMISSION-UNKNOWN"} <= set(errors.ERRORS))

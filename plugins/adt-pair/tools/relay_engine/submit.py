@@ -595,6 +595,11 @@ def _admit(conn, ctx, data, now, *, _system=False):
         return replay
     draft = header.parse(data)
     lines = _Lines(data, draft.header_bytes)
+    opens_import_bundle = draft.parent is not None and draft.bundle is not None
+    if _system and opens_import_bundle:
+        raise errors.error_for("E-FIELD-FORBIDDEN", variant="bundle",
+                               line=lines.of("BUNDLE"), field="BUNDLE",
+                               rule=header.IMPORTED_PARENT_BUNDLE_RULE)
     sender = ctx.sender
     # Before the write lock: a slow checkout or a large file digest holds no
     # lock (PR-3 fold S2); relays and recipients rows are append-only.
@@ -616,12 +621,19 @@ def _admit(conn, ctx, data, now, *, _system=False):
         if replay is not None:
             conn.execute("ROLLBACK")
             return replay
+        if opens_import_bundle:
+            parent = _parent(conn, sender, draft, lines, before_lock=False)
+            _require_unbundled_import(conn, parent, draft, lines)
         repository_id = None if _system else _repository(conn, sender, draft, lines)
         _check_findings(conn, sender, transitions)
         locks = _lock_plan(conn, sender, draft, lines, parent, targets)
         handle, created, relay_id = _identity(conn, sender.project_id, now)
-        bundle_id = (parent[1] if parent is not None
-                     else _bundle(conn, sender, draft.bundle, created))
+        if opens_import_bundle:
+            bundle_id = _bundle(conn, sender, draft.bundle, created, fresh_line=lines.of("BUNDLE"))
+        elif parent is not None:
+            bundle_id = parent[1]
+        else:
+            bundle_id = _bundle(conn, sender, draft.bundle, created)
         git_state_id = _write_git_state(conn, ctx.git_state, created)
         conn.execute(
             "INSERT INTO relays (id, handle, project_id, team_instance_id, bundle_id, kind,"
@@ -809,11 +821,23 @@ def _parent(conn, sender, draft, lines, *, before_lock: bool):
     return row
 
 
-def _bundle(conn, sender, name, created):
-    """A root opens the named bundle of its project, or joins it (A2)."""
+def _require_unbundled_import(conn, parent, draft, lines):
+    params = {"line": lines.of("PARENT"), "value": header._display(draft.parent)}
+    if parent[1] is not None:
+        raise errors.error_for("E-BUNDLE-PARENT-HAS-BUNDLE", **params)
+    imported = conn.execute("SELECT 1 FROM imported_relays WHERE relay_id = ? LIMIT 1",
+                            (parent[0],)).fetchone()
+    if imported is None:
+        raise errors.error_for("E-BUNDLE-PARENT-NOT-IMPORTED", **params)
+
+
+def _bundle(conn, sender, name, created, *, fresh_line=None):
+    """Open the project's named bundle or join it when permitted (A2)."""
     row = conn.execute("SELECT id FROM bundles WHERE project_id = ? AND name = ?",
                        (sender.project_id, name)).fetchone()
     if row is not None:
+        if fresh_line is not None:
+            raise errors.error_for("E-BUNDLE-NAME-TAKEN", line=fresh_line, value=name)
         return row[0]
     bundle_id = new_uuid7(created)
     conn.execute("INSERT INTO bundles (id, project_id, team_instance_id, name, opened_by_seat_id,"
