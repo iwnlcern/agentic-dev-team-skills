@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import closing, contextmanager
 from types import MappingProxyType
-from typing import Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar
 
 from relay_engine import store_layout, store_steps, strings
 
@@ -50,6 +50,8 @@ class DeclaredJob:
 
 
 T = TypeVar('T')
+ProjectStopResult = Literal['stopped', 'already_stopped', 'not_recorded', 'not_known']
+ProjectStartResult = Literal['started', 'started_not_served', 'not_stopped', 'still_stopped', 'not_known']
 
 
 class StorePort(Protocol):
@@ -61,6 +63,8 @@ class StorePort(Protocol):
     def ledger_file(self, project_id: str) -> str: ...
     def store_id(self) -> str: ...
     def served_projects(self) -> frozenset[str]: ...
+    def request_project_stop(self, project_id: str, principal: str) -> ProjectStopResult: ...
+    def request_project_start(self, project_id: str, principal: str) -> ProjectStartResult: ...
 
 
 class CalleeLeftTransaction(Exception):
@@ -153,6 +157,11 @@ class StoreWriter:
         self._worker = None
         self._closed = False
         self._served = set()
+        self._project_locks = {}
+        self._project_admission = {}
+        self._pending_project_start = set()
+        self._closing_projects = set()
+        self._pending_project_stop = set()
         self._rollback_errors = {}
         self._connections = {}
         self._ledger_files = {}
@@ -220,7 +229,7 @@ class StoreWriter:
 
     def _require_served(self, project_id):
         self._require_running()
-        if project_id not in self._served:
+        if project_id not in self._served or not self._project_available(project_id):
             raise WriterUnavailable('project_not_served')
 
     def _check_files(self, project_id, job):
@@ -438,6 +447,144 @@ class StoreWriter:
     def submit_declared(self, job: DeclaredJob) -> JobOutcome:
         return self._call(_Request('declared', job=job))
 
+    def _project_available(self, project):
+        return (self._project_admission.get(project, 'open') == 'open'
+                and project not in self._closing_projects)
+
+    def _project_request_lock(self, project):
+        if self._nested() or getattr(self._local, 'reader', False):
+            raise NestedWriterJob()
+        with self._lock:
+            self._require_running()
+            return self._project_locks.setdefault(project, threading.Lock())
+
+    def _fence_project(self, project):
+        for request in self._requests.values():
+            if request is self._active_request or request.done.is_set():
+                continue
+            direct = request.kind in {'job', 'callee', 'open'} and request.project_id == project
+            declared = request.kind == 'declared' and project in request.bindings
+            if direct or declared:
+                request.withdrawn = True
+                request.error = WriterUnavailable('project_not_served')
+                request.done.set()
+                request.ready.set()
+
+    def _post_project_request(self, kind, project):
+        request = _Request(kind, project)
+        request.ready.set()
+        self._requests[id(request)] = request
+        self._queue.put(request)
+
+    def _post_project_stop(self, project):
+        with self._lock:
+            if (project in self._served and project not in self._pending_project_stop
+                    and project not in self._closing_projects
+                    and not self._closed and not self._admission_closed()):
+                self._pending_project_stop.add(project)
+                self._post_project_request('project_stop', project)
+
+    def _record_project(self, record, project, principal):
+        def run(conns):
+            event = record(conns['catalogue'], 'project', project, by=principal)
+            return JobOutcome(True, event)
+
+        return self.submit_declared(DeclaredJob(store_steps.Declared('written', {}), run))
+
+    def _project_stop_row(self, project):
+        try:
+            rows = self.read_catalogue(store_layout.open_stops)
+        except Exception:
+            return None
+        return any(row.scope == 'project' and row.project_id == project for row in rows)
+
+    def request_project_stop(self, project_id: str, principal: str) -> ProjectStopResult:
+        with self._project_request_lock(project_id):
+            with self._changed:
+                was = self._project_admission.get(project_id, 'open')
+                self._project_admission[project_id] = 'stopping'
+                self._fence_project(project_id)
+            try:
+                outcome = self._record_project(store_layout.record_stop, project_id, principal)
+            except sqlite3.IntegrityError as error:
+                if (getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+                        and "index 'engine_stops_one_open'" in str(error)):
+                    return 'already_stopped'
+                outcome = JobOutcome(False, None)
+            except Exception:
+                outcome = JobOutcome(False, None)
+            if outcome.commit:
+                self._post_project_stop(project_id)
+                return 'stopped'
+            row = self._project_stop_row(project_id)
+            if row is None:
+                return 'not_known'
+            if row:
+                self._post_project_stop(project_id)
+                return 'stopped' if outcome.indeterminate else 'already_stopped'
+            with self._lock:
+                self._project_admission[project_id] = was
+            return 'not_recorded'
+
+    def request_project_start(self, project_id: str, principal: str) -> ProjectStartResult:
+        with self._project_request_lock(project_id):
+            with self._lock:
+                was_pending = project_id in self._pending_project_start
+                self._pending_project_start.add(project_id)
+                if self._project_admission.get(project_id) != 'stopping':
+                    self._project_admission[project_id] = 'starting'
+            try:
+                outcome = self._record_project(store_layout.record_start, project_id, principal)
+            except Exception:
+                outcome = JobOutcome(False, None)
+            if outcome.commit:
+                row = False
+                if outcome.value is None and not was_pending:
+                    with self._lock:
+                        self._pending_project_start.discard(project_id)
+                        self._project_admission[project_id] = 'open'
+                    return 'not_stopped'
+            else:
+                row = self._project_stop_row(project_id)
+            with self._lock:
+                if row is None:
+                    self._project_admission[project_id] = 'starting'
+                    return 'not_known'
+                if row:
+                    if not was_pending:
+                        self._pending_project_start.discard(project_id)
+                    self._project_admission[project_id] = 'stopping'
+                    return 'still_stopped'
+                if self._closed or self._admission_closed():
+                    self._project_admission[project_id] = 'starting'
+                    return 'started_not_served'
+                self._pending_project_start.discard(project_id)
+                self._project_admission[project_id] = 'open'
+                self._post_project_request('open', project_id)
+            return 'started'
+
+    def _project_stop(self, project):
+        self._phase('project_stop')
+        with self._changed:
+            if self._project_admission.get(project) != 'stopping':
+                return
+            conn = self._connections.get(project)
+            if conn is None:
+                return
+            self._closing_projects.add(project)
+        try:
+            self._close_handle(conn)
+        except BaseException as error:
+            with self._changed:
+                self._rollback_errors[project] = error
+            raise
+        with self._changed:
+            self._served.discard(project)
+            self._connections.pop(project, None)
+            self._bindings.pop(project, None)
+            self._ledger_files.pop(project, None)
+            self._closing_projects.discard(project)
+
     def _request_close(self):
         if not self._closed:
             self._closed = True
@@ -555,8 +702,17 @@ class StoreWriter:
         return True
 
     def _open(self, project_id):
-        if project_id in self._rollback_errors:
-            raise _unavailable('rollback_failed', self._rollback_errors[project_id])
+        with self._lock:
+            if project_id in self._rollback_errors:
+                raise _unavailable('rollback_failed', self._rollback_errors[project_id])
+        if any(row.scope == 'store' or row.project_id == project_id
+               for row in store_layout.open_stops(self._catalogue)):
+            with self._lock:
+                self._project_admission[project_id] = 'stopping'
+            return
+        with self._lock:
+            if not self._project_available(project_id):
+                raise WriterUnavailable('project_not_served')
         if project_id not in self._connections:
             path = self._file_path(project_id)
             try:
@@ -578,11 +734,20 @@ class StoreWriter:
             except BaseException:
                 self._close_handle(conn)
                 raise
-            self._connections[project_id] = conn
             with self._lock:
-                self._ledger_files[project_id] = path
-                self._bindings[project_id] = _FileBinding(conn, identity)
-                self._served.add(project_id)
+                if self._project_available(project_id):
+                    self._connections[project_id] = conn
+                    self._ledger_files[project_id] = path
+                    self._bindings[project_id] = _FileBinding(conn, identity)
+                    self._served.add(project_id)
+                    return
+            try:
+                self._close_handle(conn)
+            except BaseException as error:
+                with self._lock:
+                    self._rollback_errors[project_id] = error
+                raise _unavailable('rollback_failed', error) from error
+            raise WriterUnavailable('project_not_served')
 
     def _rollback(self, original=None):
         failure = None
@@ -826,6 +991,8 @@ class StoreWriter:
                     self._active_request = request
                 if request.kind == 'open':
                     self._open(request.project_id)
+                elif request.kind == 'project_stop':
+                    self._project_stop(request.project_id)
                 elif request.kind == 'declared':
                     result = self._run_declared(request)
                 else:
@@ -849,6 +1016,8 @@ class StoreWriter:
                             request.result, request.error = result, error
                         request.done.set()
                     self._requests.pop(id(request), None)
+                    if request.kind == 'project_stop':
+                        self._pending_project_stop.discard(request.project_id)
                     self._changed.notify_all()
                 self._queue.task_done()
 
