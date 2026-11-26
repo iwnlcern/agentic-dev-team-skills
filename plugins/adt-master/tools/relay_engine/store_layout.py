@@ -1352,6 +1352,36 @@ class IncumbentGuard:
         self._current(armed)
         return members
 
+    def runtime_admission(self, armed: IncumbentRecord, project_id: str,
+                          catalogue: sqlite3.Connection, *,
+                          purpose: Literal['join', 'stopped_read']) -> None:
+        """Check the live catalogue in a read transaction owned by this call."""
+        try:
+            _canonical_id(project_id)
+        except ValueError:
+            raise LayoutFault('member-unproved') from None
+        if purpose not in ('join', 'stopped_read'):
+            raise ValueError('unknown runtime admission purpose')
+        if catalogue.in_transaction:
+            raise LayoutFault('member-unproved')
+        _pragma(catalogue, 'BEGIN')
+        try:
+            _require_admission_identity(catalogue, armed.store, project_id)
+            if any_hold(catalogue) is not None:
+                raise LayoutFault('incumbent-hold')
+            stops = open_stops(catalogue)
+            if any(stop.scope == 'store' for stop in stops):
+                raise LayoutFault('incumbent-hold')
+            stopped = any(stop.project_id == project_id for stop in stops)
+            if purpose == 'join' and stopped:
+                raise LayoutFault('incumbent-hold')
+            if purpose == 'stopped_read' and not stopped:
+                raise LayoutFault('member-unproved')
+        except sqlite3.Error as exc:
+            raise LayoutFault('member-unproved') from exc
+        finally:
+            _pragma(catalogue, 'ROLLBACK')
+
     def _member_identities(self, project, *, sidecar_free=True, catalogue_sidecar_free=None):
         if catalogue_sidecar_free is None:
             catalogue_sidecar_free = sidecar_free

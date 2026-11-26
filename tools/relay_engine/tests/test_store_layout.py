@@ -1819,6 +1819,92 @@ class TestRuntimeAdmission(unittest.TestCase):
         wal.touch(mode=0o600, exist_ok=False)
         self._fault('journal-unresolved', self.guard._member_identities, P)
 
+    def _admission(self, project, purpose):
+        return self.guard.runtime_admission(self.armed, project, self.catalogue, purpose=purpose)
+
+    def _stop(self, scope, project):
+        store_layout.record_stop(self.catalogue, scope, project, 'test')
+        self.catalogue.commit()
+
+    def test_runtime_admission_joins_new_active_route(self):
+        self.assertIsNone(self._admission(Q, 'join'))
+
+    def test_runtime_admission_reads_wal_commits(self):
+        self.catalogue.execute('PRAGMA wal_autocheckpoint=0').close()
+        with closing(self.catalogue.execute('PRAGMA wal_checkpoint(TRUNCATE)')) as cursor:
+            self.assertEqual(cursor.fetchone()[0], 0)
+        self._stop('project', Q)
+        with closing(store_layout._immutable_incumbent_read(
+                store_layout.catalogue_path(self.root))) as immutable:
+            self.assertEqual(store_layout.route_state(immutable, Q), 'active')
+            self.assertFalse(any(stop.project_id == Q for stop in store_layout.open_stops(immutable)))
+        self._fault('incumbent-hold', self._admission, Q, 'join')
+        self.assertIsNone(self._admission(Q, 'stopped_read'))
+
+    def test_runtime_admission_hold_refuses_both(self):
+        store_layout.take_holds(self.catalogue, TestMaintenanceHolds.A, 'cutover',
+                                [store_layout.project_scope(Q)], 1)
+        self.catalogue.commit()
+        for purpose in ('join', 'stopped_read'):
+            with self.subTest(purpose=purpose):
+                self._fault('incumbent-hold', self._admission, Q, purpose)
+
+    def test_runtime_admission_store_stop_refuses_both(self):
+        self._stop('store', None)
+        for purpose in ('join', 'stopped_read'):
+            with self.subTest(purpose=purpose):
+                self._fault('incumbent-hold', self._admission, Q, purpose)
+
+    def test_stopped_read_needs_own_stop(self):
+        self._fault('member-unproved', self._admission, Q, 'stopped_read')
+        self._stop('project', P)
+        self._fault('member-unproved', self._admission, Q, 'stopped_read')
+
+    def test_runtime_admission_proof_refusals(self):
+        self.catalogue.execute('DELETE FROM project_routes WHERE project_id=?', (Q,)).close()
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, Q, 'join')
+        store_layout.reserve_project(self.catalogue, Q, 'second', 1)
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, Q, 'join')
+        store_layout.activate_project(self.catalogue, Q)
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, 'not-an-id', 'join')
+        self.catalogue.execute('UPDATE catalogue_identity SET store_id=?', (K,)).close()
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, Q, 'join')
+
+    def test_runtime_admission_refuses_open_transaction(self):
+        self.catalogue.execute('BEGIN IMMEDIATE').close()
+        store_layout.record_stop(self.catalogue, 'project', Q, 'test')
+        statements = []
+        self.catalogue.set_trace_callback(statements.append)
+        try:
+            self._fault('member-unproved', self._admission, Q, 'join')
+            self.assertEqual(statements, [])
+            self.assertTrue(self.catalogue.in_transaction)
+        finally:
+            self.catalogue.set_trace_callback(None)
+            self.catalogue.rollback()
+        self.assertFalse(any(stop.project_id == Q for stop in store_layout.open_stops(self.catalogue)))
+
+    def test_runtime_admission_leaves_no_transaction(self):
+        self.assertIsNone(self._admission(Q, 'join'))
+        self.assertFalse(self.catalogue.in_transaction)
+        self._fault('member-unproved', self._admission, Q, 'stopped_read')
+        self.assertFalse(self.catalogue.in_transaction)
+
+    def test_runtime_admission_maps_read_error_and_rolls_back(self):
+        self.catalogue.execute('DROP TABLE engine_stops').close()
+        self.catalogue.commit()
+        failure = self._fault('member-unproved', self._admission, Q, 'join')
+        self.assertIsInstance(failure.__cause__, sqlite3.Error)
+        self.assertFalse(self.catalogue.in_transaction)
+
+    def test_runtime_admission_refuses_unknown_purpose(self):
+        with self.assertRaises(ValueError):
+            self._admission(Q, 'unknown')
+
 
 if __name__ == '__main__':
     unittest.main()
