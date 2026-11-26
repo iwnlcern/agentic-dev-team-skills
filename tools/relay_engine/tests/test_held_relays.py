@@ -1,8 +1,11 @@
 """Store's held-relay records and local transition rules."""
+import ast
 from contextlib import closing
+from pathlib import Path
 import sqlite3
 
 from relay_engine import catalogue, schema
+import relay_engine.held_relays as held_relays
 from relay_engine.tests import test_schema
 
 
@@ -83,3 +86,131 @@ class TestHeldTables(test_schema.Store):
             self.conn.execute(stmt).close()
         self.transfer()
         self.conn.execute(stmt).close()
+
+
+class TestStep(test_schema.Store):
+    def setUp(self):
+        self.conn = self.connect()
+        self.relay(self.conn, 'relay', 1, body_sha=SHA)
+
+    def admit(self, receiver='q', decision='held', facts=None, now=1):
+        if facts is None:
+            facts = held_relays.ReceiverFacts('active', False, 'present')
+        return held_relays.admit(self.conn, 'relay', receiver, SHA, (
+            held_relays.Recipient(receiver + '-seat', 'team.implementer@' + receiver, 'to'),
+            held_relays.Recipient(receiver + '-cc', 'team.planner@' + receiver, 'cc'),
+        ), decision, facts, now)
+
+    def select(self, sql):
+        with closing(self.conn.execute(sql)) as cursor:
+            return cursor.fetchall()
+
+    def test_step_cases(self):
+        cases = (
+            ('not_active', True, 'not_read', 'denied', 'returned', 'destination_not_active'),
+            ('active', True, 'not_read', 'denied', 'denied', None),
+            ('active', True, 'not_read', 'held', 'held', None),
+            ('active', True, 'unavailable', 'allowed', 'allowed', 'receiver_stopped'),
+            ('active', False, 'unavailable', 'allowed', 'allowed', 'receiver_unavailable'),
+            ('active', False, 'not_read', 'allowed', 'allowed', 'receiver_unavailable'),
+            ('active', False, 'missing', 'allowed', 'returned', 'recipient_not_found'),
+            ('active', False, 'present', 'allowed', 'delivered', None),
+        )
+        for i, (route, stopped, seats, decision, state, reason) in enumerate(cases):
+            receiver = f'q{i}'
+            self.admit(receiver)
+            with self.subTest(receiver=receiver, route=route, decision=decision, seats=seats):
+                res = held_relays.step(self.conn, 'relay', receiver, decision,
+                                       held_relays.ReceiverFacts(route, stopped, seats), 2)
+                self.assertEqual(res, held_relays.State(state, reason))
+                with closing(self.conn.execute(
+                    'SELECT state,reason FROM xproject_transfers WHERE receiver_project_id=?',
+                    (receiver,),
+                )) as cursor:
+                    self.assertEqual(cursor.fetchone(), (state, reason))
+        self.assertEqual(self.select('SELECT relay_id,receiver_project_id,body_sha256,delivered_at '
+                                     'FROM xproject_deliveries'), [('relay', 'q7', SHA, 2)])
+
+    def test_step_writes_nothing_unchanged(self):
+        self.admit()
+        facts = held_relays.ReceiverFacts('active', False, 'unavailable')
+        writes = self.conn.total_changes
+        self.assertEqual(held_relays.step(self.conn, 'relay', 'q', 'held', facts, 2),
+                         held_relays.State('held', None))
+        self.assertEqual(self.conn.total_changes, writes)
+        held_relays.step(self.conn, 'relay', 'q', 'allowed', facts, 3)
+        self.assertEqual(self.select('SELECT from_state,to_state,reason,at FROM xproject_events '
+                                     'ORDER BY event_id')[-1],
+                         ('held', 'allowed', 'receiver_unavailable', 3))
+        self.assertEqual(len(self.select('SELECT event_id FROM xproject_events')), 2)
+
+    def test_admit_inserts_and_steps(self):
+        self.assertEqual(self.admit(decision='allowed'), held_relays.State('delivered', None))
+        self.assertEqual(self.select('SELECT receiver_project_id,seat_id,role,opened_at '
+                                     'FROM xproject_recipients ORDER BY role'),
+                         [('q', 'q-cc', 'cc', None), ('q', 'q-seat', 'to', None)])
+        self.assertEqual(self.select('SELECT state,body_sha256 FROM xproject_transfers'),
+                         [('delivered', SHA)])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.admit()
+
+    def test_unknown_decision_refused(self):
+        writes = self.conn.total_changes
+        with self.assertRaises(ValueError):
+            self.admit(decision='maybe')
+        self.assertEqual(self.conn.total_changes, writes)
+        self.admit()
+        writes = self.conn.total_changes
+        with self.assertRaises(ValueError):
+            held_relays.step(self.conn, 'relay', 'q', 'maybe',
+                             held_relays.ReceiverFacts('active', False, 'present'), 2)
+        self.assertEqual(self.conn.total_changes, writes)
+
+    def test_terminal_not_stepped(self):
+        self.admit(decision='allowed')
+        writes = self.conn.total_changes
+        self.assertEqual(held_relays.step(
+            self.conn, 'relay', 'q', 'held',
+            held_relays.ReceiverFacts('not_active', False, 'not_read'), 2),
+            held_relays.State('delivered', None))
+        self.assertEqual(self.conn.total_changes, writes)
+
+    def test_mark_opened_once(self):
+        self.admit(decision='allowed')
+        self.assertIs(held_relays.mark_opened(self.conn, 'relay', 'q', 'q-seat', 10), True)
+        self.assertIs(held_relays.mark_opened(self.conn, 'relay', 'q', 'q-seat', 11), False)
+        self.assertEqual(self.select("SELECT opened_at FROM xproject_recipients WHERE role='to'"), [(10,)])
+        with self.assertRaises(ValueError):
+            held_relays.mark_opened(self.conn, 'relay', 'q', 'other-seat', 10)
+
+    def test_no_time_out(self):
+        self.admit()
+        facts = held_relays.ReceiverFacts('active', False, 'not_read')
+        for now in (10, 1000, 10**10):
+            self.assertEqual(held_relays.step(self.conn, 'relay', 'q', 'held', facts, now),
+                             held_relays.State('held', None))
+
+    def test_imports_no_authority(self):
+        banned = {'xproject', 'authority', 'slips', 'claims', 'restore_cancel', 'operator_queue'}
+        for node in ast.walk(ast.parse(Path(held_relays.__file__).read_text())):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = {part for alias in node.names for part in alias.name.split('.')}
+                if isinstance(node, ast.ImportFrom):
+                    names.update((node.module or '').split('.'))
+                self.assertFalse(names & banned)
+
+    def test_status_and_non_terminal(self):
+        self.admit('q2', decision='allowed', facts=held_relays.ReceiverFacts('active', True, 'not_read'), now=2)
+        self.admit('q1', now=3)
+        self.assertEqual(held_relays.status(self.conn, 'relay'), (
+            held_relays.TransferStatus('relay', 'q1', SHA, 'held', None, 3),
+            held_relays.TransferStatus('relay', 'q2', SHA, 'allowed', 'receiver_stopped', 2),
+        ))
+        self.assertEqual(held_relays.status(self.conn, 'unknown'), ())
+        self.admit('q3', decision='allowed')
+        self.admit('q4', decision='denied')
+        self.admit('q5', facts=held_relays.ReceiverFacts('not_active', False, 'not_read'))
+        self.assertEqual(held_relays.non_terminal(self.conn),
+                         (held_relays.TransferKey('relay', 'q1'), held_relays.TransferKey('relay', 'q2')))
+        self.assertEqual(held_relays.non_terminal(self.conn, 'q2'),
+                         (held_relays.TransferKey('relay', 'q2'),))
