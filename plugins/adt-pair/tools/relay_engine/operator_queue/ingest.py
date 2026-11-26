@@ -1,10 +1,17 @@
 """Question reads and anchored catalogue ingests within caller-owned jobs."""
+from __future__ import annotations
+
 import hashlib
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from sqlite3 import Connection
+from typing import TYPE_CHECKING
 
 from relay_engine import queries
-from relay_engine.operator_queue import kinds, records
+from relay_engine.operator_queue import component, kinds, records
+
+if TYPE_CHECKING:
+    from relay_engine.api_writer import StorePort
 
 
 def read_questions(ledger_conn: Connection, project_id: str, after_handle: int, limit: int):
@@ -384,3 +391,23 @@ def store_ingest_startup(port: records.JobPort, log_path: Path, now_ms: int) -> 
         except records.JobUnavailable:
             raise StartupIngestIncomplete(source, 'job_unavailable') from None
     return raised
+
+
+def startup_callback(log_path: Path) -> Callable[[StorePort], None]:
+    def before_joins(port: StorePort) -> None:
+        job_port = component.catalogue_only(component.PlatformJobPort.over_port(port))
+        store_ingest_startup(job_port, log_path, time.time_ns() // 1_000_000)
+
+    return before_joins
+
+
+def project_start_callback() -> Callable[[StorePort], None]:
+    def before_project_join(port: StorePort) -> None:
+        job_port = component.catalogue_only(component.PlatformJobPort.over_port(port))
+        now_ms = time.time_ns() // 1_000_000
+        try:
+            job_port.catalogue(lambda conn: ingest_stop_events(conn, now_ms))
+        except records.JobUnavailable:
+            raise StartupIngestIncomplete('stop_events', 'job_unavailable') from None
+
+    return before_project_join

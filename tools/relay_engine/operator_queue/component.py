@@ -11,6 +11,7 @@ from relay_engine.operator_queue import kinds
 
 if TYPE_CHECKING:
     from relay_engine.api_submit import ServiceContext
+    from relay_engine.api_writer import StorePort
     from relay_engine.operator_queue import records, saga
 
 
@@ -23,7 +24,13 @@ class _CalleeJob:
 class PlatformJobPort:
     """Adapt Queue callbacks to the five Store port modes."""
     def __init__(self, ctx: 'ServiceContext'):
-        self._store = ctx.port
+        self._store = self.over_port(ctx.port)._store
+
+    @classmethod
+    def over_port(cls, port: StorePort) -> PlatformJobPort:
+        adapter = cls.__new__(cls)
+        adapter._store = port
+        return adapter
 
     @staticmethod
     def _call(submit, *args):
@@ -82,6 +89,35 @@ class PlatformJobPort:
 
     def read_catalogue(self, fn):
         return self._call(self._store.read_catalogue, fn)
+
+
+class _CatalogueOnly:
+    def __init__(self, job_port: PlatformJobPort):
+        self._port = job_port
+
+    def catalogue(self, fn):
+        return self._port.catalogue(fn)
+
+    def read_catalogue(self, fn):
+        return self._port.read_catalogue(fn)
+
+    def _unavailable(self):
+        from relay_engine.operator_queue import records
+
+        raise records.JobUnavailable('store_held')
+
+    def catalogue_with_ledger_read(self, project_id, fn):
+        self._unavailable()
+
+    def callee_ledger(self, project_id, fn):
+        self._unavailable()
+
+    def read_ledger(self, project_id, fn):
+        self._unavailable()
+
+
+def catalogue_only(job_port: PlatformJobPort) -> records.JobPort:
+    return _CatalogueOnly(job_port)
 
 
 def _normalize_raise(args):

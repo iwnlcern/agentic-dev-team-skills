@@ -2990,3 +2990,115 @@ class TestAnswerWordsR22(unittest.TestCase):
         self.assertEqual(slips.project_stopped_answer(),
                          slips.Answer('held', 'authority.project-stopped',
                                       'this project is stopped', 'operator', None, None))
+
+
+class TestAnswerReasonInventory(unittest.TestCase):
+    def test_answer_reasons_come_from_the_inventory(self):
+        import ast
+
+        from relay_engine import authority, slips, strings
+
+        def called(expr, owner, name):
+            if not isinstance(expr, ast.Call):
+                return False
+            func = expr.func
+            if owner is None:
+                return isinstance(func, ast.Name) and func.id == name
+            return (isinstance(func, ast.Attribute) and func.attr == name
+                    and isinstance(func.value, ast.Name) and func.value.id == owner)
+
+        def inventory_key(expr):
+            return (isinstance(expr, ast.Constant) and isinstance(expr.value, str)
+                    and expr.value in strings.INVENTORY)
+
+        def local_tree(node):
+            yield node
+            for child in ast.iter_child_nodes(node):
+                if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                          ast.ClassDef, ast.Lambda)):
+                    yield from local_tree(child)
+
+        def local_values(fn, name):
+            # Map only plain and annotated assignments with a direct name target.
+            # Any other write is an unsupported binding, including augmented
+            # assignment, loop and context targets, and assignment expressions.
+            nodes = tuple(local_tree(fn))
+            direct = {}
+            for node in nodes:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            direct[target] = node.value
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    direct[node.target] = node.value
+            values = [direct.get(node) for node in nodes
+                      if isinstance(node, ast.Name) and node.id == name
+                      and not isinstance(node.ctx, ast.Load)]
+            for node in nodes:
+                if ((isinstance(node, ast.arg) and node.arg == name)
+                        or (isinstance(node, ast.ExceptHandler) and node.name == name)
+                        or (isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == name)
+                        or (isinstance(node, ast.MatchMapping) and node.rest == name)
+                        or (isinstance(node, ast.alias)
+                            and (node.asname or node.name.split('.')[0]) == name)
+                        or (isinstance(node, (ast.Nonlocal, ast.Global)) and name in node.names)):
+                    values.append(None)
+            return values
+
+        def allowed(expr, fn, allowed_call):
+            if allowed_call(expr):
+                return True
+            if fn is None or not isinstance(expr, ast.Name):
+                return False
+            values = local_values(fn, expr.id)
+            return bool(values) and all(allowed_call(value) for value in values)
+
+        def reason_call(expr):
+            return (called(expr, None, '_restore_reason')
+                    or (called(expr, 'strings', 'render') and bool(expr.args)
+                        and inventory_key(expr.args[0])))
+
+        def restore_render(expr):
+            return (called(expr, 'strings', 'render') and bool(expr.args)
+                    and inventory_key(expr.args[0])
+                    and expr.args[0].value in ('authority-restore-standing', 'authority-restore-held'))
+
+        helpers = []
+        for module in (slips, authority):
+            file = Path(module.__file__)
+            tree = ast.parse(file.read_text(encoding='utf-8'), filename=str(file))
+            if module is slips:
+                helpers = [node for node in tree.body
+                           if isinstance(node, ast.FunctionDef) and node.name == '_restore_reason']
+            owners = {}
+            for fn in (node for node in ast.walk(tree)
+                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                for node in local_tree(fn):
+                    owners[node] = fn
+            for node in ast.walk(tree):
+                wrapper = called(node, None, '_answer')
+                if not (wrapper or called(node, None, 'Answer') or called(node, 'slips', 'Answer')):
+                    continue
+                index = 1 if wrapper else 2
+                fn = owners.get(node)
+                site = f'{file.name}:{node.lineno}'
+                self.assertGreater(len(node.args), index, site)
+                reason = node.args[index]
+                if module is slips and called(node, None, 'Answer') and fn is not None:
+                    if fn.name == '_answer':
+                        self.assertIsInstance(reason, ast.Name, site)
+                        self.assertEqual(reason.id, 'reason', site)
+                        continue
+                    if fn.name == '_allow':
+                        self.assertIsInstance(reason, ast.Constant, site)
+                        self.assertIsNone(reason.value, site)
+                        continue
+                self.assertTrue(allowed(reason, fn, reason_call), site)
+
+        self.assertEqual(len(helpers), 1, 'slips.py must define _restore_reason once')
+        helper, = helpers
+        returns = [node for node in local_tree(helper) if isinstance(node, ast.Return)]
+        self.assertTrue(returns, '_restore_reason must return a rendered reason')
+        for node in returns:
+            self.assertTrue(restore_render(node.value),
+                            f'slips.py:{node.lineno}: _restore_reason must return an inventory render')
