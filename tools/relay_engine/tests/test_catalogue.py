@@ -213,7 +213,7 @@ class TestCatalogue(unittest.TestCase):
         conn = self.opened()
         definitions = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name").fetchall()
         digest = hashlib.sha256('\n'.join(sql for (sql,) in definitions).encode()).hexdigest()
-        self.assertEqual(digest, 'ddcdd6c8b0e39f7f5d012d2dcf02f807b9ad0f8140ca3a44ad992d143ab165c7')
+        self.assertEqual(digest, 'cd68e1276ede0fc873115bd1a91b5574e74af59115cc23db5cfdcf72b0ad9a9b')
 
     def test_constraints_hold(self):
         conn = self.opened()
@@ -311,7 +311,7 @@ class TestQueueCatalogue(unittest.TestCase):
         self.assertTrue(QUEUE_TABLES <= tables)
         self.assertEqual({n for n, owner in catalogue.TABLE_OWNERS.items() if owner == 'console'},
                          QUEUE_TABLES)
-        self.assertEqual(len(catalogue.TABLE_OWNERS), 18)
+        self.assertEqual(len(catalogue.TABLE_OWNERS), 20)
         for name in QUEUE_TABLES:
             self.assertEqual(conn.execute('SELECT strict FROM pragma_table_list WHERE name=?',
                                           (name,)).fetchone(), (1,))
