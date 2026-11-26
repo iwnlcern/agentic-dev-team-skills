@@ -10958,7 +10958,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/held_relays.py",
-    "sha256": "ecd8f94dcc151ffa334b6bee4e4f57834bf67aeb99be0ff12663549d1f51e870",
+    "sha256": "adee8ae42866eb00316ec27525045b1c45ac9977dac74d6a2629324a3a55bbe8",
     "source": "tools/relay_engine/held_relays.py"
   },
   {
@@ -22130,7 +22130,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/held_relays.py",
-    "sha256": "ecd8f94dcc151ffa334b6bee4e4f57834bf67aeb99be0ff12663549d1f51e870",
+    "sha256": "adee8ae42866eb00316ec27525045b1c45ac9977dac74d6a2629324a3a55bbe8",
     "source": "tools/relay_engine/held_relays.py"
   },
   {
@@ -33218,7 +33218,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/held_relays.py",
-    "sha256": "ecd8f94dcc151ffa334b6bee4e4f57834bf67aeb99be0ff12663549d1f51e870",
+    "sha256": "adee8ae42866eb00316ec27525045b1c45ac9977dac74d6a2629324a3a55bbe8",
     "source": "tools/relay_engine/held_relays.py"
   },
   {
