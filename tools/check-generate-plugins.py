@@ -1230,7 +1230,7 @@ assert Path(authority.__file__).resolve().parent == (Path(sys.argv[1]) / "relay_
 print(json.dumps({name: [getattr(authority, name).pattern, getattr(authority, name).flags]
                   for name in ('HTML_OPEN', 'HTML_START', 'CONTROL_CHARACTERS')}))
 """
-    result = subprocess.run([PYTHON, "-I", "-c", pattern_reader, str(scratch / "tools")],
+    result = subprocess.run([PYTHON, "-I", "-B", "-c", pattern_reader, str(scratch / "tools")],
                             cwd=scratch_base, text=True, capture_output=True)
     expect_success(result, f"{plugin} installed authority patterns")
     patterns = {name: re.compile(pattern, flags)
@@ -1284,7 +1284,7 @@ for row in json.load(sys.stdin):
             "\nDISPATCH IMPL\n", "\nDISPATCH IMPL\n\ncontrol" + character + "marker\n", 1)
         expect(mutated != implementation_region, f"{plugin} missing token for control mutation")
         cases.append([fill(single_example_block(mutated, f"{plugin} control mutation")), "DISPATCH IMPL"])
-    result = subprocess.run([PYTHON, "-I", "-c", judge, str(scratch / "tools")],
+    result = subprocess.run([PYTHON, "-I", "-B", "-c", judge, str(scratch / "tools")],
                             input=json.dumps(cases), cwd=scratch_base, text=True, capture_output=True)
     expect_success(result, f"{plugin} installed authority predicates")
     judgments = [json.loads(line) for line in result.stdout.splitlines()]

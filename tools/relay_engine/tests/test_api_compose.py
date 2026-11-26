@@ -103,7 +103,7 @@ class TestComposition(unittest.TestCase):
         for module, expected in (('api_compose', False), ('api_writer', True)):
             script = ('import sys,json;sys.path.insert(0,' + repr(str(TOOLS)) + ');'
                       'import relay_engine.' + module + ';print(json.dumps(sorted(sys.modules)))')
-            result = subprocess.run([sys.executable, '-I', '-c', script],
+            result = subprocess.run([sys.executable, '-I', '-B', '-c', script],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             modules = set(json.loads(result.stdout))

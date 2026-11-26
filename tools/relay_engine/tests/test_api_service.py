@@ -1417,7 +1417,7 @@ print('stopped', flush=True)
                 started = time.monotonic()
                 timed_out = False
                 try:
-                    result = subprocess.run([sys.executable, '-I', '-c', script],
+                    result = subprocess.run([sys.executable, '-I', '-B', '-c', script],
                         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
                 except subprocess.TimeoutExpired as error:
                     timed_out = True

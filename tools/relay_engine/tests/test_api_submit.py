@@ -603,7 +603,7 @@ b=build_platform()
 assert export_schema(b.registry,'3.0').canonical_bytes
 print(json.dumps(sorted(sys.modules)))
 """
-        result = subprocess.run([sys.executable, '-I', '-c', script, tools],
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', script, tools],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         loaded = set(json.loads(result.stdout))
@@ -614,7 +614,7 @@ print(json.dumps(sorted(sys.modules)))
 b.composition.port_factories['platform'](SimpleNamespace(port=None,clock=lambda:0,store_root='',project_id='P'))
 print(json.dumps(sorted(sys.modules)))
 """
-        control = subprocess.run([sys.executable, '-I', '-c', control_script, tools],
+        control = subprocess.run([sys.executable, '-I', '-B', '-c', control_script, tools],
                                  capture_output=True, text=True, timeout=30)
         self.assertEqual(control.returncode, 0, control.stderr)
         self.assertIn('relay_engine.api_submit', json.loads(control.stdout.splitlines()[-1]))

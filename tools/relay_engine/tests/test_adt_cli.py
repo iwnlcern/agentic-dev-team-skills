@@ -292,7 +292,7 @@ class AdtTests(unittest.TestCase):
         imports = 'import relay_engine; [importlib.import_module(m.name) for m in pkgutil.walk_packages(relay_engine.__path__, "relay_engine.") if ".tests" not in m.name]; '
         query = 'print(json.dumps(sorted(n for n in sys.modules if n=="adapters" or n.startswith("adapters.") or n.startswith("tools.adapters"))))'
         for extra, expected in [('', False), ('import tools.adapters.seat_record; ', True)]:
-            proc = subprocess.run([sys.executable, '-I', '-c', prefix + imports + extra + query],
+            proc = subprocess.run([sys.executable, '-I', '-B', '-c', prefix + imports + extra + query],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(bool(json.loads(proc.stdout)), expected)
