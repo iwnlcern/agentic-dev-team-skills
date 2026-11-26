@@ -1,6 +1,7 @@
 """Installed approval-seal service; all item operations use the project flock."""
 from contextlib import contextmanager
 from dataclasses import replace
+import errno
 import hashlib
 import hmac
 import json
@@ -99,13 +100,19 @@ class SealService:
             raise RuntimeError('seal_renderer_already_attached')
         self.renderer, self._renderer_attached = renderer, True
 
-    def _report(self, project, chain, cause):
-        self.report(SealReport(project, chain, cause, self.clock_ms()))
+    def _report(self, project, chain, cause, errno_name=None):
+        self.report(SealReport(project, chain, cause, self.clock_ms(), errno_name))
 
-    def _fail(self, project, cause, chain=None, *, report=True):
+    def _fail(self, project, cause, chain=None, *, report=True, error=None):
+        source = error
+        if isinstance(error, slots.CannotRecord):
+            source = error.__cause__
+        errno_name = None
+        if isinstance(source, OSError) and isinstance(source.errno, int):
+            errno_name = errno.errorcode.get(source.errno, str(source.errno))
         if report:
-            self._report(project, chain, cause)
-        raise SealUnusable(cause, chain) from None
+            self._report(project, chain, cause, errno_name)
+        raise SealUnusable(cause, chain, errno_name) from None
 
     @contextmanager
     def _locked(self, project, *, exclusive, create=False, report=True):
@@ -118,8 +125,8 @@ class SealService:
                 raise OSError('unusable_project')
             with self.folder.lock(project, exclusive=exclusive):
                 yield
-        except OSError:
-            self._fail(project, 'folder_unusable', report=report)
+        except OSError as error:
+            self._fail(project, 'folder_unusable', report=report, error=error)
 
     @contextmanager
     def _open(self, project, name, *, write=False):
@@ -164,13 +171,13 @@ class SealService:
         try:
             with self._open(project, name, write=write) as fd:
                 return slots.read_slots(fd, kind=kind, binding=(project, chain), ledger_identity=None)
-        except (OSError, slots.CannotRecord):
+        except (OSError, slots.CannotRecord) as error:
             found = self._pointer_or_damage(project)
             if found is None:
                 self._report(project, None, 'pointer_unset')
             elif found is POINTER_UNREADABLE:
                 self._report(project, None, 'pointer_damaged')
-            self._fail(project, cause, chain, report=found == chain)
+            self._fail(project, cause, chain, report=found == chain, error=error)
 
     def _cleanup(self, directory, name):
         # Called only inside this project's exclusive flock. Final names stay.
@@ -210,8 +217,8 @@ class SealService:
                 if (state.sequence != 0 or state.value != 0 or
                         os.pread(fd, 256, 0) != os.pread(fd, 256, 65536)):
                     raise slots.CannotRecord(7)
-        except (OSError, slots.CannotRecord):
-            self._fail(project, cause, chain)
+        except (OSError, slots.CannotRecord) as error:
+            self._fail(project, cause, chain, error=error)
 
     def _cleanup_item(self, project, name):
         directory = self.folder.project_dir(project)
@@ -241,8 +248,8 @@ class SealService:
             os.fsync(directory)
             if sys.platform == 'darwin':
                 slots._sync(fd, changing_length=True)
-        except (slots.CannotRecord, OSError):
-            self._fail(project, 'folder_unusable')
+        except (slots.CannotRecord, OSError) as error:
+            self._fail(project, 'folder_unusable', error=error)
         finally:
             if fd is not None:
                 os.close(fd)
@@ -274,8 +281,8 @@ class SealService:
             if not create:
                 self._fail(project, 'pointer_unset')
             self._new_pointer(project, chain)
-        except (slots.CannotRecord, OSError):
-            self._fail(project, 'folder_unusable')
+        except (slots.CannotRecord, OSError) as error:
+            self._fail(project, 'folder_unusable', error=error)
 
     def set_current(self, project, chain, *, ledger_fd, expected, bind):
         require_canonical_id(project); require_canonical_id(chain)
@@ -305,8 +312,8 @@ class SealService:
                     with self._open(project, chain + '.counter', write=True) as fd:
                         try:
                             slots.rewrite_identity(fd, state, identity)
-                        except slots.CannotRecord:
-                            self._fail(project, 'counter_unusable', chain)
+                        except slots.CannotRecord as error:
+                            self._fail(project, 'counter_unusable', chain, error=error)
             if not high_created and found != chain:
                 self._abandoned(project, chain, slots.ItemKind.HIGH_WATER, ledger_fd)
             self._cleanup_item(project, chain + '.counter')
@@ -382,8 +389,8 @@ class SealService:
     def chains(self, project):
         try:
             return self.folder.chains(project)
-        except OSError:
-            self._fail(project, 'folder_unusable')
+        except OSError as error:
+            self._fail(project, 'folder_unusable', error=error)
 
     def _keys(self):
         try:
@@ -523,8 +530,8 @@ class SealService:
                     updated = replace(state, sequence=state.sequence + 1, value=number)
                     slots._write(fd, slots._slot(updated), slots.OFFSETS[updated.sequence % 2])
                     slots._sync(fd)
-            except (OSError, slots.CannotRecord):
-                self._fail(project, 'counter_unusable', chain)
+            except (OSError, slots.CannotRecord) as error:
+                self._fail(project, 'counter_unusable', chain, error=error)
             self.declarations[project] = (transaction, tuple(declaration), position + 1)
             mismatch_projects = self._mismatch_projects
             if project in mismatch_projects:

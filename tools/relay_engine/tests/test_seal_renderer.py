@@ -500,6 +500,30 @@ class SealRendererTests(unittest.TestCase):
             self.service.rendered_through(P, C)
         self.assertEqual(caught.exception.cause, 'high_water_unusable')
 
+    def test_high_water_raise_names_errno(self):
+        renderer = self.renderer()
+        original = self.service._open
+
+        def opened(project, name, *, write=False):
+            if name.endswith('.high-water') and write:
+                raise OSError(errno.ENOSPC, 'forced')
+            return original(project, name, write=write)
+
+        for converted in (False, True):
+            with self.subTest(converted=converted):
+                self.reports.clear()
+                patch = (mock.patch.object(os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'forced'))
+                         if converted else mock.patch.object(self.service, '_open', side_effect=opened))
+                with patch, self.assertRaises(self.types.SealUnusable) as caught:
+                    renderer._raise(P, C, 1)
+                exc = caught.exception
+                self.assertEqual((exc.cause, exc.chain_id), ('high_water_unusable', C))
+                self.assertEqual(exc.errno_name, 'ENOSPC')
+                self.assertEqual(str(exc), f"{('high_water_unusable', C)!r} errno=ENOSPC")
+                self.assertEqual(self.reports, [
+                    self.types.SealReport(P, C, 'high_water_unusable', 0, 'ENOSPC'),
+                ])
+
     def test_reader_never_sees_half_written_slot(self):
         renderer = self.renderer(); self.open(renderer)
         done = self.spawn(lambda: [renderer.drain(P, C, through=n) for n in range(1, 1001)])

@@ -359,8 +359,8 @@ class SealRenderer:
                 try:
                     with self.service._open(project, chain + '.high-water', write=True) as fd:
                         slots.write_next(fd, state, value=through)
-                except (OSError, slots.CannotRecord):
-                    self.service._fail(project, 'high_water_unusable', chain)
+                except (OSError, slots.CannotRecord) as error:
+                    self.service._fail(project, 'high_water_unusable', chain, error=error)
 
     def _drain(self, owner, chain, through):
         project = owner.project
