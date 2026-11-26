@@ -22,6 +22,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from relay_engine import api_compose, api_definitions as d, api_keys, api_platform
+from relay_engine import daemon
 from relay_engine import api_protocol as p, api_writer, jcs, lifecycle_paths, store_layout, store_steps, version
 from relay_engine.tests.test_api_sessions import replace_occupant_for_test
 from relay_engine.tests.test_submit import draft
@@ -1222,9 +1223,108 @@ service.serve_forever()
         with patch.object(api_compose, 'compose_components', side_effect=compose):
             return service.start()
 
+    @staticmethod
+    def _remove_owned_legacy_socket(directory, identity):
+        try:
+            current = directory.lstat()
+        except FileNotFoundError:
+            return
+        if (current.st_dev, current.st_ino) != identity:
+            return
+        endpoint = directory / 's'
+        try:
+            if stat.S_ISSOCK(endpoint.lstat().st_mode):
+                endpoint.unlink()
+        except FileNotFoundError:
+            pass
+        if not any(directory.iterdir()):
+            directory.rmdir()
+
+    def _make_legacy_neighbour(self, other_root):
+        endpoint = Path(daemon.socket_path(str(other_root), override=''))
+        child = """import os
+import sys
+from pathlib import Path
+from relay_engine import daemon
+endpoint = Path(daemon.socket_path(sys.argv[1], override=''))
+endpoint.parent.parent.mkdir(mode=0o700, exist_ok=True)
+try:
+    endpoint.parent.mkdir(mode=0o700)
+except FileExistsError:
+    print(f'conflict: {endpoint.parent}', flush=True)
+    sys.exit(3)
+owned = endpoint.parent.lstat()
+print(f'owned {owned.st_dev} {owned.st_ino}', flush=True)
+with daemon.prepare_socket(str(endpoint)):
+    print(endpoint, flush=True)
+"""
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[2]),
+                   PYTHONDONTWRITEBYTECODE='1')
+        env.pop('RELAY_SOCKET', None)
+        cmd = [sys.executable, '-c', child, str(other_root)]
+        try:
+            completed = subprocess.run(cmd, env=env, capture_output=True, timeout=10)
+            status = completed.returncode
+            stdout, stderr = completed.stdout, completed.stderr
+        except subprocess.TimeoutExpired as error:
+            status = 'timeout'
+            stdout, stderr = error.stdout or b'', error.stderr or b''
+        lines = stdout.decode(errors='replace').splitlines()
+        identity = None
+        if lines and lines[0].startswith('owned '):
+            _, device, inode = lines[0].split()
+            identity = (int(device), int(inode))
+            self.addCleanup(self._remove_owned_legacy_socket, endpoint.parent, identity)
+        details = f'neighbour {endpoint}: {status}; stdout={stdout!r}; stderr={stderr!r}'
+        self.assertEqual(status, 0, details)
+        self.assertIsNotNone(identity, details)
+        self.assertEqual(lines[1:], [str(endpoint)], details)
+        info = endpoint.parent.lstat()
+        self.assertEqual((info.st_dev, info.st_ino), identity)
+        self.assertTrue(stat.S_ISDIR(info.st_mode))
+        self.assertEqual((info.st_uid, stat.S_IMODE(info.st_mode)), (os.geteuid(), 0o700))
+        self.assertTrue(stat.S_ISSOCK(endpoint.lstat().st_mode))
+
     def test_no_2_9_7_paths_touched(self):
+        self._assert_no_2_9_7_paths(neighbour=False)
+
+    def test_no_2_9_7_paths_touched_beside_a_neighbour_daemon(self):
+        self._assert_no_2_9_7_paths(neighbour=True)
+
+    def _assert_no_2_9_7_paths(self, *, neighbour):
         legacy = Path('/tmp/relay-engine')
-        before = set(legacy.iterdir()) if legacy.is_dir() else set()
+        bases = (legacy, Path(os.path.realpath(legacy)))
+        real_mkdir = os.mkdir
+        real_bind = socket.socket.bind
+
+        def deny_legacy(path):
+            if not isinstance(path, (str, bytes, os.PathLike)):
+                return
+            name = os.fsdecode(path)
+            if name.startswith('\0'):
+                return
+            absolute = Path(os.path.abspath(name))
+            resolved = Path(os.path.realpath(absolute))
+            if any(candidate.is_relative_to(base)
+                   for candidate in (absolute, resolved) for base in bases):
+                raise AssertionError(f'legacy socket path attempted: {absolute}')
+
+        def mkdir(path, mode=0o777, *, dir_fd=None):
+            deny_legacy(path)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+
+        def bind(sock, address):
+            deny_legacy(address)
+            return real_bind(sock, address)
+
+        real_start = self.service.start
+
+        def start():
+            if neighbour:
+                with tempfile.TemporaryDirectory() as root:
+                    self._make_legacy_neighbour(Path(root).resolve())
+            return real_start()
+
         class Environment(dict):
             def get(self, key, default=None):
                 if key == 'RELAY_SOCKET':
@@ -1234,10 +1334,16 @@ service.serve_forever()
                 if key == 'RELAY_SOCKET':
                     raise AssertionError('legacy endpoint read')
                 return super().__getitem__(key)
-        with patch.object(os, 'environ', Environment(os.environ)):
-            self.start(); self.service.stop()
+        with (patch.object(os, 'environ', Environment(os.environ)),
+              patch.object(self.service, 'start', start),
+              patch.object(os, 'mkdir', mkdir),
+              patch.object(socket.socket, 'bind', bind)):
+            self.start()
+            self.service.stop()
         self.assertFalse((self.root / '.engine').exists())
-        self.assertEqual(set(legacy.iterdir()) if legacy.is_dir() else set(), before)
+        own_directory = Path(daemon.socket_path(self.service.store_root, override='')).parent
+        self.assertFalse(os.path.lexists(own_directory),
+                         f'legacy socket directory remains: {own_directory}')
         self.assertFalse((self.home / '.adt').exists())
 
     def test_sigterm_drains_and_removes_files(self):

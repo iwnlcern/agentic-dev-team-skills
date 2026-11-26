@@ -277,20 +277,49 @@ class FixtureService:
 if __name__ == '__main__':
     import argparse
     import signal
+    import time
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--origin-file', required=True)
     parser.add_argument('--page-dir', required=True)
     parser.add_argument('--scenario')
+    parser.add_argument('--launch-file', type=Path)
+    parser.add_argument('--evidence-file', type=Path)
     options = parser.parse_args()
     scenario = json.loads(Path(options.scenario).read_text()) if options.scenario else {}
     fixture = FixtureService(scenario, options.page_dir)
-    done = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: done.set())
-    signal.signal(signal.SIGINT, lambda *_: done.set())
+    pending = []
+    for event in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2):
+        signal.signal(event, lambda received, _frame: pending.append(received))
+
+    def publish(path, data):
+        transient = path.with_name(path.name + '.next')
+        transient.write_bytes(data)
+        transient.replace(path)
+
+    def publish_launch():
+        if options.launch_file is not None:
+            publish(options.launch_file, (fixture.launch_url() + '\n').encode())
+
+    seq = 0
     try:
         origin = fixture.start()
-        Path(options.origin_file).write_text(origin + '\n')
-        done.wait()
+        publish_launch()
+        publish(Path(options.origin_file), (origin + '\n').encode())
+        while True:
+            if not pending:
+                time.sleep(0.025)
+                continue
+            event = pending.pop(0)
+            if event in (signal.SIGTERM, signal.SIGINT):
+                break
+            if event == signal.SIGUSR1:
+                fixture.restart()
+                publish_launch()
+            elif event == signal.SIGUSR2 and options.evidence_file is not None:
+                seq += 1
+                snapshot = {'seq': str(seq), 'requests': fixture.requests(),
+                            'lookups': fixture.lookups()}
+                publish(options.evidence_file, _json(snapshot) + b'\n')
     finally:
         fixture.stop()

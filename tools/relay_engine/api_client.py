@@ -126,6 +126,15 @@ def read_key_file(path: str) -> SeatKey:
         raise LocalRefusal('key_file_invalid') from None
 
 
+def _validate_deadline(deadline):
+    if deadline is None:
+        return
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise TypeError('deadline must be an int or float')
+    if not -1e15 <= deadline <= 1e15:
+        raise ValueError('deadline out of range')
+
+
 class ApiClient:
     def __init__(self, connection, registry, digest):
         self._socket = connection
@@ -136,20 +145,26 @@ class ApiClient:
         self._decoder = api_wire.ApiFrameDecoder()
 
     @classmethod
-    def open(cls, ready: ReadyFile) -> 'ApiClient':
+    def open(cls, ready: ReadyFile, *, deadline: float | None = None) -> 'ApiClient':
+        _validate_deadline(deadline)
         registry, digest = _registry_and_digest()
         if ready.schema_digest != digest:
             raise LocalRefusal('ready_file_mismatch')
+        if deadline is not None and deadline <= time.monotonic():
+            raise EndpointUnavailable('not_performed')
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.settimeout(30)
         try:
+            remaining = 30 if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            connection.settimeout(min(remaining, 30))
             connection.connect(ready.socket)
         except OSError:
             connection.close()
             raise EndpointUnavailable('not_performed') from None
         client = cls(connection, registry, digest)
         try:
-            client._discover(ready)
+            client._discover(ready, deadline=deadline)
             return client
         except BaseException:
             client.close()
@@ -168,8 +183,10 @@ class ApiClient:
         if isinstance(result, ApiErrorValue) or any(result[name] != value for name, value in expected.items()):
             raise EndpointUnavailable('endpoint_mismatch')
 
-    def call(self, operation: str, args: Mapping) -> Mapping | ApiErrorValue:
-        return self._call(operation, args)
+    def call(self, operation: str, args: Mapping, *,
+             deadline: float | None = None) -> Mapping | ApiErrorValue:
+        _validate_deadline(deadline)
+        return self._call(operation, args, deadline=deadline)
 
     def _call(self, operation, args, *, deadline=None):
         def bound_timeout():
@@ -177,12 +194,21 @@ class ApiClient:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError()
-                self._socket.settimeout(remaining)
+                self._socket.settimeout(min(remaining, 30))
 
-        with self._lock:
+        if deadline is None:
+            self._lock.acquire()
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._lock.acquire(timeout=min(remaining, 30)):
+                raise EndpointUnavailable('not_performed')
+
+        try:
             self._request_id += 1
             request_id = str(self._request_id)
             try:
+                if deadline is None:
+                    self._socket.settimeout(30)
                 raw = jcs.jcs_encode({'request_id': request_id, 'op': operation, 'args': dict(args)})
                 bound_timeout()
                 self._socket.sendall(len(raw).to_bytes(4, 'big') + raw)
@@ -213,14 +239,25 @@ class ApiClient:
             except (OSError, ValueError, TypeError, KeyError, EndpointUnavailable):
                 self.close()
                 raise EndpointUnavailable('unknown') from None
+        finally:
+            self._lock.release()
 
-    def identify(self, key: SeatKey) -> Mapping | ApiErrorValue:
-        return self.call('seat.identify', {'key_id': key.key_id, 'key_secret': key.key_secret})
+    def identify(self, key: SeatKey, *,
+                 deadline: float | None = None) -> Mapping | ApiErrorValue:
+        _validate_deadline(deadline)
+        args = {'key_id': key.key_id, 'key_secret': key.key_secret}
+        if deadline is None:
+            return self.call('seat.identify', args)
+        return self.call('seat.identify', args, deadline=deadline)
 
     def sign_in(self, key: SeatKey, host: str, host_session_id: str,
-                operation_key: str) -> Mapping | ApiErrorValue:
-        return self.call('session.sign-in', {'key_id': key.key_id, 'key_secret': key.key_secret,
-            'host': host, 'host_session_id': host_session_id, 'operation_key': operation_key})
+                operation_key: str, *, deadline: float | None = None) -> Mapping | ApiErrorValue:
+        _validate_deadline(deadline)
+        args = {'key_id': key.key_id, 'key_secret': key.key_secret,
+            'host': host, 'host_session_id': host_session_id, 'operation_key': operation_key}
+        if deadline is None:
+            return self.call('session.sign-in', args)
+        return self.call('session.sign-in', args, deadline=deadline)
 
     def close(self) -> None:
         self._socket.close()

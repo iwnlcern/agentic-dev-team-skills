@@ -140,8 +140,35 @@ def _pragma(conn, sql):
     cursor.close()
 
 
+_WAL_SWITCH_BUDGET_S = 5.0
+_WAL_RETRY_PAUSE_S = 0.01
+
+
+def _pause(seconds):
+    time.sleep(seconds)
+
+
 def _configure(conn):
-    if _row(conn, 'PRAGMA journal_mode=WAL') != ('wal',):
+    if conn.in_transaction:
+        raise ValueError('WAL configuration requires an idle connection')
+    busy_timeout, = _row(conn, 'PRAGMA busy_timeout')
+    deadline = time.monotonic() + _WAL_SWITCH_BUDGET_S
+    try:
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            _pragma(conn, f'PRAGMA busy_timeout={remaining_ms}')
+            try:
+                mode = _row(conn, 'PRAGMA journal_mode=WAL')
+                break
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorname != 'SQLITE_BUSY' or time.monotonic() >= deadline:
+                    raise
+                _pause(_WAL_RETRY_PAUSE_S)
+                if time.monotonic() >= deadline:
+                    raise
+    finally:
+        _pragma(conn, f'PRAGMA busy_timeout={busy_timeout}')
+    if mode != ('wal',):
         raise LayoutFault('not-wal')
     _pragma(conn, 'PRAGMA synchronous=FULL')
     if sys.platform == 'darwin':
@@ -187,6 +214,56 @@ def open_ledger(root, project_id: str, *, create: bool = False, _check_admission
         _configure(conn)
     except BaseException:
         conn.close()
+        raise
+    return conn
+
+
+# A writer handoff that raises cannot be trusted to own or fence this handle.
+_UNOWNED_CLOSES: list[tuple[str, sqlite3.Connection, BaseException]] = []
+
+
+def open_ledger_runtime(root, project_id: str, *, check: Callable[[], None],
+                        on_failed_close: Callable[[sqlite3.Connection, BaseException], None]
+                        ) -> sqlite3.Connection:
+    """Open a guarded writer ledger, preserving custody when a cleanup close fails."""
+    path = ledger_path(root, project_id).absolute()
+    key = os.fspath(path)
+    if any(retained_key == key for retained_key, _, _ in _UNOWNED_CLOSES):
+        raise LayoutFault('close-unresolved')
+    check()
+    if not path.exists():
+        raise LayoutFault('missing')
+    try:
+        conn = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True)
+    except sqlite3.OperationalError:
+        if not path.exists():
+            raise LayoutFault('missing') from None
+        raise
+    try:
+        check()
+        if _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'") is None:
+            raise LayoutFault('no-project-row')
+        with closing(conn.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')) as rows:
+            projects = rows.fetchall()
+        if not projects:
+            raise LayoutFault('no-project-row')
+        if projects != [(project_id,)]:
+            raise LayoutFault('wrong-project')
+        _pragma(conn, 'PRAGMA foreign_keys=ON')
+        schema.init_v3(conn)
+        _configure(conn)
+    except BaseException as original:
+        try:
+            conn.close()
+        except BaseException as close_error:
+            try:
+                on_failed_close(conn, close_error)
+            except BaseException as handoff_error:
+                _UNOWNED_CLOSES.append((key, conn, close_error))
+                original.add_note('cleanup close failed: ' + type(close_error).__name__)
+                original.add_note('failed-close handoff raised: ' + type(handoff_error).__name__)
+            else:
+                original.add_note('cleanup close failed: ' + type(close_error).__name__)
         raise
     return conn
 
@@ -1337,7 +1414,54 @@ class IncumbentGuard:
         if self._member_identities(armed.project, sidecar_free=False) != members:
             raise LayoutFault('member-changed')
 
-    def _member_identities(self, project, *, sidecar_free=True):
+    def runtime_members(self, armed: IncumbentRecord, project_id: str, *,
+                        phase: Literal['initial', 'connected']) -> tuple:
+        """Prove the selected members while the writer owns the live catalogue."""
+        if phase not in ('initial', 'connected'):
+            raise ValueError('unknown runtime member phase')
+        try:
+            _canonical_id(project_id)
+        except ValueError:
+            raise LayoutFault('member-unproved') from None
+        self._current(armed)
+        members = self._member_identities(project_id, sidecar_free=(phase == 'initial'),
+                                         catalogue_sidecar_free=False)
+        self._current(armed)
+        return members
+
+    def runtime_admission(self, armed: IncumbentRecord, project_id: str,
+                          catalogue: sqlite3.Connection, *,
+                          purpose: Literal['join', 'stopped_read']) -> None:
+        """Check the live catalogue in a read transaction owned by this call."""
+        try:
+            _canonical_id(project_id)
+        except ValueError:
+            raise LayoutFault('member-unproved') from None
+        if purpose not in ('join', 'stopped_read'):
+            raise ValueError('unknown runtime admission purpose')
+        if catalogue.in_transaction:
+            raise LayoutFault('member-unproved')
+        _pragma(catalogue, 'BEGIN')
+        try:
+            _require_admission_identity(catalogue, armed.store, project_id)
+            if any_hold(catalogue) is not None:
+                raise LayoutFault('incumbent-hold')
+            stops = open_stops(catalogue)
+            if any(stop.scope == 'store' for stop in stops):
+                raise LayoutFault('incumbent-hold')
+            stopped = any(stop.project_id == project_id for stop in stops)
+            if purpose == 'join' and stopped:
+                raise LayoutFault('incumbent-hold')
+            if purpose == 'stopped_read' and not stopped:
+                raise LayoutFault('member-unproved')
+        except sqlite3.Error as exc:
+            raise LayoutFault('member-unproved') from exc
+        finally:
+            _pragma(catalogue, 'ROLLBACK')
+
+    def _member_identities(self, project, *, sidecar_free=True, catalogue_sidecar_free=None):
+        if catalogue_sidecar_free is None:
+            catalogue_sidecar_free = sidecar_free
         self._check_lock()
         _canonical_id(project)
         with ExitStack() as stack:
@@ -1354,13 +1478,14 @@ class IncumbentGuard:
                                                 directory=True):
                         raise LayoutFault('member-changed')
                     parent_ids.append(identity)
-                def member(directory, name):
-                    if sidecar_free:
+                def member(directory, name, require_sidecar_free):
+                    if require_sidecar_free:
                         return _sidecar_free_member(directory, name)
                     return _owned_inode(os.stat(name, dir_fd=directory, follow_symlinks=False))
 
-                catalogue = member(self._root_fd, catalogue_path(self._path).name)
-                ledger = member(selected, ledger_path(self._path, project).name)
+                catalogue = member(self._root_fd, catalogue_path(self._path).name,
+                                   catalogue_sidecar_free)
+                ledger = member(selected, ledger_path(self._path, project).name, sidecar_free)
             except OSError as exc:
                 raise LayoutFault('member-unproved') from exc
         self._check_lock()

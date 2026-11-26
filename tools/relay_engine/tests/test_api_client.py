@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 import socket
+import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -268,3 +270,244 @@ class ClientTests(unittest.TestCase):
                 for p in tools.rglob('*.py') if 'tests' not in p.relative_to(tools).parts]
         self.assertEqual([(p, lines) for p, lines in hits if lines], [])
         self.assertEqual(sign_in_calls('client.sign_in(key, host, window, operation_key)'), [1])
+
+
+class _DeadlineSocket:
+    def __init__(self, registry):
+        self.registry = registry
+        self.timeouts = []
+        self.requests = []
+        self.closed = False
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+    def gettimeout(self):
+        return self.timeouts[-1]
+
+    def sendall(self, data):
+        self.requests.append(json.loads(data[4:]))
+
+    def recv(self, _size):
+        raw = jcs.jcs_encode({
+            'request_id': self.requests[-1]['request_id'],
+            'error': api_protocol.api_error(self.registry, 'key_rejected'),
+        })
+        return len(raw).to_bytes(4, 'big') + raw
+
+    def connect(self, _path):
+        raise socket.timeout
+
+    def close(self):
+        self.closed = True
+
+
+class ClientDeadlineTests(unittest.TestCase):
+    def setUp(self):
+        from relay_engine import api_client
+
+        self.c = api_client
+        self.registry, self.digest = self.c._registry_and_digest()
+
+    def ready(self, endpoint='unused'):
+        return self.c.ReadyFile('unused', endpoint, 'fixture', 'a' * 64, self.digest, 1)
+
+    def recording_client(self):
+        peer = _DeadlineSocket(self.registry)
+        peer.settimeout(30)
+        client = self.c.ApiClient(peer, self.registry, self.digest)
+        self.addCleanup(client.close)
+        return client, peer
+
+    def bounded(self, call, unblock):
+        outcomes = []
+
+        def invoke():
+            try:
+                outcomes.append(call())
+            except BaseException as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=invoke, daemon=True)
+        worker.start()
+        worker.join(1.2)
+        if worker.is_alive():
+            unblock()
+            worker.join(0.4)
+            self.assertFalse(worker.is_alive(), 'bounded test worker did not stop')
+            self.fail('client operation exceeded the test time bound')
+        result, = outcomes
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def test_open_past_deadline_not_performed(self):
+        with patch.object(socket, 'socket') as construct:
+            with self.assertRaises(self.c.EndpointUnavailable) as error:
+                self.c.ApiClient.open(self.ready(), deadline=time.monotonic() - 1)
+            construct.assert_not_called()
+        self.assertEqual(error.exception.outcome, 'not_performed')
+
+    def test_open_deadline_bounds_silent_discovery(self):
+        with tempfile.TemporaryDirectory(prefix='ad-c-') as directory:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                address = str(Path(directory) / 'api.sock')
+                listener.bind(address)
+                listener.listen(1)
+                listener.settimeout(0.8)
+                accepted = threading.Event()
+                release = threading.Event()
+
+                def silence():
+                    try:
+                        peer, _ = listener.accept()
+                    except (OSError, TimeoutError):
+                        return
+                    with peer:
+                        accepted.set()
+                        release.wait(1.5)
+
+                server = threading.Thread(target=silence, daemon=True)
+                server.start()
+                try:
+                    start = time.monotonic()
+                    with self.assertRaises(self.c.EndpointUnavailable) as error:
+                        self.bounded(
+                            lambda: self.c.ApiClient.open(self.ready(address), deadline=start + 0.3),
+                            release.set,
+                        )
+                    self.assertTrue(accepted.is_set())
+                    self.assertEqual(error.exception.outcome, 'unknown')
+                    self.assertLess(time.monotonic() - start, 2)
+                finally:
+                    release.set()
+                    server.join(0.9)
+                    self.assertFalse(server.is_alive())
+
+    def test_call_deadline_bounds_silent_reply(self):
+        sock, peer = socket.socketpair()
+        with sock, peer:
+            sock.settimeout(30)
+            client = self.c.ApiClient(sock, self.registry, self.digest)
+            start = time.monotonic()
+            with self.assertRaises(self.c.EndpointUnavailable) as error:
+                self.bounded(
+                    lambda: client.call('queue.list', {}, deadline=start + 0.3),
+                    lambda: peer.shutdown(socket.SHUT_RDWR),
+                )
+            self.assertEqual(error.exception.outcome, 'unknown')
+            self.assertLess(time.monotonic() - start, 2)
+            peer.settimeout(0.15)
+            size = int.from_bytes(fixture.exact(peer, 4), 'big')
+            request = json.loads(fixture.exact(peer, size))
+            self.assertEqual(request['op'], 'queue.list')
+            self.assertEqual(sock.fileno(), -1)
+
+    def test_call_without_deadline_restores_default_timeout(self):
+        client, peer = self.recording_client()
+        bounded = client._call('queue.list', {}, deadline=time.monotonic() + 1)
+        self.assertLess(peer.gettimeout(), 30)
+        self.assertEqual(client.call('queue.list', {}), bounded)
+        self.assertEqual(peer.gettimeout(), 30)
+
+    def test_deadline_domain(self):
+        client, peer = self.recording_client()
+        expected = client.call('queue.list', {}, deadline=time.monotonic() + 60)
+        for value, exception in (
+            ('1', TypeError), (True, TypeError), (float('nan'), ValueError),
+            (float('inf'), ValueError), (-float('inf'), ValueError),
+            (10**1000, ValueError), (-10**1000, ValueError), (2e15, ValueError),
+        ):
+            with self.subTest(value=value):
+                before = (len(peer.requests), len(peer.timeouts), client._request_id)
+                with self.assertRaises(exception):
+                    client.call('queue.list', {}, deadline=value)
+                self.assertEqual(
+                    (len(peer.requests), len(peer.timeouts), client._request_id), before
+                )
+                self.assertFalse(peer.closed)
+                self.assertEqual(client.call('queue.list', {}), expected)
+
+    def test_expired_deadline_refuses_before_lock(self):
+        client, peer = self.recording_client()
+        with patch.object(client, '_lock', wraps=client._lock) as lock:
+            lock.acquire(blocking=False)
+            try:
+                start = time.monotonic()
+                with self.assertRaises(self.c.EndpointUnavailable) as error:
+                    client.call('queue.list', {}, deadline=start - 1.5)
+                self.assertLess(time.monotonic() - start, 0.1)
+                self.assertEqual(error.exception.outcome, 'not_performed')
+                lock.acquire.assert_called_once_with(blocking=False)
+                self.assertFalse(peer.closed)
+                self.assertEqual(peer.requests, [])
+                self.assertEqual(client._request_id, 0)
+            finally:
+                lock.release()
+
+    def test_far_deadline_caps_socket_wait_at_30(self):
+        client, peer = self.recording_client()
+        client.call('queue.list', {}, deadline=time.monotonic() + 1e12)
+        self.assertGreater(len(peer.timeouts), 1)
+        self.assertTrue(all(0 < timeout <= 30 for timeout in peer.timeouts))
+
+    def test_lock_wait_bounded_without_closing(self):
+        client, peer = self.recording_client()
+        lock = client._lock
+        self.assertTrue(lock.acquire(blocking=False))
+        released = False
+
+        def unblock():
+            nonlocal released
+            lock.release()
+            released = True
+
+        try:
+            start = time.monotonic()
+            with self.assertRaises(self.c.EndpointUnavailable) as error:
+                self.bounded(
+                    lambda: client.call('queue.list', {}, deadline=start + 0.2),
+                    unblock,
+                )
+            self.assertEqual(error.exception.outcome, 'not_performed')
+            self.assertLess(time.monotonic() - start, 2)
+            self.assertFalse(peer.closed)
+            self.assertEqual(peer.requests, [])
+            self.assertEqual(client._request_id, 0)
+        finally:
+            if not released:
+                unblock()
+        self.assertIsInstance(client.call('queue.list', {}), self.c.ApiErrorValue)
+
+    def test_open_connect_deadline_installed(self):
+        for budget in (5, 100):
+            with self.subTest(budget=budget):
+                peer = _DeadlineSocket(self.registry)
+                with patch.object(socket, 'socket', return_value=peer):
+                    with patch.object(self.c.ApiClient, '_discover') as discover:
+                        with self.assertRaises(self.c.EndpointUnavailable) as error:
+                            self.c.ApiClient.open(
+                                self.ready(), deadline=time.monotonic() + budget
+                            )
+                discover.assert_not_called()
+                self.assertEqual(error.exception.outcome, 'not_performed')
+                self.assertTrue(peer.closed)
+                self.assertEqual(len(peer.timeouts), 1)
+                if budget == 5:
+                    self.assertGreater(peer.timeouts[0], 0)
+                    self.assertLessEqual(peer.timeouts[0], 5)
+                else:
+                    self.assertEqual(peer.timeouts[0], 30)
+
+    def test_identify_and_sign_in_forward_deadline(self):
+        client, _ = self.recording_client()
+        key = self.c.SeatKey('fixture', 'a' * 43)
+        deadline = time.monotonic() + 3
+        with patch.object(client, 'call') as call:
+            client.identify(key, deadline=deadline)
+            client.sign_in(key, 'codex', 'window', 'once', deadline=deadline)
+            self.assertEqual(
+                [(row.args[0], row.kwargs) for row in call.call_args_list],
+                [('seat.identify', {'deadline': deadline}),
+                 ('session.sign-in', {'deadline': deadline})],
+            )

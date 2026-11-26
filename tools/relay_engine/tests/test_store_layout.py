@@ -1,7 +1,9 @@
 """Per-project paths and opening: catches ambient-home, creation and WAL regressions."""
 import os
+import shutil
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 import sqlite3
@@ -16,9 +18,11 @@ import uuid
 from unittest import mock
 
 from relay_engine import errors, schema, store_layout, submit
+from relay_engine.tests.test_store_lifecycle import (
+    P, _INCUMBENT_STORE_ID, _incumbent_birth, _incumbent_boot, _materialize_incumbent_store,
+)
 
 
-P = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 Q = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 K = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
@@ -110,8 +114,11 @@ class TestStoreLayout(unittest.TestCase):
         self.assertIn('PRAGMA synchronous=FULL', trace)
 
         class Answer:
+            def __init__(self, row):
+                self.row = row
+
             def fetchone(self):
-                return ('delete',)
+                return self.row
 
             def fetchall(self):
                 return []
@@ -120,8 +127,14 @@ class TestStoreLayout(unittest.TestCase):
                 pass
 
         class RefusingWal:
+            in_transaction = False
+
             def execute(self, sql):
-                return Answer()
+                if sql == 'PRAGMA busy_timeout':
+                    return Answer((5000,))
+                if sql == 'PRAGMA journal_mode=WAL':
+                    return Answer(('delete',))
+                return Answer(('delete',))
 
             def close(self):
                 pass
@@ -1715,6 +1728,352 @@ class TestMaintenanceHolds(unittest.TestCase):
                     self.assertEqual(caught.project_id, P)
                 self.assertEqual(self.rows(), before)
                 self.assertTrue(self.conn.in_transaction)
+
+
+class TestRuntimeAdmission(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / 'store'
+        self.guard, birth = store_layout.IncumbentGuard._create_new(
+            self.root, _INCUMBENT_STORE_ID, P)
+        self.addCleanup(self.guard.close)
+        idle, _ = self.guard.enroll_new(birth)
+        owner = store_layout._IncumbentOwner(
+            str(uuid.uuid4()), os.getpid(), _incumbent_birth(os.getpid()),
+            _incumbent_boot(), 'fixture-runtime', 'off')
+        self.armed = self.guard.arm(idle, owner)
+        _materialize_incumbent_store(self.root)
+        self.catalogue = store_layout.open_catalogue(self.root)
+        self.addCleanup(self.catalogue.close)
+        store_layout.reserve_project(self.catalogue, Q, 'second', 1)
+        store_layout.activate_project(self.catalogue, Q)
+        self.catalogue.commit()
+        with closing(store_layout.open_ledger(self.root, Q, create=True)) as ledger:
+            ledger.execute("INSERT INTO projects (id,name,created_at) VALUES (?, 'second', 1)",
+                           (Q,)).close()
+            ledger.commit()
+        store_layout.ledger_path(self.root, Q).chmod(0o600)
+
+    def _fault(self, cause, callback, *args, **kwargs):
+        with self.assertRaises(store_layout.LayoutFault) as caught:
+            callback(*args, **kwargs)
+        self.assertEqual(caught.exception.cause, cause)
+        return caught.exception
+
+    def _replace_arm(self):
+        fresh = replace(self.armed, owner=replace(self.armed.owner, epoch=str(uuid.uuid4())))
+        self.guard._replace(self.armed, fresh)
+
+    def _replace_ledger(self, project):
+        path = store_layout.ledger_path(self.root, project)
+        copy = path.with_suffix('.replacement')
+        shutil.copyfile(path, copy)
+        copy.chmod(0o600)
+        copy.replace(path)
+
+    def _live_wal(self, project):
+        ledger = store_layout.open_ledger(self.root, project)
+        self.addCleanup(ledger.close)
+        ledger.execute('SELECT 1 FROM projects').close()
+        path = store_layout.ledger_path(self.root, project)
+        for suffix in ('-wal', '-shm'):
+            self.assertTrue(path.with_name(path.name + suffix).exists())
+
+    def test_runtime_members_initial_allows_catalogue_sidecars(self):
+        path = store_layout.catalogue_path(self.root)
+        for suffix in ('-wal', '-shm'):
+            self.assertTrue(path.with_name(path.name + suffix).exists())
+        members = self.guard.runtime_members(self.armed, P, phase='initial')
+        self.assertEqual(len(members), 4)
+        self.assertEqual(members, self.guard._member_identities(P, sidecar_free=False))
+
+    def test_runtime_members_initial_refuses_ledger_sidecars(self):
+        self._live_wal(P)
+        self._fault('journal-unresolved', self.guard.runtime_members,
+                    self.armed, P, phase='initial')
+
+    def test_runtime_members_connected_allows_ledger_sidecars(self):
+        members = self.guard.runtime_members(self.armed, P, phase='initial')
+        self._live_wal(P)
+        self.assertEqual(self.guard.runtime_members(self.armed, P, phase='connected'), members)
+
+    def test_runtime_members_connected_detects_replaced_ledger(self):
+        members = self.guard.runtime_members(self.armed, P, phase='initial')
+        self._replace_ledger(P)
+        self.assertNotEqual(self.guard.runtime_members(self.armed, P, phase='connected'), members)
+
+    def test_runtime_members_refuses_stale_arm(self):
+        self._replace_arm()
+        self._fault('incumbent-changed', self.guard.runtime_members, self.armed, P, phase='initial')
+
+    def test_runtime_members_refuses_malformed_id(self):
+        for phase in ('initial', 'connected'):
+            with self.subTest(phase=phase):
+                self._fault('member-unproved', self.guard.runtime_members,
+                            self.armed, 'not-an-id', phase=phase)
+
+    def test_runtime_members_refuses_unknown_phase(self):
+        with self.assertRaises(ValueError):
+            self.guard.runtime_members(self.armed, P, phase='later')
+
+    def test_offline_members_keep_malformed_id_error(self):
+        with self.assertRaises(ValueError):
+            self.guard._member_identities('not-an-id')
+
+    def test_offline_members_keep_catalogue_sidecar_rule(self):
+        self.catalogue.close()
+        path = store_layout.catalogue_path(self.root)
+        wal = path.with_name(path.name + '-wal')
+        wal.touch(mode=0o600, exist_ok=False)
+        self._fault('journal-unresolved', self.guard._member_identities, P)
+
+    def _admission(self, project, purpose):
+        return self.guard.runtime_admission(self.armed, project, self.catalogue, purpose=purpose)
+
+    def _stop(self, scope, project):
+        store_layout.record_stop(self.catalogue, scope, project, 'test')
+        self.catalogue.commit()
+
+    def test_runtime_admission_joins_new_active_route(self):
+        self.assertIsNone(self._admission(Q, 'join'))
+
+    def test_runtime_admission_reads_wal_commits(self):
+        self.catalogue.execute('PRAGMA wal_autocheckpoint=0').close()
+        with closing(self.catalogue.execute('PRAGMA wal_checkpoint(TRUNCATE)')) as cursor:
+            self.assertEqual(cursor.fetchone()[0], 0)
+        self._stop('project', Q)
+        with closing(store_layout._immutable_incumbent_read(
+                store_layout.catalogue_path(self.root))) as immutable:
+            self.assertEqual(store_layout.route_state(immutable, Q), 'active')
+            self.assertFalse(any(stop.project_id == Q for stop in store_layout.open_stops(immutable)))
+        self._fault('incumbent-hold', self._admission, Q, 'join')
+        self.assertIsNone(self._admission(Q, 'stopped_read'))
+
+    def test_runtime_admission_hold_refuses_both(self):
+        store_layout.take_holds(self.catalogue, TestMaintenanceHolds.A, 'cutover',
+                                [store_layout.project_scope(Q)], 1)
+        self.catalogue.commit()
+        for purpose in ('join', 'stopped_read'):
+            with self.subTest(purpose=purpose):
+                self._fault('incumbent-hold', self._admission, Q, purpose)
+
+    def test_runtime_admission_store_stop_refuses_both(self):
+        self._stop('store', None)
+        for purpose in ('join', 'stopped_read'):
+            with self.subTest(purpose=purpose):
+                self._fault('incumbent-hold', self._admission, Q, purpose)
+
+    def test_stopped_read_needs_own_stop(self):
+        self._fault('member-unproved', self._admission, Q, 'stopped_read')
+        self._stop('project', P)
+        self._fault('member-unproved', self._admission, Q, 'stopped_read')
+
+    def test_runtime_admission_proof_refusals(self):
+        self.catalogue.execute('DELETE FROM project_routes WHERE project_id=?', (Q,)).close()
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, Q, 'join')
+        store_layout.reserve_project(self.catalogue, Q, 'second', 1)
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, Q, 'join')
+        store_layout.activate_project(self.catalogue, Q)
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, 'not-an-id', 'join')
+        self.catalogue.execute('UPDATE catalogue_identity SET store_id=?', (K,)).close()
+        self.catalogue.commit()
+        self._fault('member-unproved', self._admission, Q, 'join')
+
+    def test_runtime_admission_refuses_open_transaction(self):
+        self.catalogue.execute('BEGIN IMMEDIATE').close()
+        store_layout.record_stop(self.catalogue, 'project', Q, 'test')
+        statements = []
+        self.catalogue.set_trace_callback(statements.append)
+        try:
+            self._fault('member-unproved', self._admission, Q, 'join')
+            self.assertEqual(statements, [])
+            self.assertTrue(self.catalogue.in_transaction)
+        finally:
+            self.catalogue.set_trace_callback(None)
+            self.catalogue.rollback()
+        self.assertFalse(any(stop.project_id == Q for stop in store_layout.open_stops(self.catalogue)))
+
+    def test_runtime_admission_leaves_no_transaction(self):
+        self.assertIsNone(self._admission(Q, 'join'))
+        self.assertFalse(self.catalogue.in_transaction)
+        self._fault('member-unproved', self._admission, Q, 'stopped_read')
+        self.assertFalse(self.catalogue.in_transaction)
+
+    def test_runtime_admission_maps_read_error_and_rolls_back(self):
+        self.catalogue.execute('DROP TABLE engine_stops').close()
+        self.catalogue.commit()
+        failure = self._fault('member-unproved', self._admission, Q, 'join')
+        self.assertIsInstance(failure.__cause__, sqlite3.Error)
+        self.assertFalse(self.catalogue.in_transaction)
+
+    def test_runtime_admission_refuses_unknown_purpose(self):
+        with self.assertRaises(ValueError):
+            self._admission(Q, 'unknown')
+
+
+    def _record_connects(self, factory=None):
+        handles = []
+        real_connect = sqlite3.connect
+
+        def connect(database, *args, **kwargs):
+            # schema.init_v3 checks its definitions against a separate in-memory database.
+            if database == ':memory:':
+                return real_connect(database, *args, **kwargs)
+            if factory is not None:
+                kwargs['factory'] = factory
+            handle = real_connect(database, *args, **kwargs)
+            handles.append(handle)
+            self.addCleanup(sqlite3.Connection.close, handle)
+            return handle
+
+        patch = mock.patch('relay_engine.store_layout.sqlite3.connect', new=connect)
+        return handles, patch
+
+    def _prove_open(self, project, after_first):
+        members = self.guard.runtime_members(self.armed, project, phase='initial')
+        checked = False
+
+        def check():
+            nonlocal checked
+            if self.guard.runtime_members(self.armed, project, phase='connected') != members:
+                raise store_layout.LayoutFault('member-changed')
+            if not checked:
+                checked = True
+                after_first()
+
+        return check
+
+    def _assert_closed(self, handle):
+        with self.assertRaises(sqlite3.ProgrammingError):
+            handle.execute('SELECT 1').close()
+
+    def test_runtime_open_returns_configured_handle(self):
+        handles, patch = self._record_connects()
+        check = mock.Mock()
+        handoff = mock.Mock()
+        with patch:
+            with closing(store_layout.open_ledger_runtime(
+                    self.root, P, check=check, on_failed_close=handoff)) as ledger:
+                with closing(ledger.execute('PRAGMA journal_mode')) as cursor:
+                    self.assertEqual(cursor.fetchone(), ('wal',))
+                with closing(ledger.execute('PRAGMA foreign_keys')) as cursor:
+                    self.assertEqual(cursor.fetchone(), (1,))
+                self.assertEqual(handles, [ledger])
+        self.assertEqual(check.call_count, 2)
+        handoff.assert_not_called()
+
+    def test_runtime_open_check_before_connect(self):
+        handles, patch = self._record_connects()
+        check = mock.Mock(side_effect=store_layout.LayoutFault('member-unproved'))
+        with patch:
+            self._fault('member-unproved', store_layout.open_ledger_runtime,
+                        self.root, P, check=check, on_failed_close=mock.Mock())
+        self.assertEqual(handles, [])
+
+    def test_runtime_open_refuses_swap_after_connect(self):
+        handles, patch = self._record_connects()
+        check = self._prove_open(P, lambda: self._replace_ledger(P))
+        handoff = mock.Mock()
+        with patch:
+            self._fault('member-changed', store_layout.open_ledger_runtime,
+                        self.root, P, check=check, on_failed_close=handoff)
+        self.assertEqual(len(handles), 1)
+        self._assert_closed(handles[0])
+        handoff.assert_not_called()
+
+    def test_runtime_open_refuses_stale_arm_after_connect(self):
+        handles, patch = self._record_connects()
+        check = self._prove_open(P, self._replace_arm)
+        with patch:
+            self._fault('incumbent-changed', store_layout.open_ledger_runtime,
+                        self.root, P, check=check, on_failed_close=mock.Mock())
+        self.assertEqual(len(handles), 1)
+        self._assert_closed(handles[0])
+
+    def test_runtime_open_wrong_project_row(self):
+        with closing(store_layout.open_ledger(self.root, Q)) as ledger:
+            ledger.execute('UPDATE projects SET id=? WHERE id=?', (P, Q)).close()
+            ledger.commit()
+        handles, patch = self._record_connects()
+        with patch:
+            self._fault('wrong-project', store_layout.open_ledger_runtime,
+                        self.root, Q, check=mock.Mock(), on_failed_close=mock.Mock())
+        self.assertEqual(len(handles), 1)
+        self._assert_closed(handles[0])
+
+    def _fail_close(self):
+        close_error = sqlite3.OperationalError('fixture close')
+
+        class FailCloseOnce(sqlite3.Connection):
+            def close(self):
+                if not getattr(self, 'close_attempted', False):
+                    self.close_attempted = True
+                    raise close_error
+                super().close()
+
+        original = store_layout.LayoutFault('member-changed')
+        check = mock.Mock(side_effect=[None, original])
+        handles, patch = self._record_connects(FailCloseOnce)
+        return close_error, original, check, handles, patch
+
+    def test_runtime_open_hands_failed_close(self):
+        close_error, original, check, handles, patch = self._fail_close()
+        handoff = mock.Mock()
+        with patch:
+            failure = self._fault('member-changed', store_layout.open_ledger_runtime,
+                                  self.root, P, check=check, on_failed_close=handoff)
+        self.assertIs(failure, original)
+        self.assertEqual(failure.__notes__, ['cleanup close failed: OperationalError'])
+        self.assertEqual(len(handles), 1)
+        handoff.assert_called_once_with(handles[0], close_error)
+
+    def test_runtime_open_failed_handoff_retains_and_fences(self):
+        close_error, original, check, handles, patch = self._fail_close()
+        handoff = mock.Mock(side_effect=RuntimeError('handoff before recording'))
+        with patch:
+            failure = self._fault('member-changed', store_layout.open_ledger_runtime,
+                                  self.root, P, check=check, on_failed_close=handoff)
+        self.assertIs(failure, original)
+        self.assertEqual(failure.__notes__, [
+            'cleanup close failed: OperationalError', 'failed-close handoff raised: RuntimeError',
+        ])
+        self.assertEqual(len(handles), 1)
+        handoff.assert_called_once_with(handles[0], close_error)
+        entries = store_layout._UNOWNED_CLOSES
+        own = [entry for entry in entries if entry[1] is handles[0]]
+        for entry in own:
+            self.addCleanup(entries.remove, entry)
+        self.assertEqual(len(own), 1)
+        self.assertIs(own[0][2], close_error)
+        next_check = mock.Mock()
+        with patch:
+            try:
+                self._fault('close-unresolved', store_layout.open_ledger_runtime,
+                            self.root, P, check=next_check, on_failed_close=mock.Mock())
+            finally:
+                self.assertEqual(len(handles), 1, 'fenced retry connected again')
+                next_check.assert_not_called()
+        with closing(store_layout.open_ledger_runtime(
+                self.root, Q, check=mock.Mock(), on_failed_close=mock.Mock())):
+            pass
+
+    def test_runtime_pre_open_sequence_refuses_malformed_id(self):
+        handles, patch = self._record_connects()
+
+        def pre_open():
+            project = 'not-an-id'
+            self.guard.runtime_members(self.armed, project, phase='initial')
+            self.guard.runtime_admission(self.armed, project, self.catalogue, purpose='join')
+            store_layout.open_ledger_runtime(self.root, project, check=mock.Mock(),
+                                             on_failed_close=mock.Mock())
+
+        with patch:
+            self._fault('member-unproved', pre_open)
+        self.assertEqual(handles, [])
 
 
 if __name__ == '__main__':

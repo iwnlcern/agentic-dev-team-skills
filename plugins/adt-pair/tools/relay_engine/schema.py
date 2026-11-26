@@ -763,14 +763,32 @@ def require_sqlite(minimum=_MINIMUM):
             minimum=".".join(map(str, minimum)))
 
 
+# The engine opens a store only when every object in it is one the engine builds or
+# one of these SQLite tables; an object a newer SQLite adds of its own is refused
+# with E-SCHEMA-MISMATCH naming it until an engine release lists it.
+_SQLITE_OWNED: frozenset[tuple[str, str, str, str]] = frozenset({
+    ("table", "sqlite_sequence", "sqlite_sequence",
+     "CREATE TABLE sqlite_sequence(name,seq)"),
+    ("table", "sqlite_stat1", "sqlite_stat1",
+     "CREATE TABLE sqlite_stat1(tbl,idx,stat)"),
+    ("table", "sqlite_stat4", "sqlite_stat4",
+     "CREATE TABLE sqlite_stat4(tbl,idx,neq,nlt,ndlt,sample)"),
+})
+
+
+def _catalogue(conn) -> list[tuple[str, str, str, str | None]]:
+    rows = conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+    catalogue = (tuple(row) for row in rows)
+    return [row for row in catalogue if row not in _SQLITE_OWNED]
+
+
 def init_v3(conn):
     """Create the v3 store in an empty file, in one transaction; open a
     matching store unchanged; refuse anything else and write nothing."""
     require_sqlite()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        names = {name for (name,) in conn.execute(
-            "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")}
+        names = {name for _, name, _, _ in _catalogue(conn)}
         if names:
             _require_matching(conn, names)
             conn.execute("ROLLBACK")
@@ -788,8 +806,7 @@ def init_v3(conn):
 
 
 def _require_matching(conn, names):
-    tables = {name for (name,) in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")}
+    tables = {name for kind, name, _, _ in _catalogue(conn) if kind == "table"}
     row = None
     if "schema_version" in tables:
         row = conn.execute(
@@ -809,9 +826,8 @@ def _require_matching(conn, names):
     raise errors.error_for("E-SCHEMA-MISMATCH", found=found)
 
 
-def _definitions(conn):
-    return {(kind, name): sql for kind, name, sql in conn.execute(
-        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'")}
+def _definitions(conn) -> dict[tuple[str, str], tuple[str, str | None]]:
+    return {(kind, name): (table, sql) for kind, name, table, sql in _catalogue(conn)}
 
 
 def _definition_difference(conn):
