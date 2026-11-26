@@ -46,7 +46,7 @@ _PAGE_ASSETS = {
 }
 _DISCOVERY = frozenset({'/api/connect', '/api/schema'})
 _PAGE_OPERATION_PREFIX = '/api/op/'
-_PAGE_OPERATIONS = frozenset({'queue.answer', 'queue.dismiss', 'queue.open', 'queue.dismiss_all'})
+_PAGE_OPERATIONS = frozenset({'queue.answer', 'queue.dismiss', 'queue.open', 'queue.dismiss-all'})
 _PAGE_READ_PREFIX = '/api/read/'
 _PAGE_READS = frozenset({'queue.list', 'queue.get'})
 PAGE_STATUS = {

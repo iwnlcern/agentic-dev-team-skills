@@ -10736,7 +10736,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/api_operator_bridge.py",
-    "sha256": "5d56f97a4b0f94e7d1cade1fb241d5e81576b1a4be96aa800437592528085993",
+    "sha256": "c41f1a2ef293ea9044e661c665808cc566d8f3e192e8fe841185f8fbb8ef4e6c",
     "source": "tools/relay_engine/api_operator_bridge.py"
   },
   {
@@ -21902,7 +21902,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/api_operator_bridge.py",
-    "sha256": "5d56f97a4b0f94e7d1cade1fb241d5e81576b1a4be96aa800437592528085993",
+    "sha256": "c41f1a2ef293ea9044e661c665808cc566d8f3e192e8fe841185f8fbb8ef4e6c",
     "source": "tools/relay_engine/api_operator_bridge.py"
   },
   {
@@ -32984,7 +32984,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/api_operator_bridge.py",
-    "sha256": "5d56f97a4b0f94e7d1cade1fb241d5e81576b1a4be96aa800437592528085993",
+    "sha256": "c41f1a2ef293ea9044e661c665808cc566d8f3e192e8fe841185f8fbb8ef4e6c",
     "source": "tools/relay_engine/api_operator_bridge.py"
   },
   {
