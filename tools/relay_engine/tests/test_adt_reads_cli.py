@@ -32,12 +32,34 @@ class AdtReadsTests(unittest.TestCase):
     def setUp(self):
         self.store = fixtures.RelayReadTests()
         self.store.setUp()
+        self.runtimes = []
+        start = self.store.start
+
+        def record_runtime(*args, **kwargs):
+            start(*args, **kwargs)
+            self.runtimes.append(Path(self.store.ready.path).parent)
+
+        self.store.start = record_runtime
+        self.addCleanup(self.check_runtime_folders)
         self.addCleanup(self.store.doCleanups)
         env = patch.dict(os.environ, {})
         env.start()
         self.addCleanup(env.stop)
         for key in ('ADT_READY_FILE', 'ADT_KEY_FILE', 'ADT_SESSION_ID'):
             os.environ.pop(key, None)
+
+    def check_runtime_folders(self):
+        allowed = {'api.sock', 'ready.json'}
+        extra = []
+        for number, runtime in enumerate(self.runtimes, 1):
+            try:
+                names = {path.name for path in runtime.iterdir()}
+            except FileNotFoundError:
+                continue
+            leftovers = sorted(names - allowed)
+            if leftovers:
+                extra.append(f'runtime folder {number} has extras: {leftovers}')
+        self.assertFalse(extra, '\n'.join(extra))
 
     def command(self, *args, **kwargs):
         raw, err = io.BytesIO(), io.StringIO()
@@ -171,7 +193,9 @@ class AdtReadsTests(unittest.TestCase):
         original = json.loads(ready.read_bytes())
         stale, refused, absent = (ready.with_name(name) for name in ('stale.json', 'refused.json', 'absent.json'))
         fixtures.f._private_file(stale, json.dumps(original | {'schema_digest': '0' * 64}).encode())
+        self.addCleanup(stale.unlink, missing_ok=True)
         fixtures.f._private_file(refused, json.dumps(original | {'socket': str(ready.parent / 'no.sock')}).encode())
+        self.addCleanup(refused.unlink, missing_ok=True)
         with patch.object(subprocess, 'Popen', side_effect=AssertionError('read commands must not launch')) as launch:
             for path in (absent, stale, refused):
                 with self.subTest(path=path.name):
@@ -187,6 +211,7 @@ class AdtReadsTests(unittest.TestCase):
             with self.subTest(command=command):
                 ready = Path(self.store.ready.path).with_name(f'invalid-{command}.json')
                 fixtures.f._private_file(ready, b'{')
+                self.addCleanup(ready.unlink, missing_ok=True)
                 with patch.object(subprocess, 'Popen',
                                   side_effect=AssertionError('read commands must not launch')) as launch:
                     if command == 'read':
