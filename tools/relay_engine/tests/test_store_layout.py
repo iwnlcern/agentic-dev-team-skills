@@ -1,7 +1,9 @@
 """Per-project paths and opening: catches ambient-home, creation and WAL regressions."""
 import os
+import shutil
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 import sqlite3
@@ -16,9 +18,11 @@ import uuid
 from unittest import mock
 
 from relay_engine import errors, schema, store_layout, submit
+from relay_engine.tests.test_store_lifecycle import (
+    P, _INCUMBENT_STORE_ID, _incumbent_birth, _incumbent_boot, _materialize_incumbent_store,
+)
 
 
-P = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 Q = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 K = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
@@ -1715,6 +1719,105 @@ class TestMaintenanceHolds(unittest.TestCase):
                     self.assertEqual(caught.project_id, P)
                 self.assertEqual(self.rows(), before)
                 self.assertTrue(self.conn.in_transaction)
+
+
+class TestRuntimeAdmission(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / 'store'
+        self.guard, birth = store_layout.IncumbentGuard._create_new(
+            self.root, _INCUMBENT_STORE_ID, P)
+        self.addCleanup(self.guard.close)
+        idle, _ = self.guard.enroll_new(birth)
+        owner = store_layout._IncumbentOwner(
+            str(uuid.uuid4()), os.getpid(), _incumbent_birth(os.getpid()),
+            _incumbent_boot(), 'fixture-runtime', 'off')
+        self.armed = self.guard.arm(idle, owner)
+        _materialize_incumbent_store(self.root)
+        self.catalogue = store_layout.open_catalogue(self.root)
+        self.addCleanup(self.catalogue.close)
+        store_layout.reserve_project(self.catalogue, Q, 'second', 1)
+        store_layout.activate_project(self.catalogue, Q)
+        self.catalogue.commit()
+        with closing(store_layout.open_ledger(self.root, Q, create=True)) as ledger:
+            ledger.execute("INSERT INTO projects (id,name,created_at) VALUES (?, 'second', 1)",
+                           (Q,)).close()
+            ledger.commit()
+        store_layout.ledger_path(self.root, Q).chmod(0o600)
+
+    def _fault(self, cause, callback, *args, **kwargs):
+        with self.assertRaises(store_layout.LayoutFault) as caught:
+            callback(*args, **kwargs)
+        self.assertEqual(caught.exception.cause, cause)
+        return caught.exception
+
+    def _replace_arm(self):
+        fresh = replace(self.armed, owner=replace(self.armed.owner, epoch=str(uuid.uuid4())))
+        self.guard._replace(self.armed, fresh)
+
+    def _replace_ledger(self, project):
+        path = store_layout.ledger_path(self.root, project)
+        copy = path.with_suffix('.replacement')
+        shutil.copyfile(path, copy)
+        copy.chmod(0o600)
+        copy.replace(path)
+
+    def _live_wal(self, project):
+        ledger = store_layout.open_ledger(self.root, project)
+        self.addCleanup(ledger.close)
+        ledger.execute('SELECT 1 FROM projects').close()
+        path = store_layout.ledger_path(self.root, project)
+        for suffix in ('-wal', '-shm'):
+            self.assertTrue(path.with_name(path.name + suffix).exists())
+
+    def test_runtime_members_initial_allows_catalogue_sidecars(self):
+        path = store_layout.catalogue_path(self.root)
+        for suffix in ('-wal', '-shm'):
+            self.assertTrue(path.with_name(path.name + suffix).exists())
+        members = self.guard.runtime_members(self.armed, P, phase='initial')
+        self.assertEqual(len(members), 4)
+        self.assertEqual(members, self.guard._member_identities(P, sidecar_free=False))
+
+    def test_runtime_members_initial_refuses_ledger_sidecars(self):
+        self._live_wal(P)
+        self._fault('journal-unresolved', self.guard.runtime_members,
+                    self.armed, P, phase='initial')
+
+    def test_runtime_members_connected_allows_ledger_sidecars(self):
+        members = self.guard.runtime_members(self.armed, P, phase='initial')
+        self._live_wal(P)
+        self.assertEqual(self.guard.runtime_members(self.armed, P, phase='connected'), members)
+
+    def test_runtime_members_connected_detects_replaced_ledger(self):
+        members = self.guard.runtime_members(self.armed, P, phase='initial')
+        self._replace_ledger(P)
+        self.assertNotEqual(self.guard.runtime_members(self.armed, P, phase='connected'), members)
+
+    def test_runtime_members_refuses_stale_arm(self):
+        self._replace_arm()
+        self._fault('incumbent-changed', self.guard.runtime_members, self.armed, P, phase='initial')
+
+    def test_runtime_members_refuses_malformed_id(self):
+        for phase in ('initial', 'connected'):
+            with self.subTest(phase=phase):
+                self._fault('member-unproved', self.guard.runtime_members,
+                            self.armed, 'not-an-id', phase=phase)
+
+    def test_runtime_members_refuses_unknown_phase(self):
+        with self.assertRaises(ValueError):
+            self.guard.runtime_members(self.armed, P, phase='later')
+
+    def test_offline_members_keep_malformed_id_error(self):
+        with self.assertRaises(ValueError):
+            self.guard._member_identities('not-an-id')
+
+    def test_offline_members_keep_catalogue_sidecar_rule(self):
+        self.catalogue.close()
+        path = store_layout.catalogue_path(self.root)
+        wal = path.with_name(path.name + '-wal')
+        wal.touch(mode=0o600, exist_ok=False)
+        self._fault('journal-unresolved', self.guard._member_identities, P)
 
 
 if __name__ == '__main__':

@@ -1337,7 +1337,24 @@ class IncumbentGuard:
         if self._member_identities(armed.project, sidecar_free=False) != members:
             raise LayoutFault('member-changed')
 
-    def _member_identities(self, project, *, sidecar_free=True):
+    def runtime_members(self, armed: IncumbentRecord, project_id: str, *,
+                        phase: Literal['initial', 'connected']) -> tuple:
+        """Prove the selected members while the writer owns the live catalogue."""
+        if phase not in ('initial', 'connected'):
+            raise ValueError('unknown runtime member phase')
+        try:
+            _canonical_id(project_id)
+        except ValueError:
+            raise LayoutFault('member-unproved') from None
+        self._current(armed)
+        members = self._member_identities(project_id, sidecar_free=(phase == 'initial'),
+                                         catalogue_sidecar_free=False)
+        self._current(armed)
+        return members
+
+    def _member_identities(self, project, *, sidecar_free=True, catalogue_sidecar_free=None):
+        if catalogue_sidecar_free is None:
+            catalogue_sidecar_free = sidecar_free
         self._check_lock()
         _canonical_id(project)
         with ExitStack() as stack:
@@ -1354,13 +1371,14 @@ class IncumbentGuard:
                                                 directory=True):
                         raise LayoutFault('member-changed')
                     parent_ids.append(identity)
-                def member(directory, name):
-                    if sidecar_free:
+                def member(directory, name, require_sidecar_free):
+                    if require_sidecar_free:
                         return _sidecar_free_member(directory, name)
                     return _owned_inode(os.stat(name, dir_fd=directory, follow_symlinks=False))
 
-                catalogue = member(self._root_fd, catalogue_path(self._path).name)
-                ledger = member(selected, ledger_path(self._path, project).name)
+                catalogue = member(self._root_fd, catalogue_path(self._path).name,
+                                   catalogue_sidecar_free)
+                ledger = member(selected, ledger_path(self._path, project).name, sidecar_free)
             except OSError as exc:
                 raise LayoutFault('member-unproved') from exc
         self._check_lock()
