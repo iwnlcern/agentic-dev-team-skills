@@ -140,8 +140,35 @@ def _pragma(conn, sql):
     cursor.close()
 
 
+_WAL_SWITCH_BUDGET_S = 5.0
+_WAL_RETRY_PAUSE_S = 0.01
+
+
+def _pause(seconds):
+    time.sleep(seconds)
+
+
 def _configure(conn):
-    if _row(conn, 'PRAGMA journal_mode=WAL') != ('wal',):
+    if conn.in_transaction:
+        raise ValueError('WAL configuration requires an idle connection')
+    busy_timeout, = _row(conn, 'PRAGMA busy_timeout')
+    deadline = time.monotonic() + _WAL_SWITCH_BUDGET_S
+    try:
+        while True:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            _pragma(conn, f'PRAGMA busy_timeout={remaining_ms}')
+            try:
+                mode = _row(conn, 'PRAGMA journal_mode=WAL')
+                break
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorname != 'SQLITE_BUSY' or time.monotonic() >= deadline:
+                    raise
+                _pause(_WAL_RETRY_PAUSE_S)
+                if time.monotonic() >= deadline:
+                    raise
+    finally:
+        _pragma(conn, f'PRAGMA busy_timeout={busy_timeout}')
+    if mode != ('wal',):
         raise LayoutFault('not-wal')
     _pragma(conn, 'PRAGMA synchronous=FULL')
     if sys.platform == 'darwin':

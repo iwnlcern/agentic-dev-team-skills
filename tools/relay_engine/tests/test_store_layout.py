@@ -114,8 +114,11 @@ class TestStoreLayout(unittest.TestCase):
         self.assertIn('PRAGMA synchronous=FULL', trace)
 
         class Answer:
+            def __init__(self, row):
+                self.row = row
+
             def fetchone(self):
-                return ('delete',)
+                return self.row
 
             def fetchall(self):
                 return []
@@ -124,8 +127,14 @@ class TestStoreLayout(unittest.TestCase):
                 pass
 
         class RefusingWal:
+            in_transaction = False
+
             def execute(self, sql):
-                return Answer()
+                if sql == 'PRAGMA busy_timeout':
+                    return Answer((5000,))
+                if sql == 'PRAGMA journal_mode=WAL':
+                    return Answer(('delete',))
+                return Answer(('delete',))
 
             def close(self):
                 pass

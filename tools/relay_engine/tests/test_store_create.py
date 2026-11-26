@@ -1,11 +1,13 @@
 """Delta 8 creation: real turns, crash boundaries and admission side effects."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
+from unittest import mock
 
 from relay_engine import store_layout, store_steps
 from relay_engine.store_create import Creation, CreationHeld, create_project, finish_creation
@@ -66,6 +68,45 @@ class CrashingTurns:
         if written and self.crash_at == f'after-{point}':
             raise Crash()
         return value
+
+
+@contextmanager
+def wal_write_holder(path, release):
+    ready = threading.Event()
+    errors = []
+
+    def hold():
+        try:
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute('BEGIN IMMEDIATE').close()
+                ready.set()
+                if not release.wait(timeout=12):
+                    raise AssertionError('WAL test holder was not released')
+                conn.commit()
+        except Exception as error:
+            errors.append(error)
+            ready.set()
+
+    worker = threading.Thread(target=hold)
+    worker.start()
+    try:
+        if not ready.wait(timeout=8):
+            raise AssertionError('WAL test holder did not acquire its lock')
+        if errors:
+            raise errors[0]
+        yield
+    finally:
+        release.set()
+        worker.join(timeout=13)
+        if worker.is_alive():
+            raise AssertionError('WAL test holder did not finish')
+        if errors:
+            raise errors[0]
+
+
+def database_value(conn, sql):
+    with closing(conn.execute(sql)) as cursor:
+        return cursor.fetchone()[0]
 
 
 class TestCreateProject(unittest.TestCase):
@@ -217,6 +258,168 @@ class TestCreateProject(unittest.TestCase):
                     else:
                         self.assertIsInstance(value, store_layout.RouteUnavailable)
                         self.assertEqual(value.cause, 'not-found')
+
+    def new_rollback_db(self, label):
+        path = Path(self.tmp.name) / label
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute('CREATE TABLE seed(value)').close()
+            self.assertEqual(database_value(conn, 'PRAGMA journal_mode'), 'delete')
+        return path
+
+    def test_configure_waits_for_a_write_holder(self):
+        path = self.new_rollback_db('wal-write-holder.sqlite3')
+        release = threading.Event()
+        retried = threading.Event()
+
+        def pause(seconds):
+            retried.set()
+            release.set()
+            time.sleep(seconds)
+
+        with closing(sqlite3.connect(path)) as conn:
+            with wal_write_holder(path, release):
+                with mock.patch.object(store_layout, '_pause', pause, create=True):
+                    store_layout._configure(conn)
+            self.assertTrue(retried.is_set())
+            self.assertEqual(database_value(conn, 'PRAGMA journal_mode'), 'wal')
+            self.assertEqual(database_value(conn, 'PRAGMA busy_timeout'), 5000)
+
+    def test_configure_budget_covers_sqlites_wait(self):
+        for mode in ('reader', 'write holder'):
+            with self.subTest(mode=mode):
+                path = self.new_rollback_db(f'wal-budget-{mode}.sqlite3')
+                state = {}
+
+                def configure():
+                    with closing(sqlite3.connect(path)) as conn:
+                        started = time.monotonic()
+                        state['outcome'] = outcome(lambda: store_layout._configure(conn))
+                        state['elapsed'] = time.monotonic() - started
+                        state['timeout'] = database_value(conn, 'PRAGMA busy_timeout')
+
+                with closing(sqlite3.connect(path)) as other:
+                    other.execute('BEGIN' if mode == 'reader' else 'BEGIN IMMEDIATE').close()
+                    if mode == 'reader':
+                        with closing(other.execute('SELECT * FROM seed')) as cursor:
+                            cursor.fetchall()
+                    with mock.patch.object(store_layout, '_WAL_SWITCH_BUDGET_S', 0.3, create=True):
+                        worker = threading.Thread(target=configure)
+                        worker.start()
+                        try:
+                            worker.join(timeout=2)
+                            alive_at_bound = worker.is_alive()
+                        finally:
+                            other.commit()
+                            worker.join(timeout=8)
+                        self.assertFalse(worker.is_alive(), 'worker did not finish after release')
+                    self.assertFalse(alive_at_bound, 'WAL switch exceeded its busy-wait budget')
+                    self.assertIsInstance(state['outcome'], sqlite3.OperationalError)
+                    self.assertEqual(state['outcome'].sqlite_errorname, 'SQLITE_BUSY')
+                    self.assertGreaterEqual(state['elapsed'], 0.3)
+                    self.assertLess(state['elapsed'], 1.5)
+                    self.assertEqual(database_value(other, 'PRAGMA journal_mode'), 'delete')
+                    self.assertEqual(state['timeout'], 5000)
+
+    def test_two_finishes_wait_out_a_held_switch(self):
+        self.fixture(self.root)
+        database = store_layout.ledger_path(self.root, P).resolve()
+        barrier = threading.Barrier(2, timeout=10)
+        setup = threading.Lock()
+        release = threading.Event()
+        retried = threading.Event()
+        targeted = threading.local()
+        first = False
+        configure = store_layout._configure
+
+        class ConcurrentTurns:
+            def __init__(inner_self):
+                inner_self.inner = store_steps.DirectTurns(self.root)
+
+            def run(inner_self, declared, body, *, fence_project=None):
+                if declared.ledgers:
+                    barrier.wait()
+                return inner_self.inner.run(declared, body, fence_project=fence_project)
+
+        def pause(seconds):
+            if getattr(targeted, 'first', False):
+                retried.set()
+                release.set()
+            time.sleep(seconds)
+
+        def configure_ledger(conn):
+            nonlocal first
+            with closing(conn.execute('PRAGMA database_list')) as cursor:
+                main = next(filename for _, name, filename in cursor if name == 'main')
+            if Path(main).resolve() == database:
+                # The peer cannot enter the switch until DDL setup and the
+                # write holder are in place for the targeted ledger worker.
+                with setup:
+                    run_with_holder = not first
+                    first = True
+                    if run_with_holder:
+                        self.assertEqual(database_value(conn, 'PRAGMA journal_mode'), 'delete')
+                        holder = wal_write_holder(database, release)
+                        holder.__enter__()
+                if run_with_holder:
+                    targeted.first = True
+                    try:
+                        return configure(conn)
+                    finally:
+                        targeted.first = False
+                        holder.__exit__(None, None, None)
+            return configure(conn)
+
+        results = [None, None]
+
+        def finish(index):
+            results[index] = outcome(lambda: finish_creation(ConcurrentTurns(), P))
+
+        threads = [threading.Thread(target=finish, args=(i,)) for i in range(2)]
+        with mock.patch.object(store_layout, '_pause', pause, create=True):
+            with mock.patch.object(store_layout, '_configure', configure_ledger):
+                for thread in threads:
+                    thread.start()
+                try:
+                    for thread in threads:
+                        thread.join(timeout=30)
+                finally:
+                    release.set()
+                    for thread in threads:
+                        thread.join(timeout=12)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(results, [None, None])
+        self.assertEqual(self.rows(self.root, ledger=True), [(P, 'example', 1000)])
+        self.assertEqual(self.rows(self.root)[0][2], 'active')
+        self.assertTrue(first)
+        self.assertTrue(retried.is_set())
+
+    def test_configure_raises_other_errors_at_once(self):
+        error = sqlite3.OperationalError('disk I/O error')
+        error.sqlite_errorname = 'SQLITE_IOERR'
+
+        class Stub:
+            in_transaction = False
+            timeout = 5000
+            wal_calls = 0
+
+            def execute(self, sql):
+                if sql == 'PRAGMA journal_mode=WAL':
+                    self.wal_calls += 1
+                    raise error
+                if sql.startswith('PRAGMA busy_timeout='):
+                    self.timeout = int(sql.partition('=')[2])
+                elif sql != 'PRAGMA busy_timeout':
+                    raise AssertionError(f'unexpected statement: {sql}')
+                cursor = mock.Mock()
+                cursor.fetchone.return_value = (self.timeout,)
+                return cursor
+
+        conn = Stub()
+        with mock.patch.object(store_layout, '_WAL_SWITCH_BUDGET_S', 0.03, create=True):
+            with self.assertRaises(sqlite3.OperationalError) as raised:
+                store_layout._configure(conn)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(conn.wal_calls, 1)
 
     def test_finish_twice_concurrently(self):
         # C1: both callers pass admission, so duplicate insertion is observed.
