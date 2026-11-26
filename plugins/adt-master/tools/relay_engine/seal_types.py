@@ -49,6 +49,7 @@ class SealReport:
     chain_id: str | None
     cause: str | None
     at_ms: int
+    errno_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,9 +68,18 @@ def require_canonical_id(value: str) -> str:
 
 
 class SealUnusable(Exception):
-    def __init__(self, cause: str, chain_id: str | None):
+    def __init__(self, cause: str, chain_id: str | None, errno_name: str | None = None):
         self.cause, self.chain_id = cause, chain_id
-        super().__init__(cause, chain_id)
+        self.errno_name = errno_name
+        if errno_name is None:
+            super().__init__(cause, chain_id)
+        else:
+            super().__init__(cause, chain_id, errno_name)
+
+    def __str__(self):
+        if self.errno_name is None:
+            return super().__str__()
+        return f"{(self.cause, self.chain_id)!r} errno={self.errno_name}"
 
 
 class ReserveRefused(Exception):

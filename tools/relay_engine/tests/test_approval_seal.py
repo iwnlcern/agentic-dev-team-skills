@@ -1,5 +1,6 @@
 """Service and crash-boundary witnesses, on explicit temporary seal roots."""
 from contextlib import ExitStack
+import copy
 from dataclasses import replace
 import errno
 import fcntl
@@ -7,6 +8,7 @@ import hashlib
 import importlib
 import os
 from pathlib import Path
+import pickle
 import pwd
 import struct
 import sys
@@ -354,6 +356,177 @@ class ApprovalSealTests(unittest.TestCase):
                              [('SealIdentityOneSided', P, C)])
 
 
+
+    def assert_errno_refusal(self, exc, cause, chain=None, *, report=True):
+        self.assertEqual((exc.cause, exc.chain_id), (cause, chain))
+        self.assertEqual(exc.errno_name, 'ENOSPC')
+        self.assertEqual(str(exc), f"{(cause, chain)!r} errno=ENOSPC")
+        expected = [self.t.SealReport(P, chain, cause, 1234, 'ENOSPC')] if report else []
+        self.assertEqual(self.reports, expected)
+
+    def missing_project_refusal(self):
+        with self.assertRaises(self.t.SealUnusable) as caught:
+            with self.service._locked(P, exclusive=True, create=False):
+                self.fail('missing project entered the lock')
+        return caught.exception
+
+    def test_refusal_without_errno_keeps_its_text(self):
+        exc = self.missing_project_refusal()
+        self.assertEqual(exc.args, ('folder_unusable', None))
+        self.assertEqual(str(exc), "('folder_unusable', None)")
+        self.assertEqual([(r.project_id, r.chain_id, r.cause, r.at_ms) for r in self.reports],
+                         [(P, None, 'folder_unusable', 1234)])
+
+    def test_refusal_without_errno_has_no_name(self):
+        exc = self.missing_project_refusal()
+        self.assertIsNone(exc.errno_name)
+        self.assertIsNone(self.reports[0].errno_name)
+
+    def test_cannot_record_has_no_name(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(self.s, 'write_next', side_effect=self.s.CannotRecord(7)):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._write_pointer(P, D, damaged=False)
+        self.assertEqual(caught.exception.cause, 'folder_unusable')
+        self.assertIsNone(caught.exception.errno_name)
+        self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234)])
+
+    def test_locked_names_errno(self):
+        with self.assertRaises(self.t.SealUnusable) as caught:
+            with self.service._locked(P, exclusive=True, create=True):
+                raise OSError(errno.ENOSPC, 'forced')
+        self.assert_errno_refusal(caught.exception, 'folder_unusable')
+
+    def test_item_read_names_errno(self):
+        self.set_chain()
+        real_open = self.service._open
+
+        def open_item(project, name, **kwargs):
+            if name.endswith('.counter'):
+                raise OSError(errno.ENOSPC, 'forced')
+            return real_open(project, name, **kwargs)
+
+        for chain, report in ((C, True), (D, False)):
+            with self.subTest(chain=chain):
+                self.reports.clear()
+                with mock.patch.object(self.service, '_open', side_effect=open_item):
+                    with self.assertRaises(self.t.SealUnusable) as caught:
+                        self.service._item(P, chain, self.s.ItemKind.COUNTER)
+                self.assert_errno_refusal(caught.exception, 'counter_unusable', chain, report=report)
+
+    def test_abandoned_check_names_errno(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(os, 'pread', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._abandoned(P, C, self.s.ItemKind.COUNTER, self.ledger)
+        self.assert_errno_refusal(caught.exception, 'counter_unusable', C)
+
+    def test_new_pointer_names_errno(self):
+        with self.service._locked(P, exclusive=True, create=True):
+            with mock.patch.object(os, 'ftruncate', side_effect=OSError(errno.ENOSPC, 'forced')):
+                with self.assertRaises(self.t.SealUnusable) as caught:
+                    self.service._new_pointer(P, C)
+        self.assert_errno_refusal(caught.exception, 'folder_unusable')
+
+    def test_write_pointer_names_errno(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(self.s, 'write_next', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._write_pointer(P, D, damaged=False)
+        self.assert_errno_refusal(caught.exception, 'folder_unusable')
+
+    def test_write_pointer_names_errno_through_cause(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._write_pointer(P, D, damaged=False)
+        self.assert_errno_refusal(caught.exception, 'folder_unusable')
+
+    def test_rebind_write_names_errno_through_cause(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.set_chain(expected=C, fd=self.other, bind='rebind')
+        self.assert_errno_refusal(caught.exception, 'counter_unusable', C)
+
+    def assert_write_cannot_record_nameless(self, write):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(self.s, 'write_next', side_effect=write):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._write_pointer(P, D, damaged=False)
+        self.assertEqual(caught.exception.cause, 'folder_unusable')
+        self.assertIsNone(caught.exception.errno_name)
+        self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234)])
+
+    def test_context_only_has_no_name(self):
+        def write(*args, **kwargs):
+            try:
+                raise OSError(errno.ENOSPC, 'forced')
+            except OSError:
+                raise self.s.CannotRecord(7)
+
+        self.assert_write_cannot_record_nameless(write)
+
+    def test_indirect_cause_has_no_name(self):
+        def write(*args, **kwargs):
+            try:
+                try:
+                    raise OSError(errno.ENOSPC, 'forced')
+                except OSError as error:
+                    raise ValueError('fixture') from error
+            except ValueError as error:
+                raise self.s.CannotRecord(7) from error
+
+        self.assert_write_cannot_record_nameless(write)
+
+    def test_chains_names_errno(self):
+        with mock.patch.object(type(self.service.folder), 'chains',
+                               side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service.chains(P)
+        self.assert_errno_refusal(caught.exception, 'folder_unusable')
+
+    def test_reserve_counter_write_names_errno(self):
+        self.set_chain()
+        self.reports.clear()
+        with mock.patch.object(self.s, '_write', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service.reserve(P, C, kind='approve', subject='subject', payload=b'{}',
+                                     transaction=1, declared_kinds=('approve',))
+        self.assert_errno_refusal(caught.exception, 'counter_unusable', C)
+
+    def test_unknown_errno_number_is_kept(self):
+        with self.assertRaises(self.t.SealUnusable) as caught:
+            with self.service._locked(P, exclusive=True, create=True):
+                raise OSError(99999, 'forced')
+        self.assertEqual(caught.exception.errno_name, '99999')
+        self.assertEqual(str(caught.exception), "('folder_unusable', None) errno=99999")
+
+    def test_refusal_round_trips_without_errno(self):
+        exc = self.t.SealUnusable('folder_unusable', None)
+        for rebuild in (copy.copy, lambda e: pickle.loads(pickle.dumps(e))):
+            with self.subTest(rebuild=rebuild):
+                rebuilt = rebuild(exc)
+                self.assertEqual(rebuilt.args, ('folder_unusable', None))
+                self.assertEqual((rebuilt.cause, rebuilt.chain_id), ('folder_unusable', None))
+                self.assertEqual(str(rebuilt), "('folder_unusable', None)")
+
+    def test_refusal_round_trips_with_errno(self):
+        exc = self.t.SealUnusable('folder_unusable', None, 'ENOSPC')
+        for rebuild in (copy.copy, lambda e: pickle.loads(pickle.dumps(e))):
+            with self.subTest(rebuild=rebuild):
+                rebuilt = rebuild(exc)
+                self.assertEqual(rebuilt.args, ('folder_unusable', None, 'ENOSPC'))
+                self.assertEqual((rebuilt.cause, rebuilt.chain_id), ('folder_unusable', None))
+                self.assertEqual(rebuilt.errno_name, 'ENOSPC')
+                self.assertEqual(str(rebuilt), "('folder_unusable', None) errno=ENOSPC")
+
     def test_pointer_write_failure_is_folder_unusable(self):
         self.set_chain()
         for clear in (False, True):
@@ -362,7 +535,7 @@ class ApprovalSealTests(unittest.TestCase):
                 self.fault(lambda: self.a.clear_current(P, expected=C) if clear
                            else self.set_chain(expected=C), 'folder_unusable')
             self.assertEqual(self.pointer.read_bytes(), before)
-            self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234)])
+            self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234, 'ENOSPC')])
         for failure in (OSError(errno.ENOSPC, 'full'), self.s.CannotRecord(7)):
             self.root = self.base / str(uuid.uuid4()); self.service.folder.root = self.root
             self.reports.clear()
@@ -373,7 +546,10 @@ class ApprovalSealTests(unittest.TestCase):
             with mock.patch.object(self.service, '_new_pointer', side_effect=new):
                 self.fault(lambda: self.set_chain(), 'folder_unusable')
             self.assertFalse(self.pointer.exists())
-            self.assertEqual(self.reports, [self.t.SealReport(P, None, 'folder_unusable', 1234)])
+            expected = (self.t.SealReport(P, None, 'folder_unusable', 1234, 'ENOSPC')
+                        if isinstance(failure, OSError)
+                        else self.t.SealReport(P, None, 'folder_unusable', 1234))
+            self.assertEqual(self.reports, [expected])
 
     def test_bad_ledger_descriptor_is_callers_fault(self):
         self.set_chain(); self.reports.clear()

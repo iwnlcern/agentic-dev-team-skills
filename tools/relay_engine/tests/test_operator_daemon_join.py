@@ -1,6 +1,5 @@
 """Exercise the checked launcher, guarded bridge and real Store on one scratch project."""
 import base64
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 import itertools
@@ -17,7 +16,6 @@ import socket as network
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -25,15 +23,16 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from relay_engine import (
-    api_client, api_operator_bridge, api_service, api_writer, jcs, lifecycle_paths, queries, store_layout, submit,
+    api_client, api_operator_bridge, api_service, jcs, lifecycle_paths, queries, store_layout, submit,
 )
-from relay_engine.operator_queue import notifier, records
+from relay_engine.operator_queue import records
 from relay_engine.tests import test_api_service as service_fixture
 from relay_engine.tests.test_api_service import P
 from relay_engine.tests.test_submit import draft
 
 
 ADMISSION_CEILING_SECONDS = 20
+HOST_PROGRESS_CEILING_SECONDS = 20
 
 
 class OperatorDaemonJoinTests(unittest.TestCase):
@@ -117,6 +116,44 @@ class OperatorDaemonJoinTests(unittest.TestCase):
                 return result
             self.assertLess(time.monotonic(), deadline, 'timed out waiting for durable state')
             time.sleep(0.05)
+
+    def wait_for_host_progress(self, observe, what) -> object:
+        started = time.monotonic()
+        while True:
+            outcome = observe()
+            elapsed = time.monotonic() - started
+            if outcome:
+                print(json.dumps({'host_wait': {'what': what, 'elapsed_seconds': round(elapsed, 3)}}))
+                return outcome
+            if elapsed >= HOST_PROGRESS_CEILING_SECONDS:
+                self.fail(f'host delay: {what} not reached after {elapsed:.1f} s '
+                          f'(ceiling {HOST_PROGRESS_CEILING_SECONDS} s)')
+            time.sleep(0.05)
+
+    def test_host_progress_wait_reports_host_delay_at_ceiling(self):
+        what = 'never observed'
+        ticks = 0
+        observations = []
+
+        def monotonic():
+            return ticks * 0.05
+
+        def advance(_seconds):
+            nonlocal ticks
+            ticks += 1
+
+        def observe():
+            observations.append(monotonic())
+            return False
+
+        with patch.object(time, 'monotonic', side_effect=monotonic), patch.object(
+                time, 'sleep', side_effect=advance) as sleep:
+            with self.assertRaisesRegex(AssertionError, (
+                    r'^host delay: never observed not reached after 20\.0 s \(ceiling 20 s\)$')):
+                self.wait_for_host_progress(observe, what)
+        self.assertEqual(observations[-1], 20.0)
+        self.assertEqual(sleep.call_count, 400)
+        self.assertTrue(all(call.args == (0.05,) for call in sleep.call_args_list))
 
     def check_assets(self, origin, directory):
         for route, filename, media in (
@@ -337,7 +374,8 @@ const { chromium } = require(process.argv[1]);
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, pass_fds=(idle_fd,),
         ) as daemon:
             try:
-                target = self.wait_until(lambda: self.live_target(self.root))
+                target = self.wait_for_host_progress(lambda: self.live_target(self.root),
+                                                     'service discovery after cold start')
                 ready = Path(target.ready_path)
                 self.wait_until(ready.exists)
                 origin = json.loads(ready.read_text())['bridge_origin']
@@ -554,7 +592,7 @@ runpy.run_path(sys.argv[0], run_name='__main__')
                     self.assertEqual(snapshot(question), before)
                     self.assertFalse(started.exists())
                 else:
-                    self.wait_until(started.exists)
+                    self.wait_for_host_progress(started.exists, 'notifier program start after submit')
                     pid, custodian, argv, inherited = json.loads(started.read_bytes())
                     self.assertNotEqual(custodian, daemon.pid)
                     self.assertEqual(inherited, [])
@@ -636,6 +674,122 @@ time.sleep(15)
         custodian_reaped = arm / 'custodian-reaped'
         retiring, claimed, eof = arm / 'retiring', arm / 'claimed', arm / 'eof'
         after_exit = arm / 'after-exit'
+        early = phase in {'pre_ready', 'before_final'}
+        marker = arm / ('stop_entered' if phase == 'pre_ready' else 'retired')
+        parked_exit = arm / 'parked_exit'
+        custodian_identity = arm / 'custodian_identity'
+        issued_identity = arm / 'issued_identity'
+
+        def atomic_write(path, data):
+            temporary = path.with_suffix('.tmp')
+            temporary.write_text(data)
+            os.replace(temporary, path)
+
+        def read_optional(path):
+            try:
+                return path.read_text()
+            except FileNotFoundError:
+                return None
+
+        def stop_facts(sent, end):
+            marker_seconds = time.monotonic() - sent
+            exit_record = read_optional(parked_exit)
+            return {
+                'marker': marker.exists(),
+                'wait_end': end,
+                'parked_entry_pid': parked_entry_pid,
+                'release_text': read_optional(release),
+                'parked_exit': json.loads(exit_record) if exit_record is not None else None,
+                'daemon_status': daemon.poll(),
+                'elapsed_seconds': round(marker_seconds, 3),
+            }
+
+        def departed(identity, label, *, pending=False):
+            self.assertIsNotNone(identity, f'missing {label} identity')
+            self.assertIsInstance(identity.get('birth'), str, f'unverified {label} birth')
+            self.assertTrue(identity['birth'], f'empty {label} birth')
+            pid = identity.get('pid')
+            self.assertTrue(type(pid) is int and pid > 0, f'invalid {label} PID')
+            try:
+                observed, _ = lifecycle_paths._native_identity(pid)
+            except (OSError, ValueError) as error:
+                # Distinguish a departed PID from a live PID whose birth cannot be read.
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return 'gone'
+                self.fail(f'unverified {label} PID {pid}: {error}')
+            if observed == identity['birth']:
+                if pending:
+                    return None
+                self.fail(f'{label} PID {pid} survived with matching birth')
+            return 'different-birth'
+
+        def cleanup_facts(daemon, observed_stop):
+            self.assertIsNotNone(daemon.returncode, 'daemon was not reaped')
+            saved = read_optional(custodian_identity)
+            custody = json.loads(saved) if saved is not None else None
+            self.assertIsNotNone(custody, 'missing custodian identity')
+            self.assertTrue(release.exists(), 'cleanup attempted before release')
+            departure_started = time.monotonic()
+            try:
+                outcome = self.wait_for_host_progress(lambda: departed(custody, 'custodian', pending=True),
+                                                      'custodian departure after release')
+            except AssertionError as error:
+                self.fail(f'{error}; custodian PID {custody.get("pid")} birth {custody.get("birth")}')
+            departure_seconds = time.monotonic() - departure_started
+            self.assertLess(departure_seconds, HOST_PROGRESS_CEILING_SECONDS,
+                            f'custodian departure was not observed within the ceiling: {custody!r}')
+            self.assertIn(outcome, ('gone', 'different-birth'))
+            record = {'installed_custody_cleanup': phase, 'daemon_pid': daemon.pid,
+                      'daemon_status': daemon.returncode, 'custodian': custody,
+                      'custodian_outcome': outcome, 'departure_seconds': round(departure_seconds, 3)}
+            issued_pid = read_optional(issued)
+            record['notifier'] = None
+            if issued_pid is not None:
+                exit_code = read_optional(reaped)
+                if exit_code is not None:
+                    record['notifier'] = {'pid': int(issued_pid), 'reaped': int(exit_code)}
+                else:
+                    saved = read_optional(issued_identity)
+                    identity = json.loads(saved) if saved is not None else None
+                    self.assertIsNotNone(identity, 'missing issued notifier identity')
+                    self.assertEqual(identity['pid'], int(issued_pid))
+                    record['notifier'] = {**identity, 'outcome': departed(identity, 'notifier')}
+
+            saved_exit = read_optional(parked_exit)
+            parked_outcome = json.loads(saved_exit) if saved_exit is not None else None
+            cleaned_release = {'exit': 'release', 'release_text': ''}
+            fallback = {'exit': 'deadline', 'release_text': None}
+            record['parked_exit'] = parked_outcome
+            if observed_stop is not None and observed_stop['marker']:
+                self.assertEqual(parked_outcome, {'exit': 'release', 'release_text': 'after-marker'})
+            elif observed_stop is not None:
+                self.assertIsNone(observed_stop['release_text'], 'release existed before cleanup')
+                self.assertIn(observed_stop['parked_exit'], (None, cleaned_release, fallback))
+                end = observed_stop['wait_end']
+                self.assertIn(end, ('daemon-exit', 'ceiling'))
+                before_status = observed_stop['daemon_status']
+                if end == 'daemon-exit':
+                    self.assertIsNotNone(before_status, 'daemon exit was not observed before cleanup')
+                    self.assertEqual(before_status, daemon.returncode)
+                if phase == 'before_final':
+                    self.assertIn(parked_outcome, (cleaned_release, fallback))
+                elif saved_exit is None:
+                    self.assertEqual(end, 'daemon-exit', 'parked exit missing without foreground exit')
+                    self.assertEqual(before_status, 75, 'parked exit missing without foreground cutoff status')
+                    self.assertEqual(observed_stop['parked_entry_pid'], custody['pid'],
+                                     'foreground was not observed parked on the recorded custodian')
+                    self.assertFalse(custodian_reaped.exists(), 'foreground recorded a custodian reap')
+                    record['parked_end'] = 'foreground_cutoff'
+                    record['custodian_reaped_present'] = False
+                else:
+                    allowed = (cleaned_release, fallback) if end == 'ceiling' else (fallback,)
+                    self.assertIn(parked_outcome, allowed)
+                    if end == 'ceiling' and parked_outcome == cleaned_release:
+                        self.assertIsNone(before_status, 'daemon already exited at ceiling capture')
+            return record
+
         # The test hook loads in the actual installed launcher processes. It
         # parks the specified boundary without changing any shipped bytes.
         (arm / 'sitecustomize.py').write_text(f"""
@@ -650,18 +804,40 @@ retiring = pathlib.Path({str(retiring)!r})
 claimed = pathlib.Path({str(claimed)!r})
 eof = pathlib.Path({str(eof)!r})
 after_exit = pathlib.Path({str(after_exit)!r})
+early = {early!r}
+marker = pathlib.Path({str(marker)!r})
+parked_exit = pathlib.Path({str(parked_exit)!r})
+custodian_identity = pathlib.Path({str(custodian_identity)!r})
+issued_identity = pathlib.Path({str(issued_identity)!r})
+publish_marker = True
+if early:
+    sys.path.insert(0, {str(launcher.parent)!r})
+    from relay_engine.lifecycle_paths import _native_identity
+def atomic_write(path, data):
+    temporary = path.with_suffix(f'.{{os.getpid()}}.{{threading.get_ident()}}.tmp')
+    temporary.write_text(data)
+    os.replace(temporary, path)
+def record_identity(path, pid):
+    birth, _ = _native_identity(pid)
+    atomic_write(path, json.dumps(dict(pid=pid, birth=birth)))
 def wait_for(path):
     deadline = time.monotonic() + 9
     while not path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
+    return 'release' if path.exists() else 'deadline'
 def park(value):
     parked.write_text(str(value))
-    wait_for(release)
+    outcome = wait_for(release)
+    if early:
+        release_text = release.read_text() if outcome == 'release' else None
+        atomic_write(parked_exit, json.dumps(dict(exit=outcome, release_text=release_text)))
 def native(argv, **kwargs):
     if phase == 'late_invocation':
         park('before invocation')
     child = original_popen(argv, **kwargs)
     issued.write_text(str(child.pid))
+    if early:
+        record_identity(issued_identity, child.pid)
     for name in ('poll', 'wait'):
         method = getattr(child, name)
         def capture(*args, base=method, **kwargs):
@@ -675,6 +851,8 @@ def native(argv, **kwargs):
     return child
 original_popen = subprocess.Popen
 if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
+    if early:
+        record_identity(custodian_identity, os.getpid())
     if phase in ('late_invocation', 'late_return'):
         subprocess.Popen = native
     elif phase in ('before_final', 'overlap', 'first_read'):
@@ -708,6 +886,15 @@ if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
         subprocess.Popen = native
 elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
     if phase == 'pre_ready':
+        from relay_engine.api_service import _ForegroundEpoch
+        enter_stop = _ForegroundEpoch.enter_stop
+        def observe_stop(self):
+            result = enter_stop(self)
+            if publish_marker:
+                atomic_write(marker, json.dumps(dict(admission_closed=self.admission_closed,
+                                                     attempt=self.attempt is not None)))
+            return result
+        _ForegroundEpoch.enter_stop = observe_stop
         def start_custodian(argv, **kwargs):
             child = original_popen(argv, **kwargs)
             if '--private-notifier-custodian' in argv:
@@ -721,6 +908,14 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
             return child
         subprocess.Popen = start_custodian
     elif phase == 'before_final':
+        from relay_engine.api_service import _NotifierGate
+        retire = _NotifierGate.retire
+        def observe_retire(self):
+            result = retire(self)
+            if publish_marker and self.released:
+                atomic_write(marker, 'retired')
+            return result
+        _NotifierGate.retire = observe_retire
         sendall = socket.socket.sendall
         def leave_stop_unread(self, data, *args):
             if b'"kind":"stop"' not in data:
@@ -747,6 +942,8 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
         with (service_fixture.private_idle(admission, env) as (idle_fd, child_env),
               subprocess.Popen(command, cwd=arm, env=child_env, pass_fds=(idle_fd,), start_new_session=True,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon):
+            parked_entry_pid = None
+            observed_stop = None
             try:
                 ready = Path(lifecycle_paths.ready_file_path(admission.idle.store,
                              platform=sys.platform, environ=env, home=str(home)))
@@ -763,6 +960,7 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
                 self.wait_until(lambda: parked.exists() and parked.stat().st_size)
                 if phase == 'pre_ready':
                     custodian = int(parked.read_text())
+                    parked_entry_pid = custodian
                     self.assertFalse(ready.exists())
                     with (root / 'api-service.lock').open('rb') as original:
                         with self.assertRaises(BlockingIOError):
@@ -795,10 +993,18 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
                     return
                 sent = time.monotonic()
                 daemon.terminate()
-                early = phase in {'pre_ready', 'before_final'}
                 if early:
-                    time.sleep(0.25)
-                    release.touch()
+                    try:
+                        self.wait_for_host_progress(lambda: marker.exists() or daemon.poll() is not None,
+                                                    'stop observed after SIGTERM')
+                    except AssertionError as error:
+                        observed_stop = stop_facts(sent, 'ceiling')
+                        self.fail(f'{error}; {json.dumps(observed_stop)}')
+                    observed_stop = stop_facts(sent, 'daemon-exit' if not marker.exists() else 'marker')
+                    self.assertTrue(observed_stop['marker'], f'missing stop marker; {json.dumps(observed_stop)}')
+                    if phase == 'pre_ready':
+                        self.assertEqual(json.loads(marker.read_text()), {'admission_closed': True, 'attempt': True})
+                    atomic_write(release, 'after-marker')
                 if phase == 'overlap':
                     self.wait_until(retiring.exists)
                     release.touch()
@@ -809,6 +1015,9 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
                 self.assertLess(elapsed, 2 if early else 5)
                 if early:
                     self.assertFalse(issued.exists())
+                    saved_exit = read_optional(parked_exit)
+                    self.assertIsNotNone(saved_exit, 'missing parked exit record')
+                    self.assertEqual(json.loads(saved_exit), {'exit': 'release', 'release_text': 'after-marker'})
                     if phase == 'pre_ready':
                         self.assertTrue(custodian_reaped.exists(), 'foreground did not reap the pre-READY custodian')
                         self.assertEqual(json.loads(custodian_reaped.read_text()), [custodian, 0])
@@ -830,13 +1039,26 @@ elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
                 print(json.dumps({'installed_custody': phase, 'status': daemon.returncode,
                                   'term_seconds': round(elapsed, 3), 'issued': issued.exists(),
                                   'reaped': reaped.exists(), 'overlap_claim': claimed.exists(),
-                                  'eof': eof.exists(), 'stop_unavailable_to_custodian': phase != 'pre_ready'}))
+                                  'eof': eof.exists(), 'stop_unavailable_to_custodian': phase != 'pre_ready',
+                                  **({'marker_seconds': observed_stop['elapsed_seconds'],
+                                      'parked_exit': json.loads(saved_exit)} if early else {})}))
             finally:
+                prior_failure = sys.exception()
                 after_exit.touch()
                 release.touch()
                 if daemon.poll() is None:
                     daemon.kill()
                     daemon.communicate(timeout=3)
+                if early:
+                    try:
+                        cleanup = json.dumps(cleanup_facts(daemon, observed_stop))
+                        print(cleanup)
+                        if prior_failure is not None:
+                            prior_failure.add_note(f'cleanup evidence: {cleanup}')
+                    except (AssertionError, OSError, ValueError) as error:
+                        if prior_failure is None:
+                            raise
+                        prior_failure.add_note(f'unverified cleanup for {phase}: {error}')
 
     def test_installed_first_read_eof_after_foreground_loss(self):
         self.check_installed_custody_discriminator(self.install_candidate(), 'first_read')

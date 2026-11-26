@@ -2031,6 +2031,17 @@ class RealTree(unittest.TestCase):
                 "observed": observed,
             }, indent=2) + "\n")
 
+    def test_sampler_directory_is_covered_on_linux_only(self):
+        directory = "tools/release_check_sampler_tests"
+        step = "release_check_sampler_tests"
+        steps = rc.step_table(REPO)
+        self.assertIn(directory, rc._discovered_units(REPO))
+        self.assertEqual([s.covers for s in steps if s.id == step], [(directory,)])
+        self.assertNotIn(step, [s.id for s in rc._selected_steps(steps, "mac", rc.EXCLUSIONS)])
+        with tempfile.TemporaryDirectory() as name:
+            plan = json.loads(rc.write_container_plan(name, steps, "linux", rc.EXCLUSIONS).read_text())
+        self.assertIn(step, plan["step_ids"])
+
     def test_pdc_consumer_runs_on_mac_only(self):  # PR-3 G-E2; DD-v3-tests § 3.6
         module = "relay_engine.tests.test_pdc_consumer"
         steps = rc.step_table(REPO)

@@ -1,7 +1,8 @@
 """Private launch page and the actual adt Console parser."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
+from http.client import HTTPConnection
 import io
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import os
 import re
 import runpy
 import shlex
+import socket
 import stat
 import subprocess
 import sys
@@ -16,6 +18,7 @@ import tempfile
 import time
 from threading import Event, Thread, get_ident
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 import unittest
 from unittest.mock import ANY, Mock, patch
 
@@ -30,6 +33,12 @@ from relay_engine.operator_queue.notifier import DeliveryCancelled, NotifierIssu
 _PREFIX = b'<!doctype html><meta name="referrer" content="no-referrer"><meta http-equiv="refresh" content="0;url='
 _SUFFIX = b'">'
 _HINT = 'If the page did not open, run adt console open --print and paste the address.\n'
+
+_READY_UNAVAILABLE = (
+    'The Store for this ready file is unavailable for Console. If it is still starting, '
+    'wait a moment and run this command again. Otherwise check the operator launch terminal for the refusal.\n'
+)
+_READY_PAGE_FAULT = 'The Console launch page could not be opened.\n'
 
 
 def load_launcher():
@@ -526,6 +535,257 @@ class TestOperatorBridgeLaunch(unittest.TestCase):
             except SystemExit as exit_status:
                 status = exit_status.code
         return status, stdout.getvalue(), stderr.getvalue()
+
+    def held_ready_fixture(self):
+        from relay_engine.api_service import ApiService
+
+        temporary = tempfile.TemporaryDirectory(prefix='cr-', dir='/tmp')
+        self.addCleanup(temporary.cleanup)
+        workspace = Path(temporary.name).resolve()
+        home = workspace / 'home'
+        home.mkdir(mode=0o700)
+        env = patch.dict(os.environ, {'HOME': str(home), 'XDG_RUNTIME_DIR': ''})
+        env.start()
+        self.addCleanup(env.stop)
+        root = workspace / 'store'
+        with patch.object(submit, '_home', return_value=str(workspace)):
+            admission = service_fixture.admitted_store_fixture(root, service_fixture.P, project_name='console')
+        hold = Event()
+        hold.set()
+        admits = ApiService._admits
+        admission_patch = patch.object(ApiService, '_admits',
+                                       lambda service: not hold.is_set() and admits(service))
+        admission_patch.start()
+        self.addCleanup(admission_patch.stop)
+        service = ApiService(str(root), service_fixture.P, clock=lambda: 0, bridge_port=0,
+                             notifier_mode='off', admission=admission.receipt)
+        self.addCleanup(service.stop)
+        ready = Path(service.start())
+        origin = json.loads(ready.read_bytes())['bridge_origin']
+
+        def release():
+            hold.clear()
+            loop = Thread(target=service.serve_forever)
+            self.addCleanup(loop.join, 5)
+            self.addCleanup(service.stop)
+            loop.start()
+
+        self.opener = Mock(return_value=SimpleNamespace(returncode=0))
+        with patch.object(subprocess, 'run', self.opener):
+            self.group = load_launcher()['console_group']()
+        return ready, origin, release
+
+    @contextmanager
+    def ready_probe_witness(self, path):
+        records = []
+        results = []
+        base = socket.socket
+
+        class RecordingSocket(base):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.events = []
+
+            def connect(self, address):
+                if address == path:
+                    records.append(self.events)
+                try:
+                    outcome = super().connect(address)
+                except OSError:
+                    self.events.append(('connect', 'error'))
+                    raise
+                self.events.append(('connect', 'ok'))
+                return outcome
+
+            def settimeout(self, value):
+                self.events.append(('timeout', value))
+                return super().settimeout(value)
+
+            def sendall(self, data, *args):
+                self.events.append(('sendall', data))
+                return super().sendall(data, *args)
+
+            def recv(self, *args):
+                try:
+                    data = super().recv(*args)
+                except TimeoutError:
+                    self.events.append(('recv', 'timeout'))
+                    raise
+                self.events.append(('recv', 'data' if data else 'empty'))
+                return data
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(socket, 'socket', RecordingSocket))
+            resolve = getattr(lifecycle_paths, 'ready_target', None)
+            if resolve is not None:
+                def record(ready_path):
+                    result = resolve(ready_path)
+                    results.append(result)
+                    return result
+
+                stack.enter_context(patch.object(lifecycle_paths, 'ready_target', record))
+            yield records, results
+
+    def assert_ready_probe_request(self, records):
+        self.assertEqual(len(records), 1)
+        events, = records
+        self.assertEqual([value for kind, value in events if kind == 'connect'], ['ok'])
+        sent, = [value for kind, value in events if kind == 'sendall']
+        self.assertEqual(int.from_bytes(sent[:4], 'big'), len(sent) - 4)
+        self.assertEqual(json.loads(sent[4:])['op'], 'protocol.connect')
+        timeouts = [value for kind, value in events if kind == 'timeout']
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= 0.5 for value in timeouts))
+        return [value for kind, value in events if kind == 'recv']
+
+    def assert_ready_identity_fault(self, results):
+        self.assertEqual(len(results), 1)
+        result, = results
+        self.assertIsInstance(result, lifecycle_paths.ConsoleTargetUnavailable)
+        self.assertEqual(result.reason, 'identity_unavailable')
+        return result.identity_fault
+
+    def assert_ready_refusal(self, status, output, error, words=_READY_UNAVAILABLE):
+        self.assertEqual(status, 1)
+        self.assertFalse(output)
+        self.assertEqual(error, words)
+        self.opener.assert_not_called()
+
+    def assert_held_ready_refusal(self, ready, *options):
+        path = json.loads(ready.read_bytes())['socket']
+        with self.ready_probe_witness(path) as (records, results):
+            status, output, error = self.invoke_console('--ready', str(ready), *options)
+        if not options and status == 0:
+            self.assertEqual(self.opener.call_count, 1)
+        self.assert_ready_refusal(status, output, error)
+        self.assertEqual(self.assert_ready_probe_request(records), ['timeout'])
+        self.assertIsInstance(self.assert_ready_identity_fault(results), api_client.EndpointUnavailable)
+
+    def test_console_open_ready_print_refuses_inside_start_window(self):
+        ready, origin, _ = self.held_ready_fixture()
+        connection = HTTPConnection(urlsplit(origin).netloc, timeout=2)
+        self.addCleanup(connection.close)
+        connection.request('GET', '/')
+        # Inspect the first response byte so a reset after a status line cannot
+        # be confused with an unadmitted connection that never sent a response.
+        try:
+            first_byte = connection.sock.recv(1)
+        except ConnectionResetError:
+            print('held bridge GET: connection reset before status')
+        else:
+            self.assertEqual(first_byte, b'', 'held bridge must not send an HTTP response')
+            print('held bridge GET: end of stream before status')
+        self.assert_held_ready_refusal(ready, '--print')
+
+    def test_console_open_ready_opening_refuses_inside_start_window(self):
+        ready, _, _ = self.held_ready_fixture()
+        self.assert_held_ready_refusal(ready)
+
+    def test_console_open_ready_after_release(self):
+        ready, origin, release = self.held_ready_fixture()
+        release()
+        status, output, error = self.invoke_console('--ready', str(ready), '--print')
+        self.assertEqual(status, 0)
+        self.assertFalse(error)
+        self.opener.assert_not_called()
+        launch = urlsplit(output.rstrip('\n'))
+        self.assertEqual(f'{launch.scheme}://{launch.netloc}', origin)
+        self.assertEqual(launch.path, '/')
+        self.assertTrue(launch.fragment.startswith('launch='))
+        connection = HTTPConnection(launch.netloc, timeout=2)
+        self.addCleanup(connection.close)
+        connection.request('GET', launch.path)
+        with connection.getresponse() as response:
+            self.assertEqual(response.status, 200)
+            response.read()
+        status, output, error = self.invoke_console('--ready', str(ready))
+        self.assertEqual((status, output, error), (0, _HINT, ''))
+        page = str(ready.with_name('open.html'))
+        argv = ['/usr/bin/open', '--', page] if sys.platform == 'darwin' else ['xdg-open', page]
+        self.opener.assert_called_once_with(argv)
+
+    @contextmanager
+    def ready_variant(self, path, data):
+        with path.open('x') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(data, stream)
+        try:
+            yield path
+        finally:
+            path.unlink()
+
+    def test_console_open_ready_endpoint_refusals(self):
+        production, selected = self.selected_store_fixture()
+        ready = self.ready_paths[selected]
+        live = json.loads(ready.read_bytes())
+        other_store = json.loads(self.ready_paths[production].read_bytes())['store_id']
+        with tempfile.TemporaryDirectory(prefix='rs-', dir='/tmp') as temporary, ExitStack() as stack:
+            private = Path(temporary).resolve()
+            stale_socket = str(private / 'api.sock')
+            child = stack.enter_context(subprocess.Popen(['/bin/sleep', '30']))
+            stack.callback(child.terminate)
+            cases = (
+                ('refused', private / 'ready.json', dict(live, socket=stale_socket)),
+                ('absent', private / 'ready.json', dict(live, socket=stale_socket)),
+                ('wrong_process', ready.with_name('wrong-process.json'), dict(live, pid=child.pid)),
+                ('foreign', ready.with_name('foreign.json'), dict(live, store_id=other_store)),
+            )
+            for case, path, data in cases:
+                if case == 'refused':
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as bound:
+                        bound.bind(stale_socket)
+                elif case == 'absent':
+                    Path(stale_socket).unlink()
+                with self.ready_variant(path, data):
+                    api_client.read_ready_file(str(path))
+                    for options in (('--print',), ()):
+                        with self.subTest(case=case, options=options):
+                            self.opener.reset_mock()
+                            with self.ready_probe_witness(data['socket']) as (records, results):
+                                status, output, error = self.invoke_console('--ready', str(path), *options)
+                            self.assert_ready_refusal(status, output, error)
+                            fault = self.assert_ready_identity_fault(results)
+                            if case == 'foreign':
+                                self.assertIn('data', self.assert_ready_probe_request(records))
+                                self.assertIsInstance(fault, api_client.EndpointUnavailable)
+                                self.assertEqual(fault.outcome, 'endpoint_mismatch')
+                            else:
+                                self.assertEqual(len(records), 1)
+                                events, = records
+                                stage = 'ok' if case == 'wrong_process' else 'error'
+                                self.assertEqual([value for kind, value in events if kind == 'connect'], [stage])
+                                self.assertFalse(any(kind == 'sendall' for kind, _ in events))
+                                self.assertIsInstance(fault, ValueError if case == 'wrong_process' else OSError)
+
+    def test_console_open_ready_file_faults_keep_page_words(self):
+        _, selected = self.selected_store_fixture()
+        ready = self.ready_paths[selected]
+        other_schema = json.loads(ready.read_bytes())
+        other_schema['schema_digest'] = ('a' if other_schema['schema_digest'][0] != 'a' else 'b') + (
+            other_schema['schema_digest'][1:])
+        with self.ready_variant(ready.with_name('other-schema.json'), other_schema) as mismatch:
+            api_client.read_ready_file(str(mismatch))
+            paths = (ready.with_name('missing.json'), mismatch)
+            observed = []
+            for path in paths:
+                for options in (('--print',), ()):
+                    with self.subTest(path=path.name, options=options):
+                        self.opener.reset_mock()
+                        with self.ready_probe_witness(other_schema['socket']) as (records, _):
+                            status, output, error = self.invoke_console('--ready', str(path), *options)
+                        self.assert_ready_refusal(status, output, error, _READY_PAGE_FAULT)
+                        self.assertEqual(records, [])
+                        observed.append(path)
+            # A command red must not be obscured by any direct call of the new helper.
+            if observed == [path for path in paths for _ in range(2)]:
+                for path in paths:
+                    with self.subTest(helper=path.name):
+                        with self.ready_probe_witness(other_schema['socket']) as (records, results):
+                            lifecycle_paths.ready_target(str(path))
+                        self.assertEqual(records, [])
+                        result, = results
+                        self.assertIsInstance(result, lifecycle_paths.ReadyFileInvalid)
+                        self.assertIsInstance(result.fault, api_client.LocalRefusal)
 
     def test_console_open_selects_store(self):
         production, selected = self.selected_store_fixture()

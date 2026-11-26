@@ -13,13 +13,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from relay_engine.tests.writer_support import serve_for_test
 from relay_engine import api_keys as keys, api_platform as platform, api_sessions as sessions
 from relay_engine import api_protocol as p, api_schema, api_wire as w, api_writer as writer
-from relay_engine import jcs, store_layout
+from relay_engine import api_relay_reads, jcs, store_layout
 
 P = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 TOOLS = Path(__file__).resolve().parents[2]
@@ -153,11 +154,23 @@ class SessionTests(unittest.TestCase):
         self.runtime = p.RuntimeContext('store', 'isolated', 'runtime', '3.0.0', 'a' * 64,
                                        True, {'3.0': artifact})
         self.key = self.add_seat()
+        self.reads = SimpleNamespace(inbox=lambda args: {
+            **dict.fromkeys(('total', 'answered', 'unanswered', 'imported'), '0'),
+            'truncated': 'false', 'rows': [],
+        }, read=lambda args, binding: {
+            'relay_id': args['relay_id'],
+            'envelope': dict(handle='1', kind='SITREP', sender='operator', to=[], cc=[],
+                             subject='', parent=None, parent_id=None, verdict=None, needs='none',
+                             created_at='1', imported='true'),
+            'body_base64': '', 'unopened': [], 'refs': [], 'findings': [],
+        })
+        port = platform.PlatformPort(self.service, None, self.reads)
+        self.ports = dict.fromkeys(self.registry.handlers, port)
 
     def connection(self):
         return p.dispatch_api(p.initial_connection_state(),
             w.ApiRequest('1', 'protocol.connect', {'supported': {'min': '3.0', 'max': '3.0'}}),
-            self.runtime, self.registry, {name: platform.PlatformPort(self.service, None) for name in self.registry.handlers}).state
+            self.runtime, self.registry, self.ports).state
 
     def add_seat(self):
         seat = 'seat' + str(next(self.seat_n))
@@ -179,7 +192,7 @@ class SessionTests(unittest.TestCase):
     def call(self, op='session.sign-in', args=None, state=None):
         state = self.connection() if state is None else state
         return p.dispatch_api(state, w.ApiRequest(str(state.last_request_id + 1), op,
-            self.args() if args is None else args), self.runtime, self.registry, {name: platform.PlatformPort(self.service, None) for name in self.registry.handlers})
+            self.args() if args is None else args), self.runtime, self.registry, self.ports)
 
     def success(self, result):
         self.assertIn('result', result.response, result.response)
@@ -286,7 +299,7 @@ class SessionTests(unittest.TestCase):
 
     def test_identify_keeps_binding(self):
         from relay_engine import api_definitions as d, api_registry as r, errors
-        graph = d.platform_definitions()
+        graph = platform.platform_component().definitions
         operation = d.OperationDef('test.bound', d.TypeRef('IdentifyBoundArgs'),
             d.TypeRef('IdentifyBoundResult'), d.TypeRef('ApiError'), 'seat_session',
             'pure_observation', 'read_repeat', 'none')
@@ -299,6 +312,7 @@ class SessionTests(unittest.TestCase):
             return {}
         self.registry = r.compile_registry(graph, dict(platform.platform_handlers(), **{'test.bound': bound}),
                                             (errors.api_error_catalog(),))
+        self.ports[operation.name] = self.ports['seat.identify']
         self.runtime = replace(self.runtime, schemas={'3.0': api_schema.export_schema(self.registry, '3.0')})
         signed = self.call()
         self.success(signed)
@@ -327,7 +341,7 @@ class SessionTests(unittest.TestCase):
             self.assertEqual((op.principal, op.effect, op.retry, op.browser_get), row)
 
     def test_capabilities_are_exactly_the_handled_operations(self):
-        names = ('protocol.connect', 'protocol.schema', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
+        names = ('protocol.connect', 'protocol.schema', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
         queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
                  'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
         self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue)))
@@ -337,12 +351,22 @@ class SessionTests(unittest.TestCase):
                 platform.platform_handlers()
 
     def test_dispatch_and_generation_share_handlers(self):
-        for name, handler in p.session_handlers().items():
+        for name, handler in (p.session_handlers() | api_relay_reads.reads_handlers()).items():
             self.assertIs(self.registry.handlers[name], handler)
         with patch.object(self.service, 'run', wraps=self.service.run) as run:
             signed = self.call()
             self.success(signed)
             run.assert_called_once_with('session.sign-in', self.args(), None)
+        args = {'seat_address': 'team.planner@project', 'limit': '1'}
+        with patch.object(self.reads, 'inbox', wraps=self.reads.inbox) as inbox:
+            result = self.success(self.call('relay.inbox', args))
+            self.assertEqual(result['rows'], [])
+            inbox.assert_called_once_with(args)
+        read_args = {'relay_id': 'sample'}
+        with patch.object(self.reads, 'read', wraps=self.reads.read) as read:
+            result = self.success(self.call('relay.read', read_args, state=signed.state))
+            self.assertEqual(result['relay_id'], 'sample')
+            read.assert_called_once_with(read_args, signed.state.binding)
 
     def test_generation_import_boundary_fresh_process(self):
         probe = '''import sys,json

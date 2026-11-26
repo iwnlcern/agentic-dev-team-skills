@@ -506,7 +506,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_hook_files.py",
-    "sha256": "ac3cb6a29ccb14574a9dd95318ccb72bf0b213ac7b5796b471d15307dfd2c020",
+    "sha256": "5fc14bcb5e57515a121d1ffc80a27fc17209a39245724ffb3c3b29c14bd57ff2",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -536,7 +536,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_seat_record.py",
-    "sha256": "c2ed327543a9013847bb85fc1ccadaf7dcc573ab39cfb3a9e9d4fcb5c9f733ce",
+    "sha256": "ca5ff43b4cf987213b5f0e57701e6dd0acc83db6b187dd0d50af23a35aaaddb1",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -572,7 +572,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adt",
-    "sha256": "fb6681594c402b2fa3238e8b84a6d6ffc8f5cfb03443325b5e458762101baa8f",
+    "sha256": "ed0c0adf449cfb8a1ca281fcb384d5c5221e96888ea36d005a30d63c1919d5ae",
     "source": "tools/adt"
   },
   {
@@ -10700,13 +10700,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/adt_cli.py",
-    "sha256": "9188195e30c418736ab1173416c5534eea52d6a44c13917ffde6b9b9859510ab",
+    "sha256": "5c607098036f932fb7d7d12c1a872c5b854df872b48ede296baf3c21d0abc5e1",
     "source": "tools/relay_engine/adt_cli.py"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/api_bridge.py",
-    "sha256": "7aad9118644af32f4a6196f3be875d85c4b17a052530580cc479097891319641",
+    "sha256": "4a94345a76286b9f63b5ffccc8e79793aba70485e9c1956a7bc508a78cdf7d2c",
     "source": "tools/relay_engine/api_bridge.py"
   },
   {
@@ -10742,7 +10742,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/api_platform.py",
-    "sha256": "cdd37f9bd7b61a95707ab0866fa01a9736913db048151e728950e73c3751dc04",
+    "sha256": "a40e486d52d5329f993af8033ea0e5d615942bafb56f34679a8a3f9cc731159d",
     "source": "tools/relay_engine/api_platform.py"
   },
   {
@@ -10760,8 +10760,20 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/api_registry.py",
-    "sha256": "e5a5ab58d6615872700bc43170f954b4aa8639b93eccef57080aee274aa3178a",
+    "sha256": "b016ac6e9a4e59a329c2d6b0c75f9849d8ce2a949e70298130b4954cd78200bb",
     "source": "tools/relay_engine/api_registry.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/api_relay_reads.py",
+    "sha256": "cf62e25d8221c78a30d19473ca46fcce02e99726d8abb5f66c78797c1eb636b8",
+    "source": "tools/relay_engine/api_relay_reads.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/api_relay_reads_service.py",
+    "sha256": "04d8943a89415e47a66e11df2c604c86b8f5fb6e9649e1a06a72c576cbe08589",
+    "source": "tools/relay_engine/api_relay_reads_service.py"
   },
   {
     "kit_version": "2.9.7",
@@ -10802,7 +10814,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/approval_seal.py",
-    "sha256": "371411f10b5de9cb5c0d0caa3006956928e57c1d47ccc788511c5f6824434a52",
+    "sha256": "8f450bd4ec3697b710a6e85f02d92ae311694845276ecffca564dee8fd12b07e",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -10810,6 +10822,12 @@
     "path": "adt-master/tools/relay_engine/authority.py",
     "sha256": "3b7afd51df11075dea7409200797f0fd091505353f1d059cc624e9c67783df60",
     "source": "tools/relay_engine/authority.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/authority_bench.py",
+    "sha256": "87e720aead25f6095e52e58355d475014be868cb7c344b1b387b8b062d44c02d",
+    "source": "tools/relay_engine/authority_bench.py"
   },
   {
     "kit_version": "2.9.7",
@@ -10892,7 +10910,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/errors.py",
-    "sha256": "497c7089b1e4618616236cad0772aa74c1fb68d9d33f909a49f4e3d6a7e73e9d",
+    "sha256": "82f2dc3441c01fb367251d3aab7d06bd899bc772538edcb6c16589854f444c61",
     "source": "tools/relay_engine/errors.py"
   },
   {
@@ -10904,25 +10922,25 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/generated/api/api_3_0.rs",
-    "sha256": "c016ea19b6a42cb2ffcfc02356ef8f0ddb3f764c451877d9de0b6b9c82493b83",
+    "sha256": "e0d2f3b98ce56637d97a610c14cf9e103b65209efaa27fad74ec59d7b1317aa6",
     "source": "tools/relay_engine/generated/api/api_3_0.rs"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/generated/api/api_3_0.ts",
-    "sha256": "ff0ff578b0a40a6f9387a8f95293e645a4a5b4a354a1f9beec927e89328a374e",
+    "sha256": "beebfe3801953deea5041dc7cfc80278e5b6d76d19fe4de4750bcb42a418a300",
     "source": "tools/relay_engine/generated/api/api_3_0.ts"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/generated/api/manifest.json",
-    "sha256": "67b08d9573209ae51a7d5dab6742af9716ff5dc79e0dd83db934c04444a14097",
+    "sha256": "fc6e123d92826850bc5795b14bfc01f01613f3ca1660a41f27d57a7e22cc3522",
     "source": "tools/relay_engine/generated/api/manifest.json"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/generated/api/schema-3.0.json",
-    "sha256": "b6c5b0e8348d9e6f0fe907ab8073699f3b1f3e51b395663c640dcf87e13d54a7",
+    "sha256": "ae6b2fe4c56f04019c852b1f0692d1621c1c8c114393538a058c3f5fbbea01d4",
     "source": "tools/relay_engine/generated/api/schema-3.0.json"
   },
   {
@@ -10982,7 +11000,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/lifecycle_paths.py",
-    "sha256": "a7e8781bae98c94904e6ec3efa3ded985435236c1e08c1f835d94b5f63c50a40",
+    "sha256": "ebad741125280d95621d5d09276550e67b8eca381dce26b05f644a088365d931",
     "source": "tools/relay_engine/lifecycle_paths.py"
   },
   {
@@ -11144,7 +11162,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seal_renderer.py",
-    "sha256": "00c24ebc845bb3bb62d5d98d1c780974e46e8f6070fba7abba8381b4e7f29fb9",
+    "sha256": "590641ca2f0d7f308f3d26dae67d6c6293cd1ebf99ab74a62fc01556dce27eb0",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -11156,7 +11174,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seal_types.py",
-    "sha256": "8a2434f39f8cbb91969d5dcf4da085cf2fde9fc37956e812164be45c22bbfb26",
+    "sha256": "8726fad2764baa8332173d25a6cfb8f8605463a770434d210ca5135e0b54c200",
     "source": "tools/relay_engine/seal_types.py"
   },
   {
@@ -11174,7 +11192,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/slips.py",
-    "sha256": "808adb6351953c58b3d1f10cba10dd8192d7a4be143d7b304a621e9c9f6e7a84",
+    "sha256": "8c198d5fc44f2079a968faea65cae0010805a0a27144a39a46d2c53476cab6c0",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -11222,7 +11240,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/strings.py",
-    "sha256": "cc751119a628a4980c6e59b6b6cbf602f981279b3fd69e608edbf9bbe7d13ade",
+    "sha256": "e9f0a6be3612448dc5ff9e2528da4d19c5574c8de181d4b4dae1113338e67f42",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -11240,7 +11258,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "6fc340286e63ed46ea5bccf1a4f5493b24d4e2e7ed0e1cc2cbd38341bd1e04df",
+    "sha256": "5885166909547347ae0a769db4cb76ef7c974f3148b5195799f750758412ec68",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -11654,7 +11672,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_hook_files.py",
-    "sha256": "ac3cb6a29ccb14574a9dd95318ccb72bf0b213ac7b5796b471d15307dfd2c020",
+    "sha256": "5fc14bcb5e57515a121d1ffc80a27fc17209a39245724ffb3c3b29c14bd57ff2",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -11684,7 +11702,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_seat_record.py",
-    "sha256": "c2ed327543a9013847bb85fc1ccadaf7dcc573ab39cfb3a9e9d4fcb5c9f733ce",
+    "sha256": "ca5ff43b4cf987213b5f0e57701e6dd0acc83db6b187dd0d50af23a35aaaddb1",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -11720,7 +11738,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adt",
-    "sha256": "fb6681594c402b2fa3238e8b84a6d6ffc8f5cfb03443325b5e458762101baa8f",
+    "sha256": "ed0c0adf449cfb8a1ca281fcb384d5c5221e96888ea36d005a30d63c1919d5ae",
     "source": "tools/adt"
   },
   {
@@ -21848,13 +21866,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/adt_cli.py",
-    "sha256": "9188195e30c418736ab1173416c5534eea52d6a44c13917ffde6b9b9859510ab",
+    "sha256": "5c607098036f932fb7d7d12c1a872c5b854df872b48ede296baf3c21d0abc5e1",
     "source": "tools/relay_engine/adt_cli.py"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/api_bridge.py",
-    "sha256": "7aad9118644af32f4a6196f3be875d85c4b17a052530580cc479097891319641",
+    "sha256": "4a94345a76286b9f63b5ffccc8e79793aba70485e9c1956a7bc508a78cdf7d2c",
     "source": "tools/relay_engine/api_bridge.py"
   },
   {
@@ -21890,7 +21908,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/api_platform.py",
-    "sha256": "cdd37f9bd7b61a95707ab0866fa01a9736913db048151e728950e73c3751dc04",
+    "sha256": "a40e486d52d5329f993af8033ea0e5d615942bafb56f34679a8a3f9cc731159d",
     "source": "tools/relay_engine/api_platform.py"
   },
   {
@@ -21908,8 +21926,20 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/api_registry.py",
-    "sha256": "e5a5ab58d6615872700bc43170f954b4aa8639b93eccef57080aee274aa3178a",
+    "sha256": "b016ac6e9a4e59a329c2d6b0c75f9849d8ce2a949e70298130b4954cd78200bb",
     "source": "tools/relay_engine/api_registry.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/api_relay_reads.py",
+    "sha256": "cf62e25d8221c78a30d19473ca46fcce02e99726d8abb5f66c78797c1eb636b8",
+    "source": "tools/relay_engine/api_relay_reads.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/api_relay_reads_service.py",
+    "sha256": "04d8943a89415e47a66e11df2c604c86b8f5fb6e9649e1a06a72c576cbe08589",
+    "source": "tools/relay_engine/api_relay_reads_service.py"
   },
   {
     "kit_version": "2.9.7",
@@ -21950,7 +21980,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/approval_seal.py",
-    "sha256": "371411f10b5de9cb5c0d0caa3006956928e57c1d47ccc788511c5f6824434a52",
+    "sha256": "8f450bd4ec3697b710a6e85f02d92ae311694845276ecffca564dee8fd12b07e",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -21958,6 +21988,12 @@
     "path": "adt-orchestrator/tools/relay_engine/authority.py",
     "sha256": "3b7afd51df11075dea7409200797f0fd091505353f1d059cc624e9c67783df60",
     "source": "tools/relay_engine/authority.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/authority_bench.py",
+    "sha256": "87e720aead25f6095e52e58355d475014be868cb7c344b1b387b8b062d44c02d",
+    "source": "tools/relay_engine/authority_bench.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22040,7 +22076,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/errors.py",
-    "sha256": "497c7089b1e4618616236cad0772aa74c1fb68d9d33f909a49f4e3d6a7e73e9d",
+    "sha256": "82f2dc3441c01fb367251d3aab7d06bd899bc772538edcb6c16589854f444c61",
     "source": "tools/relay_engine/errors.py"
   },
   {
@@ -22052,25 +22088,25 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/generated/api/api_3_0.rs",
-    "sha256": "c016ea19b6a42cb2ffcfc02356ef8f0ddb3f764c451877d9de0b6b9c82493b83",
+    "sha256": "e0d2f3b98ce56637d97a610c14cf9e103b65209efaa27fad74ec59d7b1317aa6",
     "source": "tools/relay_engine/generated/api/api_3_0.rs"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/generated/api/api_3_0.ts",
-    "sha256": "ff0ff578b0a40a6f9387a8f95293e645a4a5b4a354a1f9beec927e89328a374e",
+    "sha256": "beebfe3801953deea5041dc7cfc80278e5b6d76d19fe4de4750bcb42a418a300",
     "source": "tools/relay_engine/generated/api/api_3_0.ts"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/generated/api/manifest.json",
-    "sha256": "67b08d9573209ae51a7d5dab6742af9716ff5dc79e0dd83db934c04444a14097",
+    "sha256": "fc6e123d92826850bc5795b14bfc01f01613f3ca1660a41f27d57a7e22cc3522",
     "source": "tools/relay_engine/generated/api/manifest.json"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/generated/api/schema-3.0.json",
-    "sha256": "b6c5b0e8348d9e6f0fe907ab8073699f3b1f3e51b395663c640dcf87e13d54a7",
+    "sha256": "ae6b2fe4c56f04019c852b1f0692d1621c1c8c114393538a058c3f5fbbea01d4",
     "source": "tools/relay_engine/generated/api/schema-3.0.json"
   },
   {
@@ -22130,7 +22166,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/lifecycle_paths.py",
-    "sha256": "a7e8781bae98c94904e6ec3efa3ded985435236c1e08c1f835d94b5f63c50a40",
+    "sha256": "ebad741125280d95621d5d09276550e67b8eca381dce26b05f644a088365d931",
     "source": "tools/relay_engine/lifecycle_paths.py"
   },
   {
@@ -22292,7 +22328,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seal_renderer.py",
-    "sha256": "00c24ebc845bb3bb62d5d98d1c780974e46e8f6070fba7abba8381b4e7f29fb9",
+    "sha256": "590641ca2f0d7f308f3d26dae67d6c6293cd1ebf99ab74a62fc01556dce27eb0",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -22304,7 +22340,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seal_types.py",
-    "sha256": "8a2434f39f8cbb91969d5dcf4da085cf2fde9fc37956e812164be45c22bbfb26",
+    "sha256": "8726fad2764baa8332173d25a6cfb8f8605463a770434d210ca5135e0b54c200",
     "source": "tools/relay_engine/seal_types.py"
   },
   {
@@ -22322,7 +22358,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/slips.py",
-    "sha256": "808adb6351953c58b3d1f10cba10dd8192d7a4be143d7b304a621e9c9f6e7a84",
+    "sha256": "8c198d5fc44f2079a968faea65cae0010805a0a27144a39a46d2c53476cab6c0",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -22370,7 +22406,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/strings.py",
-    "sha256": "cc751119a628a4980c6e59b6b6cbf602f981279b3fd69e608edbf9bbe7d13ade",
+    "sha256": "e9f0a6be3612448dc5ff9e2528da4d19c5574c8de181d4b4dae1113338e67f42",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -22388,7 +22424,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "6fc340286e63ed46ea5bccf1a4f5493b24d4e2e7ed0e1cc2cbd38341bd1e04df",
+    "sha256": "5885166909547347ae0a769db4cb76ef7c974f3148b5195799f750758412ec68",
     "source": "tools/relay_engine/version.py"
   },
   {
@@ -22718,7 +22754,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_hook_files.py",
-    "sha256": "ac3cb6a29ccb14574a9dd95318ccb72bf0b213ac7b5796b471d15307dfd2c020",
+    "sha256": "5fc14bcb5e57515a121d1ffc80a27fc17209a39245724ffb3c3b29c14bd57ff2",
     "source": "tools/adapters/tests/test_hook_files.py"
   },
   {
@@ -22748,7 +22784,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_seat_record.py",
-    "sha256": "c2ed327543a9013847bb85fc1ccadaf7dcc573ab39cfb3a9e9d4fcb5c9f733ce",
+    "sha256": "ca5ff43b4cf987213b5f0e57701e6dd0acc83db6b187dd0d50af23a35aaaddb1",
     "source": "tools/adapters/tests/test_seat_record.py"
   },
   {
@@ -22784,7 +22820,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adt",
-    "sha256": "fb6681594c402b2fa3238e8b84a6d6ffc8f5cfb03443325b5e458762101baa8f",
+    "sha256": "ed0c0adf449cfb8a1ca281fcb384d5c5221e96888ea36d005a30d63c1919d5ae",
     "source": "tools/adt"
   },
   {
@@ -32912,13 +32948,13 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/adt_cli.py",
-    "sha256": "9188195e30c418736ab1173416c5534eea52d6a44c13917ffde6b9b9859510ab",
+    "sha256": "5c607098036f932fb7d7d12c1a872c5b854df872b48ede296baf3c21d0abc5e1",
     "source": "tools/relay_engine/adt_cli.py"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/api_bridge.py",
-    "sha256": "7aad9118644af32f4a6196f3be875d85c4b17a052530580cc479097891319641",
+    "sha256": "4a94345a76286b9f63b5ffccc8e79793aba70485e9c1956a7bc508a78cdf7d2c",
     "source": "tools/relay_engine/api_bridge.py"
   },
   {
@@ -32954,7 +32990,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/api_platform.py",
-    "sha256": "cdd37f9bd7b61a95707ab0866fa01a9736913db048151e728950e73c3751dc04",
+    "sha256": "a40e486d52d5329f993af8033ea0e5d615942bafb56f34679a8a3f9cc731159d",
     "source": "tools/relay_engine/api_platform.py"
   },
   {
@@ -32972,8 +33008,20 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/api_registry.py",
-    "sha256": "e5a5ab58d6615872700bc43170f954b4aa8639b93eccef57080aee274aa3178a",
+    "sha256": "b016ac6e9a4e59a329c2d6b0c75f9849d8ce2a949e70298130b4954cd78200bb",
     "source": "tools/relay_engine/api_registry.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/api_relay_reads.py",
+    "sha256": "cf62e25d8221c78a30d19473ca46fcce02e99726d8abb5f66c78797c1eb636b8",
+    "source": "tools/relay_engine/api_relay_reads.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/api_relay_reads_service.py",
+    "sha256": "04d8943a89415e47a66e11df2c604c86b8f5fb6e9649e1a06a72c576cbe08589",
+    "source": "tools/relay_engine/api_relay_reads_service.py"
   },
   {
     "kit_version": "2.9.7",
@@ -33014,7 +33062,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/approval_seal.py",
-    "sha256": "371411f10b5de9cb5c0d0caa3006956928e57c1d47ccc788511c5f6824434a52",
+    "sha256": "8f450bd4ec3697b710a6e85f02d92ae311694845276ecffca564dee8fd12b07e",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -33022,6 +33070,12 @@
     "path": "adt-pair/tools/relay_engine/authority.py",
     "sha256": "3b7afd51df11075dea7409200797f0fd091505353f1d059cc624e9c67783df60",
     "source": "tools/relay_engine/authority.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/authority_bench.py",
+    "sha256": "87e720aead25f6095e52e58355d475014be868cb7c344b1b387b8b062d44c02d",
+    "source": "tools/relay_engine/authority_bench.py"
   },
   {
     "kit_version": "2.9.7",
@@ -33104,7 +33158,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/errors.py",
-    "sha256": "497c7089b1e4618616236cad0772aa74c1fb68d9d33f909a49f4e3d6a7e73e9d",
+    "sha256": "82f2dc3441c01fb367251d3aab7d06bd899bc772538edcb6c16589854f444c61",
     "source": "tools/relay_engine/errors.py"
   },
   {
@@ -33116,25 +33170,25 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/generated/api/api_3_0.rs",
-    "sha256": "c016ea19b6a42cb2ffcfc02356ef8f0ddb3f764c451877d9de0b6b9c82493b83",
+    "sha256": "e0d2f3b98ce56637d97a610c14cf9e103b65209efaa27fad74ec59d7b1317aa6",
     "source": "tools/relay_engine/generated/api/api_3_0.rs"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/generated/api/api_3_0.ts",
-    "sha256": "ff0ff578b0a40a6f9387a8f95293e645a4a5b4a354a1f9beec927e89328a374e",
+    "sha256": "beebfe3801953deea5041dc7cfc80278e5b6d76d19fe4de4750bcb42a418a300",
     "source": "tools/relay_engine/generated/api/api_3_0.ts"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/generated/api/manifest.json",
-    "sha256": "67b08d9573209ae51a7d5dab6742af9716ff5dc79e0dd83db934c04444a14097",
+    "sha256": "fc6e123d92826850bc5795b14bfc01f01613f3ca1660a41f27d57a7e22cc3522",
     "source": "tools/relay_engine/generated/api/manifest.json"
   },
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/generated/api/schema-3.0.json",
-    "sha256": "b6c5b0e8348d9e6f0fe907ab8073699f3b1f3e51b395663c640dcf87e13d54a7",
+    "sha256": "ae6b2fe4c56f04019c852b1f0692d1621c1c8c114393538a058c3f5fbbea01d4",
     "source": "tools/relay_engine/generated/api/schema-3.0.json"
   },
   {
@@ -33194,7 +33248,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/lifecycle_paths.py",
-    "sha256": "a7e8781bae98c94904e6ec3efa3ded985435236c1e08c1f835d94b5f63c50a40",
+    "sha256": "ebad741125280d95621d5d09276550e67b8eca381dce26b05f644a088365d931",
     "source": "tools/relay_engine/lifecycle_paths.py"
   },
   {
@@ -33356,7 +33410,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seal_renderer.py",
-    "sha256": "00c24ebc845bb3bb62d5d98d1c780974e46e8f6070fba7abba8381b4e7f29fb9",
+    "sha256": "590641ca2f0d7f308f3d26dae67d6c6293cd1ebf99ab74a62fc01556dce27eb0",
     "source": "tools/relay_engine/seal_renderer.py"
   },
   {
@@ -33368,7 +33422,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seal_types.py",
-    "sha256": "8a2434f39f8cbb91969d5dcf4da085cf2fde9fc37956e812164be45c22bbfb26",
+    "sha256": "8726fad2764baa8332173d25a6cfb8f8605463a770434d210ca5135e0b54c200",
     "source": "tools/relay_engine/seal_types.py"
   },
   {
@@ -33386,7 +33440,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/slips.py",
-    "sha256": "808adb6351953c58b3d1f10cba10dd8192d7a4be143d7b304a621e9c9f6e7a84",
+    "sha256": "8c198d5fc44f2079a968faea65cae0010805a0a27144a39a46d2c53476cab6c0",
     "source": "tools/relay_engine/slips.py"
   },
   {
@@ -33434,7 +33488,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/strings.py",
-    "sha256": "cc751119a628a4980c6e59b6b6cbf602f981279b3fd69e608edbf9bbe7d13ade",
+    "sha256": "e9f0a6be3612448dc5ff9e2528da4d19c5574c8de181d4b4dae1113338e67f42",
     "source": "tools/relay_engine/strings.py"
   },
   {
@@ -33452,7 +33506,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "6fc340286e63ed46ea5bccf1a4f5493b24d4e2e7ed0e1cc2cbd38341bd1e04df",
+    "sha256": "5885166909547347ae0a769db4cb76ef7c974f3148b5195799f750758412ec68",
     "source": "tools/relay_engine/version.py"
   },
   {

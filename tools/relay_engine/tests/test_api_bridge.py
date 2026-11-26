@@ -138,7 +138,8 @@ class TestBridge(unittest.TestCase):
         cases = [('invalid_args', {}, 400), ('already_connected', {}, 400),
                  ('pin_mismatch', {'field': 'build_id', 'required': 'f' * 64, 'actual': 'a' * 64}, 409),
                  ('runtime_not_ready', {}, 503), ('handler_fault', {}, 500),
-                 ('key_rejected', {}, 401), ('operation_key_reused', {}, 409)]
+                 ('key_rejected', {}, 401), ('operation_key_reused', {}, 409),
+                 ('relay_unknown', {}, 404)]
         for kind, payload, status in cases:
             with self.subTest(kind=kind):
                 error = p.api_error(self.registry, kind, **payload)
@@ -160,7 +161,7 @@ class TestBridge(unittest.TestCase):
         from relay_engine import errors
         self.assertEqual(self.b.STATUS_BY_CLASS, {
             'wire': 400, 'auth': 401, 'version': 409, 'conflict': 409,
-            'internal': 500, 'unavailable': 503, 'admission': 422})
+            'internal': 500, 'unavailable': 503, 'admission': 422, 'lookup': 404})
 
         def covered():
             for variant in errors.api_error_catalog().variants:

@@ -1,14 +1,17 @@
-"""Explicit foreground service, relay submission and session sign-out commands."""
+"""Explicit foreground service, relay and session commands."""
 import argparse
 import base64
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 import fcntl
 import hashlib
 import os
 from pathlib import Path
+import sys
 import time
 import tempfile
+import unicodedata
 import uuid
 
 from relay_engine import api_client, api_service, strings, store_layout, version
@@ -39,6 +42,19 @@ def _bridge_port(value):
     return port
 
 
+def _decimal_arg(text):
+    if not text.isascii() or not text.isdecimal():
+        raise argparse.ArgumentTypeError('expected decimal digits')
+    return text
+
+
+def local_midnight_ms(text: str) -> int:
+    if len(text) != 8 or not text.isascii() or not text.isdecimal():
+        raise ValueError('expected YYYYMMDD')
+    midnight = datetime(int(text[:4]), int(text[4:6]), int(text[6:]))
+    return int(midnight.timestamp()) * 1000
+
+
 def _parser(groups):
     parser = argparse.ArgumentParser(prog='adt')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -53,7 +69,16 @@ def _parser(groups):
     submit.add_argument('--submission-key')
     sign_out = commands.add_parser('sign-out')
     sign_out.add_argument('--operation-key')
-    for command in (submit, sign_out):
+    read = commands.add_parser('read')
+    read.add_argument('relay_id')
+    inbox = commands.add_parser('inbox')
+    inbox.add_argument('seat_address')
+    inbox.add_argument('--since', type=local_midnight_ms, metavar='YYYYMMDD')
+    inbox.add_argument('--before-handle', type=_decimal_arg, metavar='N')
+    inbox.add_argument('--limit', type=_decimal_arg, default='100', metavar='N')
+    inbox.add_argument('--json', action='store_true')
+    inbox.add_argument('--ready')
+    for command in (submit, sign_out, read):
         command.add_argument('--session-id')
         command.add_argument('--key')
         command.add_argument('--ready')
@@ -94,6 +119,129 @@ def _refusal(value):
         return 75 if value.code == 'E_API_UNAVAILABLE' else 1
     strings.emit('stdout', 'command-result', result=strings.machine_result(value))
     return 0
+
+
+_DISPLAY_ESCAPE = frozenset({'Cc', 'Cf', 'Cs', 'Co', 'Cn', 'Zl', 'Zp', 'Zs'})
+_READ_FIELDS = ('handle', 'kind', 'sender', 'to', 'cc', 'subject', 'parent', 'parent_id',
+                'verdict', 'needs', 'created_at', 'imported')
+
+
+def printable(text: str) -> str:
+    chars = []
+    for char in text:
+        code = ord(char)
+        if (code < 32 or 127 <= code <= 159
+                or char != ' ' and unicodedata.category(char) in _DISPLAY_ESCAPE):
+            chars.append(f'\\u{code:04x}')
+        else:
+            chars.append(char)
+    return ''.join(chars)
+
+
+def _open_read_endpoint(path):
+    try:
+        return api_client.ApiClient.open(api_client.read_ready_file(path))
+    except api_client.LocalRefusal as error:
+        if error.kind == 'ready_file_mismatch':
+            raise api_client.EndpointUnavailable('endpoint_mismatch') from None
+        if error.kind == 'ready_file_invalid':
+            try:
+                Path(path).lstat()
+            except FileNotFoundError:
+                raise api_client.EndpointUnavailable('not_performed') from None
+            except OSError:
+                pass
+        raise
+
+
+def read_command(args: argparse.Namespace, resolver: WindowResolver | None) -> int:
+    key_path, session_id, ready_path = _resolve(args, resolver)
+    key = api_client.read_key_file(key_path)
+    client = _open_read_endpoint(ready_path)
+    try:
+        resumed = client.call('session.resume', {
+            'key_id': key.key_id, 'key_secret': key.key_secret, 'session_id': session_id,
+        })
+        if isinstance(resumed, api_client.ApiErrorValue):
+            return _refusal(resumed)
+        result = client.call('relay.read', {'relay_id': args.relay_id})
+    finally:
+        client.close()
+    if isinstance(result, api_client.ApiErrorValue):
+        return _refusal(result)
+
+    for key in _READ_FIELDS:
+        value = result['envelope'][key]
+        if isinstance(value, list):
+            value = ', '.join(value)
+        strings.emit('stdout', 'adt-read-field', key=key,
+                     value=printable('-' if value is None else value))
+    for pointer in result['unopened']:
+        strings.emit('stdout', 'adt-read-unopened', relay_id=printable(pointer['relay_id']),
+                     handle=printable(pointer['handle']))
+    for line in result['refs']:
+        strings.emit('stdout', 'adt-read-ref', ordinal=printable(line['ordinal']),
+                     spelling=printable(line['spelling']))
+    for finding in result['findings']:
+        visible = {key: printable(finding[key])
+                   for key in ('handle', 'severity', 'status', 'summary')}
+        if finding['check'] is None:
+            strings.emit('stdout', 'adt-read-finding-unchecked', **visible)
+        else:
+            strings.emit('stdout', 'adt-read-finding', check=printable(finding['check']), **visible)
+    strings.emit('stdout', 'adt-read-body-start')
+    strings.emit_verbatim(sys.stdout.buffer, base64.b64decode(result['body_base64'], validate=True))
+    return 0
+
+
+def _print_inbox(seat_address, result, ranged):
+    counts = {key: printable(result[key]) for key in ('total', 'answered', 'unanswered', 'imported')}
+    counts['seat_address'] = printable(seat_address)
+    rows = result['rows']
+    if result['truncated'] == 'true':
+        counts.update(shown=str(len(rows)), lowest=printable(rows[-1]['handle']))
+        if ranged:
+            strings.emit('stdout', 'adt-inbox-counts-range-more', **counts)
+        else:
+            strings.emit('stdout', 'adt-inbox-counts-more', **counts)
+    elif ranged:
+        strings.emit('stdout', 'adt-inbox-counts-range', **counts)
+    else:
+        strings.emit('stdout', 'adt-inbox-counts', **counts)
+    for row in rows:
+        stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(int(row['created_at']) // 1000))
+        visible = {key: printable(row[key]) for key in ('handle', 'relay_id', 'state', 'needs', 'sender')}
+        visible['stamp'] = printable(stamp)
+        if row['subject_over_bound'] == 'true':
+            strings.emit('stdout', 'adt-inbox-row-hidden', **visible)
+        else:
+            strings.emit('stdout', 'adt-inbox-row', subject=printable(row['subject']), **visible)
+
+
+def inbox_command(args: argparse.Namespace, resolver: WindowResolver | None) -> int:
+    ready = args.ready if args.ready is not None else os.environ.get('ADT_READY_FILE')
+    if ready is None and resolver is not None:
+        window = resolver()
+        if window is not None:
+            ready = window.ready_path
+    request = {'seat_address': args.seat_address, 'limit': args.limit}
+    if args.since is not None:
+        request['since_ms'] = str(args.since)
+    if args.before_handle is not None:
+        request['before_handle'] = args.before_handle
+    client = _open_read_endpoint(ready)
+    try:
+        result = client.call('relay.inbox', request)
+    finally:
+        client.close()
+    if isinstance(result, api_client.ApiErrorValue):
+        return _refusal(result)
+    if args.json:
+        _refusal(dict(result, seat_address=args.seat_address))
+    else:
+        _print_inbox(args.seat_address, result,
+                     args.since is not None or args.before_handle is not None)
+    return 3 if result['unanswered'] != '0' else 0
 
 
 def _show_path(path):
@@ -189,6 +337,10 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
                 return 0
             finally:
                 service.stop()
+        if args.command == 'read':
+            return read_command(args, resolver)
+        if args.command == 'inbox':
+            return inbox_command(args, resolver)
         key_path, session_id, ready_path = _resolve(args, resolver)
         key = api_client.read_key_file(key_path)
         credentials = {'key_id': key.key_id, 'key_secret': key.key_secret, 'session_id': session_id}

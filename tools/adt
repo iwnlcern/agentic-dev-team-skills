@@ -434,7 +434,16 @@ def console_open(ready_path: str, *, print_only: bool, run: Callable = subproces
 
 def _console_open_selected(args: argparse.Namespace) -> int:
     if args.ready is not None:
-        return console_open(args.ready, print_only=args.print_only)
+        target = lifecycle_paths.ready_target(args.ready)
+        if isinstance(target, lifecycle_paths.ReadyFileInvalid):
+            print('The Console launch page could not be opened.', file=sys.stderr)
+            return 1
+        if isinstance(target, lifecycle_paths.ConsoleTargetUnavailable):
+            print('The Store for this ready file is unavailable for Console. If it is still starting, '
+                  'wait a moment and run this command again. Otherwise check the operator launch terminal '
+                  'for the refusal.', file=sys.stderr)
+            return 1
+        return console_open(target.ready_path, print_only=args.print_only)
 
     root = args.store_root if args.store_root is not None else str(store_layout.production_root())
     target = lifecycle_paths.console_target(root)

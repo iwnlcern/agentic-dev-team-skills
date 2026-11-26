@@ -63,7 +63,7 @@ class TestExport(unittest.TestCase):
         old_digest = '9445baeef11240763072427eee4f9f629979f0a3cc03a6951428dc005784044a'
         artifact = self.export()
         self.assertNotEqual(artifact.digest, old_digest)
-        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 44)
+        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 47)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(load_generator().main(['--check']), 0)
 
@@ -87,7 +87,7 @@ class TestExport(unittest.TestCase):
             'protocol_window_v1', 'schema_payload_v1', 'negotiated_schema_v1'})
         scopes = [(rule.get('type_ref', rule.get('array_ref', rule.get('operation'))), rule['kind']) for rule in rules]
         self.assertEqual(scopes, sorted(set(scopes)))
-        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 44)
+        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 47)
         for item in doc['$defs'].values():
             if item.get('type') == 'object':
                 self.assertIs(item['additionalProperties'], False)
@@ -709,7 +709,7 @@ class TestGeneratedConsumers(unittest.TestCase):
                 with self.subTest(field=field, emitter=emit.__name__), self.assertRaises(ValueError):
                     emit(compiled, altered)
 
-    def test_session_request_and_result_consumer_vectors(self):
+    def test_session_and_inbox_request_and_result_consumer_vectors(self):
         from relay_engine import api_platform, api_protocol as p, api_schema, api_wire as w
         compiled = api_platform.build_platform().registry
         artifact = api_schema.export_schema(compiled, '3.0')
@@ -734,6 +734,25 @@ class TestGeneratedConsumers(unittest.TestCase):
             ('session.end', 'SessionEndArgs', 'SessionEndResult',
              dict(key, session_id='session', operation_key='op'),
              dict(session_id='session', ended_at='2001', receipt='original')),
+            ('relay.inbox', 'RelayInboxArgs', 'RelayInboxResult',
+             dict(seat_address='team.planner@project', limit='500', since_ms='0', before_handle='9'),
+             dict(total='2', answered='0', unanswered='1', imported='1', truncated='false',
+                  rows=[dict(relay_id='relay-8', handle='8', created_at='100',
+                             sender='operator', subject=None, subject_over_bound='true',
+                             needs='act', state='unanswered'),
+                        dict(relay_id='relay-7', handle='7', created_at='99',
+                             sender='team.implementer@project', subject='notice',
+                             subject_over_bound='false', needs='none', state='imported')])),
+            ('relay.read', 'RelayReadArgs', 'RelayReadResult', dict(relay_id='relay-8'),
+             dict(relay_id='relay-8', envelope=dict(
+                  handle='8', kind='REVIEW', sender='team.planner@project',
+                  to=['team.implementer@project'], cc=['operator'], subject='notice',
+                  parent='7', parent_id='relay-7', verdict=None, needs='review',
+                  created_at='100', imported='false'),
+                  body_base64='YQ==', unopened=[dict(relay_id='relay-7', handle='7')],
+                  refs=[dict(ordinal='1', spelling='#7')],
+                  findings=[dict(handle='1', severity='advisory', status='open',
+                                 summary='notice', check=None)])),
         ]
         cases = []
         for operation, args_type, result_type, args, result in rows:
@@ -802,6 +821,31 @@ class TestGeneratedConsumers(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     self.run_consumer(language, cases=control, controls=False)
 
+    def test_lookup_consumer_vectors(self):
+        rows = (('relay_unknown', 'check_relay_id'), ('project_unknown', 'check_seat_address'),
+                ('seat_unknown', 'check_seat_address'))
+
+        def frame(error):
+            raw = jcs.jcs_encode({'request_id': '1', 'error': error})
+            return (len(raw).to_bytes(4, 'big') + raw).hex()
+
+        cases = []
+        for kind, remedy in rows:
+            error = {'code': 'E_API_NOT_FOUND', 'class': 'lookup',
+                     'cause': {'kind': kind}, 'remedy': remedy}
+            bad = dict(error, remedy=next(other for _, other in rows if other != remedy))
+            cases.extend([
+                ({'action': 'encode_error', 'id': '1', 'value': error}, {'hex': frame(error)}),
+                ({'action': 'encode_error', 'id': '1', 'value': bad}, {'invalid': True}),
+                ({'action': 'decode', 'id': '1', 'operation': 'protocol.connect', 'connect': '',
+                  'frame': frame(error)}, {'error': error}),
+                ({'action': 'decode', 'id': '1', 'operation': 'protocol.connect', 'connect': '',
+                  'frame': frame(bad)}, {'unavailable': True}),
+            ])
+        for language in ('rs', 'ts'):
+            with self.subTest(language=language):
+                self.run_consumer(language, cases=cases, controls=False)
+
     def test_manifest_matches_artifacts(self):
         from relay_engine import api_schema
         root = TOOLS / 'relay_engine/generated/api'
@@ -813,7 +857,7 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['operations'], [
             'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
             'queue.dismiss-all', 'queue.get', 'queue.list', 'queue.open', 'queue.raise',
-            'queue.withdraw', 'relay.submit', 'seat.identify', 'session.end',
+            'queue.withdraw', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end',
             'session.resume', 'session.sign-in',
         ])
         self.assertEqual(set(manifest['bindings']), {'api_3_0.rs', 'api_3_0.ts'})

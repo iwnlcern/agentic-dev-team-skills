@@ -500,6 +500,30 @@ class SealRendererTests(unittest.TestCase):
             self.service.rendered_through(P, C)
         self.assertEqual(caught.exception.cause, 'high_water_unusable')
 
+    def test_high_water_raise_names_errno(self):
+        renderer = self.renderer()
+        original = self.service._open
+
+        def opened(project, name, *, write=False):
+            if name.endswith('.high-water') and write:
+                raise OSError(errno.ENOSPC, 'forced')
+            return original(project, name, write=write)
+
+        for converted in (False, True):
+            with self.subTest(converted=converted):
+                self.reports.clear()
+                patch = (mock.patch.object(os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'forced'))
+                         if converted else mock.patch.object(self.service, '_open', side_effect=opened))
+                with patch, self.assertRaises(self.types.SealUnusable) as caught:
+                    renderer._raise(P, C, 1)
+                exc = caught.exception
+                self.assertEqual((exc.cause, exc.chain_id), ('high_water_unusable', C))
+                self.assertEqual(exc.errno_name, 'ENOSPC')
+                self.assertEqual(str(exc), f"{('high_water_unusable', C)!r} errno=ENOSPC")
+                self.assertEqual(self.reports, [
+                    self.types.SealReport(P, C, 'high_water_unusable', 0, 'ENOSPC'),
+                ])
+
     def test_reader_never_sees_half_written_slot(self):
         renderer = self.renderer(); self.open(renderer)
         done = self.spawn(lambda: [renderer.drain(P, C, through=n) for n in range(1, 1001)])
@@ -995,15 +1019,67 @@ class SealRendererTests(unittest.TestCase):
             self.assertFalse(any(r.kind == 'drain' for r in requests))
 
     def test_key_seq_race_two_processes(self):
+        owned_processes = []
+        owned_pipe_ends = []
+        context = None
+
+        def cleanup_spawn():
+            nonlocal context
+            problems = []
+            process = end = None
+            for process, attempted in owned_processes:
+                if not attempted:
+                    continue
+                if process.pid is None:
+                    problems.append('start failed, ownership unknown')
+                    continue
+                try:
+                    if process.exitcode is None:
+                        process.terminate()
+                        process.join(5)
+                    if process.exitcode is None:
+                        process.kill()
+                        process.join(5)
+                except OSError as error:
+                    problems.append(f'cannot reap owned child {process.pid}: {error}')
+                if process.exitcode is None:
+                    problems.append(f'owned child {process.pid} still alive')
+            for end in owned_pipe_ends:
+                try:
+                    end.close()
+                except OSError as error:
+                    problems.append(f'cannot close owned pipe end: {error}')
+            if problems:
+                self.fail('; '.join(problems))
+            owned_processes.clear()
+            owned_pipe_ends.clear()
+            context = None
+            del process, end
+            from multiprocessing import resource_tracker
+
+            tracker = resource_tracker._resource_tracker
+            tracker._stop()
+            self.assertIsNone(tracker._pid)
+
+        self.addCleanup(cleanup_spawn)
         for rename_control in (False, True):
             with self.subTest(rename_control=rename_control):
                 root = self.base / ('process-seal-control' if rename_control else 'process-seal')
-                context = multiprocessing.get_context('spawn'); children = []; pipes = []
+                context = multiprocessing.get_context('spawn')
+                children = []
+                pipes = []
                 for project, chain in ((P, C), (Q, D)):
                     parent, child = context.Pipe()
+                    owned_pipe_ends.extend((parent, child))
                     process = context.Process(target=key_child,
                                 args=(str(root), project, chain, child, rename_control))
-                    process.start(); child.close(); children.append(process); pipes.append(parent)
+                    owned = [process, False]
+                    owned_processes.append(owned)
+                    owned[1] = True
+                    process.start()
+                    child.close()
+                    children.append(process)
+                    pipes.append(parent)
                 try:
                     for pipe in pipes:
                         self.assertTrue(pipe.poll(30)); self.assertEqual(pipe.recv(), 'before-link')
@@ -1026,7 +1102,9 @@ class SealRendererTests(unittest.TestCase):
                     for process in children:
                         process.join(60)
                         if process.is_alive():
-                            process.kill(); process.join(); self.fail('owned fixture child exceeded hang ceiling')
+                            process.kill()
+                            process.join(5)
+                            self.fail('owned fixture child exceeded hang ceiling')
                         exits.append(process.exitcode)
                     self.assertEqual(exits, [0, 0])
 

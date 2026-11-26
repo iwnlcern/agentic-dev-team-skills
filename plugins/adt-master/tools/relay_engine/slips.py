@@ -1,5 +1,6 @@
-"""Authority value contracts, admission-time implement slips and act queries."""
+"""Authority value contracts, admission-time implement slips and queries."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal
 
@@ -34,6 +35,28 @@ class Answer:
 
 
 @dataclass(frozen=True)
+class StandingSlip:
+    slip_id: str
+    revision: int
+    state: str
+    kind: str
+    bundle_id: str
+    repository_id: str
+    binds: str
+    held: Answer | None
+
+
+@dataclass(frozen=True)
+class Standing:
+    slips: tuple[StandingSlip, ...]
+    hold: Answer | None
+
+
+class QueryUnavailable(RuntimeError):
+    """A read could not produce an authority query result."""
+
+
+@dataclass(frozen=True)
 class Effect:
     kind: str
     repository_id: str | None
@@ -46,6 +69,7 @@ class Effect:
         if self.kind not in EFFECT_CLASSES:
             raise ValueError("unknown effect kind")
 
+from hashlib import sha256
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -498,16 +522,51 @@ def working_path(conn, artifact, effect):
         return str(Path(base) / relative)
 
 
+def _lineage_hold(conn, slip) -> Answer | None:
+    principal = slip['issuer_seat_id'] or slip['issuer_special']
+    failed, _, objected = _evidence(conn, slip['issued_in'], principal, slip['seat_id'])
+    if failed:
+        return _lineage_answer(failed, objected, slip['issued_in'], _planner(conn, slip['seat_id']), slip)
+    return None
+
+
+def _claim_hold(conn, slip, planner) -> Answer | None:
+    for claim in json.loads(slip['binds'])['claims']:
+        for lock in claim['locks']:
+            objection = claims.standing_objection(
+                conn, slip['project_id'], lock['artifact'], lock['content_sha256'])
+            if objection is not None:
+                unblocker = 'operator' if objection.verdict == 'human-decision-required' else planner
+                return _answer('verification-objected',
+                               strings.render('authority-verification', kind=claim['kind'],
+                                              state='objected', relay=objection.review_relay_id),
+                               unblocker, slip)
+        state = claims.verification_state(conn, claim['claim'])
+        if state == 'pending':
+            row = conn.execute('SELECT reviewer_seat_id FROM verification_requests WHERE claim_relay_id = ? LIMIT 1',
+                               (claim['claim'],)).fetchone()
+            reviewer = _seat(conn, row[0]) if row and row[0] is not None else None
+            if not claims.reviewer_can_answer(conn, row[0] if row else None):
+                reviewer = None
+            unblocker = reviewer[3] + '.' + reviewer[2] if reviewer else 'operator'
+            if reviewer is None:
+                reason = strings.render('authority-no-reviewer', relay=claim['claim'])
+            else:
+                reason = strings.render('authority-verification', kind=claim['kind'],
+                                        state=state, relay=claim['claim'])
+            return _answer('verification-pending', reason, unblocker, slip)
+    return None
+
+
 def _checked_slip(conn, slip, effect, digest):
     planner = _planner(conn, slip['seat_id'])
     if slip['state'] != 'live':
         return _answer('slip-invalid', strings.render('authority-state', state=slip['state']), planner, slip)
     if slip['repository_id'] != effect.repository_id:
         return _answer('slip-invalid', strings.render('authority-repository', repository=slip['repository_id']), planner, slip)
-    principal = slip['issuer_seat_id'] or slip['issuer_special']
-    failed, _, objected = _evidence(conn, slip['issued_in'], principal, slip['seat_id'])
-    if failed:
-        return _lineage_answer(failed, objected, slip['issued_in'], planner, slip)
+    lineage_hold = _lineage_hold(conn, slip)
+    if lineage_hold is not None:
+        return lineage_hold
     binds = json.loads(slip['binds'])
     for claim in binds['claims']:
         for lock in claim['locks']:
@@ -538,31 +597,78 @@ def _checked_slip(conn, slip, effect, digest):
                            strings.render('authority-verification', kind=bound['kind'],
                                           state='objected', relay=objection.review_relay_id),
                            unblocker, slip)
-    for claim in binds['claims']:
-        for lock in claim['locks']:
-            objection = claims.standing_objection(
-                conn, slip['project_id'], lock['artifact'], lock['content_sha256'])
-            if objection is not None:
-                unblocker = 'operator' if objection.verdict == 'human-decision-required' else planner
-                return _answer('verification-objected',
-                               strings.render('authority-verification', kind=claim['kind'],
-                                              state='objected', relay=objection.review_relay_id),
-                               unblocker, slip)
-        state = claims.verification_state(conn, claim['claim'])
-        if state == 'pending':
-            row = conn.execute('SELECT reviewer_seat_id FROM verification_requests WHERE claim_relay_id = ? LIMIT 1',
-                               (claim['claim'],)).fetchone()
-            reviewer = _seat(conn, row[0]) if row and row[0] is not None else None
-            if not claims.reviewer_can_answer(conn, row[0] if row else None):
-                reviewer = None
-            unblocker = reviewer[3] + '.' + reviewer[2] if reviewer else 'operator'
-            if reviewer is None:
-                reason = strings.render('authority-no-reviewer', relay=claim['claim'])
-            else:
-                reason = strings.render('authority-verification', kind=claim['kind'],
-                                        state=state, relay=claim['claim'])
-            return _answer('verification-pending', reason, unblocker, slip)
-    return _allow(slip)
+    return _claim_hold(conn, slip, planner) or _allow(slip)
+
+
+@contextmanager
+def _read_query(conn):
+    """Keep all reads in one snapshot without ending a caller's transaction."""
+    try:
+        with submit.read_guard(conn):
+            owns_snapshot = not conn.in_transaction
+            if owns_snapshot:
+                conn.execute('BEGIN')
+            try:
+                yield
+            finally:
+                if owns_snapshot and conn.in_transaction:
+                    conn.execute('ROLLBACK')
+    except Exception as exc:
+        raise QueryUnavailable('authority query unavailable') from exc
+
+
+def standing(conn, seat_id: str, now_ms: int) -> Standing:
+    """Report live scopes and target-independent holds for an authenticated seat."""
+    with _read_query(conn):
+        seat = _seat(conn, seat_id)
+        if seat is None:
+            raise LookupError('unknown seat')
+        restore = restore_cancel.held(conn, seat[1])
+        if restore is not None:
+            job = restore.job_id
+            try:
+                reason = strings.render('authority-restore-standing', job=job)
+            except ValueError:
+                raw = job.encode('utf-8', 'surrogatepass')
+                token = strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw))
+                reason = strings.render('authority-restore-standing', job=str(token))
+            return Standing((), _answer('restore-held', reason, 'operator'))
+        rows = conn.execute('SELECT ' + _SLIP_COLUMNS + ', kind FROM slips'
+                            " WHERE seat_id = ? AND state = 'live' ORDER BY issued_at, handle", (seat_id,))
+        planner = _planner(conn, seat_id)
+        entries = []
+        for row in rows:
+            slip = _slip(row)
+            held = _lineage_hold(conn, slip) or _claim_hold(conn, slip, planner)
+            entries.append(StandingSlip(slip['id'], slip['revision'], slip['state'], row[-1],
+                                        slip['bundle_id'], slip['repository_id'], slip['binds'], held))
+        return Standing(tuple(entries), None)
+
+
+
+def scope(conn, seat_id: str, repository_id: str, *,
+          ref: str | None = None, path: str | None = None) -> tuple[str, int] | None:
+    """Report live implement-slip coverage, not whether a particular act would allow."""
+    if (ref is None) == (path is None):
+        raise ValueError('scope needs exactly one ref or path')
+    if path is not None and (not path or Path(path).is_absolute() or '..' in Path(path).parts):
+        return None
+    if ref == '':
+        return None
+    with _read_query(conn):
+        binding = None if ref is None else conn.execute(
+            'SELECT seat_id, bundle_id FROM branch_bindings WHERE repository_id = ? AND branch = ?',
+            (repository_id, ref)).fetchone()
+        sql = ("SELECT id, revision FROM slips WHERE seat_id = ? AND repository_id = ?"
+               " AND kind = 'implement' AND state = 'live'")
+        params = [seat_id, repository_id]
+        if binding is not None:
+            if binding[0] != seat_id:
+                return None
+            sql += ' AND bundle_id = ?'
+            params.append(binding[1])
+        row = conn.execute(sql + ' ORDER BY issued_at DESC, handle DESC LIMIT 1', params).fetchone()
+        return tuple(row) if row is not None else None
 
 
 def _act(conn, seat_id, effect, now_ms, digest):

@@ -26,6 +26,7 @@ import platform
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,10 @@ SWEEP_ROUNDS = 5
 PLATFORM_DIRS = ("/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/System/")
 BOTH = frozenset({"mac", "linux"})
 MAC = frozenset({"mac"})
+LINUX = frozenset({"linux"})
+SAMPLER_INTERVAL = 0.01
+SAMPLER_INSTANCE_CAP = 4096
+SAMPLER_COMMAND_BYTES = 1024
 # The one engine module that runs on the mac leg only: pdc's real inbox sweeper reads the
 # engine's mirror headers against the operator's own checkout, which the linux image never
 # has; a pdc break blocks the release unless the operator approves it by name
@@ -229,6 +234,10 @@ def step_table(repo):
         steps.append(Step("release_check_tests",
                           [python, "-m", "unittest", "discover", "-s", "tools/release_check_tests"],
                           MAC, ("tools/release_check_tests",), summary=True))
+    if (repo / "tools/release_check_sampler_tests").is_dir():
+        steps.append(Step("release_check_sampler_tests",
+                          [python, "-m", "unittest", "discover", "-s", "tools/release_check_sampler_tests"],
+                          LINUX, ("tools/release_check_sampler_tests",), summary=True))
     for relative, args, legs in KNOWN_CHECKS:
         if (repo / relative).is_file():
             step_id = " ".join([Path(relative).name, *args])
@@ -261,7 +270,7 @@ def _discovered_units(repo):
     units.extend(_rel(repo, p) for p in sorted(repo.glob("tools/check-*.py")))
     if (repo / "tools/mtbattery.py").is_file():
         units.append("tools/mtbattery.py")
-    for directory in ("tools/kit_tests", "tools/release_check_tests"):
+    for directory in ("tools/kit_tests", "tools/release_check_tests", "tools/release_check_sampler_tests"):
         if (repo / directory).is_dir():
             units.append(directory)
     return units
@@ -360,7 +369,7 @@ def release_preflight(repo, steps, exclusions):
     return literals, problems
 
 
-def _listing():
+def _listing(collector=None):
     """(pid, pgid, markers) for this user's live processes; markers are the MARKER values
     found in each environment.  Read as bytes: any process's environment may hold bytes
     that are not UTF-8.  Zombies are skipped (they hold no environment and are not running)."""
@@ -378,7 +387,14 @@ def _listing():
             if stat[0] == b"Z":
                 continue
             markers = frozenset(e[len(prefix):] for e in environ if e.startswith(prefix))
-            procs.append((int(entry.name), int(stat[2]), markers))
+            pid = int(entry.name)
+            procs.append((pid, int(stat[2]), markers))
+            if collector is not None:
+                try:
+                    start_tick = int(stat[19])
+                except (IndexError, ValueError):
+                    start_tick = None
+                collector(pid, start_tick)
     else:
         listing = subprocess.run(
             ["ps", "-E", "-ww", "-o", "pid=,pgid=,stat=,command=", "-U", str(os.getuid())],
@@ -426,15 +442,257 @@ class _Sweep:
                   f"{SWEEP_ROUNDS} SIGKILL rounds", file=sys.stderr)
 
 
+class _SampledRow(dict):
+    """The per-leg observer is not a field in the legacy result row."""
+
+    def __init__(self, row, sampler):
+        super().__init__(row)
+        self.sampler = sampler
+
+
+def _sample_stat(entry):
+    before, after = (entry / "stat").read_bytes().rsplit(b")", 1)
+    fields = after.split()
+    return int(before.split(b" ", 1)[0]), int(fields[19]), int(fields[1]), int(fields[2])
+
+
+class _Sampler:
+    """Linux diagnostic only; legacy sweep control never reads the sampled processes."""
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self._store = threading.Lock()
+        self.active = {}
+        self.instances = {}
+        self.history = {}
+        self.faults = []
+        self.scan_times = []
+        self.scan_intervals = []
+        self.sweep_intervals = []
+        self.last_sweep = None
+        self.pass_number = 0
+        self.instance_cap = False
+
+    def fault(self, point, kind, *, step=None):
+        self.faults.append({"point": point, "type": kind,
+                            "steps": [step] if step is not None else sorted(self.active)})
+
+    def optional(self, point, operation, *args):
+        try:
+            return operation(*args)
+        except Exception as error:  # Diagnostic work must not enter the runner stop path.
+            if point == "history":
+                # Every history operation takes its own step ID first.
+                self.fault(point, type(error).__name__, step=args[0])
+            else:
+                self.fault(point, type(error).__name__)
+            return None
+
+    def activate(self, step, marker, pgid):
+        self.active = {**self.active, step: (marker, pgid)}
+
+    def retire(self, step):
+        self.active = {name: pair for name, pair in self.active.items() if name != step}
+
+    def observe(self, step, pids, ticks):
+        history = self.history.setdefault(step, {})
+        for pid in pids:
+            rows = history.setdefault(pid, {})
+            tick = ticks.get(pid)
+            # For aggregation only distinct sightings matter; retain their first pass.
+            rows.setdefault(tick, self.pass_number)
+
+    def tick(self, now):
+        if self.last_sweep is not None:
+            self.sweep_intervals.append(now - self.last_sweep)
+        self.last_sweep = now
+        self.pass_number += 1
+
+    def start(self):
+        threading.Thread(target=self._run, name="release-check-sampler", daemon=True).start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _scan(self, proc=Path("/proc")):
+        active = self.active
+        captures = {}
+        marker_prefix = f"{MARKER}=".encode()
+        for entry in proc.iterdir():
+            if self._stop.is_set():
+                break
+            if not entry.name.isdecimal():
+                continue
+            try:
+                pid, tick, parent, group = _sample_stat(entry)
+                markers = frozenset(item[len(marker_prefix):] for item in
+                                    (entry / "environ").read_bytes().split(b"\0")
+                                    if item.startswith(marker_prefix))
+                matched = {}
+                for step, (token, pgid) in active.items():
+                    marker_match, group_match = token in markers, group == pgid
+                    if marker_match or group_match:
+                        matched[step] = ("both" if marker_match and group_match else
+                                         "marker" if marker_match else "group")
+                if not matched:
+                    continue
+                try:
+                    with (entry / "cmdline").open("rb") as stream:
+                        raw = stream.read(SAMPLER_COMMAND_BYTES + 1)
+                except OSError:
+                    raw = b""
+                last_pid, last_tick, _, _ = _sample_stat(entry)
+            except (OSError, ValueError, IndexError):
+                continue
+            if (pid, tick) != (last_pid, last_tick):
+                continue
+            at = time.monotonic()
+            args = raw[:SAMPLER_COMMAND_BYTES].rstrip(b"\0").replace(b"\0", b" ")
+            try:
+                command = args.decode() if args else None
+                undecodable = False
+            except UnicodeDecodeError:
+                command, undecodable = args.decode(errors="backslashreplace"), True
+            captures[(pid, tick)] = {
+                "start_tick": tick, "ppid": parent, "pgid": group, "matched": matched,
+                "first_seen": at, "last_seen": at,
+                "last_sampled_command": command, "command_sampled_at": at if command else None,
+                "command_status": "sampled" if command else "key-only",
+                "truncated": len(raw) > SAMPLER_COMMAND_BYTES, "undecodable": undecodable,
+            }
+        self._keep(captures)
+
+    def _keep(self, captures):
+        with self._store:
+            for key, info in captures.items():
+                old = self.instances.get(key)
+                if old is None and len(self.instances) >= SAMPLER_INSTANCE_CAP:
+                    self.instance_cap = True
+                    continue
+                if old is not None:
+                    info["first_seen"] = old["first_seen"]
+                    if info["last_sampled_command"] is None:
+                        for field in ("last_sampled_command", "command_sampled_at",
+                                      "command_status", "truncated", "undecodable"):
+                            info[field] = old[field]
+                self.instances[key] = info
+
+    def _run(self):
+        previous = None
+        try:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                self._scan()
+                with self._store:
+                    self.scan_times.append(time.monotonic() - started)
+                    if previous is not None:
+                        self.scan_intervals.append(started - previous)
+                previous = started
+                self._stop.wait(max(0, SAMPLER_INTERVAL - (time.monotonic() - started)))
+        except Exception as error:
+            self.fault("scan", type(error).__name__)
+
+    def snapshot(self, timeout):
+        if not self._store.acquire(timeout=timeout):
+            return None
+        try:
+            instances = dict(self.instances)
+            scans, scan_intervals = self.scan_times[:], self.scan_intervals[:]
+            capped = self.instance_cap
+        finally:
+            self._store.release()
+        metrics = {"scans": len(scans), "instance-cap": capped}
+        for name, values in (("scan_seconds", scans), ("scan_interval_seconds", scan_intervals),
+                             ("sweep_tick_interval_seconds", self.sweep_intervals)):
+            metrics[name] = {"max": max(values, default=None),
+                             "median": statistics.median(values) if values else None}
+        return {"instances": instances, "metrics": metrics}
+
+
+def _new_sampler():
+    return _Sampler()
+
+
+def _name_leaked(leaked, history, instances, *, history_incomplete=False):
+    by_pid = {}
+    for (pid, _), detail in instances.items():
+        by_pid.setdefault(pid, []).append(detail)
+    rows = []
+    for pid in leaked:
+        ticks = {tick for _, tick in history.get(pid, ())} or {None}
+        observations = []
+        for tick in sorted(ticks - {None}):
+            detail = instances.get((pid, tick))
+            named = bool(not history_incomplete and detail
+                         and detail.get("last_sampled_command") is not None)
+            observation = {"start_tick": tick, "status": "named" if named else "unnamed"}
+            if named:
+                observation["instance"] = detail
+            observations.append(observation)
+        if None in ticks:
+            observations.append({"status": "no-key"})
+        summary = "ambiguous" if len(ticks) > 1 else (
+            "named" if observations[0]["status"] == "named" else "unnamed")
+        row = {"pid": pid, "summary": summary, "observations": observations}
+        if history_incomplete:
+            row.update(summary="unnamed", reason="history-incomplete")
+            for observation in observations:
+                observation["reason"] = "history-incomplete"
+        elif ticks == {None} and len(by_pid.get(pid, ())) == 1:
+            row["pid_joined_unconfirmed"] = by_pid[pid][0]
+        rows.append(row)
+    return rows
+
+
+def _add_sampler_results(sampler, results):
+    snapshot = sampler.optional("snapshot", sampler.snapshot, 0.5)
+    if snapshot is None:
+        if not any(item["point"] == "snapshot" for item in sampler.faults):
+            sampler.fault("snapshot", "store-unavailable")
+        results["sampler"] = {"sampler-incomplete": list(sampler.faults)}
+        return
+    try:
+        named = []
+        incomplete_steps = {step for fault in sampler.faults if fault["point"] == "history"
+                            for step in fault["steps"]}
+        for row in results["steps"]:
+            ticks = sampler.history.get(row["id"], {})
+            history = {pid: [(at, tick) for tick, at in passes.items()]
+                       for pid, passes in ticks.items()}
+            named.append(_name_leaked(row["leaked"], history, snapshot["instances"],
+                                      history_incomplete=row["id"] in incomplete_steps))
+        metrics = {**snapshot["metrics"], "sampler-incomplete": list(sampler.faults)}
+        # Validate the complete optional addition before publishing any of it.
+        json.dumps((named, metrics))
+    except Exception as error:
+        sampler.fault("serialize", type(error).__name__)
+        results["sampler"] = {"sampler-incomplete": list(sampler.faults)}
+        return
+    for row, names in zip(results["steps"], named):
+        row["leaked_named"] = names
+    results["sampler"] = metrics
+
+
 def _advance_sweeps(sweeps):
     """One pass over the pending sweeps; finished ones leave the list."""
-    listing = _listing()
+    sampler = getattr(sweeps[0].row, "sampler", None) if sweeps else None
+    ticks = {}
+    if sampler is None:
+        listing = _listing()
+    else:
+        listing = _listing(lambda pid, tick: sampler.optional("collector", ticks.__setitem__, pid, tick))
     now = time.monotonic()
+    if sampler is not None:
+        sampler.optional("collector", sampler.tick, now)
     for sweep in list(sweeps):
         alive = {pid for pid, group, markers in listing
                  if sweep.marker in markers or group == sweep.pgid}
         sweep.seen |= alive
+        if sampler is not None:
+            sampler.optional("history", sampler.observe, sweep.row["id"], alive, ticks)
         if not alive:
+            if sampler is not None:
+                sampler.optional("history", sampler.retire, sweep.row["id"])
             sweep.finish()
             sweeps.remove(sweep)
             continue
@@ -449,6 +707,8 @@ def _advance_sweeps(sweeps):
                 _signal(pid, signal.SIGKILL)
             sweep.rounds += 1
         else:
+            if sampler is not None:
+                sampler.optional("history", sampler.retire, sweep.row["id"])
             sweep.finish(alive)
             sweeps.remove(sweep)
 
@@ -538,6 +798,42 @@ class LegResult:
     results_path: Path = None
 
 
+def _publish_leg_result(path, results, sampler, sampler_note):
+    # This is exactly the old write_text payload. Prepare it before optional work.
+    legacy = json.dumps(results, indent=2) + "\n"
+    if sampler is not None or sampler_note is not None:
+        stage = path.with_name("results.json.sampler-tmp")
+        try:
+            if sampler is not None:
+                sampler.optional("serialize", _add_sampler_results, sampler, results)
+                if "sampler" not in results:
+                    results["sampler"] = {"sampler-incomplete": list(sampler.faults)}
+            else:
+                results["sampler"] = sampler_note
+            augmented = (json.dumps(results, indent=2) + "\n").encode("utf-8")
+            if stage.write_bytes(augmented) != len(augmented):
+                raise OSError("short sampler result write")
+            os.replace(stage, path)
+            return
+        except Exception as error:
+            try:
+                stage.unlink(missing_ok=True)
+            except Exception:
+                pass  # The optional cleanup must not block the legacy write.
+            kind = type(error).__name__
+            try:
+                if sampler is not None:
+                    sampler.fault("publish", kind)
+                else:
+                    sampler_note.setdefault("sampler-incomplete", []).append(
+                        {"point": "publish", "type": kind, "steps": []})
+                print(f"release-check: {results['leg']}: sampler output not published ({kind})",
+                      file=sys.stderr)
+            except Exception:
+                pass  # Losing the diagnostic must not skip the required write.
+    path.write_text(legacy)
+
+
 def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, exclusions=EXCLUSIONS,
             leg_dir=None, exact_exclusions=False):
     """Run one leg's steps under the cap; write out/<leg>/results.json and one log per step."""
@@ -575,11 +871,26 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
         "exclusions": [{"path": e.path, "reason": e.reason} for e in exclusions],
         "steps": [], "exit": None,
     }
+    sampler = None
+    sampler_note = None
+    if leg == "linux":
+        try:
+            sampler = _new_sampler()
+            if sampler is not None:
+                sampler.start()
+        except Exception as error:
+            sampler_note = {"sampler-incomplete": [
+                {"point": "start", "type": type(error).__name__, "steps": []}]}
+            sampler = None
+    elif leg == "mac":
+        sampler_note = {"platform": "not-sampled"}
     rows = {}
     for index, step in enumerate(active):
         log = logs / f"{index:03d}-{step.id.replace('/', '_').replace(' ', '_')}.log"
         rows[step.id] = {"id": step.id, "argv": list(step.argv), "outcome": "unfinished",
                          "reason": None, "exit_code": None, "wall_seconds": 0.0, "log": str(log), "leaked": []}
+        if sampler is not None:
+            rows[step.id] = _SampledRow(rows[step.id], sampler)
 
     since = datetime.datetime.now().replace(microsecond=0)
     deadline = time.monotonic() + cap_seconds
@@ -599,6 +910,8 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     if STOP.is_set():
         results["interrupted"] = True
     _stop_all(running, sweeps, rows, errors)
+    if sampler is not None:
+        sampler.optional("snapshot", sampler.stop)
     started_log.close()
     for step in pending:
         Path(rows[step.id]["log"]).touch()
@@ -614,7 +927,7 @@ def run_leg(leg, steps, workers, cap_seconds, out, *, repo=REPO, environ=None, e
     exit_code = 2 if errors else 0 if all(r["outcome"] == "pass" for r in results["steps"]) else 1
     results["exit"] = exit_code
     results_path = leg_out / "results.json"
-    results_path.write_text(json.dumps(results, indent=2) + "\n")
+    _publish_leg_result(results_path, results, sampler, sampler_note)
     failed = [r["id"] for r in results["steps"] if r["outcome"] != "pass"]
     print(f"release-check: {leg} leg exit {exit_code}; {len(failed)} of {len(active)} steps not green"
           + (" (interrupted)" if results["interrupted"] else "")
@@ -637,6 +950,9 @@ def _schedule(pending, running, sweeps, rows, base_env, repo, workers, deadline,
                                     stdout=handle, stderr=subprocess.STDOUT, close_fds=True,
                                     start_new_session=True)
             running[step.id] = (proc, marker, time.monotonic(), handle)
+            sampler = getattr(rows[step.id], "sampler", None)
+            if sampler is not None:
+                sampler.optional("history", sampler.activate, step.id, marker.encode(), proc.pid)
             # Written as the step starts, so a runner killed outright leaves a record of what
             # to stop (plan r6 change 3; tools/TESTING.md "After a SIGKILL").
             started_log.write(json.dumps({"id": step.id, "pid": proc.pid, "marker": marker}) + "\n")

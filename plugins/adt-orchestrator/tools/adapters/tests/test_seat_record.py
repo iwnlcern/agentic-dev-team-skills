@@ -23,6 +23,7 @@ REPO = Path(__file__).resolve().parents[3]
 # added there would be invisible to the seat-record obligation check.
 SIGN_IN_STANDINS: frozenset[str] = frozenset({
     "tools/relay_engine/tests/test_api_protocol.py",
+    "tools/relay_engine/tests/test_api_relay_inbox.py",
     "tools/relay_engine/tests/test_api_sessions.py",
     "tools/relay_engine/tests/test_api_service.py",
     "tools/relay_engine/tests/test_api_submit.py",
@@ -453,6 +454,7 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
     def test_sign_in_exceptions_are_exact(self):
         self.assertEqual(SIGN_IN_STANDINS, frozenset({
             "tools/relay_engine/tests/test_api_protocol.py",
+            "tools/relay_engine/tests/test_api_relay_inbox.py",
             "tools/relay_engine/tests/test_api_sessions.py",
             "tools/relay_engine/tests/test_api_service.py",
             "tools/relay_engine/tests/test_api_submit.py",

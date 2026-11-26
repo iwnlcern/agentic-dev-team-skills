@@ -298,6 +298,178 @@ class SlipStore(ClaimStore):
         return answer
 
 
+class TestStanding(SlipStore):
+    def standing(self, conn=None):
+        return slips.standing(self.conn if conn is None else conn, IMPL.seat_id, self.clock)
+
+    def test_standing_answer(self):
+        _, _, old = self.build(bundle='replaced', design=False)
+        _, _, revoked = self.build(bundle='revoked', design=False)
+        self.assertEqual(slips.revoke(self.conn, self.issued(revoked), 'operator', 'stop',
+                                     self.clock).outcome, 'allow')
+        _, _, live = self.build(bundle='replaced', design=False)
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        other = self.submit(with_repo(draft(kind='IMPL', needs='act', bundle='another',
+                                           to=SECOND.address)), operator)
+        self.issued(other)
+        self.assertEqual(self.conn.execute('SELECT state FROM slips WHERE id = ?',
+                                          (self.issued(old),)).fetchone(), ('ended',))
+        answer = self.standing()
+        self.assertEqual([(slip.slip_id, slip.state, slip.kind, slip.repository_id)
+                          for slip in answer.slips],
+                         [(self.issued(live), 'live', 'implement', 'repo-1')])
+        self.assertIsNone(answer.hold)
+
+    def test_standing_empty_seat(self):
+        answer = self.standing()
+        self.assertEqual((answer.slips, answer.hold), ((), None))
+
+    def test_standing_claim_hold_matches_act(self):
+        dc, pc, _ = self.build(verified=False)
+        self.verify(dc)
+        pending = self.code('verification-pending')
+        self.assertEqual(self.standing().slips[0].held, pending)
+        self.verify(pc)
+        self.assertIsNone(self.standing().slips[0].held)
+        self.assertEqual(self.act().outcome, 'allow')
+
+    def test_standing_lineage_hold(self):
+        """Construct loss of delegation after issuance using only a lineage read double.
+
+        Ordinary submissions do not remove delegation, and the authority-row
+        fixture guard forbids editing its recipients directly.
+        """
+        delegation = self.go()
+        plan = self.approved('plan', parent=delegation.relay_id)
+        self.verify(plan)
+        issued = self.issue(plan)
+        sid = self.issued(issued)
+        before = self.standing().slips
+        self.assertEqual([(entry.slip_id, entry.state) for entry in before], [(sid, 'live')])
+        self.assertIsNone(before[0].held)
+
+        # Change only the observed delegation in this issuance's real walk.
+        real_lineage = queries.lineage
+
+        def without_delegation(conn, relay_id, *args, **kwargs):
+            rows = real_lineage(conn, relay_id, *args, **kwargs)
+            if relay_id == issued.relay_id:
+                return [replace(row, needs='read') if row.id == delegation.relay_id else row
+                        for row in rows]
+            return rows
+
+        with mock.patch.object(queries, 'lineage', side_effect=without_delegation):
+            entry, = self.standing().slips
+            self.assertEqual((entry.slip_id, entry.state), (sid, 'live'))
+            self.assertIsNotNone(entry.held, 'expected a lineage hold after delegation is removed')
+            self.assertEqual(entry.held, self.code('lineage-incomplete'))
+
+    def test_standing_restore_hold_not_empty(self):
+        from relay_engine import restore_cancel
+
+        self.build()
+        restore_cancel.cancel_all(self.conn, 'p', 'fixture-job-7', self.clock)
+        answer = self.standing()
+        self.assertEqual(answer.slips, ())
+        self.assertIsNotNone(answer.hold)
+        self.assertEqual((answer.hold.outcome, answer.hold.code, answer.hold.unblocker),
+                         ('held', 'authority.restore-held', 'operator'))
+        self.assertIn('fixture-job-7', answer.hold.reason)
+
+        from hashlib import sha256
+        from relay_engine import strings
+
+        with self.subTest(witness='sentinel'):
+            with mock.patch.dict(strings.INVENTORY,
+                                 {'authority-restore-standing': 'restore probe {job}'}):
+                self.assertEqual(self.standing().hold.reason, 'restore probe fixture-job-7')
+
+        for job_id in ('', '\n', 'a\u2028b'):
+            with self.subTest(witness='refused-job', job_id=job_id):
+                restore_cancel.cancel_all(self.conn, 'p', job_id, self.clock)
+                answer = self.standing()
+                self.assertEqual(answer.slips, ())
+                self.assertIsNotNone(answer.hold)
+                self.assertEqual((answer.hold.outcome, answer.hold.code, answer.hold.unblocker),
+                                 ('held', 'authority.restore-held', 'operator'))
+                raw = job_id.encode('utf-8', 'surrogatepass')
+                token = str(strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw)))
+                self.assertEqual(answer.hold.reason,
+                                 'a restore (job ' + token + ') holds this project')
+
+    def test_act_path_mismatch_outranks_pending_claim(self):
+        # Preservation: this precedence already holds before standing exists.
+        self.build(verified=False)
+        self.code('verification-pending')
+        self.plan.write_bytes(b'changed plan\n')
+        self.code('plan-changed')
+
+    def test_standing_fault_raises_unavailable(self):
+        class BrokenRead(CommitFault):
+            def execute(self, sql, parameters=()):
+                if 'FROM slips' in sql:
+                    raise sqlite3.DatabaseError('read fault')
+                return self.conn.execute(sql, parameters)
+
+        with self.assertRaises(getattr(slips, 'QueryUnavailable', RuntimeError)):
+            self.standing(BrokenRead(self.conn))
+
+
+class TestScope(SlipStore):
+    def scope(self, repository='repo-1', **target):
+        return slips.scope(self.conn, IMPL.seat_id, repository, **target)
+
+    def test_scope_ref_bound_to_seat(self):
+        _, _, older = self.build(bundle='older', design=False)
+        self.assertEqual(self.act(branch='older').slip_id, self.issued(older))
+        _, _, newer = self.build(bundle='newer', design=False)
+        self.issued(newer)
+        self.assertEqual(self.scope(ref='older'), (self.issued(older), 1))
+
+    def test_scope_matches_act_binding(self):
+        _, _, older = self.build(bundle='older', design=False)
+        _, _, newer = self.build(bundle='newer', design=False)
+        self.issued(older)
+        covered = self.scope(ref='not-yet-bound')
+        self.assertEqual(covered, (self.issued(newer), 1))
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM branch_bindings WHERE branch = 'not-yet-bound'").fetchone())
+        answer = self.act(branch='not-yet-bound')
+        self.assertEqual((answer.slip_id, answer.revision), covered)
+
+    def test_scope_ref_bound_to_other_seat(self):
+        _, _, ours = self.build(bundle='shared', design=False)
+        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+        theirs = self.submit(with_repo(draft(kind='IMPL', needs='act', bundle='shared',
+                                            to=SECOND.address)), operator)
+        self.assertEqual(self.act(seat=SECOND, branch='theirs').slip_id, self.issued(theirs))
+        self.assertEqual(self.scope(ref='open'), (self.issued(ours), 1))
+        self.assertIsNone(self.scope(ref='theirs'))
+
+    def test_scope_path_in_repository(self):
+        _, _, issued = self.build()
+        self.assertEqual(self.scope(path='src/sample.py'), (self.issued(issued), 1))
+        self.assertIsNone(self.scope('repo-2', path='src/sample.py'))
+
+    def test_scope_rejects_unsafe_paths(self):
+        self.build()
+        for path in ('/src/file', 'src/../file', ''):
+            with self.subTest(path=path):
+                self.assertIsNone(self.scope(path=path))
+
+    def test_scope_needs_exactly_one_target(self):
+        with self.assertRaises(ValueError):
+            self.scope()
+        with self.assertRaises(ValueError):
+            self.scope(ref='work', path='src/file')
+
+    def test_scope_ignores_ended_slips(self):
+        _, _, issued = self.build()
+        self.assertEqual(slips.revoke(self.conn, self.issued(issued), 'operator', 'stop',
+                                     self.clock).outcome, 'allow')
+        self.assertIsNone(self.scope(ref='work'))
+        self.assertIsNone(self.scope(path='src/file'))
+
+
 class TestQueries(SlipStore):
     def test_planner_issues_after_approved_plan(self):
         _, _, impl = self.build()
