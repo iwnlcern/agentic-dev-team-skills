@@ -617,6 +617,19 @@ def _read_query(conn):
         raise QueryUnavailable('authority query unavailable') from exc
 
 
+def _restore_reason(job_id: str, relay: str | None = None) -> str:
+    try:
+        if relay is None:
+            return strings.render('authority-restore-standing', job=job_id)
+        return strings.render('authority-restore-held', job=job_id, relay=relay)
+    except ValueError:
+        raw = job_id.encode('utf-8', 'surrogatepass')
+        token = str(strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw)))
+        if relay is None:
+            return strings.render('authority-restore-standing', job=token)
+        return strings.render('authority-restore-held', job=token, relay=relay)
+
+
 def standing(conn, seat_id: str, now_ms: int) -> Standing:
     """Report live scopes and target-independent holds for an authenticated seat."""
     with _read_query(conn):
@@ -625,13 +638,7 @@ def standing(conn, seat_id: str, now_ms: int) -> Standing:
             raise LookupError('unknown seat')
         restore = restore_cancel.held(conn, seat[1])
         if restore is not None:
-            job = restore.job_id
-            try:
-                reason = strings.render('authority-restore-standing', job=job)
-            except ValueError:
-                raw = job.encode('utf-8', 'surrogatepass')
-                token = strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw))
-                reason = strings.render('authority-restore-standing', job=str(token))
+            reason = _restore_reason(restore.job_id)
             return Standing((), _answer('restore-held', reason, 'operator'))
         rows = conn.execute('SELECT ' + _SLIP_COLUMNS + ', kind FROM slips'
                             " WHERE seat_id = ? AND state = 'live' ORDER BY issued_at, handle", (seat_id,))
@@ -692,8 +699,7 @@ def _act(conn, seat_id, effect, now_ms, digest):
                     (seat_id,)).fetchone() is None:
         refused = restore_cancel.held_refusal(conn, seat_id, None, effect.repository_id, 0)
         if refused:
-            return _answer('restore-held', strings.render('authority-restore-held',
-                           job=refused.job_id, relay=refused.relay_id), 'operator')
+            return _answer('restore-held', _restore_reason(refused.job_id, refused.relay_id), 'operator')
         return _diagnostic(conn, seat, seat_id)
     if not effect.repository_id or not effect.ref:
         return _answer('slip-invalid', strings.render('authority-context'), _planner(conn, seat_id))
@@ -722,8 +728,7 @@ def _act(conn, seat_id, effect, now_ms, digest):
         refused = restore_cancel.held_refusal(conn, seat_id, binding[1] if binding else None,
                                               effect.repository_id, after)
         if refused:
-            return _answer('restore-held', strings.render('authority-restore-held',
-                           job=refused.job_id, relay=refused.relay_id), 'operator', slip)
+            return _answer('restore-held', _restore_reason(refused.job_id, refused.relay_id), 'operator', slip)
     if slip:
         answer = _checked_slip(conn, slip, effect, digest)
         if answer.outcome == 'allow' and binding is None:

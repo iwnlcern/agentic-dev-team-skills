@@ -385,6 +385,41 @@ class TestHold(RestoreStore):
             self.assertIn(refused.relay_id, answer.reason)
             self.assertIsNotNone(answer.slip_id)
 
+    def test_hold_answer_survives_refused_job_ids(self):
+        from hashlib import sha256
+
+        from relay_engine import authority, strings
+        from relay_engine.tests.test_submit import IMPL
+
+        for issued in (False, True):
+            for job in ('', '\n', 'a\u2028b'):
+                with self.subTest(site='revoked-slip' if issued else 'no-slip', job=job):
+                    fixture = TestHold()
+                    try:
+                        fixture.setUp()
+                        _, plan, _ = fixture.build(issue=issued, design=False)
+                        fixture.cancel(job)
+                        refused = fixture.issue(plan)
+                        fixture.conn.execute('BEGIN IMMEDIATE')
+                        try:
+                            answer = authority.act_entry(
+                                fixture.conn, IMPL.seat_id, slips.Effect('commit', 'repo-1', 'work'),
+                                fixture.clock)
+                            fixture.conn.commit()
+                        except BaseException:
+                            fixture.conn.rollback()
+                            raise
+                        self.assertEqual((answer.outcome, answer.code, answer.unblocker),
+                                         ('held', 'authority.restore-held', 'operator'))
+                        raw = job.encode('utf-8', 'surrogatepass')
+                        token = strings.rejected_value(sha256(raw).hexdigest()[:12], len(raw))
+                        self.assertEqual(
+                            answer.reason,
+                            f'a restore (job {token}) holds this project, and go-ahead '
+                            f'{refused.relay_id} was refused')
+                    finally:
+                        fixture.doCleanups()
+
     def test_hold_keeps_independent_answers(self):
         # RC-M11: a hold cannot record an IMPL already refused for evidence.
         from relay_engine.tests.test_submit import IMPL
