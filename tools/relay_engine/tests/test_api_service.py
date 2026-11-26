@@ -612,7 +612,7 @@ service.start()
                 with (patch.object(service, 'is_stopping', side_effect=stop_after_last_sample),
                       patch.object(os, publish.__name__, wraps=publish) as published,
                       patch.object(service, '_publish_locator', wraps=service._publish_locator) as locator,
-                      patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as opens):
+                      patch.object(store_layout, 'open_ledger_runtime', wraps=store_layout.open_ledger_runtime) as opens):
                     self.assertIsNone(service.start())
                     opens.assert_called_once()
                     self.assertTrue(triggered)

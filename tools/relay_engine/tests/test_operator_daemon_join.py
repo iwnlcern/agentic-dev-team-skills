@@ -1950,6 +1950,7 @@ def foreground_fixture_main():
                 store_layout.IncumbentGuard.arm = stop_after_arm
                 store_layout.open_catalogue = unexpected_open
                 store_layout.open_ledger = unexpected_open
+                store_layout.open_ledger_runtime = unexpected_open
                 api_service.ApiService._publish_locator = unexpected_open
             if mode == 'witness-barrier':
                 acknowledge = owner_start.witness_child_epoch
