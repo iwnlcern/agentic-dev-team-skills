@@ -60,6 +60,15 @@ INSTALLED_TIERS = {
 }
 
 
+GO_AHEAD_LINES: tuple[str, str, str, str] = (
+    'If an implementing agent approves a plan, receives its go-ahead, and later asks for revisions to that same plan, it can still commit under the go-ahead it holds until that go-ahead is revoked or its bundle closes.',
+    'A seat holds one live go-ahead per bundle and repository: a newer one replaces the earlier.',
+    "To stop a seat's work in a bundle, revoke its go-ahead there.",
+    "No page or command lists a seat's live go-aheads.",
+)
+STEP_8_LAST: str = 'After approve, a correction that leaves bound items unchanged is an erratum with a delta review of the erratum alone, per the Plan contract section of `protocol.md`; a change to a bound item is a reissue.'
+
+
 class TestSeatReplies(KitTreeCase):
     def _role_copies(self, role):
         rel = f"skills/{role}/SKILL.md"
@@ -120,3 +129,19 @@ class TestSeatReplies(KitTreeCase):
         for path in [ROOT / "shared/protocol.md", *sorted(PLUGINS.glob("*/skills/*/protocol.md"))]:
             with self.subTest(protocol=path.relative_to(ROOT)):
                 self.assertNotIn("ANSWERS", path.read_text(encoding="utf-8"))
+
+
+    def test_live_go_ahead_line(self):
+        for copy, text in self._role_copies("pair-planner"):
+            with self.subTest(copy=copy):
+                lines = text.splitlines()
+                for line in GO_AHEAD_LINES:
+                    self.assertEqual(lines.count(line), 1)
+                at = lines.index(GO_AHEAD_LINES[0])
+                self.assertGreater(at, 0)
+                self.assertEqual(lines[at - 1 : at + 4], [STEP_8_LAST, *GO_AHEAD_LINES])
+                self.assertLess(at + 4, len(lines))
+                self.assertTrue(lines[at + 4].startswith("9. **Implementation dispatch**"))
+        protocol = self.canonical_text("shared/protocol.md")
+        for line in GO_AHEAD_LINES:
+            self.assertNotIn(line, protocol)
