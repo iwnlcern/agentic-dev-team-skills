@@ -191,6 +191,56 @@ def open_ledger(root, project_id: str, *, create: bool = False, _check_admission
     return conn
 
 
+# A writer handoff that raises cannot be trusted to own or fence this handle.
+_UNOWNED_CLOSES: list[tuple[str, sqlite3.Connection, BaseException]] = []
+
+
+def open_ledger_runtime(root, project_id: str, *, check: Callable[[], None],
+                        on_failed_close: Callable[[sqlite3.Connection, BaseException], None]
+                        ) -> sqlite3.Connection:
+    """Open a guarded writer ledger, preserving custody when a cleanup close fails."""
+    path = ledger_path(root, project_id).absolute()
+    key = os.fspath(path)
+    if any(retained_key == key for retained_key, _, _ in _UNOWNED_CLOSES):
+        raise LayoutFault('close-unresolved')
+    check()
+    if not path.exists():
+        raise LayoutFault('missing')
+    try:
+        conn = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True)
+    except sqlite3.OperationalError:
+        if not path.exists():
+            raise LayoutFault('missing') from None
+        raise
+    try:
+        check()
+        if _row(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'") is None:
+            raise LayoutFault('no-project-row')
+        with closing(conn.execute('SELECT id FROM projects NOT INDEXED LIMIT 2')) as rows:
+            projects = rows.fetchall()
+        if not projects:
+            raise LayoutFault('no-project-row')
+        if projects != [(project_id,)]:
+            raise LayoutFault('wrong-project')
+        _pragma(conn, 'PRAGMA foreign_keys=ON')
+        schema.init_v3(conn)
+        _configure(conn)
+    except BaseException as original:
+        try:
+            conn.close()
+        except BaseException as close_error:
+            try:
+                on_failed_close(conn, close_error)
+            except BaseException as handoff_error:
+                _UNOWNED_CLOSES.append((key, conn, close_error))
+                original.add_note('cleanup close failed: ' + type(close_error).__name__)
+                original.add_note('failed-close handoff raised: ' + type(handoff_error).__name__)
+            else:
+                original.add_note('cleanup close failed: ' + type(close_error).__name__)
+        raise
+    return conn
+
+
 def open_catalogue(root, *, kind: str | None = None):
     """Open a bound catalogue; only an explicit declaration creates production."""
     return _open_catalogue(root, kind)

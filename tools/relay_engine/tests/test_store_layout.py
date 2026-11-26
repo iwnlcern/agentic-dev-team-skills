@@ -1906,5 +1906,166 @@ class TestRuntimeAdmission(unittest.TestCase):
             self._admission(Q, 'unknown')
 
 
+    def _record_connects(self, factory=None):
+        handles = []
+        real_connect = sqlite3.connect
+
+        def connect(database, *args, **kwargs):
+            # schema.init_v3 checks its definitions against a separate in-memory database.
+            if database == ':memory:':
+                return real_connect(database, *args, **kwargs)
+            if factory is not None:
+                kwargs['factory'] = factory
+            handle = real_connect(database, *args, **kwargs)
+            handles.append(handle)
+            self.addCleanup(sqlite3.Connection.close, handle)
+            return handle
+
+        patch = mock.patch('relay_engine.store_layout.sqlite3.connect', new=connect)
+        return handles, patch
+
+    def _prove_open(self, project, after_first):
+        members = self.guard.runtime_members(self.armed, project, phase='initial')
+        checked = False
+
+        def check():
+            nonlocal checked
+            if self.guard.runtime_members(self.armed, project, phase='connected') != members:
+                raise store_layout.LayoutFault('member-changed')
+            if not checked:
+                checked = True
+                after_first()
+
+        return check
+
+    def _assert_closed(self, handle):
+        with self.assertRaises(sqlite3.ProgrammingError):
+            handle.execute('SELECT 1').close()
+
+    def test_runtime_open_returns_configured_handle(self):
+        handles, patch = self._record_connects()
+        check = mock.Mock()
+        handoff = mock.Mock()
+        with patch:
+            with closing(store_layout.open_ledger_runtime(
+                    self.root, P, check=check, on_failed_close=handoff)) as ledger:
+                with closing(ledger.execute('PRAGMA journal_mode')) as cursor:
+                    self.assertEqual(cursor.fetchone(), ('wal',))
+                with closing(ledger.execute('PRAGMA foreign_keys')) as cursor:
+                    self.assertEqual(cursor.fetchone(), (1,))
+                self.assertEqual(handles, [ledger])
+        self.assertEqual(check.call_count, 2)
+        handoff.assert_not_called()
+
+    def test_runtime_open_check_before_connect(self):
+        handles, patch = self._record_connects()
+        check = mock.Mock(side_effect=store_layout.LayoutFault('member-unproved'))
+        with patch:
+            self._fault('member-unproved', store_layout.open_ledger_runtime,
+                        self.root, P, check=check, on_failed_close=mock.Mock())
+        self.assertEqual(handles, [])
+
+    def test_runtime_open_refuses_swap_after_connect(self):
+        handles, patch = self._record_connects()
+        check = self._prove_open(P, lambda: self._replace_ledger(P))
+        handoff = mock.Mock()
+        with patch:
+            self._fault('member-changed', store_layout.open_ledger_runtime,
+                        self.root, P, check=check, on_failed_close=handoff)
+        self.assertEqual(len(handles), 1)
+        self._assert_closed(handles[0])
+        handoff.assert_not_called()
+
+    def test_runtime_open_refuses_stale_arm_after_connect(self):
+        handles, patch = self._record_connects()
+        check = self._prove_open(P, self._replace_arm)
+        with patch:
+            self._fault('incumbent-changed', store_layout.open_ledger_runtime,
+                        self.root, P, check=check, on_failed_close=mock.Mock())
+        self.assertEqual(len(handles), 1)
+        self._assert_closed(handles[0])
+
+    def test_runtime_open_wrong_project_row(self):
+        with closing(store_layout.open_ledger(self.root, Q)) as ledger:
+            ledger.execute('UPDATE projects SET id=? WHERE id=?', (P, Q)).close()
+            ledger.commit()
+        handles, patch = self._record_connects()
+        with patch:
+            self._fault('wrong-project', store_layout.open_ledger_runtime,
+                        self.root, Q, check=mock.Mock(), on_failed_close=mock.Mock())
+        self.assertEqual(len(handles), 1)
+        self._assert_closed(handles[0])
+
+    def _fail_close(self):
+        close_error = sqlite3.OperationalError('fixture close')
+
+        class FailCloseOnce(sqlite3.Connection):
+            def close(self):
+                if not getattr(self, 'close_attempted', False):
+                    self.close_attempted = True
+                    raise close_error
+                super().close()
+
+        original = store_layout.LayoutFault('member-changed')
+        check = mock.Mock(side_effect=[None, original])
+        handles, patch = self._record_connects(FailCloseOnce)
+        return close_error, original, check, handles, patch
+
+    def test_runtime_open_hands_failed_close(self):
+        close_error, original, check, handles, patch = self._fail_close()
+        handoff = mock.Mock()
+        with patch:
+            failure = self._fault('member-changed', store_layout.open_ledger_runtime,
+                                  self.root, P, check=check, on_failed_close=handoff)
+        self.assertIs(failure, original)
+        self.assertEqual(failure.__notes__, ['cleanup close failed: OperationalError'])
+        self.assertEqual(len(handles), 1)
+        handoff.assert_called_once_with(handles[0], close_error)
+
+    def test_runtime_open_failed_handoff_retains_and_fences(self):
+        close_error, original, check, handles, patch = self._fail_close()
+        handoff = mock.Mock(side_effect=RuntimeError('handoff before recording'))
+        with patch:
+            failure = self._fault('member-changed', store_layout.open_ledger_runtime,
+                                  self.root, P, check=check, on_failed_close=handoff)
+        self.assertIs(failure, original)
+        self.assertEqual(failure.__notes__, [
+            'cleanup close failed: OperationalError', 'failed-close handoff raised: RuntimeError',
+        ])
+        self.assertEqual(len(handles), 1)
+        handoff.assert_called_once_with(handles[0], close_error)
+        entries = store_layout._UNOWNED_CLOSES
+        own = [entry for entry in entries if entry[1] is handles[0]]
+        for entry in own:
+            self.addCleanup(entries.remove, entry)
+        self.assertEqual(len(own), 1)
+        self.assertIs(own[0][2], close_error)
+        next_check = mock.Mock()
+        with patch:
+            try:
+                self._fault('close-unresolved', store_layout.open_ledger_runtime,
+                            self.root, P, check=next_check, on_failed_close=mock.Mock())
+            finally:
+                self.assertEqual(len(handles), 1, 'fenced retry connected again')
+                next_check.assert_not_called()
+        with closing(store_layout.open_ledger_runtime(
+                self.root, Q, check=mock.Mock(), on_failed_close=mock.Mock())):
+            pass
+
+    def test_runtime_pre_open_sequence_refuses_malformed_id(self):
+        handles, patch = self._record_connects()
+
+        def pre_open():
+            project = 'not-an-id'
+            self.guard.runtime_members(self.armed, project, phase='initial')
+            self.guard.runtime_admission(self.armed, project, self.catalogue, purpose='join')
+            store_layout.open_ledger_runtime(self.root, project, check=mock.Mock(),
+                                             on_failed_close=mock.Mock())
+
+        with patch:
+            self._fault('member-unproved', pre_open)
+        self.assertEqual(handles, [])
+
+
 if __name__ == '__main__':
     unittest.main()
