@@ -163,6 +163,7 @@ class TransferTurn:
         self._writer = writer
         self._request = request
         self._conns = conns
+        self._guard_catalogues = {}
         self._catalogue = TurnConnection(conns['catalogue'])
         self._sender = TurnConnection(conns[request.project_id])
         self._writes_open = False
@@ -1074,19 +1075,15 @@ class StoreWriter:
             self._guarded_failed_close(project_id, conn, failure)
             original.add_note('cleanup close failed: ' + type(failure).__name__)
 
-    def _open_guarded(self, project_id, *, purpose, separate_catalogue=False):
+    def _open_guarded(self, project_id, *, purpose, guard_catalogue=None):
         guard, arm = self._store_guard, self._store_arm
         self._check_store_open()
         members = guard.runtime_members(arm, project_id, phase='initial')
 
+        catalogue = self._catalogue if guard_catalogue is None else guard_catalogue
+
         def require_admission():
-            if separate_catalogue:
-                # G-GUARD owns its BEGIN/ROLLBACK. It must not use or alter the
-                # transfer's already-open catalogue transaction.
-                with closing(store_layout.open_catalogue_readonly(self._root)) as catalogue:
-                    guard.runtime_admission(arm, project_id, catalogue, purpose=purpose)
-            else:
-                guard.runtime_admission(arm, project_id, self._catalogue, purpose=purpose)
+            guard.runtime_admission(arm, project_id, catalogue, purpose=purpose)
 
         require_admission()
 
@@ -1433,7 +1430,19 @@ class StoreWriter:
             self._retire_declared_file(label, turn._conns[label], error)
             if original is not None:
                 original.add_note(f'{label}: transfer cleanup failed: {type(error).__name__}')
+        for project, catalogue in turn._guard_catalogues.items():
+            try:
+                self._close_handle(catalogue)
+            except BaseException as error:
+                with self._changed:
+                    self._rollback_errors[project] = error
+        turn._guard_catalogues.clear()
         return next(iter(failures.values()), None)
+
+    def _pin_transfer_catalogue(self, catalogue):
+        # A deferred BEGIN alone does not fix the WAL snapshot.
+        with closing(catalogue.execute('SELECT count(*) FROM sqlite_schema')) as cursor:
+            cursor.fetchone()
 
     def _run_transfer(self, request):
         self._phase('dequeued')
@@ -1444,6 +1453,7 @@ class StoreWriter:
         sender = request.project_id
         try:
             conns['catalogue'].execute('BEGIN').close()
+            self._pin_transfer_catalogue(conns['catalogue'])
             conns['catalogue'].execute('PRAGMA query_only=ON').close()
             conns[sender].execute('BEGIN IMMEDIATE').close()
             conns[sender].execute('PRAGMA query_only=ON').close()
@@ -1519,6 +1529,15 @@ class StoreWriter:
             raise _unavailable('rollback_failed', failure) from failure
         return outcome
 
+    def _require_transfer_stopped_snapshot(self, catalogue, project):
+        if store_layout.any_hold(catalogue) is not None:
+            raise store_layout.LayoutFault('incumbent-hold')
+        stops = store_layout.open_stops(catalogue)
+        if any(stop.scope == 'store' for stop in stops):
+            raise store_layout.LayoutFault('incumbent-hold')
+        if not any(stop.scope == 'project' and stop.project_id == project for stop in stops):
+            raise store_layout.LayoutFault('member-unproved')
+
     def _transfer_read_receiver(self, turn, project, fn, route):
         request = turn._request
         conn = proxy = None
@@ -1532,7 +1551,16 @@ class StoreWriter:
                         self._require_transfer_running()
                         if self._declared_read_route(project) != route:
                             raise WriterUnavailable('project_not_served')
-                    conn, members = self._open_guarded(project, purpose='stopped_read', separate_catalogue=True)
+                    # G-GUARD owns its transaction and sees a later snapshot
+                    # than the one pinned by this turn.
+                    try:
+                        catalogue = store_layout.open_catalogue_readonly(self._root)
+                    except (OSError, sqlite3.Error) as error:
+                        raise store_layout.LayoutFault('member-unproved') from error
+                    turn._guard_catalogues[project] = catalogue
+                    conn, members = self._open_guarded(project, purpose='stopped_read',
+                                                       guard_catalogue=catalogue)
+                    self._require_transfer_stopped_snapshot(turn._conns['catalogue'], project)
                 with self._changed:
                     self._require_transfer_running()
                     if self._declared_read_route(project) != route:

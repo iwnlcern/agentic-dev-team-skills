@@ -2712,6 +2712,7 @@ class TransferModeTests(ProjectWriterFixture):
         self.flush(writer)
         self.assertIn(P, writer.served_projects())
         self.assertNotIn(Q, writer.served_projects())
+        before = self.value()
         catalogue_path = store_layout.catalogue_path(self.root)
 
         def change_blocker(present):
@@ -2811,7 +2812,7 @@ class TransferModeTests(ProjectWriterFixture):
             self.assertEqual(guard_calls, [(*prefix, 'incumbent-hold')])
             self.assertEqual(pinned_causes, [])
         else:
-            self.assertEqual(guard_calls, [(*prefix, None)] * 2)
+            self.assertEqual(guard_calls, [(*prefix, None)] * 3)
             self.assertEqual(pinned_causes, ['incumbent-hold'])
         self.assertEqual(len({id(conn) for conn in handles}), 1)
         self.assertEqual(live, [True] * len(handles))
@@ -2819,7 +2820,7 @@ class TransferModeTests(ProjectWriterFixture):
         self.assertEqual(len(observed), 1)
         self.assertEqual((observed[0].project_id, observed[0].reason), (Q, 'layout_fault'))
         self.assertEqual(outcome, api_writer.JobOutcome(False, observed[0], False, 'receiver_required'))
-        self.assertEqual(self.value(), 'before')
+        self.assertEqual(self.value(), before)
 
     def test_stopped_route_guard_sees_a_hold_after_the_turn_snapshot(self):
         self.stopped_guard_snapshot_case('late_hold')
