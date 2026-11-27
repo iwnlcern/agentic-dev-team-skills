@@ -18,15 +18,26 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
-# These test modules build requests on scratch ledgers or mock ports; neither
-# signs a host session in. Every call in these files is exempt, so a real client
-# added there would be invisible to the seat-record obligation check.
+# These test modules build requests on scratch ledgers or mock ports.
+# Every call in these files is exempt from the seat-record obligation check.
 SIGN_IN_STANDINS: frozenset[str] = frozenset({
+    # Relay-reads fixtures sign in to a test-owned service on a scratch store.
+    "tools/relay_engine/tests/relay_reads_fixtures.py",
+    # CLI fixtures sign in to a test-owned service on a scratch store.
+    "tools/relay_engine/tests/test_adt_cli.py",
+    # Read CLI fixtures sign in through the relay-reads scratch-store helper.
+    "tools/relay_engine/tests/test_adt_reads_cli.py",
+    # Client tests use a scratch service or a scripted mock peer.
+    "tools/relay_engine/tests/test_api_client.py",
     "tools/relay_engine/tests/test_api_protocol.py",
     "tools/relay_engine/tests/test_api_relay_inbox.py",
+    # Relay-read API tests sign in to a test-owned service on a scratch store.
+    "tools/relay_engine/tests/test_api_relay_read.py",
     "tools/relay_engine/tests/test_api_sessions.py",
     "tools/relay_engine/tests/test_api_service.py",
     "tools/relay_engine/tests/test_api_submit.py",
+    # Daemon join tests sign in through a helper against test-owned scratch daemons.
+    "tools/relay_engine/tests/test_operator_daemon_join.py",
 })
 # The API handler receives sign-in and forwards it to the session port: it is
 # the operation's callee. Only its own body is exempt, not nested functions.
@@ -34,22 +45,20 @@ SIGN_IN_RECEIVERS: frozenset[tuple[str, str]] = frozenset({
     ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
 })
 # Client methods send sign-in for callers; their own bodies are excused.
-# G-B1 counts their callers; until then this census does not see those calls.
-# Slice B's Task 9 adds its one entry.
+# Their calls are counted and checked at the caller.
 SIGN_IN_CLIENT_METHODS: frozenset[tuple[str, str]] = frozenset({
     ("tools/relay_engine/api_client.py", "sign_in"),
 })
 
 
 def sign_in_census(source):
-    """Find sign-in constants in direct arguments or keywords, not comparisons.
+    """Find bare or attribute sign_in calls and direct sign-in arguments.
 
     Payload dicts/lists, variables and f-strings are not followed. Transactions
     use seat_record.transaction or the exact unaliased import-from spelling;
     other import aliases are not followed. A with-name.write or seat_record.write
     must occur earlier by line inside the with, not necessarily by execution.
-    G-B1's base erratum pins the real sign-in client method when it first exists.
-    Counting includes the two named stand-in files and the receiving handler;
+    Counting includes named stand-in files and the receiving handler;
     sign_in_misses filters their exceptions. Those files hide any future real
     client added there; the handler's own body hides one if its role changes.
     Other files and other or nested functions in the receiver file stay checked.
@@ -65,8 +74,11 @@ def sign_in_census(source):
     for call in ast.walk(tree):
         if not isinstance(call, ast.Call):
             continue
-        if not any(isinstance(arg, ast.Constant) and arg.value == "session.sign-in"
-                   for arg in [*call.args, *(k.value for k in call.keywords)]):
+        named_sign_in = ((isinstance(call.func, ast.Attribute) and call.func.attr == "sign_in")
+                         or (isinstance(call.func, ast.Name) and call.func.id == "sign_in"))
+        if not named_sign_in and not any(
+                isinstance(arg, ast.Constant) and arg.value == "session.sign-in"
+                for arg in [*call.args, *(k.value for k in call.keywords)]):
             continue
         found.append(call.lineno)
         node, valid = call, False
@@ -112,10 +124,9 @@ def sign_in_misses(rel: str, source: str) -> list[int]:
 
     Stand-in files hide every call, including a future real client there. The
     receiver hides its own calls even if it later signs a host session in;
-    other files and other or nested functions remain checked. Counting itself
-    is unchanged, so SIGN_IN_CENSUS still reports every found call.
-    A named client method's body is excused; calls of that method outside a
-    transaction are not seen until G-B1's Task 3 counts its callers.
+    other files and other or nested functions remain checked. SIGN_IN_CENSUS
+    reports every found call, including those in excused bodies.
+    A named client method's own body is excused, not its callers.
     """
     _, misses = sign_in_census(source)
     if rel in SIGN_IN_STANDINS:
@@ -453,11 +464,17 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
 
     def test_sign_in_exceptions_are_exact(self):
         self.assertEqual(SIGN_IN_STANDINS, frozenset({
+            "tools/relay_engine/tests/relay_reads_fixtures.py",
+            "tools/relay_engine/tests/test_adt_cli.py",
+            "tools/relay_engine/tests/test_adt_reads_cli.py",
+            "tools/relay_engine/tests/test_api_client.py",
             "tools/relay_engine/tests/test_api_protocol.py",
             "tools/relay_engine/tests/test_api_relay_inbox.py",
+            "tools/relay_engine/tests/test_api_relay_read.py",
             "tools/relay_engine/tests/test_api_sessions.py",
             "tools/relay_engine/tests/test_api_service.py",
             "tools/relay_engine/tests/test_api_submit.py",
+            "tools/relay_engine/tests/test_operator_daemon_join.py",
         }))
         self.assertEqual(SIGN_IN_RECEIVERS, frozenset({
             ("tools/relay_engine/api_protocol.py", "_session_sign_in"),
@@ -522,6 +539,14 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
         with self.subTest(control='g'):
             with mock.patch.object(sys.modules[__name__], 'SIGN_IN_CLIENT_METHODS', frozenset()):
                 self.assertEqual(sign_in_misses("tools/relay_engine/api_client.py", client_method), [2])
+        rel = "tools/adapters/sign_in.py"
+        self.assertEqual(sign_in_misses(rel, "client.sign_in(key, host, window, operation_key)\n"), [1])
+        self.assertEqual(sign_in_misses(rel, "sign_in(key, host, window, operation_key)\n"), [1])
+        transaction = 'with seat_record.transaction("codex", "id") as tx:\n'
+        write = '    tx.write("s", "a.planner", "p")\n'
+        sign_in = '    client.sign_in(key, host, window, operation_key)\n'
+        self.assertEqual(sign_in_misses(rel, transaction + write + sign_in), [])
+        self.assertEqual(sign_in_misses(rel, transaction + sign_in + write), [2])
         found, bad = [], []
         for path in sorted((REPO / "tools").rglob("*.py")):
             source = path.read_text(encoding="utf-8")

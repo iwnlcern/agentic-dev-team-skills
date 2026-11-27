@@ -1,5 +1,4 @@
 """Client identity, credential and response guards on isolated endpoints."""
-import ast
 from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import replace
 import io
@@ -17,11 +16,6 @@ from relay_engine import api_protocol, api_schema, jcs
 from relay_engine.tests import test_api_service as fixture
 
 
-def sign_in_calls(source):
-    return [node.lineno for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.Call) and (
-                isinstance(node.func, ast.Attribute) and node.func.attr == 'sign_in'
-                or isinstance(node.func, ast.Name) and node.func.id == 'sign_in')]
 
 
 class ClientTests(unittest.TestCase):
@@ -263,13 +257,6 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(set(requests[2]['args']), {'key_id', 'key_secret', 'host', 'host_session_id', 'operation_key'})
         self.assertNotIn(key.key_secret, json.dumps(requests[0]))
 
-    def test_no_shipped_caller_of_sign_in(self):
-        """Ends at G-B1: Adapter hooks Task 3 counts sign_in calls under owner review."""
-        tools = Path(__file__).resolve().parents[2]
-        hits = [(str(p.relative_to(tools)), sign_in_calls(p.read_text()))
-                for p in tools.rglob('*.py') if 'tests' not in p.relative_to(tools).parts]
-        self.assertEqual([(p, lines) for p, lines in hits if lines], [])
-        self.assertEqual(sign_in_calls('client.sign_in(key, host, window, operation_key)'), [1])
 
 
 class _DeadlineSocket:
