@@ -525,7 +525,7 @@ if {phase!r} == 'held':
         command = [sys.executable, str(launcher), *args]
         if phase in {'finishing', 'commit_permitted'}:
             fixture = f"""
-import pathlib, runpy, sys, threading, time
+import os, pathlib, runpy, sys, threading, time
 sys.path.insert(0, {str(launcher.parent)!r})
 from relay_engine.api_writer import StoreWriter
 from relay_engine.operator_queue import notifier
@@ -551,7 +551,9 @@ def checkpoint(self, phase):
 def submit(self, job):
     value = old_submit(self, job)
     if threading.current_thread().name == 'adt-queue-notify' and value.fault:
-        waiter.write_text(value.fault)
+        waiter_temp = waiter.with_name(f'waiter.{{os.getpid()}}.{{threading.get_ident()}}.tmp')
+        waiter_temp.write_text(value.fault)
+        os.replace(waiter_temp, waiter)
     return value
 notifier.notify_delivered = delivered
 StoreWriter._phase = checkpoint

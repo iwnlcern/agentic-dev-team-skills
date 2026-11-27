@@ -47,6 +47,41 @@ class SourceRoot:
     manifest_sha256: str
 
 
+def _read_ledger(duplicate):
+    """Extract ordered source rows from a disposable ledger directory."""
+    conn = sqlite3.connect(duplicate / 'ledger.db')
+    conn.row_factory = sqlite3.Row
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+        def rows(table):
+            if table not in tables:
+                return ()
+            return tuple(dict(r) for r in conn.execute('SELECT * FROM ' + table + ' ORDER BY rowid'))
+
+        meta = {r['key']: r['value'] for r in rows('meta')}
+        if not meta.get('root_uuid') or not meta.get('run_id'):
+            raise ValueError('source identity missing')
+        audit = {name: rows(name) for name in ('seat_events', 'commissions', 'runs', 'admission_findings')}
+        return meta, rows('relays'), audit
+    finally:
+        conn.close()
+
+
+def _source_root(root, ledger, manifest, manifest_bytes, rendered):
+    meta, raw_relays, audit = ledger
+    relays = []
+    for raw in raw_relays:
+        payload, mtime, error = rendered(raw)
+        row = {**raw, 'rendered_bytes': payload, 'file_mtime': mtime}
+        if error is not None:
+            row['file_error'] = error
+        relays.append(row)
+    return SourceRoot(root, meta['root_uuid'], meta['run_id'], tuple(relays),
+                      audit['seat_events'], audit['commissions'], audit['runs'],
+                      audit['admission_findings'], meta, manifest, hashlib.sha256(manifest_bytes).hexdigest())
+
+
 def read_source(copy_dir) -> SourceRoot:
     """Read a staged copy, retaining exact file bytes and source audit rows."""
     root = Path(copy_dir).resolve()
@@ -161,40 +196,20 @@ def read_source(copy_dir) -> SourceRoot:
                     checked_file(root / staged, logical, destination)
             else:
                 checked_file(root / staged, logical)
-        conn = sqlite3.connect(duplicate / 'ledger.db')
-        conn.row_factory = sqlite3.Row
-        try:
-            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            def rows(table):
-                if table not in tables:
-                    return ()
-                return tuple(dict(r) for r in conn.execute('SELECT * FROM ' + table + ' ORDER BY rowid'))
-            meta = {r['key']: r['value'] for r in rows('meta')}
-            if not meta.get('root_uuid') or not meta.get('run_id'):
-                raise ValueError('source identity missing')
-            raw_relays = rows('relays')
-            audit = {name: rows(name) for name in ('seat_events', 'commissions', 'runs', 'admission_findings')}
-        finally:
-            conn.close()
-    relays = []
-    for raw in raw_relays:
-        row = dict(raw)
+        ledger = _read_ledger(duplicate)
+
+    def rendered(row):
         relative = row['rendered_path']
         path = Path(relative)
-        row['rendered_bytes'] = None
-        row['file_mtime'] = None
         if relative in manifest:
-            with io.BytesIO() as rendered:
-                row['file_mtime'] = checked_file(root / path, relative, rendered)
-                row['rendered_bytes'] = rendered.getvalue()
-        elif path.is_absolute() or not (root / path).resolve().is_relative_to(root):
-            row['file_error'] = 'rendered path escapes copy'
-        else:
-            row['file_error'] = 'rendered path missing from source manifest'
-        relays.append(row)
-    return SourceRoot(root, meta['root_uuid'], meta['run_id'], tuple(relays),
-                      audit['seat_events'], audit['commissions'], audit['runs'],
-                      audit['admission_findings'], meta, manifest, hashlib.sha256(manifest_bytes).hexdigest())
+            with io.BytesIO() as payload:
+                mtime = checked_file(root / path, relative, payload)
+                return payload.getvalue(), mtime, None
+        if path.is_absolute() or not (root / path).resolve().is_relative_to(root):
+            return None, None, 'rendered path escapes copy'
+        return None, None, 'rendered path missing from source manifest'
+
+    return _source_root(root, ledger, manifest, manifest_bytes, rendered)
 
 
 def created_at_ms(stamp: str, rank: int, file_mtime: float | None) -> int | Listed:

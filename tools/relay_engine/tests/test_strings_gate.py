@@ -30,6 +30,7 @@ PRIVATE_DESCRIPTOR_SITES = frozenset({
     ('owner_start', '_run_child', 'fdopen', 'retire_write'),
     ('store_layout', '_read_frame', 'fdopen', 'fd'),
     ('store_layout', '_replace', 'fdopen', 'fd'),
+    ('store_migrate', '_prepared_receipt', 'fdopen', 'file_fd'),
 })
 
 
@@ -232,7 +233,13 @@ def gate_violations(paths):
                                       node.func.value.id == "addresses")
                     slips_family = (call_name == "render" and node.args and
                                     _slips_family_key(module, fn, node.args[0]))
+                    report_render = (
+                        module == "store_migrate" and fn == "_publish_report" and
+                        call_name == "render" and not node.args and not node.keywords and
+                        isinstance(node.func, ast.Attribute) and
+                        isinstance(node.func.value, ast.Name) and node.func.value.id == "report")
                     if (not internal_dispatch and not address_render and not slips_family and
+                            not report_render and
                             (len(node.args) <= key_index or
                             not isinstance(node.args[key_index], ast.Constant) or
                             not isinstance(node.args[key_index].value, str) or
@@ -327,6 +334,25 @@ class TestGate(unittest.TestCase):
                     expected = [(module, 2, "non-inventory emission key")] if refused else []
                     self.assertEqual(gate_violations([path]), expected)
 
+    def test_report_render_allowance_is_site_bound(self):
+        cases = (
+            ("store_migrate", "_publish_report", "report.render()", False),
+            ("store_migrate", "other", "report.render()", True),
+            ("probe", "_publish_report", "report.render()", True),
+            ("store_migrate", "_publish_report", "report.render(key)", True),
+            ("store_migrate", "_publish_report", "report.render(key=value)", True),
+            ("store_migrate", "_publish_report", "other.render()", True),
+            ("store_migrate", "_publish_report", "strings.render(key)", True),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for module, function, call, refused in cases:
+                with self.subTest(module=module, function=function, call=call):
+                    path = Path(temporary) / (module + ".py")
+                    path.write_text(f"def {function}():\n    return {call}\n",
+                                    encoding="utf-8")
+                    expected = [(module, 2, "non-inventory emission key")] if refused else []
+                    self.assertEqual(gate_violations([path]), expected)
+
     def test_private_descriptor_sites_are_exact(self):
         self.assertIn("PRIVATE_DESCRIPTOR_SITES", globals())
         self.assertEqual(PRIVATE_DESCRIPTOR_SITES, {
@@ -343,6 +369,7 @@ class TestGate(unittest.TestCase):
             ('owner_start', '_run_child', 'fdopen', 'retire_write'),
             ('store_layout', '_read_frame', 'fdopen', 'fd'),
             ('store_layout', '_replace', 'fdopen', 'fd'),
+            ('store_migrate', '_prepared_receipt', 'fdopen', 'file_fd'),
         })
 
     def test_private_descriptor_allowance_keeps_other_raw_sinks_blocked(self):
