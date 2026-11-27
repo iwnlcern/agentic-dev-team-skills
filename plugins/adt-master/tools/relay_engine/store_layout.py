@@ -543,6 +543,12 @@ def any_hold(catalogue_conn) -> tuple[str, str] | None:
                 'SELECT scope, job_id FROM maintenance_holds ORDER BY scope LIMIT 1')
 
 
+def name_holder(catalogue_conn, name: str) -> str | None:
+    """Read the holder of a reserved name, including a creating route."""
+    row = _row(catalogue_conn, 'SELECT project_id FROM project_routes WHERE name=?', (name,))
+    return None if row is None else row[0]
+
+
 def _reservation_conflict(conn, project_id, name):
     if _row(conn, 'SELECT 1 FROM project_routes WHERE project_id=?', (project_id,)):
         raise ProjectExists(project_id)
