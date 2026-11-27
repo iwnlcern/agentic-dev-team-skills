@@ -1274,6 +1274,126 @@ store_layout.sqlite3.connect = refused
                                   authorize=authorize, launch=spawn, birth_provider=birth, show=lambda _: None)
         spawn.assert_not_called()
 
+    def test_installed_acknowledgement_does_not_block_start_or_serving(self):
+        import pty
+
+        from relay_engine import api_client
+
+        package = self.install_candidate().resolve().parents[1]
+        home = self.home.resolve()
+        drop_in = home / '.agents' / 'skills'
+        drop_in.parent.mkdir(mode=0o700)
+        package.rename(drop_in)
+        launcher = drop_in / 'tools' / 'adt'
+        overlay = self.base / 'ack-overlay'
+        overlay.mkdir(mode=0o700)
+        (home / '.adt-owner' / 'receipts').mkdir(mode=0o700, parents=True)
+        (home / '.adt-owner').chmod(0o700)
+        (overlay / 'sitecustomize.py').write_text(f"""
+import hmac, os, pathlib, socket, sys, time
+sys.path.insert(0, {str(launcher.parent)!r})
+from relay_engine import adt_cli, operator_terminal, owner_start, submit
+directory = pathlib.Path({str(overlay)!r})
+submit._home = lambda: {str(home)!r}
+
+def sign(message):
+    return hmac.digest(b'ephemeral-installed-fixture', message, 'sha256')
+
+def verify(message, proof):
+    if not hmac.compare_digest(sign(message), proof):
+        raise operator_terminal.OperatorCheckRefused('bad_signature')
+
+operator_terminal._verify_signature = verify
+authorize = owner_start.authorize_owner_start
+owner_start.authorize_owner_start = lambda selection, owner, *, prove, show: authorize(
+    selection, owner, prove=sign, show=show)
+
+if sys.argv[1:2] == ['--private-notifier-custodian']:
+    sendall = socket.socket.sendall
+    def hold(self, data, *args):
+        if b'"kind":"ready"' in data:
+            (directory / 'custodian').write_text(str(os.getpid()))
+            deadline = time.monotonic() + 30
+            while not (directory / 'release').exists():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('test did not release custodian')
+                time.sleep(0.01)
+        return sendall(self, data, *args)
+    socket.socket.sendall = hold
+elif sys.argv[1:3] == ['engine', 'serve']:
+    original_main = adt_cli.main
+    def main(argv, **kwargs):
+        custodian = kwargs['queue_notifier'].__globals__['_NotifierCustodian']
+        original_ack = custodian.acknowledge
+        def record_ack(self, *args):
+            (directory / 'ack-entered').touch()
+            result = (original_ack(self, time.monotonic() + 30, args[1])
+                      if args else original_ack(self))
+            (directory / 'ack-exited').write_text(str(result))
+            return result
+        custodian.acknowledge = record_ack
+        return original_main(argv, **kwargs)
+    adt_cli.main = main
+""")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(overlay), HOME=str(home))
+        command = [sys.executable, str(launcher), 'engine', 'run', '--store-root', str(home / '.adt'),
+                   '--project-id', P, '--bridge-port', '0', '--initialize', '--project-name', 'Selected project']
+        terminal_pid, terminal = pty.fork()
+        if terminal_pid == 0:
+            try:
+                os.execve(sys.executable, command, env)
+            finally:
+                os._exit(127)
+        status = None
+        transcript = bytearray()
+
+        def reap_terminal():
+            nonlocal status
+            seen, result = os.waitpid(terminal_pid, os.WNOHANG)
+            if seen:
+                status = result
+            return bool(seen)
+
+        try:
+            deadline = time.monotonic() + 8
+            while b'/ready.json' not in transcript and time.monotonic() < deadline:
+                if select.select([terminal], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(terminal, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    transcript.extend(chunk)
+            output = transcript.decode(errors='replace')
+            ready = [line for line in output.splitlines() if line.startswith('/') and line.endswith('/ready.json')]
+            self.assertEqual(len(ready), 1, output)
+            self.wait_until((overlay / 'ack-entered').exists)
+            self.wait_until(lambda: (overlay / 'custodian').exists() and (overlay / 'custodian').stat().st_size)
+            self.assertFalse((overlay / 'ack-exited').exists())
+            # Opening the client completes protocol.connect over the real Unix socket.
+            client = api_client.ApiClient.open(api_client.read_ready_file(ready[0]), deadline=time.monotonic() + 2)
+            client.close()
+            self.assertFalse((overlay / 'ack-exited').exists())
+            (overlay / 'release').touch()
+            self.wait_until(lambda: (overlay / 'ack-exited').exists() and (overlay / 'ack-exited').stat().st_size)
+            self.assertEqual((overlay / 'ack-exited').read_text(), 'True')
+            os.write(terminal, b'\x03')
+            self.wait_until(reap_terminal)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int((overlay / 'custodian').read_text()), 0)
+        finally:
+            (overlay / 'release').touch()
+            os.close(terminal)
+            if status is None and not reap_terminal():
+                os.kill(terminal_pid, signal.SIGTERM)
+                try:
+                    self.wait_until(reap_terminal)
+                except AssertionError:
+                    os.kill(terminal_pid, signal.SIGKILL)
+                    os.waitpid(terminal_pid, 0)
+
     def test_installed_foreground_owner_clean_restart(self):
         import hashlib
         import pty
@@ -1294,20 +1414,31 @@ store_layout.sqlite3.connect = refused
         overlay.mkdir(mode=0o700)
         trace = scratch / 'installed.jsonl'
         marker = scratch / 'ordinary-open'
+        exits = scratch / 'custodian-exits.jsonl'
         (overlay / 'sitecustomize.py').write_text(f"""
-import hashlib, hmac, json, os, pathlib, sqlite3, sys
+import atexit, hashlib, hmac, json, os, pathlib, sqlite3, sys, time
 sys.path.insert(0, {str(installed)!r})
 from relay_engine import adt_cli, api_service, operator_terminal, owner_start, store_layout, submit
 base = pathlib.Path(os.environ['ADT_SYNTHETIC_HOME'])
 assert base.is_relative_to(pathlib.Path({str(scratch)!r}))
 submit._home = lambda: str(base)
 trace = pathlib.Path({str(trace)!r})
+exits = pathlib.Path({str(exits)!r})
+round_tag = os.environ['ADT_SYNTHETIC_ROUND']
+custodian = '--private-notifier-custodian' in sys.orig_argv
+
+if custodian:
+    @atexit.register
+    def custodian_exit():
+        with exits.open('a') as out:
+            print(json.dumps({{'pid': os.getpid(), 'round': round_tag, 't': time.monotonic()}}), file=out)
 
 def emit(data):
     with trace.open('a') as out:
         print(json.dumps(data), file=out)
 
-emit({{'pid': os.getpid(), 'origins': [module.__file__ for module in
+emit({{'pid': os.getpid(), 'round': round_tag, 'custodian': custodian,
+       'origins': [module.__file__ for module in
        (adt_cli, api_service, owner_start, store_layout)], 'sqlite': sqlite3.sqlite_version,
        'interpreter': sys.executable}})
 
@@ -1343,6 +1474,50 @@ if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(overlay),
                    HOME=str(home), ADT_SYNTHETIC_HOME=str(home))
 
+        def trace_rows(path=trace):
+            if not path.exists():
+                return []
+            return [json.loads(line) for line in path.read_text().splitlines()]
+
+        def fixture_custodians(rows):
+            return [row for row in rows if row.get('custodian') is True]
+
+        def gone(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        def fixture_pid(pid):
+            result = subprocess.run(['ps', '-ww', '-p', str(pid), '-o', 'command='],
+                                    capture_output=True, text=True, timeout=1)
+            return (result.returncode == 0 and str(launcher) in result.stdout
+                    and '--private-notifier-custodian' in result.stdout)
+
+        def clean_custodians():
+            # Read the startup trace even if a refusal assertion failed early.
+            pids = {row['pid'] for row in fixture_custodians(trace_rows())}
+            active = {pid for pid in pids if not gone(pid) and fixture_pid(pid)}
+            forced = sorted(active)
+            for event, limit in ((signal.SIGTERM, 3), (signal.SIGKILL, 2)):
+                for pid in active:
+                    if fixture_pid(pid):
+                        try:
+                            os.kill(pid, event)
+                        except ProcessLookupError:
+                            pass
+                deadline = time.monotonic() + limit
+                while active and time.monotonic() < deadline:
+                    active = {pid for pid in active if not gone(pid)}
+                    if active:
+                        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            self.assertFalse(active, ('fixture custodian cleanup incomplete', sorted(active)))
+            if forced:
+                print(json.dumps({'custodian_cleanup': 'gone', 'fixture_pids': forced}), flush=True)
+
+        self.addCleanup(clean_custodians)
+
         def receipt_directory(directory):
             receipts = directory / '.adt-owner' / 'receipts'
             receipts.mkdir(mode=0o700, parents=True)
@@ -1374,21 +1549,35 @@ if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
             self.assertIn(expected_return, [json.loads(line) for line in trace.read_text().splitlines()])
             return {**expected_return, 'raw_receipt_base64': base64.b64encode(frame).decode('ascii')}
 
-        def refuse(argv, expected, *, selected_home=home, environment=env, pass_fds=()):
-            before = len(trace.read_text().splitlines())
+        refusals = 0
+
+        def refuse(argv, expected, *, selected_home=home, environment=env, pass_fds=(), late_round=None):
+            nonlocal refusals
+            refusals += 1
+            tag = f'refuse-{refusals}'
+            before = len(trace_rows())
             result = subprocess.run(argv, env=dict(environment, ADT_SYNTHETIC_HOME=str(selected_home),
-                                                   ADT_SYNTHETIC_REFUSAL='1'),
+                                                   ADT_SYNTHETIC_REFUSAL='1', ADT_SYNTHETIC_ROUND=tag),
                                     pass_fds=pass_fds, capture_output=True, timeout=8)
+            returned = time.monotonic()
             self.assertEqual((result.returncode, result.stdout), (1, b''), result.stderr)
             self.assertIn(expected, result.stderr)
             self.assertFalse(marker.exists())
-            self.assertEqual(len(trace.read_text().splitlines()), before + 1)
+            new = trace_rows()[before:]
+            refused = [row for row in new if row.get('custodian') is False and row.get('round') == tag]
+            late = [row for row in new if late_round is not None and row.get('custodian') is True
+                    and row.get('round') == late_round]
+            self.assertEqual(len(refused), 1, ('expected one refusal startup', new))
+            self.assertLessEqual(len(late), 1, ('expected at most one late custodian', new))
+            self.assertEqual(len(new), 1 + len(late), ('unexpected refusal-window row', new))
+            return returned
 
         self.assertFalse(root.exists())
         terminal_pid, terminal = pty.fork()
         if terminal_pid == 0:
             try:
-                os.execve(sys.executable, command(root, initialize=True), env)
+                os.execve(sys.executable, command(root, initialize=True),
+                          dict(env, ADT_SYNTHETIC_ROUND='initial'))
             finally:
                 os._exit(127)
         status = None
@@ -1431,7 +1620,7 @@ if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
                                  (live.store, 'production'))
             installed_launch = subprocess.check_output(
                 [sys.executable, str(launcher), 'console', 'open', '--store-root', str(root), '--print'],
-                env=env, timeout=5).decode().strip()
+                env=dict(env, ADT_SYNTHETIC_ROUND='console'), timeout=5).decode().strip()
             self.assertEqual(urlsplit(installed_launch).netloc, urlsplit(metadata['bridge_origin']).netloc)
             os.write(terminal, b'\x03')
             self.wait_until(reap_terminal)
@@ -1478,7 +1667,9 @@ if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
             wrong_receipt.unlink()
 
         def stop_round(*, kill_child):
-            with subprocess.Popen(command(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as owner:
+            round_tag = 'abandoned' if kill_child else 'successor'
+            with subprocess.Popen(command(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=dict(env, ADT_SYNTHETIC_ROUND=round_tag)) as owner:
                 try:
                     next_ready = self.ready_from(owner)
                     current = arm()
@@ -1507,7 +1698,26 @@ if os.environ.get('ADT_SYNTHETIC_REFUSAL'):
         successor = stop_round(kill_child=False)
         second_return = retained(successor)
         abandoned = stop_round(kill_child=True)
-        refuse(command(root), b'incumbent-changed')
+        refused_at = refuse(command(root), b'incumbent-changed', late_round='abandoned')
+        rows = fixture_custodians(trace_rows())
+        qualified = (sys.platform, os.uname().machine) in {('darwin', 'arm64'), ('linux', 'aarch64')}
+        self.assertEqual(sorted(row['round'] for row in rows),
+                         ['abandoned', 'initial', 'successor'] if qualified else [],
+                         ('custodian startups per eligible round', rows))
+        pid_rounds = {row['pid']: row['round'] for row in rows}
+        self.assertEqual(len(pid_rounds), len(rows), rows)
+        deadline = refused_at + 5
+        while pid_rounds:
+            exiting = [row for row in trace_rows(exits) if row['t'] <= deadline]
+            exited = {(row['pid'], row['round']) for row in exiting}
+            pending = [(pid, tag) for pid, tag in pid_rounds.items()
+                       if (pid, tag) not in exited or not gone(pid)]
+            left = deadline - time.monotonic()
+            self.assertGreaterEqual(left, 0, ('missing custodian exit or disappearance', pending, exited))
+            if not pending:
+                print(json.dumps({'custodian_exit_witness': exiting, 'deadline': deadline}), flush=True)
+                break
+            time.sleep(min(left, 0.05))
         self.assertEqual(arm(), abandoned)
         receipt, = receipts.iterdir()
         self.assertEqual(receipt.read_bytes(), base64.b64decode(second_return['raw_receipt_base64']))

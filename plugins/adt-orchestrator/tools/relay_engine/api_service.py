@@ -517,6 +517,7 @@ class ApiService:
         self.writer = None
         self._bridge = None
         self._queue = None
+        self._notify_lock = threading.Lock()
         self._notify_thread = None
         self._notify_error = None
         self._runtime_inode = None
@@ -924,11 +925,13 @@ class ApiService:
             if self._foreground is not None and not self._foreground.acknowledge_ready():
                 return None
             self._install_signals()
-            if (self._notifier_mode == 'configured' and self._queue is not None and not self.is_stopping()
+            if (self._notifier_mode == 'configured' and self._queue is not None
                     and (self.queue_notifier is not None or self._notifier_custodian is not None)):
-                thread = threading.Thread(target=self._notify_queue, name='adt-queue-notify')
-                thread.start()
-                self._notify_thread = thread
+                with self._notify_lock:
+                    if not self.is_stopping():
+                        thread = threading.Thread(target=self._notify_queue, name='adt-queue-notify')
+                        thread.start()
+                        self._notify_thread = thread
             return self.ready_path
         except store_layout.LayoutFault:
             if self.is_stopping():
@@ -1012,6 +1015,8 @@ class ApiService:
             deliver(argv)
 
         try:
+            if custody is not None and not custody.acknowledge(custody.spawned_at + 2, self.is_stopping):
+                return
             while not self.is_stopping():
                 if custody is None:
                     notifier.notify_pass(self._queue.port, send, self.clock(), notifier=program)
@@ -1179,10 +1184,19 @@ class ApiService:
 
     def _stop_owned(self, attempt=None):
         self._stopping.set()
+        deadline = None if attempt is None else attempt.work
+        acquired = (self._notify_lock.acquire() if deadline is None else
+                    self._notify_lock.acquire(timeout=max(0, deadline - time.monotonic())))
+        if not acquired:
+            raise OSError('notifier retirement incomplete')
+        try:
+            notify_thread = self._notify_thread
+        finally:
+            self._notify_lock.release()
+
         if self._idle_fd is not None:
             fd, self._idle_fd = self._idle_fd, None
             os.close(fd)
-        deadline = None if attempt is None else attempt.work
         custody = self._notifier_custodian
         if custody is not None:
             custody.begin_stop(attempt)
@@ -1213,9 +1227,9 @@ class ApiService:
             with self._condition:
                 if self._clients or self._threads:
                     raise OSError('service transport retirement incomplete')
-        if self._notify_thread is not None:
-            self._notify_thread.join(None if deadline is None else max(0, deadline - time.monotonic()))
-            if self._notify_thread.is_alive():
+        if notify_thread is not None:
+            notify_thread.join(None if deadline is None else max(0, deadline - time.monotonic()))
+            if notify_thread.is_alive():
                 raise OSError('notifier retirement incomplete')
             self._notify_thread = None
         if custody is not None:
