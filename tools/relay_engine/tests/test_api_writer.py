@@ -2608,7 +2608,14 @@ class TransferModeTests(ProjectWriterFixture):
             return self.write(turn)
 
         if case == 'layout_fault':
-            with mock.patch.object(writer, '_declared_read_route', side_effect=store_layout.LayoutFault('test')):
+            real = writer._check_binding
+
+            def check(label, binding):
+                if label == Q:
+                    raise store_layout.LayoutFault('member-changed')
+                return real(label, binding)
+
+            with mock.patch.object(writer, '_check_binding', side_effect=check):
                 self.assertTrue(self.transfer(writer, run).commit)
         else:
             self.assertTrue(self.transfer(writer, run).commit)
@@ -2654,8 +2661,8 @@ class TransferModeTests(ProjectWriterFixture):
         guarded_open = writer._open_guarded
         close = writer._close_handle
 
-        def open_guarded(project, *, purpose):
-            conn, members = guarded_open(project, purpose=purpose)
+        def open_guarded(project, *, purpose, **options):
+            conn, members = guarded_open(project, purpose=purpose, **options)
             self.assertEqual((project, purpose), (Q, 'stopped_read'))
             handles.append(conn)
             return conn, members
@@ -2671,13 +2678,21 @@ class TransferModeTests(ProjectWriterFixture):
             self.assertEqual(turn.read_receiver(Q, 'required', self.read_name, route='stopped'), 'second')
             return self.write(turn)
 
+        submit_transfer = writer.submit_transfer
+        run_transfer = writer._run_transfer
+
+        def check_closed(request):
+            outcome = run_transfer(request)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed database'):
+                handles[0].execute('SELECT 1')
+            return outcome
+
         with (mock.patch.object(writer, '_open_guarded', side_effect=open_guarded),
-              mock.patch.object(writer, '_close_handle', side_effect=close_handle)):
-            self.assertTrue(self.transfer(writer, run).commit)
+              mock.patch.object(writer, '_close_handle', side_effect=close_handle),
+              mock.patch.object(writer, '_run_transfer', side_effect=check_closed)):
+            self.assertTrue(submit_transfer(api_writer.TransferJob(P, run)).commit)
         self.assertEqual(len(handles), 1)
         self.assertIsNone(requests[0].transient)
-        with self.assertRaises(sqlite3.ProgrammingError):
-            handles[0].execute('SELECT 1')
         if fail_close:
             self.assertIs(writer._rollback_errors[Q], error)
         self.assertEqual(self.value(), 'after')
@@ -2714,9 +2729,10 @@ class TransferModeTests(ProjectWriterFixture):
         def run(turn):
             for sql in ("INSERT INTO projects (id, name, created_at) VALUES ('extra', 'extra', 1)",
                         'CREATE TABLE blocked (x)'):
-                with self.assertRaises(sqlite3.DatabaseError) as caught:
-                    turn.sender.execute(sql)
-                self.assertEqual(caught.exception.sqlite_errorname, 'SQLITE_AUTH')
+                with self.subTest(sql=sql):
+                    with self.assertRaises(sqlite3.DatabaseError) as caught:
+                        turn.sender.execute(sql).close()
+                    self.assertEqual(caught.exception.sqlite_errorname, 'SQLITE_AUTH')
             return self.write(turn)
 
         self.assertEqual(self.transfer(writer, run).fault, 'turn_violation')
@@ -2759,14 +2775,21 @@ class TransferModeTests(ProjectWriterFixture):
 
     def test_cached_sender_statement_is_refused(self):
         writer = self.writer()
-        writer.submit(P, self.job(self.success))
+        sql = "INSERT INTO projects (id, name, created_at) VALUES ('cached', 'extra', 1)"
+
+        def cache(conn):
+            conn.execute(sql).close()
+            return api_writer.JobOutcome(False, None)
+
+        writer.submit(P, self.job(cache))
+
         def run(turn):
             with self.assertRaisesRegex(sqlite3.DatabaseError, 'not authorized'):
-                self.change(turn.sender, 'cached sql')
+                turn.sender.execute(sql).close()
             return api_writer.JobOutcome(False, None)
 
         self.assertEqual(self.transfer(writer, run).fault, 'turn_violation')
-        self.assertEqual(self.value(), 'after')
+        self.assertEqual(self.value(), 'before')
 
     def test_turn_exposes_no_raw_connection(self):
         writer = self.writer_pair()
@@ -2859,7 +2882,7 @@ class TransferModeTests(ProjectWriterFixture):
         epoch = SimpleNamespace(attempt=None, admission_closed=False)
         writer._epoch = epoch
         actual_interrupt = writer._interrupt
-        requests, sites, ran = [], [], []
+        requests, sites, ran, facts = [], [], [], []
 
         def interruption(conns):
             if case in ('active', 'idle'):
@@ -2887,7 +2910,9 @@ class TransferModeTests(ProjectWriterFixture):
                 self.fail('active receiver query not interrupted')
             if case == 'idle':
                 park()
-            return self.read_name(conn)
+            value = self.read_name(conn)
+            facts.append(value)
+            return value
 
         def run(turn):
             requests.append(writer._active_request)
@@ -2931,6 +2956,8 @@ class TransferModeTests(ProjectWriterFixture):
         self.assertIsNone(requests[0].receiver)
         if case in ('idle', 'unpublished'):
             self.assertEqual(sites, [('read_receiver', 'stopped')])
+        if case == 'idle':
+            self.assertEqual(facts, ['before'])
         if case == 'opening':
             self.assertEqual(sites, [('open_sender_writes', 'stopped')])
         if case == 'unpublished':
