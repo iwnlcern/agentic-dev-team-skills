@@ -53,6 +53,16 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/tools/adapters/relay-monitor.py\" session-end --host auto --plugin-root \"${CLAUDE_PLUGIN_ROOT}\""
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """relay-monitor: kit-side relay auto-delivery adapter (DD-v295-b2 r7).
 
-Modes: follow, bind, drain, session-start, status, operator, replay.
-Reads the run's rendered INDEX.md; never touches the engine record.
+Modes: follow, bind, drain, session-start, session-end, status, operator, replay.
+Reads the run's rendered INDEX.md; session teardown uses the engine API.
 """
 
 from __future__ import annotations
@@ -61,6 +61,8 @@ ROOT_BUDGET = 1.0
 # 0.214 s, and the worst combined case (wedged engine, hung `ps`, busy note) must stay at or under 1.6 s
 IDENTITY_BUDGET = 1.0  # both engine identity calls together; status/SessionStart fit 2 s (DD A6)
 STATUS_BUDGET = 1.3  # every read status and SessionStart make, engine calls included (fold F3)
+SESSION_END_BUDGET = 0.8  # leave hook process startup and exit time under Codex's one-second default
+SESSION_CLOSE_RESERVE = 0.15  # durable disconnect and hook output after the last service call
 PS_BUDGET = 0.25  # one process start-time read on the status path, used only where the kernel will not say (F3, G3)
 WRITE_BUDGET = 0.1  # a note write on the status path; a busy note is skipped, never waited on (G2)
 IDENTITY_TTL = 60.0
@@ -1521,6 +1523,8 @@ def _follow(args, session: str) -> int:
         while True:
             stop = "terminated" if _STOP_SIGNAL else "window gone" if watch is not None and watch.gone() else None
             if stop:
+                if stop == "window gone" and win is not None:
+                    _finish_window_session(win.key, "claude-code", end=time.monotonic() + STATUS_BUDGET)
                 store.update(
                     lambda n: record_own_exit(n, reason=stop.replace(" ", "-"), instance=me["instance"]),
                     timeout=2.0,
@@ -2756,6 +2760,135 @@ def arming_text(plugin_root: str, session: str, label: str | None) -> str:
     )
 
 
+def _session_api():
+    # Resolve the sibling tools tree in both a checkout and an installed kit;
+    # no engine package is needed on the normal status or unconnected hooks.
+    tools = str(Path(_ADAPTERS_DIR).parent)
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from relay_engine import api_client
+    return api_client
+
+
+def _read_matching_window(window_key, host, *, home, session=None):
+    import window_record
+
+    try:
+        record = window_record.read(window_key, home=home)
+    except ValueError:
+        return None
+    if record is None or record.host != host or (
+        session is not None and record.host_session_id != session
+    ):
+        return None
+    return record
+
+
+def _send_window_end(record, pending, *, end):
+    def deadline():
+        now = time.monotonic()
+        return min(now + 5, end) if now < end else None
+
+    if deadline() is None:
+        return "kept"
+    api = _session_api()
+    try:
+        key = api.read_key_file(record.key_path)
+    except api.LocalRefusal:
+        return "credential-failed"
+    credentials = {"key_id": key.key_id, "key_secret": key.key_secret, "session_id": record.session_id}
+    try:
+        ready = api.read_ready_file(record.ready_path)
+        bound = deadline()
+        if bound is None:
+            return "kept"
+        with contextlib.closing(api.ApiClient.open(ready, deadline=bound)) as client:
+            for op, args in (
+                ("session.resume", credentials),
+                ("session.end", {**credentials, "operation_key": pending.operation_key}),
+            ):
+                bound = deadline()
+                if bound is None:
+                    return "kept"
+                result = client.call(op, args, deadline=bound)
+                if isinstance(result, api.ApiErrorValue):
+                    reason = result.cause.get("reason")
+                    if reason == "session_not_current":
+                        return "deleted"
+                    return "credential-failed" if reason in ("key_rejected", "key_replaced") else "kept"
+    except (api.LocalRefusal, api.EndpointUnavailable):
+        return "kept"
+    return "deleted"
+
+
+def _finish_window_session(window_key, host, *, end, session=None) -> bool:
+    from dataclasses import replace
+
+    import pending_ends
+    import window_record
+
+    home = Path.home()
+    record = _read_matching_window(window_key, host, home=home, session=session)
+    if record is None or not record.connected:
+        return False
+    stamp = int(time.time() * 1000)
+    service_end = end - SESSION_CLOSE_RESERVE
+    pending = pending_ends.PendingEnd(
+        host=record.host, host_session_id=record.host_session_id, project_id=record.project_id,
+        session_id=record.session_id, generation=record.generation, key_path=record.key_path,
+        created_ms=stamp, last_attempt_ms=None, credential_failed=False, next_eligible_ms=0,
+        operation_key=uuid.uuid4().hex, ready_path=record.ready_path,
+    )
+    try:
+        path = home / ".adt" / "pending-ends" / pending_ends._filename(pending)
+        previous = pending_ends._load(path)
+        if previous is not None:
+            identity = ("host", "host_session_id", "generation", "session_id", "project_id",
+                        "key_path", "ready_path")
+            if any(getattr(previous, k) != getattr(pending, k) for k in identity):
+                return False
+            pending = previous
+        will_send = time.monotonic() < service_end and pending.next_eligible_ms <= stamp
+        if will_send:
+            pending = replace(pending, last_attempt_ms=stamp)
+        path = pending_ends.write(pending, home=home)
+    except (OSError, ValueError):
+        # Never end a session without a durable, matching operation key.
+        return False
+
+    try:
+        if will_send:
+            outcome = _send_window_end(record, pending, end=service_end)
+            if outcome != "kept" and pending_ends._load(path) == pending:
+                if outcome == "deleted":
+                    path.unlink(missing_ok=True)
+                else:
+                    pending_ends.write(replace(pending, credential_failed=True,
+                                               next_eligible_ms=stamp + 3600000), home=home)
+    except (OSError, ValueError, ImportError):
+        # The pending end survives local transport/custody failure.
+        pass
+    try:
+        # Preserve a successor connection that appeared during the bounded service attempt.
+        if window_record.read(window_key, home=home) != record:
+            return False
+        window_record.mark_not_connected(window_key, home=home)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def session_end(args) -> int:
+    end = time.monotonic() + SESSION_END_BUDGET
+    payload = read_payload()
+    session = resolve_session(args, payload)
+    if valid_session_id(session) and decide_host(args, payload, os.environ) == "codex":
+        _finish_window_session("cx-" + session, "codex", end=end, session=session)
+    # A Claude SessionEnd can mean clear, resume or a later parent exit.
+    # The actual Claude parent-liveness exit is the only window-gone path.
+    return 0
+
+
 def session_start(args) -> int:
     end = time.monotonic() + STATUS_BUDGET
     with root_budget(cap=end):
@@ -2779,7 +2912,15 @@ def session_start(args) -> int:
             or os.environ.get("PLUGIN_ROOT")
             or str(Path(__file__).resolve().parents[2])
         )
+        source = payload.get("source")
+        dropped = False
+        if host == "claude-code" and source in ("clear", "fork", "resume"):
+            resolved = bounded_root_call(lambda: follow_window(host, session))
+            if resolved.kind == "ok" and resolved.value is not None:
+                dropped = _finish_window_session(resolved.value.key, host, end=end)
         lines = [status_line(store, plugin_root, end=end)]
+        if dropped:
+            lines.append("not connected — ask for your seat name and key")
 
         def note_update(fn):  # a busy note is not waited on (fold F3, G2)
             with contextlib.suppress(LockTimeout):
@@ -2792,10 +2933,14 @@ def session_start(args) -> int:
                 os.environ.get("ADT_CODEX_FORK") == "0"
             )  # the only stock signal the kit honours (erratum-1 A)
             note_update(lambda n: n.update({"host": "codex", "codex_fork_override": override}))
+            if source == "resume":
+                record = _read_matching_window("cx-" + session, host, home=Path.home(), session=session)
+                if record is not None and not record.connected:
+                    lines.append("not connected — run adt connect --key " + shlex.quote(record.key_path))
             lines.append(
                 FALLBACK_OVERRIDE_TEXT
                 if override
-                else arming_text(plugin_root, session, source_label(payload.get("source")))
+                else arming_text(plugin_root, session, source_label(source))
             )
         else:
             note_update(lambda n: n.update({"host": "claude-code"}))
@@ -2810,6 +2955,7 @@ def session_start(args) -> int:
 
 
 MODES["session-start"] = session_start
+MODES["session-end"] = session_end
 MODES["status"] = status
 
 
@@ -3170,6 +3316,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("drain", parents=[common])
     p.add_argument("--deadline", type=float, default=DRAIN_DEADLINE)
     sub.add_parser("session-start", parents=[common])
+    sub.add_parser("session-end", parents=[common])
     sub.add_parser("status", parents=[common])
     p = sub.add_parser("operator", parents=[common])
     p.add_argument("--root", action="append", default=[])
@@ -3194,7 +3341,7 @@ def main(argv=None) -> int:
     except Exception:
         # Hooks consume untrusted payloads and must not interrupt their host.
         # Other modes retain their ordinary error reporting.
-        if args.mode in ("drain", "session-start") or (args.mode == "bind" and not args.manual):
+        if args.mode in ("drain", "session-start", "session-end") or (args.mode == "bind" and not args.manual):
             return 0
         raise
 
