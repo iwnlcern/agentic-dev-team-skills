@@ -27,7 +27,8 @@ TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch
           "evidence_objects", "evidence_object_bundles", "evidence_bundles",
           "evidence_captures", "evidence_uploads", "evidence_retention",
           "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
-          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events"}
+          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events",
+          "cross_project_allows", "cross_project_decisions", "cross_project_outcomes"}
 
 INDEXES = {
     "verification_requests": {("artifact", "content_sha256")},
@@ -1140,9 +1141,10 @@ class TestTableOwners(Store):
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
                  "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events"}
-        self.assertEqual(len(actual), 47)
+        self.assertEqual(len(actual), 50)
         authority = {"reviewer_assignments", "verification_requests", "waivers",
-                     "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals"}
+                     "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals",
+                     "cross_project_allows", "cross_project_decisions", "cross_project_outcomes"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "authority"}, authority)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "platform"}, platform)
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "store"}, store)

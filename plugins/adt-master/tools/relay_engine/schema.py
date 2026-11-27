@@ -280,6 +280,42 @@ _AUTHORITY_TABLES += (
 TABLE_OWNERS.update({name: 'authority' for name in ('restore_cancels', 'restore_refusals')})
 
 
+_AUTHORITY_TABLES += (
+    """CREATE TABLE IF NOT EXISTS cross_project_allows (
+    receiver_project_id TEXT PRIMARY KEY CHECK (length(receiver_project_id) >= 1),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    granted_at INTEGER NOT NULL,
+    granted_by TEXT NOT NULL CHECK (granted_by = 'operator'),
+    revoked_at INTEGER,
+    revoked_by TEXT CHECK (revoked_by IS NULL OR revoked_by = 'operator'),
+    CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS cross_project_decisions (
+    relay_id TEXT NOT NULL REFERENCES relays (id),
+    receiver_project_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL %s,
+    choice TEXT NOT NULL CHECK (choice IN ('once', 'deny')),
+    decided_at INTEGER NOT NULL,
+    decided_by TEXT NOT NULL CHECK (decided_by = 'operator'),
+    PRIMARY KEY (relay_id, receiver_project_id)
+) STRICT""" % _sha("body_sha256"),
+    """CREATE TABLE IF NOT EXISTS cross_project_outcomes (
+    apply_key TEXT PRIMARY KEY CHECK (length(CAST(apply_key AS BLOB)) BETWEEN 1 AND 256
+        AND instr(apply_key, char(0)) = 0),
+    call TEXT NOT NULL CHECK (call IN ('answer', 'revoke_always')),
+    arguments_sha256 TEXT NOT NULL %s,
+    status TEXT NOT NULL CHECK (status IN ('applied', 'stale')),
+    stale_pin TEXT,
+    receipt_id TEXT NOT NULL UNIQUE,
+    recorded_at INTEGER NOT NULL,
+    CHECK ((status = 'applied') = (stale_pin IS NULL))
+) STRICT""" % _sha("arguments_sha256"),
+)
+TABLE_OWNERS.update({name: 'authority' for name in (
+    'cross_project_allows', 'cross_project_decisions', 'cross_project_outcomes',
+)})
+
+
 _STORE_HELD_TABLES = (
     """CREATE TABLE IF NOT EXISTS xproject_transfers (
     relay_id TEXT NOT NULL REFERENCES relays (id),
@@ -797,6 +833,13 @@ WHEN EXISTS (
 BEGIN SELECT RAISE(ABORT, 'verification rows must share request, kind and reviewer'); END""",
 )
 
+
+_TRIGGERS += tuple(
+    """CREATE TRIGGER IF NOT EXISTS %s_%s BEFORE %s ON %s
+BEGIN SELECT RAISE(ABORT, 'permission record is insert-only'); END""" % (table, suffix, event, table)
+    for table in ("cross_project_decisions", "cross_project_outcomes")
+    for suffix, event in (("fixed", "UPDATE"), ("kept", "DELETE"))
+)
 
 _TRIGGERS += (
     """CREATE TRIGGER IF NOT EXISTS xproject_transfers_terminal_fixed BEFORE UPDATE ON xproject_transfers
