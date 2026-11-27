@@ -294,7 +294,7 @@ def compile_registry(definitions: d.DefinitionGraph, handlers: Mapping[str, Call
                 or op.principal not in {'unsigned', 'seat_key', 'seat_session', 'operator', 'service'}
                 or op.effect not in {'connection_metadata', 'pure_observation',
                                      'session_write', 'connection_binding', 'relay_admission',
-                                     'catalogue_write', 'relay_open'}
+                                     'catalogue_write', 'relay_open', 'settings_write'}
                 or op.retry not in {'read_repeat', 'operation_key', 'submission_key'}
                 or op.browser_get not in {'connect', 'schema', 'none'} | queue_get_routes
                 or (op.browser_get != 'none' and

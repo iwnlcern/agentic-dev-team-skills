@@ -164,7 +164,7 @@ class SessionTests(unittest.TestCase):
                              created_at='1', imported='true'),
             'body_base64': '', 'unopened': [], 'refs': [], 'findings': [],
         })
-        port = platform.PlatformPort(self.service, None, self.reads)
+        port = platform.PlatformPort(self.service, None, self.reads, settings=None)
         self.ports = dict.fromkeys(self.registry.handlers, port)
 
     def connection(self):
@@ -341,7 +341,9 @@ class SessionTests(unittest.TestCase):
             self.assertEqual((op.principal, op.effect, op.retry, op.browser_get), row)
 
     def test_capabilities_are_exactly_the_handled_operations(self):
-        names = ('protocol.connect', 'protocol.schema', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end', 'session.resume', 'session.sign-in')
+        names = ('project.settings.get', 'project.settings.set', 'protocol.connect',
+                 'protocol.schema', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify',
+                 'session.end', 'session.resume', 'session.sign-in')
         queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
                  'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')
         self.assertEqual(self.registry.capabilities(), tuple(sorted(names + queue)))

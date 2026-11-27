@@ -1145,6 +1145,7 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
         ("E_API_CONFLICT", "conflict", "ApiConflictCause", (
             ("operation_key_reused", "use_new_operation_key"),
             ("submission_key_reused", "use_new_submission_key"),
+            ("settings_revision_stale", "reload_settings"),
         )),
         ("E_QUEUE_STATE", "conflict", "ApiQueueStateCause", (
             ("revision_mismatch", "refresh_item"),

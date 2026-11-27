@@ -63,7 +63,7 @@ class TestExport(unittest.TestCase):
         old_digest = '9445baeef11240763072427eee4f9f629979f0a3cc03a6951428dc005784044a'
         artifact = self.export()
         self.assertNotEqual(artifact.digest, old_digest)
-        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 47)
+        self.assertEqual(len(json.loads(artifact.canonical_bytes)['$defs']['ApiError']['oneOf']), 48)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(load_generator().main(['--check']), 0)
 
@@ -87,7 +87,7 @@ class TestExport(unittest.TestCase):
             'protocol_window_v1', 'schema_payload_v1', 'negotiated_schema_v1'})
         scopes = [(rule.get('type_ref', rule.get('array_ref', rule.get('operation'))), rule['kind']) for rule in rules]
         self.assertEqual(scopes, sorted(set(scopes)))
-        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 47)
+        self.assertEqual(len(doc['$defs']['ApiError']['oneOf']), 48)
         for item in doc['$defs'].values():
             if item.get('type') == 'object':
                 self.assertIs(item['additionalProperties'], False)
@@ -855,7 +855,7 @@ class TestGeneratedConsumers(unittest.TestCase):
         self.assertEqual(manifest['schema_byte_count'], str(artifact.byte_count))
         self.assertEqual(manifest['protocol'], '3.0')
         self.assertEqual(manifest['operations'], [
-            'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
+            'project.settings.get', 'project.settings.set', 'protocol.connect', 'protocol.schema', 'queue.answer', 'queue.dismiss',
             'queue.dismiss-all', 'queue.get', 'queue.list', 'queue.open', 'queue.raise',
             'queue.withdraw', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify', 'session.end',
             'session.resume', 'session.sign-in',

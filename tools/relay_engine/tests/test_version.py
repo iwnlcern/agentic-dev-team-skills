@@ -43,6 +43,8 @@ EXPECTED_ROSTER = (
     "relay_engine/api_relay_reads.py",
     "relay_engine/api_relay_reads_service.py",
     "relay_engine/api_schema.py",
+    "relay_engine/api_settings.py",
+    "relay_engine/api_settings_service.py",
     "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
     "relay_engine/api_submit.py",
