@@ -198,6 +198,8 @@ class _ForegroundEpoch:
         self.signal_ingress = 'handler'
         self.signal_ingress_reason = None
         self._acquired = {}
+        self._pid = os.getpid()
+        self._pipe_lock = threading.RLock()
         try:
             self.read_fd, self._write_fd = os.pipe()
             self._acquired['pipe'] = (self._write_fd, self.read_fd)
@@ -228,13 +230,14 @@ class _ForegroundEpoch:
         self._close_wake_pipe()
 
     def _close_wake_pipe(self):
-        if (pipe := self._acquired.pop('pipe', None)) is not None:
-            write_end, read_fd = pipe
-            if isinstance(write_end, int):
-                os.close(write_end)
-            else:
-                write_end.close()
-            os.close(read_fd)
+        with self._pipe_lock:
+            if (pipe := self._acquired.pop('pipe', None)) is not None:
+                write_end, read_fd = pipe
+                if isinstance(write_end, int):
+                    os.close(write_end)
+                else:
+                    write_end.close()
+                os.close(read_fd)
 
     @property
     def finished(self):
@@ -278,8 +281,14 @@ class _ForegroundEpoch:
         return self.attempt
 
     def _wake(self):
-        # FileIO is unbuffered. A full nonblocking pipe already carries a wake.
-        self._wake_pipe.write(b'\x00')
+        # A fork child may have inherited this lock from a vanished thread.
+        if os.getpid() != self._pid:
+            return
+        with self._pipe_lock:
+            pipe = self._acquired.get('pipe')
+            if pipe is not None and not isinstance(pipe[0], int):
+                # FileIO is unbuffered. A full pipe already carries a wake.
+                self._wake_pipe.write(b'\x00')
 
     def publish_stop(self, observed_at):
         offered = _StopAttempt(observed_at)
@@ -335,8 +344,7 @@ class _ForegroundEpoch:
         self._finished = True
         self._wake()
         self._observer.join()
-        if not self._process_owner:
-            self._close_wake_pipe()
+        self._close_wake_pipe()
 
 
 class ServiceStartRefused(Exception):
