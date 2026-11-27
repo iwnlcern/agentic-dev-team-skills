@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "19913c55d38e91d0aaab81db006b7f44cd3b97e4fcd6fa38aaa4e14edba6d8ef",
+    "sha256": "545918d1f401fad190604742d9bebce17ad6ca924b0e448a722fbcb5d2e9ae4e",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -374,7 +374,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/pending_ends.py",
-    "sha256": "fdd870066b5baf121c1cb5c145c5bce623dda02f9e8ac399933b6c12f1471b5a",
+    "sha256": "6b26949961f2fd32d4fd9f0a25d1bc741988a99e78925ddea28d8c97537ec4ec",
     "source": "tools/adapters/pending_ends.py"
   },
   {
@@ -523,8 +523,14 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_pending_end_senders.py",
+    "sha256": "f81208f2cccbde912f9923c019ed44b9f96ba092636b964da39776a369e597dc",
+    "source": "tools/adapters/tests/test_pending_end_senders.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_pending_ends.py",
-    "sha256": "209111a7b0bb14b64343b0cbddc25be447fbc7158ad9cb236b39ee35ffe6446e",
+    "sha256": "eb824e728ab8d533a92e62959fa9ecb7ac87c6d16b432fed5a653eb2fc6a8b93",
     "source": "tools/adapters/tests/test_pending_ends.py"
   },
   {
@@ -11528,7 +11534,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "19913c55d38e91d0aaab81db006b7f44cd3b97e4fcd6fa38aaa4e14edba6d8ef",
+    "sha256": "545918d1f401fad190604742d9bebce17ad6ca924b0e448a722fbcb5d2e9ae4e",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11558,7 +11564,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/pending_ends.py",
-    "sha256": "fdd870066b5baf121c1cb5c145c5bce623dda02f9e8ac399933b6c12f1471b5a",
+    "sha256": "6b26949961f2fd32d4fd9f0a25d1bc741988a99e78925ddea28d8c97537ec4ec",
     "source": "tools/adapters/pending_ends.py"
   },
   {
@@ -11707,8 +11713,14 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_pending_end_senders.py",
+    "sha256": "f81208f2cccbde912f9923c019ed44b9f96ba092636b964da39776a369e597dc",
+    "source": "tools/adapters/tests/test_pending_end_senders.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_pending_ends.py",
-    "sha256": "209111a7b0bb14b64343b0cbddc25be447fbc7158ad9cb236b39ee35ffe6446e",
+    "sha256": "eb824e728ab8d533a92e62959fa9ecb7ac87c6d16b432fed5a653eb2fc6a8b93",
     "source": "tools/adapters/tests/test_pending_ends.py"
   },
   {
@@ -22628,7 +22640,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "19913c55d38e91d0aaab81db006b7f44cd3b97e4fcd6fa38aaa4e14edba6d8ef",
+    "sha256": "545918d1f401fad190604742d9bebce17ad6ca924b0e448a722fbcb5d2e9ae4e",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -22658,7 +22670,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/pending_ends.py",
-    "sha256": "fdd870066b5baf121c1cb5c145c5bce623dda02f9e8ac399933b6c12f1471b5a",
+    "sha256": "6b26949961f2fd32d4fd9f0a25d1bc741988a99e78925ddea28d8c97537ec4ec",
     "source": "tools/adapters/pending_ends.py"
   },
   {
@@ -22807,8 +22819,14 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_pending_end_senders.py",
+    "sha256": "f81208f2cccbde912f9923c019ed44b9f96ba092636b964da39776a369e597dc",
+    "source": "tools/adapters/tests/test_pending_end_senders.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_pending_ends.py",
-    "sha256": "209111a7b0bb14b64343b0cbddc25be447fbc7158ad9cb236b39ee35ffe6446e",
+    "sha256": "eb824e728ab8d533a92e62959fa9ecb7ac87c6d16b432fed5a653eb2fc6a8b93",
     "source": "tools/adapters/tests/test_pending_ends.py"
   },
   {

@@ -19,7 +19,8 @@ class PendingEndTests(TmpEnv):
 
     def record(self, m, session, *, last=None, next_ms=0, failed=False, created=1):
         return m.PendingEnd("codex", session, "project-id", "internal-" + session, 3,
-                            str(self.base / "home" / "a b" / "é.key"), created, last, failed, next_ms)
+                            str(self.base / "home" / "a b" / "é.key"), created, last, failed, next_ms,
+                            operation_key="close-" + session, ready_path=str(self.base / "ready"))
 
     def mutant(self, m, old, new):
         source = Path(m.__file__).read_text()

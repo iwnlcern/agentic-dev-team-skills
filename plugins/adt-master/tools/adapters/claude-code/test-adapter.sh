@@ -919,7 +919,7 @@ assert_case_engine_json_origin "e3-plugin-repoint-new-hook-engine-json" "$engine
 assert_relay_version "e3-plugin-repoint-new-version-triad" "$e3_plugin_new/tools/relay" "$e3_plugin_new/tools" "2.9.7" "$e3_plugin_new_fingerprint" || fail=1
 
 adapter_client_log="$tmp/adapter-client-unittest.log"
-if (cd "$ROOT" && PYTHONPATH="$ROOT/tools" python3 -m unittest tools.adapters.tests.test_resolver >"$adapter_client_log" 2>&1) &&
+if (cd "$ROOT" && PYTHONPATH="$ROOT/tools" python3 -m unittest tools.adapters.tests.test_resolver tools.adapters.tests.test_pending_end_senders >"$adapter_client_log" 2>&1) &&
   awk '
     /^Ran / {
       waiting = ran = ($0 ~ /^Ran [1-9][0-9]* tests? in [0-9]+([.][0-9]+)?s$/)
