@@ -888,6 +888,23 @@ svc = service()
 parked, release, read_again, reader_entered = (threading.Event() for _ in range(4))
 read = os.read
 reading = []
+child_closes = []
+if case == 'fork_hook_failure':
+    import tempfile
+    child_stderr = tempfile.TemporaryFile()
+    close = os.close
+    def fail_detach(*args, **kwargs):
+        raise OSError('fixture failed signal wakeup detach')
+    def child_close(fd):
+        child_closes.append(fd)
+        close(fd)
+    def prepare_failed_child():
+        os.dup2(child_stderr.fileno(), 2)
+        signal.set_wakeup_fd = fail_detach
+        os.close = child_close
+    # after_in_child hooks run in registration order; inject the failure
+    # in the child only, just before the real service hook.
+    os.register_at_fork(after_in_child=prepare_failed_child)
 def park_first_reader(fd, size):
     if threading.current_thread().name == 'adt-signal-reader':
         reading.append(fd)
@@ -928,6 +945,7 @@ if case == 'classify':
     svc.stop()
 elif case in ('fds_open_after_finish', 'finished_no_op'):
     assert parked.wait(1)
+    assert epoch._wake_pipe.fileno() == epoch._write_fd
     fds = [epoch.read_fd, epoch._write_fd, reading[0], sigfd]
     inodes = [os.fstat(fd).st_ino for fd in fds]
     calls = []
@@ -993,6 +1011,9 @@ else:
             elif case == 'fork_lock':
                 assert m._foreground_registry.owner is None
                 service().arm_foreground()
+            elif case == 'fork_hook_failure':
+                assert not child_closes and fd_open(sigfd) and fd_open(reading[0])
+                assert getattr(m, '_fork_isolation_failed', False), 'failed detach not recorded'
             else:
                 assert wakeup_fd() == -1
         except BaseException:
@@ -1002,14 +1023,21 @@ else:
         os._exit(0)
     if case == 'fork_lock':
         assert released_at and time.monotonic() >= released_at[0], 'fork did not wait for the registry lock'
-    assert os.waitpid(child, 0)[1] == 0
+    status = os.waitpid(child, 0)[1]
+    if case == 'fork_hook_failure':
+        child_stderr.seek(0)
+        output = child_stderr.read()
+        child_stderr.close()
+        assert not output, output
+    assert status == 0
     if case == 'fork_signal':
         assert not epoch._stopped.wait(1) and epoch.attempt is None
     if not epoch.finished:
         svc.stop()
 """
         for case in ('classify', 'foreign', 'fds_open_after_finish', 'finished_no_op', 'in_flight_after_check',
-                     'fork_signal', 'fork_probe', 'fork_foreign', 'fork_after_clean_finish', 'fork_lock'):
+                     'fork_signal', 'fork_probe', 'fork_foreign', 'fork_after_clean_finish', 'fork_lock',
+                     'fork_hook_failure'):
             with self.subTest(case=case):
                 foreign = case == 'foreign'
                 self.check_watchdog_child(script, case=case, expected=75 if foreign else 0, hard_stop=foreign)
@@ -1057,6 +1085,11 @@ def track_close(fd):
     with trace_lock:
         trace.append(('close', fd))
     return close(fd)
+class RecordingFileIO(m.io.FileIO):
+    def close(self):
+        with trace_lock:
+            trace.append(('close', self.fileno()))
+        super().close()
 def track_join(thread, *args, **kwargs):
     join(thread, *args, **kwargs)
     with trace_lock:
@@ -1101,6 +1134,7 @@ try:
     with (patch.object(os, 'pipe', capture_pipe),
           patch.object(os, 'set_blocking', blocking),
           patch.object(os, 'close', track_close),
+          patch.object(m.io, 'FileIO', RecordingFileIO),
           patch.object(os, 'register_at_fork', fork_hook),
           patch.object(threading.Thread, 'join', track_join),
           patch.object(threading.Thread, 'start', reader_start),
@@ -1122,8 +1156,10 @@ except (RuntimeError, OSError):
     assert not any(t.name in ('adt-store-fence', 'adt-stop-observer') for t in threading.enumerate())
     joiners = [entry[1] for entry in trace if entry[0] == 'join']
     assert set(joiners) == set(started.values())
-    if started:
+    if pipes:
         indices = [i for i, event in enumerate(trace) if event[0] == 'close']
+        write_fd = pipes[0][1]
+        assert sum(trace[i][1] == write_fd for i in indices) == 1, trace
         assert len(indices) == 2 and set(trace[i][1] for i in indices) == set(pipes[0])
         assert all(i < indices[0] and not entry[2] for i, entry in enumerate(trace) if entry[0] == 'join')
 else:
