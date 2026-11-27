@@ -26,7 +26,8 @@ TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch
           "lifecycle_outbox", "lifecycle_outbox_events",
           "evidence_objects", "evidence_object_bundles", "evidence_bundles",
           "evidence_captures", "evidence_uploads", "evidence_retention",
-          "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
+          "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
+          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events"}
 
 INDEXES = {
     "verification_requests": {("artifact", "content_sha256")},
@@ -41,6 +42,7 @@ INDEXES = {
     "refusals": {("project_id", "code")},
     "seat_sessions": {("seat_id",)},
     "token_counts": {("bundle_id",)},
+    "xproject_transfers": {("receiver_project_id", "state")},
 }
 
 SHA = "a" * 64
@@ -500,7 +502,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 30)
+        self.assertEqual(len(named), 31)
 
 
 class TestChecks(Store):
@@ -1136,8 +1138,9 @@ class TestTableOwners(Store):
                     "seats", "seat_occupants", "seat_sessions", "mutation_receipts"}
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
-                 "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays"}
-        self.assertEqual(len(actual), 43)
+                 "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
+                 "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events"}
+        self.assertEqual(len(actual), 47)
         authority = {"reviewer_assignments", "verification_requests", "waivers",
                      "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals"}
         self.assertEqual({t for t, owner in schema.TABLE_OWNERS.items() if owner == "authority"}, authority)

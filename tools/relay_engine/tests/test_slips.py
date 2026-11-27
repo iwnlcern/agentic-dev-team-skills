@@ -2921,6 +2921,111 @@ class TestRepositoryRule(SlipStore):
                     self.assertEqual(answer.reason, 'no implement slip exists for this seat')
 
 
+class TestNoBundle(SlipStore):
+    def imported_parent(self):
+        from relay_engine import imports
+
+        historical = imports.ImportedRelay(
+            created_at=self.clock, kind='SITREP', verdict=None, subject='Imported history',
+            sender=PLANNER.seat_id, sender_role=PLANNER.role,
+            team_instance_id=PLANNER.team_instance_id, to=(IMPL.seat_id, 'operator'),
+            cc=(), parent_id=None, parent_spelling=None, body=b'imported history',
+            header_bytes=0, header_sha256=hashlib.sha256(b'').hexdigest())
+        with self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            relay_id = imports.import_relay_step(self.conn, 'p', historical,
+                                                marked_at_ms=self.clock)
+            self.conn.execute(
+                'INSERT INTO imported_relays (relay_id, root_uuid, seq, stamp, zone,'
+                ' utc_offset_s, rendered_path, origin, headers_json, source_sha256,'
+                ' delivery_marked_at) VALUES (?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)',
+                (relay_id, relay_id, '20261125-000000', 'UTC', 'old/sitrep.md',
+                 '2.9.7', '{}', hashlib.sha256(historical.body).hexdigest(), self.clock))
+        self.assertEqual(self.conn.execute('SELECT bundle_id FROM relays WHERE id = ?',
+                                           (relay_id,)).fetchone(), (None,))
+        return relay_id
+
+    def test_no_bundle_refused(self):
+        for arm in ('non-claim', 'review', 'impl'):
+            with self.subTest(arm=arm):
+                fixture = TestNoBundle()
+                try:
+                    fixture.setUp()
+                    parent = fixture.imported_parent()
+                    conn = fixture.conn
+                    if arm in ('non-claim', 'review'):
+                        refs = ('file:' + str(fixture.plan),)
+                        request = fixture.submit(draft(kind='PLAN', needs='review',
+                                                       to=IMPL.address, parent=parent, refs=refs))
+                        self.assertEqual(conn.execute('SELECT bundle_id FROM relays WHERE id = ?',
+                                                      (request.relay_id,)).fetchone(), (None,))
+                        if arm == 'non-claim':
+                            continue
+
+                        def slots():
+                            lock = conn.execute(
+                                'SELECT locked_by FROM snapshots WHERE relay_id = ?',
+                                (request.relay_id,)).fetchall()
+                            answer = conn.execute(
+                                "SELECT answered_by FROM recipients WHERE relay_id = ? "
+                                "AND seat_id = ? AND role = 'to'",
+                                (request.relay_id, IMPL.seat_id)).fetchone()
+                            return lock, answer
+
+                        self.assertEqual(slots(), ([(None,)], (None,)))
+                        with self.assertRaises(errors.EngineError) as caught:
+                            fixture.submit(draft(kind='PLAN-REVIEW', verdict='approve',
+                                                 parent=request.relay_id, to=PLANNER.address,
+                                                 refs=refs), IMPL)
+                        error = caught.exception
+                        self.assertEqual(error.code, 'E-AUTHORITY-NO-BUNDLE',
+                                         f'kind={error.params.get("kind")}')
+                        self.assertEqual(slots(), ([(None,)], (None,)))
+                        self.assertIsNone(conn.execute(
+                            "SELECT 1 FROM verification_requests LIMIT 1").fetchone())
+                        self.assertIsNone(conn.execute(
+                            "SELECT 1 FROM relays WHERE kind = 'PLAN-REVIEW' "
+                            "OR (kind = 'REVIEW' AND sender_special = 'system')").fetchone())
+                        self.assertIsNotNone(conn.execute(
+                            "SELECT 1 FROM relays WHERE id = ? AND kind = 'PLAN'",
+                            (request.relay_id,)).fetchone())
+                    else:
+                        tables = ('slips', 'slip_events', 'restore_refusals')
+
+                        def counts():
+                            return tuple(conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
+                                         for table in tables)
+
+                        before = counts()
+                        operator = submit.SeatRef('operator', 'operator', 'operator', None, 'p')
+                        data = draft(kind='IMPL', needs='act', to=IMPL.address, parent=parent)
+                        with self.assertRaises(errors.EngineError) as caught:
+                            fixture.submit(with_repo(data), operator)
+                        error = caught.exception
+                        self.assertEqual(error.code, 'E-AUTHORITY-NO-BUNDLE',
+                                         f'kind={error.params.get("kind")}')
+                        self.assertIsNone(conn.execute(
+                            "SELECT 1 FROM relays WHERE kind = 'IMPL'").fetchone())
+                        self.assertEqual(counts(), before)
+                finally:
+                    fixture.doCleanups()
+
+    def test_no_bundle_catalogue(self):
+        from relay_engine import strings
+
+        code = 'E-AUTHORITY-NO-BUNDLE'
+        error = errors.error_for(code)
+        self.assertEqual(error.cause,
+                         "this relay's chain has no bundle, so no approval or go-ahead is recorded on it")
+        self.assertEqual(error.remedy,
+                         'ask your planner to file the plan again with NEEDS review and a new '
+                         'BUNDLE beside its PARENT, then review or act on that plan')
+        self.assertEqual(errors.explain_for(code)[0],
+                         'a reply to imported history stays outside every bundle until a plan opens one')
+        self.assertEqual(errors.ERRORS[code].cls, 'command')
+        self.assertIn(code, strings._CODE_VALUES)
+
+
 class TestAnswerCodesR22(unittest.TestCase):
     def test_answer_codes_r22(self):
         from relay_engine import slips

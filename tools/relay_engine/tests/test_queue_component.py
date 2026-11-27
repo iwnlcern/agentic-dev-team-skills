@@ -123,7 +123,7 @@ except (AttributeError, TypeError, AssertionError):
 else:
     raise AssertionError("factory accepted an invalid context")
 """
-        subprocess.run([sys.executable, '-I', '-c', program, path], check=True,
+        subprocess.run([sys.executable, '-I', '-B', '-c', program, path], check=True,
                        stdin=subprocess.DEVNULL, timeout=20)
 
     def test_package_import_boundary_and_exports(self):
@@ -172,7 +172,7 @@ for name in exports:
 """
         for order in ('package-first', 'component-first', 'records-first'):
             with self.subTest(order=order):
-                result = subprocess.run([sys.executable, '-I', '-c', program, path, order],
+                result = subprocess.run([sys.executable, '-I', '-B', '-c', program, path, order],
                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
 

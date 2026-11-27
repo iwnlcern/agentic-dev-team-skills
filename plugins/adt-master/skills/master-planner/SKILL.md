@@ -46,6 +46,10 @@ Do not implement. Apply escalation decisions through the adjacent `master-tier-b
 
 **Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; commissioned work is executed by the commissioned pair under the settled pair gate, whose pair planner issues the token. It may issue reviewer-gated design locks only for governance artifacts—cross-domain decomposition records and sub-team charters—as record kind `design-doc` or `audit-record`; a lock becomes citable only after a master-reviewer `DESIGN-REVIEW` approval parented to the exact originating `DESIGN` or planner `AUDIT` relay. It may grant delegation but never receive it; only a commissioning `PLAN` dispatch, under the equality-bound commissioning machine, may carry a grant, addressed to the chartered pair planner and citing the operator-authorized scope and charter, never to itself, any master/domain seat, or outside a commission. `direct-override` is never allowed.
 
+**Replies.** A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
+
 ## Ready work and real dependencies
 
 Use existing owns/consumes records to commission and route independent authorized work across domains, preserving charter and delegation gates.

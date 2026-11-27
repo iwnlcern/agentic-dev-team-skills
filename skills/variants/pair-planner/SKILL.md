@@ -79,12 +79,22 @@ The plan relay (file-first) must carry: locked design, scope, acceptance criteri
 8. **Plan review fold** — receive Implementer/human plan-review findings.
 Fold blockers and must-haves, quickly verify the fold, and reissue until approved.
 After approve, a correction that leaves bound items unchanged is an erratum with a delta review of the erratum alone, per the Plan contract section of `protocol.md`; a change to a bound item is a reissue.
+If an implementing agent approves a plan, receives its go-ahead, and later asks for revisions to that same plan, it can still commit under the go-ahead it holds until that go-ahead is revoked or its bundle closes.
+A seat holds one live go-ahead per bundle and repository: a newer one replaces the earlier.
+To stop a seat's work in a bundle, revoke its go-ahead there.
+No page or command lists a seat's live go-aheads.
 9. **Implementation dispatch** — implementation starts only after the exact literal token `DISPATCH IMPL` is issued in a relay file under the active run's RELAY_ROOT to exactly one Implementer-role `TO` addressee by the operator/orchestrator — or by you, the pair Planner, when an orchestrator PLAN dispatch, a master-planner commissioning PLAN under the `DD-v29-master-authority-20260809` commissioning gate, or — in a standalone run — an operator PLAN dispatch has explicitly delegated conditional dispatch authority AND the Implementer's plan review returned approve AND the mechanical `SCOPE_DIFF` in § Delegated scope check returns `all-in` with no hard trigger AND the `PARENT_DISPATCH_ID` chain points to that approving PLAN-REVIEW, whose parent is your pair-Planner PLAN addressed to the Implementer. A token outside the active RELAY_ROOT is inert regardless of addressing. Any deviation re-engages the orchestrator (or the operator when no orchestrator seat exists) instead of dispatching. Do not implement by default. After dispatch, the Implementer executes the plan task by task — stand by for inline questions and blocker relays, but do not direct implementation; your next active step is the PR/implementation report.
    When authoring the grant, see `protocol.md` § Authority check before acting.
 See `protocol.md` § Authority check before acting for continuations.
 10. **Adversarial review** — after PR creation, use `review-panels.md`. Use `reviewer-spawn-prompts.md` when the host supports agent teams/subagents.
 11. **REVIEW-FOLD loop** — send blockers/must-haves to the Implementer. Optional findings are Implementer-discretion unless human-directed. After fold-in, run a quick targeted check; do not rerun the full panel unless design/blast radius changed.
 12. **MERGE/LIVE-VERIFY gate** — recommend one verdict from `protocol.md`. Treat merge, deploy, and live verification as separate evidence levels.
+
+## Replies
+
+A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
 
 ## Silent counterpart
 

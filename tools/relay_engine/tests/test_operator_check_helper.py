@@ -64,7 +64,7 @@ class OperatorCheckHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             launcher = Path(directory) / 'operator-check'
             _, body = PATH.read_bytes().split(b'\n', 1)
-            launcher.write_bytes(f'#!{sys.executable} -IS\n'.encode() + body)
+            launcher.write_bytes(f'#!{sys.executable} -ISB\n'.encode() + body)
             launcher.chmod(0o755)
             result = subprocess.run([launcher, 'probe'], capture_output=True, check=True)
             self.assertEqual((result.stdout, result.stderr), (b'', b''))

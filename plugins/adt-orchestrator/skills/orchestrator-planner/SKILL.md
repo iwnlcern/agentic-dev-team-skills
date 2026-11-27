@@ -89,6 +89,10 @@ Apply the operation-level controls in `orchestration-moves.md` § Sequencing and
 
 Prefer file-first relays under `.relays/<RUN_ID>/` using the layout in `protocol.md`; include the addressee in the INDEX `to` column. Print the pointer context — `FROM` and a 3-6 line summary — followed by the exact terminal `RELAY`/`TO`/`CC` hand-off block per `protocol.md`. For v3 delivery, connect with `adt connect --key <key-path> [--switch]` (DD-v3-adapter § 4.1–4.2); the pointer block remains the fallback. If a receiver cannot access the path, relay or attach the file contents.
 
+**Replies.** A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
+
 ## Ready work and real dependencies
 
 Use existing bundle/plan records to route independent authorized work across pairs; a received substantive event re-engages only the relevant sequencing decision, not task-by-task execution or a standing plan-approval round.

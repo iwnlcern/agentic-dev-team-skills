@@ -346,6 +346,9 @@ def _shape(number, field, value, form):
                   value=_display(value), form=form)
 
 
+IMPORTED_PARENT_BUNDLE_RULE = "BUNDLE with PARENT requires a live PLAN with NEEDS review"
+
+
 def _validate(values, seen, body, header_bytes, validate_address):
     first = {}
     lists = {"REF": [], "FINDING": [], "FIXES": [], "RESOLVE": [], "ANSWERS": []}
@@ -387,10 +390,9 @@ def _validate(values, seen, body, header_bytes, validate_address):
             _shape(number, "ANSWERS", answer, "#<n> or a lowercase UUID")
     if "BUNDLE" in first:
         number, bundle = first["BUNDLE"]
-        if parent is not None:
+        if parent is not None and (kind, needs) != ("PLAN", "review"):
             raise _refuse("E-FIELD-FORBIDDEN", variant="bundle", line=number,
-                          field="BUNDLE",
-                          rule="BUNDLE opens a lineage, so it never sits beside PARENT")
+                          field="BUNDLE", rule=IMPORTED_PARENT_BUNDLE_RULE)
         if _BUNDLE.fullmatch(bundle) is None:
             _shape(number, "BUNDLE", bundle, "[a-z0-9][a-z0-9-]{0,47}")
     if parent is None and bundle is None:

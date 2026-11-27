@@ -24,7 +24,7 @@ class OperatorCheckInstallTests(unittest.TestCase):
             files = install.install_plan('linux', b'#!/usr/bin/python3 -IS\n# "quoted"\n', sys.executable)
             payload = install.invocation_payload('linux', sys.executable, 'operator', files,
                                                  root=directory, owner_uid=os.geteuid())
-            result = subprocess.run([sys.executable, '-IS', '-c', install.INSTALLER_SOURCE, 'decode'],
+            result = subprocess.run([sys.executable, '-ISB', '-c', install.INSTALLER_SOURCE, 'decode'],
                                     input=payload, capture_output=True, check=True)
             self.assertEqual(json.loads(result.stdout)['outcome'], 'decoded')
             self.assertEqual(list(Path(directory).iterdir()), [])
@@ -33,7 +33,7 @@ class OperatorCheckInstallTests(unittest.TestCase):
             self.assertIn(b'# "quoted"', base64.b64decode(helper['content_b64']))
 
     def test_installer_envelope_types_refused(self):
-        result = subprocess.run([sys.executable, '-IS', '-c', install.INSTALLER_SOURCE, 'decode'],
+        result = subprocess.run([sys.executable, '-ISB', '-c', install.INSTALLER_SOURCE, 'decode'],
                                 input=b'{"v":true}', capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotEqual(json.loads(result.stdout)['outcome'], 'decoded')
@@ -62,7 +62,7 @@ key.with_suffix(".pub").write_text("test public")
                                              root=directory, owner_uid=os.geteuid())
 
         def invoke(action):
-            return subprocess.run([sys.executable, '-IS', '-c', install.INSTALLER_SOURCE, action],
+            return subprocess.run([sys.executable, '-ISB', '-c', install.INSTALLER_SOURCE, action],
                                   input=payload, capture_output=True, check=False)
 
         return root, files, invoke
@@ -165,7 +165,7 @@ os.replace = stop_after_replace
 try:
     result = main()''',
                 )
-                result = subprocess.run([sys.executable, '-IS', '-c', instrumented, 'install'],
+                result = subprocess.run([sys.executable, '-ISB', '-c', instrumented, 'install'],
                                         input=payload, capture_output=True, check=False)
                 self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
                 result = invoke('install')

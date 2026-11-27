@@ -75,6 +75,30 @@ class TestRegistry(unittest.TestCase):
 
 
 class TestParse(Refused):
+    def test_imported_parent_bundle_header(self):
+        lines = replace("NEEDS", "review", replace("KIND", "PLAN"))
+        for parent in ("#12", "0192f3a4-5b6c-7d8e-9f01-23456789abcd"):
+            parsed = header.parse(draft(lines + ["PARENT: " + parent]))
+            self.assertEqual((parsed.kind, parsed.needs, parsed.parent, parsed.bundle, parsed.body),
+                             ("PLAN", "review", parent, "b1", b"body text\n"))
+        root = header.parse(draft(lines))
+        reply = header.parse(draft(replace("BUNDLE", None, lines) + ["PARENT: #12"]))
+        self.assertEqual((root.parent, root.bundle), (None, "b1"))
+        self.assertEqual((reply.parent, reply.bundle), ("#12", None))
+
+    def test_imported_parent_bundle_header_refusals(self):
+        rule = "BUNDLE with PARENT requires a live PLAN with NEEDS review"
+        for kind, need in (("SITREP", "review"), ("PLAN", "none")):
+            with self.subTest(kind=kind, need=need):
+                lines = replace("NEEDS", need, replace("KIND", kind)) + ["PARENT: #12"]
+                error = self.refused(draft(lines), "E-FIELD-FORBIDDEN", line=5)
+                self.assertEqual(error.params, {"line": 5, "field": "BUNDLE", "rule": rule})
+                self.assertEqual(error.remedy, "remove BUNDLE to inherit the parent's bundle")
+        lines = replace("NEEDS", "review", replace("KIND", "PLAN"))
+        bad_bundle = replace("BUNDLE", "Bad_Bundle", lines)
+        self.refused(draft(bad_bundle + ["PARENT: bad-parent"]), "E-FIELD-SHAPE", line=6)
+        self.refused(draft(bad_bundle + ["PARENT: #12"]), "E-FIELD-SHAPE", line=5)
+
     def test_answers_field(self):
         # Breaks: ANSWERS loses multiplicity, order, shape checks or kind independence.
         uuid = "0192f3a4-5b6c-7d8e-9f01-23456789abcd"
@@ -466,7 +490,7 @@ class TestPanelFold1(Refused):
                                 "E-FINDING-NO-CHECK", line=7)
         self.assertIn("advisory", blocking.remedy)
         both = self.refused(draft(BASE + ["PARENT: #2"]), "E-FIELD-FORBIDDEN", line=5)
-        self.assertIn("inherits", both.remedy)
+        self.assertEqual(both.remedy, "remove BUNDLE to inherit the parent's bundle")
         self.assertNotIn("KIND", both.remedy)
 
     def test_boundaries(self):  # M9 header survivors H1-H5, H7, H10

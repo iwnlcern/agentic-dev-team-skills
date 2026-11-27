@@ -60,12 +60,22 @@ def claim_of(conn, admitted, draft, project_id):
     return (draft.kind.partition('-')[0].lower(), tuple(locks.values())) if locks else None
 
 
+def relay_bundle(conn, relay_id: str) -> tuple[str, str]:
+    """Read the relay bundle or refuse an Authority action on a bundleless chain."""
+    row = conn.execute('SELECT r.bundle_id, b.name FROM relays r'
+                       ' JOIN bundles b ON b.id = r.bundle_id WHERE r.id = ?',
+                       (relay_id,)).fetchone()
+    if row is None:
+        raise errors.error_for('E-AUTHORITY-NO-BUNDLE')
+    return row
+
+
 def file_verification_request(conn, ctx, claim_relay_id, kind, locks, now_ms):
     if kind not in CLAIM_KINDS or not locks:
         raise ValueError('a verification needs a supported claim and its locks')
-    team, bundle = conn.execute('SELECT r.team_instance_id, b.name FROM relays r'
-                                ' JOIN bundles b ON b.id = r.bundle_id WHERE r.id = ?',
-                                (claim_relay_id,)).fetchone()
+    _, bundle = relay_bundle(conn, claim_relay_id)
+    team = conn.execute('SELECT team_instance_id FROM relays WHERE id = ?',
+                        (claim_relay_id,)).fetchone()[0]
     reviewer = reviewer_for(conn, team)
     address = None
     if reviewer is not None:

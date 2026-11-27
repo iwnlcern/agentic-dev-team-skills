@@ -280,7 +280,55 @@ _AUTHORITY_TABLES += (
 TABLE_OWNERS.update({name: 'authority' for name in ('restore_cancels', 'restore_refusals')})
 
 
-_TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
+_STORE_HELD_TABLES = (
+    """CREATE TABLE IF NOT EXISTS xproject_transfers (
+    relay_id TEXT NOT NULL REFERENCES relays (id),
+    receiver_project_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL %s,
+    state TEXT NOT NULL CHECK (state IN ('held', 'allowed', 'delivered', 'denied', 'returned')),
+    reason TEXT,
+    created_at INTEGER NOT NULL,
+    changed_at INTEGER NOT NULL,
+    PRIMARY KEY (relay_id, receiver_project_id),
+    CHECK (reason IS NULL OR
+        (state = 'allowed' AND reason IN ('receiver_stopped', 'receiver_unavailable')) OR
+        (state = 'returned' AND reason IN ('destination_not_active', 'recipient_not_found')))
+) STRICT""" % _sha("body_sha256"),
+    """CREATE TABLE IF NOT EXISTS xproject_recipients (
+    relay_id TEXT NOT NULL,
+    receiver_project_id TEXT NOT NULL,
+    seat_id TEXT NOT NULL,
+    address TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('to', 'cc')),
+    opened_at INTEGER,
+    PRIMARY KEY (relay_id, receiver_project_id, seat_id),
+    FOREIGN KEY (relay_id, receiver_project_id) REFERENCES xproject_transfers (relay_id, receiver_project_id)
+) STRICT""",
+    """CREATE TABLE IF NOT EXISTS xproject_deliveries (
+    relay_id TEXT NOT NULL,
+    receiver_project_id TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL %s,
+    delivered_at INTEGER NOT NULL,
+    PRIMARY KEY (relay_id, receiver_project_id),
+    FOREIGN KEY (relay_id, receiver_project_id) REFERENCES xproject_transfers (relay_id, receiver_project_id)
+) STRICT""" % _sha("body_sha256"),
+    """CREATE TABLE IF NOT EXISTS xproject_events (
+    event_id INTEGER PRIMARY KEY,
+    relay_id TEXT NOT NULL,
+    receiver_project_id TEXT NOT NULL,
+    from_state TEXT CHECK (from_state IN ('held', 'allowed', 'delivered', 'denied', 'returned')),
+    to_state TEXT NOT NULL CHECK (to_state IN ('held', 'allowed', 'delivered', 'denied', 'returned')),
+    reason TEXT,
+    at INTEGER NOT NULL,
+    FOREIGN KEY (relay_id, receiver_project_id) REFERENCES xproject_transfers (relay_id, receiver_project_id)
+) STRICT""",
+)
+TABLE_OWNERS.update({name: 'store' for name in (
+    'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events',
+)})
+
+
+_TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + _STORE_HELD_TABLES + (
     """CREATE TABLE IF NOT EXISTS imported_relays (
     relay_id TEXT NOT NULL REFERENCES relays(id),
     root_uuid TEXT NOT NULL,
@@ -655,6 +703,7 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + (
 )
 
 _INDEXES = (
+    "CREATE INDEX IF NOT EXISTS xproject_transfers_receiver_state ON xproject_transfers (receiver_project_id, state)",
     "CREATE INDEX IF NOT EXISTS verification_requests_bytes ON verification_requests (artifact, content_sha256)",
     "CREATE UNIQUE INDEX IF NOT EXISTS relays_submission_party ON relays"
     " (coalesce(sender_seat_id, sender_special), submission_key)"
@@ -746,6 +795,21 @@ WHEN EXISTS (
          OR v.kind IS NOT NEW.kind OR v.reviewer_seat_id IS NOT NEW.reviewer_seat_id)
 )
 BEGIN SELECT RAISE(ABORT, 'verification rows must share request, kind and reviewer'); END""",
+)
+
+
+_TRIGGERS += (
+    """CREATE TRIGGER IF NOT EXISTS xproject_transfers_terminal_fixed BEFORE UPDATE ON xproject_transfers
+WHEN OLD.state IN ('delivered', 'denied', 'returned')
+BEGIN SELECT RAISE(ABORT, 'terminal transfer is immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_deliveries_fixed BEFORE UPDATE ON xproject_deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery record is insert-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_deliveries_kept BEFORE DELETE ON xproject_deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery record is insert-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_events_fixed BEFORE UPDATE ON xproject_events
+BEGIN SELECT RAISE(ABORT, 'transfer event is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_events_kept BEFORE DELETE ON xproject_events
+BEGIN SELECT RAISE(ABORT, 'transfer event is append-only'); END""",
 )
 
 

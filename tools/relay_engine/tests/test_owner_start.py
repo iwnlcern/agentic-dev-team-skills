@@ -450,7 +450,7 @@ class OwnerStartTests(unittest.TestCase):
                 with (patch.object(store_layout, 'production_root', return_value=root),
                       patch.object(self.startup, '_clock_ns', side_effect=lambda: now[0]),
                       patch.object(store_layout, 'open_catalogue', wraps=store_layout.open_catalogue) as catalogue,
-                      patch.object(store_layout, 'open_ledger', wraps=store_layout.open_ledger) as ledger):
+                      patch.object(store_layout, 'open_ledger_runtime', wraps=store_layout.open_ledger_runtime) as ledger):
                     refusal = 'synthetic-birth-unsettled' if incomplete else 'startup_expired'
                     with self.assertRaisesRegex((self.startup.StartupRefused, store_layout.LayoutFault), refusal):
                         self.startup.run_owner(root, PROJECT, initialize=True, project_name='Example',

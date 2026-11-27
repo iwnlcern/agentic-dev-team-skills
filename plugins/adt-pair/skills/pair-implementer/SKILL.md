@@ -119,6 +119,12 @@ Merge is human/operator gated. Tests green plus valid dispatch is not merge auth
 A fictional merge citation is `AUTHORITY_CHECK: allowed merge example-b4/MERGE-GATE-orchestrator-planner-20261013-070000.md 20261013-070001`.
 Copy the actual command output for your act, not these example values.
 
+## Replies
+
+A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
+
 ## Silent counterpart
 
 When a relay you are waiting on from another seat is well past when it was due by your pair's own pace, send that seat one short relay saying what you are waiting for and the last relay you saw from it, and asking it to report or to say it cannot go on.

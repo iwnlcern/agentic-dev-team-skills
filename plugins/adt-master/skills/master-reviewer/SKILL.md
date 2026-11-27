@@ -36,6 +36,10 @@ Do not build or implement. Review decisions against the adjacent `master-tier-bo
 
 **Authority (DD-v29-master-authority-20260809).** This seat carries no `DISPATCH IMPL` or `DISPATCH MERGE`; it may cite locks; never issues them. It never grants or receives delegation, and `direct-override` is never allowed.
 
+**Replies.** A reply may answer more than one relay: `PARENT` names one, and each other relay it answers goes on its own `ANSWERS` line, written as `PARENT` is, `#<n>` or a lowercase UUID.
+Do not list the parent in `ANSWERS` as well.
+The engine refuses an `ANSWERS` line that names no relay of the project (`E-ANSWERS-UNKNOWN`), a relay not sent to you in `TO` or `CC` (`E-ANSWERS-NOT-ADDRESSED`), a relay you have not read yet (`E-ANSWERS-UNOPENED`), or the parent or a relay already listed (`E-ANSWERS-REPEATED`).
+
 ## Ready work and real dependencies
 
 Apply this scrutiny to cross-domain ownership, commissioning, arbitration and the actual owns/consumes seams; a shared domain name alone is not a dependency.

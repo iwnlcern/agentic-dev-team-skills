@@ -14,6 +14,8 @@ TABLE_OWNERS: dict[str, str] = {
     'engine_stops': 'store',
     'engine_stop_events': 'store',
     'checkout_routes': 'store',
+    'xproject_inbox': 'store',
+    'xproject_asks': 'store',
     'queue_items': 'console',
     'queue_conditions': 'console',
     'queue_events': 'console',
@@ -231,6 +233,23 @@ ON queue_highwaters (COALESCE(project_id, ''), source)""",
     reason TEXT NOT NULL CHECK (length(reason) >= 1),
     skipped_at_ms INTEGER NOT NULL CHECK (skipped_at_ms >= 0),
     UNIQUE (source, row_ref)
+) STRICT""",
+    """CREATE TABLE xproject_inbox (
+    source_project_id TEXT NOT NULL,
+    relay_id TEXT NOT NULL,
+    receiver_project_id TEXT NOT NULL,
+    seat_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('to', 'cc')),
+    delivered_at INTEGER NOT NULL,
+    PRIMARY KEY (source_project_id, relay_id, receiver_project_id, seat_id)
+) STRICT""",
+    """CREATE TABLE xproject_asks (
+    source_project_id TEXT NOT NULL,
+    relay_id TEXT NOT NULL,
+    receiver_project_id TEXT NOT NULL,
+    incarnation INTEGER NOT NULL CHECK (incarnation >= 0),
+    last_item_id TEXT NOT NULL,
+    PRIMARY KEY (source_project_id, relay_id, receiver_project_id)
 ) STRICT""",
 )
 

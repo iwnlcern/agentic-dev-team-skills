@@ -11,6 +11,33 @@ from unittest import mock
 
 import mtbattery as mt
 
+LIVE_TOOLS = mt.TOOLS
+_active_tools_digest: Path | None = None
+
+
+@contextlib.contextmanager
+def isolated_tools_digest():
+    global _active_tools_digest
+    if _active_tools_digest is not None:
+        yield _active_tools_digest
+        return
+
+    with tempfile.TemporaryDirectory() as raw:
+        private = Path(raw)
+        (private / 'original').write_text('original')
+        real_digest = mt.tree_digest
+
+        def digest(root):
+            return real_digest(private if root == LIVE_TOOLS else root)
+
+        _active_tools_digest = private
+        try:
+            with mock.patch.object(mt, 'tree_digest', new=digest):
+                yield private
+        finally:
+            _active_tools_digest = None
+
+
 PC10 = 'plancontract/PC10-draft-explicit-root/.engine/drafts/v29-x.planner/draft-plan.md'
 
 
@@ -372,7 +399,7 @@ def main():
     def test_main_preflight_exits_7_before_any_arm(self):
         import io
         stdout = io.StringIO()
-        with mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']), \
+        with isolated_tools_digest(), mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']), \
                 mock.patch.object(mt, 'run_arm', side_effect=AssertionError('arm must not run')) as run, contextlib.redirect_stdout(stdout):
             self.assertEqual(mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py')]), 7)
         self.assertEqual(run.call_count, 0)
@@ -381,7 +408,7 @@ def main():
 
     def test_main_passes_selection_to_preflight(self):
         import io
-        with mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']) as guard, contextlib.redirect_stdout(io.StringIO()):
+        with isolated_tools_digest(), mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']) as guard, contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'XR8']), 7)
         self.assertEqual(len(guard.call_args.args[2]), 2)
         self.assertTrue(all('XR8' in arm.get('rows', (arm['row'],)) for arm in guard.call_args.args[2]))
@@ -475,7 +502,7 @@ class TestMutationPopulations(unittest.TestCase):
     def test_main_denominator_line_names_both_populations(self):
         import io
         out = io.StringIO()
-        with self.cheap_parent(), mock.patch.object(mt, 'run_workers', return_value=[]), contextlib.redirect_stdout(out):
+        with isolated_tools_digest(), self.cheap_parent(), mock.patch.object(mt, 'run_workers', return_value=[]), contextlib.redirect_stdout(out):
             mt.main(['--spec', str(mt.TOOLS / 'mtbattery-spec.py'), '--only', 'C1'])
         lines = out.getvalue().splitlines()
         denominator = [line for line in lines if line.startswith('DENOMINATOR ')]
@@ -619,7 +646,8 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' 
         reports = [mt.ArmReport('dispatch-impl-false', ('ARM=dispatch-impl-false first-report',), (), True),
                    mt.ArmReport('dispatch-impl-true', ('ARM=dispatch-impl-true second-report',), (), True)]
         out = io.StringIO()
-        with TestMutationPopulations().cheap_parent(), mock.patch.object(mt, 'run_workers', return_value=reports), contextlib.redirect_stdout(out):
+        with isolated_tools_digest(), TestMutationPopulations().cheap_parent(), \
+                mock.patch.object(mt, 'run_workers', return_value=reports), contextlib.redirect_stdout(out):
             code = mt.main(['--spec', str(mt.TOOLS/'mtbattery-spec.py'), '--only', 'C1'])
         self.assertEqual(code, 0)
         lines = out.getvalue().splitlines()
@@ -631,7 +659,7 @@ print('MTBATTERY_REPORT ' + json.dumps(dict(name=name, lines=['ARM=' + name + ' 
     def test_main_preflight_starts_no_worker(self):
         import io
         out = io.StringIO()
-        with mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']), \
+        with isolated_tools_digest(), mock.patch.object(mt, 'structural_errors', return_value=['G3 seeded']), \
              mock.patch.object(mt, 'run_workers', side_effect=AssertionError('worker started')), contextlib.redirect_stdout(out):
             self.assertEqual(mt.main(['--spec', str(mt.TOOLS/'mtbattery-spec.py')]), 7)
         lines = out.getvalue().splitlines()
@@ -715,7 +743,7 @@ class TestFoldValidation(unittest.TestCase):
             if hook:
                 hook(*args, **kwargs)
             return reports
-        with TestMutationPopulations().cheap_parent(), \
+        with isolated_tools_digest(), TestMutationPopulations().cheap_parent(), \
                 mock.patch.object(mt, 'run_workers', side_effect=workers), contextlib.redirect_stdout(out):
             code = mt.main(['--spec', str(Path(__file__).parents[2]/'mtbattery-spec.py'),
                             '--only', 'C1', *extra])
@@ -852,6 +880,40 @@ class TestFoldVerdicts(unittest.TestCase):
             code, output = TestFoldValidation().parent(reports)
         self.assertEqual(code, 0)
         self.assertLess(output.index('ARM=dispatch-impl-true '), output.index('ARM=dispatch-impl-false '))
+
+    def test_parent_ignores_a_write_under_the_live_tools_tree(self):
+        with tempfile.TemporaryDirectory() as raw:
+            stand_in = Path(raw)
+            (stand_in / 'original').write_text('original')
+
+            def load(name, _path):
+                if name == 'mtbattery_spec':
+                    (stand_in / 'neighbour').write_text('unrelated write')
+                    return spec
+                return harness
+
+            case = TestFoldValidation()
+            with mock.patch.object(mt, 'TOOLS', stand_in), \
+                    mock.patch.dict(globals(), LIVE_TOOLS=stand_in), \
+                    mock.patch.object(mt, 'load_module', side_effect=load):
+                code, output = case.parent(case.reports())
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('source tools', output)
+
+    def test_guard_still_refuses_a_change_in_the_digested_tree(self):
+        with isolated_tools_digest() as private:
+
+            def load(name, _path):
+                if name == 'mtbattery_spec':
+                    (private / 'battery-write').write_text('owned write')
+                    return spec
+                return harness
+
+            case = TestFoldValidation()
+            with mock.patch.object(mt, 'load_module', side_effect=load):
+                code, output = case.parent(case.reports())
+        self.assertEqual(code, 7, output)
+        self.assertIn('ERROR source tools added battery-write', output)
 
     def test_workers_apply_shuffle_and_job_bounds(self):
         import json, sys

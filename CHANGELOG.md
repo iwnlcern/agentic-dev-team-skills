@@ -15,6 +15,8 @@ Kit 3.0 is a large change, not a patch; its migration steps will be listed here 
 - Use `relay lint` before filing and `tools/TESTING.md` for test practice.
 - At the release head, rewrite the moved-root warning in `sprint-doc-setup` against the v3 store; its measured 2.9.7 statement remains pinned until then.
 - A seat waiting on a relay well past due may send that seat one nudge, which grants nothing; the pair-planner, pair-implementer and orchestrator-planner skills say when and how.
+- A reply may answer several relays through `ANSWERS`; every role skill says how, and names the four refusals.
+- The pair Planner's plan-review step states the go-ahead rule: an approved plan's go-ahead stays usable after a later revision request until it is revoked or its bundle closes, and a newer go-ahead replaces the earlier one.
 
 - Superpowers is no longer required: each role skill states the practices it relies on, and Planner skills read a trimmed brainstorming reference vendored at `vendor/obra/superpowers/brainstorming.md` (MIT, modified from Superpowers 7.0.0).
 - Every plugin ships a paper-airplane icon, drawn by the generator.
