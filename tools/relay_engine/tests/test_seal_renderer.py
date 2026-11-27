@@ -25,10 +25,12 @@ R = '40000000-0000-4000-8000-000000000004'
 
 
 def _replace_final_name(source, target, directory, *, link, between=None):
+    keep = source + '.keep'
+    link(source, keep, src_dir_fd=directory, dst_dir_fd=directory)
     os.rename(source, target, src_dir_fd=directory, dst_dir_fd=directory)
     if between is not None:
         between()
-    link(target, source, src_dir_fd=directory, dst_dir_fd=directory)
+    os.rename(keep, source, src_dir_fd=directory, dst_dir_fd=directory)
 
 
 def key_child(root, project, chain, pipe, rename_control=False):
