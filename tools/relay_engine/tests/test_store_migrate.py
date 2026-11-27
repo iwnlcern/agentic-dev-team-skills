@@ -6,6 +6,7 @@ import importlib
 import io
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -711,7 +712,8 @@ class StoreMigrationCopyTests(unittest.TestCase):
         turns.run(store_steps.Declared('read', {}), private_catalogue)
         self.assertEqual({legacy: source_snapshot(legacy) for legacy in (legacy_a, legacy_b)}, source_before)
 
-    def _copied_import_fixture(self, label, rows, *, cutover=False, takeover_project=None):
+    def _copied_import_fixture(self, label, rows, *, cutover=False, takeover_project=None,
+                               paired=False):
         import json
 
         from relay_engine.tests.test_store_import import LEGACY_DDL
@@ -751,8 +753,17 @@ class StoreMigrationCopyTests(unittest.TestCase):
         if cutover:
             (legacy / '.engine' / 'seats').mkdir(mode=0o700)
             (legacy / '.engine' / 'drafts').mkdir(mode=0o700)
+        roots = (legacy,)
+        if paired:
+            second = legacy.with_name('second-root')
+            shutil.copytree(legacy, second)
+            with closing(sqlite3.connect(second / '.engine' / 'ledger.db')) as db, db:
+                db.executemany('UPDATE meta SET value=? WHERE key=?', (
+                    (str(second), 'canonical_root'), (str(uuid.uuid4()), 'root_uuid'),
+                )).close()
+            roots += (second,)
         if takeover_project is None:
-            job_id = self.start(migrate, root, turns, legacy)
+            job_id = self.start(migrate, root, turns, legacy, roots=roots)
         else:
             self.seed_reservation(root, turns, case='undone', project=takeover_project)
             job_id = self.start(migrate, root, turns, legacy, mode='takeover', name='reserved')
@@ -1607,11 +1618,11 @@ class StoreMigrationCopyTests(unittest.TestCase):
         self.assertEqual(len(files), 3)
         return normalize(data), files
 
-    def _cutover_fixture(self, label, *, takeover_project=None):
+    def _cutover_fixture(self, label, *, takeover_project=None, paired=False):
         migrate, root, turns, legacy, job_id = self._copied_import_fixture(label, (
             ('first', 'fixture.planner', 'fixture.implementer', ('operator',), ()),
             ('second', 'fixture.implementer', 'fixture.planner', ('operator',), ('first',)),
-        ), cutover=True, takeover_project=takeover_project)
+        ), cutover=True, takeover_project=takeover_project, paired=paired)
         self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'running'}).unresolved())
         return migrate, root, turns, legacy, job_id
 
@@ -1626,6 +1637,258 @@ class StoreMigrationCopyTests(unittest.TestCase):
     def _cutover_holds(self, turns, job_id):
         return turns.run(store_steps.Declared('read', {}), lambda conns:
                          store_layout.holds_of(conns['catalogue'], job_id))
+
+    def _undo_fixture(self, label, *, paired=False):
+        migrate, root, turns, legacy, job_id = self._cutover_fixture(label, paired=paired)
+        _, data = self.checkpoint(root, job_id)
+        legacy_before = {Path(item['path']): self._undo_files(Path(item['path']))
+                         for item in data['roots']}
+        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+        return migrate, root, turns, legacy, job_id, data['project_id'], legacy_before
+
+    @staticmethod
+    def _undo_files(root):
+        return {path.relative_to(root): (path.stat().st_mode, None if path.is_dir() else path.read_bytes())
+                for path in root.rglob('*')}
+
+    class _QueueBlocked(Exception):
+        def __init__(self, items):
+            self.items = items
+
+    @staticmethod
+    def _undo_queue(catalogue_conn, project_id, undo_job_id, *, now_ms):
+        return None
+
+    def _undo_call(self, migrate, root, turns, job_id, queue_step=None):
+        return migrate.undo(root, turns, job_id,
+                            queue_step=self._undo_queue if queue_step is None else queue_step,
+                            blocked_error=self._QueueBlocked, now_ms=NOW_MS + 2)
+
+    def _undo_native_relay(self, turns, project):
+        def native(conns):
+            db = conns[project]
+            with closing(db.execute("SELECT * FROM relays ORDER BY handle LIMIT 1")) as rows:
+                columns = [field[0] for field in rows.description]
+                value = dict(zip(columns, rows.fetchone(), strict=True))
+            value.update(id=str(uuid.uuid4()), handle=100, created_at=NOW_MS + 2)
+            db.execute('INSERT INTO relays VALUES (' + ','.join('?' for _ in columns) + ')',
+                       tuple(value.values())).close()
+        turns.run(store_steps.Declared(None, {project: 'written'}), native)
+
+    def _undo_route_state(self, turns, project):
+        return turns.run(store_steps.Declared('read', {}), lambda c: store_layout._row(
+            c['catalogue'], 'SELECT state, held_by_job FROM project_routes WHERE project_id=?', (project,)))
+
+    def test_undo_restores_roots(self):
+        migrate, root, turns, legacy, job_id, project, preimage = self._undo_fixture(
+            'undo-clean', paired=True)
+        result = self._undo_call(migrate, root, turns, job_id)
+        self.assertEqual(len(preimage), 2)
+        self.assertEqual(set(result.restored_roots), set(preimage))
+        self.assertEqual({path: self._undo_files(path) for path in preimage}, preimage)
+        self.assertEqual(self._undo_route_state(turns, project), ('creating', job_id))
+        self.assertFalse(self._cutover_holds(turns, job_id))
+        self.assertFalse(store_layout.ledger_path(root, project).exists())
+        self.assertTrue((self.job_path(root, job_id) / 'undone' / 'ledger.sqlite3').is_file())
+        self.assertEqual(self.checkpoint(root, job_id)[0], 'undo')
+        self._undo_call(migrate, root, turns, job_id)
+        self.assertEqual({path: self._undo_files(path) for path in preimage}, preimage)
+
+        migrate, root, turns, legacy, job_id, project, _ = self._undo_fixture('undo-native')
+        self._undo_native_relay(turns, project)
+        before = self._undo_files(legacy), self._undo_files(root / 'projects')
+        with self.assertRaises(migrate.UndoRefused):
+            self._undo_call(migrate, root, turns, job_id)
+        self.assertEqual((self._undo_files(legacy), self._undo_files(root / 'projects')), before)
+        self.assertEqual(self._undo_route_state(turns, project), ('active', job_id))
+        self.assertFalse(self._cutover_holds(turns, job_id))
+
+    def test_undo_queue_step(self):
+        migrate, root, turns, legacy, job_id, project, _ = self._undo_fixture('undo-queue')
+        calls = []
+        connections = []
+        change_route = store_layout.return_to_creating
+        items = ('pending-cross-project-item',)
+        before = self._undo_files(legacy), self._undo_files(root / 'projects')
+
+        def queue_step(catalogue_conn, project_id, undo_job_id, *, now_ms):
+            self.assertTrue(catalogue_conn.in_transaction)
+            self.assertEqual(store_layout._row(catalogue_conn,
+                'SELECT state FROM project_routes WHERE project_id=?', (project_id,)), ('active',))
+            calls.append((project_id, undo_job_id, now_ms))
+            connections.append(catalogue_conn)
+            if len(calls) == 1:
+                catalogue_conn.execute('UPDATE project_routes SET created_at=0 WHERE project_id=?',
+                                       (project_id,)).close()
+                raise self._QueueBlocked(items)
+            self.assertNotEqual(store_layout._row(catalogue_conn,
+                'SELECT created_at FROM project_routes WHERE project_id=?', (project_id,)), (0,))
+
+        with self.assertRaises(migrate.UndoRefused) as refused:
+            self._undo_call(migrate, root, turns, job_id, queue_step)
+        self.assertEqual(refused.exception.items, items)
+        self.assertEqual(calls, [(project, job_id, NOW_MS + 2)])
+        self.assertEqual((self._undo_files(legacy), self._undo_files(root / 'projects')), before)
+        self.assertEqual(self._undo_route_state(turns, project), ('active', job_id))
+        self.assertFalse(self._cutover_holds(turns, job_id))
+        def verify_transition(catalogue_conn, project_id, undo_job_id):
+            self.assertIs(catalogue_conn, connections[-1])
+            self.assertTrue(catalogue_conn.in_transaction)
+            change_route(catalogue_conn, project_id, undo_job_id)
+
+        with mock.patch.object(store_layout, 'return_to_creating', verify_transition):
+            self._undo_call(migrate, root, turns, job_id, queue_step)
+            self._undo_call(migrate, root, turns, job_id, queue_step)
+        self.assertEqual(calls, [(project, job_id, NOW_MS + 2)] * 2)
+
+    def test_undo_submit_ordering(self):
+        for before_step in (True, False):
+            with self.subTest(before_step=before_step):
+                migrate, root, turns, legacy, job_id, project, _ = self._undo_fixture(
+                    'undo-submit-' + str(before_step))
+                if before_step:
+                    self._undo_native_relay(turns, project)
+                    with self.assertRaises(migrate.UndoRefused):
+                        self._undo_call(migrate, root, turns, job_id)
+                    self.assertNotIn(project, turns.fenced_projects)
+                    continue
+                prepare = store_steps.prepare_database
+                observed = []
+
+                def after_route(path):
+                    self.assertTrue(path.is_file())
+                    with self.assertRaises(store_layout.RouteUnavailable) as refused:
+                        self._undo_native_relay(turns, project)
+                    observed.append(refused.exception.cause)
+                    return prepare(path)
+
+                with mock.patch.object(store_steps, 'prepare_database', after_route):
+                    self._undo_call(migrate, root, turns, job_id)
+                self.assertEqual(observed, ['fenced'])
+
+    def _undo_recutover(self, migrate, root, legacy):
+        # Restart builds the served set from active routes, before the same ID is cut over again.
+        turns = store_steps.DirectTurns(root)
+        second = migrate.start(root, turns, migrate.MigrationManifest('takeover', 'fixture', (legacy,)),
+                               NOW_MS + 10)
+        self.quiet(migrate, root, turns, second)
+        migrate.copy(root, turns, second)
+        self.assertFalse(migrate.decide(root, turns, second, {'fixture': 'running'}).unresolved())
+        migrate.cutover(root, turns, second, NOW_MS + 11)
+        return turns, second
+
+    def test_old_batch_after_recutover(self):
+        migrate, root, turns, legacy, job_id, project, _ = self._undo_fixture('undo-epoch')
+        select = 'SELECT position,epoch FROM queue_highwaters WHERE project_id=? AND source=?'
+        args = (project, 'question')
+        turns.run(store_steps.Declared('written', {}), lambda c: c['catalogue'].execute(
+            'INSERT INTO queue_highwaters VALUES (?,?,0,0,NULL)', args).close())
+        old = turns.run(store_steps.Declared('read', {}),
+                        lambda c: store_layout._row(c['catalogue'], select, args))
+
+        def queue_step(catalogue_conn, project_id, undo_job_id, *, now_ms):
+            self.assertTrue(catalogue_conn.in_transaction)
+            self.assertEqual((project_id, undo_job_id, now_ms), (project, job_id, NOW_MS + 2))
+            catalogue_conn.execute('UPDATE queue_highwaters SET epoch=epoch+1 WHERE project_id=?',
+                                   (project_id,)).close()
+
+        self._undo_call(migrate, root, turns, job_id, queue_step)
+        turns, second = self._undo_recutover(migrate, root, legacy)
+        self.assertEqual(self._undo_route_state(turns, project), ('active', second))
+        new = turns.run(store_steps.Declared('read', {}),
+                        lambda c: store_layout._row(c['catalogue'], select, args))
+        self.assertEqual((old, new), ((0, 0), (0, 1)))
+        self.assertNotEqual(old, new)
+
+    def test_undone_route_is_inert(self):
+        from relay_engine import store_create
+
+        migrate, root, turns, legacy, job_id, project, _ = self._undo_fixture('undo-inert')
+        self._undo_call(migrate, root, turns, job_id)
+        with self.assertRaises(store_create.CreationHeld):
+            store_create.finish_creation(turns, project)
+        with self.assertRaises(store_create.CreationHeld):
+            store_create.create_project(turns, 'fixture', now_ms=NOW_MS + 3)
+        self.assertFalse(store_layout.ledger_path(root, project).exists())
+        self.assertEqual(self._undo_route_state(turns, project), ('creating', job_id))
+        turns, second = self._undo_recutover(migrate, root, legacy)
+        self.assertEqual(self._undo_route_state(turns, project), ('active', second))
+        self.assertEqual(self.checkpoint(root, second)[1]['project_id'], project)
+
+
+    def test_undo_resumes_after_each_durable_effect(self):
+        for boundary in ('undo-route', 'undo-prepare', 'move', 'inverse-restore', 'undo-release'):
+            with self.subTest(boundary=boundary):
+                migrate, root, turns, legacy, job_id, project, preimage = self._undo_fixture(
+                    'undo-resume-' + boundary)
+                calls = []
+
+                def queue_step(catalogue_conn, project_id, undo_job_id, *, now_ms):
+                    calls.append((project_id, undo_job_id, now_ms))
+
+                real_receipt = store_steps.Journal.receipt
+                seen = []
+
+                def interrupted(journal, ident, observed):
+                    step = store_layout._row(journal._conn, 'SELECT step FROM intents WHERE id=?',
+                                             (ident,))[0]
+                    if step == boundary:
+                        seen.append(ident)
+                        raise InterruptedCopy(boundary)
+                    return real_receipt(journal, ident, observed)
+
+                with mock.patch.object(store_steps.Journal, 'receipt', interrupted):
+                    with self.assertRaisesRegex(InterruptedCopy, boundary):
+                        self._undo_call(migrate, root, turns, job_id, queue_step)
+                self.assertEqual(len(seen), 1)
+                self.assertEqual(self._undo_route_state(turns, project), ('creating', job_id))
+                self.assertIn(project, turns.fenced_projects)
+                self.assertEqual(bool(self._cutover_holds(turns, job_id)), boundary != 'undo-release')
+                self._undo_call(migrate, root, turns, job_id, queue_step)
+                self.assertEqual(calls, [(project, job_id, NOW_MS + 2)])
+                self.assertEqual({path: self._undo_files(path) for path in preimage}, preimage)
+                self.assertEqual(self.checkpoint(root, job_id)[0], 'undo')
+                with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
+                    self.assertEqual(journal.pending(), [])
+
+    def test_undo_resumes_refusal_receipt(self):
+        migrate, root, turns, legacy, job_id, project, _ = self._undo_fixture('undo-refusal-resume')
+
+        def blocked(catalogue_conn, project_id, undo_job_id, *, now_ms):
+            raise self._QueueBlocked(('pending',))
+
+        with mock.patch.object(store_steps.Journal, 'receipt', side_effect=InterruptedCopy):
+            with self.assertRaises(InterruptedCopy):
+                self._undo_call(migrate, root, turns, job_id, blocked)
+        self.assertEqual(self._undo_route_state(turns, project), ('active', job_id))
+        with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
+            pending, = [intent for intent in journal.pending() if intent.step == 'undo-refuse']
+            self.assertEqual(pending.target['items'], ['pending'])
+        self._undo_call(migrate, root, turns, job_id)
+        with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
+            self.assertEqual(journal.pending(), [])
+            self.assertEqual(journal.last_checkpoint()[0], 'undo')
+
+    def test_first_v3_write_ignores_imports_but_observes_slips_and_claims(self):
+        migrate = self.producer('first_v3_write')
+        with closing(sqlite3.connect(':memory:')) as ledger:
+            ledger.executescript('''
+                CREATE TABLE relays(id TEXT);
+                CREATE TABLE imported_relays(relay_id TEXT);
+                CREATE TABLE slips(id TEXT);
+                CREATE TABLE verification_requests(claim_relay_id TEXT);
+                INSERT INTO relays VALUES ('imported');
+                INSERT INTO imported_relays VALUES ('imported');
+            ''').close()
+            self.assertIsNone(migrate.first_v3_write(ledger))
+            for kind, table in (('slip', 'slips'), ('claim', 'verification_requests'), ('relay', 'relays')):
+                with self.subTest(kind=kind):
+                    ledger.execute('SAVEPOINT test_write').close()
+                    ledger.execute(f'INSERT INTO {table} VALUES (?)', ('native',)).close()
+                    self.assertEqual(migrate.first_v3_write(ledger), kind)
+                    ledger.execute('ROLLBACK TO test_write').close()
+                    ledger.execute('RELEASE test_write').close()
+
 
     def test_cutover_boundaries(self):
         from relay_engine import store_backup

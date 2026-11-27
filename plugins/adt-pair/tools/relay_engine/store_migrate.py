@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 import errno
 import fcntl
 import hashlib
@@ -1129,3 +1129,193 @@ def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> No
             journal.receipt(release.id, release.after)
         turn('read', lambda cat: route_is(cat, active), require_hold=False)
         journal.checkpoint('cutover', data)
+
+
+@dataclass(frozen=True)
+class UndoResult:
+    job_id: str
+    project_id: str
+    restored_roots: tuple[Path, ...]
+
+
+class UndoRefused(Exception):
+    """Undo cannot discard committed v3 work or a live queue action."""
+
+    def __init__(self, reason, items):
+        self.reason = reason
+        self.items = items
+        super().__init__(reason)
+
+
+def first_v3_write(ledger_conn) -> str | None:
+    """Name the first kind of work that makes this ledger forward-only."""
+    for kind, sql in (
+        ('relay', 'SELECT 1 FROM relays r WHERE NOT EXISTS '
+                  '(SELECT 1 FROM imported_relays i WHERE i.relay_id=r.id) LIMIT 1'),
+        ('slip', 'SELECT 1 FROM slips LIMIT 1'),
+        ('claim', 'SELECT 1 FROM verification_requests LIMIT 1'),
+    ):
+        if store_layout._row(ledger_conn, sql) is not None:
+            return kind
+    return None
+
+
+def undo(root, turns: store_steps.TurnRunner, job_id: str, *,
+         queue_step: Callable[..., object], blocked_error: type[Exception], now_ms: int) -> UndoResult:
+    """Fence and return a cutover to legacy before the first v3 write."""
+    root = store_layout.resolve_root(root)
+    with _job(root, job_id) as (job, journal):
+        phase, data = journal.last_checkpoint()
+        if phase not in ('cutover', 'undo'):
+            raise ValueError(f'undo requires a completed cutover, not {phase}')
+        project, name = data['project_id'], data['project_name']
+        paths = tuple(Path(item['path']) for item in data['roots'])
+        result = UndoResult(job_id, project, paths)
+        _bound_turn(turns, data)
+        if phase == 'undo':
+            return result
+
+        scopes = sorted([store_layout.project_scope(project)] + [
+            store_layout.root_scope(item['root_uuid']) for item in data['roots']
+        ])
+        held = frozenset(scopes)
+        active = [project, 'active', job_id]
+        creating = [project, 'creating', job_id]
+        before = {'route': active, 'holds': []}
+        after = {'route': creating, 'holds': scopes}
+
+        def checked_cat(conns):
+            cat = conns['catalogue']
+            if _identity(cat) != data['store_id']:
+                raise JobOrphaned(f'Store changed for migration {job_id}')
+            return cat
+
+        def observe(cat):
+            return {'route': _cutover_route(cat, name),
+                    'holds': sorted(store_layout.holds_of(cat, job_id))}
+
+        def step(access, action, *, require_hold=True):
+            def body(conns):
+                cat = checked_cat(conns)
+                if require_hold and (observed := observe(cat)) != after:
+                    raise store_steps.StepStateUnknown(after, after, observed)
+                return action(cat)
+            return turns.run(store_steps.Declared(access, {}), body)
+
+        # A refusal has no catalogue effect. Its intent carries the full
+        # observation, so a crash before the receipt cannot lose that record.
+        for undone_refusal in journal.pending():
+            if undone_refusal.step == 'undo-refuse':
+                journal.receipt(undone_refusal.id, undone_refusal.target)
+        route_intent, routed = _cutover_log(journal, 'undo-route')
+        if route_intent is not None and (route_intent.target, route_intent.before, route_intent.after) != (
+                project, before, after):
+            raise store_steps.StepStateUnknown(before, after, route_intent)
+        if not routed:
+            observed = step('read', observe, require_hold=False)
+            if route_intent is None or observed != after:
+                if observed != before:
+                    raise store_steps.StepStateUnknown(before, after, observed)
+
+                def route_and_queue(conns):
+                    nonlocal route_intent
+                    cat = checked_cat(conns)
+                    current = observe(cat)
+                    if current != before:
+                        raise store_steps.StepStateUnknown(before, after, current)
+                    if route_intent is None:
+                        route_intent = _cutover_intent(journal, 'undo-route', project, before, after)
+                    if (kind := first_v3_write(conns[project])) is not None:
+                        raise UndoRefused('first-v3-write', (kind,))
+                    try:
+                        queue_step(cat, project, job_id, now_ms=now_ms)
+                    except blocked_error as error:
+                        raise UndoRefused('queue-blocked', error.items) from error
+                    store_layout.take_holds(cat, job_id, 'undo', scopes, now_ms)
+                    store_layout.return_to_creating(cat, project, job_id)
+
+                try:
+                    turns.run(store_steps.Declared('written', {project: 'read'}), route_and_queue,
+                              fence_project=project)
+                except UndoRefused as error:
+                    items = json.loads(json.dumps(error.items, default=_undo_item_data))
+                    refusal = {'route_intent': route_intent.id, 'reason': error.reason, 'items': items}
+                    ident = journal.intent('undo-refuse', refusal, before, before)
+                    journal.receipt(ident, refusal)
+                    raise
+            journal.receipt(route_intent.id, after)
+
+        ledger = store_layout.ledger_path(root, project)
+        undone = job / 'undone' / 'ledger.sqlite3'
+        prepare, prepared_done = _cutover_log(journal, 'undo-prepare')
+        if prepare is not None and (prepare.target, prepare.before, prepare.after) != (
+                str(ledger), None, 'prepared'):
+            raise ValueError('undo prepare journal does not match the ledger')
+        if not prepared_done:
+            def prepare_ledger(_cat):
+                nonlocal prepare
+                if prepare is None:
+                    prepare = _cutover_intent(journal, 'undo-prepare', str(ledger), None, 'prepared')
+                prepared = store_steps.prepare_database(ledger)
+                journal.receipt(prepare.id, {'size': prepared.size, 'sha256': prepared.sha256})
+            step('read', prepare_ledger)
+        prepared = store_steps.Prepared(**json.loads(store_layout._row(
+            journal._conn, 'SELECT observed FROM receipts WHERE intent_id=?', (prepare.id,))[0]))
+        move, moved = _cutover_log(journal, 'move', lambda target: target.get('dst') == str(undone))
+        if not moved:
+            def move_ledger(_cat):
+                if move is None:
+                    store_steps.move_database(journal, prepared, ledger, undone)
+                else:
+                    src, dst = store_steps._states(prepared)
+                    if (move.target, move.before, move.after) != (
+                            {'src': str(ledger), 'dst': str(undone)}, src, dst):
+                        raise store_steps.StepStateUnknown(src, dst, move)
+                    store_steps.resume_move(journal, move)
+            step('read', move_ledger)
+
+        release, released = _cutover_log(journal, 'undo-release')
+        if release is None:
+            for index, (item, expected) in enumerate(zip(data['roots'], data['fingerprints'], strict=True)):
+                step('read', lambda _cat: _undo_root(data, job, journal, index, item, expected))
+
+        released_state = {'route': creating, 'holds': []}
+        if release is not None and (release.target, release.before, release.after) != (
+                job_id, after, released_state):
+            raise store_steps.StepStateUnknown(after, released_state, release)
+        if not released:
+            def release_holds(cat):
+                nonlocal release
+                observed = observe(cat)
+                if release is not None and observed == released_state:
+                    return
+                if observed != after:
+                    raise store_steps.StepStateUnknown(after, released_state, observed)
+                if release is None:
+                    release = _cutover_intent(journal, 'undo-release', job_id, after, released_state)
+                if store_layout.release_holds(cat, job_id) != len(held):
+                    raise HoldMissing(f'undo holds missing for migration {job_id}')
+            step('written', release_holds, require_hold=False)
+            journal.receipt(release.id, release.after)
+        observed = step('read', observe, require_hold=False)
+        if observed != released_state:
+            raise store_steps.StepStateUnknown(after, released_state, observed)
+        journal.checkpoint('undo', data)
+        return result
+
+
+def _undo_item_data(item):
+    # The queue's blocking item is a dataclass behind the injected seam.
+    return asdict(item) if is_dataclass(item) else str(item)
+
+
+def _undo_root(data, job, journal, index, item, expected):
+    path = Path(item['path'])
+    target = store_steps.MarkerTarget(
+        data['store_id'], data['job_id'], job, index, item['root_uuid'], item['path'],
+    )
+    store_steps.advance_inverse(journal, target)
+    try:
+        _match_fingerprint(path, expected, _fingerprint(path, {}))
+    except LegacySourceLink as error:
+        raise NotQuiet(str(error)) from error
