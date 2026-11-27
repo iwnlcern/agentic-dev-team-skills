@@ -889,14 +889,26 @@ if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
 elif len(sys.argv) > 2 and sys.argv[1:3] == ['engine', 'serve']:
     if phase == 'pre_ready':
         from relay_engine.api_service import _ForegroundEpoch
+        marker_lock = threading.Lock()
+        marker_written = False
+        def publish_once(epoch):
+            global marker_written
+            with marker_lock:
+                if publish_marker and not marker_written:
+                    atomic_write(marker, json.dumps(dict(admission_closed=epoch.admission_closed,
+                                                         attempt=epoch.attempt is not None)))
+                    marker_written = True
         enter_stop = _ForegroundEpoch.enter_stop
         def observe_stop(self):
             result = enter_stop(self)
-            if publish_marker:
-                atomic_write(marker, json.dumps(dict(admission_closed=self.admission_closed,
-                                                     attempt=self.attempt is not None)))
+            publish_once(self)
             return result
         _ForegroundEpoch.enter_stop = observe_stop
+        observed_signal = _ForegroundEpoch._observed_signal
+        def observe_signal(self, now):
+            observed_signal(self, now)
+            threading.Thread(target=publish_once, args=(self,), daemon=True).start()
+        _ForegroundEpoch._observed_signal = observe_signal
         def start_custodian(argv, **kwargs):
             child = original_popen(argv, **kwargs)
             if '--private-notifier-custodian' in argv:

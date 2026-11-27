@@ -31,6 +31,8 @@ PRIVATE_DESCRIPTOR_SITES = frozenset({
     ('store_layout', '_read_frame', 'fdopen', 'fd'),
     ('store_layout', '_replace', 'fdopen', 'fd'),
     ('store_migrate', '_prepared_receipt', 'fdopen', 'file_fd'),
+    ('store_steps', '_marker_inventory', 'fdopen', 'fd'),
+    ('store_steps', '_marker_preimage', 'fdopen', 'manifest_fd'),
 })
 
 
@@ -370,6 +372,8 @@ class TestGate(unittest.TestCase):
             ('store_layout', '_read_frame', 'fdopen', 'fd'),
             ('store_layout', '_replace', 'fdopen', 'fd'),
             ('store_migrate', '_prepared_receipt', 'fdopen', 'file_fd'),
+            ('store_steps', '_marker_inventory', 'fdopen', 'fd'),
+            ('store_steps', '_marker_preimage', 'fdopen', 'manifest_fd'),
         })
 
     def test_private_descriptor_allowance_keeps_other_raw_sinks_blocked(self):
@@ -381,6 +385,9 @@ class TestGate(unittest.TestCase):
             ("api_service", "another_function", "os.write(fd, b'x')", ["raw os sink"]),
             ("probe", "_write_private_frame", "os.write(fd, b'x')", ["raw os sink"]),
             ("api_service", "_write_private_frame", "sys.stdout.write('x')", ["raw sys sink"]),
+            ("store_steps", "_marker_inventory", "os.fdopen(fd, 'rb')", []),
+            ("store_steps", "_marker_inventory", "os.fdopen(1, 'rb')", ["raw os sink"]),
+            ("store_steps", "another_function", "os.fdopen(fd, 'rb')", ["raw os sink"]),
         )
         with tempfile.TemporaryDirectory() as temporary:
             for module, function, call, violations in cases:

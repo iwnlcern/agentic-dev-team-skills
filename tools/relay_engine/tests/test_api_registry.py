@@ -310,6 +310,7 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_ADMISSION', 'admission', 'wire', 'correct_draft'),
             ('E_API_ADMISSION', 'admission', 'integrity', 'report_nonsecret_failure'),
             ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
+            ('E_API_CONFLICT', 'conflict', 'settings_revision_stale', 'reload_settings'),
             ('E_API_UNAVAILABLE', 'unavailable', 'authority_unavailable', 'retry_same_submission'),
             ('E_API_UNAVAILABLE', 'unavailable', 'admission_not_stored', 'retry_same_submission'),
             ('E_API_UNAVAILABLE', 'unavailable', 'admission_unknown', 'retry_same_submission'),
@@ -410,6 +411,7 @@ class TestErrorCatalog(unittest.TestCase):
             ('E_API_AUTH', 'auth', 'not_asking_seat', 'withdraw_own_item'),
             ('E_API_CONFLICT', 'conflict', 'operation_key_reused', 'use_new_operation_key'),
             ('E_API_CONFLICT', 'conflict', 'submission_key_reused', 'use_new_submission_key'),
+            ('E_API_CONFLICT', 'conflict', 'settings_revision_stale', 'reload_settings'),
         }
         observed = set()
         for arm in registry.error_arms():
@@ -523,7 +525,7 @@ class TestErrorCatalog(unittest.TestCase):
         }
         def digest(data):
             return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        self.assertEqual(digest(value), '879241c596e695244b2a28de76be05c81f4da180ca8c06a990415c7985d20616')
+        self.assertEqual(digest(value), '963075d4c260b9eb0b108a4d8aabf9e66ad0b0d97e31f2bb663f09694eb22857')
         self.assertFalse(any(k.startswith('E_API_') for k in errors.ERRORS))
         changed = dict(value, errors=dict(value['errors'], E_API_INTERNAL={}))
         self.assertNotEqual(digest(changed), digest(value))
@@ -672,7 +674,7 @@ class TestCompile(unittest.TestCase):
                 with self.assertRaises(self.r.RegistryCompileError) as caught:
                     self.compile(graph)
                 self.assertIn(caught.exception.reason, self.r.COMPILE_REASONS)
-        self.assertEqual(len(self.compile().error_arms()), 47)
+        self.assertEqual(len(self.compile().error_arms()), 48)
 
     def test_compile_refuses_branch_defects(self):
         from dataclasses import replace
@@ -755,7 +757,7 @@ class TestCompile(unittest.TestCase):
 
     def test_error_arms_are_complete_records(self):
         registry = self.compile()
-        self.assertEqual(len(registry.error_arms()), 47)
+        self.assertEqual(len(registry.error_arms()), 48)
         for arm in registry.error_arms():
             leaf = registry.types[arm.cause_type.name].shape
             kind = registry.types[leaf.fields[0].type_ref.name].shape.values[0]

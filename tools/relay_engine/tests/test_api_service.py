@@ -728,8 +728,663 @@ service.start()
             with self.subTest(phase=phase):
                 self.check_hard_stop_with_parked_owner(phase)
 
-    def check_hard_stop_with_parked_owner(self, phase):
-        root = self.base / ('guard-' + phase)
+    def test_foreground_watchdog_observes_signal_sent_to_another_thread(self):
+        for name in ('adt-stop-observer', 'adt-store-fence', 'main'):
+            with self.subTest(thread=name):
+                try:
+                    self.check_hard_stop_with_parked_owner('accept', deliver='thread:' + name)
+                except subprocess.TimeoutExpired:
+                    self.fail(f'child alive 5 s after SIGTERM to {name}')
+                finally:
+                    (self.base / 'accept').unlink(missing_ok=True)
+
+    def test_losing_enter_stop_never_sees_claim_without_attempt(self):
+        script = """
+import threading
+from relay_engine import api_service as m
+entered = threading.Event()
+release = threading.Event()
+original = m._StopAttempt.__init__
+results = []
+def parked(self, now):
+    if threading.current_thread().name == 'parked-constructor':
+        entered.set()
+        assert release.wait(2)
+    original(self, now)
+m._StopAttempt.__init__ = parked
+epoch = m._ForegroundEpoch(lambda attempt: True)
+first = threading.Thread(target=lambda: results.append(epoch.enter_stop()), name='parked-constructor')
+first.start()
+try:
+    assert entered.wait(2)
+    claim_without_attempt = epoch.admission_closed and epoch.attempt is None
+    loser = epoch.enter_stop()
+    assert loser is not None, 'loser returned None while admission was closed'
+    assert not claim_without_attempt, 'admission closed before the attempt was published'
+finally:
+    release.set()
+    first.join(2)
+    epoch.finish()
+assert results == [loser] and epoch.attempt is loser
+"""
+        tools = Path(__file__).resolve().parents[2]
+        result = subprocess.run([sys.executable, '-c', script],
+                                env=dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1'),
+                                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def check_watchdog_child(self, script, *, case=None, expected=0, hard_stop=False, timeout=12,
+                             expected_stdout=None):
+        tools = Path(__file__).resolve().parents[2]
+        env = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
+        prelude = """
+import os, signal, threading, time
+from relay_engine import api_service as m
+def service():
+    return m.ApiService('/unused', 'test', clock=lambda: 1)
+def wakeup_fd():
+    current = signal.set_wakeup_fd(-1)
+    signal.set_wakeup_fd(current, warn_on_full_buffer=False)
+    return current
+def fd_open(fd):
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+"""
+        args = [] if case is None else [case]
+        result = subprocess.run([sys.executable, '-c', prelude + script, *args],
+                                capture_output=True, env=env, timeout=timeout)
+        self.assertEqual(result.returncode, expected, result.stderr.decode())
+        if expected_stdout is not None:
+            self.assertEqual(result.stdout.decode(), expected_stdout)
+        if hard_stop:
+            sent = float(result.stdout.decode().strip())
+            self.assertGreaterEqual(time.monotonic() - sent, 3.8)
+            self.assertLess(time.monotonic() - sent, 5)
+
+    def test_serve_arms_the_process_owner(self):
+        import ast
+
+        source = Path(__file__).resolve().parents[1] / 'adt_cli.py'
+        tree = ast.parse(source.read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == 'arm_foreground']
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(any(keyword.arg == 'process_owner' and isinstance(keyword.value, ast.Constant)
+                            and keyword.value.value is True for keyword in calls[0].keywords))
+
+    def test_foreground_arm_registry(self):
+        script = """
+import sys
+case = sys.argv[1]
+reader_parked, reader_release, reader_drained = (threading.Event() for _ in range(3))
+original_read = os.read
+reader_calls = 0
+def park_reader(fd, size):
+    global reader_calls
+    if threading.current_thread().name == 'adt-signal-reader':
+        reader_calls += 1
+        if reader_calls == 1:
+            reader_parked.set()
+            assert reader_release.wait(3)
+        else:
+            reader_drained.set()
+    return original_read(fd, size)
+if case == 'owner_after_finish':
+    os.read = park_reader
+a, b = service(), service()
+old = signal.getsignal(signal.SIGTERM)
+a.arm_foreground(process_owner=case != 'other_then_owner' and case != 'nested_non_owners')
+if case == 'nested_non_owners':
+    b.arm_foreground()
+    assert signal.getsignal(signal.SIGTERM) == b._signal
+    b.stop()
+    assert signal.getsignal(signal.SIGTERM) == a._signal
+    a.stop()
+    assert signal.getsignal(signal.SIGTERM) == old
+elif case == 'owner_after_finish':
+    assert reader_parked.wait(1)
+    inherited_fd = wakeup_fd()
+    a.stop()
+    b.arm_foreground(process_owner=True)
+    assert b._foreground.signal_ingress == 'handler'
+    assert b._foreground.signal_ingress_reason == 'reader_bound'
+    assert wakeup_fd() == inherited_fd
+    os.write(inherited_fd, bytes([signal.SIGTERM]))
+    reader_release.set()
+    assert reader_drained.wait(1) and not b._foreground._stopped.is_set()
+    assert b._foreground.attempt is None
+    b.stop()
+else:
+    handler, prior = signal.getsignal(signal.SIGTERM), wakeup_fd()
+    try:
+        b.arm_foreground(process_owner=case == 'other_then_owner')
+    except RuntimeError as error:
+        assert str(error) == 'foreground arm conflict: live_epoch'
+    else:
+        raise AssertionError('live arm was not refused')
+    assert wakeup_fd() == prior and signal.getsignal(signal.SIGTERM) == handler
+    assert b._foreground is None
+    if case == 'mixed_signal':
+        def deliver():
+            sent = time.monotonic()
+            signal.pthread_kill(a._foreground._observer.ident, signal.SIGTERM)
+            print(sent, flush=True)
+        threading.Thread(target=deliver, daemon=True).start()
+        threading.Event().wait()
+    a.stop()
+    assert signal.getsignal(signal.SIGTERM) == old
+"""
+        for case in ('owner_then_other', 'other_then_owner', 'nested_non_owners', 'owner_after_finish',
+                     'mixed_signal'):
+            with self.subTest(case=case):
+                mixed = case == 'mixed_signal'
+                self.check_watchdog_child(script, case=case, expected=75 if mixed else 0, hard_stop=mixed)
+
+    def test_process_owner_reader(self):
+        script = """
+import sys
+class RecordingFileIO(m.io.FileIO):
+    writes_after_close = 0
+    def write(self, data):
+        if self.closed:
+            self.writes_after_close += 1
+        return super().write(data)
+m.io.FileIO = RecordingFileIO
+case = sys.argv[1]
+svc = service()
+parked, release, read_again, reader_entered = (threading.Event() for _ in range(4))
+read = os.read
+reading = []
+child_closes = []
+if case == 'fork_hook_failure':
+    import tempfile
+    child_stderr = tempfile.TemporaryFile()
+    close = os.close
+    def fail_detach(*args, **kwargs):
+        raise OSError('fixture failed signal wakeup detach')
+    def child_close(fd):
+        child_closes.append(fd)
+        close(fd)
+    def prepare_failed_child():
+        os.dup2(child_stderr.fileno(), 2)
+        signal.set_wakeup_fd = fail_detach
+        os.close = child_close
+    # after_in_child hooks run in registration order; inject the failure
+    # in the child only, just before the real service hook.
+    os.register_at_fork(after_in_child=prepare_failed_child)
+def park_first_reader(fd, size):
+    if threading.current_thread().name == 'adt-signal-reader':
+        reading.append(fd)
+        reader_entered.set()
+        if len(reading) == 1 and case in ('finished_no_op', 'fds_open_after_finish'):
+            parked.set()
+            assert release.wait(3)
+        if len(reading) > 1:
+            read_again.set()
+    return read(fd, size)
+os.read = park_first_reader
+if case == 'foreign':
+    foreign_read, foreign_write = os.pipe()
+    os.set_blocking(foreign_write, False)
+    signal.set_wakeup_fd(foreign_write)
+svc.arm_foreground(process_owner=case != 'late_non_owner')
+epoch = svc._foreground
+sigfd = wakeup_fd()
+if case == 'foreign':
+    assert epoch.signal_ingress == 'handler' and epoch.signal_ingress_reason == 'foreign_wakeup_fd'
+    assert sigfd == foreign_write
+    sent = time.monotonic()
+    signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)
+    print(sent, flush=True)
+    threading.Event().wait()
+if case != 'late_non_owner':
+    assert epoch.signal_ingress == 'wakeup' and reader_entered.wait(1)
+if case == 'classify':
+    os.write(sigfd, bytes([signal.SIGUSR1]))
+    assert read_again.wait(1) and epoch.attempt is None
+    gate_read, gate_write = os.pipe()
+    gate = m._NotifierGate(gate_write)
+    assert epoch.install_notifier_gate(gate)
+    signal.pthread_kill(epoch._observer.ident, signal.SIGTERM)
+    assert epoch._stopped.wait(1) and epoch.attempt is not None
+    ready, _, _ = m.select.select([gate_read], [], [], 1)
+    assert ready and os.read(gate_read, 1) == b''
+    os.close(gate_read)
+    svc.stop()
+elif case in ('fds_open_after_finish', 'finished_no_op'):
+    assert parked.wait(1)
+    assert epoch._wake_pipe.fileno() == epoch._write_fd
+    fds = [reading[0], sigfd]
+    inodes = [os.fstat(fd).st_ino for fd in fds]
+    calls = []
+    publish = epoch.publish_stop
+    def record(now):
+        if threading.current_thread().name == 'adt-signal-reader':
+            calls.append(now)
+        return publish(now)
+    epoch.publish_stop = record
+    os.write(sigfd, bytes([signal.SIGTERM]))
+    svc.stop()
+    assert [os.fstat(fd).st_ino for fd in fds] == inodes
+    release.set()
+    assert read_again.wait(1) and not calls
+elif case in ('in_flight_after_check', 'late_non_owner'):
+    owner = case == 'in_flight_after_check'
+    ingress_fds = [reading[0], sigfd] if owner else []
+    inodes = [os.fstat(fd).st_ino for fd in ingress_fds]
+    publish = epoch.publish_stop
+    errors = []
+    threading.excepthook = errors.append
+    def blocked_publish(now):
+        if threading.current_thread() is not threading.main_thread():
+            parked.set()
+            assert release.wait(3)
+        return publish(now)
+    epoch.publish_stop = blocked_publish
+    if owner:
+        os.write(sigfd, bytes([signal.SIGTERM]))
+    else:
+        worker = threading.Thread(target=epoch._observed_signal, args=(time.monotonic(),))
+        worker.start()
+    try:
+        assert parked.wait(1)
+        assert svc.stop() == 0
+    finally:
+        release.set()
+    if owner:
+        assert read_again.wait(1) and not errors, errors
+        assert any(t.name == 'adt-signal-reader' and t.is_alive() for t in threading.enumerate())
+    else:
+        worker.join(2)
+        assert not worker.is_alive()
+    if errors:
+        raise errors[0].exc_value
+    assert epoch._wake_pipe.writes_after_close == 0, 'late wake wrote after close'
+    assert epoch._wake_pipe.closed and 'pipe' not in epoch._acquired, 'finished wake pair not closed'
+    assert inodes == [os.fstat(fd).st_ino for fd in ingress_fds]
+else:
+    if case == 'fork_foreign':
+        foreign_read, foreign_write = os.pipe()
+        os.set_blocking(foreign_write, False)
+        signal.set_wakeup_fd(foreign_write)
+    if case == 'fork_after_clean_finish':
+        svc.stop()
+        def sentinel(*args):
+            pass
+        signal.signal(signal.SIGTERM, sentinel)
+    if case == 'fork_lock':
+        locked = threading.Event()
+        released_at = []
+        def hold():
+            with m._foreground_registry.lock:
+                locked.set()
+                time.sleep(0.5)
+                released_at.append(time.monotonic())
+        threading.Thread(target=hold, daemon=True).start()
+        assert locked.wait(1)
+    child = os.fork()
+    if child == 0:
+        signal.alarm(2)
+        try:
+            if case == 'fork_signal':
+                os.kill(os.getpid(), signal.SIGTERM)
+            elif case == 'fork_foreign':
+                assert wakeup_fd() == foreign_write
+                assert os.fstat(sigfd) and os.fstat(reading[0])
+            elif case == 'fork_after_clean_finish':
+                assert signal.getsignal(signal.SIGTERM) is sentinel
+                assert wakeup_fd() == -1 and m._foreground_registry.owner is None
+            elif case == 'fork_lock':
+                assert m._foreground_registry.owner is None
+                service().arm_foreground()
+            elif case == 'fork_hook_failure':
+                assert not child_closes and fd_open(sigfd) and fd_open(reading[0])
+                assert getattr(m, '_fork_isolation_failed', False), 'failed detach not recorded'
+            else:
+                assert wakeup_fd() == -1
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            os._exit(1)
+        os._exit(0)
+    if case == 'fork_lock':
+        assert released_at and time.monotonic() >= released_at[0], 'fork did not wait for the registry lock'
+    status = os.waitpid(child, 0)[1]
+    if case == 'fork_hook_failure':
+        child_stderr.seek(0)
+        output = child_stderr.read()
+        child_stderr.close()
+        assert not output, output
+    assert status == 0
+    if case == 'fork_signal':
+        assert not epoch._stopped.wait(1) and epoch.attempt is None
+    if not epoch.finished:
+        svc.stop()
+"""
+        for case in ('classify', 'foreign', 'fds_open_after_finish', 'finished_no_op', 'in_flight_after_check', 'late_non_owner',
+                     'fork_signal', 'fork_probe', 'fork_foreign', 'fork_after_clean_finish', 'fork_lock',
+                     'fork_hook_failure'):
+            with self.subTest(case=case):
+                foreign = case == 'foreign'
+                self.check_watchdog_child(script, case=case, expected=75 if foreign else 0, hard_stop=foreign)
+
+    def test_epoch_wake_lifetime(self):
+        script = """
+import sys
+case = sys.argv[1]
+trace = []
+errors = []
+threading.excepthook = errors.append
+close = os.close
+join = threading.Thread.join
+class RecordingFileIO(m.io.FileIO):
+    def close(self):
+        if not self.closed:
+            trace.append(('wrapper_close', self.fileno()))
+            if case == 'reentrant_close':
+                epoch._wake()
+        super().close()
+    def write(self, data):
+        trace.append(('write', self.closed))
+        return super().write(data)
+m.io.FileIO = RecordingFileIO
+def record_close(fd):
+    trace.append(('raw_close', fd))
+    close(fd)
+def record_join(thread, *args, **kwargs):
+    join(thread, *args, **kwargs)
+    trace.append(('join', thread.name, thread.is_alive()))
+os.close = record_close
+threading.Thread.join = record_join
+if case == 'finish_reader_bound':
+    first = service()
+    first.arm_foreground(process_owner=True)
+    assert first._foreground.signal_ingress == 'wakeup'
+    first.stop()
+svc = service()
+svc.arm_foreground(process_owner=case in ('finish_owner', 'finish_reader_bound', 'fork_wake_lock'))
+epoch = svc._foreground
+if case == 'finish_reader_bound':
+    assert epoch.signal_ingress_reason == 'reader_bound'
+if case in ('finish_owner', 'fork_wake_lock'):
+    assert epoch.signal_ingress == 'wakeup'
+if case == 'fork_wake_lock':
+    # The placeholder lets the held product reach the real inherited handler
+    # and fail on the unwanted write even before there is a production lock.
+    lock = getattr(epoch, '_pipe_lock', threading.RLock())
+    parked = threading.Event()
+    release = threading.Event()
+    def hold_lock():
+        with lock:
+            parked.set()
+            assert release.wait(7)
+    helper = threading.Thread(target=hold_lock, daemon=True)
+    helper.start()
+    read_counter, write_counter = os.pipe()
+    child = None
+    reaped = False
+    try:
+        assert parked.wait(1)
+        child = os.fork()
+        if child == 0:
+            before = len(trace)
+            os.kill(os.getpid(), signal.SIGTERM)
+            writes = sum(row[0] == 'write' for row in trace[before:])
+            os.write(write_counter, str(writes).encode())
+            os._exit(0)
+        close(write_counter)
+        limit = time.monotonic() + 5
+        while time.monotonic() < limit:
+            pid, status = os.waitpid(child, os.WNOHANG)
+            if pid == child:
+                reaped = True
+                break
+            time.sleep(0.01)
+        assert reaped, 'fork child blocked on inherited wake lock'
+        assert os.waitstatus_to_exitcode(status) == 0, status
+        counter = os.read(read_counter, 8)
+        assert counter == b'0', ('fork child wrote wake byte', counter)
+        assert epoch._acquired['pipe'] == (epoch._wake_pipe, epoch.read_fd)
+        assert not epoch._wake_pipe.closed
+    finally:
+        if child and not reaped:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+        release.set()
+        helper.join(2)
+        close(read_counter)
+    assert not errors
+    assert svc.stop() == 0
+else:
+    trace.clear()
+    assert svc.stop() == 0
+    assert epoch._wake_pipe.closed and 'pipe' not in epoch._acquired, 'finished wake pair not closed'
+    assert trace.count(('wrapper_close', epoch._write_fd)) == 1, trace
+    assert trace.count(('raw_close', epoch.read_fd)) == 1, trace
+    assert ('raw_close', epoch._write_fd) not in trace and ('wrapper_close', epoch.read_fd) not in trace
+    joined = trace.index(('join', 'adt-stop-observer', False))
+    closed = trace.index(('wrapper_close', epoch._write_fd))
+    assert joined < closed < trace.index(('raw_close', epoch.read_fd)), trace
+    assert all(row[0] != 'write' for row in trace[closed + 1:]), ('wake after close started', trace)
+    assert not errors
+    if case == 'reentrant_close':
+        print('reentrant close finished')
+"""
+        for case in ('finish_owner', 'finish_reader_bound', 'finish_non_owner', 'reentrant_close',
+                     'fork_wake_lock'):
+            with self.subTest(case=case):
+                isolated = case in ('reentrant_close', 'fork_wake_lock')
+                self.check_watchdog_child(
+                    script, case=case, timeout=10 if isolated else 12,
+                    expected_stdout='reentrant close finished\n' if case == 'reentrant_close' else None,
+                )
+
+    def test_foreground_arm_unwind(self):
+        script = """
+import sys
+from unittest.mock import patch
+case, _, mode = sys.argv[1].partition(':')
+svc = service()
+signal_pair = (signal.SIGTERM, signal.SIGINT)
+handlers = [signal.getsignal(sig) for sig in signal_pair]
+trace = []
+trace_lock = threading.Lock()
+started = {}
+pipes = []
+fences = []
+def record_fence(attempt):
+    fences.append(attempt)
+    return True
+svc._fence_writer = record_fence
+pipe = os.pipe
+set_blocking = os.set_blocking
+close = os.close
+join = threading.Thread.join
+start = threading.Thread.start
+start_worker = m._ForegroundEpoch._start_worker
+sig = signal.signal
+install = m.ApiService._install_signals
+wakeup = signal.set_wakeup_fd
+at_fork = os.register_at_fork
+def capture_pipe():
+    if case == 'reader_pipe' and pipes:
+        raise OSError('reader pipe')
+    fds = pipe()
+    pipes.append(fds)
+    return fds
+def blocking(fd, block):
+    if case == 'after_pipe' or (case == 'reader_blocking' and len(pipes) == 2):
+        raise OSError('blocking setup')
+    set_blocking(fd, block)
+    if case == 'after_blocking':
+        raise OSError('post-blocking setup')
+def track_close(fd):
+    with trace_lock:
+        trace.append(('close', fd))
+    return close(fd)
+class RecordingFileIO(m.io.FileIO):
+    def close(self):
+        with trace_lock:
+            trace.append(('close', self.fileno()))
+        super().close()
+def track_join(thread, *args, **kwargs):
+    join(thread, *args, **kwargs)
+    with trace_lock:
+        trace.append(('join', thread, thread.is_alive()))
+def worker(epoch, role, thread):
+    if case == role + '_pre':
+        raise RuntimeError('pre-start')
+    start_worker(epoch, role, thread)
+    started[role] = thread
+    if case == role + '_post':
+        raise RuntimeError('post-start')
+def install_fault(self):
+    if case == 'before_handlers':
+        raise RuntimeError('before handlers')
+    return install(self)
+def second_handler_fault(signum, handler):
+    if case == 'mid_handlers' and signum == signal.SIGINT and handler == svc._signal:
+        raise RuntimeError('mid handlers')
+    return sig(signum, handler)
+def reader_start(thread):
+    if thread.name == 'adt-signal-reader' and case in ('reader_start', 'unwind_incomplete'):
+        raise RuntimeError('reader start')
+    return start(thread)
+def installed_wakeup(fd, **kwargs):
+    if case == 'reader_wakeup' and fd >= 0 and len(pipes) == 2:
+        raise OSError('fd install')
+    if case == 'unwind_incomplete' and fd == -1:
+        raise OSError('ownership probe')
+    return wakeup(fd, **kwargs)
+def fork_hook(**kwargs):
+    if case == 'reader_fork':
+        raise OSError('fork hook')
+    return at_fork(**kwargs)
+def assert_registry_clear():
+    r = m._foreground_registry
+    assert r.owner is None and not r.others
+
+if case == 'reservation':
+    other = service()
+    other.arm_foreground()
+try:
+    with (patch.object(os, 'pipe', capture_pipe),
+          patch.object(os, 'set_blocking', blocking),
+          patch.object(os, 'close', track_close),
+          patch.object(m.io, 'FileIO', RecordingFileIO),
+          patch.object(os, 'register_at_fork', fork_hook),
+          patch.object(threading.Thread, 'join', track_join),
+          patch.object(threading.Thread, 'start', reader_start),
+          patch.object(signal, 'signal', second_handler_fault),
+          patch.object(signal, 'set_wakeup_fd', installed_wakeup),
+          patch.object(m._ForegroundEpoch, '_start_worker', worker),
+          patch.object(m.ApiService, '_install_signals', install_fault)):
+        svc.arm_foreground(process_owner=True)
+except (RuntimeError, OSError):
+    assert case not in ('reader_pipe', 'reader_blocking', 'reader_wakeup', 'reader_fork',
+                        'reader_start', 'unwind_incomplete')
+    if case == 'reservation':
+        other.stop()
+    assert_registry_clear()
+    assert svc._foreground is None and not fences
+    assert [signal.getsignal(sig) for sig in signal_pair] == handlers
+    for pair in pipes:
+        assert not any(fd_open(fd) for fd in pair)
+    assert not any(t.name in ('adt-store-fence', 'adt-stop-observer') for t in threading.enumerate())
+    joiners = [entry[1] for entry in trace if entry[0] == 'join']
+    assert set(joiners) == set(started.values())
+    if pipes:
+        indices = [i for i, event in enumerate(trace) if event[0] == 'close']
+        write_fd = pipes[0][1]
+        assert sum(trace[i][1] == write_fd for i in indices) == 1, trace
+        assert len(indices) == 2 and set(trace[i][1] for i in indices) == set(pipes[0])
+        assert all(i < indices[0] and not entry[2] for i, entry in enumerate(trace) if entry[0] == 'join')
+else:
+    reasons = dict(reader_pipe='pipe_failed', reader_blocking='pipe_failed', reader_wakeup='wakeup_failed',
+                   reader_fork='fork_hook_failed', reader_start='reader_failed',
+                   unwind_incomplete='unwind_incomplete')
+    epoch = svc._foreground
+    assert m._foreground_registry.owner is epoch
+    assert all(signal.getsignal(sig) == svc._signal for sig in signal_pair)
+    assert epoch.signal_ingress == 'handler' and epoch.signal_ingress_reason == reasons[case]
+    assert not any(t.name == 'adt-signal-reader' for t in threading.enumerate())
+    if case == 'unwind_incomplete':
+        assert all(fd_open(fd) for fd in pipes[1])
+        assert wakeup_fd() == pipes[1][1]
+    else:
+        assert wakeup_fd() == -1
+        if len(pipes) == 2:
+            assert not any(fd_open(fd) for fd in pipes[1])
+    # Independently exercise bounded hard stop and ordinary stop cleanup.
+    sent = time.monotonic()
+    signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)
+    assert epoch.attempt is not None
+    if mode == 'hard':
+        print(sent, flush=True)
+        threading.Event().wait()
+    svc.stop()
+    assert_registry_clear()
+    assert [signal.getsignal(sig) for sig in signal_pair] == handlers
+    assert wakeup_fd() == (pipes[1][1] if case == 'unwind_incomplete' else -1)
+"""
+        cases = ('reservation', 'after_pipe', 'after_blocking', 'observer_pre', 'observer_post', 'fencer_pre',
+                 'fencer_post', 'before_handlers', 'mid_handlers', 'reader_pipe', 'reader_blocking',
+                 'reader_wakeup', 'reader_fork', 'reader_start', 'unwind_incomplete')
+        for case in cases:
+            with self.subTest(case=case):
+                self.check_watchdog_child(script, case=case)
+                if case.startswith('reader_') or case == 'unwind_incomplete':
+                    self.check_watchdog_child(script, case=case + ':hard', expected=75, hard_stop=True)
+
+    def test_foreground_stale_handler_and_cli_cleanup(self):
+        self.check_watchdog_child("""
+from relay_engine import adt_cli
+from unittest.mock import patch
+old = signal.getsignal(signal.SIGTERM)
+svc = service()
+svc.arm_foreground()
+stop = threading.Thread(target=svc.stop)
+stop.start()
+stop.join(2)
+assert not stop.is_alive() and svc._foreground is None and svc._signals_orphaned
+assert signal.getsignal(signal.SIGTERM) == svc._signal
+def refuse_stale():
+    target = service()
+    try:
+        target.arm_foreground(process_owner=True)
+    except RuntimeError as error:
+        assert str(error) == 'foreground arm conflict: stale_handler'
+    else:
+        raise AssertionError('stale handler was accepted')
+    assert signal.getsignal(signal.SIGTERM) == svc._signal and wakeup_fd() == -1
+refuse_stale()
+svc._restore_signals()
+assert not svc._signals_orphaned and signal.getsignal(signal.SIGTERM) == old
+
+blocker = service()
+blocker.arm_foreground()
+idle, retired = os.pipe()
+with patch.object(adt_cli, '_private_store_channels', return_value=(idle, retired)):
+    errors = []
+    with patch.object(adt_cli.strings, 'report_diagnostic', side_effect=errors.append):
+        rc = adt_cli.main(['engine', 'serve', '--store-root', '/unused', '--project-id', 'test'])
+    assert rc == 1 and len(errors) == 1
+    assert str(errors[0]) == 'foreground arm conflict: live_epoch'
+assert not fd_open(idle) and not fd_open(retired)
+blocker.stop()
+target = service()
+target.arm_foreground(process_owner=True)
+target.stop()
+""")
+
+    def test_saturated_signal_pipe_still_stops(self):
+        self.check_hard_stop_with_parked_owner('accept', deliver='thread:saturated')
+
+    def check_hard_stop_with_parked_owner(self, phase, *, deliver='terminate'):
+        root = self.base / ('guard-' + phase + ('' if deliver == 'terminate' else '-' + deliver[7:]))
         admission = admitted_store_fixture(root, P, project_name='service')
         tools = Path(__file__).resolve().parents[2]
         # Keep the original process alive with the same actual flock, then park
@@ -748,7 +1403,7 @@ def park(*_args):
 
 service = ApiService({str(root)!r}, {P!r}, clock=lambda: 1, stop_report=park,
                      idle_fd=int(os.environ.pop('ADT_PRIVATE_IDLE_FD')))
-service.arm_foreground()
+service.arm_foreground(process_owner=True)
 service.start()
 if {phase!r} == 'record-sync':
     original_replace = store_layout.IncumbentGuard._replace
@@ -786,6 +1441,69 @@ elif {phase!r} != 'record-sync':
     service._stop_owned = refuse
 service.stop()
 """
+        if deliver != 'terminate':
+            assert phase == 'accept' and deliver.startswith('thread:')
+            target = deliver[7:]
+            if target == 'saturated':
+                setup = r"""
+import signal
+reader_parked = threading.Event()
+reader_release = threading.Event()
+signal_write_fd = None
+real_set_fd = signal.set_wakeup_fd
+real_read = os.read
+def capture_fd(fd, **kwargs):
+    global signal_write_fd
+    if fd >= 0:
+        signal_write_fd = fd
+    return real_set_fd(fd, **kwargs)
+def parked_read(fd, size):
+    if threading.current_thread().name == 'adt-signal-reader':
+        reader_parked.set()
+        assert reader_release.wait(3)
+    return real_read(fd, size)
+signal.set_wakeup_fd = capture_fd
+os.read = parked_read
+"""
+                script = script.replace('service.arm_foreground', setup + 'service.arm_foreground', 1)
+            helper = f"""
+import signal
+import time
+def deliver_signal():
+    while not marker.exists():
+        time.sleep(0.005)
+    threads = {{item.name: item for item in threading.enumerate()}}
+    if {target!r} == 'saturated':
+        assert reader_parked.wait(2)
+        chunk = bytes([signal.SIGTERM]) * 4096
+        while True:
+            try:
+                os.write(signal_write_fd, chunk)
+            except BlockingIOError:
+                break
+        while True:
+            try:
+                os.write(signal_write_fd, chunk[:1])
+            except BlockingIOError:
+                break
+        signal.pthread_kill(threads['adt-stop-observer'].ident, signal.SIGTERM)
+        try:
+            os.write(signal_write_fd, chunk[:1])
+        except BlockingIOError:
+            pass
+        else:
+            raise AssertionError('signal pipe did not remain full')
+        sent = time.monotonic()
+        reader_release.set()
+    else:
+        thread = threading.main_thread() if {target!r} == 'main' else threads[{target!r}]
+        sent = time.monotonic()
+        signal.pthread_kill(thread.ident, signal.SIGTERM)
+    print('sent', sent, flush=True)
+threading.Thread(target=deliver_signal, daemon=True).start()
+"""
+            accept_setup = '    service._listener = ParkedAccept()\n'
+            script = script.replace(accept_setup, accept_setup + helper, 1)
         environment = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
         lock = root / 'api-service.lock'
         with (private_idle(admission, environment) as (idle_fd, child_env),
@@ -804,8 +1522,14 @@ service.stop()
                         time.sleep(0.01)
                 with lock.open('rb') as observer:
                     original_inode = os.fstat(observer.fileno()).st_ino
-                    started = time.monotonic()
-                    child.terminate()
+                    if deliver == 'terminate':
+                        started = time.monotonic()
+                        child.terminate()
+                    else:
+                        self.assertTrue(select.select([child.stdout], [], [], 3)[0], 'missing sent marker')
+                        sent = child.stdout.readline().decode().split()
+                        self.assertEqual(sent[:1], ['sent'])
+                        started = float(sent[1])
                     deadline = started + 2
                     while not (self.base / phase).exists():
                         self.assertLess(time.monotonic(), deadline)
@@ -941,17 +1665,35 @@ service.serve_forever()
                     try:
                         self.assertTrue(waiting.wait(1))
                         self.assertIsNone(epoch.attempt)
+                        self.assertFalse(writer._admission_closed())
                         second = pool.submit(writer.submit_declared, job)
-                        with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
-                            second.result(0.25)
-                        release.set()
+                        deadline = time.monotonic() + 1
+                        while True:
+                            with writer._lock:
+                                active = writer._active_request
+                                queued = [request for request in writer._requests.values()
+                                          if request is not active]
+                                if queued:
+                                    self.assertEqual(len(queued), 1)
+                                    self.assertEqual(queued[0].kind, 'declared')
+                                    self.assertFalse(queued[0].withdrawn)
+                                    self.assertFalse(active.committing)
+                                    break
+                            self.assertLess(time.monotonic(), deadline, 'second request was not queued')
+                            time.sleep(0.005)
                         with self.assertRaises(TimeoutError):
-                            first.result(0.15)
-                        with writer._lock:
-                            self.assertFalse(writer._active_request.committing)
+                            second.result(0.25)
+                        self.assertIsNone(epoch.attempt)
                     finally:
                         release_publication.set()
                     stopping.result(1)
+                self.assertTrue(writer._admission_closed())
+                self.assertIsNotNone(epoch.attempt)
+                with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                    second.result(1)
+                with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                    writer.submit_declared(job)
+                self.assertLess(time.monotonic(), epoch.attempt.active)
             finally:
                 release.set()
             self.assertTrue(first.result(1).commit)
@@ -1020,15 +1762,16 @@ service.serve_forever()
                     stopping = pool.submit(service._signal, signal.SIGTERM, None)
                     try:
                         self.assertTrue(publishing.wait(1))
-                        execute.set()
-                        remaining = origin[0] + 1.55 - time.monotonic()
-                        self.assertGreater(remaining, 0)
-                        with self.assertRaises(TimeoutError):
-                            result.result(remaining)
+                        deadline = origin[0] + 1.55
+                        while (remaining := deadline - time.monotonic()) > 0:
+                            time.sleep(remaining)
                         self.assertIsNone(epoch.attempt)
                     finally:
                         publish.set()
                     stopping.result(1)
+                self.assertIsNotNone(epoch.attempt)
+                self.assertGreater(time.monotonic(), origin[0] + 1.5)
+                execute.set()
                 outcome = result.result(1)
                 self.assertEqual((outcome.commit, outcome.fault, outcome.indeterminate),
                                  (False, 'stop_unwritten', False))

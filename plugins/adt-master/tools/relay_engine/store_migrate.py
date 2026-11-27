@@ -1,4 +1,4 @@
-"""Fixture-qualified Store migration from manifest through validation."""
+"""Fixture-qualified Store migration from manifest through cutover."""
 
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, contextmanager
@@ -17,7 +17,7 @@ import stat
 import tempfile
 import time
 
-from relay_engine import identity_import, imports, store_import, store_layout, store_steps, submit
+from relay_engine import identity_import, imports, store_backup, store_import, store_layout, store_steps, submit
 from relay_engine.store_evidence import _sync_dir, _sync_file
 
 
@@ -52,6 +52,10 @@ class QuietResult:
 
 class JobOrphaned(ValueError):
     """The job's Store identity no longer matches the catalogue."""
+
+
+class CutoverStarted(ValueError):
+    """A validated migration cannot be rebuilt after cutover starts."""
 
 
 class HoldMissing(ValueError):
@@ -94,13 +98,27 @@ def _job_path(root, job_id):
 
 
 @contextmanager
-def _job(root, job_id):
+def _job(root, job_id, *, read_check=None):
     # The directory inode serializes phase/retry operations without another
     # writable job record. A reader of an existing reservation uses its journal.
     path = _job_path(root, job_id)
     fd = os.open(path, _DIRECTORY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        if read_check is not None:
+            # A writable WAL connection can checkpoint a crashed writer on
+            # close, even when this operation issued no SQL writes.
+            uri = (path / 'job.sqlite3').absolute().as_uri() + '?mode=ro'
+            try:
+                wal_has_content = (path / 'job.sqlite3-wal').stat().st_size != 0
+            except FileNotFoundError:
+                wal_has_content = False
+            if not wal_has_content:
+                # Under this job's exclusive lock an empty/missing WAL is
+                # stable, and an immutable read creates no SQLite side files.
+                uri += '&immutable=1'
+            with closing(sqlite3.connect(uri, uri=True, isolation_level=None)) as conn:
+                read_check(store_steps.Journal(conn))
         with closing(store_steps.open_journal(path)) as journal:
             yield path, journal
     finally:
@@ -820,9 +838,18 @@ def _publish_report(job, report):
 def decide(root, turns: store_steps.TurnRunner, job_id: str,
            decisions: Mapping[str, str]) -> store_import.Report:
     """Recheck original fingerprints, then rebuild from the fixed copied inputs."""
-    with _job(store_layout.resolve_root(root), job_id) as (job, journal):
-        phase, data = journal.last_checkpoint()
+    def check_before_write(journal):
+        _, data = journal.last_checkpoint()
         _bound_turn(turns, data)
+        row = store_layout._row(
+            journal._conn, "SELECT 1 FROM intents WHERE step LIKE 'cutover-%' OR step='move' "
+            "OR step LIKE 'marker-%' LIMIT 1"
+        )
+        if row is not None:
+            raise CutoverStarted(f'cutover already started for migration {job_id}')
+
+    with _job(store_layout.resolve_root(root), job_id, read_check=check_before_write) as (job, journal):
+        phase, data = journal.last_checkpoint()
         sources = _read_committed_sources(job, phase, data, job_id, prepared_ok=True)
         for item, expected in zip(data['roots'], data['fingerprints'], strict=True):
             path = Path(item['path'])
@@ -847,3 +874,258 @@ def decide(root, turns: store_steps.TurnRunner, job_id: str,
 
         _bound_turn(turns, data, finish)
         return report
+
+
+def _cutover_log(journal, step, target=None):
+    cursor = journal._conn.execute(
+        'SELECT i.id,i.target,i.before_state,i.after_state,r.observed '
+        'FROM intents i LEFT JOIN receipts r ON r.intent_id=i.id WHERE i.step=? ORDER BY i.id',
+        (step,),
+    )
+    try:
+        found = [(store_steps.Intent(row[0], step, *(json.loads(value) for value in row[1:4])),
+                  row[4] is not None) for row in cursor]
+    finally:
+        cursor.close()
+    if target is not None:
+        found = [entry for entry in found if target(entry[0].target)]
+    if len(found) > 1:
+        raise ValueError(f'duplicate cutover journal step: {step}')
+    return found[0] if found else (None, False)
+
+
+def _cutover_intent(journal, step, target, before, after):
+    return store_steps.Intent(journal.intent(step, target, before, after), step, target, before, after)
+
+
+def _cutover_holders(conn, scopes):
+    return {scope: list(holder) for scope in scopes if
+            (holder := store_layout._row(
+                conn, 'SELECT job_id FROM maintenance_holds WHERE scope=?', (scope,),
+            )) is not None}
+
+
+def _cutover_route(conn, name):
+    row = store_layout._row(
+        conn, 'SELECT project_id,state,held_by_job FROM project_routes WHERE name=?', (name,),
+    )
+    return None if row is None else list(row)
+
+
+def _cutover_before_reserve(conn, data, root):
+    name, project, prior = (data[k] for k in ('project_name', 'project_id', 'prior_job'))
+    observed = _cutover_route(conn, name)
+    if data['mode'] == 'takeover':
+        if observed != [project, 'creating', prior] or os.path.lexists(
+                store_layout.ledger_path(root, project)):
+            raise store_layout.ReservationChanged(f'reservation owner, state or ledger changed for {name!r}')
+    elif observed is not None:
+        raise store_layout.NameTaken(name, observed[0])
+
+
+def _cutover_marker(data, job, journal, index, item, expected):
+    target = store_steps.MarkerTarget(
+        data['store_id'], data['job_id'], job, index, item['root_uuid'], item['path'],
+    )
+    progress = store_steps.marker_progress(journal, target)
+    if progress.phase == 'marked':
+        return
+    preimage = None
+    if progress.phase == 'none':
+        path = Path(item['path'])
+        try:
+            _match_fingerprint(path, expected, _fingerprint(path, {}))
+        except LegacySourceLink as error:
+            raise NotQuiet(str(error)) from error
+        original = job / 'originals' / str(index)
+        if os.path.lexists(original):
+            inventory, _ = store_steps._marker_preimage(original)
+            preimage = store_steps.PreimageManifest(tuple(inventory))
+        else:
+            preimage = store_steps.capture_preimage(path, original)
+    store_steps.advance_marker(journal, target, preimage)
+
+
+def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> None:
+    """Back up, reserve, move, mark, activate and release a validated migration."""
+    root = store_layout.resolve_root(root)
+    with _job(root, job_id) as (job, journal):
+        phase, data = journal.last_checkpoint()
+        name, project = data['project_name'], data['project_id']
+        scopes = sorted([store_layout.project_scope(project)] + [
+            store_layout.root_scope(item['root_uuid']) for item in data['roots']
+        ])
+        held = {scope: [job_id] for scope in scopes}
+        creating = [project, 'creating', job_id]
+        active = [project, 'active', job_id]
+        route_before = [project, 'creating', data['prior_job']] if data['mode'] == 'takeover' else None
+        ledger = store_layout.ledger_path(root, project)
+
+        def check(conn, *, require_hold=False):
+            if _identity(conn) != data['store_id']:
+                raise JobOrphaned(f'Store changed for migration {job_id}')
+            if require_hold and _cutover_holders(conn, scopes) != held:
+                raise HoldMissing(f'cutover holds missing for migration {job_id}')
+
+        def turn(access, action, *, require_hold=True):
+            def body(conns):
+                cat = conns['catalogue']
+                check(cat, require_hold=require_hold)
+                return action(cat)
+            return turns.run(store_steps.Declared(access, {}), body)
+
+        def route_is(cat, expected):
+            observed = _cutover_route(cat, name)
+            if observed != expected:
+                raise store_steps.StepStateUnknown(expected, expected, observed)
+
+        def raise_refused(intent):
+            holder = intent.target['holder']
+            if holder is None:
+                raise store_layout.ReservationChanged(intent.target['reason'])
+            raise store_layout.NameTaken(name, holder)
+
+        def finish_refused(intent, done):
+            if not done:
+                def release_refused(cat):
+                    observed = _cutover_holders(cat, scopes)
+                    # Only inspect or release this job's scopes. A later job
+                    # can already hold them after the refusal committed.
+                    own = {scope: value for scope, value in observed.items() if value == [job_id]}
+                    if own == held:
+                        store_layout.release_holds(cat, job_id)
+                    elif own:
+                        raise store_steps.StepStateUnknown(held, {}, own)
+                turn('written', release_refused, require_hold=False)
+                journal.receipt(intent.id, intent.after)
+            reserve_intent, reserve_done = _cutover_log(journal, 'cutover-reserve')
+            if reserve_intent is not None and not reserve_done:
+                journal.receipt(reserve_intent.id, {'refused': intent.id})
+            raise_refused(intent)
+
+        first_holder = turn('read', lambda cat: store_layout.name_holder(cat, name),
+                            require_hold=False)
+        if phase == 'cutover':
+            return
+        if phase != 'check':
+            raise ValueError(f'cutover requires a validated check checkpoint, not {phase}')
+
+        refused, refusal_done = _cutover_log(journal, 'cutover-refuse')
+        if refused is not None:
+            finish_refused(refused, refusal_done)
+        release, released = _cutover_log(journal, 'cutover-release')
+        if release is None:
+            backup, backed_up = _cutover_log(journal, 'cutover-backup')
+            if not backed_up:
+                def before_backup(conns):
+                    nonlocal backup
+                    cat = conns['catalogue']
+                    check(cat)
+                    _cutover_before_reserve(cat, data, root)
+                    observed = _cutover_holders(cat, scopes)
+                    if observed:
+                        scope, holder = next(iter(observed.items()))
+                        raise store_layout.HoldConflict(holder[0], scope)
+                    if backup is None:
+                        backup = _cutover_intent(journal, 'cutover-backup', job_id, {}, held)
+
+                observed = turn('read', lambda cat: _cutover_holders(cat, scopes), require_hold=False)
+                if backup is None or observed != backup.after:
+                    if backup is not None and any(value == [job_id] for value in observed.values()):
+                        raise store_steps.StepStateUnknown(backup.before, backup.after, observed)
+                    if first_holder is not None and first_holder != project:
+                        raise store_layout.NameTaken(name, first_holder)
+                    last = store_backup.last_complete(root, 'before-move')
+                    stamp = now_ms if last is None else max(now_ms, last + 1)
+                    try:
+                        store_backup.backup(turns, root, 'before-move', stamp,
+                                           then_hold=(job_id, 'cutover', scopes), before=before_backup)
+                    except store_backup.BackupRefused as error:
+                        if error.reason == 'creation-pending':
+                            holder = turn('read', lambda cat: store_layout.name_holder(cat, name),
+                                          require_hold=False)
+                            if holder is not None and holder == error.detail and holder != project:
+                                raise store_layout.NameTaken(name, holder) from error
+                        raise
+                turn('read', lambda _cat: None)
+                journal.receipt(backup.id, backup.after)
+
+            reserve, reserved = _cutover_log(journal, 'cutover-reserve')
+            if not reserved:
+                def reserve_route(cat):
+                    nonlocal reserve, refused
+                    observed = _cutover_route(cat, name)
+                    if reserve is not None and observed == reserve.after:
+                        return
+                    try:
+                        _cutover_before_reserve(cat, data, root)
+                        if reserve is None:
+                            reserve = _cutover_intent(journal, 'cutover-reserve', project,
+                                                      route_before, creating)
+                        if data['mode'] == 'takeover':
+                            store_layout.take_over_reservation(cat, project, data['prior_job'],
+                                                               job_id, os.path.lexists(ledger))
+                        else:
+                            store_layout.reserve_project(cat, project, name, now_ms, held_by_job=job_id)
+                    except (store_layout.NameTaken, store_layout.ReservationChanged) as error:
+                        refused = _cutover_intent(
+                            journal, 'cutover-refuse',
+                            {'name': name, 'holder': getattr(error, 'holder_project_id', None),
+                             'reason': str(error)}, held, {},
+                        )
+                        store_layout.release_holds(cat, job_id)
+
+                turn('written', reserve_route)
+                if refused is not None:
+                    journal.receipt(refused.id, refused.after)
+                    finish_refused(refused, True)
+                journal.receipt(reserve.id, reserve.after)
+
+            move, moved = _cutover_log(journal, 'move')
+            if not moved:
+                turn('read', lambda cat: route_is(cat, creating))
+                staging = job / 'staging' / 'ledger.sqlite3'
+                prepared = store_steps.Prepared(**data['prepared'])
+                if move is None:
+                    store_steps.move_database(journal, prepared, staging, ledger)
+                else:
+                    before, after = store_steps._states(prepared)
+                    if (move.target, move.before, move.after) != (
+                            {'src': str(staging), 'dst': str(ledger)}, before, after):
+                        raise store_steps.StepStateUnknown(before, after, move)
+                    store_steps.resume_move(journal, move)
+
+            activate, activated = _cutover_log(journal, 'cutover-activate')
+            if activate is None:
+                for index, (item, expected) in enumerate(
+                        zip(data['roots'], data['fingerprints'], strict=True)):
+                    turn('read', lambda cat: route_is(cat, creating))
+                    _cutover_marker(data, job, journal, index, item, expected)
+
+            if not activated:
+                def activate_route(cat):
+                    nonlocal activate
+                    if activate is not None and _cutover_route(cat, name) == activate.after:
+                        return
+                    route_is(cat, creating)
+                    if activate is None:
+                        activate = _cutover_intent(journal, 'cutover-activate', project, creating, active)
+                    store_layout.activate_project(cat, project)
+                turn('written', activate_route)
+                journal.receipt(activate.id, activate.after)
+
+        if not released:
+            def release_span(cat):
+                nonlocal release
+                route_is(cat, active)
+                observed = _cutover_holders(cat, scopes)
+                if release is not None and not any(value == [job_id] for value in observed.values()):
+                    return
+                check(cat, require_hold=True)
+                if release is None:
+                    release = _cutover_intent(journal, 'cutover-release', job_id, held, {})
+                store_layout.release_holds(cat, job_id)
+            turn('written', release_span, require_hold=False)
+            journal.receipt(release.id, release.after)
+        turn('read', lambda cat: route_is(cat, active), require_hold=False)
+        journal.checkpoint('cutover', data)

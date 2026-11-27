@@ -706,6 +706,9 @@ _AUTHORITY_TEXT = {
     'authority-not-current-project-unreadable-reason': "this session's current sign-in may be in project {project}, which could not be read",
     'authority-not-current-project-unreadable-remedy': 'commit again once project {project} can be read; if it is faulted, ask the operator to rejoin it',
 
+    'error-authority-cross-project-denied-cause': 'the operator did not allow this relay to reach the other project',
+    'error-authority-cross-project-denied-remedy': 'ask the operator, or send it to a seat of your own project',
+    'error-authority-cross-project-denied-explain': 'a relay to another project waits until the operator answers it, and a deny ends that relay only',
     'error-authority-restore-held-cause': "a restore holds this project, so no planner's go-ahead is issued",
     'error-authority-restore-held-remedy': 'ask the operator to end the restore hold at their terminal, then ask your planner for a new go-ahead',
     'error-authority-restore-held-explain': 'a restore cancels every go-ahead and approval, and only the operator ends its hold',
@@ -777,6 +780,7 @@ ERRORS = {
     "E-AUTHORITY-CHECK-UNAVAILABLE": _spec("authority-check-unavailable", "command"),
     "E-AUTHORITY-RESTORE-HELD": _spec("authority-restore-held", "command"),
     "E-AUTHORITY-NO-BUNDLE": _spec("authority-no-bundle", "command"),
+    "E-AUTHORITY-CROSS-PROJECT-DENIED": _spec("authority-cross-project-denied", "command"),
 
     "E-SNAPSHOT-STALE": _spec("snapshot-stale", "integrity"),
     "E-SNAPSHOT-NOT-TO": _spec("snapshot-not-to", "integrity"),
@@ -1145,6 +1149,7 @@ def api_error_catalog() -> api_definitions.ClosedErrorDefinitions:
         ("E_API_CONFLICT", "conflict", "ApiConflictCause", (
             ("operation_key_reused", "use_new_operation_key"),
             ("submission_key_reused", "use_new_submission_key"),
+            ("settings_revision_stale", "reload_settings"),
         )),
         ("E_QUEUE_STATE", "conflict", "ApiQueueStateCause", (
             ("revision_mismatch", "refresh_item"),

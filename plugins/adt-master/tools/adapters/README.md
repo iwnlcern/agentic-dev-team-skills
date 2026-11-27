@@ -164,9 +164,9 @@ Deployment drift remains on the watch list. A future adapter hardening turn may 
 
 ## Shipped adapter: relay auto-delivery (`relay-monitor.py`)
 
-Files: `tools/adapters/relay-monitor.py`, `tools/adapters/window.py`, `tools/adapters/hostlogs.py`, `tools/adapters/shell_lex.py`, `tools/adapters/plugin-monitors.json` (shipped as `monitors/monitors.json`), the three hooks in `plugin-hooks.json`, `tools/adapters/codex/adt-codex`, `tools/adapters/claude-code/relay-guard-destinations.py`, tests and the scope oracle in `tools/adapters/tests/`.
+Files: `tools/adapters/relay-monitor.py`, `tools/adapters/window.py`, `tools/adapters/hostlogs.py`, `tools/adapters/shell_lex.py`, `tools/adapters/plugin-monitors.json` (shipped as `monitors/monitors.json`), the four monitor hooks in `plugin-hooks.json`, `tools/adapters/codex/adt-codex`, `tools/adapters/claude-code/relay-guard-destinations.py`, tests and the scope oracle in `tools/adapters/tests/`.
 
-Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `status`, `operator`, `replay`.
+Modes: `follow` (the watcher; plugin monitor on Claude Code, fork `monitor start` on Codex), `bind` (PostToolUse hook and `--manual` rebind), `drain` (Codex Stop hook), `session-start` (delivery state into context; fork arming), `session-end` (end a Codex window session), `status`, `operator`, `replay`.
 State: one note per session under `${TMPDIR:-/tmp}/adt-relay-monitor/<session>.json` with a short state lock, and a lifetime window lock `window-<key>.lock` in the same directory (one doorbell per window, below); progress is a cursor on the index's `file` cell.
 The progress rule in `bind_from_receipt` in `tools/adapters/relay-monitor.py` applies only to filings it binds from.
 For those filings, one as the bound seat in the bound root leaves progress where it is; any other moves that root's progress to the filing itself, skipping earlier undelivered relays even after a return filing.

@@ -550,7 +550,8 @@ class SubmitServiceTests(unittest.TestCase):
     def test_platform_is_one_component(self):
         self.assertCountEqual([component.owner for component in api_platform.platform_components()],
                               ['platform', 'console'])
-        platform = ('protocol.connect', 'protocol.schema', 'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify',
+        platform = ('project.settings.get', 'project.settings.set', 'protocol.connect', 'protocol.schema',
+                    'relay.inbox', 'relay.read', 'relay.submit', 'seat.identify',
                     'session.end', 'session.resume', 'session.sign-in')
         queue = ('queue.answer', 'queue.dismiss', 'queue.dismiss-all', 'queue.get',
                  'queue.list', 'queue.open', 'queue.raise', 'queue.withdraw')

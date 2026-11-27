@@ -1,7 +1,7 @@
 """Project restore cancellation, approval cuts and operator-only release."""
 from dataclasses import dataclass
 
-from . import submit
+from . import submit, xproject
 
 CUT_SQL = 'SELECT cut_handle FROM restore_cancels WHERE project_id = ?'
 
@@ -58,6 +58,7 @@ def cancel_all(conn, project_id: str, job_id: str, now_ms: int) -> Cancelled:
                                  ' (slip_id, revision, event, at, by_seat_id, by_special, detail)'
                                  " VALUES (?, ?, 'revoke', ?, NULL, 'operator', ?)",
                                  (sid, revision + 1, now_ms, 'restore:' + job_id))
+                xproject.revoke_all_for_restore(conn, now_ms)
                 conn.execute('INSERT INTO restore_cancels (project_id, job_id, cut_handle, held_at)'
                              ' VALUES (?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET'
                              ' job_id=excluded.job_id, cut_handle=excluded.cut_handle,'

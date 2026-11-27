@@ -140,6 +140,8 @@ LOCKED_ENGINE_SET = (
     "relay_engine/api_relay_reads.py",
     "relay_engine/api_relay_reads_service.py",
     "relay_engine/api_schema.py",
+    "relay_engine/api_settings.py",
+    "relay_engine/api_settings_service.py",
     "relay_engine/api_service.py",
     "relay_engine/api_sessions.py",
     "relay_engine/api_submit.py",
@@ -221,6 +223,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/submit.py",
     "relay_engine/supersede.py",
     "relay_engine/version.py",
+    "relay_engine/xproject.py",
 )
 EXACT_INVENTORY_SENTINELS = {
     "adt-orchestrator": {
@@ -506,7 +509,7 @@ def check_clean() -> None:
 
 
 def check_monitors_declaration() -> None:
-    """Each plugin ships exactly one always-on relay-monitor watcher, readable, sourced canonically, with its three hooks."""
+    """Each plugin ships exactly one always-on relay-monitor watcher, readable, sourced canonically, with bind, drain, session-start and session-end hooks."""
     for plugin in PLUGINS:
         path = PLUGINS_ROOT / plugin / "monitors" / "monitors.json"
         expect(path.is_file(), f"{plugin} lacks monitors/monitors.json")
@@ -522,6 +525,7 @@ def check_monitors_declaration() -> None:
         def commands(event):
             return [h["command"] for group in hooks.get(event, []) for h in group["hooks"]]
         expect(any('relay-monitor.py" session-start --host auto' in c for c in commands("SessionStart")), f"{plugin} lacks the session-start hook")
+        expect(any('relay-monitor.py" session-end --host auto' in c for c in commands("SessionEnd")), f"{plugin} lacks the session-end hook")
         expect(any('relay-monitor.py" bind --host auto' in c for c in commands("PostToolUse")), f"{plugin} lacks the bind hook")
         expect(any('relay-monitor.py" drain --host auto' in c for c in commands("Stop")), f"{plugin} lacks the drain hook")
         expect(not any("relay-monitor.py" in c for c in commands("PostToolUseFailure")), f"{plugin} must not run relay-monitor on PostToolUseFailure")

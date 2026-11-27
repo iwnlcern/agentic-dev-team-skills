@@ -35,6 +35,8 @@ SIGN_IN_STANDINS: frozenset[str] = frozenset({
     "tools/relay_engine/tests/test_api_relay_read.py",
     "tools/relay_engine/tests/test_api_sessions.py",
     "tools/relay_engine/tests/test_api_service.py",
+    # Settings API tests sign in to a test-owned service on a scratch store.
+    "tools/relay_engine/tests/test_api_settings.py",
     "tools/relay_engine/tests/test_api_submit.py",
     # Daemon join tests sign in through a helper against test-owned scratch daemons.
     "tools/relay_engine/tests/test_operator_daemon_join.py",
@@ -473,6 +475,7 @@ with s.transaction("codex", "id", home=Path(sys.argv[1])):
             "tools/relay_engine/tests/test_api_relay_read.py",
             "tools/relay_engine/tests/test_api_sessions.py",
             "tools/relay_engine/tests/test_api_service.py",
+            "tools/relay_engine/tests/test_api_settings.py",
             "tools/relay_engine/tests/test_api_submit.py",
             "tools/relay_engine/tests/test_operator_daemon_join.py",
         }))

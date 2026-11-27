@@ -522,7 +522,7 @@ class SessionIdentityTests(TmpEnv):
             return result
 
     def test_invalid_hook_sessions_exit_zero_without_writes(self):
-        for mode in ("bind", "drain", "session-start"):
+        for mode in ("bind", "drain", "session-start", "session-end"):
             for session in ("../../escaped-note", ""):
                 for source in (
                     "payload",
@@ -4053,7 +4053,7 @@ report.write_text(json.dumps(state))
 
     def test_hook_deep_json_exits_zero(self):
         # Inject the decoder failure: actual depth thresholds vary by interpreter.
-        for mode in ("bind", "drain", "session-start"):
+        for mode in ("bind", "drain", "session-start", "session-end"):
             with self.subTest(mode=mode):
                 output, errors = io.StringIO(), io.StringIO()
                 with (
@@ -4063,7 +4063,7 @@ report.write_text(json.dumps(state))
                     mock.patch("sys.stderr", errors),
                 ):
                     self.assertEqual(self.rm.main([mode, "--host", "codex"]), 0)
-                if mode == "bind":
+                if mode in ("bind", "session-end"):
                     self.assertEqual(output.getvalue(), "")
                 elif mode == "drain":
                     self.assertEqual(json.loads(output.getvalue()), {})
@@ -7970,6 +7970,7 @@ class CliSmokeTests(TmpEnv):
             "bind",
             "drain",
             "session-start",
+            "session-end",
             "status",
             "operator",
             "replay",
@@ -8903,7 +8904,7 @@ for token in ('index-missing','index-malformed','index-unreadable','root-stalled
 
     def test_fifo_index_never_blocks_any_caller(self):
         # Each short-lived command gets an independent external supervisor.
-        for mode in ('status', 'session-start', 'bind-manual', 'bind-hook', 'drain'):
+        for mode in ('status', 'session-start', 'session-end', 'bind-manual', 'bind-hook', 'drain'):
             with self.subTest(mode=mode):
                 self.index.unlink(missing_ok=True)
                 os.mkfifo(self.index)
@@ -8915,6 +8916,8 @@ mode={mode!r};start=time.monotonic()
 if mode=='status': m.status_line(store,None)
 elif mode=='session-start':
     m.read_payload=lambda:{{}};m.session_start(args())
+elif mode=='session-end':
+    m.read_payload=lambda:{{'session_id':'fifo'}};m.session_end(args(host='codex'))
 elif mode=='bind-manual': m.bind(args(manual=True,root=str(root),anchor='lane/r1.md'))
 elif mode=='bind-hook':
     sys.stdin=io.StringIO(json.dumps(dict(session_id='fifo',cwd=str(root),hook_event_name='PostToolUse',tool_input={{'command':'tools/relay submit d.md --root '+str(root)}},tool_response={{'stdout':json.dumps(dict(path='lane/r1.md',render_state='rendered',duplicate=False))}})))
@@ -9274,3 +9277,250 @@ class NewlineCompatibilityTests(TmpEnv):
                     note = store.load()
                     self.assertEqual(note['phase'], 'following')
                     self.assertEqual(note['progress'][str(self.root)], dict(file='lane/r2.md', position=2))
+
+
+class DropTests(TmpEnv):
+    def setUp(self):
+        super().setUp()
+        import pending_ends
+        import window_record
+        self.pending_ends, self.records = pending_ends, window_record
+        self.home = pathlib.Path.home()
+        self.claude = self.rm.window.Window("claude-code", "cc-test-window", 1, None, None, "test")
+        self.key = self.home / "keys" / "the seat.key"
+        self.key.parent.mkdir(parents=True)
+        self.key.write_text("adt-seat-key-v1 12345678-abcd-1234-abcd-123456789abc " + "a" * 43 + "\n")
+        self.key.chmod(0o600)
+        self.calls = []
+        self.refuse = False
+        self.hang = False
+
+        class Refused(Exception):
+            pass
+
+        class Unavailable(Exception):
+            pass
+
+        self.unavailable = Unavailable
+        fixture = self
+
+        class Client:
+            @classmethod
+            def open(cls, ready, *, deadline):
+                fixture.trace("open", {"path": ready}, deadline)
+                if fixture.refuse:
+                    raise Unavailable()
+                return cls()
+
+            def call(self, operation, payload, *, deadline):
+                fixture.trace(operation, payload, deadline)
+                if operation == "session.end" and fixture.hang:
+                    threading.Event().wait(max(0, deadline - time.monotonic()))
+                    raise Unavailable()
+                return {"session_id": payload["session_id"]}
+
+            def close(self):
+                pass
+
+        self.api = types.SimpleNamespace(
+            ApiClient=Client, LocalRefusal=Refused, EndpointUnavailable=Unavailable,
+            ApiErrorValue=type("ApiErrorValue", (), {}),
+            read_ready_file=lambda ready: ready,
+            read_key_file=lambda _: types.SimpleNamespace(key_id="fake-id", key_secret="test-only"),
+        )
+        self.enterContext(mock.patch.object(self.rm, "_session_api", return_value=self.api, create=True))
+        self.enterContext(mock.patch.object(self.rm, "follow_window", return_value=self.claude))
+        self.enterContext(mock.patch.object(self.rm, "status_line", return_value="relay-monitor: test"))
+
+    def pending(self):
+        return self.pending_ends._scan(home=self.home)[0]
+
+    def trace(self, op, args, deadline):
+        records = self.pending()
+        self.assertEqual(len(records), 1, "must persist exactly one end before any transport")
+        self.assertTrue(self.record_read().connected, "disconnect must follow the send attempt")
+        self.assertGreater(deadline, time.monotonic())
+        self.calls.append((op, args.copy(), deadline, records[0]))
+
+    def record(self, host="claude-code", connected=True):
+        self.window_key = self.claude.key if host == "claude-code" else "cx-codex-thread"
+        record = self.records.WindowRecord(
+            self.window_key, host, "old-conversation" if host == "claude-code" else "codex-thread",
+            "seat-id", "lane.implementer", "project-id", str(self.key),
+            "internal-session", 4, str(self.home / "ready.json"), connected, 300)
+        self.records.write(record, home=self.home)
+        return record
+
+    def record_read(self):
+        return self.records.read(self.window_key, home=self.home)
+
+    def hook(self, mode, host, session, source=None):
+        args = types.SimpleNamespace(host=host, session=session, plugin_root="/plug")
+        payload = {"session_id": session}
+        if source is not None:
+            payload["source" if mode == "session_start" else "reason"] = source
+        out = io.StringIO()
+        with mock.patch.object(self.rm, "read_payload", return_value=payload), contextlib.redirect_stdout(out):
+            self.assertEqual(getattr(self.rm, mode)(args), 0)
+        return out.getvalue()
+
+    def start(self, source, host="claude-code", session="new-conversation"):
+        output = self.hook("session_start", host, session, source)
+        return json.loads(output)["hookSpecificOutput"]["additionalContext"]
+
+    def assert_end(self, record):
+        self.assertEqual([row[0] for row in self.calls], ["open", "session.resume", "session.end"])
+        opened, resume, end = self.calls
+        self.assertEqual(opened[1]["path"], record.ready_path)
+        self.assertEqual(resume[1], dict(key_id="fake-id", key_secret="test-only", session_id=record.session_id))
+        self.assertEqual(end[1], dict(resume[1], operation_key=opened[3].operation_key))
+        self.assertTrue(opened[3].operation_key)
+        self.assertEqual(opened[3].host_session_id, record.host_session_id)
+        self.assertEqual(opened[3].generation, record.generation)
+        self.assertEqual(self.pending(), [])
+        self.assertFalse(self.record_read().connected)
+        self.assertEqual(self.record_read().key_path, record.key_path)
+
+    def assert_no_carried_record(self):
+        self.assertEqual(list((self.home / ".adt/sessions").glob("*.json")), [])
+
+    def test_drop_clear_and_branch_end_without_record(self):
+        for source in ("clear", "fork"):
+            with self.subTest(source=source):
+                self.calls.clear()
+                record = self.record()
+                self.assertIn("not connected — ask for your seat name and key", self.start(source))
+                self.assert_end(record)
+                self.assert_no_carried_record()
+
+    def test_drop_resume_ends_without_carry(self):
+        record = self.record()
+        self.start("resume")
+        self.assert_end(record)
+        self.assert_no_carried_record()
+
+    def test_drop_with_engine_down_ends_later(self):
+        record = self.record()
+        self.refuse = True
+        self.start("clear")
+        self.assertEqual([c[0] for c in self.calls], ["open"])
+        pending, = self.pending()
+        self.assertEqual((pending.session_id, pending.ready_path), (record.session_id, record.ready_path))
+        self.assertFalse(self.record_read().connected)
+        self.refuse = False
+        attempts = []
+        class Retry:
+            def call(self, operation, args, *, deadline):
+                attempts.append((operation, args.copy()))
+                return {"session_id": args["session_id"]}
+        # Later service availability is consumed by Task 3's sender; do not run the hook again.
+        with mock.patch.object(sys, "path", [str(HERE.parent.parent), *sys.path]):
+            report = self.pending_ends.drain_share(client=Retry(), ready_path=pending.ready_path,
+                                                    home=self.home, share_s=2, clock=time)
+        self.assertEqual(report.deleted, 1)
+        self.assertEqual([a[0] for a in attempts], ["session.resume", "session.end"])
+        self.assertEqual(attempts[1][1]["operation_key"], pending.operation_key)
+        self.assertEqual(self.pending(), [])
+
+    def follower_exit(self):
+        args = types.SimpleNamespace(host="claude-code", session="old-conversation", plugin_root=None)
+        lines = []
+        watch = mock.Mock()
+        watch.gone.return_value = True
+        with (mock.patch.object(self.rm.window, "ExitWatch", return_value=watch),
+              mock.patch.object(self.rm, "FdSink"),
+              mock.patch("sys.stdout", mock.Mock()),
+              mock.patch.object(self.rm, "stop_line", side_effect=lambda fd, why: lines.append(why))):
+            self.assertEqual(self.rm.follow(args), 0)
+        self.assertEqual(lines, ["window gone"])
+        watch.close.assert_called_once()
+
+    def test_window_gone_ends_session(self):
+        record = self.record()
+        self.follower_exit()
+        self.assert_end(record)
+        record = self.record("codex")
+        self.calls.clear()
+        self.assertEqual(self.hook("session_end", "codex", "codex-thread"), "")
+        self.assert_end(record)
+
+    def test_codex_resume_after_sessionend_names_connect(self):
+        record = self.record("codex")
+        connected_line = self.start("resume", "codex", "codex-thread")
+        self.assertNotIn("adt connect --key", connected_line)
+        self.hook("session_end", "codex", "codex-thread")
+        self.assert_end(record)
+        resumed = self.start("resume", "codex", "codex-thread")
+        self.assertIn("adt connect --key " + shlex.quote(record.key_path), resumed)
+        self.assertIn('follow --host codex --session codex-thread', resumed)
+        self.assertLess(resumed.index("adt connect"), resumed.index("follow --host codex"))
+
+    def test_claude_sessionend_clear_keeps_doorbell(self):
+        record = self.record()
+        with mock.patch.object(self.rm, "stop_line") as stop:
+            for reason in ("clear", "resume", "prompt_input_exit"):
+                self.assertEqual(self.hook("session_end", "claude-code", "old-conversation", reason), "")
+        stop.assert_not_called()
+        self.assertEqual((self.calls, self.pending(), self.record_read()), ([], [], record))
+
+    def test_drop_within_sessionstart_budget(self):
+        self.record()
+        self.hang = True
+        start = time.monotonic()
+        self.start("clear")
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.3)
+        self.assertEqual([c[0] for c in self.calls], ["open", "session.resume", "session.end"])
+        self.assertEqual(len(self.pending()), 1)
+        self.assertFalse(self.record_read().connected)
+
+    def test_drop_bounded_while_write_blocked(self):
+        record = self.record()
+        r, w = os.pipe()
+        try:
+            os.set_blocking(w, False)
+            while True:
+                try:
+                    os.write(w, b"x" * 4096)
+                except BlockingIOError:
+                    break
+            leader = self.rm.WindowLock(record.window_key)
+            self.assertTrue(leader.acquire())
+            try:
+                start = time.monotonic()
+                self.start("clear")
+                self.assertLess(time.monotonic() - start, 1.3)
+                self.assert_end(record)
+            finally:
+                leader.release()
+        finally:
+            os.close(r)
+            os.close(w)
+
+    def test_drop_without_connected_record_does_nothing(self):
+        for connected in (None, False):
+            for mode in ("start", "follower", "codex"):
+                with self.subTest(connected=connected, mode=mode):
+                    windows = self.home / ".adt/windows"
+                    windows.mkdir(parents=True, exist_ok=True)
+                    for path in windows.glob("*.json"):
+                        path.unlink()
+                    if connected is not None:
+                        self.record("codex" if mode == "codex" else "claude-code", connected)
+                    before = {p.name: p.read_bytes() for p in windows.glob("*.json")}
+                    if mode == "start":
+                        self.start("clear")
+                    elif mode == "follower":
+                        self.follower_exit()
+                    else:
+                        self.hook("session_end", "codex", "codex-thread")
+                    self.assertEqual((self.calls, self.pending()), ([], []))
+                    self.assertEqual({p.name: p.read_bytes() for p in windows.glob("*.json")}, before)
+                    self.assert_no_carried_record()
+
+    def test_session_end_hook_declared(self):
+        expected = 'relay-monitor.py" session-end --host auto'
+        for tier in ("adt-pair", "adt-orchestrator", "adt-master"):
+            hooks = json.loads((REPO / f"plugins/{tier}/hooks/hooks.json").read_text())["hooks"]
+            self.assertTrue(any(expected in h["command"] for item in hooks.get("SessionEnd", [])
+                                for h in item["hooks"]), tier)

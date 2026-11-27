@@ -28,6 +28,53 @@ class RestoreStore(SlipStore):
 
 
 class TestCancel(RestoreStore):
+
+    def test_restore_cancels_allows(self):
+        from importlib.util import find_spec
+        from unittest import mock
+        from relay_engine import held_relays, queries
+
+        self.assertIsNotNone(find_spec('relay_engine.xproject'), 'permission step not implemented')
+        from relay_engine import xproject
+
+        conn = self.conn
+        facts = held_relays.ReceiverFacts('active', False, 'present')
+        before_relay = self.submit(draft())
+        later_relay = self.submit(draft(subject='new after restore'))
+        def digest(relay):
+            return conn.execute('SELECT body_sha256 FROM relays WHERE id=?',
+                                (relay.relay_id,)).fetchone()[0]
+
+        def allow(relay, key, revision, generation):
+            body = digest(relay)
+            conn.execute('BEGIN IMMEDIATE').close()
+            held_relays.admit(conn, relay.relay_id, 'q', body, (), 'held', facts, self.clock)
+            self.assertEqual(xproject.decide(conn, relay.relay_id, 'q', body), 'held')
+            result = xproject.answer(conn, relay.relay_id, 'q', 'always', 'operator', self.clock,
+                                     surface='page', apply_key=key, expected_body_sha256=body,
+                                     expected_allow_revision=revision, expected_restore_job=generation,
+                                     facts=facts)
+            self.assertEqual(result.status, 'applied')
+            conn.commit()
+
+        allow(before_relay, 'first-allow', 0, '')
+        target = queries.ForeignReadTarget(before_relay.relay_id, digest(before_relay),
+                                           'p', 'q', 'q-seat', 'to')
+        self.assertIs(xproject.release(conn, target), True)
+        with mock.patch.object(xproject, 'revoke_all_for_restore', wraps=xproject.revoke_all_for_restore) as step:
+            self.assertFalse(self.cancel('job-x').already)
+            step.assert_called_once_with(conn, self.clock)
+            step.reset_mock()
+            before = conn.total_changes
+            self.assertTrue(self.cancel('job-x').already)
+            step.assert_not_called()
+            self.assertEqual(conn.total_changes, before)
+        self.assertEqual(xproject.allow_revision(conn, 'q'), 2)
+        self.assertIs(xproject.release(conn, target), True)
+        self.release()
+        allow(later_relay, 'new-allow', 2, 'job-x')
+        self.assertEqual(xproject.allow_revision(conn, 'q'), 3)
+
     def test_cancel_rolls_back_on_failure_after_first_write(self):
         # RC-M16: without rollback, the earlier revocations and events remain.
         import sqlite3

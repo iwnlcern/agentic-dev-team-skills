@@ -135,32 +135,32 @@ class StoreMigrationCopyTests(unittest.TestCase):
         with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
             return journal.last_checkpoint()
 
-    def seed_reservation(self, root, turns, *, case):
+    def seed_reservation(self, root, turns, *, case, project=PROJECT):
         job_id = None if case == 'base creation' else PRIOR_JOB
         if job_id is not None:
             store_id = PRIOR_STORE if case == 'orphaned' else self.store_id(turns)
             with closing(store_steps.open_journal(
                     store_steps.migration_dir(root, job_id), create=True)) as journal:
                 journal.checkpoint('manifest', {
-                    'job_id': job_id, 'store_id': store_id, 'project_id': PROJECT,
+                    'job_id': job_id, 'store_id': store_id, 'project_id': project,
                     'project_name': 'reserved', 'mode': 'new-project', 'roots': [],
                 })
                 if case in ('undone', 'held', 'ledger', 'other name', 'held name'):
-                    journal.checkpoint('undo', {'project_id': PROJECT})
+                    journal.checkpoint('undo', {'project_id': project})
 
         def write(conns):
             conn = conns['catalogue']
-            store_layout.reserve_project(conn, PROJECT, 'reserved', NOW_MS, held_by_job=job_id)
+            store_layout.reserve_project(conn, project, 'reserved', NOW_MS, held_by_job=job_id)
             if case == 'active':
-                store_layout.activate_project(conn, PROJECT)
+                store_layout.activate_project(conn, project)
             if case == 'held':
-                store_layout.take_holds(conn, PRIOR_JOB, 'undo', (store_layout.project_scope(PROJECT),), NOW_MS)
+                store_layout.take_holds(conn, PRIOR_JOB, 'undo', (store_layout.project_scope(project),), NOW_MS)
         turns.run(store_steps.Declared('written', {}), write)
         if case == 'ledger':
-            with closing(store_layout.open_ledger(root, PROJECT, create=True)) as conn:
+            with closing(store_layout.open_ledger(root, project, create=True)) as conn:
                 conn.execute(
                     'INSERT INTO projects(id,name,created_at) VALUES (?,?,?)',
-                    (PROJECT, 'reserved', NOW_MS),
+                    (project, 'reserved', NOW_MS),
                 ).close()
                 conn.commit()
 
@@ -711,7 +711,7 @@ class StoreMigrationCopyTests(unittest.TestCase):
         turns.run(store_steps.Declared('read', {}), private_catalogue)
         self.assertEqual({legacy: source_snapshot(legacy) for legacy in (legacy_a, legacy_b)}, source_before)
 
-    def _copied_import_fixture(self, label, rows):
+    def _copied_import_fixture(self, label, rows, *, cutover=False, takeover_project=None):
         import json
 
         from relay_engine.tests.test_store_import import LEGACY_DDL
@@ -748,7 +748,14 @@ class StoreMigrationCopyTests(unittest.TestCase):
                 ).close()
         (legacy / '.engine' / 'ledger.db').write_bytes(seed.read_bytes())
 
-        job_id = self.start(migrate, root, turns, legacy)
+        if cutover:
+            (legacy / '.engine' / 'seats').mkdir(mode=0o700)
+            (legacy / '.engine' / 'drafts').mkdir(mode=0o700)
+        if takeover_project is None:
+            job_id = self.start(migrate, root, turns, legacy)
+        else:
+            self.seed_reservation(root, turns, case='undone', project=takeover_project)
+            job_id = self.start(migrate, root, turns, legacy, mode='takeover', name='reserved')
         self.quiet(migrate, root, turns, job_id)
         migrate.copy(root, turns, job_id)
         self.assertEqual(self.checkpoint(root, job_id)[0], 'copy')
@@ -1599,3 +1606,382 @@ class StoreMigrationCopyTests(unittest.TestCase):
                 files[name] = entry[-1]
         self.assertEqual(len(files), 3)
         return normalize(data), files
+
+    def _cutover_fixture(self, label, *, takeover_project=None):
+        migrate, root, turns, legacy, job_id = self._copied_import_fixture(label, (
+            ('first', 'fixture.planner', 'fixture.implementer', ('operator',), ()),
+            ('second', 'fixture.implementer', 'fixture.planner', ('operator',), ('first',)),
+        ), cutover=True, takeover_project=takeover_project)
+        self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'running'}).unresolved())
+        return migrate, root, turns, legacy, job_id
+
+    def _cutover_route(self, turns, project):
+        def observe(conns):
+            try:
+                return store_layout.route(conns['catalogue'], project_id=project).state
+            except store_layout.RouteUnavailable as error:
+                return error.cause
+        return turns.run(store_steps.Declared('read', {}), observe)
+
+    def _cutover_holds(self, turns, job_id):
+        return turns.run(store_steps.Declared('read', {}), lambda conns:
+                         store_layout.holds_of(conns['catalogue'], job_id))
+
+    def test_cutover_boundaries(self):
+        from relay_engine import store_backup
+
+        for label, owner, method in (
+            ('hold', store_backup, 'backup'),
+            ('reserve', store_layout, 'reserve_project'),
+            ('move', store_steps, '_rename'),
+            ('marker', store_steps, '_marker_effect'),
+            ('activate', store_layout, 'activate_project'),
+            ('release', store_layout, 'release_holds'),
+            ('receipt', store_steps.Journal, 'checkpoint'),
+        ):
+            with self.subTest(boundary=label):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture('boundary-' + label)
+                _, data = self.checkpoint(root, job_id)
+                project = data['project_id']
+                original = getattr(owner, method)
+                calls = []
+                seen = []
+                original_run = turns.run
+
+                def watch(*args, **kwargs):
+                    result = original_run(*args, **kwargs)
+                    seen.append(original_run(store_steps.Declared('read', {}), lambda c:
+                        store_layout._row(c['catalogue'],
+                            'SELECT state FROM project_routes WHERE project_id=?', (project,))))
+                    return result
+
+                def crash(*args, **kwargs):
+                    if label == 'marker' and args[2].step != 'marker-place':
+                        return original(*args, **kwargs)
+                    calls.append(label)
+                    if label != 'receipt':
+                        original(*args, **kwargs)
+                    raise InterruptedCopy(label)
+
+                with mock.patch.object(turns, 'run', watch), mock.patch.object(owner, method, crash):
+                    with self.assertRaisesRegex(InterruptedCopy, label):
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                self.assertEqual(calls, [label])
+                route = self._cutover_route(turns, project)
+                if label in ('hold', 'reserve', 'move', 'marker', 'activate') and route != 'active':
+                    self.assertIn(route, ('not-found', 'creating'))
+                if label == 'move':
+                    self.assertEqual(route, 'creating')
+                    self.assertTrue(store_layout.ledger_path(root, project).is_file())
+                if label == 'marker':
+                    self.assertEqual(route, 'creating')
+                    self.assertTrue((legacy / '.engine.migrated-to-v3').is_dir())
+                if label == 'receipt':
+                    self.assertEqual(route, 'active')
+                migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                migrate.cutover(root, turns, job_id, NOW_MS + 2)
+                self.assertEqual(self._cutover_route(turns, project), 'active')
+                self.assertEqual(self.checkpoint(root, job_id)[0], 'cutover')
+                self.assertFalse(self._cutover_holds(turns, job_id))
+                self.assertEqual((legacy / '.engine' / 'daemon.json').read_bytes(),
+                                 store_steps.MARKER_DAEMON_JSON)
+                with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
+                    self.assertEqual(journal.pending(), [])
+                if label in ('hold', 'reserve', 'move', 'marker', 'activate'):
+                    self.assertNotIn(('active',), seen)
+
+        migrate, root, turns, legacy, job_id = self._cutover_fixture('boundary-drift')
+        drift = legacy / 'relays' / 'first.md'
+        drift.write_bytes(b'changed after validation')
+        job = self.job_path(root, job_id)
+        with self.assertRaisesRegex(migrate.NotQuiet, 'first.md'):
+            migrate.cutover(root, turns, job_id, NOW_MS + 1)
+        self.assertFalse((job / 'originals').exists())
+        self.assertFalse((legacy / '.engine.migrated-to-v3').exists())
+
+    def test_cutover_requires_store_and_hold(self):
+        for change in ('store', 'hold'):
+            with self.subTest(change=change):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture('binding-' + change)
+                with mock.patch.object(store_steps, '_rename', side_effect=InterruptedCopy):
+                    with self.assertRaises(InterruptedCopy):
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+
+                def alter(c):
+                    conn = c['catalogue']
+                    if change == 'store':
+                        conn.execute('UPDATE catalogue_identity SET store_id=?', (PRIOR_STORE,)).close()
+                    else:
+                        store_layout.release_holds(conn, job_id)
+
+                turns.run(store_steps.Declared('written', {}), alter)
+                self.assertEqual(bool(self._cutover_holds(turns, job_id)), change == 'store')
+                job = self.job_path(root, job_id)
+                before = source_snapshot(job), source_snapshot(legacy)
+                error = migrate.JobOrphaned if change == 'store' else migrate.HoldMissing
+                with self.assertRaises(error):
+                    migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                self.assertEqual((source_snapshot(job), source_snapshot(legacy)), before)
+                self.assertEqual(self._cutover_route(turns, self.checkpoint(root, job_id)[1]['project_id']),
+                                 'creating')
+
+    def test_cutover_reserve_name_taken(self):
+        from relay_engine import store_backup
+
+        for timing in ('before-backup', 'after-backup'):
+            with self.subTest(timing=timing):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture(timing)
+                original = store_backup.backup
+
+                def reserve():
+                    turns.run(store_steps.Declared('written', {}), lambda c:
+                              store_layout.reserve_project(c['catalogue'], PROJECT, 'fixture', NOW_MS))
+
+                def interpose(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    reserve()
+                    return result
+
+                if timing == 'before-backup':
+                    reserve()
+                with mock.patch.object(store_backup, 'backup',
+                                       interpose if timing == 'after-backup' else original):
+                    with self.assertRaises(store_layout.NameTaken) as refused:
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                self.assertEqual((refused.exception.name, refused.exception.holder_project_id),
+                                 ('fixture', PROJECT))
+                self.assertFalse(self._cutover_holds(turns, job_id))
+                self.assertFalse((legacy / '.engine.migrated-to-v3').exists())
+                if timing == 'before-backup':
+                    self.assertFalse((root / 'backups').exists())
+                else:
+                    self.assertEqual(store_backup.backup(turns, root, 'daily', NOW_MS + 2).reason, 'daily')
+                    with self.assertRaises(store_layout.NameTaken) as again:
+                        migrate.cutover(root, turns, job_id, NOW_MS + 3)
+                    self.assertEqual(str(again.exception), str(refused.exception))
+                    self.assertFalse(self._cutover_holds(turns, job_id))
+
+    def test_before_move_backup_then_hold(self):
+        from relay_engine import store_backup
+
+        migrate, root, turns, legacy, job_id = self._cutover_fixture('backup-before-hold')
+        with mock.patch.object(store_layout, 'reserve_project', side_effect=InterruptedCopy):
+            with self.assertRaises(InterruptedCopy):
+                migrate.cutover(root, turns, job_id, NOW_MS + 1)
+        backups = list((root / 'backups').glob('*-before-move'))
+        self.assertEqual(len(backups), 1)
+        self.assertFalse(list(backups[0].rglob('job.sqlite3')))
+        with closing(sqlite3.connect((backups[0] / 'machine.sqlite3').as_uri() + '?mode=ro', uri=True)) as conn:
+            for table in ('project_routes', 'maintenance_holds'):
+                self.assertEqual(store_layout._row(conn, f'SELECT count(*) FROM {table}'), (0,))
+        with self.assertRaises(store_backup.BackupRefused) as refused:
+            store_backup.backup(turns, root, 'daily', NOW_MS + 2)
+        self.assertEqual(refused.exception.reason, 'maintenance-held')
+        self.assertIn(job_id, str(refused.exception))
+        migrate.cutover(root, turns, job_id, NOW_MS + 2)
+        self.assertFalse(self._cutover_holds(turns, job_id))
+
+    def test_takeover_reservation(self):
+        project = '01800000-0000-7000-8000-000000000012'
+        for change in (None, 'hold', 'owner'):
+            with self.subTest(change=change):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture(
+                    f'takeover-{change}', takeover_project=project)
+                if change == 'hold':
+                    scope = store_layout.root_scope(ROOT_ID)
+                    turns.run(store_steps.Declared('written', {}), lambda c:
+                              store_layout.take_holds(c['catalogue'], PRIOR_JOB, 'undo', (scope,), NOW_MS))
+                    with self.assertRaises(store_layout.HoldConflict) as refused:
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                    self.assertIn(PRIOR_JOB, str(refused.exception))
+                elif change == 'owner':
+                    turns.run(store_steps.Declared('written', {}), lambda c:
+                        store_layout.take_over_reservation(c['catalogue'], project, PRIOR_JOB,
+                                                           store_layout._canonical_job(job_id), False))
+                    with self.assertRaises(store_layout.ReservationChanged):
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                else:
+                    original = store_layout.take_over_reservation
+                    observed = []
+
+                    def held(conn, *args):
+                        observed.append(store_layout.holds_of(conn, job_id))
+                        return original(conn, *args)
+
+                    with mock.patch.object(store_layout, 'take_over_reservation', held):
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                    self.assertEqual(observed, [frozenset({
+                        store_layout.project_scope(project), store_layout.root_scope(ROOT_ID),
+                    })])
+                    self.assertEqual(self._cutover_route(turns, project), 'active')
+                self.assertFalse(self._cutover_holds(turns, job_id))
+                if change:
+                    self.assertFalse((legacy / '.engine.migrated-to-v3').exists())
+
+    def test_cutover_native_cut_each_boundary(self):
+        from relay_engine.tests.test_store_steps import native_cut
+
+        cases = [('cutover-backup', 'catalogue'), ('cutover-reserve', 'catalogue'),
+                 ('move', 'rename'), ('cutover-activate', 'catalogue'), ('cutover-release', 'catalogue')]
+        for step, effect in (('open', 'mkdir'), ('fill', 'file-sync'), ('seal', 'rename'),
+                             ('aside', 'rename'), ('place', 'rename')):
+            cases.extend(('marker-' + step, point) for point in ('intent', effect, 'receipt'))
+        cases.extend((step, point) for step, effect in (('dispose-tomb', 'rename'),
+                     ('dispose-clear', 'unlink')) for point in ('intent', effect, 'receipt'))
+        for step, point in cases:
+            with self.subTest(step=step, point=point):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture('native-' + step + '-' + point)
+                project = self.checkpoint(root, job_id)[1]['project_id']
+                run = lambda: migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                disposal = step.startswith('dispose-')
+                if disposal:
+                    native_cut(run, 'marker-fill', 'file-sync', attempt=1)
+                native_cut(run, step, point, dispose_slot='build' if disposal else None)
+                if step.startswith('marker-') or disposal:
+                    with mock.patch.object(migrate, '_fingerprint',
+                                           side_effect=lambda *a, **k: self.fail(
+                                               'fingerprinted after marker work began')), mock.patch.object(
+                            store_steps, 'capture_preimage', side_effect=lambda *a, **k: self.fail(
+                                'recaptured after marker work began')):
+                        run()
+                else:
+                    run()
+                self.assertEqual(self.checkpoint(root, job_id)[0], 'cutover')
+                routes = turns.run(store_steps.Declared('read', {}), lambda c: c['catalogue'].execute(
+                    'SELECT project_id,name,state,held_by_job FROM project_routes ORDER BY project_id').fetchall())
+                self.assertEqual(routes, [(project, 'fixture', 'active', job_id)])
+                self.assertFalse(self._cutover_holds(turns, job_id))
+                self.assertEqual((legacy / '.engine/daemon.json').read_bytes(), store_steps.MARKER_DAEMON_JSON)
+                with closing(store_steps.open_journal(self.job_path(root, job_id))) as journal:
+                    self.assertEqual(journal.pending(), [])
+
+    def test_decide_refused_after_cutover_intent(self):
+        from relay_engine.tests.test_store_steps import native_cut
+
+        for step in ('cutover-backup', 'move', None):
+            with self.subTest(step=step):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture(f'native-decide-{step}')
+                if step is None:
+                    self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'finished'}).unresolved())
+                    continue
+                phase, data = self.checkpoint(root, job_id)
+                run = lambda: migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                native_cut(run, step, 'intent')
+                job = self.job_path(root, job_id)
+                def snapshot():
+                    database = job / 'job.sqlite3'
+                    uri = database.as_uri() + '?mode=ro'
+                    with closing(sqlite3.connect(uri, uri=True)) as conn:
+                        rows = tuple(conn.execute(sql).fetchall() for sql in (
+                            'SELECT * FROM checkpoints ORDER BY id',
+                            'SELECT * FROM intents ORDER BY id',
+                            'SELECT * FROM receipts ORDER BY intent_id',
+                        ))
+                    # SQLite WAL read marks are transient bookkeeping.
+                    files = {name: value for name, value in source_snapshot(job).items()
+                             if name != 'job.sqlite3-shm'}
+                    return (files, rows, source_snapshot(legacy), self._cutover_holds(turns, job_id),
+                            self._cutover_route(turns, data['project_id']))
+                before = snapshot()
+                expected = getattr(migrate, 'CutoverStarted', ())
+                with self.assertRaises(expected or ValueError) as caught:
+                    migrate.decide(root, turns, job_id, {'fixture': 'finished'})
+                self.assertEqual(type(caught.exception).__name__, 'CutoverStarted')
+                self.assertEqual(snapshot(), before)
+                run()
+                self.assertEqual(self._cutover_route(turns, data['project_id']), 'active')
+                self.assertEqual(self.checkpoint(root, job_id)[1]['prepared'], data['prepared'])
+
+    def test_cutover_name_taken_beside_schema_only_creation(self):
+        from relay_engine import store_backup
+
+        for timing in ('early', 'late', 'unrelated'):
+            with self.subTest(timing=timing):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture('schema-only-' + timing)
+                name = 'fixture' if timing != 'unrelated' else 'other'
+                original = store_backup.backup
+                project = self.checkpoint(root, job_id)[1]['project_id']
+                job = self.job_path(root, job_id)
+                before = source_snapshot(job), source_snapshot(legacy)
+
+                competing = store_layout.ledger_path(root, PROJECT)
+
+                def competing_snapshot():
+                    route = turns.run(store_steps.Declared('read', {}), lambda c: store_layout._row(
+                        c['catalogue'], 'SELECT project_id,name,state,held_by_job FROM project_routes '
+                        'WHERE project_id=?', (PROJECT,)))
+                    return route, source_snapshot(competing.parent)
+
+                before_reservation = None
+
+                def reserve():
+                    nonlocal before_reservation
+                    turns.run(store_steps.Declared('written', {}), lambda c:
+                              store_layout.reserve_project(c['catalogue'], PROJECT, name, NOW_MS))
+                    with closing(store_layout.open_ledger(root, PROJECT, create=True)):
+                        pass
+                    before_reservation = competing_snapshot()
+
+                def interpose(*args, **kwargs):
+                    reserve()
+                    return original(*args, **kwargs)
+
+                if timing != 'late':
+                    reserve()
+                caught = None
+                with mock.patch.object(store_backup, 'backup', interpose if timing == 'late' else original):
+                    try:
+                        migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                    except (store_layout.NameTaken, store_backup.BackupRefused) as exc:
+                        caught = exc
+                self.assertIs(type(caught), store_backup.BackupRefused if timing == 'unrelated'
+                              else store_layout.NameTaken)
+                if timing == 'unrelated':
+                    self.assertEqual(caught.reason, 'creation-pending')
+                else:
+                    self.assertEqual((caught.name, caught.holder_project_id), (name, PROJECT))
+                self.assertIsNotNone(before_reservation)
+                self.assertEqual(competing_snapshot(), before_reservation)
+                self.assertEqual(self._cutover_route(turns, PROJECT), 'creating')
+                self.assertEqual(self._cutover_route(turns, project), 'not-found')
+                self.assertEqual((source_snapshot(job), source_snapshot(legacy)), before)
+                self.assertFalse((root / 'backups').exists())
+                self.assertFalse(self._cutover_holds(turns, job_id))
+                with closing(store_steps.open_journal(job)) as journal:
+                    self.assertEqual(journal.pending(), [])
+
+    def test_superseded_reserve_intent_resumes_to_refusal(self):
+        import json
+        from relay_engine import store_backup
+        from relay_engine.tests.test_store_steps import native_cut
+
+        for cut in (None, 'intent', 'catalogue', 'receipt'):
+            with self.subTest(refusal_cut=cut):
+                migrate, root, turns, legacy, job_id = self._cutover_fixture(f'refuse-cut-{cut}')
+                job = self.job_path(root, job_id)
+                _, data = self.checkpoint(root, job_id)
+                run = lambda: migrate.cutover(root, turns, job_id, NOW_MS + 1)
+                native_cut(run, 'cutover-reserve', 'intent')
+                turns.run(store_steps.Declared('written', {}), lambda c:
+                          store_layout.reserve_project(c['catalogue'], PROJECT, 'fixture', NOW_MS))
+                if cut is not None:
+                    native_cut(run, 'cutover-refuse', cut)
+                for _ in range(2):
+                    with self.assertRaises(store_layout.NameTaken) as caught:
+                        run()
+                    self.assertEqual((caught.exception.name, caught.exception.holder_project_id),
+                                     ('fixture', PROJECT))
+                self.assertFalse(self._cutover_holds(turns, job_id))
+                self.assertEqual(self._cutover_route(turns, PROJECT), 'creating')
+                self.assertEqual(self._cutover_route(turns, data['project_id']), 'not-found')
+                self.assertFalse(store_layout.ledger_path(root, data['project_id']).exists())
+                self.assertTrue((job / 'staging/ledger.sqlite3').exists())
+                self.assertFalse((legacy / '.engine.migrated-to-v3').exists())
+                with closing(store_steps.open_journal(job)) as journal:
+                    reserve, refuse = [tuple(row) for row in journal._conn.execute(
+                        "SELECT i.id,r.observed FROM intents i LEFT JOIN receipts r ON r.intent_id=i.id "
+                        "WHERE i.step IN ('cutover-reserve','cutover-refuse') ORDER BY i.id")]
+                    self.assertEqual(json.loads(reserve[1]) if reserve[1] else None,
+                                     {'refused': refuse[0]})
+                    self.assertEqual(journal.pending(), [])
+                self.assertEqual(store_backup.backup(turns, root, 'daily', NOW_MS + 2).reason, 'daily')
