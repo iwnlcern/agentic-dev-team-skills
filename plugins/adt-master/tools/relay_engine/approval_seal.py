@@ -54,6 +54,46 @@ def _hex(value, length):
     return type(value) is str and len(value) == length and all(c in '0123456789abcdef' for c in value)
 
 
+def _operand_token(source, root) -> str | None:
+    """Render the first operand without guessing any relative path's dir-fd."""
+    if source.filename is None:
+        return None
+    name = os.fsdecode(source.filename)
+    if os.path.isabs(name):
+        absolute, anchor = os.path.abspath(name), os.path.abspath(root)
+        if os.path.commonpath((absolute, anchor)) == anchor:
+            name = os.path.relpath(absolute, anchor)
+        else:
+            name = os.path.basename(name)
+    pieces = []
+    for char in name:
+        code = ord(char)
+        if char == '\\':
+            pieces.append('\\\\')
+        elif 0x21 <= code <= 0x7e:
+            pieces.append(char)
+        elif code <= 0x7f:
+            pieces.append(f'\\x{code:02x}')
+        elif code <= 0xffff:
+            pieces.append(f'\\u{code:04x}')
+        else:
+            pieces.append(f'\\U{code:08x}')
+    token = ''.join(pieces)
+    return token if len(token) <= 256 else token[:255] + '~'
+
+
+def _raising_operation(source) -> str | None:
+    """Return the deepest project frame of the original filesystem error."""
+    operation = None
+    frame = source.__traceback__
+    while frame is not None:
+        module = frame.tb_frame.f_globals.get('__name__', '')
+        if module.startswith('relay_engine.') and not module.startswith('relay_engine.tests.'):
+            operation = f"{module.removeprefix('relay_engine.')}.{frame.tb_frame.f_code.co_name}"
+        frame = frame.tb_next
+    return operation
+
+
 def production_root() -> Path:
     home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     return home / ('Library/Application Support/adt-approval-seal' if sys.platform == 'darwin'
@@ -107,12 +147,17 @@ class SealService:
         source = error
         if isinstance(error, slots.CannotRecord):
             source = error.__cause__
-        errno_name = None
+        errno_name = filename = operation = None
         if isinstance(source, OSError) and isinstance(source.errno, int):
             errno_name = errno.errorcode.get(source.errno, str(source.errno))
+            try:
+                filename, operation = _operand_token(source, self.folder.root), _raising_operation(source)
+            except Exception:
+                # Optional diagnostics must not replace the original refusal.
+                filename = operation = None
         if report:
             self._report(project, chain, cause, errno_name)
-        raise SealUnusable(cause, chain, errno_name) from None
+        raise SealUnusable(cause, chain, errno_name, filename, operation) from None
 
     @contextmanager
     def _locked(self, project, *, exclusive, create=False, report=True):

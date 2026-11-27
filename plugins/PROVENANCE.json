@@ -10844,7 +10844,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/approval_seal.py",
-    "sha256": "8f450bd4ec3697b710a6e85f02d92ae311694845276ecffca564dee8fd12b07e",
+    "sha256": "5ea23b2c99f4d8c53a9e772d36d905dcfd9d86c35c7bcf9ea3004b28f68f063c",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -11210,7 +11210,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/seal_types.py",
-    "sha256": "8726fad2764baa8332173d25a6cfb8f8605463a770434d210ca5135e0b54c200",
+    "sha256": "a66b4e299793f5dcc9dbed0518c9750d53047d601ee18f7bdf9ef54c3a4dfd2c",
     "source": "tools/relay_engine/seal_types.py"
   },
   {
@@ -22052,7 +22052,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/approval_seal.py",
-    "sha256": "8f450bd4ec3697b710a6e85f02d92ae311694845276ecffca564dee8fd12b07e",
+    "sha256": "5ea23b2c99f4d8c53a9e772d36d905dcfd9d86c35c7bcf9ea3004b28f68f063c",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -22418,7 +22418,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/seal_types.py",
-    "sha256": "8726fad2764baa8332173d25a6cfb8f8605463a770434d210ca5135e0b54c200",
+    "sha256": "a66b4e299793f5dcc9dbed0518c9750d53047d601ee18f7bdf9ef54c3a4dfd2c",
     "source": "tools/relay_engine/seal_types.py"
   },
   {
@@ -33176,7 +33176,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/approval_seal.py",
-    "sha256": "8f450bd4ec3697b710a6e85f02d92ae311694845276ecffca564dee8fd12b07e",
+    "sha256": "5ea23b2c99f4d8c53a9e772d36d905dcfd9d86c35c7bcf9ea3004b28f68f063c",
     "source": "tools/relay_engine/approval_seal.py"
   },
   {
@@ -33542,7 +33542,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/seal_types.py",
-    "sha256": "8726fad2764baa8332173d25a6cfb8f8605463a770434d210ca5135e0b54c200",
+    "sha256": "a66b4e299793f5dcc9dbed0518c9750d53047d601ee18f7bdf9ef54c3a4dfd2c",
     "source": "tools/relay_engine/seal_types.py"
   },
   {
