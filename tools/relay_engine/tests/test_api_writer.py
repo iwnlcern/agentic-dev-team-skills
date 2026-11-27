@@ -2703,6 +2703,132 @@ class TransferModeTests(ProjectWriterFixture):
     def test_transient_close_failure_is_isolated(self):
         self.stopped_receiver(True)
 
+    def stopped_guard_snapshot_case(self, case):
+        GuardedWriterFixture.setUp(self)
+        writer = self.writer
+        GuardedWriterFixture.admit_second(self)
+        writer.open_project(Q)
+        self.assertEqual(writer.request_project_stop(Q, 'fixture'), 'stopped')
+        self.flush(writer)
+        self.assertIn(P, writer.served_projects())
+        self.assertNotIn(Q, writer.served_projects())
+        catalogue_path = store_layout.catalogue_path(self.root)
+
+        def change_blocker(present):
+            with closing(sqlite3.connect(catalogue_path)) as conn, conn:
+                if case == 'cleared_store_stop':
+                    if present:
+                        store_layout.record_stop(conn, 'store', None, 'fixture')
+                    else:
+                        store_layout.record_start(conn, 'store', None, 'fixture')
+                elif present:
+                    conn.execute("INSERT INTO maintenance_holds VALUES ('fixture', 'job', 'cutover', 1)").close()
+                else:
+                    conn.execute("DELETE FROM maintenance_holds WHERE scope='fixture'").close()
+
+        if case != 'late_hold':
+            change_blocker(True)
+
+        pin = getattr(writer, '_pin_transfer_catalogue', None)
+        pinned_guard = getattr(writer, '_require_transfer_stopped_snapshot', None)
+        runtime = self.guard.runtime_admission
+        authorizer = writer._transfer_authorizer
+        run_transfer = writer._run_transfer
+        guard_calls, pinned_causes, handles = [], [], []
+        authorised, observed, ran, live, closed = [], [], [], [], []
+
+        def pin_and_interleave(pinned_conn):
+            pin(pinned_conn)
+            if case == 'late_hold':
+                change_blocker(True)
+
+        def after_begin(phase):
+            if phase == 'began' and case != 'late_hold':
+                change_blocker(False)
+
+        def authorizer_factory(turn, label):
+            authorised.append(label)
+            return authorizer(turn, label)
+
+        def snapshot_check(pinned_conn, project):
+            try:
+                return pinned_guard(pinned_conn, project)
+            except store_layout.LayoutFault as error:
+                pinned_causes.append(error.cause)
+                raise
+
+        def check_private(arm, project, conn, *, purpose):
+            handles.append(conn)
+            common = (project, purpose, conn is writer._catalogue,
+                      writer._catalogue.in_transaction, 'catalogue' in authorised)
+            try:
+                runtime(arm, project, conn, purpose=purpose)
+            except store_layout.LayoutFault as error:
+                guard_calls.append((*common, error.cause))
+                raise
+            else:
+                guard_calls.append((*common, None))
+
+        def read(conn):
+            ran.append(self.read_name(conn))
+            return ran[-1]
+
+        def run(turn):
+            try:
+                turn.read_receiver(Q, 'required', read, route='stopped')
+            except api_writer.ReceiverRequired as error:
+                observed.append(error)
+            for conn in handles:
+                try:
+                    conn.execute('SELECT 1').close()
+                except sqlite3.ProgrammingError as error:
+                    live.append(str(error))
+                else:
+                    live.append(True)
+            return self.write(turn)
+
+        def close_witness(request):
+            outcome = run_transfer(request)
+            for conn in handles:
+                try:
+                    conn.execute('SELECT 1').close()
+                except sqlite3.ProgrammingError as error:
+                    closed.append(str(error))
+                else:
+                    closed.append(False)
+            return outcome
+
+        with (mock.patch.object(writer, '_pin_transfer_catalogue', side_effect=pin_and_interleave, create=True),
+              mock.patch.object(writer, '_require_transfer_stopped_snapshot', side_effect=snapshot_check, create=True),
+              mock.patch.object(writer, '_phase_hook', side_effect=after_begin),
+              mock.patch.object(writer, '_transfer_authorizer', side_effect=authorizer_factory),
+              mock.patch.object(self.guard, 'runtime_admission', side_effect=check_private),
+              mock.patch.object(writer, '_run_transfer', side_effect=close_witness)):
+            outcome = self.transfer(writer, run)
+        self.assertEqual(ran, [], 'stopped receiver callback ran despite the catalogue blocker')
+        prefix = (Q, 'stopped_read', False, True, True)
+        if case == 'late_hold':
+            self.assertEqual(guard_calls, [(*prefix, 'incumbent-hold')])
+            self.assertEqual(pinned_causes, [])
+        else:
+            self.assertEqual(guard_calls, [(*prefix, None)] * 2)
+            self.assertEqual(pinned_causes, ['incumbent-hold'])
+        self.assertEqual(len({id(conn) for conn in handles}), 1)
+        self.assertEqual(live, [True] * len(handles))
+        self.assertEqual(closed, ['Cannot operate on a closed database.'] * len(handles))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual((observed[0].project_id, observed[0].reason), (Q, 'layout_fault'))
+        self.assertEqual(outcome, api_writer.JobOutcome(False, observed[0], False, 'receiver_required'))
+        self.assertEqual(self.value(), 'before')
+
+    def test_stopped_route_guard_sees_a_hold_after_the_turn_snapshot(self):
+        self.stopped_guard_snapshot_case('late_hold')
+
+    def test_stopped_route_refuses_a_blocker_cleared_after_the_turn_snapshot(self):
+        for case in ('cleared_hold', 'cleared_store_stop'):
+            with self.subTest(case=case):
+                self.stopped_guard_snapshot_case(case)
+
     def test_receiver_naming_the_sender_is_refused(self):
         writer = self.writer()
         def run(turn):
@@ -2753,25 +2879,55 @@ class TransferModeTests(ProjectWriterFixture):
 
     def test_transaction_control_is_refused(self):
         writer = self.writer()
-        def run(turn):
-            for phase in ('receiver', 'write'):
-                if phase == 'write':
-                    turn.open_sender_writes()
-                for target, sqls in (
-                    (turn.sender, ('COMMIT', 'ROLLBACK', 'BEGIN', 'PRAGMA query_only=OFF',
-                                   'PRAGMA optimize', "ATTACH ':memory:' AS other")),
-                    (turn.catalogue, ('COMMIT',)),
-                ):
-                    for sql in sqls:
-                        with self.assertRaisesRegex(sqlite3.DatabaseError, 'not authorized'):
-                            target.execute(sql)
-                self.assertTrue(all(conn.in_transaction for conn in (
-                    writer._catalogue, writer._connections[P])))
-            self.change(turn.sender)
+
+        def seed(conn):
+            conn.execute('CREATE TABLE transfer_witness (statement TEXT NOT NULL)').close()
             return api_writer.JobOutcome(True, None)
 
-        self.assertEqual(self.transfer(writer, run), api_writer.JobOutcome(False, None, False, 'turn_violation'))
-        self.assertEqual(self.value(), 'before')
+        self.assertTrue(writer.submit(P, self.job(seed)).commit)
+
+        def snapshot():
+            with closing(sqlite3.connect(store_layout.ledger_path(self.root, P))) as conn:
+                with closing(conn.execute('SELECT statement FROM transfer_witness ORDER BY rowid')) as rows:
+                    values = rows.fetchall()
+                with closing(conn.execute('PRAGMA user_version')) as rows:
+                    return values, rows.fetchone()[0]
+
+        def check(phase, target, sql):
+            recorded = []
+
+            def run(turn):
+                if phase == 'write':
+                    turn.open_sender_writes()
+                try:
+                    getattr(turn, target).execute(sql).close()
+                except sqlite3.Error as error:
+                    name = error.sqlite_errorname
+                else:
+                    name = 'ok'
+                recorded.append((name, writer._connections[P].in_transaction, writer._catalogue.in_transaction))
+                if phase == 'receiver':
+                    turn.open_sender_writes()
+                turn.sender.execute('INSERT INTO transfer_witness VALUES (?)', (sql,)).close()
+                return api_writer.JobOutcome(True, None)
+
+            before = snapshot()
+            outcome = self.transfer(writer, run)
+            after = snapshot()
+            with self.subTest(phase=phase, target=target, sql=sql, observation='authorizer'):
+                self.assertEqual([item[0] for item in recorded], ['SQLITE_AUTH'])
+            with self.subTest(phase=phase, target=target, sql=sql, observation='transactions'):
+                self.assertEqual([item[1:] for item in recorded], [(True, True)])
+                self.assertEqual(outcome, api_writer.JobOutcome(False, None, False, 'turn_violation'))
+            with self.subTest(phase=phase, target=target, sql=sql, observation='durable'):
+                self.assertEqual(after, before)
+
+        basic = ('COMMIT', 'ROLLBACK', 'BEGIN', 'PRAGMA query_only=OFF', 'PRAGMA optimize',
+                 "ATTACH ':memory:' AS other")
+        for phase in ('receiver', 'write'):
+            for sql in basic + (('PRAGMA user_version=7',) if phase == 'write' else ()):
+                check(phase, 'sender', sql)
+            check(phase, 'catalogue', 'COMMIT')
 
     def test_cached_sender_statement_is_refused(self):
         writer = self.writer()
