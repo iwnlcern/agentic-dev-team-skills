@@ -1451,6 +1451,60 @@ class TestAdmissionReplay(Store):
 
 
 
+class TestLocalGuard(Store):
+    def setUp(self):
+        super().setUp()
+        self.conn.execute("CREATE TEMP TABLE guard_probe (n INTEGER)")
+
+    @staticmethod
+    def deny_insert(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_INSERT and table == "guard_probe":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def test_local_guard_restores_previous_layer_on_raise(self):
+        self.assertTrue(hasattr(submit, "local_guarded"), "local guard adapter is missing")
+        guarded = submit.local_guarded(self.conn)
+        with guarded.guard(self.deny_insert):
+            with self.assertRaisesRegex(RuntimeError, "inner block"):
+                with guarded.guard(None):
+                    raise RuntimeError("inner block")
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.conn.execute("INSERT INTO guard_probe VALUES (1)")
+        self.conn.execute("INSERT INTO guard_probe VALUES (2)")
+        self.assertEqual(self.conn.execute("SELECT n FROM guard_probe").fetchall(), [(2,)])
+
+    def test_local_guard_progress_restored(self):
+        self.assertTrue(hasattr(submit, "local_guarded"), "local guard adapter is missing")
+        guarded = submit.local_guarded(self.conn)
+        calls = []
+        def progress():
+            calls.append(True)
+            return 0
+
+        with self.assertRaisesRegex(RuntimeError, "progress block"):
+            with guarded.guard(None, progress=progress):
+                self.assertEqual(guarded.execute("SELECT 1").fetchone(), (1,))
+                raise RuntimeError("progress block")
+        self.assertTrue(calls)
+        calls.clear()
+        self.assertEqual(self.conn.execute("SELECT 1").fetchone(), (1,))
+        self.assertEqual(calls, [])
+
+    def test_inner_none_guard_lifts_outer(self):
+        self.assertTrue(hasattr(submit, "local_guarded"), "local guard adapter is missing")
+        guarded = submit.local_guarded(self.conn)
+        write = "INSERT INTO guard_probe VALUES (1)"
+        with guarded.guard(self.deny_insert):
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.conn.execute(write)
+            with guarded.guard(None):
+                guarded.execute(write)
+            with self.assertRaises(sqlite3.DatabaseError):
+                self.conn.execute(write)
+        self.assertEqual(self.conn.execute("SELECT n FROM guard_probe").fetchall(), [(1,)])
+
+
 class TestAdmissionHook(Store):
     """Breaks: post-commit callbacks, cached authority, partial writes and unsafe errors."""
 
@@ -1647,6 +1701,40 @@ class TestAdmissionHook(Store):
         submit.submit(self.conn, self.hook_ctx(direct, frozenset({"fixture_owned"})), draft())
         self.assertEqual(self.conn.execute("SELECT count(*) FROM fixture_owned").fetchone(), (1,))
         self.assert_free()
+
+    def test_system_filing_lift_keeps_hook_progress(self):
+        class ProgressConnection(sqlite3.Connection):
+            in_system_filing = False
+            ticks_inside_filing = 0
+
+            def set_progress_handler(conn, handler, steps):
+                def tick():
+                    conn.ticks_inside_filing += int(conn.in_system_filing)
+                    return handler()
+                return super().set_progress_handler(None if handler is None else tick, steps)
+
+        self.conn = sqlite3.connect(":memory:", factory=ProgressConnection)
+        self.addCleanup(self.conn.close)
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        schema.init_v3(self.conn)
+        platform_rows(self.conn)
+        self.conn.execute("CREATE TEMP TABLE guard_probe (n INTEGER)")
+        filed = []
+
+        def hook(c, a, d, x):
+            c.in_system_filing = True
+            try:
+                filed.append(submit.file_system_relay(c, x, draft(bundle="system")))
+            finally:
+                c.in_system_filing = False
+            with self.assertRaises(sqlite3.DatabaseError):
+                c.execute("INSERT INTO guard_probe VALUES (1)")
+
+        submit.submit(self.conn, self.hook_ctx(hook), draft())
+        self.assertEqual(len(filed), 1)
+        self.assertEqual(self.relay(filed[0].relay_id)["sender_special"], "system")
+        self.assertGreater(self.conn.ticks_inside_filing, 0)
+        self.assertEqual(self.conn.execute("SELECT n FROM guard_probe").fetchall(), [])
 
     def test_system_relay_hook_only_atomic(self):
         self.require_hook()

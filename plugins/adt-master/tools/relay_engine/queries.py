@@ -351,8 +351,8 @@ def _read_in_transaction(conn, relay_id, seat_id, at_ms, meta, foreign_release):
                       repository)
 
 
-def _check_foreign_release(conn, target, foreign_release):
-    """Use the Engine-owned authorizer slot only for trusted read-only owner code."""
+def _check_foreign_release(conn, target, foreign_release, *, in_turn=False):
+    """Run the release check in a read-only Engine guard."""
     allowed = {sqlite3.SQLITE_READ, sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION,
                sqlite3.SQLITE_RECURSIVE}
     denied = False
@@ -364,17 +364,16 @@ def _check_foreign_release(conn, target, foreign_release):
         denied = True
         return sqlite3.SQLITE_DENY
 
-    # Entry/exit reset also invalidates permissions on previously prepared statements.
-    conn.set_authorizer(authorize)
-    try:
+    guarded = conn if in_turn else submit.local_guarded(conn)
+    with guarded.guard(authorize):
         try:
             released = foreign_release(conn, target)
-        except Exception:
+        except Exception as error:
+            if in_turn and isinstance(error, sqlite3.Error):
+                raise
             raise ValueError("foreign read is not released") from None
-        if denied or not conn.in_transaction or released is not True:
+        if denied or not guarded.in_transaction or released is not True:
             raise ValueError("foreign read is not released")
-    finally:
-        conn.set_authorizer(None)
 
 
 def _git_state(conn, state_id):
