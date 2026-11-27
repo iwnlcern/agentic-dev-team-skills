@@ -223,6 +223,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/submit.py",
     "relay_engine/supersede.py",
     "relay_engine/version.py",
+    "relay_engine/xproject.py",
 )
 EXACT_INVENTORY_SENTINELS = {
     "adt-orchestrator": {

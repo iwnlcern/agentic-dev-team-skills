@@ -124,6 +124,7 @@ assert ENGINE_SET == (
     "relay_engine/submit.py",
     "relay_engine/supersede.py",
     "relay_engine/version.py",
+    "relay_engine/xproject.py",
 )
 MANIFEST_PATH = "PROVENANCE.json"
 ROOT = Path(__file__).resolve().parent.parent

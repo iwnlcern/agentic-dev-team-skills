@@ -11168,7 +11168,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/restore_cancel.py",
-    "sha256": "7b96de38e9c86bd2c1890c6503329159d976e8f5e178f2349e507e2c0141626d",
+    "sha256": "92d92a91665f5eaaed563d2045b3a12c64c9dbee44d147062c7e2e4861fb4686",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -11294,8 +11294,14 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/version.py",
-    "sha256": "d516b3a67230a2a9555b207a637acdf3afb5278be0824b55e2ed3e8ffe00dd05",
+    "sha256": "09d86d5df8683a8bc29bd49aa6eeb9b5b25399b0db40ac31c00bfbdfed8708a7",
     "source": "tools/relay_engine/version.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/relay_engine/xproject.py",
+    "sha256": "1f607cc5289a902539e219a989c21ee015bc40c18960250059d0dd98f030b37f",
+    "source": "tools/relay_engine/xproject.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22370,7 +22376,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/restore_cancel.py",
-    "sha256": "7b96de38e9c86bd2c1890c6503329159d976e8f5e178f2349e507e2c0141626d",
+    "sha256": "92d92a91665f5eaaed563d2045b3a12c64c9dbee44d147062c7e2e4861fb4686",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -22496,8 +22502,14 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/version.py",
-    "sha256": "d516b3a67230a2a9555b207a637acdf3afb5278be0824b55e2ed3e8ffe00dd05",
+    "sha256": "09d86d5df8683a8bc29bd49aa6eeb9b5b25399b0db40ac31c00bfbdfed8708a7",
     "source": "tools/relay_engine/version.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/relay_engine/xproject.py",
+    "sha256": "1f607cc5289a902539e219a989c21ee015bc40c18960250059d0dd98f030b37f",
+    "source": "tools/relay_engine/xproject.py"
   },
   {
     "kit_version": "2.9.7",
@@ -33488,7 +33500,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/restore_cancel.py",
-    "sha256": "7b96de38e9c86bd2c1890c6503329159d976e8f5e178f2349e507e2c0141626d",
+    "sha256": "92d92a91665f5eaaed563d2045b3a12c64c9dbee44d147062c7e2e4861fb4686",
     "source": "tools/relay_engine/restore_cancel.py"
   },
   {
@@ -33614,8 +33626,14 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/version.py",
-    "sha256": "d516b3a67230a2a9555b207a637acdf3afb5278be0824b55e2ed3e8ffe00dd05",
+    "sha256": "09d86d5df8683a8bc29bd49aa6eeb9b5b25399b0db40ac31c00bfbdfed8708a7",
     "source": "tools/relay_engine/version.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/relay_engine/xproject.py",
+    "sha256": "1f607cc5289a902539e219a989c21ee015bc40c18960250059d0dd98f030b37f",
+    "source": "tools/relay_engine/xproject.py"
   },
   {
     "kit_version": "2.9.7",
