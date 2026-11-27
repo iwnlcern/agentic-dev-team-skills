@@ -552,13 +552,19 @@ def _run_sender_check(conn, ctx):
         _CHECK_FRAMES.pop(conn, None)
 
 
+def replay_in_snapshot(conn, ctx, data) -> Admitted | None:
+    """Check the current sender and replay key in the caller's open transaction."""
+    if not conn.in_transaction:
+        raise RuntimeError("snapshot replay requires an open transaction")
+    _run_sender_check(conn, ctx)
+    return _replay(conn, ctx, data, before_lock=True)
+
+
 def _checked_replay(conn, ctx, data):
-    """D6 step 1: the sender check, then the replay lookup on the same read
-    snapshot, in one short read transaction ended before any preparation."""
+    """D6 step 1: end the local read transaction before any preparation."""
     conn.execute("BEGIN")
     try:
-        _run_sender_check(conn, ctx)
-        return _replay(conn, ctx, data, before_lock=True)
+        return replay_in_snapshot(conn, ctx, data)
     finally:
         if _transaction_state(conn) == "active":
             conn.execute("ROLLBACK")

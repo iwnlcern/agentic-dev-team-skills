@@ -2377,6 +2377,63 @@ class TestSenderCheck(Store):
         return self.conn.execute("SELECT project_id, coalesce(seat_id, special), code FROM refusals"
                                  " ORDER BY id DESC LIMIT 1").fetchone()
 
+    def test_replay_in_snapshot_issues_no_transaction_statement(self):
+        self.assertTrue(hasattr(submit, "replay_in_snapshot"), "snapshot replay helper is missing")
+        data = draft()
+        prior = self.submit(data, submission_key="snapshot")
+        check, calls = self.recorder()
+        ctx = self.checked(check, submission_key="snapshot")
+        trace = []
+        self.conn.execute("PRAGMA query_only=ON")
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.set_trace_callback(trace.append)
+            self.assertEqual(submit.replay_in_snapshot(self.conn, ctx, data), prior)
+            self.assertTrue(self.conn.in_transaction)
+        finally:
+            self.conn.set_trace_callback(None)
+            self.conn.rollback()
+            self.conn.execute("PRAGMA query_only=OFF")
+        self.assertEqual(calls, [True])
+        self.assertTrue(any(statement.lstrip().upper().startswith("SELECT ") for statement in trace))
+        self.assertFalse({"BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"}
+                         & {statement.split()[0].upper() for statement in trace})
+
+    def test_replay_in_snapshot_answers_and_refuses(self):
+        self.assertTrue(hasattr(submit, "replay_in_snapshot"), "snapshot replay helper is missing")
+        data = draft(subject="original")
+        prior = self.submit(data, submission_key="snapshot")
+        check, calls = self.recorder(raising=(4,))
+        ctx = self.checked(check, submission_key="snapshot")
+        self.conn.execute("PRAGMA query_only=ON")
+        self.conn.execute("BEGIN")
+        try:
+            missing = replace(ctx, submission_key="missing")
+            self.assertIsNone(submit.replay_in_snapshot(self.conn, missing, data))
+            self.assertEqual(submit.replay_in_snapshot(self.conn, ctx, data), prior)
+            with self.assertRaises(errors.EngineError) as changed:
+                submit.replay_in_snapshot(self.conn, ctx, draft(subject="changed"))
+            self.assertEqual(changed.exception.code, "E-SUBMISSION-KEY-REUSED")
+            with self.assertRaises(errors.EngineError) as stale:
+                submit.replay_in_snapshot(self.conn, ctx, data)
+            self.assertEqual(stale.exception.code, "E-SENDER-NOT-CURRENT")
+            self.assertEqual(stale.exception.params["reason"], "key_replaced")
+            self.assertTrue(self.conn.in_transaction)
+        finally:
+            self.conn.rollback()
+            self.conn.execute("PRAGMA query_only=OFF")
+        self.assertEqual(calls, [True, True, True, True])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM refusals").fetchone(), (0,))
+
+    def test_replay_in_snapshot_needs_transaction(self):
+        self.assertTrue(hasattr(submit, "replay_in_snapshot"), "snapshot replay helper is missing")
+        check, calls = self.recorder()
+        self.assertFalse(self.conn.in_transaction)
+        with self.assertRaises(RuntimeError):
+            submit.replay_in_snapshot(self.conn, self.checked(check), draft())
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(calls, [])
+
     def test_sender_check_once_per_path(self):
         self.checked(None)  # the field exists, or this test errors here
         folder = tempfile.TemporaryDirectory()
