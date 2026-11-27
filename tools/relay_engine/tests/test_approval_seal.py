@@ -524,7 +524,10 @@ class ApprovalSealTests(unittest.TestCase):
         actual_open = os.open
 
         def opened(path, *args, **kwargs):
-            if isinstance(path, str) and path.startswith('.creating-'):
+            directory = kwargs.get('dir_fd')
+            key_root = self.root / 'keys'
+            if (isinstance(path, str) and path.startswith('.creating-') and directory is not None
+                    and key_root.is_dir() and os.path.samestat(os.fstat(directory), key_root.stat())):
                 raise source
             return actual_open(path, *args, **kwargs)
 
