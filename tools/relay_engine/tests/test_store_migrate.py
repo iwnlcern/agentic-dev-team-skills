@@ -1,4 +1,5 @@
 """Manifest, quiet and copy boundaries on synthetic 2.9.7 roots."""
+from collections.abc import Sequence
 from contextlib import closing, contextmanager, ExitStack
 import hashlib
 import importlib
@@ -13,7 +14,7 @@ from unittest import mock
 from urllib.parse import unquote, urlsplit
 import uuid
 
-from relay_engine import store_layout, store_steps
+from relay_engine import jcs, store_import, store_layout, store_steps
 
 
 NOW_MS = 1_790_000_000_000
@@ -1032,9 +1033,67 @@ class StoreMigrationCopyTests(unittest.TestCase):
                 'ORDER BY 1, 2, 3, 4').fetchall()
         return instances, relays, provenance, parties
 
+    def _semantic_digest(self, ledger: Path, planned: Sequence[store_import.PlannedRelay], *,
+                         check_meta: bool = True) -> dict[str, list]:
+        excluded = {('relays', 'id'), ('edges', 'id')}
+
+        def quoted(identifier):
+            return '"' + identifier.replace('"', '""') + '"'
+
+        with closing(sqlite3.connect(ledger.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            tables = [row['name'] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                if not row['name'].startswith('sqlite_')]
+            relay_rows = db.execute('SELECT id, project_id, handle FROM relays').fetchall()
+            self.assertEqual(sorted(row['handle'] for row in relay_rows),
+                             list(range(1, len(planned) + 1)))
+            relay_identities = {row['id']: (row['project_id'], row['handle']) for row in relay_rows}
+            relay_ids = {identity: relay_id for relay_id, identity in relay_identities.items()}
+            result = {}
+            for table in tables:
+                # The one-column relay references in this schema all point to relays.id.
+                relay_references = set()
+                for key in db.execute(f'PRAGMA foreign_key_list({quoted(table)})'):
+                    if key['table'] == 'relays':
+                        self.assertEqual(key['to'], 'id')
+                        relay_references.add(key['from'])
+                rows = []
+                for row in db.execute(f'SELECT * FROM {quoted(table)}'):
+                    columns = []
+                    for column in sorted(row.keys()):
+                        if (table, column) in excluded:
+                            continue
+                        value = row[column]
+                        if column in relay_references and value is not None:
+                            self.assertIn(value, relay_identities, f'{table}.{column}')
+                            value = relay_identities[value]
+                        elif (table, column) == ('relays', 'meta_sha256'):
+                            project, handle = row['project_id'], row['handle']
+                            relay = planned[handle - 1]
+                            form = {
+                                'import': '2.9.7',
+                                'header_sha256': relay.header_sha256,
+                                'parent': None if relay.parent is None else
+                                relay_ids[project, relay.parent + 1],
+                            }
+                            if relay.answers:
+                                form['answers'] = [relay_ids[project, pos + 1] for pos in relay.answers]
+                            expected = hashlib.sha256(jcs.jcs_encode(form)).hexdigest()
+                            if check_meta:
+                                self.assertEqual(value, expected,
+                                                 f'relays.meta_sha256 for {project}/{handle}')
+                            value = ('meta', value == expected)
+                        columns.append((column, value))
+                    rows.append(tuple(columns))
+                result[table] = sorted(rows, key=repr)
+            return result
+
     def test_decide_records_and_rebuilds(self):
         migrate, root, turns, legacy, job_id = self._check_fixture('decide-rebuild')
         job = self.job_path(root, job_id)
+        ledger = job / 'staging' / 'ledger.sqlite3'
+        planned = store_import.plan_relays(migrate.read_copied_sources(root, turns, job_id)).relays
         migrate.import_staging(root, turns, job_id)
         marked = self.checkpoint(root, job_id)[1]['marked_at_ms']
         real_build = migrate._write_import_batches
@@ -1051,8 +1110,10 @@ class StoreMigrationCopyTests(unittest.TestCase):
         with mock.patch.object(migrate, '_write_import_batches', side_effect=observe):
             self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'finished'}).unresolved())
             finished = self._check_projection(job)
+            finished_semantic = self._semantic_digest(ledger, planned)
             self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'finished'}).unresolved())
             self.assertEqual(self._check_projection(job), finished)
+            self.assertEqual(self._semantic_digest(ledger, planned), finished_semantic)
             self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'running'}).unresolved())
             running = self._check_projection(job)
         self.assertEqual(attempts, [{'fixture': 'finished'}, {'fixture': 'finished'}, {'fixture': 'running'}])
@@ -1072,6 +1133,26 @@ class StoreMigrationCopyTests(unittest.TestCase):
         with self.assertRaisesRegex(migrate.NotQuiet, 'relays/second[.]md'):
             migrate.decide(root, turns, job_id, {'fixture': 'running'})
         self.assertEqual(source_snapshot(job), before)
+
+    def test_decide_refuses_link_drift(self):
+        for relative in ('relays/second.md', 'relays'):
+            with self.subTest(relative=relative):
+                label = 'decide-link-' + relative.replace('/', '-')
+                migrate, root, turns, legacy, job_id = self._check_fixture(label)
+                job = self.job_path(root, job_id)
+                migrate.import_staging(root, turns, job_id)
+                self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'finished'}).unresolved())
+                before = source_snapshot(job)
+                changed = legacy / relative
+                retained = legacy.parent / 'retained'
+                changed.rename(retained)
+                changed.symlink_to(retained, target_is_directory=retained.is_dir())
+
+                with self.assertRaises(migrate.NotQuiet) as refused:
+                    migrate.decide(root, turns, job_id, {'fixture': 'running'})
+                self.assertEqual(str(refused.exception), f'legacy source link: {changed}')
+                self.assertIsInstance(refused.exception.__cause__, migrate.LegacySourceLink)
+                self.assertEqual(source_snapshot(job), before)
 
     def test_validation_needs_resolved_items(self):
         migrate, root, turns, _, job_id = self._check_fixture('decide-validate')
@@ -1148,12 +1229,23 @@ class StoreMigrationCopyTests(unittest.TestCase):
     def test_phase_crash_semantic_digest(self):
         migrate, root, turns, _, job_id = self._check_fixture('phase-restart')
         job = self.job_path(root, job_id)
+        ledger = job / 'staging' / 'ledger.sqlite3'
+        planned = store_import.plan_relays(migrate.read_copied_sources(root, turns, job_id)).relays
+        self.maxDiff = None
         migrate.import_staging(root, turns, job_id)
-        decisions = {'fixture': 'finished'}
-        migrate.decide(root, turns, job_id, decisions)
-        expected = self._check_projection(job)
+        decisions = {'fixture': 'running'}
+        self.assertFalse(migrate.decide(root, turns, job_id, decisions).unresolved())
+        expected = self._semantic_digest(ledger, planned)
+        marker = self.checkpoint(root, job_id)[1]['marked_at_ms']
         real_checkpoint = store_steps.Journal.checkpoint
 
+        def generated_ids():
+            with closing(sqlite3.connect(ledger.as_uri() + '?mode=ro&immutable=1', uri=True)) as db:
+                return tuple({row[0] for row in db.execute(f'SELECT id FROM {table}')}
+                             for table in ('relays', 'edges'))
+
+        expected_ids = generated_ids()
+        rebuilt_with_new_ids = False
         for boundary in ('copy', 'import', 'check'):
             with self.subTest(boundary=boundary):
                 hit = []
@@ -1168,9 +1260,74 @@ class StoreMigrationCopyTests(unittest.TestCase):
                     with self.assertRaisesRegex(InterruptedCopy, boundary):
                         migrate.decide(root, turns, job_id, decisions)
                 self.assertEqual(hit, [boundary])
-                resumed = migrate.decide(root, turns, job_id, decisions)
-                self.assertFalse(resumed.unresolved())
-                self.assertEqual(self._check_projection(job), expected)
+                durable_phase, durable = self.checkpoint(root, job_id)
+                self.assertEqual(durable_phase, boundary)
+                with mock.patch.object(migrate, '_write_import_batches',
+                                       wraps=migrate._write_import_batches) as writer:
+                    if boundary in ('import', 'check'):
+                        self.assertFalse(migrate.import_staging(root, turns, job_id).unresolved())
+                        writer.assert_not_called()
+                        self.assertEqual(hashlib.sha256(ledger.read_bytes()).hexdigest(),
+                                         durable['prepared']['sha256'])
+                        self.assertEqual(self._semantic_digest(ledger, planned), expected)
+                        self.assertEqual(self.checkpoint(root, job_id), (boundary, durable))
+                    if boundary != 'check':
+                        self.assertFalse(migrate.decide(root, turns, job_id, decisions).unresolved())
+                        writer.assert_called_once()
+                        self.assertEqual(writer.call_args.args[1], durable['import_attempt'])
+                self.assertEqual(self._semantic_digest(ledger, planned), expected)
+                phase, resumed = self.checkpoint(root, job_id)
+                self.assertEqual(phase, 'check')
+                self.assertEqual(resumed['marked_at_ms'], marker)
+                if boundary != 'check':
+                    rebuilt_with_new_ids |= all(after != before for after, before in
+                                               zip(generated_ids(), expected_ids, strict=True))
+        self.assertTrue(rebuilt_with_new_ids)
+
+        zero_hash = '0' * 64
+        controls = (
+            ('created_at', 'UPDATE relays SET created_at = (SELECT max(created_at) FROM relays) + 1 '
+                           'WHERE handle = (SELECT max(handle) FROM relays)', ()),
+            ('source_sha256', 'UPDATE imported_relays SET source_sha256 = ? WHERE rowid = '
+                              '(SELECT min(rowid) FROM imported_relays)', (zero_hash,)),
+            ('edge_spelling', "UPDATE edges SET spelling = spelling || 'x'", ()),
+            ('top_seat', 'UPDATE projects SET top_seat_id = ? WHERE id = ?', ()),
+            ('delivered_at', 'UPDATE recipients SET delivered_at = delivered_at + 1 WHERE rowid = '
+                             "(SELECT min(rowid) FROM recipients WHERE role = 'to')", ()),
+            ('meta_without_ids', 'UPDATE relays SET meta_sha256 = ? WHERE handle = 1', (zero_hash,)),
+            ('meta_with_parent', 'UPDATE relays SET meta_sha256 = ? WHERE handle = 2', (zero_hash,)),
+        )
+        for name, statement, params in controls:
+            with self.subTest(control=name), tempfile.TemporaryDirectory(dir=self.scratch) as directory:
+                control_job = Path(directory)
+                control_ledger = control_job / 'staging' / 'ledger.sqlite3'
+                control_ledger.parent.mkdir()
+                with (closing(sqlite3.connect(ledger.as_uri() + '?mode=ro&immutable=1', uri=True)) as original,
+                      closing(sqlite3.connect(control_ledger)) as changed):
+                    original.backup(changed)
+                    changed.execute('PRAGMA foreign_keys = ON').close()
+                    if name == 'edge_spelling':
+                        self.assertEqual(changed.execute('SELECT count(*) FROM edges').fetchone(), (1,))
+                    if name == 'top_seat':
+                        project, top = changed.execute('SELECT id, top_seat_id FROM projects').fetchone()
+                        seats = dict(changed.execute(
+                            'SELECT s.role, s.id FROM seats s JOIN team_instances t '
+                            'ON t.id = s.team_instance_id WHERE t.project_id = ?', (project,)))
+                        self.assertEqual(top, seats['planner'])
+                        self.assertNotEqual(top, seats['implementer'])
+                        params = seats['implementer'], project
+                    with changed:
+                        changed.execute(statement, params).close()
+                        self.assertEqual(changed.execute('SELECT changes()').fetchone(), (1,))
+                        if name == 'top_seat':
+                            self.assertEqual(changed.execute(
+                                'SELECT s.role FROM projects p JOIN seats s ON s.id = p.top_seat_id '
+                                'JOIN team_instances t ON t.id = s.team_instance_id '
+                                'WHERE p.id = ? AND t.project_id = p.id', (project,)).fetchone(),
+                                ('implementer',))
+                actual = self._semantic_digest(control_ledger, planned,
+                                               check_meta=not name.startswith('meta_'))
+                self.assertNotEqual(actual, expected)
 
     def test_store_id_binding(self):
         migrate, root, turns, _, job_id = self._check_fixture('phases-store-id')

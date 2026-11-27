@@ -826,7 +826,11 @@ def decide(root, turns: store_steps.TurnRunner, job_id: str,
         sources = _read_committed_sources(job, phase, data, job_id, prepared_ok=True)
         for item, expected in zip(data['roots'], data['fingerprints'], strict=True):
             path = Path(item['path'])
-            _match_fingerprint(path, expected, _fingerprint(path, {}))
+            try:
+                actual = _fingerprint(path, {})
+            except LegacySourceLink as error:
+                raise NotQuiet(str(error)) from error
+            _match_fingerprint(path, expected, actual)
 
         choices = json.loads(_canonical_bytes(dict(decisions)))
         data = {**data, 'decisions': choices,
