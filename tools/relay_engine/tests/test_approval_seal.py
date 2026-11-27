@@ -14,7 +14,7 @@ import struct
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 import uuid
@@ -428,6 +428,35 @@ class ApprovalSealTests(unittest.TestCase):
             with self.assertRaises(self.t.SealUnusable) as caught:
                 self.service._abandoned(P, C, self.s.ItemKind.COUNTER, self.ledger)
         self.assert_errno_refusal(caught.exception, 'counter_unusable', C)
+
+    def test_comprehension_fault_names_read_slots(self):
+        self.set_chain()
+        with mock.patch.object(os, 'pread', side_effect=OSError(errno.ENOSPC, 'forced')):
+            with self.assertRaises(self.t.SealUnusable) as caught:
+                self.service._abandoned(P, C, self.s.ItemKind.COUNTER, self.ledger)
+        self.assertEqual(getattr(caught.exception, 'operation', None), 'seal_slots.read_slots')
+
+    def test_generator_and_lambda_frames_name_their_function(self):
+        def fault():
+            raise OSError(errno.ENOSPC, 'probe')
+
+        probe = ModuleType('relay_engine._seal_frame_probe')
+        probe.fault = fault
+        exec("""
+def probe_genexpr():
+    next(fault() for _ in (0,))
+
+def probe_lambda():
+    (lambda: fault())()
+""", probe.__dict__)
+        for name in ('probe_genexpr', 'probe_lambda'):
+            with self.subTest(frame=name):
+                try:
+                    getattr(probe, name)()
+                except OSError as error:
+                    self.assertEqual(self.a._raising_operation(error), f'_seal_frame_probe.{name}')
+                else:
+                    self.fail('probe did not raise OSError')
 
     def test_new_pointer_names_errno(self):
         with self.service._locked(P, exclusive=True, create=True):

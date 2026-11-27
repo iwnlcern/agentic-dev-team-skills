@@ -88,8 +88,10 @@ def _raising_operation(source) -> str | None:
     frame = source.__traceback__
     while frame is not None:
         module = frame.tb_frame.f_globals.get('__name__', '')
-        if module.startswith('relay_engine.') and not module.startswith('relay_engine.tests.'):
-            operation = f"{module.removeprefix('relay_engine.')}.{frame.tb_frame.f_code.co_name}"
+        name = frame.tb_frame.f_code.co_name
+        if (module.startswith('relay_engine.') and not module.startswith('relay_engine.tests.')
+                and name.isidentifier()):
+            operation = f"{module.removeprefix('relay_engine.')}.{name}"
         frame = frame.tb_next
     return operation
 
