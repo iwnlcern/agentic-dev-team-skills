@@ -773,7 +773,8 @@ assert results == [loser] and epoch.attempt is loser
                                 capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
-    def check_watchdog_child(self, script, *, case=None, expected=0, hard_stop=False):
+    def check_watchdog_child(self, script, *, case=None, expected=0, hard_stop=False, timeout=12,
+                             expected_stdout=None):
         tools = Path(__file__).resolve().parents[2]
         env = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
         prelude = """
@@ -794,8 +795,10 @@ def fd_open(fd):
 """
         args = [] if case is None else [case]
         result = subprocess.run([sys.executable, '-c', prelude + script, *args],
-                                capture_output=True, env=env, timeout=12)
+                                capture_output=True, env=env, timeout=timeout)
         self.assertEqual(result.returncode, expected, result.stderr.decode())
+        if expected_stdout is not None:
+            self.assertEqual(result.stdout.decode(), expected_stdout)
         if hard_stop:
             sent = float(result.stdout.decode().strip())
             self.assertGreaterEqual(time.monotonic() - sent, 3.8)
@@ -883,6 +886,13 @@ else:
     def test_process_owner_reader(self):
         script = """
 import sys
+class RecordingFileIO(m.io.FileIO):
+    writes_after_close = 0
+    def write(self, data):
+        if self.closed:
+            self.writes_after_close += 1
+        return super().write(data)
+m.io.FileIO = RecordingFileIO
 case = sys.argv[1]
 svc = service()
 parked, release, read_again, reader_entered = (threading.Event() for _ in range(4))
@@ -920,7 +930,7 @@ if case == 'foreign':
     foreign_read, foreign_write = os.pipe()
     os.set_blocking(foreign_write, False)
     signal.set_wakeup_fd(foreign_write)
-svc.arm_foreground(process_owner=True)
+svc.arm_foreground(process_owner=case != 'late_non_owner')
 epoch = svc._foreground
 sigfd = wakeup_fd()
 if case == 'foreign':
@@ -930,7 +940,8 @@ if case == 'foreign':
     signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)
     print(sent, flush=True)
     threading.Event().wait()
-assert epoch.signal_ingress == 'wakeup' and reader_entered.wait(1)
+if case != 'late_non_owner':
+    assert epoch.signal_ingress == 'wakeup' and reader_entered.wait(1)
 if case == 'classify':
     os.write(sigfd, bytes([signal.SIGUSR1]))
     assert read_again.wait(1) and epoch.attempt is None
@@ -946,7 +957,7 @@ if case == 'classify':
 elif case in ('fds_open_after_finish', 'finished_no_op'):
     assert parked.wait(1)
     assert epoch._wake_pipe.fileno() == epoch._write_fd
-    fds = [epoch.read_fd, epoch._write_fd, reading[0], sigfd]
+    fds = [reading[0], sigfd]
     inodes = [os.fstat(fd).st_ino for fd in fds]
     calls = []
     publish = epoch.publish_stop
@@ -960,22 +971,40 @@ elif case in ('fds_open_after_finish', 'finished_no_op'):
     assert [os.fstat(fd).st_ino for fd in fds] == inodes
     release.set()
     assert read_again.wait(1) and not calls
-elif case == 'in_flight_after_check':
+elif case in ('in_flight_after_check', 'late_non_owner'):
+    owner = case == 'in_flight_after_check'
+    ingress_fds = [reading[0], sigfd] if owner else []
+    inodes = [os.fstat(fd).st_ino for fd in ingress_fds]
     publish = epoch.publish_stop
     errors = []
     threading.excepthook = errors.append
     def blocked_publish(now):
-        if threading.current_thread().name == 'adt-signal-reader':
+        if threading.current_thread() is not threading.main_thread():
             parked.set()
             assert release.wait(3)
         return publish(now)
     epoch.publish_stop = blocked_publish
-    os.write(sigfd, bytes([signal.SIGTERM]))
-    assert parked.wait(1)
-    svc.stop()
-    release.set()
-    assert read_again.wait(1) and not errors
-    assert any(t.name == 'adt-signal-reader' and t.is_alive() for t in threading.enumerate())
+    if owner:
+        os.write(sigfd, bytes([signal.SIGTERM]))
+    else:
+        worker = threading.Thread(target=epoch._observed_signal, args=(time.monotonic(),))
+        worker.start()
+    try:
+        assert parked.wait(1)
+        assert svc.stop() == 0
+    finally:
+        release.set()
+    if owner:
+        assert read_again.wait(1) and not errors, errors
+        assert any(t.name == 'adt-signal-reader' and t.is_alive() for t in threading.enumerate())
+    else:
+        worker.join(2)
+        assert not worker.is_alive()
+    if errors:
+        raise errors[0].exc_value
+    assert epoch._wake_pipe.writes_after_close == 0, 'late wake wrote after close'
+    assert epoch._wake_pipe.closed and 'pipe' not in epoch._acquired, 'finished wake pair not closed'
+    assert inodes == [os.fstat(fd).st_ino for fd in ingress_fds]
 else:
     if case == 'fork_foreign':
         foreign_read, foreign_write = os.pipe()
@@ -1035,12 +1064,123 @@ else:
     if not epoch.finished:
         svc.stop()
 """
-        for case in ('classify', 'foreign', 'fds_open_after_finish', 'finished_no_op', 'in_flight_after_check',
+        for case in ('classify', 'foreign', 'fds_open_after_finish', 'finished_no_op', 'in_flight_after_check', 'late_non_owner',
                      'fork_signal', 'fork_probe', 'fork_foreign', 'fork_after_clean_finish', 'fork_lock',
                      'fork_hook_failure'):
             with self.subTest(case=case):
                 foreign = case == 'foreign'
                 self.check_watchdog_child(script, case=case, expected=75 if foreign else 0, hard_stop=foreign)
+
+    def test_epoch_wake_lifetime(self):
+        script = """
+import sys
+case = sys.argv[1]
+trace = []
+errors = []
+threading.excepthook = errors.append
+close = os.close
+join = threading.Thread.join
+class RecordingFileIO(m.io.FileIO):
+    def close(self):
+        if not self.closed:
+            trace.append(('wrapper_close', self.fileno()))
+            if case == 'reentrant_close':
+                epoch._wake()
+        super().close()
+    def write(self, data):
+        trace.append(('write', self.closed))
+        return super().write(data)
+m.io.FileIO = RecordingFileIO
+def record_close(fd):
+    trace.append(('raw_close', fd))
+    close(fd)
+def record_join(thread, *args, **kwargs):
+    join(thread, *args, **kwargs)
+    trace.append(('join', thread.name, thread.is_alive()))
+os.close = record_close
+threading.Thread.join = record_join
+if case == 'finish_reader_bound':
+    first = service()
+    first.arm_foreground(process_owner=True)
+    assert first._foreground.signal_ingress == 'wakeup'
+    first.stop()
+svc = service()
+svc.arm_foreground(process_owner=case in ('finish_owner', 'finish_reader_bound', 'fork_wake_lock'))
+epoch = svc._foreground
+if case == 'finish_reader_bound':
+    assert epoch.signal_ingress_reason == 'reader_bound'
+if case in ('finish_owner', 'fork_wake_lock'):
+    assert epoch.signal_ingress == 'wakeup'
+if case == 'fork_wake_lock':
+    # The placeholder lets the held product reach the real inherited handler
+    # and fail on the unwanted write even before there is a production lock.
+    lock = getattr(epoch, '_pipe_lock', threading.RLock())
+    parked = threading.Event()
+    release = threading.Event()
+    def hold_lock():
+        with lock:
+            parked.set()
+            assert release.wait(7)
+    helper = threading.Thread(target=hold_lock, daemon=True)
+    helper.start()
+    read_counter, write_counter = os.pipe()
+    child = None
+    reaped = False
+    try:
+        assert parked.wait(1)
+        child = os.fork()
+        if child == 0:
+            before = len(trace)
+            os.kill(os.getpid(), signal.SIGTERM)
+            writes = sum(row[0] == 'write' for row in trace[before:])
+            os.write(write_counter, str(writes).encode())
+            os._exit(0)
+        close(write_counter)
+        limit = time.monotonic() + 5
+        while time.monotonic() < limit:
+            pid, status = os.waitpid(child, os.WNOHANG)
+            if pid == child:
+                reaped = True
+                break
+            time.sleep(0.01)
+        assert reaped, 'fork child blocked on inherited wake lock'
+        assert os.waitstatus_to_exitcode(status) == 0, status
+        counter = os.read(read_counter, 8)
+        assert counter == b'0', ('fork child wrote wake byte', counter)
+        assert epoch._acquired['pipe'] == (epoch._wake_pipe, epoch.read_fd)
+        assert not epoch._wake_pipe.closed
+    finally:
+        if child and not reaped:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+        release.set()
+        helper.join(2)
+        close(read_counter)
+    assert not errors
+    assert svc.stop() == 0
+else:
+    trace.clear()
+    assert svc.stop() == 0
+    assert epoch._wake_pipe.closed and 'pipe' not in epoch._acquired, 'finished wake pair not closed'
+    assert trace.count(('wrapper_close', epoch._write_fd)) == 1, trace
+    assert trace.count(('raw_close', epoch.read_fd)) == 1, trace
+    assert ('raw_close', epoch._write_fd) not in trace and ('wrapper_close', epoch.read_fd) not in trace
+    joined = trace.index(('join', 'adt-stop-observer', False))
+    closed = trace.index(('wrapper_close', epoch._write_fd))
+    assert joined < closed < trace.index(('raw_close', epoch.read_fd)), trace
+    assert all(row[0] != 'write' for row in trace[closed + 1:]), ('wake after close started', trace)
+    assert not errors
+    if case == 'reentrant_close':
+        print('reentrant close finished')
+"""
+        for case in ('finish_owner', 'finish_reader_bound', 'finish_non_owner', 'reentrant_close',
+                     'fork_wake_lock'):
+            with self.subTest(case=case):
+                isolated = case in ('reentrant_close', 'fork_wake_lock')
+                self.check_watchdog_child(
+                    script, case=case, timeout=10 if isolated else 12,
+                    expected_stdout='reentrant close finished\n' if case == 'reentrant_close' else None,
+                )
 
     def test_foreground_arm_unwind(self):
         script = """
