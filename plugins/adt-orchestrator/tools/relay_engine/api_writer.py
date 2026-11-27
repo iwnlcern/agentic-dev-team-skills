@@ -135,6 +135,50 @@ class TurnConnection:
     def __init__(self, conn):
         self._conn = conn
         self._cursors = set()
+        self._writer_authorizer = None
+        self._guards = []
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._check().in_transaction
+
+    @contextmanager
+    def guard(self, authorizer, progress=None):
+        conn = self._check()
+        layer = (authorizer, progress)
+        self._guards.append(layer)
+        try:
+            self._install_guard(conn)
+            yield
+        finally:
+            # Turn cleanup may have invalidated an unclosed guard.
+            if self._guards and self._guards[-1] is layer:
+                self._guards.pop()
+                self._install_guard(conn)
+
+    def _set_writer_authorizer(self, authorizer):
+        self._writer_authorizer = authorizer
+        self._check().set_authorizer(authorizer)
+
+    def _install_guard(self, conn):
+        writer_authorizer = self._writer_authorizer
+        authorizer, progress = self._guards[-1] if self._guards else (None, None)
+        if authorizer is None:
+            conn.set_authorizer(writer_authorizer)
+        else:
+            def combined(*args):
+                decision = writer_authorizer(*args)
+                if decision == sqlite3.SQLITE_DENY:
+                    return decision
+                # An Engine-layer refusal is local to the statement.
+                return authorizer(*args)
+            conn.set_authorizer(combined)
+        conn.set_progress_handler(progress, 0 if progress is None else 1)
+
+    def _clear_guards(self):
+        if self._guards:
+            self._guards.clear()
+            self._install_guard(self._check())
 
     def execute(self, sql, parameters=()) -> TurnCursor:
         return self._wrap(self._check().execute(sql, parameters))
@@ -153,9 +197,13 @@ class TurnConnection:
         return self._conn
 
     def _invalidate(self):
-        self._conn = None
-        for cursor in tuple(self._cursors):
-            cursor.close()
+        try:
+            self._clear_guards()
+        finally:
+            self._conn = None
+            self._writer_authorizer = None
+            for cursor in tuple(self._cursors):
+                cursor.close()
 
 
 class TransferTurn:
@@ -1397,7 +1445,7 @@ class StoreWriter:
                 conn.execute('PRAGMA query_only=OFF').close()
                 turn._writes_open = True
             finally:
-                conn.set_authorizer(self._transfer_authorizer(turn, label))
+                turn.sender._install_guard(conn)
 
     def _cleanup_transfer_connections(self, conns, proxy_error=None, *, reset=True):
         failures = {} if proxy_error is None else dict(proxy_error)
@@ -1457,8 +1505,8 @@ class StoreWriter:
             conns['catalogue'].execute('PRAGMA query_only=ON').close()
             conns[sender].execute('BEGIN IMMEDIATE').close()
             conns[sender].execute('PRAGMA query_only=ON').close()
-            for label, conn in conns.items():
-                conn.set_authorizer(self._transfer_authorizer(turn, label))
+            turn.catalogue._set_writer_authorizer(self._transfer_authorizer(turn, 'catalogue'))
+            turn.sender._set_writer_authorizer(self._transfer_authorizer(turn, sender))
         except BaseException as error:
             self._finish_transfer(turn, error)
             for label, binding in bindings.items():
@@ -1476,6 +1524,8 @@ class StoreWriter:
             with self._changed:
                 self._require_transfer_running()
             outcome = request.job.run(turn)
+            turn.catalogue._clear_guards()
+            turn.sender._clear_guards()
             if not isinstance(outcome, JobOutcome):
                 raise TypeError('transfer job must return JobOutcome')
             self._phase('finishing')
@@ -1584,8 +1634,8 @@ class StoreWriter:
 
             conn.execute('PRAGMA query_only=ON').close()
             conn.execute('BEGIN').close()
-            conn.set_authorizer(self._transfer_authorizer(turn, project))
             proxy = TurnConnection(conn)
+            proxy._set_writer_authorizer(self._transfer_authorizer(turn, project))
             try:
                 result = fn(proxy)
             except sqlite3.Error:
