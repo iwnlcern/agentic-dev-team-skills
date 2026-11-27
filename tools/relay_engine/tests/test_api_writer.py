@@ -2930,6 +2930,216 @@ class TransferModeTests(ProjectWriterFixture):
                 check(phase, 'sender', sql)
             check(phase, 'catalogue', 'COMMIT')
 
+    def guard_writer(self):
+        writer = self.writer()
+
+        def seed(conn):
+            conn.execute('CREATE TABLE guard_witness (value TEXT NOT NULL)').close()
+            return api_writer.JobOutcome(True, None)
+
+        self.assertTrue(writer.submit(P, self.job(seed)).commit)
+        return writer
+
+    def guard_rows(self):
+        path = store_layout.ledger_path(self.root, P)
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as conn:
+            with closing(conn.execute('SELECT value FROM guard_witness ORDER BY rowid')) as cursor:
+                return cursor.fetchall()
+
+    @staticmethod
+    def guard_insert(conn, value):
+        conn.execute('INSERT INTO guard_witness VALUES (?)', (value,)).close()
+
+    @staticmethod
+    def deny_guard_insert(action, table, *_):
+        if action == sqlite3.SQLITE_INSERT and table == 'guard_witness':
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    @staticmethod
+    def guard_status(fn):
+        try:
+            fn()
+        except sqlite3.Error as error:
+            return error.sqlite_errorname
+        return 'ok'
+
+    def test_turn_guard_cannot_lift_the_writer_policy(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            with turn.sender.guard(lambda *_: sqlite3.SQLITE_OK):
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'blocked')))
+                seen.append(self.guard_status(lambda: turn.sender.execute('COMMIT').close()))
+            return api_writer.JobOutcome(False, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH', 'SQLITE_AUTH'])
+        self.assertEqual(outcome.fault, 'turn_violation')
+        self.assertEqual(self.guard_rows(), [])
+
+    def test_turn_guard_restores_writer_policy_after_a_raise(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def deny_read(action, *_):
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ else sqlite3.SQLITE_OK
+
+        def run(turn):
+            def select():
+                turn.sender.execute('SELECT value FROM guard_witness').close()
+
+            def guarded_select():
+                with turn.sender.guard(deny_read):
+                    select()
+
+            seen.append(self.guard_status(guarded_select))
+            seen.append(self.guard_status(select))
+            seen.append(self.guard_status(lambda: turn.sender.execute('COMMIT').close()))
+            return api_writer.JobOutcome(False, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH', 'ok', 'SQLITE_AUTH'])
+        self.assertEqual(outcome.fault, 'turn_violation')
+
+    def test_open_sender_writes_inside_a_guard_keeps_the_guard(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            with turn.sender.guard(self.deny_guard_insert):
+                turn.open_sender_writes()
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'blocked')))
+                self.change(turn.sender, 'updated')
+            self.guard_insert(turn.sender, 'allowed')
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH'])
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.value(), 'updated')
+        self.assertEqual(self.guard_rows(), [('allowed',)])
+
+    def test_inner_guard_replaces_the_outer_layer(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            turn.open_sender_writes()
+            with turn.sender.guard(self.deny_guard_insert):
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'outer before')))
+                with turn.sender.guard(None):
+                    seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'inner')))
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'outer after')))
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH', 'ok', 'SQLITE_AUTH'])
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.guard_rows(), [('inner',)])
+
+    def test_engine_layer_deny_does_not_mark_the_turn(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            turn.open_sender_writes()
+            turn.sender.execute('SAVEPOINT s').close()
+            self.guard_insert(turn.sender, 'partial')
+            with turn.sender.guard(self.deny_guard_insert):
+                seen.append(self.guard_status(lambda: self.guard_insert(turn.sender, 'denied')))
+                turn.sender.execute('ROLLBACK TO s').close()
+                turn.sender.execute('RELEASE s').close()
+            self.guard_insert(turn.sender, 'recorded refusal')
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['SQLITE_AUTH'])
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.guard_rows(), [('recorded refusal',)])
+
+    def test_turn_guard_progress_aborts_and_clears(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            def select():
+                with closing(turn.sender.execute('SELECT 1')) as cursor:
+                    return cursor.fetchone()
+            with turn.sender.guard(None, progress=lambda: 1):
+                try:
+                    select()
+                except sqlite3.OperationalError as error:
+                    seen.append((error.sqlite_errorname, str(error)))
+                else:
+                    seen.append('not interrupted')
+            seen.append(select())
+            return api_writer.JobOutcome(False, None)
+
+        self.transfer(writer, run)
+        self.assertEqual(seen, [('SQLITE_INTERRUPT', 'interrupted'), (1,)])
+
+    def test_transfer_turn_admits_named_savepoints(self):
+        writer = self.guard_writer()
+        seen = []
+
+        def run(turn):
+            turn.open_sender_writes()
+            statements = (
+                lambda: turn.sender.execute('SAVEPOINT s').close(),
+                lambda: self.guard_insert(turn.sender, 'rolled back'),
+                lambda: turn.sender.execute('ROLLBACK TO s').close(),
+                lambda: turn.sender.execute('RELEASE s').close(),
+                lambda: self.guard_insert(turn.sender, 'committed'),
+            )
+            for statement in statements:
+                seen.append(self.guard_status(statement))
+                if seen[-1] != 'ok':
+                    break
+            return api_writer.JobOutcome(True, None)
+
+        outcome = self.transfer(writer, run)
+        self.assertEqual(seen, ['ok'] * 5)
+        self.assertEqual(outcome, api_writer.JobOutcome(True, None))
+        self.assertEqual(self.guard_rows(), [('committed',)])
+
+    def test_transfer_turn_refuses_plain_transaction_control_inside_a_savepoint(self):
+        writer = self.guard_writer()
+        for sql in ('END', 'ROLLBACK', 'COMMIT'):
+            with self.subTest(sql=sql):
+                seen = []
+
+                def run(turn, sql=sql):
+                    turn.open_sender_writes()
+                    turn.sender.execute('SAVEPOINT s').close()
+                    self.guard_insert(turn.sender, sql)
+                    seen.append(self.guard_status(lambda: turn.sender.execute(sql).close()))
+                    return api_writer.JobOutcome(True, None)
+
+                before = self.guard_rows()
+                outcome = self.transfer(writer, run)
+                self.assertEqual(seen, ['SQLITE_AUTH'])
+                self.assertEqual(outcome, api_writer.JobOutcome(False, None, False, 'turn_violation'))
+                self.assertEqual(self.guard_rows(), before)
+
+    def test_turn_connection_in_transaction_and_closed_guard(self):
+        writer = self.guard_writer()
+        retained = []
+
+        def run(turn):
+            retained.append((turn.sender, turn.sender.in_transaction))
+            return api_writer.JobOutcome(False, None)
+
+        self.transfer(writer, run)
+        sender, active = retained[0]
+        self.assertIs(active, True)
+        with self.assertRaises(api_writer.TurnClosed):
+            _ = sender.in_transaction
+        with self.assertRaises(api_writer.TurnClosed):
+            with sender.guard(None):
+                self.fail('closed guard entered')
+
     def test_cached_sender_statement_is_refused(self):
         writer = self.writer()
         sql = "INSERT INTO projects (id, name, created_at) VALUES ('cached', 'extra', 1)"
@@ -2952,7 +3162,7 @@ class TransferModeTests(ProjectWriterFixture):
         writer = self.writer_pair()
         retained = []
         def inspect(proxy):
-            for name in ('commit', 'rollback', 'close', 'cursor', 'set_authorizer', 'interrupt', 'in_transaction'):
+            for name in ('commit', 'rollback', 'close', 'cursor', 'set_authorizer', 'interrupt'):
                 self.assertFalse(hasattr(proxy, name), name)
             with closing(proxy.execute('SELECT 1')) as cursor:
                 self.assertFalse(hasattr(cursor, 'connection'))
