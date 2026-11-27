@@ -2,6 +2,7 @@
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, closing
 from dataclasses import asdict, dataclass
+import io
 import json
 import os
 from pathlib import Path
@@ -89,9 +90,11 @@ class _ForegroundRegistry:
 
 
 _foreground_registry = _ForegroundRegistry()
+_fork_isolation_failed = False
 
 
 def _close_signal_pipe(read_fd, write_fd, *, forked=False):
+    global _fork_isolation_failed
     try:
         current = signal.set_wakeup_fd(-1)
         if current != write_fd:
@@ -100,7 +103,8 @@ def _close_signal_pipe(read_fd, write_fd, *, forked=False):
                 return True
     except (OSError, ValueError):
         if forked:
-            print('foreground wakeup fd isolation failed', file=sys.stderr)
+            # The child may inherit a held stderr lock. Do not write before exec.
+            _fork_isolation_failed = True
         return False
     os.close(write_fd)
     os.close(read_fd)
@@ -198,6 +202,8 @@ class _ForegroundEpoch:
             self.read_fd, self._write_fd = os.pipe()
             self._acquired['pipe'] = (self._write_fd, self.read_fd)
             os.set_blocking(self._write_fd, False)
+            self._wake_pipe = io.FileIO(self._write_fd, 'wb')
+            self._acquired['pipe'] = (self._wake_pipe, self.read_fd)
             self._observer = threading.Thread(target=self._observe, name='adt-stop-observer', daemon=True)
             self._start_worker('observer', self._observer)
             self._fencer = threading.Thread(target=self._begin_retirement, name='adt-store-fence', daemon=True)
@@ -222,8 +228,13 @@ class _ForegroundEpoch:
         self._close_wake_pipe()
 
     def _close_wake_pipe(self):
-        for fd in self._acquired.pop('pipe', ()):
-            os.close(fd)
+        if (pipe := self._acquired.pop('pipe', None)) is not None:
+            write_end, read_fd = pipe
+            if isinstance(write_end, int):
+                os.close(write_end)
+            else:
+                write_end.close()
+            os.close(read_fd)
 
     @property
     def finished(self):
@@ -267,11 +278,8 @@ class _ForegroundEpoch:
         return self.attempt
 
     def _wake(self):
-        try:
-            os.write(self._write_fd, b'\x00')
-        except BlockingIOError:
-            # A full nonblocking pipe already carries a wake.
-            pass
+        # FileIO is unbuffered. A full nonblocking pipe already carries a wake.
+        self._wake_pipe.write(b'\x00')
 
     def publish_stop(self, observed_at):
         offered = _StopAttempt(observed_at)
