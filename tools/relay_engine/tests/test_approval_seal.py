@@ -545,14 +545,14 @@ class ApprovalSealTests(unittest.TestCase):
     def test_operation_only_without_filename(self):
         self.set_chain()
         self.reports.clear()
-        with mock.patch.object(self.s, '_write', side_effect=OSError(errno.ENOSPC, 'forced')):
+        with mock.patch.object(self.s.os, 'pwrite', side_effect=OSError(errno.ENOSPC, 'forced')):
             with self.assertRaises(self.t.SealUnusable) as caught:
                 self.service._write_pointer(P, D, damaged=False)
         exc = caught.exception
         self.assertIsNone(getattr(exc, 'filename', None))
-        self.assertEqual(getattr(exc, 'operation', None), 'seal_slots.write_next', 'operation')
-        self.assertEqual(exc.args, ('folder_unusable', None, 'ENOSPC', None, 'seal_slots.write_next'))
-        self.assertEqual(str(exc), "('folder_unusable', None) errno=ENOSPC op=seal_slots.write_next")
+        self.assertEqual(getattr(exc, 'operation', None), 'seal_slots._write', 'operation')
+        self.assertEqual(exc.args, ('folder_unusable', None, 'ENOSPC', None, 'seal_slots._write'))
+        self.assertEqual(str(exc), "('folder_unusable', None) errno=ENOSPC op=seal_slots._write")
         self.assert_errno_refusal(exc, 'folder_unusable')
 
     def test_deliberate_refusals_stay_byte_identical(self):
