@@ -835,12 +835,24 @@ def _find_relay(conn, project_id, spelling, *, before_lock: bool):
     return row
 
 
+def _local_reply_target(conn, sender, spelling, code, params, *, before_lock: bool):
+    target, qualified, project = spelling.partition("@")
+    if qualified:
+        with _busy_answer() if before_lock else nullcontext():
+            own = conn.execute("SELECT 1 FROM projects WHERE id = ? AND name = ?",
+                               (sender.project_id, project)).fetchone()
+        if own is None:
+            raise errors.error_for(code, variant="foreign", **params)
+    return _find_relay(conn, sender.project_id, target, before_lock=before_lock)
+
+
 def _answers(conn, sender, draft, lines, parent, *, before_lock: bool) -> tuple[str, ...]:
     """Resolve addressed, opened and distinct answers before taking the write lock."""
     resolved = []
     for index, spelling in enumerate(draft.answers):
         params = {"line": lines.of("ANSWERS", index), "value": header._display(spelling)}
-        row = _find_relay(conn, sender.project_id, spelling, before_lock=before_lock)
+        row = _local_reply_target(conn, sender, spelling, "E-ANSWERS-UNKNOWN", params,
+                                  before_lock=before_lock)
         if row is None:
             raise errors.error_for("E-ANSWERS-UNKNOWN", **params)
         with _busy_answer() if before_lock else nullcontext():
@@ -861,10 +873,11 @@ def _parent(conn, sender, draft, lines, *, before_lock: bool):
     if draft.parent is None:
         return None
     line = lines.of("PARENT")
-    row = _find_relay(conn, sender.project_id, draft.parent, before_lock=before_lock)
+    params = {"line": line, "value": header._display(draft.parent)}
+    row = _local_reply_target(conn, sender, draft.parent, "E-PARENT-UNKNOWN", params,
+                              before_lock=before_lock)
     if row is None:
-        raise errors.error_for("E-PARENT-UNKNOWN", line=line,
-                               value=header._display(draft.parent))
+        raise errors.error_for("E-PARENT-UNKNOWN", **params)
     with _busy_answer() if before_lock else nullcontext():
         member = conn.execute(
             "SELECT 1 FROM relays WHERE id = ? AND " + party_sql("sender_") + " = ?"

@@ -4435,6 +4435,29 @@ class TestImportStep(Store):
 
 
 class TestAnswers(Store):
+    def test_local_qualified_spelling(self):
+        self.conn.execute("UPDATE projects SET name = 'local-name' WHERE id = ?", (PROJECT,))
+        self.conn.commit()
+        self.assertEqual(self.conn.execute(
+            "SELECT name FROM projects WHERE id = ?", ("q",)).fetchone(), ("q",))
+        target = self.submit(draft(to=IMPL.address))
+        answered = self.submit(draft(to=IMPL.address))
+        self._open(answered)
+        written = self.submit(self._draft((answered.relay_id + "@local-name",),
+                              parent=f"#{target.handle}@local-name"), sender=IMPL)
+        self.assertEqual(self.relay(written.relay_id)["parent_id"], target.relay_id)
+        self.assertEqual(self._marks([answered.relay_id]),
+                         [(answered.relay_id, IMPL.seat_id, written.relay_id)])
+        for field, raw in (
+                ("PARENT", draft(parent="#999999@q")),
+                ("PARENT", draft(parent=f"#{target.handle}@q")),
+                ("ANSWERS", self._draft((answered.relay_id + "@q",), parent=f"#{target.handle}"))):
+            with self.subTest(field=field):
+                code = "E-" + field + "-UNKNOWN"
+                exception = self.refused(code, raw, sender=IMPL)
+                self.assertEqual(exception.cause, errors.error_for(
+                    code, variant="foreign", **exception.params).cause)
+
     def _draft(self, answers, **kwargs):
         # Keep the existing draft helper untouched until C1 has run.
         data = draft(**kwargs)

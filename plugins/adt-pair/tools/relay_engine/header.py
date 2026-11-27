@@ -102,6 +102,21 @@ _REPO = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 _BUNDLE = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
 _HANDLE = re.compile(r"#[1-9][0-9]{0,17}")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_REPLY_TARGET_FORM = "#<n>, a lowercase UUID, #<n>@<project> or <uuid>@<project>"
+
+
+def _reply_target_valid(spelling):
+    target, qualified, project = spelling.partition("@")
+    if _HANDLE.fullmatch(target) is None and _UUID.fullmatch(target) is None:
+        return False
+    if qualified:
+        try:
+            addresses.validate_name("project", project)
+        except addresses.AddressRefused:
+            return False
+    return True
+
+
 _FINDING_HANDLE = re.compile(r"F[1-9][0-9]{0,17}")
 _COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _INDEX = re.compile(r"[1-9][0-9]{0,5}")
@@ -383,11 +398,11 @@ def _validate(values, seen, body, header_bytes, validate_address):
     parent = bundle = None
     if "PARENT" in first:
         number, parent = first["PARENT"]
-        if _HANDLE.fullmatch(parent) is None and _UUID.fullmatch(parent) is None:
-            _shape(number, "PARENT", parent, "#<n> or a lowercase UUID")
+        if not _reply_target_valid(parent):
+            _shape(number, "PARENT", parent, _REPLY_TARGET_FORM)
     for number, answer in lists["ANSWERS"]:
-        if _HANDLE.fullmatch(answer) is None and _UUID.fullmatch(answer) is None:
-            _shape(number, "ANSWERS", answer, "#<n> or a lowercase UUID")
+        if not _reply_target_valid(answer):
+            _shape(number, "ANSWERS", answer, _REPLY_TARGET_FORM)
     if "BUNDLE" in first:
         number, bundle = first["BUNDLE"]
         if parent is not None and (kind, needs) != ("PLAN", "review"):

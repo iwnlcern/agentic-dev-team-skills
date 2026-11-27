@@ -590,6 +590,22 @@ class TestExplainCLI(unittest.TestCase):
 
 
 class TestAdmissionErrors(unittest.TestCase):
+    def test_foreign_variant_texts_render(self):
+        for field in ("PARENT", "ANSWERS"):
+            with self.subTest(field=field):
+                prefix = "error-" + field.lower() + "-unknown-foreign"
+                spec = errors.ERROR_VARIANTS[("E-" + field + "-UNKNOWN", "foreign")]
+                self.assertEqual((spec.cause_key, spec.explain_key), (prefix + "-cause", prefix + "-explain"))
+                params = dict(line=7, value="#1@other")
+                cause = strings.render(spec.cause_key, **params)
+                self.assertIn("line 7", cause)
+                self.assertIn("#1@other", cause)
+                self.assertIn("received", cause)
+                self.assertIn("received", strings.render(spec.explain_key))
+                for key, fields in ((spec.cause_key, params), (spec.explain_key, {})):
+                    with self.assertRaises((TypeError, ValueError)):
+                        strings.render(key, **fields, unknown="unexpected")
+
     """Breaks: unregistered replay refusal or changed legacy error envelope."""
 
     def test_imported_parent_bundle_error_catalog(self):

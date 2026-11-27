@@ -160,6 +160,7 @@ TABLE_OWNERS: dict[str, str] = {
     "bodies": "engine",
     "recipients": "engine",
     "edges": "engine",
+    "foreign_edges": "engine",
     "bundles": "engine",
     "findings": "engine",
     "finding_events": "engine",
@@ -486,6 +487,16 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + _STORE_HELD_TABLES + (
         OR (target_type = 'path' AND target_relay_id IS NULL
             AND target_repository_id IS NULL AND target_path IS NOT NULL))
 ) STRICT""" % (_hex64("digest_at_submit"), _object_id("digest_at_submit")),
+    """CREATE TABLE IF NOT EXISTS foreign_edges (
+    relay_id TEXT NOT NULL REFERENCES relays (id),
+    kind TEXT NOT NULL CHECK (kind IN ('parent', 'answers')),
+    ordinal INTEGER NOT NULL CHECK (ordinal > 0 AND (kind <> 'parent' OR ordinal = 1)),
+    source_project_id TEXT NOT NULL,
+    target_relay_id TEXT NOT NULL,
+    target_handle INTEGER NOT NULL CHECK (target_handle > 0),
+    spelling TEXT NOT NULL,
+    PRIMARY KEY (relay_id, kind, ordinal)
+) STRICT""",
     """CREATE TABLE IF NOT EXISTS bundles (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects (id),
@@ -761,6 +772,8 @@ _INDEXES = (
     " WHERE role = 'to' AND delivered_at IS NULL AND opened_at IS NULL",
     "CREATE INDEX IF NOT EXISTS recipients_open ON recipients (relay_id)"
     " WHERE role = 'to' AND answered_by IS NULL",
+    "CREATE INDEX IF NOT EXISTS foreign_edges_source_target"
+    " ON foreign_edges (source_project_id, target_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_from ON edges (from_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_relay ON edges (target_relay_id)",
     "CREATE INDEX IF NOT EXISTS edges_target_git ON edges (target_repository_id, target_path)",
@@ -795,6 +808,10 @@ _TRIGGERS = tuple(
 WHEN NEW.handle IS NOT OLD.handle
 BEGIN SELECT RAISE(ABORT, 'a handle never changes'); END""" % (table, table)
     for table in ("relays", "findings")) + (
+    """CREATE TRIGGER IF NOT EXISTS foreign_edges_no_update BEFORE UPDATE ON foreign_edges
+BEGIN SELECT RAISE(ABORT, 'foreign edge is immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS foreign_edges_no_delete BEFORE DELETE ON foreign_edges
+BEGIN SELECT RAISE(ABORT, 'foreign edge is immutable'); END""",
     # A closed bundle stays closed (slice 2a D4); setting it once, or to the same value, is allowed.
     """CREATE TRIGGER IF NOT EXISTS bundles_closed_at_fixed BEFORE UPDATE OF closed_at ON bundles
 WHEN OLD.closed_at IS NOT NULL AND NEW.closed_at IS NOT OLD.closed_at
