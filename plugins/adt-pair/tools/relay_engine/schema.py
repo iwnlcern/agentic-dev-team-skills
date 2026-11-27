@@ -325,6 +325,7 @@ _STORE_HELD_TABLES = (
     reason TEXT,
     created_at INTEGER NOT NULL,
     changed_at INTEGER NOT NULL,
+    admit_seq INTEGER NOT NULL UNIQUE,
     PRIMARY KEY (relay_id, receiver_project_id),
     CHECK (reason IS NULL OR
         (state = 'allowed' AND reason IN ('receiver_stopped', 'receiver_unavailable')) OR
@@ -358,9 +359,14 @@ _STORE_HELD_TABLES = (
     at INTEGER NOT NULL,
     FOREIGN KEY (relay_id, receiver_project_id) REFERENCES xproject_transfers (relay_id, receiver_project_id)
 ) STRICT""",
+    """CREATE TABLE IF NOT EXISTS xproject_notices (
+    event_id INTEGER PRIMARY KEY REFERENCES xproject_events (event_id),
+    notice_relay_id TEXT NOT NULL UNIQUE REFERENCES relays (id),
+    filed_at INTEGER NOT NULL
+) STRICT""",
 )
 TABLE_OWNERS.update({name: 'store' for name in (
-    'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events',
+    'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events', 'xproject_notices',
 )})
 
 
@@ -740,6 +746,8 @@ _TABLES = _PLATFORM_TABLES + _AUTHORITY_TABLES + _STORE_HELD_TABLES + (
 
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS xproject_transfers_receiver_state ON xproject_transfers (receiver_project_id, state)",
+    "CREATE INDEX IF NOT EXISTS xproject_transfers_pending ON xproject_transfers "
+    "(receiver_project_id, admit_seq) WHERE state IN ('held', 'allowed')",
     "CREATE INDEX IF NOT EXISTS verification_requests_bytes ON verification_requests (artifact, content_sha256)",
     "CREATE UNIQUE INDEX IF NOT EXISTS relays_submission_party ON relays"
     " (coalesce(sender_seat_id, sender_special), submission_key)"
@@ -853,6 +861,10 @@ BEGIN SELECT RAISE(ABORT, 'delivery record is insert-only'); END""",
 BEGIN SELECT RAISE(ABORT, 'transfer event is append-only'); END""",
     """CREATE TRIGGER IF NOT EXISTS xproject_events_kept BEFORE DELETE ON xproject_events
 BEGIN SELECT RAISE(ABORT, 'transfer event is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_notices_fixed BEFORE UPDATE ON xproject_notices
+BEGIN SELECT RAISE(ABORT, 'notice receipt is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS xproject_notices_kept BEFORE DELETE ON xproject_notices
+BEGIN SELECT RAISE(ABORT, 'notice receipt is append-only'); END""",
 )
 
 

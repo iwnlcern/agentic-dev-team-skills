@@ -27,7 +27,7 @@ TABLES = {"restore_cancels", "restore_refusals", "slips", "slip_events", "branch
           "evidence_objects", "evidence_object_bundles", "evidence_bundles",
           "evidence_captures", "evidence_uploads", "evidence_retention",
           "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
-          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events",
+          "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events", "xproject_notices",
           "cross_project_allows", "cross_project_decisions", "cross_project_outcomes"}
 
 INDEXES = {
@@ -43,7 +43,7 @@ INDEXES = {
     "refusals": {("project_id", "code")},
     "seat_sessions": {("seat_id",)},
     "token_counts": {("bundle_id",)},
-    "xproject_transfers": {("receiver_project_id", "state")},
+    "xproject_transfers": {("receiver_project_id", "state"), ("receiver_project_id", "admit_seq")},
 }
 
 SHA = "a" * 64
@@ -503,7 +503,7 @@ class TestShape(Store):
         stored = {name for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")}
         self.assertEqual(stored, named)
-        self.assertEqual(len(named), 31)
+        self.assertEqual(len(named), 32)
 
 
 class TestChecks(Store):
@@ -1140,8 +1140,8 @@ class TestTableOwners(Store):
         store = {"evidence_objects", "evidence_object_bundles", "evidence_bundles",
                  "evidence_captures", "evidence_uploads", "evidence_retention",
                  "evidence_derive", "evidence_prune_marks", "evidence_pruned", "imported_relays",
-                 "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events"}
-        self.assertEqual(len(actual), 50)
+                 "xproject_transfers", "xproject_recipients", "xproject_deliveries", "xproject_events", "xproject_notices"}
+        self.assertEqual(len(actual), 51)
         authority = {"reviewer_assignments", "verification_requests", "waivers",
                      "slips", "slip_events", "branch_bindings", "restore_cancels", "restore_refusals",
                      "cross_project_allows", "cross_project_decisions", "cross_project_outcomes"}

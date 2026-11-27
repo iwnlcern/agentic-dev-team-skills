@@ -10,7 +10,7 @@ from relay_engine.tests import test_schema
 
 
 SHA = 'a' * 64
-LEDGER = {'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events'}
+LEDGER = {'xproject_transfers', 'xproject_recipients', 'xproject_deliveries', 'xproject_events', 'xproject_notices'}
 CATALOGUE = {'xproject_inbox', 'xproject_asks'}
 
 
@@ -22,8 +22,8 @@ class TestHeldTables(test_schema.Store):
     def transfer(self, receiver='q', state='held', reason=None, digest=SHA):
         self.conn.execute(
             'INSERT INTO xproject_transfers '
-            '(relay_id,receiver_project_id,body_sha256,state,reason,created_at,changed_at) '
-            'VALUES (?,?,?,?,?,1,1)', ('relay', receiver, digest, state, reason)).close()
+            '(relay_id,receiver_project_id,body_sha256,state,reason,created_at,changed_at,admit_seq) '
+            'VALUES (?,?,?,?,?,1,1,(SELECT COALESCE(MAX(admit_seq), 0) + 1 FROM xproject_transfers))', ('relay', receiver, digest, state, reason)).close()
 
     def test_held_tables_strict_and_owned(self):
         cat = sqlite3.connect(':memory:')
@@ -93,10 +93,10 @@ class TestStep(test_schema.Store):
         self.conn = self.connect()
         self.relay(self.conn, 'relay', 1, body_sha=SHA)
 
-    def admit(self, receiver='q', decision='held', facts=None, now=1):
+    def admit(self, receiver='q', decision='held', facts=None, now=1, *, relay_id='relay'):
         if facts is None:
             facts = held_relays.ReceiverFacts('active', False, 'present')
-        return held_relays.admit(self.conn, 'relay', receiver, SHA, (
+        return held_relays.admit(self.conn, relay_id, receiver, SHA, (
             held_relays.Recipient(receiver + '-seat', 'team.implementer@' + receiver, 'to'),
             held_relays.Recipient(receiver + '-cc', 'team.planner@' + receiver, 'cc'),
         ), decision, facts, now)
@@ -198,6 +198,117 @@ class TestStep(test_schema.Store):
                 if isinstance(node, ast.ImportFrom):
                     names.update((node.module or '').split('.'))
                 self.assertFalse(names & banned)
+
+    def test_admit_seq_orders_admissions(self):
+        self.assertEqual(held_relays.horizon(self.conn), 0)
+        for receiver, now in (('q', 20), ('r', 20), ('s', 10)):
+            self.admit(receiver, now=now)
+        self.assertEqual(self.select(
+            'SELECT receiver_project_id,created_at,admit_seq FROM xproject_transfers '
+            'ORDER BY admit_seq'), [('q', 20, 1), ('r', 20, 2), ('s', 10, 3)])
+        self.assertEqual(held_relays.horizon(self.conn), 3)
+
+    def test_admit_seq_counts_terminal_rows(self):
+        self.admit()
+        facts = held_relays.ReceiverFacts('active', False, 'present')
+        self.assertEqual(held_relays.step(self.conn, 'relay', 'q', 'allowed', facts, 2),
+                         held_relays.State('delivered', None))
+        self.assertEqual(held_relays.horizon(self.conn), 1)
+        self.admit('r')
+        self.assertEqual(self.select(
+            'SELECT state,admit_seq FROM xproject_transfers ORDER BY admit_seq'),
+            [('delivered', 1), ('held', 2)])
+
+    def test_non_terminal_page_fence(self):
+        for i in range(2, 9):
+            self.relay(self.conn, f'r{i}', i, body_sha=SHA)
+        self.admit(now=20)
+        self.admit(decision='allowed',
+                   facts=held_relays.ReceiverFacts('active', True, 'not_read'),
+                   now=10, relay_id='r2')
+        self.admit(decision='allowed', relay_id='r3')
+        self.admit(decision='denied', relay_id='r4')
+        self.admit(facts=held_relays.ReceiverFacts('not_active', False, 'not_read'),
+                   relay_id='r5')
+        self.admit('r', relay_id='r6')
+        through = held_relays.horizon(self.conn)
+        self.admit(now=20, relay_id='r7')
+        self.admit(now=5, relay_id='r8')
+
+        page = held_relays.non_terminal_page
+        expected = (held_relays.TransferRow('relay', 'q', 20, 1),
+                    held_relays.TransferRow('r2', 'q', 10, 2))
+        self.assertEqual(page(self.conn, 'q', None, 10, through=through), expected)
+        self.assertEqual(page(self.conn, 'q', None, 1, through=through), expected[:1])
+        self.assertEqual(page(self.conn, 'q', 1, 1, through=through), expected[1:])
+        self.assertEqual(page(self.conn, 'q', 2, 10, through=through), ())
+
+    def test_pending_receivers_fence(self):
+        cat = self.connect(init=False)
+        catalogue.init_catalogue(cat)
+        with closing(cat.execute('SELECT count(*) FROM project_routes')) as cursor:
+            self.assertEqual(cursor.fetchone(), (0,))
+        self.relay(self.conn, 'r2', 2, body_sha=SHA)
+        for receiver in ('z', 'no-route', 'a'):
+            self.admit(receiver)
+        self.admit('a', relay_id='r2')
+        self.admit('terminal', decision='denied')
+        through = held_relays.horizon(self.conn)
+        self.admit('after-fence')
+
+        page = held_relays.pending_receivers
+        self.assertEqual(page(self.conn, None, 10, through=through), ('a', 'no-route', 'z'))
+        self.assertEqual(page(self.conn, None, 1, through=through), ('a',))
+        self.assertEqual(page(self.conn, 'a', 1, through=through), ('no-route',))
+        self.assertEqual(page(self.conn, 'no-route', 10, through=through), ('z',))
+
+    def test_selectors_refuse_bad_bounds(self):
+        self.relay(self.conn, 'r2', 2, body_sha=SHA)
+        self.admit()
+        self.admit(relay_id='r2')
+        closed = self.connect()
+        closed.close()
+        selectors = (
+            ('non_terminal_page', ('q', None)),
+            ('pending_receivers', (None,)),
+        )
+        for name, args in selectors:
+            selector = getattr(held_relays, name)
+            for label, conn in (('open', self.conn), ('closed', closed)):
+                for limit, through in ((0, 2), (1, -1)):
+                    with self.subTest(selector=name, connection=label, limit=limit, through=through):
+                        try:
+                            with self.assertRaises(ValueError):
+                                selector(conn, *args, limit, through=through)
+                        except sqlite3.ProgrammingError:
+                            if label != 'closed':
+                                raise
+                            self.fail('bounds check ran after a read')
+
+    def test_notice_receipt_append_only(self):
+        self.relay(self.conn, 'notice-1', 2, body_sha=SHA)
+        self.relay(self.conn, 'notice-2', 3, body_sha=SHA)
+        self.admit()
+        self.admit('r')
+        events = self.select('SELECT event_id FROM xproject_events ORDER BY event_id')
+        (first,), (second,) = events
+        insert = ('INSERT INTO xproject_notices (event_id,notice_relay_id,filed_at) '
+                  'VALUES (?,?,?)')
+        self.conn.execute(insert, (first, 'notice-1', 4)).close()
+        for row in ((first, 'notice-2', 5), (second, 'notice-1', 5)):
+            with self.subTest(row=row), self.assertRaisesRegex(sqlite3.IntegrityError, 'UNIQUE'):
+                self.conn.execute(insert, row).close()
+        for stmt in ('UPDATE xproject_notices SET filed_at=9', 'DELETE FROM xproject_notices'):
+            self.conn.execute('SAVEPOINT notice_receipt_probe').close()
+            try:
+                with self.subTest(sql=stmt), self.assertRaisesRegex(
+                        sqlite3.IntegrityError, 'notice receipt is append-only'):
+                    self.conn.execute(stmt).close()
+            finally:
+                self.conn.execute('ROLLBACK TO notice_receipt_probe').close()
+                self.conn.execute('RELEASE notice_receipt_probe').close()
+        self.assertEqual(self.select('SELECT event_id,notice_relay_id,filed_at FROM xproject_notices'),
+                         [(first, 'notice-1', 4)])
 
     def test_status_and_non_terminal(self):
         self.admit('q2', decision='allowed', facts=held_relays.ReceiverFacts('active', True, 'not_read'), now=2)

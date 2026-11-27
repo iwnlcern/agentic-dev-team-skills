@@ -10988,7 +10988,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/held_relays.py",
-    "sha256": "391ff0ea8cb54ae4044316bbc5df09f19834caa8f417554a0c8fdc75fcbd0e05",
+    "sha256": "cb8ab2355dfcec29ce1d8efb886555e2444706a53cd9cb71db479b02ff0895fb",
     "source": "tools/relay_engine/held_relays.py"
   },
   {
@@ -11186,7 +11186,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/schema.py",
-    "sha256": "578d031296e2042d144e818943dcc248eb1ea34153cdc4c990f49627cca9290f",
+    "sha256": "6bc0988cd5c0055bb34d0befbf0ab76f6a6b3abe0f819fd7a46b5f219fe8d876",
     "source": "tools/relay_engine/schema.py"
   },
   {
@@ -22196,7 +22196,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/held_relays.py",
-    "sha256": "391ff0ea8cb54ae4044316bbc5df09f19834caa8f417554a0c8fdc75fcbd0e05",
+    "sha256": "cb8ab2355dfcec29ce1d8efb886555e2444706a53cd9cb71db479b02ff0895fb",
     "source": "tools/relay_engine/held_relays.py"
   },
   {
@@ -22394,7 +22394,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/schema.py",
-    "sha256": "578d031296e2042d144e818943dcc248eb1ea34153cdc4c990f49627cca9290f",
+    "sha256": "6bc0988cd5c0055bb34d0befbf0ab76f6a6b3abe0f819fd7a46b5f219fe8d876",
     "source": "tools/relay_engine/schema.py"
   },
   {
@@ -33320,7 +33320,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/held_relays.py",
-    "sha256": "391ff0ea8cb54ae4044316bbc5df09f19834caa8f417554a0c8fdc75fcbd0e05",
+    "sha256": "cb8ab2355dfcec29ce1d8efb886555e2444706a53cd9cb71db479b02ff0895fb",
     "source": "tools/relay_engine/held_relays.py"
   },
   {
@@ -33518,7 +33518,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/schema.py",
-    "sha256": "578d031296e2042d144e818943dcc248eb1ea34153cdc4c990f49627cca9290f",
+    "sha256": "6bc0988cd5c0055bb34d0befbf0ab76f6a6b3abe0f819fd7a46b5f219fe8d876",
     "source": "tools/relay_engine/schema.py"
   },
   {
