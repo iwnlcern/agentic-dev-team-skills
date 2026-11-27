@@ -526,7 +526,11 @@ class SealRendererTests(unittest.TestCase):
                 exc = caught.exception
                 self.assertEqual((exc.cause, exc.chain_id), ('high_water_unusable', C))
                 self.assertEqual(exc.errno_name, 'ENOSPC')
-                self.assertEqual(str(exc), f"{('high_water_unusable', C)!r} errno=ENOSPC")
+                prefix = f"{('high_water_unusable', C)!r} errno=ENOSPC"
+                message = str(exc)
+                self.assertEqual(message[:len(prefix)], prefix)
+                self.assertRegex(message[len(prefix):], r'\A( file=[!-~]+)?( op=[a-z0-9_]+(\.[a-z0-9_]+)+)\Z')
+                self.assertIsNotNone(exc.operation)
                 self.assertEqual(self.reports, [
                     self.types.SealReport(P, C, 'high_water_unusable', 0, 'ENOSPC'),
                 ])
