@@ -2,7 +2,6 @@
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, closing
 from dataclasses import asdict, dataclass
-import io
 import json
 import os
 from pathlib import Path
@@ -75,12 +74,113 @@ class _NotifierGate:
             self.released = True
 
 
+class _ForegroundRegistry:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.owner = None
+        self.others = set()
+        self.reader = None
+
+    def discard(self, entry):
+        if self.owner is entry:
+            self.owner = None
+        else:
+            self.others.discard(entry)
+
+
+_foreground_registry = _ForegroundRegistry()
+
+
+def _close_signal_pipe(read_fd, write_fd, *, forked=False):
+    try:
+        current = signal.set_wakeup_fd(-1)
+        if current != write_fd:
+            signal.set_wakeup_fd(current)
+            if forked:
+                return True
+    except (OSError, ValueError):
+        if forked:
+            print('foreground wakeup fd isolation failed', file=sys.stderr)
+        return False
+    os.close(write_fd)
+    os.close(read_fd)
+    return True
+
+
+def _start_signal_reader(epoch, registry):
+    if registry.reader is not None:
+        return 'reader_bound'
+    try:
+        read_fd, write_fd = os.pipe()
+    except OSError:
+        return 'pipe_failed'
+    try:
+        os.set_blocking(write_fd, False)
+    except OSError:
+        os.close(write_fd)
+        os.close(read_fd)
+        return 'pipe_failed'
+
+    def release(reason):
+        return reason if _close_signal_pipe(read_fd, write_fd) else 'unwind_incomplete'
+
+    try:
+        prior = signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+    except (OSError, ValueError):
+        return release('wakeup_failed')
+    if prior != -1:
+        try:
+            signal.set_wakeup_fd(prior)
+        except (OSError, ValueError):
+            return 'unwind_incomplete'
+        os.close(write_fd)
+        os.close(read_fd)
+        return 'foreign_wakeup_fd'
+
+    def read_signals():
+        while data := os.read(read_fd, 4096):
+            if signal.SIGTERM in data or signal.SIGINT in data:
+                epoch._observed_signal(time.monotonic())
+
+    fork_state = threading.local()
+
+    def before():
+        if _foreground_registry is registry and registry.reader is epoch:
+            registry.lock.acquire()
+            fork_state.acquired = True
+
+    def after_in_parent():
+        if getattr(fork_state, 'acquired', False):
+            fork_state.acquired = False
+            registry.lock.release()
+
+    def after_in_child():
+        global _foreground_registry
+        if getattr(fork_state, 'acquired', False):
+            fork_state.acquired = False
+            _foreground_registry = _ForegroundRegistry()
+            _close_signal_pipe(read_fd, write_fd, forked=True)
+
+    try:
+        os.register_at_fork(before=before, after_in_parent=after_in_parent,
+                            after_in_child=after_in_child)
+    except (OSError, RuntimeError, ValueError):
+        return release('fork_hook_failed')
+    reader = threading.Thread(target=read_signals, name='adt-signal-reader', daemon=True)
+    try:
+        reader.start()
+    except RuntimeError:
+        return release('reader_failed')
+    registry.reader = epoch
+    epoch.signal_ingress = 'wakeup'
+    return None
+
+
 class _ForegroundEpoch:
-    def __init__(self, fence_writer):
+    def __init__(self, fence_writer, *, process_owner=False):
         self._initial = {}
         self._ready_acknowledged = False
         self._stop = {}
-        self._ingress = {}
         self.notifier_gate = None
         self._terminal = {}
         self._finished = False
@@ -89,13 +189,45 @@ class _ForegroundEpoch:
         self._fence_writer = fence_writer
         self._stopped = threading.Event()
         self._fence_complete = False
-        self._fencer = threading.Thread(target=self._begin_retirement, name='adt-store-fence', daemon=True)
-        self._fencer.start()
-        self.read_fd, write_fd = os.pipe()
-        os.set_blocking(write_fd, False)
-        self._wake_pipe = io.FileIO(write_fd, 'wb')
-        self._observer = threading.Thread(target=self._observe, name='adt-stop-observer', daemon=True)
-        self._observer.start()
+        self._process_owner = process_owner
+        self._cancelled = False
+        self.signal_ingress = 'handler'
+        self.signal_ingress_reason = None
+        self._acquired = {}
+        try:
+            self.read_fd, self._write_fd = os.pipe()
+            self._acquired['pipe'] = (self._write_fd, self.read_fd)
+            os.set_blocking(self._write_fd, False)
+            self._observer = threading.Thread(target=self._observe, name='adt-stop-observer', daemon=True)
+            self._start_worker('observer', self._observer)
+            self._fencer = threading.Thread(target=self._begin_retirement, name='adt-store-fence', daemon=True)
+            self._start_worker('fencer', self._fencer)
+        except BaseException:
+            self._cancel()
+            raise
+
+    def _start_worker(self, role, worker):
+        worker.start()
+        self._acquired[role] = worker
+
+    def _cancel(self):
+        if (fencer := self._acquired.get('fencer')) is not None:
+            self._cancelled = True
+            self._stopped.set()
+            fencer.join()
+        if (observer := self._acquired.get('observer')) is not None:
+            self._finished = True
+            self._wake()
+            observer.join()
+        self._close_wake_pipe()
+
+    def _close_wake_pipe(self):
+        for fd in self._acquired.pop('pipe', ()):
+            os.close(fd)
+
+    @property
+    def finished(self):
+        return self._finished
 
     @property
     def attempt(self):
@@ -103,7 +235,7 @@ class _ForegroundEpoch:
 
     @property
     def admission_closed(self):
-        return bool(self._ingress)
+        return 'attempt' in self._stop
 
     def install_notifier_gate(self, gate):
         if self.notifier_gate is not None:
@@ -116,25 +248,32 @@ class _ForegroundEpoch:
         return True
 
     def enter_stop(self):
-        owner = object()
-        if self._ingress.setdefault('owner', owner) is owner:
-            attempt = self.publish_stop(time.monotonic())
-            gate = self.notifier_gate
-            if gate is not None:
-                gate.retire()
-            return attempt
-        return self.attempt
+        attempt = self.publish_stop(time.monotonic())
+        self._retire_notifier_gate()
+        return attempt
+
+    def _observed_signal(self, now):
+        if not self.finished:
+            self.publish_stop(now)
+            self._retire_notifier_gate()
+
+    def _retire_notifier_gate(self):
+        gate = self.notifier_gate
+        if gate is not None:
+            gate.retire()
 
     def wait_for_attempt(self):
         self._stopped.wait()
         return self.attempt
 
     def _wake(self):
-        # FileIO is unbuffered. A full nonblocking pipe already carries a wake.
-        self._wake_pipe.write(b'\x00')
+        try:
+            os.write(self._write_fd, b'\x00')
+        except BlockingIOError:
+            # A full nonblocking pipe already carries a wake.
+            pass
 
     def publish_stop(self, observed_at):
-        self._ingress.setdefault('owner', self)
         offered = _StopAttempt(observed_at)
         attempt = self._stop.setdefault('attempt', offered)
         self._initial.setdefault('winner', attempt)
@@ -173,7 +312,8 @@ class _ForegroundEpoch:
 
     def _begin_retirement(self):
         self._stopped.wait()
-        self._fence_complete = self._fence_writer(self.attempt)
+        if not self._cancelled:
+            self._fence_complete = self._fence_writer(self.attempt)
 
     def join_fencer(self, attempt):
         self._fencer.join(max(0, attempt.work - time.monotonic()))
@@ -187,8 +327,8 @@ class _ForegroundEpoch:
         self._finished = True
         self._wake()
         self._observer.join()
-        os.close(self.read_fd)
-        self._wake_pipe.close()
+        if not self._process_owner:
+            self._close_wake_pipe()
 
 
 class ServiceStartRefused(Exception):
@@ -376,6 +516,10 @@ class ApiService:
         self._clients = set()
         self._threads = set()
         self._signals = {}
+        self._signals_orphaned = False
+        self._installing_foreground_signals = False
+        self._pending_foreground_signal = None
+        self._foreground_reservation = None
         self._stop_lock = threading.Lock()
         self._foreground = None
         self._acceptor_running = False
@@ -384,19 +528,84 @@ class ApiService:
     def _install_signals(self):
         if threading.current_thread() is threading.main_thread() and not self._signals:
             for name in (signal.SIGTERM, signal.SIGINT):
-                self._signals[name] = signal.getsignal(name)
+                previous = signal.getsignal(name)
                 signal.signal(name, self._signal)
+                self._signals[name] = previous
 
     def _restore_signals(self):
         if threading.current_thread() is threading.main_thread():
             for name, handler in self._signals.items():
                 signal.signal(name, handler)
             self._signals.clear()
+            self._signals_orphaned = False
 
-    def arm_foreground(self):
-        if self._foreground is None:
-            self._foreground = _ForegroundEpoch(self._fence_writer)
+    def arm_foreground(self, *, process_owner: bool = False) -> None:
+        """Arm a foreground service.
+
+        Any-thread stop ingress is only for the one engine serve process owner
+        (process_owner=True). Other arms, including in-process test arms, rely
+        on the main-thread signal handler.
+        """
+        registry = _foreground_registry
+        reservation = object()
+        with registry.lock:
+            reason = None
+            if process_owner and threading.current_thread() is not threading.main_thread():
+                reason = 'owner_off_main'
+            elif registry.owner is not None or (process_owner and registry.others):
+                reason = 'live_epoch'
+            elif self._foreground is not None:
+                return
+            elif self._foreground_reservation is not None:
+                reason = 'live_epoch'
+            else:
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    handler = signal.getsignal(signum)
+                    if (getattr(handler, '__func__', None) is ApiService._signal
+                            and handler.__self__._signals_orphaned):
+                        reason = 'stale_handler'
+                        break
+            if reason is not None:
+                raise RuntimeError(f'foreground arm conflict: {reason}')
+            if process_owner:
+                registry.owner = reservation
+            else:
+                registry.others.add(reservation)
+            self._foreground_reservation = reservation
+
+        epoch = None
+        self._installing_foreground_signals = True
+        had_signals = bool(self._signals)
+        try:
+            epoch = _ForegroundEpoch(self._fence_writer, process_owner=process_owner)
             self._install_signals()
+        except BaseException:
+            try:
+                if not had_signals:
+                    self._restore_signals()
+            finally:
+                if epoch is not None:
+                    epoch._cancel()
+                self._pending_foreground_signal = None
+                self._installing_foreground_signals = False
+                with registry.lock:
+                    registry.discard(reservation)
+                    self._foreground_reservation = None
+            raise
+        with registry.lock:
+            registry.discard(reservation)
+            if process_owner:
+                registry.owner = epoch
+            else:
+                registry.others.add(epoch)
+            self._foreground_reservation = None
+            self._foreground = epoch
+        self._installing_foreground_signals = False
+        if self._pending_foreground_signal is not None:
+            now, self._pending_foreground_signal = self._pending_foreground_signal, None
+            epoch._observed_signal(now)
+        if process_owner:
+            epoch.signal_ingress_reason = _start_signal_reader(epoch, registry)
 
     def _fence_writer(self, attempt):
         writer = self.writer
@@ -803,6 +1012,10 @@ class ApiService:
                 or (self._foreground is not None and self._foreground.admission_closed))
 
     def _signal(self, signum, frame):
+        if self._installing_foreground_signals:
+            if self._pending_foreground_signal is None:
+                self._pending_foreground_signal = time.monotonic()
+            return
         if self._foreground is not None:
             self._foreground.enter_stop()
             return
@@ -934,7 +1147,11 @@ class ApiService:
                     if epoch.try_seal_clean(receipt):
                         self._restore_signals()
                         epoch.finish()
-                        self._foreground = None
+                        registry = _foreground_registry
+                        with registry.lock:
+                            self._signals_orphaned = bool(self._signals)
+                            self._foreground = None
+                            registry.discard(epoch)
                         return 0
         if report is not None and self._stop_report is not None and time.monotonic() < attempt.diagnostic:
             try:

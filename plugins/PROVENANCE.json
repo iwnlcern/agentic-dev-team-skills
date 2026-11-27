@@ -10718,7 +10718,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/adt_cli.py",
-    "sha256": "5c607098036f932fb7d7d12c1a872c5b854df872b48ede296baf3c21d0abc5e1",
+    "sha256": "38bf47b9e5da312c1ba16615e47a250b65f1fb331b2f43c8d01cdb7fba4b2a0b",
     "source": "tools/relay_engine/adt_cli.py"
   },
   {
@@ -10802,7 +10802,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/relay_engine/api_service.py",
-    "sha256": "ea34ad9b27e0736e7545bff0e3f502c96f38eb2936f5be2ede2bae51c1820b9c",
+    "sha256": "91b64cbae74467fd865829acaee8d9805a4fdd3738976b52d837945c46f5471b",
     "source": "tools/relay_engine/api_service.py"
   },
   {
@@ -21926,7 +21926,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/adt_cli.py",
-    "sha256": "5c607098036f932fb7d7d12c1a872c5b854df872b48ede296baf3c21d0abc5e1",
+    "sha256": "38bf47b9e5da312c1ba16615e47a250b65f1fb331b2f43c8d01cdb7fba4b2a0b",
     "source": "tools/relay_engine/adt_cli.py"
   },
   {
@@ -22010,7 +22010,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/relay_engine/api_service.py",
-    "sha256": "ea34ad9b27e0736e7545bff0e3f502c96f38eb2936f5be2ede2bae51c1820b9c",
+    "sha256": "91b64cbae74467fd865829acaee8d9805a4fdd3738976b52d837945c46f5471b",
     "source": "tools/relay_engine/api_service.py"
   },
   {
@@ -33050,7 +33050,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/adt_cli.py",
-    "sha256": "5c607098036f932fb7d7d12c1a872c5b854df872b48ede296baf3c21d0abc5e1",
+    "sha256": "38bf47b9e5da312c1ba16615e47a250b65f1fb331b2f43c8d01cdb7fba4b2a0b",
     "source": "tools/relay_engine/adt_cli.py"
   },
   {
@@ -33134,7 +33134,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/relay_engine/api_service.py",
-    "sha256": "ea34ad9b27e0736e7545bff0e3f502c96f38eb2936f5be2ede2bae51c1820b9c",
+    "sha256": "91b64cbae74467fd865829acaee8d9805a4fdd3738976b52d837945c46f5471b",
     "source": "tools/relay_engine/api_service.py"
   },
   {

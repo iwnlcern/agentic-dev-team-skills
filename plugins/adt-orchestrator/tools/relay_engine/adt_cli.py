@@ -325,8 +325,8 @@ def main(argv: Sequence[str], *, groups: Sequence[CommandGroup] = (),
                                              startup_socket=startup_socket,
                                              notifier_setup=setup,
                                              notifier_mode='configured' if use_notifier else 'off')
-            service.arm_foreground()
             try:
+                service.arm_foreground(process_owner=True)
                 try:
                     path = service.start()
                 except (api_service.ServiceStartRefused, store_layout.LayoutFault, version.FingerprintError) as error:
