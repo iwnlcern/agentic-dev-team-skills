@@ -279,7 +279,7 @@ class AdtTests(unittest.TestCase):
         calls = [n for n in ast.walk(launcher) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'main']
         self.assertEqual(len(calls), 1)
         self.assertEqual({keyword.arg for keyword in calls[0].keywords},
-                         {'groups', 'queue_notifier', 'stop_report'})
+                         {'groups', 'queue_notifier', 'resolver', 'stop_report'})
 
     def test_seam_registers_a_group(self):
         def build(commands):

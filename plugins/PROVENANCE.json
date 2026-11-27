@@ -344,7 +344,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "5a60bae8982456242b8bcd61c5fb75a9d72d03a07df6df2b5df7c8cba17b1587",
+    "sha256": "19913c55d38e91d0aaab81db006b7f44cd3b97e4fcd6fa38aaa4e14edba6d8ef",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -394,6 +394,12 @@
     "path": "adt-master/tools/adapters/relay-monitor.py",
     "sha256": "02a7b1bd35995eaa8e43ecfa55011e0b287d56f06913e7206bce1fcf447c711d",
     "source": "tools/adapters/relay-monitor.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/resolver.py",
+    "sha256": "58673d13cd525522c28699bbf15635bcad3f49e3a1f9788630fb1ef31003be07",
+    "source": "tools/adapters/resolver.py"
   },
   {
     "kit_version": "2.9.7",
@@ -529,6 +535,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-master/tools/adapters/tests/test_resolver.py",
+    "sha256": "c621d800db69768972860b8165d8e7f0371a812fd716b6a39ff63e0fd73c8bd9",
+    "source": "tools/adapters/tests/test_resolver.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-master/tools/adapters/tests/test_scope_proof.py",
     "sha256": "df10ad9996347f898565de88fc8e04fb612c98c0de0640c39da5bd2f9f2f13ad",
     "source": "tools/adapters/tests/test_scope_proof.py"
@@ -572,7 +584,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-master/tools/adt",
-    "sha256": "ed0c0adf449cfb8a1ca281fcb384d5c5221e96888ea36d005a30d63c1919d5ae",
+    "sha256": "d05fb216189869f05208e30690ec4dc4e611cb1badeee6ff18c4cd8275661ddf",
     "source": "tools/adt"
   },
   {
@@ -11516,7 +11528,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "5a60bae8982456242b8bcd61c5fb75a9d72d03a07df6df2b5df7c8cba17b1587",
+    "sha256": "19913c55d38e91d0aaab81db006b7f44cd3b97e4fcd6fa38aaa4e14edba6d8ef",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -11566,6 +11578,12 @@
     "path": "adt-orchestrator/tools/adapters/relay-monitor.py",
     "sha256": "02a7b1bd35995eaa8e43ecfa55011e0b287d56f06913e7206bce1fcf447c711d",
     "source": "tools/adapters/relay-monitor.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/resolver.py",
+    "sha256": "58673d13cd525522c28699bbf15635bcad3f49e3a1f9788630fb1ef31003be07",
+    "source": "tools/adapters/resolver.py"
   },
   {
     "kit_version": "2.9.7",
@@ -11701,6 +11719,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-orchestrator/tools/adapters/tests/test_resolver.py",
+    "sha256": "c621d800db69768972860b8165d8e7f0371a812fd716b6a39ff63e0fd73c8bd9",
+    "source": "tools/adapters/tests/test_resolver.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adapters/tests/test_scope_proof.py",
     "sha256": "df10ad9996347f898565de88fc8e04fb612c98c0de0640c39da5bd2f9f2f13ad",
     "source": "tools/adapters/tests/test_scope_proof.py"
@@ -11744,7 +11768,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-orchestrator/tools/adt",
-    "sha256": "ed0c0adf449cfb8a1ca281fcb384d5c5221e96888ea36d005a30d63c1919d5ae",
+    "sha256": "d05fb216189869f05208e30690ec4dc4e611cb1badeee6ff18c4cd8275661ddf",
     "source": "tools/adt"
   },
   {
@@ -22604,7 +22628,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/claude-code/test-adapter.sh",
-    "sha256": "5a60bae8982456242b8bcd61c5fb75a9d72d03a07df6df2b5df7c8cba17b1587",
+    "sha256": "19913c55d38e91d0aaab81db006b7f44cd3b97e4fcd6fa38aaa4e14edba6d8ef",
     "source": "tools/adapters/claude-code/test-adapter.sh"
   },
   {
@@ -22654,6 +22678,12 @@
     "path": "adt-pair/tools/adapters/relay-monitor.py",
     "sha256": "02a7b1bd35995eaa8e43ecfa55011e0b287d56f06913e7206bce1fcf447c711d",
     "source": "tools/adapters/relay-monitor.py"
+  },
+  {
+    "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/resolver.py",
+    "sha256": "58673d13cd525522c28699bbf15635bcad3f49e3a1f9788630fb1ef31003be07",
+    "source": "tools/adapters/resolver.py"
   },
   {
     "kit_version": "2.9.7",
@@ -22789,6 +22819,12 @@
   },
   {
     "kit_version": "2.9.7",
+    "path": "adt-pair/tools/adapters/tests/test_resolver.py",
+    "sha256": "c621d800db69768972860b8165d8e7f0371a812fd716b6a39ff63e0fd73c8bd9",
+    "source": "tools/adapters/tests/test_resolver.py"
+  },
+  {
+    "kit_version": "2.9.7",
     "path": "adt-pair/tools/adapters/tests/test_scope_proof.py",
     "sha256": "df10ad9996347f898565de88fc8e04fb612c98c0de0640c39da5bd2f9f2f13ad",
     "source": "tools/adapters/tests/test_scope_proof.py"
@@ -22832,7 +22868,7 @@
   {
     "kit_version": "2.9.7",
     "path": "adt-pair/tools/adt",
-    "sha256": "ed0c0adf449cfb8a1ca281fcb384d5c5221e96888ea36d005a30d63c1919d5ae",
+    "sha256": "d05fb216189869f05208e30690ec4dc4e611cb1badeee6ff18c4cd8275661ddf",
     "source": "tools/adt"
   },
   {

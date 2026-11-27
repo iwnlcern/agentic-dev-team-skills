@@ -689,5 +689,6 @@ if __name__ == '__main__':
     if len(sys.argv) == 6 and sys.argv[1] == '--private-notifier-custodian':
         _, _, configured, gate_fd, channel_fd, epoch = sys.argv
         raise SystemExit(_custodian(int(gate_fd), int(channel_fd), epoch, configured))
+    from adapters.resolver import adapter_resolver
     raise SystemExit(main(sys.argv[1:], groups=(console_group(), operator_group(), _engine_owner_group()),
-                          queue_notifier=_queue_notifier, stop_report=_report_incomplete_stop))
+                          queue_notifier=_queue_notifier, stop_report=_report_incomplete_stop, resolver=adapter_resolver))
