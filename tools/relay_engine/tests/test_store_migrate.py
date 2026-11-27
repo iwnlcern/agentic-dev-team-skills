@@ -1006,6 +1006,185 @@ class StoreMigrationCopyTests(unittest.TestCase):
         self.assertEqual(source_snapshot(legacy), original)
         self.assertEqual(source_snapshot(job / 'source'), committed)
 
+    def _check_fixture(self, label):
+        return self._copied_import_fixture(label, (
+            ('first', 'fixture.planner', 'fixture.implementer', ('operator',), ()),
+            ('second', 'fixture.implementer', 'fixture.planner', ('operator',), ('first',)),
+        ))
+
+    def _check_projection(self, job):
+        ledger = job / 'staging' / 'ledger.sqlite3'
+        with closing(sqlite3.connect(ledger.as_uri() + '?mode=ro&immutable=1', uri=True)) as conn:
+            instances = conn.execute(
+                'SELECT name, closed_at FROM team_instances ORDER BY name').fetchall()
+            relays = conn.execute(
+                'SELECT r.handle, r.subject, p.handle, b.body, r.header_bytes '
+                'FROM relays r JOIN bodies b ON b.relay_id=r.id '
+                'LEFT JOIN relays p ON p.id=r.parent_id ORDER BY r.handle').fetchall()
+            provenance = conn.execute(
+                'SELECT r.handle, i.root_uuid, i.seq, i.delivery_marked_at '
+                'FROM imported_relays i JOIN relays r ON r.id=i.relay_id '
+                'ORDER BY r.handle, i.root_uuid, i.seq').fetchall()
+            parties = conn.execute(
+                'SELECT r.handle, p.role, s.role, p.special, p.delivered_at, p.opened_at, a.handle '
+                'FROM recipients p JOIN relays r ON r.id=p.relay_id '
+                'LEFT JOIN seats s ON s.id=p.seat_id LEFT JOIN relays a ON a.id=p.answered_by '
+                'ORDER BY 1, 2, 3, 4').fetchall()
+        return instances, relays, provenance, parties
+
+    def test_decide_records_and_rebuilds(self):
+        migrate, root, turns, legacy, job_id = self._check_fixture('decide-rebuild')
+        job = self.job_path(root, job_id)
+        migrate.import_staging(root, turns, job_id)
+        marked = self.checkpoint(root, job_id)[1]['marked_at_ms']
+        real_build = migrate._write_import_batches
+        attempts = []
+
+        def observe(conn, attempt, relays, identities):
+            phase, durable = self.checkpoint(root, job_id)
+            self.assertEqual(phase, 'copy')
+            self.assertEqual(durable['decisions'], attempt['decisions'])
+            self.assertEqual(durable['marked_at_ms'], marked)
+            attempts.append(durable['decisions'])
+            return real_build(conn, attempt, relays, identities)
+
+        with mock.patch.object(migrate, '_write_import_batches', side_effect=observe):
+            self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'finished'}).unresolved())
+            finished = self._check_projection(job)
+            self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'finished'}).unresolved())
+            self.assertEqual(self._check_projection(job), finished)
+            self.assertFalse(migrate.decide(root, turns, job_id, {'fixture': 'running'}).unresolved())
+            running = self._check_projection(job)
+        self.assertEqual(attempts, [{'fixture': 'finished'}, {'fixture': 'finished'}, {'fixture': 'running'}])
+        self.assertEqual(running[1:], finished[1:])
+        self.assertIsNotNone(dict(finished[0])['fixture'])
+        self.assertIsNone(dict(running[0])['fixture'])
+        self.assertEqual({row[-1] for row in running[2]}, {marked})
+
+    def test_decide_refuses_drift(self):
+        migrate, root, turns, legacy, job_id = self._check_fixture('decide-drift')
+        job = self.job_path(root, job_id)
+        migrate.import_staging(root, turns, job_id)
+        migrate.decide(root, turns, job_id, {'fixture': 'finished'})
+        before = source_snapshot(job)
+        changed = legacy / 'relays' / 'second.md'
+        changed.write_bytes(changed.read_bytes() + b'changed')
+        with self.assertRaisesRegex(migrate.NotQuiet, 'relays/second[.]md'):
+            migrate.decide(root, turns, job_id, {'fixture': 'running'})
+        self.assertEqual(source_snapshot(job), before)
+
+    def test_validation_needs_resolved_items(self):
+        migrate, root, turns, _, job_id = self._check_fixture('decide-validate')
+        job = self.job_path(root, job_id)
+        migrate.import_staging(root, turns, job_id)
+        report = migrate.decide(root, turns, job_id, {})
+        self.assertEqual(report.unresolved(), ['team needs finished-or-running choice: fixture'])
+        self.assertTrue((job / 'staging' / 'ledger.sqlite3').is_file())
+        self.assertTrue(any((job / 'report').iterdir()))
+        report = migrate.decide(root, turns, job_id, {'fixture': 'running'})
+        self.assertFalse(report.unresolved())
+        for table in ('project_routes', 'maintenance_holds'):
+            self.assertEqual(turns.run(store_steps.Declared('read', {}), lambda conns:
+                conns['catalogue'].execute(f'SELECT count(*) FROM {table}').fetchone()), (0,))
+
+    def test_imported_approve_issues_nothing(self):
+        from relay_engine import authority, imports, slips
+        from relay_engine.tests.test_slips import IMPL, ORCH, PLANNER, SlipStore, draft
+
+        fixture = SlipStore()
+        # Reuse Authority's real admission context and canonical test rows.
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        conn = fixture.conn
+        raw_header = b'PHASE: PLAN-REVIEW\nVERDICT: approve\n'
+        historic = imports.ImportedRelay(
+            fixture.clock - 2, 'PLAN-REVIEW', 'approve', 'legacy approval',
+            IMPL.seat_id, IMPL.role, IMPL.team_instance_id, (PLANNER.seat_id,), (),
+            None, None, raw_header + b'\nLegacy approval.\n',
+            len(raw_header), hashlib.sha256(raw_header).hexdigest(),
+        )
+        conn.execute('BEGIN IMMEDIATE').close()
+        historical_id = imports.import_relay_step(conn, IMPL.project_id, historic,
+                                                  marked_at_ms=fixture.clock - 1)
+        conn.execute(
+            'INSERT INTO imported_relays '
+            '(relay_id,root_uuid,seq,stamp,zone,utc_offset_s,rendered_path,origin,'
+            'headers_json,source_sha256,original_phase,foreign_to_json,delivery_marked_at) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (historical_id, '01000000-0000-4000-8000-000000000000', 1,
+             '20261118-190000', 'UTC', 0, 'legacy/approval.md', 'engine', '{}',
+             hashlib.sha256(raw_header).hexdigest(), 'PLAN-REVIEW', None,
+             fixture.clock - 1),
+        ).close()
+        conn.commit()
+        self.assertEqual(conn.execute('SELECT count(*) FROM imported_relays WHERE relay_id=?',
+                                      (historical_id,)).fetchone(), (1,))
+        self.assertEqual(conn.execute('SELECT needs FROM relays WHERE id=?',
+                                      (historical_id,)).fetchone(), ('none',))
+        self.assertEqual(conn.execute('SELECT count(*) FROM snapshots').fetchone(), (0,))
+        self.assertEqual(conn.execute('SELECT count(*) FROM verification_requests').fetchone(), (0,))
+        parent_line = b'PARENT: ' + historical_id.encode('utf-8') + b'\n'
+        plan = fixture.submit(draft(kind='PLAN', needs='review', to=IMPL.address,
+                                    cc=ORCH.address, parent=historical_id, bundle='b1',
+                                    refs=('file:' + str(fixture.plan),)).replace(
+                                        parent_line, parent_line + b'BUNDLE: b1\n', 1))
+        self.assertIsNotNone(conn.execute('SELECT bundle_id FROM relays WHERE id=?', (plan.relay_id,)).fetchone()[0])
+        refused = fixture.issue(plan, ORCH)
+        self.assertIsNone(fixture.slip(refused))
+        conn.execute('BEGIN IMMEDIATE').close()
+        try:
+            answer = authority.act_entry(conn, IMPL.seat_id, slips.Effect('commit', 'repo-1'),
+                                         fixture.clock)
+            self.assertEqual((answer.outcome, answer.code), ('deny', 'authority.lineage-incomplete'))
+        finally:
+            conn.rollback()
+        approval = fixture.submit(draft(kind='PLAN-REVIEW', verdict='approve',
+                                        parent=plan.relay_id, to=PLANNER.address,
+                                        cc=fixture.issuers,
+                                        refs=('file:' + str(fixture.plan),)), IMPL)
+        fixture.verify(approval)
+        fixture.issued(fixture.issue(approval, ORCH))
+
+    def test_phase_crash_semantic_digest(self):
+        migrate, root, turns, _, job_id = self._check_fixture('phase-restart')
+        job = self.job_path(root, job_id)
+        migrate.import_staging(root, turns, job_id)
+        decisions = {'fixture': 'finished'}
+        migrate.decide(root, turns, job_id, decisions)
+        expected = self._check_projection(job)
+        real_checkpoint = store_steps.Journal.checkpoint
+
+        for boundary in ('copy', 'import', 'check'):
+            with self.subTest(boundary=boundary):
+                hit = []
+
+                def interrupt(journal, phase, data):
+                    real_checkpoint(journal, phase, data)
+                    if phase == boundary:
+                        hit.append(phase)
+                        raise InterruptedCopy(phase)
+
+                with mock.patch.object(store_steps.Journal, 'checkpoint', interrupt):
+                    with self.assertRaisesRegex(InterruptedCopy, boundary):
+                        migrate.decide(root, turns, job_id, decisions)
+                self.assertEqual(hit, [boundary])
+                resumed = migrate.decide(root, turns, job_id, decisions)
+                self.assertFalse(resumed.unresolved())
+                self.assertEqual(self._check_projection(job), expected)
+
+    def test_store_id_binding(self):
+        migrate, root, turns, _, job_id = self._check_fixture('phases-store-id')
+        job = self.job_path(root, job_id)
+        before = source_snapshot(job)
+        with closing(sqlite3.connect(store_layout.catalogue_path(root))) as conn, conn:
+            conn.execute('UPDATE catalogue_identity SET store_id=? WHERE id=1', (PRIOR_STORE,)).close()
+        for phase, args in ((migrate.import_staging, ()), (migrate.decide, ({'fixture': 'running'},))):
+            with self.subTest(phase=phase.__name__), mock.patch.object(
+                    migrate, '_fingerprint', side_effect=AssertionError('orphan fingerprinted')):
+                with self.assertRaises(migrate.JobOrphaned):
+                    phase(root, turns, job_id, *args)
+                self.assertEqual(source_snapshot(job), before)
+
     def test_copy_never_opens_in_place(self):
         root, turns, legacy = self.fixture('raw-copy')
         original = source_snapshot(legacy)

@@ -1,6 +1,6 @@
-"""Fixture-qualified Store migration through manifest, quiet and durable copy."""
+"""Fixture-qualified Store migration from manifest through validation."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 import errno
@@ -624,7 +624,7 @@ def read_copied_sources(root, turns: store_steps.TurnRunner, job_id: str) -> tup
 
 def _read_committed_sources(job, phase, data, job_id, *, prepared_ok=False):
     invalid = 'copy-input-invalid'
-    valid_phase = phase == 'copy' or (prepared_ok and phase == 'import')
+    valid_phase = phase == 'copy' or (prepared_ok and phase in ('import', 'check'))
     if not valid_phase or data['job_id'] != job_id:
         raise CopiedSourceError(invalid, job_id, 0, 'checkpoint', 'expected this job in copy phase')
     if 'copy_format' not in data and 'rendered_receipts' not in data:
@@ -736,62 +736,110 @@ def import_staging(root, turns: store_steps.TurnRunner, job_id: str) -> store_im
         phase, data = journal.last_checkpoint()
         _bound_turn(turns, data)
         sources = _read_committed_sources(job, phase, data, job_id, prepared_ok=True)
-        staging = job / 'staging'
-        ledger = staging / 'ledger.sqlite3'
-        fixed = {key: data[key] for key in (
-            'job_id', 'store_id', 'project_id', 'project_name', 'marked_at_ms', 'rendered_receipts',
-        )}
-        attempt = data.get('import_attempt')
-        if attempt is None:
-            if phase == 'import':
-                raise ValueError('prepared import checkpoint has no fixed attempt inputs')
-            decisions = json.loads(_canonical_bytes(data.get('decisions', {})))
-            attempt = {**fixed, 'decisions': decisions}
-            data = {**data, 'import_attempt': attempt}
-            _bound_turn(turns, data, lambda: journal.checkpoint('copy', data))
-        elif attempt != {**fixed, 'decisions': attempt['decisions']}:
-            raise ValueError('fixed import attempt inputs differ from the job checkpoint')
+        return _import_staging(job, journal, turns, phase, data, sources)
 
-        planned = store_import.plan_relays(sources)
-        identities = store_import.plan_identities(sources, attempt['decisions'])
 
-        def report(plan):
-            return store_import.Report(
-                plan, identities, store_id=attempt['store_id'], project_id=attempt['project_id'],
-            )
+def _import_staging(job, journal, turns, phase, data, sources):
+    staging = job / 'staging'
+    ledger = staging / 'ledger.sqlite3'
+    fixed = _fixed_import_inputs(data)
+    attempt = data.get('import_attempt')
+    if attempt is None:
+        if phase in ('import', 'check'):
+            raise ValueError('prepared import checkpoint has no fixed attempt inputs')
+        decisions = json.loads(_canonical_bytes(data.get('decisions', {})))
+        attempt = {**fixed, 'decisions': decisions}
+        data = {**data, 'import_attempt': attempt}
+        _bound_turn(turns, data, lambda: journal.checkpoint('copy', data))
+    elif attempt != {**fixed, 'decisions': attempt['decisions']}:
+        raise ValueError('fixed import attempt inputs differ from the job checkpoint')
 
-        if phase == 'import':
-            if _prepared_receipt(staging, ledger) != data.get('prepared'):
-                raise ValueError('prepared import ledger differs from the import checkpoint')
-            return report(planned)
+    planned = store_import.plan_relays(sources)
+    identities = store_import.plan_identities(sources, attempt['decisions'])
 
-        _discard_staging(staging)
-        staging.mkdir(mode=0o700)
-        try:
-            with closing(submit.open_store(ledger)) as conn:
-                store_layout._configure(conn)
-                if store_layout._row(conn, 'PRAGMA foreign_keys') != (1,):
-                    raise store_layout.LayoutFault('foreign-keys-off')
-                try:
-                    _write_import_batches(conn, attempt, planned.relays, identities)
-                except identity_import.IdentityImportRefused as exc:
-                    refusal = store_import.Listed(exc.reason, str(exc.item))
-                except ValueError as exc:
-                    refusal = store_import.Listed('import refused', str(exc))
-                else:
-                    refusal = None
-            if refusal is not None:
-                _discard_staging(staging)
-                return report(replace(planned, listed=planned.listed + (refusal,)))
-            prepared = store_steps.prepare_database(ledger)
-            _sync_dir(staging)
-            _sync_dir(job)
-        except BaseException:
-            _discard_staging(staging)
-            raise
+    def report(plan):
+        return store_import.Report(
+            plan, identities, store_id=attempt['store_id'], project_id=attempt['project_id'],
+        )
 
-        # After checkpoint publication begins, a retry must inspect the journal
-        # before discarding any output. A failure can follow a durable commit.
-        receipt = {'size': prepared.size, 'sha256': prepared.sha256}
-        _bound_turn(turns, data, lambda: journal.checkpoint('import', {**data, 'prepared': receipt}))
+    if phase in ('import', 'check'):
+        if _prepared_receipt(staging, ledger) != data.get('prepared'):
+            raise ValueError('prepared import ledger differs from the import checkpoint')
         return report(planned)
+
+    _discard_staging(staging)
+    staging.mkdir(mode=0o700)
+    try:
+        with closing(submit.open_store(ledger)) as conn:
+            store_layout._configure(conn)
+            if store_layout._row(conn, 'PRAGMA foreign_keys') != (1,):
+                raise store_layout.LayoutFault('foreign-keys-off')
+            try:
+                _write_import_batches(conn, attempt, planned.relays, identities)
+            except identity_import.IdentityImportRefused as exc:
+                refusal = store_import.Listed(exc.reason, str(exc.item))
+            except ValueError as exc:
+                refusal = store_import.Listed('import refused', str(exc))
+            else:
+                refusal = None
+        if refusal is not None:
+            _discard_staging(staging)
+            return report(replace(planned, listed=planned.listed + (refusal,)))
+        prepared = store_steps.prepare_database(ledger)
+        _sync_dir(staging)
+        _sync_dir(job)
+    except BaseException:
+        _discard_staging(staging)
+        raise
+
+    # After checkpoint publication begins, a retry must inspect the journal
+    # before discarding any output. A failure can follow a durable commit.
+    receipt = {'size': prepared.size, 'sha256': prepared.sha256}
+    _bound_turn(turns, data, lambda: journal.checkpoint('import', {**data, 'prepared': receipt}))
+    return report(planned)
+
+
+
+def _fixed_import_inputs(data):
+    return {key: data[key] for key in (
+        'job_id', 'store_id', 'project_id', 'project_name', 'marked_at_ms', 'rendered_receipts',
+    )}
+
+
+def _publish_report(job, report):
+    folder = job / 'report'
+    folder.mkdir(mode=0o700, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.check-', dir=folder) as temporary:
+        candidate = Path(temporary) / 'migration.txt'
+        _write_metadata(candidate, report.render().encode('utf-8'))
+        os.replace(candidate, folder / candidate.name)
+    _sync_dir(folder)
+    _sync_dir(job)
+
+
+def decide(root, turns: store_steps.TurnRunner, job_id: str,
+           decisions: Mapping[str, str]) -> store_import.Report:
+    """Recheck original fingerprints, then rebuild from the fixed copied inputs."""
+    with _job(store_layout.resolve_root(root), job_id) as (job, journal):
+        phase, data = journal.last_checkpoint()
+        _bound_turn(turns, data)
+        sources = _read_committed_sources(job, phase, data, job_id, prepared_ok=True)
+        for item, expected in zip(data['roots'], data['fingerprints'], strict=True):
+            path = Path(item['path'])
+            _match_fingerprint(path, expected, _fingerprint(path, {}))
+
+        choices = json.loads(_canonical_bytes(dict(decisions)))
+        data = {**data, 'decisions': choices,
+                'import_attempt': {**_fixed_import_inputs(data), 'decisions': choices}}
+        data.pop('prepared', None)
+        _bound_turn(turns, data, lambda: journal.checkpoint('copy', data))
+        report = _import_staging(job, journal, turns, 'copy', data, sources)
+
+        def finish():
+            _publish_report(job, report)
+            if not report.unresolved():
+                _, prepared = journal.last_checkpoint()
+                journal.checkpoint('check', prepared)
+
+        _bound_turn(turns, data, finish)
+        return report
