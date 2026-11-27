@@ -6,6 +6,7 @@ from uuid import uuid4
 import errno
 import logging
 import multiprocessing
+from multiprocessing import resource_tracker
 import os
 import sqlite3
 import subprocess
@@ -735,35 +736,90 @@ def _submit_fixture_operation(root):
     return store_layout._IncumbentOperation(key, data, admitted)
 
 
+def _spawn_probe(root, pipe):
+    pipe.send(os.getpid())
+
+
 class TestIncumbentOwnerTransitions(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name) / 'store'
+        self.process_cleanups = []
+        self.tracker_cleanup_registered = False
 
     def start_process(self, target, *args):
+        if not self.tracker_cleanup_registered:
+            self.addCleanup(self.stop_tracker)
+            self.tracker_cleanup_registered = True
         ctx = multiprocessing.get_context('spawn')
         pipe, child_pipe = ctx.Pipe()
+        self.addCleanup(pipe.close)
+        self.addCleanup(child_pipe.close)
         if target is _incumbent_process:
             process = ctx.Process(target=target, args=(self.root, child_pipe, *args))
         else:
             process = ctx.Process(target=target, args=(self.root, *args, child_pipe))
+        record = [process, False, None]
+        self.process_cleanups.append(record)
+        self.addCleanup(self.stop_process, record)
+        record[1] = True
         process.start()
         child_pipe.close()
-        self.addCleanup(pipe.close)
-        self.addCleanup(self.stop_process, process)
         return process, pipe
 
-    @staticmethod
-    def stop_process(process):
-        if process.is_alive():
-            process.kill()
-        process.join(10)
-        process.close()
+    def stop_process(self, record):
+        process, attempted, _ = record
+        if not attempted:
+            record[2] = ('never-attempted', None)
+            return
+        pid = process.pid
+        if pid is None:
+            record[2] = ('blocked', 'start failed, ownership unknown')
+            return
+        try:
+            if process.is_alive():
+                process.kill()
+            process.join(10)
+            if process.exitcode is None:
+                record[2] = ('blocked', f'owned child {pid} still alive')
+                return
+            process.close()
+        except Exception as error:
+            record[2] = ('blocked', f'cannot reap owned child {pid}: {error}')
+            raise
+        record[2] = ('reaped', None)
+
+    def stop_tracker(self):
+        problems = []
+        for process, _, outcome in self.process_cleanups:
+            if outcome is None:
+                pid = process.pid
+                problems.append(f'unproven reaping for {pid if pid is not None else "not started"}')
+            elif outcome[0] not in ('reaped', 'never-attempted'):
+                problems.append(outcome[1] or f'unproven reaping for {process.pid}')
+        self.assertFalse(problems, '; '.join(problems))
+        # _stop waits without a timeout until nobody owns the pipe's write end.
+        tracker = resource_tracker._resource_tracker
+        tracker._stop()
+        self.assertIsNone(tracker._pid)
 
     def receive(self, pipe):
         self.assertTrue(pipe.poll(20), 'fixture child must report its observation')
         return pipe.recv()
+
+    def test_spawn_cleanup_stops_resource_tracker(self):
+        process, pipe = self.start_process(_spawn_probe)
+        self.assertEqual(self.receive(pipe), process.pid)
+        process.join(10)
+        self.assertEqual(process.exitcode, 0)
+        tracker = resource_tracker._resource_tracker
+        tracker_pid = tracker._pid
+        self.assertIsNotNone(tracker_pid)
+        self.doCleanups()
+        self.assertIsNone(tracker._pid)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(tracker_pid, 0)
 
     def setup_armed_birth(self):
         guard, birth = store_layout.IncumbentGuard._create_new(self.root, _INCUMBENT_STORE_ID, P)
