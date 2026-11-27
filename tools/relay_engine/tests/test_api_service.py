@@ -728,8 +728,53 @@ service.start()
             with self.subTest(phase=phase):
                 self.check_hard_stop_with_parked_owner(phase)
 
-    def check_hard_stop_with_parked_owner(self, phase):
-        root = self.base / ('guard-' + phase)
+    def test_foreground_watchdog_observes_signal_sent_to_another_thread(self):
+        for name in ('adt-stop-observer', 'adt-store-fence', 'main'):
+            with self.subTest(thread=name):
+                try:
+                    self.check_hard_stop_with_parked_owner('accept', deliver='thread:' + name)
+                except subprocess.TimeoutExpired:
+                    self.fail(f'child alive 5 s after SIGTERM to {name}')
+                finally:
+                    (self.base / 'accept').unlink(missing_ok=True)
+
+    def test_losing_enter_stop_never_sees_claim_without_attempt(self):
+        script = """
+import threading
+from relay_engine import api_service as m
+entered = threading.Event()
+release = threading.Event()
+original = m._StopAttempt.__init__
+results = []
+def parked(self, now):
+    if threading.current_thread().name == 'parked-constructor':
+        entered.set()
+        assert release.wait(2)
+    original(self, now)
+m._StopAttempt.__init__ = parked
+epoch = m._ForegroundEpoch(lambda attempt: True)
+first = threading.Thread(target=lambda: results.append(epoch.enter_stop()), name='parked-constructor')
+first.start()
+try:
+    assert entered.wait(2)
+    claim_without_attempt = epoch.admission_closed and epoch.attempt is None
+    loser = epoch.enter_stop()
+    assert loser is not None, 'loser returned None while admission was closed'
+    assert not claim_without_attempt, 'admission closed before the attempt was published'
+finally:
+    release.set()
+    first.join(2)
+    epoch.finish()
+assert results == [loser] and epoch.attempt is loser
+"""
+        tools = Path(__file__).resolve().parents[2]
+        result = subprocess.run([sys.executable, '-c', script],
+                                env=dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1'),
+                                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def check_hard_stop_with_parked_owner(self, phase, *, deliver='terminate'):
+        root = self.base / ('guard-' + phase + ('' if deliver == 'terminate' else '-' + deliver[7:]))
         admission = admitted_store_fixture(root, P, project_name='service')
         tools = Path(__file__).resolve().parents[2]
         # Keep the original process alive with the same actual flock, then park
@@ -786,6 +831,24 @@ elif {phase!r} != 'record-sync':
     service._stop_owned = refuse
 service.stop()
 """
+        if deliver != 'terminate':
+            assert phase == 'accept' and deliver.startswith('thread:')
+            target = deliver[7:]
+            helper = f"""
+import signal
+import time
+def deliver_signal():
+    while not marker.exists():
+        time.sleep(0.005)
+    threads = {{item.name: item for item in threading.enumerate()}}
+    thread = threading.main_thread() if {target!r} == 'main' else threads[{target!r}]
+    sent = time.monotonic()
+    signal.pthread_kill(thread.ident, signal.SIGTERM)
+    print('sent', sent, flush=True)
+threading.Thread(target=deliver_signal, daemon=True).start()
+"""
+            accept_setup = '    service._listener = ParkedAccept()\n'
+            script = script.replace(accept_setup, accept_setup + helper, 1)
         environment = dict(os.environ, PYTHONPATH=str(tools), PYTHONDONTWRITEBYTECODE='1')
         lock = root / 'api-service.lock'
         with (private_idle(admission, environment) as (idle_fd, child_env),
@@ -804,8 +867,14 @@ service.stop()
                         time.sleep(0.01)
                 with lock.open('rb') as observer:
                     original_inode = os.fstat(observer.fileno()).st_ino
-                    started = time.monotonic()
-                    child.terminate()
+                    if deliver == 'terminate':
+                        started = time.monotonic()
+                        child.terminate()
+                    else:
+                        self.assertTrue(select.select([child.stdout], [], [], 3)[0], 'missing sent marker')
+                        sent = child.stdout.readline().decode().split()
+                        self.assertEqual(sent[:1], ['sent'])
+                        started = float(sent[1])
                     deadline = started + 2
                     while not (self.base / phase).exists():
                         self.assertLess(time.monotonic(), deadline)
