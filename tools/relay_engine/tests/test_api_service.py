@@ -1489,17 +1489,35 @@ service.serve_forever()
                     try:
                         self.assertTrue(waiting.wait(1))
                         self.assertIsNone(epoch.attempt)
+                        self.assertFalse(writer._admission_closed())
                         second = pool.submit(writer.submit_declared, job)
-                        with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
-                            second.result(0.25)
-                        release.set()
+                        deadline = time.monotonic() + 1
+                        while True:
+                            with writer._lock:
+                                active = writer._active_request
+                                queued = [request for request in writer._requests.values()
+                                          if request is not active]
+                                if queued:
+                                    self.assertEqual(len(queued), 1)
+                                    self.assertEqual(queued[0].kind, 'declared')
+                                    self.assertFalse(queued[0].withdrawn)
+                                    self.assertFalse(active.committing)
+                                    break
+                            self.assertLess(time.monotonic(), deadline, 'second request was not queued')
+                            time.sleep(0.005)
                         with self.assertRaises(TimeoutError):
-                            first.result(0.15)
-                        with writer._lock:
-                            self.assertFalse(writer._active_request.committing)
+                            second.result(0.25)
+                        self.assertIsNone(epoch.attempt)
                     finally:
                         release_publication.set()
                     stopping.result(1)
+                self.assertTrue(writer._admission_closed())
+                self.assertIsNotNone(epoch.attempt)
+                with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                    second.result(1)
+                with self.assertRaisesRegex(api_writer.WriterUnavailable, 'stopped'):
+                    writer.submit_declared(job)
+                self.assertLess(time.monotonic(), epoch.attempt.active)
             finally:
                 release.set()
             self.assertTrue(first.result(1).commit)
@@ -1568,15 +1586,16 @@ service.serve_forever()
                     stopping = pool.submit(service._signal, signal.SIGTERM, None)
                     try:
                         self.assertTrue(publishing.wait(1))
-                        execute.set()
-                        remaining = origin[0] + 1.55 - time.monotonic()
-                        self.assertGreater(remaining, 0)
-                        with self.assertRaises(TimeoutError):
-                            result.result(remaining)
+                        deadline = origin[0] + 1.55
+                        while (remaining := deadline - time.monotonic()) > 0:
+                            time.sleep(remaining)
                         self.assertIsNone(epoch.attempt)
                     finally:
                         publish.set()
                     stopping.result(1)
+                self.assertIsNotNone(epoch.attempt)
+                self.assertGreater(time.monotonic(), origin[0] + 1.5)
+                execute.set()
                 outcome = result.result(1)
                 self.assertEqual((outcome.commit, outcome.fault, outcome.indeterminate),
                                  (False, 'stop_unwritten', False))
