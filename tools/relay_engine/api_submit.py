@@ -162,15 +162,15 @@ def _run_transfer(turn, job, data, foreign):
 
 
 def _transfer_result(outcome):
+    if outcome.commit:
+        if isinstance(outcome.value, submit.TurnRefusal):
+            raise outcome.value.error
+        return _admitted_result(outcome.value)
     if outcome.fault in ('commit_unknown', 'stop_commit_unknown'):
         return ComponentRefusal('E_API_UNAVAILABLE', 'admission_unknown')
     if outcome.fault in ('commit_failed', 'stop_unwritten', 'receiver_required'):
         return ComponentRefusal('E_API_UNAVAILABLE', 'admission_not_stored')
-    if outcome.fault is not None or not outcome.commit:
-        return ComponentRefusal('E_API_UNAVAILABLE', 'runtime_not_ready')
-    if isinstance(outcome.value, submit.TurnRefusal):
-        raise outcome.value.error
-    return _admitted_result(outcome.value)
+    return ComponentRefusal('E_API_UNAVAILABLE', 'runtime_not_ready')
 
 
 class SubmitService:

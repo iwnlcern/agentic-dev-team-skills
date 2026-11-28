@@ -228,6 +228,47 @@ class CrossProjectAdmission(unittest.TestCase):
         self.assertEqual(self.durable('SELECT label FROM rollback_witness'),
                          [(x,) for x in ('already-voided', 'already-voided', 'voided', 'voided', None, None)])
 
+    def test_committed_outcome_survives_cleanup_failure(self):
+        for admit in (True, False):
+            with self.subTest(admit=admit):
+                if not admit:
+                    # A reported sender cleanup failure retires its connection.
+                    self.doCleanups()
+                    self.setUp()
+                self.seed(seat=admit)
+                real_cleanup = self.writer._cleanup_transfer_connections
+                injected = []
+
+                def cleanup_with_failure(conns, *args, **kwargs):
+                    failures = real_cleanup(conns, *args, **kwargs)
+                    self.assertEqual(failures, {})
+                    if P in conns:
+                        injected.append(P)
+                        return {P: sqlite3.OperationalError('observed cleanup failure')}
+                    return failures
+
+                if not admit:
+                    local = self.send(to='absent.planner', key='local-refusal')
+                    self.refused(local, 'integrity', engine='E-ADDRESS')
+                with self.intercept() as outcomes, mock.patch.object(
+                        self.writer, '_cleanup_transfer_connections', side_effect=cleanup_with_failure):
+                    response = self.send(key='cleanup-outcome')
+                self.assertEqual(injected, [P])
+                self.assertEqual(len(outcomes), 1)
+                outcome, = outcomes
+                self.assertTrue(outcome.commit)
+                self.assertFalse(outcome.indeterminate)
+                self.assertEqual(outcome.fault, 'rollback_failed')
+                if admit:
+                    self.assertIsInstance(outcome.value, submit.Admitted)
+                    self.assertEqual(self.durable('SELECT id FROM relays'), [(outcome.value.relay_id,)])
+                    self.assertEqual(self.admitted(response), outcome.value.relay_id)
+                else:
+                    self.assertIsInstance(outcome.value, submit.TurnRefusal)
+                    self.assertEqual(self.counts()[0], 0)
+                    self.assertEqual(self.counts()[-1], 2)
+                    self.assertEqual(response['error'], local['error'])
+
     def test_writer_outcome_map(self):
         self.seed()
 
