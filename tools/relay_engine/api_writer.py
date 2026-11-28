@@ -33,6 +33,21 @@ class JobOutcome:
     fault: str | None = None
 
 
+def _commit_sender(conn: sqlite3.Connection) -> None:
+    conn.execute('COMMIT').close()
+
+
+def _sender_in_transaction(conn: sqlite3.Connection) -> bool:
+    return conn.in_transaction
+
+
+def _transfer_commit_outcome(sender_open: bool | None, original: BaseException,
+                             failure: BaseException | None) -> JobOutcome:
+    if sender_open is True and failure is None:
+        return JobOutcome(False, original, False, 'commit_failed')
+    return JobOutcome(False, original, True, 'commit_unknown')
+
+
 class WriterJob(Protocol):
     files: frozenset[str]
     def run(self, conn: sqlite3.Connection) -> JobOutcome: ...
@@ -1543,6 +1558,7 @@ class StoreWriter:
             failure = self._finish_transfer(turn, original)
             return JobOutcome(False, value, True, 'rollback_failed' if failure else 'job_ended_transaction')
 
+        sender_open = None
         committed = False
         if turn._refusals:
             outcome = JobOutcome(False, None, False, 'turn_violation')
@@ -1558,17 +1574,22 @@ class StoreWriter:
                     for conn in conns.values():
                         conn.set_authorizer(None)
                     if self._permit_commit():
-                        conns[sender].execute('COMMIT').close()
+                        _commit_sender(conns[sender])
                         committed = True
                     else:
                         outcome = JobOutcome(False, None, False, 'stop_unwritten')
                 except BaseException as error:
+                    if request.committing:
+                        try:
+                            sender_open = _sender_in_transaction(conns[sender])
+                        except Exception:
+                            sender_open = None
                     original = error
 
         failure = self._finish_transfer(turn, original)
         if original is not None:
             if request.committing:
-                return JobOutcome(False, original, True, 'commit_unknown')
+                return _transfer_commit_outcome(sender_open, original, failure)
             if self._stop_attempt() is not None:
                 return JobOutcome(False, None, False, 'stop_unwritten')
             if failure is None:
