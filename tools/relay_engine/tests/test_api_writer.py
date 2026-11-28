@@ -2801,6 +2801,266 @@ class JoinTests(ProjectWriterFixture):
         self.assertIn(P, writer.served_projects())
 
 
+class JoinRetryTests(ProjectWriterFixture):
+    join_writer = JoinTests.join_writer
+    block = JoinTests.block
+    raise_held = staticmethod(JoinTests.raise_held)
+
+    def test_seal_cleared_rejoins_seal_held_project_off_worker(self):
+        threads = []
+        rejoined = threading.Event()
+
+        def join(*_):
+            threads.append(threading.current_thread().name)
+            if len(threads) == 1:
+                self.raise_held('seal')
+            rejoined.set()
+
+        writer = self.join_writer(join=join)
+        self.wait_join(writer.join_project(P), 'held', kind='seal')
+        self.flush(writer)
+        writer.seal_cleared(P, 'ignored')
+        self.assertTrue(rejoined.wait(2))
+        self.wait_join(writer.join_project(P), 'served')
+        self.assertEqual(threads, ['store-writer-join'] * 2)
+
+    def test_seal_cleared_ignores_other_holds(self):
+        join = mock.Mock(side_effect=lambda *_: self.raise_held('other'))
+        writer = self.join_writer(join=join)
+        self.wait_join(writer.join_project(P), 'held', kind='other')
+        self.flush(writer)
+        writer.seal_cleared(P, 'irrelevant')
+        self.wait_join(writer.join_project(P), 'held', kind='other')
+        self.assertEqual(join.call_count, 1)
+
+    def clear_while_running(self, boundary, *, takeover=False, clears=1, blocked_close=False):
+        entered, release, pause = self.block()
+        closing, clean, pause_close = self.block()
+        calls = []
+        hooks = mock.Mock()
+
+        def phase(name):
+            if name == 'join_revalidated' and boundary == name and not entered.is_set():
+                pause()
+
+        def opened(_project):
+            if boundary == 'ledger_opened' and not entered.is_set():
+                pause()
+
+        def close(*_, **_kw):
+            if blocked_close and not closing.is_set():
+                pause_close()
+
+        def join(*_):
+            calls.append(len(calls))
+            if len(calls) == 1:
+                if boundary == 'project_join':
+                    pause()
+                self.raise_held('seal')
+
+        hooks.ledger_opened.side_effect = opened
+        hooks.ledger_closing.side_effect = close
+        writer = self.join_writer(hooks=hooks, join=join, phase=phase)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            for _ in range(clears):
+                writer.seal_cleared(P, 'recorded')
+            if takeover:
+                writer.end_hold(P)
+            release.set()
+            if blocked_close:
+                self.assertTrue(closing.wait(2))
+                self.wait_join(ticket, 'not_served' if takeover else 'pending', seconds=0.02)
+                self.assertEqual(calls, [0])
+                clean.set()
+            self.wait_join(ticket, 'not_served' if takeover else 'served')
+        finally:
+            release.set()
+            clean.set()
+        self.assertEqual(calls, [0] if takeover else [0, 1])
+        self.assertNotIn(P, writer._held)
+
+    def retry_at_ending(self, *, takeover=False, fail_close=False):
+        entered, release, pause = self.block()
+        hooks = mock.Mock()
+        hooks.ledger_closing.side_effect = pause
+        calls = []
+
+        def join(*_):
+            calls.append(1)
+            if len(calls) == 1:
+                self.raise_held('seal')
+
+        writer = self.join_writer(hooks=hooks, join=join)
+        close_handle = writer._close_handle
+
+        def close(conn):
+            close_handle(conn)
+            if fail_close and not writer._rollback_errors and entered.is_set():
+                writer._failed_closes.append(conn)
+                raise OSError('unresolved join close')
+
+        try:
+            with (mock.patch.object(writer, '_close_handle', side_effect=close),
+                  mock.patch.object(writer, '_queue_join', wraps=writer._queue_join) as queued):
+                self.wait_join(writer.join_project(P), 'held', kind='seal')
+                self.assertTrue(entered.wait(2))
+                writer.seal_cleared(P, 'recorded')
+                if takeover:
+                    writer.end_hold(P)
+                self.assertNotIn(P, writer._held)
+                self.assertEqual(calls, [1])
+                release.set()
+                self.flush(writer)
+                if fail_close:
+                    self.assertEqual(queued.call_count, 1)
+                if not takeover and not fail_close:
+                    self.wait_join(writer.join_project(P), 'served')
+        finally:
+            release.set()
+        self.assertEqual(calls, [1] if takeover or fail_close else [1, 1])
+        if fail_close:
+            self.assertIn(P, writer._rollback_errors)
+            self.assertNotIn(P, writer._join_slot)
+
+    def wait_join(self, ticket, state, *, kind=None, cause=None, seconds=2):
+        result = ticket.wait(time.monotonic() + seconds)
+        self.assertEqual((result.state, result.kind), (state, kind))
+        if cause is not None:
+            self.assertEqual(result.cause, cause)
+        return result
+
+    def test_clear_at_each_boundary(self):
+        for boundary in ('join_revalidated', 'ledger_opened', 'project_join'):
+            with self.subTest(boundary=boundary):
+                self.clear_while_running(boundary)
+
+    def test_clear_after_hold_with_cleanup_blocked(self):
+        self.retry_at_ending()
+
+    def test_clear_between_decision_and_cleanup(self):
+        entered, release, pause = self.block()
+        calls = []
+
+        def join(*_):
+            calls.append(1)
+            if len(calls) == 1:
+                self.raise_held('seal')
+
+        writer = self.join_writer(join=join)
+        close = writer._close_ledger
+
+        def close_binding(*args, **kwargs):
+            if not entered.is_set():
+                pause()
+            return close(*args, **kwargs)
+
+        try:
+            with mock.patch.object(writer, '_close_ledger', side_effect=close_binding):
+                self.wait_join(writer.join_project(P), 'held', kind='seal')
+                self.assertTrue(entered.wait(2))
+                writer.seal_cleared(P, 'irrelevant')
+                self.assertEqual(calls, [1])
+                release.set()
+                self.wait_join(writer.join_project(P), 'served')
+        finally:
+            release.set()
+        self.assertEqual(calls, [1, 1])
+
+    def test_clear_then_takeover_during_running_join(self):
+        self.clear_while_running('project_join', takeover=True, blocked_close=True)
+
+    def test_one_successor_after_cleanup(self):
+        self.clear_while_running('project_join', clears=4, blocked_close=True)
+
+    def test_takeover_after_retry_queued(self):
+        self.retry_at_ending(takeover=True)
+
+    def test_no_promotion_while_handle_unresolved(self):
+        self.retry_at_ending(fail_close=True)
+
+    def release_at(self, boundary, *, stop=False):
+        entered, release, pause = self.block()
+        hooks = mock.Mock()
+        calls = []
+        released = threading.Event()
+
+        def once(*args, **kwargs):
+            if not entered.is_set():
+                pause(*args, **kwargs)
+
+        if boundary == 'ending':
+            hooks.ledger_closing.side_effect = once
+        elif boundary == 'opened':
+            hooks.ledger_opened.side_effect = once
+
+        def join(*_):
+            calls.append(1)
+            if released.is_set():
+                return
+            if boundary == 'running':
+                once()
+                return
+            self.raise_held('other')
+
+        writer = self.join_writer(hooks=hooks, join=join)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            writer.end_hold(P, rejoin=True)
+            released.set()
+            if stop:
+                self.assertEqual(writer.request_project_stop(P, self.principal), 'stopped')
+                self.assertNotIn(P, writer._release_intent)
+            release.set()
+            self.wait_join(ticket, 'held' if boundary == 'ending' else 'stopped' if stop else 'not_served',
+                           kind='other' if boundary == 'ending' else None)
+            self.flush(writer)
+            if stop:
+                self.assertNotIn(P, writer._join_slot)
+                self.assertNotIn(P, writer._release_intent)
+                self.assertEqual(writer.request_project_start(P, self.principal), 'started')
+            self.wait_join(writer.join_project(P), 'served')
+        finally:
+            release.set()
+        self.assertEqual(len(calls), 1 if boundary == 'opened' else 2)
+
+    def test_release_intent_running(self):
+        self.release_at('running')
+
+    def test_release_intent_ending(self):
+        self.release_at('ending')
+
+    def test_release_intent_project_stop_reopen(self):
+        self.release_at('running', stop=True)
+
+    def test_release_during_ledger_opened(self):
+        self.release_at('opened')
+
+    def test_successor_carries_epochs(self):
+        writer = self.join_writer()
+        real = writer._run_join
+        checked = threading.Event()
+        seen = []
+
+        def intercept(slot):
+            if slot.issued_epochs is not None:
+                with writer._lock:
+                    writer._hold_epochs[P] += 1
+                real(slot)
+                seen.append(slot.ticket.wait(time.monotonic()).state)
+                checked.set()
+            else:
+                real(slot)
+
+        with mock.patch.object(writer, '_run_join', side_effect=intercept):
+            writer.end_hold(P, rejoin=True)
+            self.assertTrue(checked.wait(2))
+        self.assertEqual(seen, ['not_served'])
+        self.assertNotIn(P, writer.served_projects())
+
+
 class GuardedWriterFixture(unittest.TestCase):
     def setUp(self):
         from uuid import uuid4

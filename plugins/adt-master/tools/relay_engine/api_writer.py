@@ -484,6 +484,12 @@ class JoinPort:
         return self._writer._join_port_call('join_submit', self._token, job=job)
 
 
+@dataclass(frozen=True)
+class _JoinEpochs:
+    hold_epoch: int
+    stop_epoch: int
+
+
 @dataclass
 class _JoinSlot:
     project_id: str
@@ -492,6 +498,10 @@ class _JoinSlot:
     token: JoinToken | None = None
     binding: _FileBinding | None = None
     hook_opened: bool = False
+    issued_epochs: _JoinEpochs | None = None
+    clear_seq: int = 0
+    rerun: bool = False
+    successor: "_JoinSlot | None" = None
 
 
 @dataclass
@@ -585,6 +595,8 @@ class StoreWriter:
         self._joining = {}
         self._join_slot = {}
         self._held = {}
+        self._seal_clear_seq = {}
+        self._release_intent = {}
         self._hold_epochs = {}
         self._stop_epochs = {}
         self._next_join_id = 0
@@ -1002,27 +1014,90 @@ class StoreWriter:
                 return JoinTicket(JoinOutcome('held', hold.kind, hold.cause))
             slot = self._join_slot.get(project_id)
             if slot is not None:
-                return slot.ticket
-            slot = _JoinSlot(project_id, JoinTicket())
-            self._join_slot[project_id] = slot
-            self._join_queue.put(slot)
-            if self._join_thread is None:
-                self._join_thread = threading.Thread(target=self._run_joins, name='store-writer-join')
-                self._join_thread.start()
-            return slot.ticket
+                return (slot.successor or slot).ticket
+            return self._queue_join(_JoinSlot(project_id, JoinTicket()))
+
+    def _queue_join(self, slot):
+        self._join_slot[slot.project_id] = slot
+        self._join_queue.put(slot)
+        if self._join_thread is None:
+            self._join_thread = threading.Thread(target=self._run_joins, name='store-writer-join')
+            self._join_thread.start()
+        return slot.ticket
+
+    def _join_epochs(self, project):
+        return _JoinEpochs(self._hold_epochs.get(project, 0), self._stop_epochs.get(project, 0))
+
+    def _invalid_successor(self, project, epochs):
+        if self._join_stopped() or self._stop_epochs.get(project, 0) != epochs.stop_epoch:
+            return JoinOutcome('stopped')
+        if (self._startup_state != 'serving' or not self._project_available(project)
+                or self._hold_epochs.get(project, 0) != epochs.hold_epoch):
+            return JoinOutcome('not_served')
+        return None
+
+    def seal_cleared(self, project_id: str, cause: str) -> None:
+        with self._lock:
+            self._seal_clear_seq[project_id] = self._seal_clear_seq.get(project_id, 0) + 1
+            if self._join_stopped() or self._startup_state != 'serving':
+                diagnostic = 'admission_closed'
+            else:
+                slot = self._join_slot.get(project_id)
+                hold = self._held.get(project_id)
+                if slot is not None and slot.state == 'running':
+                    slot.rerun = True
+                    return
+                if slot is not None and slot.successor is not None:
+                    return
+                if hold is not None and hold.kind == 'seal':
+                    self._held.pop(project_id)
+                    if slot is None:
+                        self._queue_join(_JoinSlot(project_id, JoinTicket()))
+                    elif slot.state == 'ending':
+                        slot.successor = _JoinSlot(project_id, JoinTicket(),
+                                                   issued_epochs=self._join_epochs(project_id))
+                    return
+                diagnostic = 'not_seal_held'
+        self._report_hook('seal_cleared', project_id, diagnostic)
 
     def end_hold(self, project_id: str, *, rejoin: bool = False) -> Hold | None:
-        if rejoin:
-            raise ValueError('rejoin is not configured')
         with self._lock:
             previous = self._held.pop(project_id, None)
             self._hold_epochs[project_id] = self._hold_epochs.get(project_id, 0) + 1
+            self._release_intent.pop(project_id, None)
             slot = self._join_slot.get(project_id)
-            if slot is not None and slot.state == 'queued':
-                del self._join_slot[project_id]
-                slot.ticket._resolve(JoinOutcome('not_served'))
+            if slot is not None:
+                if slot.successor is not None:
+                    slot.successor.ticket._resolve(JoinOutcome('not_served'))
+                    slot.successor = None
+                if slot.state == 'queued':
+                    del self._join_slot[project_id]
+                    slot.ticket._resolve(JoinOutcome('not_served'))
+                    slot = None
             self._withdraw_join_requests(project_id)
+            if rejoin and not self._join_stopped():
+                self._release_intent[project_id] = self._join_epochs(project_id)
+                if slot is None:
+                    self._promote_join(project_id, None, resolved=True)
             return previous
+
+    def _promote_join(self, project, slot, *, resolved):
+        if self._join_slot.get(project) is not slot or (slot is not None and slot.state != 'ending'):
+            return
+        if slot is not None:
+            del self._join_slot[project]
+        successor = slot.successor if slot is not None else None
+        intent = self._release_intent.pop(project, None)
+        if intent is not None:
+            if successor is not None:
+                successor.ticket._resolve(JoinOutcome('not_served'))
+            successor = _JoinSlot(project, JoinTicket(), issued_epochs=intent)
+        if successor is not None:
+            refusal = self._invalid_successor(project, successor.issued_epochs)
+            if refusal is not None or not resolved:
+                successor.ticket._resolve(refusal or JoinOutcome('not_served', cause='rollback_failed'))
+            else:
+                self._queue_join(successor)
 
     def _withdraw_join_requests(self, project):
         for request in self._requests.values():
@@ -1043,23 +1118,26 @@ class StoreWriter:
         try:
             with self._project_request_lock(project):
                 def eligible(conn):
-                    return (store_layout.route_state(conn, project) == 'active'
-                            and not any(row.scope == 'store' or row.project_id == project
-                                        for row in store_layout.open_stops(conn)))
+                    stopped = any(row.scope == 'store' or row.project_id == project
+                                  for row in store_layout.open_stops(conn))
+                    return store_layout.route_state(conn, project) == 'active', stopped
 
-                allowed = self.read_catalogue(eligible)
+                active, stopped = self.read_catalogue(eligible)
                 with self._lock:
                     if self._join_slot.get(project) is not slot:
                         return
-                    if self._join_stopped() or not allowed or not self._project_available(project):
-                        self._release_queued_join(slot)
+                    invalid = self._invalid_successor(project, slot.issued_epochs) if slot.issued_epochs else None
+                    if invalid is not None or stopped or not active or self._join_stopped() or not self._project_available(project):
+                        self._release_queued_join(slot, invalid or (JoinOutcome('stopped') if stopped else None))
                         return
-                    epoch = self._hold_epochs.get(project, 0) + 1
-                    self._hold_epochs[project] = epoch
+                    if slot.issued_epochs is None:
+                        self._hold_epochs[project] = self._hold_epochs.get(project, 0) + 1
+                    epochs = self._join_epochs(project)
                     self._next_join_id += 1
                     slot.state = 'running'
+                    slot.clear_seq = self._seal_clear_seq.get(project, 0)
                     slot.token = JoinToken(project, self._next_join_id, None,
-                                           self._stop_epochs.get(project, 0), epoch)
+                                           epochs.stop_epoch, epochs.hold_epoch)
         except BaseException:
             with self._lock:
                 self._release_queued_join(slot)
@@ -1080,10 +1158,10 @@ class StoreWriter:
         else:
             self._join_control('join_end', slot, None, serve=True)
 
-    def _release_queued_join(self, slot):
+    def _release_queued_join(self, slot, outcome=None):
         if self._join_slot.get(slot.project_id) is slot and slot.state == 'queued':
             del self._join_slot[slot.project_id]
-            slot.ticket._resolve(JoinOutcome('stopped' if self._join_stopped() else 'not_served'))
+            slot.ticket._resolve(outcome or JoinOutcome('stopped' if self._join_stopped() else 'not_served'))
 
     def _join_control(self, kind, slot, error=None, *, serve=False):
         request = _Request(kind, slot.project_id, join_slot=slot, join_error=error,
@@ -1194,14 +1272,22 @@ class StoreWriter:
                 outcome = JoinOutcome('not_served', cause=forced)
             elif not authorized:
                 outcome = self._join_outcome(slot.token)
+            elif (isinstance(error, ProjectHeld) and error.project_id == project
+                  and error.kind == 'seal'
+                  and (slot.rerun or slot.clear_seq != self._seal_clear_seq.get(project, 0))):
+                epochs = _JoinEpochs(slot.token.hold_epoch, slot.token.stop_epoch)
+                slot.successor = _JoinSlot(project, slot.ticket, issued_epochs=epochs)
+                outcome = None
             elif isinstance(error, ProjectHeld) and error.project_id == project:
                 self._held[project] = Hold(error.kind, error.cause)
+                self._release_intent.pop(project, None)
                 outcome = JoinOutcome('held', error.kind, error.cause)
             else:
                 outcome = JoinOutcome('not_served')
             self._joining.pop(project, None)
             slot.state = 'ending'
-            slot.ticket._resolve(outcome)
+            if outcome is not None:
+                slot.ticket._resolve(outcome)
             self._withdraw_join_requests(project)
             close_private_hook = slot.hook_opened and not published
             if published:
@@ -1209,16 +1295,17 @@ class StoreWriter:
                 self._connections.pop(project)
                 self._ledger_files.pop(project, None)
                 self._project_members.pop(project, None)
+        resolved = forced is None
         try:
             if binding is not None:
                 self._close_ledger(project, binding.conn, opened=close_private_hook)
         except BaseException as failure:
             with self._lock:
                 self._rollback_errors[project] = failure
+            resolved = False
         finally:
             with self._lock:
-                if self._join_slot.get(project) is slot:
-                    del self._join_slot[project]
+                self._promote_join(project, slot, resolved=resolved)
 
     def _run_join_port(self, request):
         token = request.join_token
@@ -1361,6 +1448,7 @@ class StoreWriter:
                 was = self._project_admission.get(project_id, 'open')
                 self._stop_epochs[project_id] = self._stop_epochs.get(project_id, 0) + 1
                 self._project_admission[project_id] = 'stopping'
+                self._release_intent.pop(project_id, None)
                 self._fence_project(project_id)
             try:
                 outcome = self._record_project(store_layout.record_stop, project_id, principal)
@@ -1461,7 +1549,11 @@ class StoreWriter:
     def _request_close(self):
         if not self._closed:
             self._closed = True
+            self._release_intent.clear()
             for slot in tuple(self._join_slot.values()):
+                if slot.successor is not None:
+                    slot.successor.ticket._resolve(JoinOutcome('stopped'))
+                    slot.successor = None
                 self._release_queued_join(slot)
             if self._join_thread is not None:
                 self._join_queue.put(None)
