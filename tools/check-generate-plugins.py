@@ -210,6 +210,7 @@ LOCKED_ENGINE_SET = (
     "relay_engine/seal_renderer.py",
     "relay_engine/seal_slots.py",
     "relay_engine/seal_types.py",
+    "relay_engine/seal_wiring.py",
     "relay_engine/seal_worker.py",
     "relay_engine/seats.py",
     "relay_engine/slips.py",

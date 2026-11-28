@@ -111,16 +111,24 @@ def gate_violations(paths):
             for child in ast.iter_child_nodes(node):
                 parents[child] = node
 
-        def function_name(node):
+        def enclosing_function(node):
             cur = node
             while cur in parents:
                 cur = parents[cur]
                 if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return cur.name
+                    return cur
             return None
 
+        seal_launches = 0
         for node in ast.walk(tree):
-            fn = function_name(node)
+            owner = enclosing_function(node)
+            fn = owner.name if owner is not None else None
+            tmutil_site = (module == "seal_wiring" and isinstance(owner, ast.FunctionDef)
+                           and owner.name == "_run_tmutil" and parents.get(owner) is tree)
+            if (module == "seal_wiring" and isinstance(node, ast.Name) and
+                    node.id == "subprocess" and
+                    not (isinstance(parents.get(node), ast.Attribute) and parents[node].value is node)):
+                violations.append((module, node.lineno, "bare subprocess reference"))
             if (module == "rules" and isinstance(node, ast.Name) and
                     node.id == "subprocess" and
                     not (isinstance(parents.get(node), ast.Attribute) and
@@ -139,7 +147,14 @@ def gate_violations(paths):
                                   isinstance(node, ast.Import) and
                                   all(alias.name == "subprocess" and alias.asname is None
                                       for alias in node.names if alias.name.split(".")[0] == "subprocess"))
-                    if ((name in FORBIDDEN_IMPORTS and not git_import) or
+                    tmutil_import = (
+                        name == "subprocess" and module == "seal_wiring"
+                        and isinstance(node, ast.Import) and parents.get(node) is tree
+                        and any(alias.name == name and alias.asname is None for alias in node.names)
+                        and all(alias.name == name and alias.asname is None
+                                for alias in node.names if alias.name.split(".")[0] == name)
+                    )
+                    if ((name in FORBIDDEN_IMPORTS and not (git_import or tmutil_import)) or
                             (module == "rules" and name in {"asyncio", "pty", "multiprocessing"})):
                         violations.append((module, node.lineno,
                                            "forbidden import " + name))
@@ -249,6 +264,15 @@ def gate_violations(paths):
                         violations.append((module, node.lineno,
                                            "non-inventory emission key"))
             if isinstance(node, ast.Attribute):
+                if (module == "seal_wiring" and isinstance(node.value, ast.Name) and
+                        node.value.id == "subprocess"):
+                    parent = parents.get(node)
+                    if tmutil_site and node.attr == "run" and isinstance(parent, ast.Call) and parent.func is node:
+                        seal_launches += 1
+                        if seal_launches > 1:
+                            violations.append((module, node.lineno, "second tmutil launch site"))
+                    elif not (tmutil_site and node.attr in {"PIPE", "DEVNULL"}):
+                        violations.append((module, node.lineno, "subprocess outside tmutil launch site"))
                 if (module == "rules" and isinstance(node.value, ast.Name) and
                         node.value.id == "subprocess" and
                         node.attr not in {"Popen", "PIPE", "DEVNULL"}):
@@ -287,6 +311,27 @@ class TestGate(unittest.TestCase):
         paths.extend(str(path) for path in sorted(queue.glob("*.py")))
         paths.append(os.path.join(os.path.dirname(package), "relay"))
         return paths
+
+    def test_strings_gate_allows_one_launch_site(self):
+        launch = 'import subprocess\ndef _run_tmutil(argv): return subprocess.run(argv)\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'seal_wiring.py'
+            path.write_text(launch)
+            self.assertEqual(gate_violations([str(path)]), [])
+            other = Path(temporary) / 'unrelated.py'
+            other.write_text(launch)
+            self.assertTrue(gate_violations([str(other)]))
+            for source in (
+                launch.replace('subprocess.run', 'subprocess.Popen'),
+                launch.replace('_run_tmutil', 'another_function'),
+                launch.replace('subprocess.run(argv)', '(subprocess.run(argv), subprocess.run(argv))'),
+                launch.replace('import subprocess', 'import subprocess as sp').replace('subprocess.run', 'sp.run'),
+                'from subprocess import run\ndef _run_tmutil(argv): return run(argv)\n',
+                launch.replace('subprocess.run(argv)', 'subprocess.run'),
+            ):
+                with self.subTest(source=source):
+                    path.write_text(source)
+                    self.assertTrue(gate_violations([str(path)]))
 
     def test_rules_forbids_alternate_launch_imports(self):
         with tempfile.TemporaryDirectory() as temporary:
