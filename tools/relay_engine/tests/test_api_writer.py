@@ -2317,6 +2317,490 @@ class StartHookCustodyTests(ProjectWriterFixture):
         self.assertTrue(writer.settle_private_io(time.monotonic() + 1))
 
 
+class JoinTests(ProjectWriterFixture):
+    deny_rollback = WriterTests.deny_rollback
+
+    def join_writer(self, *, hooks=None, join=None, phase=None):
+        writer = api_writer.StoreWriter(self.root, runtime_instance_id='join',
+                                       hooks=hooks, phase_hook=phase)
+        self.addCleanup(writer.close)
+        writer.start(mode='service', project_join=join)
+        self.assertEqual(writer.wait_started().state, 'serving')
+        return writer
+
+    def wait_join(self, ticket, state, *, kind=None, cause=None):
+        result = ticket.wait(time.monotonic() + 2)
+        self.assertEqual(result.state, state)
+        self.assertEqual(result.kind, kind)
+        if cause is not None:
+            self.assertEqual(result.cause, cause)
+        return result
+
+    def block(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def pause(*args, **kwargs):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError('join barrier not released')
+
+        return entered, release, pause
+
+    def test_hooks_called_on_worker_in_5c_order(self):
+        seen = []
+        hooks = mock.Mock()
+
+        def record(name):
+            return lambda *args, **kwargs: seen.append((name, threading.current_thread().name))
+
+        hooks.ledger_opened.side_effect = record('opened')
+        hooks.ledger_serving.side_effect = record('serving')
+        hooks.ledger_closing.side_effect = record('closing')
+        writer = self.join_writer(hooks=hooks, join=record('join'))
+        self.wait_join(writer.join_project(P), 'served')
+        hooks.ledger_closing.assert_not_called()
+        writer.close()
+        self.assertEqual(seen, [('opened', 'store-writer'), ('join', 'store-writer-join'),
+                                ('serving', 'store-writer'), ('closing', 'store-writer')])
+        control = self.join_writer()
+        self.assertIsNone(control._join_thread)
+
+    def test_joinport_has_only_three_operations(self):
+        seen = []
+        writer = self.join_writer(join=lambda port, _: seen.append(port))
+        self.wait_join(writer.join_project(P), 'served')
+        self.assertEqual({attr for attr in dir(seen[0]) if not attr.startswith('_')},
+                         {'read', 'read_catalogue', 'submit'})
+
+    def test_join_submit_commit_then_drain_order(self):
+        seen = []
+        hooks = mock.Mock()
+
+        def join(port, project):
+            self.assertEqual(project, P)
+            self.assertNotIn(P, writer.served_projects())
+            self.assert_unavailable(lambda: writer.submit(P, self.job(self.success)),
+                                    'project_not_served')
+            self.assertTrue(port.submit(self.job(self.success)).commit)
+            def read_name(conn):
+                with closing(conn.execute('SELECT name FROM projects')) as cursor:
+                    return cursor.fetchone()[0]
+
+            self.assertEqual(port.read(read_name), 'after')
+            self.assertTrue(port.read_catalogue(lambda c: store_layout.route_state(c, P)))
+            seen.append('drain')
+
+        hooks.ledger_serving.side_effect = lambda _: seen.append('serving')
+        writer = self.join_writer(hooks=hooks, join=join)
+        self.wait_join(writer.join_project(P), 'served')
+        self.assertEqual(seen, ['drain', 'serving'])
+
+    def test_stale_joinport_refused_on_second_join(self):
+        ports = []
+
+        def join(port, project):
+            if ports:
+                self.assert_unavailable(lambda: ports[0].read(lambda _: None), 'project_not_served')
+            ports.append(port)
+            if len(ports) == 1:
+                raise ValueError('first join failed')
+
+        writer = self.join_writer(join=join)
+        self.wait_join(writer.join_project(P), 'not_served')
+        self.flush(writer)
+        self.wait_join(writer.join_project(P), 'served')
+        self.assertEqual(len(ports), 2)
+
+    def test_joinport_revoked_on_serve(self):
+        ports = []
+        writer = self.join_writer(join=lambda port, _: ports.append(port))
+        self.wait_join(writer.join_project(P), 'served')
+        self.assertNotIn(P, writer._join_slot)
+        self.assertNotIn(P, writer._joining)
+        self.assert_unavailable(lambda: ports[0].read(lambda _: None), 'project_not_served')
+
+    def test_ledger_opened_timeout_leaves_unserved(self):
+        hooks = mock.Mock()
+        hooks.ledger_opened.side_effect = TimeoutError()
+        join = mock.Mock()
+        writer = self.join_writer(hooks=hooks, join=join)
+        self.wait_join(writer.join_project(P), 'not_served')
+        writer.close()
+        hooks.ledger_closing.assert_not_called()
+        join.assert_not_called()
+        self.assertNotIn(P, writer.served_projects())
+
+    def test_join_outcome_seal_held(self):
+        callback = mock.Mock(side_effect=lambda *args: self.raise_held('seal'))
+        writer = self.join_writer(join=callback)
+        self.wait_join(writer.join_project(P), 'held', kind='seal', cause='recorded')
+
+    def test_join_outcome_other_held(self):
+        callback = mock.Mock(side_effect=lambda *args: self.raise_held('other'))
+        writer = self.join_writer(join=callback)
+        self.wait_join(writer.join_project(P), 'held', kind='other', cause='recorded')
+
+    @staticmethod
+    def raise_held(kind):
+        raise api_writer.ProjectHeld(P, kind, 'recorded')
+
+    def test_join_outcome_ledger_serving_raise(self):
+        hooks = mock.Mock()
+        hooks.ledger_serving.side_effect = ValueError('injected')
+        writer = self.join_writer(hooks=hooks)
+        self.wait_join(writer.join_project(P), 'not_served')
+        writer.close()
+        hooks.ledger_closing.assert_called_once()
+
+    def test_join_outcome_other_raise(self):
+        writer = self.join_writer(join=mock.Mock(side_effect=ValueError('injected')))
+        self.wait_join(writer.join_project(P), 'not_served')
+        self.assertNotIn(P, writer.served_projects())
+
+    def test_hold_on_published_binding_decided_before_close(self):
+        hooks = mock.Mock()
+        seen = []
+        hooks.ledger_closing.side_effect = lambda *_args, **_kw: seen.append(
+            (writer._held[P].kind, P in writer._joining))
+        writer = self.join_writer(hooks=hooks, join=lambda *_: self.raise_held('seal'))
+        self.wait_join(writer.join_project(P), 'held', kind='seal')
+        writer.close()
+        self.assertEqual(seen, [('seal', False)])
+
+    def test_ledger_closing_on_every_long_lived_close(self):
+        for path in ('stop', 'rollback', 'declared', 'finalizer', 'shutdown'):
+            with self.subTest(path=path):
+                hooks = mock.Mock()
+                join = (lambda *_: self.raise_held('other')) if path == 'finalizer' else None
+                writer = self.join_writer(hooks=hooks, join=join)
+                self.wait_join(writer.join_project(P), 'held' if join else 'served',
+                               kind='other' if join else None)
+                if path == 'stop':
+                    self.assertEqual(writer.request_project_stop(P, self.principal), 'stopped')
+                    self.flush(writer)
+                    hooks.ledger_closing.assert_called_once()
+                    with closing(store_layout.open_catalogue(self.root)) as conn:
+                        store_layout.record_start(conn, 'project', P, by=self.principal)
+                        conn.commit()
+                elif path == 'rollback':
+                    error = self.assert_unavailable(
+                        lambda: writer.submit(P, self.job(lambda conn: WriterTests.rollback_refusal(self, conn))),
+                        'rollback_failed')
+                    self.assertIsNotNone(error.__cause__)
+                    hooks.ledger_closing.assert_called_once()
+                elif path == 'declared':
+                    def retire(_):
+                        writer._retire_declared_file(P, writer._connections[P], OSError('fault'))
+                        return api_writer.JobOutcome(False, None)
+                    with mock.patch.object(writer, '_run_declared', side_effect=retire):
+                        writer.submit_declared(self.declared(lambda _: None))
+                writer.close()
+                self.assertTrue(hooks.ledger_closing.called)
+                for call in hooks.ledger_closing.call_args_list:
+                    self.assertEqual(call.args, (P,))
+                    self.assertIs(call.kwargs['deadline'], writer._stop_deadline)
+
+    def test_guarded_cleanup_record(self):
+        writer = self.join_writer()
+        failure = OSError('failed close')
+        conn = mock.Mock()
+        conn.close.side_effect = failure
+        cleanup = api_writer.GuardedCleanup()
+        writer._close_guarded_open(P, conn, store_layout.LayoutFault('incumbent-hold'), cleanup)
+        self.assertIs(cleanup.failure, failure)
+        self.assertIn(conn, writer._failed_closes)
+        self.assertIs(writer._rollback_errors[P], failure)
+
+    def test_guarded_refusal_finalizes(self):
+        hooks = mock.Mock()
+        writer = self.join_writer(hooks=hooks)
+        with mock.patch.object(writer, '_open_join_handle', side_effect=store_layout.LayoutFault('missing')):
+            self.wait_join(writer.join_project(P), 'not_served')
+        writer.close()
+        self.assertNotIn(P, writer._joining)
+        hooks.ledger_opened.assert_not_called()
+
+    def test_incumbent_hold_with_raising_close(self):
+        hooks = mock.Mock()
+        writer = self.join_writer(hooks=hooks)
+
+        def refuse(project, cleanup):
+            conn = mock.Mock()
+            conn.close.side_effect = OSError('failed close')
+            fault = store_layout.LayoutFault('incumbent-hold')
+            writer._close_guarded_open(project, conn, fault, cleanup)
+            raise fault
+
+        with mock.patch.object(writer, '_open_join_handle', side_effect=refuse):
+            self.wait_join(writer.join_project(P), 'not_served', cause='rollback_failed')
+        hooks.ledger_opened.assert_not_called()
+        self.assertNotIn(P, writer._held)
+        self.assertIn(P, writer._rollback_errors)
+
+    def test_restore_held_outcome(self):
+        hooks = mock.Mock()
+        join = mock.Mock()
+        writer = self.join_writer(hooks=hooks, join=join)
+        with mock.patch.object(writer, '_open_join_handle',
+                               side_effect=api_writer.ProjectHeld(P, 'other', 'restore_held')):
+            self.wait_join(writer.join_project(P), 'held', kind='other', cause='restore_held')
+        join.assert_not_called()
+        hooks.ledger_opened.assert_not_called()
+
+    def test_failed_private_close_fences_project(self):
+        hooks = mock.Mock()
+        hooks.ledger_opened.side_effect = ValueError('failed open hook')
+        writer = self.join_writer(hooks=hooks)
+        original_close = writer._close_handle
+        original_open = writer._open_join_handle
+        private = []
+
+        def capture(*args):
+            opened = original_open(*args)
+            private.append(opened[0].conn)
+            return opened
+
+        def fail_private(conn):
+            original_close(conn)
+            if private and conn is private[0]:
+                writer._failed_closes.append(conn)
+                raise OSError('failed close')
+
+        with (mock.patch.object(writer, '_open_join_handle', side_effect=capture),
+              mock.patch.object(writer, '_close_handle', side_effect=fail_private)):
+            self.wait_join(writer.join_project(P), 'not_served')
+            self.flush(writer)
+        self.assertIn(P, writer._rollback_errors)
+        hooks.ledger_closing.assert_not_called()
+
+    def test_stop_after_revalidation(self):
+        self.join_revoked_at('join_revalidated', by='stop')
+
+    def test_stop_during_ledger_serving(self):
+        self.join_revoked_at('ledger_serving', by='stop')
+
+    def test_stop_during_ledger_opened(self):
+        self.join_revoked_at('ledger_opened', by='stop')
+
+    def test_end_hold_during_ledger_opened(self):
+        self.join_revoked_at('ledger_opened', by='takeover')
+
+    def join_revoked_at(self, where, *, by):
+        entered, release, pause = self.block()
+        hooks = mock.Mock()
+        hook = mock.Mock()
+
+        def phase(name):
+            if name == where:
+                pause()
+
+        if where.startswith('ledger'):
+            getattr(hooks, where).side_effect = pause
+        writer = self.join_writer(hooks=hooks, join=hook, phase=phase)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            if where != 'ledger_serving':
+                self.assertNotIn(P, writer._joining)
+            if by == 'stop':
+                attempt = CatalogueHookTests.attempt(self, writer)
+                attempt.active = time.monotonic()
+                self.assertTrue(writer.fence_for_stop(attempt))
+            else:
+                writer.end_hold(P)
+        finally:
+            release.set()
+        self.wait_join(ticket, 'stopped' if by == 'stop' else 'not_served')
+        writer.close()
+        self.assertNotIn(P, writer._held)
+        self.assertNotIn(P, writer._joining)
+        self.assertNotIn(P, writer.served_projects())
+        if where != 'ledger_serving':
+            hook.assert_not_called()
+
+    def test_restore_held_after_takeover_not_published(self):
+        entered, release, pause = self.block()
+        writer = self.join_writer()
+
+        def restore(*_):
+            pause()
+            raise api_writer.ProjectHeld(P, 'other', 'restore_held')
+
+        try:
+            with mock.patch.object(writer, '_open_join_handle', side_effect=restore):
+                ticket = writer.join_project(P)
+                self.assertTrue(entered.wait(2))
+                writer.end_hold(P)
+                release.set()
+                self.wait_join(ticket, 'not_served')
+        finally:
+            release.set()
+        self.assertNotIn(P, writer._held)
+
+    def test_end_hold_revokes_queued_submit(self):
+        self.queued_join_revoked()
+
+    def test_queued_join_request_released_after_revocation(self):
+        self.queued_join_revoked()
+
+    def queued_join_revoked(self):
+        entered, release, pause = self.block()
+        ran, reasons = [], []
+
+        def join(port, _):
+            try:
+                port.submit(self.job(lambda conn: ran.append(conn)))
+            except api_writer.WriterUnavailable as error:
+                reasons.append(error.reason)
+
+        writer = self.join_writer(join=join,
+                                  phase=lambda name: pause() if name == 'join_port_queued' else None)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            writer.end_hold(P)
+        finally:
+            release.set()
+        self.wait_join(ticket, 'not_served')
+        self.assertEqual(ran, [])
+        self.assertEqual(reasons, ['project_not_served'])
+
+    def test_late_hold_after_stop_not_published(self):
+        entered, release, pause = self.block()
+
+        def join(*args):
+            pause()
+            self.raise_held('seal')
+
+        writer = self.join_writer(join=join)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            attempt = CatalogueHookTests.attempt(self, writer)
+            self.assertTrue(writer.fence_for_stop(attempt))
+        finally:
+            release.set()
+        self.wait_join(ticket, 'stopped')
+        self.assertNotIn(P, writer._held)
+
+    def test_active_operation_continues_then_discarded(self):
+        entered, release, pause = self.block()
+        seen = []
+
+        def run(conn):
+            pause()
+            seen.append('ran')
+            return self.success(conn)
+
+        def join(port, _):
+            seen.append(port.submit(self.job(run)).commit)
+            self.raise_held('seal')
+
+        writer = self.join_writer(join=join)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            writer.end_hold(P)
+        finally:
+            release.set()
+        self.wait_join(ticket, 'not_served')
+        self.assertEqual(seen, ['ran', True])
+        self.assertNotIn(P, writer._held)
+
+    def test_takeover_without_stop_not_incomplete(self):
+        entered, release, pause = self.block()
+        writer = self.join_writer(join=pause)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            writer.end_hold(P)
+        finally:
+            release.set()
+        self.wait_join(ticket, 'not_served')
+        self.assertTrue(writer.settle_private_io(time.monotonic() + 2))
+
+    def test_join_ticket_outcomes(self):
+        entered, release, pause = self.block()
+        writer = self.join_writer(join=pause)
+        try:
+            ticket = writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            self.assertIs(writer.join_project(P), ticket)
+            self.assertEqual(ticket.wait(time.monotonic()).state, 'pending')
+        finally:
+            release.set()
+        self.wait_join(ticket, 'served')
+
+    def test_lazy_join_thread_start_fenced(self):
+        writer = self.join_writer()
+        self.assertIsNone(writer._join_thread)
+        attempt = CatalogueHookTests.attempt(self, writer)
+        self.assertTrue(writer.fence_for_stop(attempt))
+        self.wait_join(writer.join_project(P), 'stopped')
+        self.assertIsNone(writer._join_thread)
+
+        control = self.join_writer()
+        registered = []
+        start = threading.Thread.start
+
+        def record_start(thread):
+            if thread.name == 'store-writer-join':
+                registered.append((control._lock._is_owned(), control._join_thread is thread))
+            return start(thread)
+
+        with mock.patch.object(threading.Thread, 'start', record_start):
+            self.wait_join(control.join_project(P), 'served')
+        self.assertEqual(registered, [(True, True)])
+
+    def test_join_thread_custody(self):
+        thread_observations = []
+
+        def join(*args):
+            thread_observations.append(threading.current_thread())
+
+        writer = self.join_writer(join=join)
+        self.wait_join(writer.join_project(P), 'served')
+        self.assertEqual(thread_observations, [writer._join_thread])
+        writer.close()
+        self.assertFalse(thread_observations[0].is_alive())
+
+    def test_writer_settle_false_with_join_blocked_at_work(self):
+        entered, release, pause = self.block()
+        writer = self.join_writer(join=pause)
+        try:
+            writer.join_project(P)
+            self.assertTrue(entered.wait(2))
+            attempt = CatalogueHookTests.attempt(self, writer)
+            attempt.work = time.monotonic() + 0.03
+            writer.fence_for_stop(attempt)
+            self.assertFalse(writer.settle_service_stop(attempt))
+        finally:
+            release.set()
+        writer.close()
+        self.assertFalse(writer.settle_service_stop(attempt))
+
+    def test_stop_deadline_reaches_every_close_after_fence(self):
+        hooks = mock.Mock()
+        writer = self.join_writer(hooks=hooks)
+        self.wait_join(writer.join_project(P), 'served')
+        attempt = CatalogueHookTests.attempt(self, writer)
+        self.assertTrue(writer.fence_for_stop(attempt))
+        self.assertTrue(writer.settle_service_stop(attempt))
+        hooks.ledger_closing.assert_called_once_with(P, deadline=writer._stop_deadline)
+        hooks.catalogue_closing.assert_called_once_with(deadline=writer._stop_deadline)
+        self.assertEqual(writer._stop_deadline.at(), attempt.active)
+
+    def test_request_project_start_unconfigured_unchanged(self):
+        self.row()
+        writer = self.join_writer()
+        with mock.patch.object(writer, 'join_project', create=True) as join:
+            self.assertEqual(writer.request_project_start(P, self.principal), 'started')
+            self.flush(writer)
+            join.assert_not_called()
+        self.assertIn(P, writer.served_projects())
+
+
 class GuardedWriterFixture(unittest.TestCase):
     def setUp(self):
         from uuid import uuid4

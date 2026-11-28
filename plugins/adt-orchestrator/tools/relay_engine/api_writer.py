@@ -424,6 +424,82 @@ def _require_identity(path, expected):
     raise UndeclaredFile()
 
 
+@dataclass(frozen=True)
+class Hold:
+    kind: Literal['seal', 'other']
+    cause: str
+
+
+class ProjectHeld(Exception):
+    def __init__(self, project_id: str, kind: Literal['seal', 'other'], cause: str):
+        self.project_id, self.kind, self.cause = project_id, kind, cause
+        super().__init__(cause)
+
+
+@dataclass(frozen=True)
+class JoinToken:
+    project_id: str
+    join_id: int
+    binding_id: int | None
+    stop_epoch: int
+    hold_epoch: int
+
+
+@dataclass(frozen=True)
+class JoinOutcome:
+    state: Literal['served', 'held', 'not_served', 'stopped', 'pending']
+    kind: Literal['seal', 'other'] | None = None
+    cause: str | None = None
+
+
+class JoinTicket:
+    def __init__(self, result: JoinOutcome | None = None):
+        self._done = threading.Event()
+        self._result = None
+        if result is not None:
+            self._resolve(result)
+
+    def _resolve(self, result):
+        self._result = result
+        self._done.set()
+
+    def wait(self, deadline: float) -> JoinOutcome:
+        if self._done.wait(max(0, deadline - time.monotonic())):
+            return self._result
+        return JoinOutcome('pending')
+
+
+class JoinPort:
+    def __init__(self, writer, token: JoinToken):
+        self._writer = writer
+        self._token = token
+
+    def read(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        return self._writer._join_port_call('join_read', self._token, fn=fn)
+
+    def read_catalogue(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        return self._writer._join_port_call('join_read_catalogue', self._token, fn=fn)
+
+    def submit(self, job: WriterJob) -> JobOutcome:
+        return self._writer._join_port_call('join_submit', self._token, job=job)
+
+
+@dataclass
+class _JoinSlot:
+    project_id: str
+    ticket: JoinTicket
+    state: Literal['queued', 'running', 'ending'] = 'queued'
+    token: JoinToken | None = None
+    binding: _FileBinding | None = None
+    hook_opened: bool = False
+
+
+@dataclass
+class GuardedCleanup:
+    failure: BaseException | None = None
+    _restore_hold: bool = False
+
+
 @dataclass
 class _Request:
     kind: str
@@ -441,6 +517,10 @@ class _Request:
     read_catalogue: bool = False
     transient: sqlite3.Connection | None = None
     receiver: sqlite3.Connection | None = None
+    join_token: JoinToken | None = None
+    join_slot: _JoinSlot | None = None
+    join_error: BaseException | None = None
+    join_serve: bool = False
 
 
 def _unavailable(reason, cause):
@@ -499,8 +579,18 @@ class StoreWriter:
         self._start_result = None
         self._before_project_join = None
         self._start_hook = None
-        self._start_hook_missed_attempt = None
-        self._start_hook_missed_private = set()
+        self._settle_missed_attempt = None
+        self._settle_missed_private = set()
+        self._project_join = None
+        self._joining = {}
+        self._join_slot = {}
+        self._held = {}
+        self._hold_epochs = {}
+        self._stop_epochs = {}
+        self._next_join_id = 0
+        self._ledger_hook_handles = set()
+        self._join_queue = queue.Queue()
+        self._join_thread = None
 
     @property
     def runtime_instance_id(self) -> str:
@@ -722,10 +812,11 @@ class StoreWriter:
 
     def start(self, *, mode: Literal['service'] | None = None,
               before_joins: Callable[[StorePort], None] | None = None,
-              before_project_join: Callable[[StorePort], None] | None = None) -> None:
+              before_project_join: Callable[[StorePort], None] | None = None,
+              project_join: Callable[[JoinPort, str], None] | None = None) -> None:
         if mode not in (None, 'service'):
             raise ValueError('unsupported startup mode')
-        if mode is None and (before_joins is not None or before_project_join is not None):
+        if mode is None and any(hook is not None for hook in (before_joins, before_project_join, project_join)):
             raise ValueError('start hooks require service mode')
         with self._lock:
             if self._worker is not None and (mode == 'service' or self._startup_state is not None):
@@ -738,6 +829,7 @@ class StoreWriter:
                 if mode == 'service':
                     self._startup_state = 'opening'
                     self._before_project_join = before_project_join
+                    self._project_join = project_join
                 self._worker = threading.Thread(target=self._work, name='store-writer')
                 self._worker.start()
                 if mode == 'service':
@@ -817,8 +909,14 @@ class StoreWriter:
         self._local.active = True
         try:
             with self._lock:
-                self._require_running()
-                if request.kind in {'job', 'callee'}:
+                if request.join_token is None:
+                    self._require_running()
+                if request.join_token is not None:
+                    if not self._join_authorized(request.join_token):
+                        raise WriterUnavailable('project_not_served')
+                    if request.kind == 'join_submit':
+                        self._check_files(request.project_id, request.job)
+                elif request.kind in {'job', 'callee'}:
                     self._require_served(request.project_id)
                     self._check_files(request.project_id, request.job)
                 elif request.kind == 'open':
@@ -843,11 +941,14 @@ class StoreWriter:
                     if project is not None and request.read_route == 'served':
                         request.bindings[project] = self._bindings[project]
                     self._require_declared_bindings(request.bindings)
-                self._require_running()
+                if request.join_token is None:
+                    self._require_running()
                 self._requests[id(request)] = request
                 self._queue.put(request)
             try:
-                if request.kind in {'job', 'callee', 'declared', 'read', 'transfer'}:
+                if request.join_token is not None:
+                    self._phase('join_port_queued')
+                elif request.kind in {'job', 'callee', 'declared', 'read', 'transfer'}:
                     self._phase('queued')
             except BaseException:
                 request.withdrawn = True
@@ -869,6 +970,293 @@ class StoreWriter:
             return request.result
         finally:
             self._local.active = False
+
+    def _join_stopped(self):
+        return self._closed or self._admission_closed() or self._stop_deadline.at() is not None
+
+    def _join_outcome(self, token):
+        if self._join_stopped() or self._stop_epochs.get(token.project_id, 0) != token.stop_epoch:
+            return JoinOutcome('stopped')
+        return JoinOutcome('not_served')
+
+    def _join_authorized(self, token, *, private=False):
+        project = token.project_id
+        slot = self._join_slot.get(project)
+        return (slot is not None and slot.state == 'running' and slot.token is token
+                and (private or (self._joining.get(project) == token.join_id
+                                 and id(self._bindings.get(project)) == token.binding_id))
+                and self._project_available(project) and not self._join_stopped()
+                and self._stop_epochs.get(project, 0) == token.stop_epoch
+                and self._hold_epochs.get(project, 0) == token.hold_epoch)
+
+    def join_project(self, project_id: str) -> JoinTicket:
+        with self._changed:
+            if self._join_stopped():
+                return JoinTicket(JoinOutcome('stopped'))
+            if self._startup_state != 'serving':
+                return JoinTicket(JoinOutcome('not_served'))
+            if project_id in self._served:
+                return JoinTicket(JoinOutcome('served'))
+            if project_id in self._held and project_id not in self._join_slot:
+                hold = self._held[project_id]
+                return JoinTicket(JoinOutcome('held', hold.kind, hold.cause))
+            slot = self._join_slot.get(project_id)
+            if slot is not None:
+                return slot.ticket
+            slot = _JoinSlot(project_id, JoinTicket())
+            self._join_slot[project_id] = slot
+            self._join_queue.put(slot)
+            if self._join_thread is None:
+                self._join_thread = threading.Thread(target=self._run_joins, name='store-writer-join')
+                self._join_thread.start()
+            return slot.ticket
+
+    def end_hold(self, project_id: str, *, rejoin: bool = False) -> Hold | None:
+        if rejoin:
+            raise ValueError('rejoin is not configured')
+        with self._lock:
+            previous = self._held.pop(project_id, None)
+            self._hold_epochs[project_id] = self._hold_epochs.get(project_id, 0) + 1
+            slot = self._join_slot.get(project_id)
+            if slot is not None and slot.state == 'queued':
+                del self._join_slot[project_id]
+                slot.ticket._resolve(JoinOutcome('not_served'))
+            self._withdraw_join_requests(project_id)
+            return previous
+
+    def _withdraw_join_requests(self, project):
+        for request in self._requests.values():
+            if (request.join_token is None or request.project_id != project
+                    or request is self._active_request or request.done.is_set()):
+                continue
+            request.withdrawn = True
+            request.error = WriterUnavailable('project_not_served')
+            request.done.set()
+            request.ready.set()
+
+    def _run_joins(self):
+        while (slot := self._join_queue.get()) is not None:
+            self._run_join(slot)
+
+    def _run_join(self, slot):
+        project = slot.project_id
+        try:
+            with self._project_request_lock(project):
+                def eligible(conn):
+                    return (store_layout.route_state(conn, project) == 'active'
+                            and not any(row.scope == 'store' or row.project_id == project
+                                        for row in store_layout.open_stops(conn)))
+
+                allowed = self.read_catalogue(eligible)
+                with self._lock:
+                    if self._join_slot.get(project) is not slot:
+                        return
+                    if self._join_stopped() or not allowed or not self._project_available(project):
+                        self._release_queued_join(slot)
+                        return
+                    epoch = self._hold_epochs.get(project, 0) + 1
+                    self._hold_epochs[project] = epoch
+                    self._next_join_id += 1
+                    slot.state = 'running'
+                    slot.token = JoinToken(project, self._next_join_id, None,
+                                           self._stop_epochs.get(project, 0), epoch)
+        except BaseException:
+            with self._lock:
+                self._release_queued_join(slot)
+            return
+        try:
+            self._phase('join_revalidated')
+            self._join_control('join_open', slot)
+            with self._lock:
+                token = slot.token
+                authorized = self._join_authorized(token)
+            if not authorized:
+                self._join_control('join_end', slot)
+                return
+            if self._project_join is not None:
+                self._project_join(JoinPort(self, token), project)
+        except BaseException as error:
+            self._join_control('join_end', slot, error)
+        else:
+            self._join_control('join_end', slot, None, serve=True)
+
+    def _release_queued_join(self, slot):
+        if self._join_slot.get(slot.project_id) is slot and slot.state == 'queued':
+            del self._join_slot[slot.project_id]
+            slot.ticket._resolve(JoinOutcome('stopped' if self._join_stopped() else 'not_served'))
+
+    def _join_control(self, kind, slot, error=None, *, serve=False):
+        request = _Request(kind, slot.project_id, join_slot=slot, join_error=error,
+                           join_serve=serve)
+        with self._lock:
+            if self._join_slot.get(slot.project_id) is not slot or self._closed:
+                return
+            request.ready.set()
+            self._queue.put(request)
+        request.done.wait()
+        if request.error is not None:
+            raise request.error
+
+    def _join_port_call(self, kind, token, *, fn=None, job=None):
+        return self._call(_Request(kind, token.project_id, job,
+                                   read_fn=fn, join_token=token))
+
+    def _open_join_handle(self, project, cleanup):
+        path = self._file_path(project)
+        self._check_store_open()
+        members = None
+        if self._store_guard is not None:
+            conn, members = self._open_guarded(project, purpose='join', cleanup=cleanup)
+            identity = members[-1]
+        else:
+            identity = _identity(path)
+            conn = store_layout.open_ledger(self._root, project)
+        try:
+            conn.isolation_level = None
+            _require_identity(path, identity)
+            return _FileBinding(conn, identity), os.path.realpath(path), members
+        except BaseException as error:
+            self._close_guarded_open(project, conn, error, cleanup)
+            raise
+
+    def _join_open(self, slot):
+        project = slot.project_id
+        with self._lock:
+            if self._join_slot.get(project) is not slot:
+                return
+            allowed = self._join_authorized(slot.token, private=True)
+            rollback = project in self._rollback_errors
+        if not allowed or rollback:
+            self._finalize_join(slot, forced='rollback_failed' if rollback else None)
+            return
+        cleanup = GuardedCleanup()
+        try:
+            slot.binding, path, members = self._open_join_handle(project, cleanup)
+        except BaseException as error:
+            if cleanup.failure is not None or (isinstance(error, store_layout.LayoutFault)
+                                               and error.cause == 'close-unresolved'):
+                self._finalize_join(slot, forced='rollback_failed')
+            else:
+                if cleanup._restore_hold:
+                    error = ProjectHeld(project, 'other', 'restore_held')
+                self._finalize_join(slot, error)
+            return
+        if self._hooks is not None:
+            try:
+                self._hooks.ledger_opened(project)
+            except BaseException:
+                self._report_hook('ledger_opened', project, 'raised')
+                self._finalize_join(slot)
+                return
+            slot.hook_opened = True
+        with self._lock:
+            if self._join_authorized(slot.token, private=True):
+                slot.token = replace(slot.token, binding_id=id(slot.binding))
+                self._connections[project] = slot.binding.conn
+                self._bindings[project] = slot.binding
+                self._ledger_files[project] = path
+                if members is not None:
+                    self._project_members[project] = members
+                self._joining[project] = slot.token.join_id
+                if slot.hook_opened:
+                    self._ledger_hook_handles.add(project)
+                return
+        self._finalize_join(slot)
+
+    def _join_finish(self, slot, error, *, serve):
+        project = slot.project_id
+        with self._lock:
+            can_serve = serve and self._join_authorized(slot.token)
+        if can_serve and self._hooks is not None:
+            try:
+                self._hooks.ledger_serving(project)
+            except BaseException:
+                self._report_hook('ledger_serving', project, 'raised')
+                can_serve = False
+        with self._lock:
+            if can_serve and self._join_authorized(slot.token):
+                self._joining.pop(project)
+                self._served.add(project)
+                del self._join_slot[project]
+                slot.ticket._resolve(JoinOutcome('served'))
+                return
+        self._finalize_join(slot, error)
+
+    def _finalize_join(self, slot, error=None, *, forced=None):
+        project = slot.project_id
+        binding = slot.binding
+        with self._lock:
+            if self._join_slot.get(project) is not slot or slot.state != 'running':
+                return
+            published = binding is not None and self._bindings.get(project) is binding
+            authorized = self._join_authorized(slot.token, private=not published)
+            if forced is not None:
+                outcome = JoinOutcome('not_served', cause=forced)
+            elif not authorized:
+                outcome = self._join_outcome(slot.token)
+            elif isinstance(error, ProjectHeld) and error.project_id == project:
+                self._held[project] = Hold(error.kind, error.cause)
+                outcome = JoinOutcome('held', error.kind, error.cause)
+            else:
+                outcome = JoinOutcome('not_served')
+            self._joining.pop(project, None)
+            slot.state = 'ending'
+            slot.ticket._resolve(outcome)
+            self._withdraw_join_requests(project)
+            close_private_hook = slot.hook_opened and not published
+            if published:
+                self._bindings.pop(project)
+                self._connections.pop(project)
+                self._ledger_files.pop(project, None)
+                self._project_members.pop(project, None)
+        try:
+            if binding is not None:
+                self._close_ledger(project, binding.conn, opened=close_private_hook)
+        except BaseException as failure:
+            with self._lock:
+                self._rollback_errors[project] = failure
+        finally:
+            with self._lock:
+                if self._join_slot.get(project) is slot:
+                    del self._join_slot[project]
+
+    def _run_join_port(self, request):
+        token = request.join_token
+        project = token.project_id
+        binding = self._bindings[project]
+        if request.kind == 'join_submit':
+            self._active_project, self._conn = project, binding.conn
+            return self._run_job(request.job)
+        if request.kind == 'join_read_catalogue':
+            with self._lock:
+                self._check_binding('catalogue', self._require_catalogue())
+            conn = store_layout.open_catalogue_readonly(self._root)
+            with self._lock:
+                request.transient = conn
+            try:
+                return request.read_fn(conn), None
+            finally:
+                self._close_handle(conn)
+        conn = binding.conn
+        conn.execute('PRAGMA query_only=ON').close()
+        try:
+            return request.read_fn(conn), None
+        finally:
+            conn.execute('PRAGMA query_only=OFF').close()
+
+    def _close_ledger(self, project, conn, *, opened=False):
+        with self._lock:
+            if project in self._ledger_hook_handles:
+                self._ledger_hook_handles.remove(project)
+                opened = True
+        try:
+            if opened:
+                try:
+                    self._hooks.ledger_closing(project, deadline=self._stop_deadline)
+                except BaseException:
+                    self._report_hook('ledger_closing', project, 'raised')
+        finally:
+            self._close_handle(conn)
 
     def open_project(self, project_id: str) -> None:
         self._call(_Request('open', project_id))
@@ -927,6 +1315,7 @@ class StoreWriter:
             return self._project_locks.setdefault(project, threading.Lock())
 
     def _fence_project(self, project):
+        self._withdraw_join_requests(project)
         for request in self._requests.values():
             if request is self._active_request or request.done.is_set():
                 continue
@@ -970,6 +1359,7 @@ class StoreWriter:
         with self._project_request_lock(project_id):
             with self._changed:
                 was = self._project_admission.get(project_id, 'open')
+                self._stop_epochs[project_id] = self._stop_epochs.get(project_id, 0) + 1
                 self._project_admission[project_id] = 'stopping'
                 self._fence_project(project_id)
             try:
@@ -1036,7 +1426,10 @@ class StoreWriter:
                     return 'started_not_served'
                 self._pending_project_start.discard(project_id)
                 self._project_admission[project_id] = 'open'
-                self._post_project_request('open', project_id)
+                if self._hooks is None and self._project_join is None:
+                    self._post_project_request('open', project_id)
+                else:
+                    self.join_project(project_id)
             return 'started'
 
     def _can_publish_start(self):
@@ -1053,7 +1446,7 @@ class StoreWriter:
                 return
             self._closing_projects.add(project)
         try:
-            self._close_handle(conn)
+            self._close_ledger(project, conn)
         except BaseException as error:
             with self._changed:
                 self._rollback_errors[project] = error
@@ -1068,6 +1461,10 @@ class StoreWriter:
     def _request_close(self):
         if not self._closed:
             self._closed = True
+            for slot in tuple(self._join_slot.values()):
+                self._release_queued_join(slot)
+            if self._join_thread is not None:
+                self._join_queue.put(None)
             self._changed.notify_all()
             if self._worker is not None:
                 request = _Request('close')
@@ -1076,7 +1473,7 @@ class StoreWriter:
 
     def close(self) -> None:
         if (self._nested() or getattr(self._local, 'reader', False)
-                or threading.current_thread() is self._start_hook):
+                or threading.current_thread() in (self._start_hook, self._join_thread)):
             raise NestedWriterJob()
         with self._lock:
             self._request_close()
@@ -1084,11 +1481,12 @@ class StoreWriter:
         if worker is not None:
             worker.join()
         self._join_start_hook(None)
+        self._join_thread_settled(None)
 
     def _publish_stop_outcome(self, request):
         if request.done.is_set():
             return
-        if request.kind in {'job', 'declared', 'callee', 'transfer'}:
+        if request.kind in {'job', 'declared', 'callee', 'transfer', 'join_submit'}:
             uncertain = request.committing or request.kind == 'callee'
             fault = 'stop_commit_unknown' if uncertain else 'stop_unwritten'
             request.result = JobOutcome(False, None, uncertain, fault)
@@ -1108,7 +1506,7 @@ class StoreWriter:
                     request.ready.set()
             self._request_close()
             connections = [conn for conn in self._readers.values() if conn is not None]
-            if active is not None and active.kind in {'declared', 'read', 'transfer'}:
+            if active is not None and active.kind in {'declared', 'read', 'transfer', 'join_read_catalogue'}:
                 connections.extend(binding.conn for binding in active.bindings.values())
                 if active.transient is not None:
                     connections.append(active.transient)
@@ -1149,20 +1547,31 @@ class StoreWriter:
         hook.join(None if deadline is None else max(0, deadline - time.monotonic()))
         return not hook.is_alive()
 
+    def _join_thread_settled(self, deadline):
+        with self._lock:
+            thread = self._join_thread
+        if thread is None:
+            return True
+        if thread is threading.current_thread():
+            return False
+        thread.join(None if deadline is None else max(0, deadline - time.monotonic()))
+        return not thread.is_alive()
+
     def settle_service_stop(self, attempt):
         with self._lock:
-            if self._stop_attempt() is not attempt or self._start_hook_missed_attempt is attempt:
+            if self._stop_attempt() is not attempt or self._settle_missed_attempt is attempt:
                 return False
             worker = self._worker
         if worker is not None:
             worker.join(max(0, attempt.work - time.monotonic()))
         hook_ended = self._join_start_hook(attempt.work)
+        join_ended = self._join_thread_settled(attempt.work)
         with self._changed:
-            if not hook_ended:
-                self._start_hook_missed_attempt = attempt
-            if (self._start_hook_missed_attempt is attempt
-                    or (worker is not None and (worker.is_alive()
-                        or not (self._close_complete or self._start_error is not None)))):
+            worker_ended = worker is None or (not worker.is_alive()
+                                             and (self._close_complete or self._start_error is not None))
+            if not (worker_ended and hook_ended and join_ended):
+                self._settle_missed_attempt = attempt
+            if self._settle_missed_attempt is attempt:
                 return False
             self._changed.wait_for(lambda: not self._readers, max(0, attempt.work - time.monotonic()))
             return not self._readers and not self._failed_closes
@@ -1176,12 +1585,13 @@ class StoreWriter:
         if worker is not None:
             worker.join(None if deadline is None else max(0, deadline - time.monotonic()))
         hook_ended = self._join_start_hook(deadline)
+        join_ended = self._join_thread_settled(deadline)
         with self._changed:
-            if not hook_ended:
-                self._start_hook_missed_private.add(deadline)
-            if (deadline in self._start_hook_missed_private
-                    or (worker is not None and (worker.is_alive()
-                        or not (self._close_complete or self._start_error is not None)))):
+            worker_ended = worker is None or (not worker.is_alive()
+                                             and (self._close_complete or self._start_error is not None))
+            if not (worker_ended and hook_ended and join_ended):
+                self._settle_missed_private.add(deadline)
+            if deadline in self._settle_missed_private:
                 return False
             remaining = None if deadline is None else max(0, deadline - time.monotonic())
             return self._changed.wait_for(lambda: not self._readers, remaining) and not self._failed_closes
@@ -1232,14 +1642,16 @@ class StoreWriter:
             self._failed_closes.append(conn)
             self._rollback_errors[project_id] = failure
 
-    def _close_guarded_open(self, project_id, conn, original):
+    def _close_guarded_open(self, project_id, conn, original, cleanup=None):
         try:
             conn.close()
         except BaseException as failure:
+            if cleanup is not None:
+                cleanup.failure = failure
             self._guarded_failed_close(project_id, conn, failure)
             original.add_note('cleanup close failed: ' + type(failure).__name__)
 
-    def _open_guarded(self, project_id, *, purpose, guard_catalogue=None):
+    def _open_guarded(self, project_id, *, purpose, guard_catalogue=None, cleanup=None):
         guard, arm = self._store_guard, self._store_arm
         self._check_store_open()
         members = guard.runtime_members(arm, project_id, phase='initial')
@@ -1258,17 +1670,21 @@ class StoreWriter:
             require_admission()
 
         def on_failed_close(conn, failure):
+            if cleanup is not None:
+                cleanup.failure = failure
             self._guarded_failed_close(project_id, conn, failure)
 
         conn = store_layout.open_ledger_runtime(self._root, project_id, check=check,
                                                 on_failed_close=on_failed_close)
         try:
             if restore_cancel.held(conn, project_id) is not None:
+                if cleanup is not None:
+                    cleanup._restore_hold = True
                 raise store_layout.LayoutFault('incumbent-hold')
             conn.isolation_level = None
             self._check_store_open()
         except BaseException as original:
-            self._close_guarded_open(project_id, conn, original)
+            self._close_guarded_open(project_id, conn, original, cleanup)
             raise
         return conn, members
 
@@ -1341,12 +1757,22 @@ class StoreWriter:
         except BaseException as error:
             failure = error
         if failure is not None:
+            project = self._active_project
             with self._lock:
-                self._served.discard(self._active_project)
-                self._bindings.pop(self._active_project, None)
-                self._rollback_errors[self._active_project] = failure
-            conn, self._conn = self._connections.pop(self._active_project), None
-            self._close_handle(conn)
+                conn = self._connections[project]
+                self._conn = None
+                self._rollback_errors[project] = failure
+                slot = self._join_slot.get(project)
+                joining = (slot is not None and slot.binding is not None
+                           and slot.binding.conn is conn)
+                if not joining:
+                    self._served.discard(project)
+                    self._bindings.pop(project, None)
+                    self._connections.pop(project)
+            if joining:
+                self._finalize_join(slot, forced='rollback_failed')
+            else:
+                self._close_ledger(project, conn)
             try:
                 strings.emit('stderr', 'store-writer-rollback-failed')
             except Exception:
@@ -1445,8 +1871,10 @@ class StoreWriter:
                 self._rollback_errors[label] = failure
                 self._connections.pop(label)
         try:
-            close = self._close_catalogue if label == 'catalogue' else self._close_handle
-            close(conn)
+            if label == 'catalogue':
+                self._close_catalogue(conn)
+            else:
+                self._close_ledger(label, conn)
         except Exception as close_error:
             failure.add_note(f'{label}: connection close failed: {type(close_error).__name__}')
 
@@ -1918,14 +2346,25 @@ class StoreWriter:
                         self._changed.wait_for(lambda: not self._readers)
                     self._close_files()
                     return
+                if request.kind == 'join_open':
+                    self._join_open(request.join_slot)
+                    continue
+                if request.kind == 'join_end':
+                    self._join_finish(request.join_slot, request.join_error, serve=request.join_serve)
+                    continue
                 with self._changed:
                     if request.withdrawn:
+                        continue
+                    if request.join_token is not None and not self._join_authorized(request.join_token):
+                        request.error = WriterUnavailable('project_not_served')
                         continue
                     if self._admission_closed():
                         request.error = WriterUnavailable('stopped')
                         continue
                     self._active_request = request
-                if request.kind == 'open':
+                if request.join_token is not None:
+                    result, error = self._run_join_port(request)
+                elif request.kind == 'open':
                     self._open(request.project_id)
                 elif request.kind == 'project_stop':
                     self._project_stop(request.project_id)
@@ -1962,8 +2401,10 @@ class StoreWriter:
                 self._queue.task_done()
 
     def _close_files(self):
+        for slot in tuple(self._join_slot.values()):
+            self._finalize_join(slot)
         for project_id, conn in tuple(self._connections.items()):
-            self._close_handle(conn)
+            self._close_ledger(project_id, conn)
             del self._connections[project_id]
         if self._catalogue is not None:
             self._close_catalogue(self._catalogue)
