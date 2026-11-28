@@ -2240,6 +2240,83 @@ class StartHookTests(ProjectWriterFixture):
         self.assertIsNone(writer._worker)
 
 
+class StartHookCustodyTests(ProjectWriterFixture):
+    def blocked_writer(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def hook(_port):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError('start hook barrier not released')
+
+        writer = api_writer.StoreWriter(self.root, runtime_instance_id='custody')
+        self.addCleanup(writer.close)
+        self.addCleanup(release.set)
+        writer.start(mode='service', before_joins=hook)
+        self.assertTrue(entered.wait(1))
+        return writer, release
+
+    def attempt(self, writer, *, work_after):
+        now = time.monotonic()
+        attempt = SimpleNamespace(active=now, work=now + work_after)
+        writer.bind_service_owner(None, SimpleNamespace(attempt=attempt, admission_closed=True))
+        self.assertTrue(writer.fence_for_stop(attempt))
+        return attempt
+
+    def test_start_hook_custody_at_stop(self):
+        writer, release = self.blocked_writer()
+        attempt = self.attempt(writer, work_after=0.1)
+        self.assert_unavailable(writer.wait_started, 'closed')
+        self.assertFalse(release.is_set())
+        self.assertFalse(writer.settle_service_stop(attempt))
+        self.assertTrue(writer._start_hook.is_alive())
+        release.set()
+        writer._start_hook.join(1)
+        self.assertFalse(writer._start_hook.is_alive())
+        self.assertFalse(writer.settle_service_stop(attempt))
+
+    def test_start_hook_released_before_work_settles_true(self):
+        writer, release = self.blocked_writer()
+        attempt = self.attempt(writer, work_after=1)
+        self.assert_unavailable(writer.wait_started, 'closed')
+        release.set()
+        self.assertTrue(writer.settle_service_stop(attempt))
+        self.assertFalse(writer._worker.is_alive())
+        self.assertFalse(writer._start_hook.is_alive())
+
+    def test_settle_private_io_waits_start_hook(self):
+        writer, release = self.blocked_writer()
+        self.assertFalse(writer.settle_private_io(time.monotonic() + 0.1))
+        self.assertTrue(writer._start_hook.is_alive())
+        release.set()
+        self.assertTrue(writer.settle_private_io(time.monotonic() + 1))
+        self.assertFalse(writer._start_hook.is_alive())
+
+    def test_close_joins_start_hook(self):
+        writer, release = self.blocked_writer()
+        started_close = threading.Event()
+        close_request = writer._request_close
+
+        def record_request():
+            close_request()
+            started_close.set()
+
+        with mock.patch.object(writer, '_request_close', side_effect=record_request):
+            with self.pool(1, release) as pool:
+                closed = pool.submit(writer.close)
+                self.assertTrue(started_close.wait(1))
+                with self.assertRaises(TimeoutError):
+                    closed.result(0.1)
+                release.set()
+                closed.result(1)
+        self.assertFalse(writer._start_hook.is_alive())
+
+    def test_no_start_hook_outside_service_mode(self):
+        writer = self.writer(opened=False)
+        self.assertIsNone(writer._start_hook)
+        self.assertTrue(writer.settle_private_io(time.monotonic() + 1))
+
+
 class GuardedWriterFixture(unittest.TestCase):
     def setUp(self):
         from uuid import uuid4

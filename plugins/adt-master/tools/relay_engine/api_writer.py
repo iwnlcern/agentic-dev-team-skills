@@ -498,6 +498,9 @@ class StoreWriter:
         self._startup_state = None
         self._start_result = None
         self._before_project_join = None
+        self._start_hook = None
+        self._start_hook_missed_attempt = None
+        self._start_hook_missed_private = set()
 
     @property
     def runtime_instance_id(self) -> str:
@@ -738,9 +741,14 @@ class StoreWriter:
                 self._worker = threading.Thread(target=self._work, name='store-writer')
                 self._worker.start()
                 if mode == 'service':
-                    hook = threading.Thread(target=self._run_start_hook, args=(before_joins,),
-                                            name='store-writer-start-hook')
-                    hook.start()
+                    self._start_hook = threading.Thread(target=self._run_start_hook,
+                                                        args=(before_joins,),
+                                                        name='store-writer-start-hook')
+                    try:
+                        self._start_hook.start()
+                    except BaseException:
+                        self._start_hook = None
+                        raise
                     return
         self._started.wait()
         if self._start_error is not None:
@@ -1067,13 +1075,15 @@ class StoreWriter:
                 self._queue.put(request)
 
     def close(self) -> None:
-        if self._nested() or getattr(self._local, 'reader', False):
+        if (self._nested() or getattr(self._local, 'reader', False)
+                or threading.current_thread() is self._start_hook):
             raise NestedWriterJob()
         with self._lock:
             self._request_close()
             worker = self._worker
         if worker is not None:
             worker.join()
+        self._join_start_hook(None)
 
     def _publish_stop_outcome(self, request):
         if request.done.is_set():
@@ -1129,15 +1139,31 @@ class StoreWriter:
                 # The original worker may have retired the handle.
                 pass
 
-    def settle_service_stop(self, attempt):
-        if self._stop_attempt() is not attempt:
+    def _join_start_hook(self, deadline):
+        with self._lock:
+            hook = self._start_hook
+        if hook is None:
+            return True
+        if hook is threading.current_thread():
             return False
-        worker = self._worker
+        hook.join(None if deadline is None else max(0, deadline - time.monotonic()))
+        return not hook.is_alive()
+
+    def settle_service_stop(self, attempt):
+        with self._lock:
+            if self._stop_attempt() is not attempt or self._start_hook_missed_attempt is attempt:
+                return False
+            worker = self._worker
         if worker is not None:
             worker.join(max(0, attempt.work - time.monotonic()))
-            if worker.is_alive() or not (self._close_complete or self._start_error is not None):
-                return False
+        hook_ended = self._join_start_hook(attempt.work)
         with self._changed:
+            if not hook_ended:
+                self._start_hook_missed_attempt = attempt
+            if (self._start_hook_missed_attempt is attempt
+                    or (worker is not None and (worker.is_alive()
+                        or not (self._close_complete or self._start_error is not None)))):
+                return False
             self._changed.wait_for(lambda: not self._readers, max(0, attempt.work - time.monotonic()))
             return not self._readers and not self._failed_closes
 
@@ -1149,9 +1175,14 @@ class StoreWriter:
             worker = self._worker
         if worker is not None:
             worker.join(None if deadline is None else max(0, deadline - time.monotonic()))
-            if worker.is_alive() or not (self._close_complete or self._start_error is not None):
-                return False
+        hook_ended = self._join_start_hook(deadline)
         with self._changed:
+            if not hook_ended:
+                self._start_hook_missed_private.add(deadline)
+            if (deadline in self._start_hook_missed_private
+                    or (worker is not None and (worker.is_alive()
+                        or not (self._close_complete or self._start_error is not None)))):
+                return False
             remaining = None if deadline is None else max(0, deadline - time.monotonic())
             return self._changed.wait_for(lambda: not self._readers, remaining) and not self._failed_closes
 
