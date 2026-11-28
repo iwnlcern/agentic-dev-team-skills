@@ -21,7 +21,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from relay_engine import api_compose, api_definitions as d, api_keys, api_platform
+from relay_engine import api_compose, api_keys, api_platform
 from relay_engine import daemon
 from relay_engine import api_protocol as p, api_writer, jcs, lifecycle_paths, store_layout, store_steps, version
 from relay_engine.tests.test_api_sessions import replace_occupant_for_test
@@ -153,11 +153,14 @@ class ApiServiceTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.home, self.temp = self.base / 'home', self.base / 'tmp'
-        self.home.mkdir(mode=0o700); self.temp.mkdir(mode=0o700)
+        self.home.mkdir(mode=0o700)
+        self.temp.mkdir(mode=0o700)
         self.env = patch.dict(os.environ, {'HOME': str(self.home), 'TMPDIR': str(self.temp)})
-        self.env.start(); self.addCleanup(self.env.stop)
+        self.env.start()
+        self.addCleanup(self.env.stop)
         self.temp_patch = patch.object(tempfile, 'tempdir', str(self.temp))
-        self.temp_patch.start(); self.addCleanup(self.temp_patch.stop)
+        self.temp_patch.start()
+        self.addCleanup(self.temp_patch.stop)
         # Import is deliberately per-test: RED names each missing service witness.
         from relay_engine import api_service
         self.m = api_service
@@ -2396,7 +2399,8 @@ service.serve_forever()
                     def compose(components):
                         value = original(components)
                         return replace(value, owners={k:v for k,v in value.owners.items() if k != 'relay.submit'})
-                    action = lambda: self.start_with_patch(service, compose)
+                    def action():
+                        return self.start_with_patch(service, compose)
                 with self.assertRaises(self.m.ServiceStartRefused) as caught:
                     action()
                 self.assertEqual(caught.exception.reason, 'port_missing' if mode == 'missing' else 'port_unrouted')
@@ -2551,7 +2555,8 @@ with daemon.prepare_socket(str(endpoint)):
             future = pool.submit(self.service.writer.submit, P, Job())
             try:
                 self.assertTrue(entered.wait(5))
-                timer = threading.Timer(0.05, release.set); timer.start()
+                timer = threading.Timer(0.05, release.set)
+                timer.start()
                 try:
                     with patch.object(os, 'unlink', side_effect=unlink):
                         os.kill(os.getpid(), signal.SIGTERM)
@@ -2561,7 +2566,8 @@ with daemon.prepare_socket(str(endpoint)):
             finally:
                 release.set()
         self.assertEqual(self.rows('SELECT name FROM projects'), [('drained',)])
-        self.assertFalse(ready.exists()); self.assertFalse(Path(data['socket']).exists())
+        self.assertFalse(ready.exists())
+        self.assertFalse(Path(data['socket']).exists())
         self.assertLess(order.index(ready.name), order.index(Path(data['socket']).name))
 
     def test_second_signal_during_drain_finishes_stop(self):
@@ -2622,13 +2628,17 @@ print('stopped', flush=True)
     def test_connection_bindings_are_independent(self):
         self.start()
         for role in ('planner', 'implementer'):
-            conn = self.connect(); self.sign_in(conn, role)
+            conn = self.connect()
+            self.sign_in(conn, role)
             result = conn.call('relay.submit', self.submit_args())
             self.assertIn('result', result, result)
         self.assertEqual(set(self.rows('SELECT sender_seat_id FROM relays')), {('planner',), ('implementer',)})
 
     def test_closed_connection_keeps_session_open(self):
-        self.start(); conn = self.connect(); signed = self.sign_in(conn); conn.close()
+        self.start()
+        conn = self.connect()
+        signed = self.sign_in(conn)
+        conn.close()
         self.assertEqual(self.rows('SELECT ended_at FROM seat_sessions WHERE id=?', (signed['session_id'],)), [(None,)])
         other = self.connect()
         self.assertIn('result', other.call('session.resume', dict(self.keys['planner'], session_id=signed['session_id'])))
@@ -2641,7 +2651,8 @@ print('stopped', flush=True)
             budget = self.m.REQUEST_BUDGET_BOUND if bound else self.m.REQUEST_BUDGET_UNBOUND
             fake = PrefixOnlySocket(budget + 1)
             self.service._connection(fake, state)
-            self.assertEqual(fake.reads, [4]); self.assertTrue(fake.closed)
+            self.assertEqual(fake.reads, [4])
+            self.assertTrue(fake.closed)
             size = int.from_bytes(fake.written[:4], 'big')
             self.assertEqual(len(fake.written), size + 4)
             value = json.loads(fake.written[4:])
@@ -2669,7 +2680,9 @@ print('stopped', flush=True)
             self.assertEqual(conn.sock.recv(1), b'')
 
     def test_largest_relay_submit_admitted(self):
-        self.start(); conn = self.connect(); self.sign_in(conn)
+        self.start()
+        conn = self.connect()
+        self.sign_in(conn)
         prefix = draft(to='platform.implementer', body='')
         data = prefix + b'x' * (131072 - len(prefix))
         args = {'draft_base64': base64.b64encode(data).decode(), 'submission_key': '\x01' * 256}
@@ -2687,7 +2700,8 @@ print('stopped', flush=True)
     def test_budget_follows_binding(self):
         self.start()
         for role, clear in (('planner', 'end'), ('implementer', 'replace')):
-            conn = self.connect(); signed = self.sign_in(conn, role)
+            conn = self.connect()
+            signed = self.sign_in(conn, role)
             self.assertIn('result', conn.call('protocol.schema', {}, 200000))
             if clear == 'end':
                 answer = conn.call('session.end', dict(self.keys[role], session_id=signed['session_id'], operation_key='end'))
@@ -2700,7 +2714,9 @@ print('stopped', flush=True)
             self.assertEqual(conn.sock.recv(1), b'')
 
     def test_refused_end_keeps_budget(self):
-        self.start(); conn = self.connect(); signed = self.sign_in(conn)
+        self.start()
+        conn = self.connect()
+        signed = self.sign_in(conn)
         bad = dict(self.keys['planner'], key_secret='A' * 43, session_id=signed['session_id'], operation_key='end')
         self.assertEqual(conn.call('session.end', bad)['error']['cause']['kind'], 'key_rejected')
         self.assertIn('result', conn.call('protocol.schema', {}, 200000))
@@ -2708,18 +2724,21 @@ print('stopped', flush=True)
         self.assertIn('result', conn.call('protocol.schema', {}, 200000))
 
     def test_pipelined_sign_in_and_submit(self):
-        self.start(); conn = self.connect()
+        self.start()
+        conn = self.connect()
         args = dict(self.keys['planner'], host='codex', host_session_id='pipeline', operation_key='pipeline')
         conn.sock.sendall(frame('session.sign-in', args, 2) + frame('relay.submit', self.submit_args(), 3, 200000))
         self.assertEqual(response(conn.sock)['request_id'], '2')
         answer = response(conn.sock)
-        self.assertEqual(answer['request_id'], '3'); self.assertIn('result', answer)
+        self.assertEqual(answer['request_id'], '3')
+        self.assertIn('result', answer)
 
     def test_connection_bound(self):
         self.start()
         clients = [self.connect() for _ in range(self.m.MAX_CONNECTIONS)]
         extra = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.addCleanup(extra.close); extra.settimeout(5)
+        self.addCleanup(extra.close)
+        extra.settimeout(5)
         extra.connect(json.loads(Path(self.service.ready_path).read_bytes())['socket'])
         self.assertEqual(extra.recv(1), b'')
         clients[0].close()
@@ -2737,22 +2756,27 @@ print('stopped', flush=True)
             def __getattr__(owner, name):
                 return getattr(owner.actual, name)
             def start(owner):
-                calls.append('start'); return owner.actual.start()
+                calls.append('start')
+                return owner.actual.start()
             def open_project(owner, project):
-                calls.append('open_project'); return owner.actual.open_project(project)
+                calls.append('open_project')
+                return owner.actual.open_project(project)
             def settle_private_io(owner, deadline):
-                calls.append('close'); return owner.actual.settle_private_io(deadline)
+                calls.append('close')
+                return owner.actual.settle_private_io(deadline)
         with patch.object(self.m, 'StoreWriter', RecordingWriter):
             self.start()
             baseline = list(calls)
-            conn = self.connect(); signed = self.sign_in(conn)
+            conn = self.connect()
+            signed = self.sign_in(conn)
             self.assertIn('result', conn.call('relay.submit', self.submit_args()))
             resumed = self.connect()
             self.assertIn('result', resumed.call('session.resume', dict(self.keys['planner'], session_id=signed['session_id'])))
             self.assertIn('result', resumed.call('session.end', dict(self.keys['planner'], session_id=signed['session_id'], operation_key='end')))
             self.assertEqual(calls, baseline)
             self.assertEqual(baseline, ['start', 'open_project'])
-            self.service.stop(); self.assertEqual(calls, baseline + ['close'])
+            self.service.stop()
+            self.assertEqual(calls, baseline + ['close'])
             platform = api_platform.platform_component()
             factory = platform.port_factory
             def wrong_factory(context):
