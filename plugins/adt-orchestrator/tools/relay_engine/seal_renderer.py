@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 import os
 import sqlite3
 import threading
+from time import monotonic
 
 from . import seal_slots as slots, store_layout
+from .api_writer import StopDeadline
 from .seal_types import (RecordInvalid, RecordUnreadable, SealUnusable,
                          require_canonical_id)
 
@@ -36,6 +38,8 @@ class _Owner:
     ident: int | None = None
     ledger_fd: int | None = None
     closing: bool = False
+    closed_ok: bool = False
+    closing_late: bool = False
     queue: deque = field(default_factory=deque)
     passes: set = field(default_factory=set)
     condition: threading.Condition = field(default_factory=threading.Condition)
@@ -80,10 +84,15 @@ class SealRenderer:
             owners = self._owners.setdefault(project_id, [])
             owner = _Owner(project_id, len(owners) + 1)
             owners.append(owner)
-        opened = _Request('open')
-        owner.thread = threading.Thread(target=self._own, args=(owner, opened),
-                                        name='seal-ledger-' + project_id, daemon=True)
-        owner.thread.start()
+            opened = _Request('open')
+            thread = threading.Thread(target=self._own, args=(owner, opened),
+                                      name='seal-ledger-' + project_id, daemon=True)
+            try:
+                thread.start()
+            except BaseException:
+                owner.state = 'never_started'
+                raise
+            owner.thread = thread
         completed = self.wait(opened.done, self.bound_s)
         if not completed:
             with owner.condition:
@@ -119,21 +128,46 @@ class SealRenderer:
             if owner.state != 'closed' and not owner.closing:
                 owner.state = 'serving' if completed else 'serving_late'
 
-    def ledger_closing(self, project_id):
+    def _fence_close(self, owner):
+        request = _Request('stop')
+        owner.closing = True
+        self._state(owner, 'closing')
+        owner.queue.append(request)
+        owner.condition.notify()
+        return request
+
+    def _wait_closing_half(self, done, deadline):
+        seconds = self.bound_s / 2
+        end = deadline.at() if deadline is not None else None
+        if end is not None:
+            seconds = min(seconds, end - monotonic())
+        return seconds > 0 and self.wait(done, seconds)
+
+    def ledger_closing(self, project_id, *, deadline: StopDeadline | None = None) -> bool:
         require_canonical_id(project_id)
         owner = self._newest(project_id)
-        if owner is None or owner.state == 'closed':
-            return
-        request = _Request('stop')
+        if owner is None:
+            return True
         with owner.condition:
-            owner.closing = True
-            self._state(owner, 'closing')
-            owner.queue.append(request)
-            owner.condition.notify()
-        if not self._hook_wait(owner, request):
-            with self._lock:
+            if owner.state == 'never_started':
+                return True
+            if owner.state == 'closed':
+                if not owner.closed_ok:
+                    owner.closing_late = True
+                return owner.closed_ok
+            request = self._fence_close(owner)
+        if not self._wait_closing_half(request.done, deadline):
+            with owner.condition:
+                if owner.reader is not None and not request.done.is_set():
+                    owner.reader.interrupt()
+            self._wait_closing_half(request.done, deadline)
+        with owner.condition:
+            confirmed = owner.closed_ok
+            if not confirmed:
+                owner.closing_late = True
                 if owner.state != 'closed':
-                    owner.state = 'closing_late'
+                    self._state(owner, 'closing_late')
+            return confirmed
 
     def signal(self, project_id, chain_id):
         require_canonical_id(project_id); require_canonical_id(chain_id)
@@ -173,16 +207,33 @@ class SealRenderer:
             if self._backstop is not None:
                 return
             self._stopped.clear()
-            self._backstop = threading.Thread(target=self._ticks, name='seal-backstop', daemon=True)
-            self._backstop.start()
+            backstop = threading.Thread(target=self._ticks, name='seal-backstop', daemon=True)
+            backstop.start()
+            self._backstop = backstop
 
-    def stop(self):
+    def opened_projects(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._owners)
+
+    def stop(self, deadline: float | None = None) -> bool:
         self._stopped.set()
-        backstop = self._backstop
+        with self._lock:
+            backstop = self._backstop
+            owners = tuple(owner for generations in self._owners.values()
+                           for owner in generations if owner.thread is not None)
+        for owner in owners:
+            with owner.condition:
+                if not owner.closing and owner.state != 'closed':
+                    self._fence_close(owner)
+        threads = [owner.thread for owner in owners]
         if backstop is not None:
-            # tick's injected contract returns on stop, and at most every second.
-            backstop.join()
-        self._backstop = None
+            threads.append(backstop)
+        for thread in threads:
+            thread.join(None if deadline is None else max(0, deadline - monotonic()))
+        with self._lock:
+            if backstop is self._backstop and backstop is not None and not backstop.is_alive():
+                self._backstop = None
+        return not any(thread.is_alive() for thread in threads) and all(owner.closed_ok for owner in owners)
 
     def _ticks(self):
         while self.tick(1.0) and not self._stopped.is_set():
@@ -274,6 +325,8 @@ class SealRenderer:
                     if owner.ledger_fd is not None:
                         os.close(owner.ledger_fd)
                         owner.ledger_fd = None
+                with owner.condition:
+                    owner.closed_ok = True
             finally:
                 with owner.condition:
                     if open_error is not None:

@@ -754,6 +754,96 @@ class SealRendererTests(unittest.TestCase):
         self.assertEqual(renderer.generations(P)[-1].state, 'opened')
         self.assertEqual(self.errors, [])
 
+    def test_renderer_close_ok_only_on_success(self):
+        for mode in ('reader', 'descriptor'):
+            with self.subTest(mode=mode):
+                def reader(*args):
+                    opened = self.ledger.open_reader(*args)
+                    close = opened.close
+                    def broken_close():
+                        close()
+                        if mode == 'reader':
+                            raise OSError('reader close failed')
+                    opened.close = broken_close
+                    return opened
+                renderer = self.renderer(reader=reader)
+                self.open(renderer)
+                owner = renderer._newest(P)
+                close_fd = os.close
+                if mode == 'descriptor':
+                    owner.ledger_fd = os.dup(self.fd)
+                def close(fd):
+                    close_fd(fd)
+                    if fd == owner.ledger_fd:
+                        raise OSError('descriptor close failed')
+                with mock.patch.object(os, 'close', close):
+                    self.assertIs(renderer.ledger_closing(P), False)
+                owner.thread.join(5)
+                self.assertEqual(owner.state, 'closed')
+                self.assertFalse(owner.closed_ok)
+                self.assertTrue(owner.closing_late)
+
+    def test_renderer_stop_deadline_with_held_reader(self):
+        from time import monotonic
+        renderer = self.renderer()
+        self.open(renderer, serving=True)
+        owner = renderer._newest(P)
+        hold, entered, release = self.hold(renderer._drain)
+        self.addCleanup(release.set)
+        with mock.patch.object(renderer, '_drain', hold):
+            renderer.signal(P, C)
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertIs(renderer.stop(monotonic()), False)
+                self.assertFalse(owner.reader.closed)
+            finally:
+                release.set()
+        self.assertIs(renderer.stop(), True)
+
+    def test_renderer_opened_projects_include_never_served(self):
+        renderer = self.renderer()
+        self.open(renderer)
+        self.assertEqual(renderer.opened_projects(), (P,))
+        owner = renderer._newest(P)
+        reader = owner.reader
+        self.assertIs(renderer.stop(), True)
+        self.assertTrue(reader.closed)
+        self.assertFalse(owner.thread.is_alive())
+
+    def test_renderer_backstop_start_failure(self):
+        renderer = self.renderer()
+        with mock.patch.object(threading.Thread, 'start', side_effect=RuntimeError('start fault')):
+            with self.assertRaisesRegex(RuntimeError, 'start fault'):
+                renderer.start()
+        self.assertIs(renderer.stop(), True)
+
+    def test_renderer_ledger_owner_start_failure(self):
+        renderer = self.renderer()
+        with mock.patch.object(threading.Thread, 'start', side_effect=RuntimeError('start fault')):
+            with self.assertRaisesRegex(RuntimeError, 'start fault'):
+                renderer.ledger_opened(P)
+        owner = renderer._newest(P)
+        if owner.thread is not None and owner.thread.ident is None:
+            self.renderers.remove(renderer)
+        self.assertEqual(owner.state, 'never_started')
+        self.assertIsNone(owner.thread)
+        self.assertIsNone(owner.reader)
+        self.assertIs(renderer.stop(), True)
+
+    def test_raising_close_keeps_stop_false(self):
+        def reader(*args):
+            opened = self.ledger.open_reader(*args)
+            close = opened.close
+            def broken_close():
+                close()
+                raise OSError('close outcome unavailable')
+            opened.close = broken_close
+            return opened
+        renderer = self.renderer(reader=reader)
+        self.open(renderer)
+        self.assertIs(renderer.stop(), False)
+        self.assertFalse(renderer._newest(P).thread.is_alive())
+
     def test_hook_close_completed(self):
         store = self.real_store(); self.rows(1, ledger=store)
         renderer = self.renderer(reader=store.open_reader, root=store.root)
