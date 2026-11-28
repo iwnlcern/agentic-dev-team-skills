@@ -2720,6 +2720,20 @@ class JoinTests(ProjectWriterFixture):
         self.wait_join(ticket, 'not_served')
         self.assertTrue(writer.settle_private_io(time.monotonic() + 2))
 
+    def test_join_route_creating_not_eligible(self):
+        join = mock.Mock()
+        writer = self.join_writer(join=join)
+        with closing(store_layout.open_catalogue(self.root)) as conn:
+            with closing(conn.execute(
+                    "UPDATE project_routes SET state='creating' WHERE project_id=?", (P,))) as cursor:
+                self.assertEqual(cursor.rowcount, 1)
+            conn.commit()
+
+        self.wait_join(writer.join_project(P), 'not_served')
+        join.assert_not_called()
+        self.assertNotIn(P, writer.served_projects())
+        self.assertNotIn(P, writer._join_slot)
+
     def test_join_ticket_outcomes(self):
         entered, release, pause = self.block()
         writer = self.join_writer(join=pause)

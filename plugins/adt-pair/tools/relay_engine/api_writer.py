@@ -1120,7 +1120,11 @@ class StoreWriter:
                 def eligible(conn):
                     stopped = any(row.scope == 'store' or row.project_id == project
                                   for row in store_layout.open_stops(conn))
-                    return store_layout.route_state(conn, project) == 'active', stopped
+                    try:
+                        store_layout.route(conn, project_id=project)
+                    except store_layout.RouteUnavailable:
+                        return False, stopped
+                    return True, stopped
 
                 active, stopped = self.read_catalogue(eligible)
                 with self._lock:
