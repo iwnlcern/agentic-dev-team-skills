@@ -714,6 +714,251 @@ c.executemany('INSERT INTO sessions VALUES (?,?)', [(i,'session-'+str(i)) for i 
     def _pending_place(self, journal, target, preimage, *, placed=False):
         return self._pending_forward(journal, target, preimage, 'place', effected=placed)
 
+    def _adoption(self):
+        snapshot_source = store_steps.snapshot_source
+        roots, targets, manifests, snapshot, legacy, _, _ = self._forward_marker_fixture()
+        unmark = self.root / 'unmark'
+        unmark.mkdir()
+        return snapshot_source, roots, targets, manifests, snapshot, legacy, unmark
+
+    @staticmethod
+    def _journal_files(folder):
+        return {p.relative_to(folder): (p.lstat().st_mode, p.read_bytes())
+                for p in folder.rglob('*') if p.is_file()}
+
+    def test_snapshot_source_copies_committed_wal_rows(self):
+        snapshot_source, _, targets, manifests, _, _, unmark = self._adoption()
+        self.journal.close()
+        target = targets['A']
+        values = (target.store_id, target.job_id, str(target.job_dir),
+                  target.root_index, target.root_uuid, str(target.root_path))
+        script = """import os, sys, ast
+from pathlib import Path
+from relay_engine import store_steps as s
+target = s.MarkerTarget(*ast.literal_eval(sys.argv[1]))
+j = s.open_journal(Path(target.job_dir))
+j._conn.execute('PRAGMA wal_autocheckpoint=0').close()
+p = s.PreimageManifest(tuple(ast.literal_eval(sys.argv[2])))
+s.advance_marker(j, target, p)
+os._exit(0)
+"""
+        subprocess.run([sys.executable, '-c', script, repr(values), repr(manifests['A'].entries)],
+                       stdin=subprocess.DEVNULL, check=True)
+        wal = self.job_path / 'job.sqlite3-wal'
+        self.assertGreater(wal.stat().st_size, 0)
+        (self.job_path / 'job.sqlite3-shm').unlink()
+        before = self._journal_files(self.job_path)
+        captured = snapshot_source(self.job_path, unmark)
+        source = store_steps.open_source(captured, unmark)
+        journal = store_steps.open_journal(unmark, create=True)
+        try:
+            self.assertEqual(store_steps.adopted_progress(source, journal, target).phase, 'marked')
+        finally:
+            journal.close()
+            store_steps.close_source(source)
+        self.assertEqual(self._journal_files(self.job_path), before)
+
+    def test_snapshot_source_custody(self):
+        snapshot_source, _, _, _, _, _, unmark = self._adoption()
+        import os
+        self.journal.checkpoint('wal-witness', True)
+        wal = (self.job_path / 'job.sqlite3-wal').resolve()
+        copy = shutil.copyfile
+
+        def stop_before_wal(src, dst, *args, **kwargs):
+            if Path(src) == wal:
+                raise RuntimeError('between input members')
+            return copy(src, dst, *args, **kwargs)
+
+        with mock.patch.object(shutil, 'copyfile', side_effect=stop_before_wal):
+            with self.assertRaisesRegex(RuntimeError, 'between input members'):
+                snapshot_source(self.job_path, unmark)
+        self.assertTrue((unmark / 'source.partial').exists())
+        self.assertFalse((unmark / 'source-inputs').exists())
+        db = (self.job_path / 'job.sqlite3').resolve()
+
+        def drift(src, dst, *args, **kwargs):
+            out = copy(src, dst, *args, **kwargs)
+            if Path(src) == db:
+                current = db.stat()
+                os.utime(db, ns=(current.st_atime_ns, current.st_mtime_ns + 10000000))
+            return out
+
+        with mock.patch.object(shutil, 'copyfile', side_effect=drift):
+            with self.assertRaises(store_steps.StepStateUnknown):
+                snapshot_source(self.job_path, unmark)
+        self.assertFalse((unmark / 'source-inputs').exists())
+        captured = snapshot_source(self.job_path, unmark)
+        published = unmark / 'source-inputs' / db.name
+        self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o400)
+        self.assertFalse((unmark / 'source.partial').exists())
+        with self.assertRaises(store_steps.StepStateUnknown):
+            snapshot_source(self.job_path, self.job_path / 'not-a-separate-job')
+        published.chmod(0o600)
+        original = published.read_bytes()
+        # Byte 63 is the low byte of SQLite's application-controlled user_version.
+        # The copy is still a database; only the published-input pin should catch it.
+        published.write_bytes(original[:63] + bytes([original[63] ^ 1]) + original[64:])
+        published.chmod(0o400)
+        with self.assertRaises(store_steps.StepStateUnknown):
+            store_steps.open_source(captured, unmark)
+        published.chmod(0o600)
+        published.write_bytes(original)
+        published.chmod(0o400)
+        self.journal.checkpoint('drift', False)
+        with self.assertRaises(store_steps.StepStateUnknown):
+            store_steps.open_source(captured, unmark)
+
+    def _adopt_marked(self, names=('A', 'B')):
+        snapshot_source, roots, targets, manifests, snapshot, legacy, unmark = self._adoption()
+        for name in names:
+            self._mark(self.journal, targets, manifests, name)
+        captured = snapshot_source(self.job_path, unmark)
+        source = store_steps.open_source(captured, unmark)
+        self.addCleanup(store_steps.close_source, source)
+        journal = store_steps.open_journal(unmark, create=True)
+        self.addCleanup(journal.close)
+        return roots, targets, snapshot, legacy, unmark, source, journal
+
+    def test_adopted_inverse_leaves_source_unchanged(self):
+        roots, targets, snapshot, _, unmark, source, journal = self._adopt_marked()
+        before = self._journal_files(self.job_path)
+        published = self._journal_files(unmark / 'source-inputs')
+        for target in targets.values():
+            store_steps.advance_adopted_inverse(source, journal, target)
+            self.assertEqual(store_steps.adopted_root_check(source, journal, target), 'preimage')
+        self.assertEqual(self._journal_files(self.job_path), before)
+        self.assertEqual(self._journal_files(unmark / 'source-inputs'), published)
+        self.assertEqual(journal.pending(), [])
+        count = store_layout._row(journal._conn, 'SELECT count(*) FROM receipts')[0]
+        self.assertEqual(count, len(roots) * 4)
+        store_steps.close_source(source)
+        self.assertFalse(list(unmark.glob('source-work-*')))
+
+    def test_adopted_inverse_crash_points(self):
+        from contextlib import closing
+        order = ('inverse-unplace', 'inverse-restore', 'dispose-tomb', 'dispose-clear')
+        effect, receipt = store_steps._marker_effect, store_steps.Journal.receipt
+        for step in order:
+            for moment in ('intent', 'effect', 'receipt'):
+                with self.subTest(step=step, moment=moment):
+                    root = self.root / f'{step}-{moment}'
+                    root.mkdir()
+                    source_dir = store_steps.migration_dir(root, JOB)
+                    with (closing(store_steps.open_journal(source_dir, create=True)) as origin,
+                          mock.patch.object(self, 'root', root),
+                          mock.patch.object(self, 'job_path', source_dir),
+                          mock.patch.object(self, 'journal', origin)):
+                        roots, targets, snapshot, _, _, source, journal = self._adopt_marked(('A',))
+                    target = targets['A']
+
+                    def cut_effect(root, fd, intent):
+                        if intent.step == step:
+                            if moment == 'effect':
+                                effect(root, fd, intent)
+                            raise RuntimeError(step)
+                        return effect(root, fd, intent)
+
+                    def cut_receipt(j, ident, observed):
+                        receipt(j, ident, observed)
+                        row = store_layout._row(j._conn, 'SELECT step FROM intents WHERE id=?', (ident,))
+                        if j is journal and row == (step,):
+                            raise RuntimeError(step)
+
+                    patch = (mock.patch.object(store_steps.Journal, 'receipt', cut_receipt)
+                             if moment == 'receipt' else
+                             mock.patch.object(store_steps, '_marker_effect', side_effect=cut_effect))
+                    with patch, self.assertRaisesRegex(RuntimeError, step):
+                        store_steps.advance_adopted_inverse(source, journal, target)
+                    self.assertEqual(store_steps.adopted_root_check(source, journal, target),
+                                     'preimage' if step == 'dispose-clear' and moment == 'receipt'
+                                     else 'at-step')
+
+                    if moment == 'effect':
+                        after = snapshot()[roots['A']]
+                        with (mock.patch.object(store_steps.Journal, 'receipt', cut_receipt),
+                              mock.patch.object(store_steps, '_marker_effect', wraps=effect) as moved,
+                              self.assertRaisesRegex(RuntimeError, step)):
+                            store_steps.advance_adopted_inverse(source, journal, target)
+                        moved.assert_not_called()
+                        self.assertEqual(snapshot()[roots['A']], after)
+                    store_steps.advance_adopted_inverse(source, journal, target)
+                    self.assertEqual(store_steps.adopted_root_check(source, journal, target), 'preimage')
+                    self.assertFalse(journal.pending())
+                    count = store_layout._row(journal._conn, 'SELECT count(*) FROM receipts')[0]
+                    self.assertEqual(count, len(order))
+                    store_steps.close_source(source)
+
+    def test_adopted_root_check_answers(self):
+        roots, targets, _, _, _, source, journal = self._adopt_marked()
+        a = targets['A']
+        self.assertEqual(store_steps.adopted_root_check(source, journal, a), 'marked')
+        progress = store_steps.marker_progress(self.journal, a)
+        self.assertEqual(progress.phase, 'marked')
+        engine = roots['A'] / '.engine'
+        old = roots['A'] / 'old-marker'
+        engine.rename(old)
+        shutil.copytree(old, engine)
+        self.assertEqual(store_steps.adopted_root_check(source, journal, a), 'other')
+        engine.rename(roots['A'] / 'copied-marker')
+        old.rename(engine)
+        history = store_steps._read_marker_history(self.journal, a)
+        sibling = roots['A'] / store_steps._marker_slots(
+            store_steps._marker_binding(a), history.progress.attempt, history.nonce)['sibling']
+        sibling.mkdir()
+        self.assertEqual(store_steps.adopted_root_check(source, journal, a), 'other')
+        sibling.rmdir()
+        store_steps.advance_adopted_inverse(source, journal, a)
+        self.assertEqual(store_steps.adopted_root_check(source, journal, a), 'preimage')
+        (engine / 'daemon.log').write_bytes(b'drift')
+        self.assertEqual(store_steps.adopted_root_check(source, journal, a), 'other')
+
+    def test_adopted_inverse_source_shapes(self):
+        snapshot_source, _, targets, manifests, snapshot, _, unmark = self._adoption()
+        self._mark(self.journal, targets, manifests, 'A')
+        self._pending_forward(self.journal, targets['B'], manifests['B'], 'aside')
+        inverse = store_steps.write_inverse_intent(self.journal, targets['A'], None)
+        store_steps.resume_inverse(self.journal, inverse, targets['A'])
+        captured = snapshot_source(self.job_path, unmark)
+        source = store_steps.open_source(captured, unmark)
+        self.addCleanup(store_steps.close_source, source)
+        journal = store_steps.open_journal(unmark, create=True)
+        self.addCleanup(journal.close)
+        before = snapshot()
+        for target in targets.values():
+            with self.assertRaises(store_steps.StepStateUnknown):
+                store_steps.advance_adopted_inverse(source, journal, target)
+        self.assertEqual(journal.pending(), [])
+        self.assertEqual(snapshot(), before)
+
+    def test_source_marker_phase(self):
+        snapshot_source, _, targets, manifests, _, _, unmark = self._adoption()
+        self._mark(self.journal, targets, manifests, 'A')
+        for pending in (False, True):
+            if pending:
+                self._pending_forward(self.journal, targets['B'], manifests['B'], 'aside')
+                store_steps.write_inverse_intent(self.journal, targets['A'], None)
+            captured = snapshot_source(self.job_path, unmark)
+            source = store_steps.open_source(captured, unmark)
+            try:
+                self.assertEqual(store_steps.source_marker_phase(source, targets['A']),
+                                 'unfinished' if pending else 'marked')
+                self.assertEqual(store_steps.source_marker_phase(source, targets['B']),
+                                 'unfinished' if pending else 'none')
+            finally:
+                store_steps.close_source(source)
+
+    def test_adopted_rows_bind_source_target(self):
+        from dataclasses import replace
+        _, targets, _, _, _, source, journal = self._adopt_marked()
+        a = targets['A']
+        intent = store_steps.write_inverse_intent(self.journal, a, None)
+        journal.intent(intent.step, {**intent.target, 'job_id': Q}, intent.before, intent.after)
+        with self.assertRaises(store_steps.StepStateUnknown):
+            store_steps.adopted_progress(source, journal, a)
+        with self.assertRaises(store_steps.StepStateUnknown):
+            store_steps.source_marker_phase(source, replace(a, root_uuid=Q))
+
     def test_resume_marker(self):
         from contextlib import closing
 

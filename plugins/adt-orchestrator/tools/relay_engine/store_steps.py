@@ -245,6 +245,140 @@ def _sha(path):
     return digest.hexdigest()
 
 
+@dataclass(frozen=True)
+class SourceSnapshot:
+    job_dir: str
+    sources: tuple[tuple[str, int, int, int, int, str], ...]
+    inputs: tuple[tuple[str, int, str], ...]
+
+
+def _source_file(path):
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError(f'not an ordinary snapshot file: {path}')
+    digest = _sha(path)
+    if identity(before) != identity(path.lstat()):
+        raise ValueError(f'snapshot file changed during read: {path}')
+    return (path.name, *identity(before)[:4], digest)
+
+
+def _source_files(directory):
+    main = _source_file(directory / 'job.sqlite3')
+    wal = directory / 'job.sqlite3-wal'
+    return (main, _source_file(wal)) if os.path.lexists(wal) else (main,)
+
+
+def _source_directories(job_dir, unmark_dir):
+    job, unmark = (Path(path).resolve(strict=True) for path in (job_dir, unmark_dir))
+    origin = job.stat()
+    origin_id = origin.st_dev, origin.st_ino
+    if any((info.st_dev, info.st_ino) == origin_id
+           for info in (part.stat() for part in (unmark, *unmark.parents))):
+        raise ValueError(f'snapshot destination aliases source: {unmark}')
+    if not job.is_dir() or not unmark.is_dir():
+        raise ValueError(f'snapshot needs ordinary directories: {job}, {unmark}')
+    return job, unmark
+
+
+def _remove_source_scratch(path):
+    if path.is_symlink() or (os.path.lexists(path) and not path.is_dir()):
+        raise ValueError(f'snapshot scratch is not a directory: {path}')
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _assert_source_rows(expected, observed):
+    for left, right in zip(expected, observed):
+        if tuple(left) != tuple(right):
+            raise ValueError(f'snapshot member changed: {left[0]}')
+    if len(expected) != len(observed):
+        raise ValueError('snapshot member set changed: job.sqlite3-wal')
+
+
+def snapshot_source(job_dir: str | Path, unmark_dir: str | Path) -> SourceSnapshot:
+    """Publish a byte-bound main/WAL pair without opening the orphaned journal."""
+    try:
+        job, unmark = _source_directories(job_dir, unmark_dir)
+        partial, published = unmark / 'source.partial', unmark / 'source-inputs'
+        for path in (partial, published):
+            _remove_source_scratch(path)
+        sources = _source_files(job)
+        partial.mkdir(mode=0o700)
+        inputs = []
+        for name, dev, ino, size, _, digest in sources:
+            member = partial / name
+            shutil.copyfile(job / name, member, follow_symlinks=False)
+            copied = _source_file(member)
+            if copied[1:3] == (dev, ino) or (copied[3], copied[5]) != (size, digest):
+                raise ValueError(f'snapshot copy differs or aliases source: {name}')
+            member.chmod(0o400)
+            with member.open('rb') as stream:
+                _sync_file(stream)
+            inputs.append((name, size, digest))
+        _assert_source_rows(sources, _source_files(job))
+        _sync_dir(partial)
+        os.rename(partial, published)
+        _sync_dir(unmark)
+        return SourceSnapshot(str(job), sources, tuple(inputs))
+    except (OSError, TypeError, ValueError) as error:
+        raise StepStateUnknown('stable source pair', 'published source inputs', str(error)) from error
+
+
+def open_source(snapshot: SourceSnapshot, unmark_dir: str | Path) -> Journal:
+    """Verify published bytes and open only a disposable, independent SQLite copy."""
+    work = None
+    try:
+        job, unmark = _source_directories(snapshot.job_dir, unmark_dir)
+        _assert_source_rows(snapshot.sources, _source_files(job))
+        published = unmark / 'source-inputs'
+        if published.is_symlink() or not published.is_dir():
+            raise ValueError(f'missing source inputs: {published}')
+        names = [row[0] for row in snapshot.inputs]
+        if names not in (['job.sqlite3'], ['job.sqlite3', 'job.sqlite3-wal']):
+            raise ValueError('invalid source input names')
+        if sorted(names) != sorted(item.name for item in published.iterdir()):
+            raise ValueError('source input member set changed')
+        known_ids = {tuple(row[1:3]) for row in snapshot.sources}
+        input_records = {}
+        for name, size, digest in snapshot.inputs:
+            path = published / name
+            read = _source_file(path)
+            if read[1:3] in known_ids or stat.S_IMODE(path.lstat().st_mode) != 0o400:
+                raise ValueError(f'snapshot input is not private and immutable: {name}')
+            if (read[3], read[5]) != (size, digest):
+                raise ValueError(f'snapshot input bytes changed: {name}')
+            known_ids.add(read[1:3])
+            input_records[name] = read
+        for stale in unmark.glob('source-work-*'):
+            _remove_source_scratch(stale)
+        work = unmark / ('source-work-' + str(uuid.uuid4()))
+        work.mkdir(mode=0o700)
+        for name, source_record in input_records.items():
+            file = work / name
+            shutil.copyfile(published / name, file, follow_symlinks=False)
+            read = _source_file(file)
+            if (read[1:3] in known_ids or (read[3], read[5]) != (source_record[3], source_record[5])
+                    or _source_file(published / name) != source_record):
+                raise ValueError(f'work copy changed or aliases input: {name}')
+            known_ids.add(read[1:3])
+        _assert_source_rows(snapshot.sources, _source_files(job))
+        source = open_journal(work)
+        source._source_custody = (snapshot, unmark, work, known_ids)
+        return source
+    except (OSError, ValueError, TypeError, sqlite3.Error) as error:
+        if work is not None:
+            _remove_source_scratch(work)
+        raise StepStateUnknown('bound source inputs', 'separate source work copy', str(error)) from error
+
+
+def close_source(source: Journal) -> None:
+    source.close()
+    _remove_source_scratch(source._source_custody[2])
+
+
 def _side_files(path):
     return [suffix for suffix in ('-wal', '-shm') if Path(str(path) + suffix).exists()]
 
@@ -624,15 +758,29 @@ def _marker_binding(target):
                 root_path=str(_absolute_marker_path(target.root_path)))
 
 
-def _marker_job_paths(journal, binding):
-    job = Path(binding['job_dir'])
+def _journal_main(journal):
     databases = journal._conn.execute('PRAGMA database_list')
     try:
-        main = next((row[2] for row in databases if row[1] == 'main'), None)
+        return next((row[2] for row in databases if row[1] == 'main'), None)
     finally:
         databases.close()
-    if main != str(job / 'job.sqlite3'):
-        raise ValueError('marker journal does not belong to the bound job')
+
+
+def _marker_job_paths(journal, binding, source=None):
+    job = Path(binding['job_dir'])
+    main = _journal_main(journal)
+    if source is None:
+        if main != str(job / 'job.sqlite3'):
+            raise ValueError('marker journal does not belong to the bound job')
+    else:
+        snapshot, unmark, work, known_ids = source._source_custody
+        if snapshot.job_dir != str(job) or _journal_main(source) != str(work / 'job.sqlite3'):
+            raise ValueError('source work copy does not belong to the bound job')
+        if journal is not source:
+            info = Path(main).lstat()
+            if (main != str(unmark / 'job.sqlite3') or not stat.S_ISREG(info.st_mode)
+                    or (info.st_dev, info.st_ino) in known_ids):
+                raise ValueError('unmark journal aliases source or is outside its job')
     return job / 'originals' / str(binding['root_index']), Path(binding['root_path'])
 
 
@@ -697,6 +845,7 @@ class _MarkerHistory:
     build_identity: dict | None
     dispose_slot: str | None
     inventory: list
+    last: Intent | None = None
 
 
 def _marker_identity(info):
@@ -790,11 +939,16 @@ def _marker_target_for(authority, binding, attempt, nonce, identity, disposing):
                 dispose_slot=disposing, slots=_marker_slots(binding, attempt, nonce))
 
 
-def _read_marker_history(journal, target):
+def _read_marker_history(journal, target, *, source=None):
     try:
         binding = _marker_binding(target)
-        preimage, root = _marker_job_paths(journal, binding)
+        preimage, root = _marker_job_paths(journal, binding, source)
         rows = list(_marker_rows(journal, binding))
+        if source is not None and source is not journal:
+            if any(intent.step not in ('inverse-unplace', 'inverse-restore', 'dispose-tomb',
+                                       'dispose-clear') for intent, _ in rows):
+                raise ValueError('unmark journal contains a forward marker step')
+            rows = list(_marker_rows(source, binding)) + rows
         if not rows:
             return _MarkerHistory(MarkerProgress('none', 1, None, 'marker-open'), binding,
                                   None, None, None, [])
@@ -802,6 +956,8 @@ def _read_marker_history(journal, target):
         with _open_marker_directory(root) as root_fd:
             root_identity = _marker_identity(os.fstat(root_fd))
         inventory, manifest_hash = _marker_preimage(preimage)
+        if source is not None and manifest_hash != start['preimage_manifest_sha256']:
+            raise _ChangedMarkerPreimage(start['preimage_manifest_sha256'], manifest_hash, str(preimage))
         original_identity = start['original_identity']
         if (set(original_identity) != {'dev', 'ino'} or
                 any(type(n) is not int or n < 0 for n in original_identity.values())):
@@ -858,8 +1014,8 @@ def _read_marker_history(journal, target):
                     step = _MARKER_SEQUENCE[_MARKER_SEQUENCE.index(step) + 1]
         next_step = None if pending or phase in ('marked', 'restored') else step
         return _MarkerHistory(MarkerProgress(phase, attempt, pending, next_step), authority,
-                              nonce, identity, disposing, inventory)
-    except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
+                              nonce, identity, disposing, inventory, rows[-1][0])
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, sqlite3.Error) as error:
         raise _marker_unknown('bound marker history', 'valid next step',
                               {'binding_error': str(error)}) from error
 
@@ -931,7 +1087,7 @@ def _marker_check(root_fd, target, state, inventory):
     return matches, seen
 
 
-def _write_marker_step(journal, target, history, inverse, preimage):
+def _write_marker_step(journal, target, history, inverse, preimage, *, source=None):
     progress = history.progress
     if progress.pending is not None:
         raise ValueError('marker step already pending for this root')
@@ -944,7 +1100,7 @@ def _write_marker_step(journal, target, history, inverse, preimage):
         if progress.phase not in ('none', 'forward') or not step:
             raise ValueError('marker step is out of order')
     binding = _marker_binding(target)
-    path, root = _marker_job_paths(journal, binding)
+    path, root = _marker_job_paths(journal, binding, source)
     authority, inventory = history.authority, history.inventory
     if progress.phase == 'none':
         inventory, digest = _marker_preimage(path)
@@ -1033,12 +1189,12 @@ def _marker_effect(root, root_fd, intent):
         os.rename(slots[src], slots[dst], src_dir_fd=root_fd, dst_dir_fd=root_fd)
 
 
-def _resume_marker_step(journal, intent, target, inverse):
-    history = _read_marker_history(journal, target)
+def _resume_marker_step(journal, intent, target, inverse, *, source=None):
+    history = _read_marker_history(journal, target, source=source)
     progress = history.progress
     if progress.pending != intent or progress.phase != ('inverse' if inverse else 'forward'):
         raise _marker_unknown(intent.before, intent.after, 'not the bound pending marker step')
-    _, root = _marker_job_paths(journal, _marker_binding(target))
+    _, root = _marker_job_paths(journal, _marker_binding(target), source)
     try:
         with _open_marker_directory(root) as root_fd:
             is_after, after_seen = _marker_check(root_fd, intent.target, intent.after, history.inventory)
@@ -1100,3 +1256,69 @@ def advance_inverse(journal, target) -> str:
         resume_inverse(journal, intent, target)
         status = 'marker'
     return status
+
+
+class _ChangedMarkerPreimage(StepStateUnknown):
+    pass
+
+
+def source_marker_phase(source: Journal, target: MarkerTarget) -> str:
+    """Classify only the immutable orphaned history, before acquiring scopes."""
+    progress = _read_marker_history(source, target, source=source).progress
+    if progress.phase == 'none':
+        return 'none'
+    return 'marked' if progress.phase == 'marked' and progress.pending is None else 'unfinished'
+
+
+def _adopted_history(source, journal, target):
+    if journal is source:
+        raise _marker_unknown('separate unmark journal', 'no alias', str(target.job_dir))
+    if source_marker_phase(source, target) != 'marked':
+        raise _marker_unknown('marked source history', 'adopted inverse', str(target.root_path))
+    return _read_marker_history(journal, target, source=source)
+
+
+def adopted_progress(source: Journal, journal: Journal, target: MarkerTarget) -> MarkerProgress:
+    return _adopted_history(source, journal, target).progress
+
+
+def adopted_root_check(source: Journal, journal: Journal, target: MarkerTarget) -> str:
+    """Read the whole bound state, including absent sibling and disposal slots."""
+    try:
+        history = _adopted_history(source, journal, target)
+    except _ChangedMarkerPreimage:
+        return 'other'
+    pending = history.progress.pending
+    last = history.last
+    if pending is not None:
+        states = (pending.after, pending.before)
+        answer = 'at-step'
+    else:
+        states = (last.after,)
+        phase = history.progress.phase
+        if phase == 'marked':
+            answer = 'marked'
+        elif phase == 'restored':
+            answer = 'preimage'
+        else:
+            answer = 'at-step'
+    try:
+        with _open_marker_directory(Path(target.root_path)) as root_fd:
+            if any(_marker_check(root_fd, last.target, state, history.inventory)[0]
+                   for state in states):
+                return answer
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return 'other'
+
+
+def advance_adopted_inverse(source: Journal, journal: Journal, target: MarkerTarget) -> str:
+    status = 'receipt'
+    while True:
+        history = _adopted_history(source, journal, target)
+        if history.progress.phase == 'restored':
+            return status
+        intent = history.progress.pending or _write_marker_step(
+            journal, target, history, True, None, source=source)
+        _resume_marker_step(journal, intent, target, True, source=source)
+        status = 'marker'
