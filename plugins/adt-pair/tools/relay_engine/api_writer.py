@@ -292,6 +292,31 @@ _TRANSFER_WRITES = frozenset({
 })
 
 
+SEAL_DRAIN_S = 10
+
+
+class StopDeadline:
+    """Read-only stop budget for hooks, armed once by the writer."""
+
+    def __init__(self):
+        self._deadline: float | None = None
+
+    def at(self) -> float | None:
+        return self._deadline
+
+    def _arm(self, deadline: float):
+        if self._deadline is None:
+            self._deadline = deadline
+
+
+class WriterHooks(Protocol):
+    def catalogue_opened(self) -> None: ...
+    def ledger_opened(self, project_id: str) -> None: ...
+    def ledger_serving(self, project_id: str) -> None: ...
+    def ledger_closing(self, project_id: str, *, deadline: StopDeadline | None = None) -> bool: ...
+    def catalogue_closing(self, *, deadline: StopDeadline | None = None) -> bool: ...
+
+
 class StorePort(Protocol):
     def submit(self, project_id: str, job: WriterJob) -> JobOutcome: ...
     def submit_callee(self, project_id: str, job: CalleeJob) -> JobOutcome: ...
@@ -339,6 +364,19 @@ class _HeldPort:
         raise WriterUnavailable('store_held')
 
     submit = submit_callee = submit_transfer = read = ledger_file = served_projects = _refuse
+    request_project_stop = request_project_start = _refuse
+
+
+class _FaultedPort:
+    def __init__(self, cause, error):
+        self._cause = cause
+        self.error = error
+
+    def _refuse(self, *_args, **_kwargs):
+        raise WriterUnavailable(self._cause) from self.error
+
+    submit = submit_callee = submit_declared = submit_transfer = _refuse
+    read_declared = read = read_catalogue = ledger_file = store_id = served_projects = _refuse
     request_project_stop = request_project_start = _refuse
 
 
@@ -413,11 +451,14 @@ def _unavailable(reason, cause):
 
 class StoreWriter:
     def __init__(self, root: str | os.PathLike, *, runtime_instance_id: str,
-                 phase_hook: Callable[[str], None] | None = None):
+                 phase_hook: Callable[[str], None] | None = None,
+                 hooks: WriterHooks | None = None):
         self._root = root
         self._runtime_instance_id = runtime_instance_id
         self._active_project = None
         self._phase_hook = phase_hook
+        self._hooks = hooks
+        self._stop_deadline = StopDeadline()
         self._queue = queue.Queue()
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
@@ -452,6 +493,8 @@ class StoreWriter:
         self._bindings: dict[str, _FileBinding] = {}
         self._started = threading.Event()
         self._start_error = None
+        self._held_cause = None
+        self._held_error = None
         self._startup_state = None
         self._start_result = None
         self._before_project_join = None
@@ -711,6 +754,13 @@ class StoreWriter:
         with self._changed:
             if self._closed or self._admission_closed() or self._start_error is not None:
                 return
+            if self._held_cause is not None:
+                result = StartResult('held', (self._held_cause,),
+                                     _FaultedPort(self._held_cause, self._held_error))
+                self._startup_state = result.state
+                self._start_result = result
+                self._changed.notify_all()
+                return
             self._startup_state = 'hooking'
         try:
             if before_joins is not None:
@@ -720,6 +770,8 @@ class StoreWriter:
         else:
             result = StartResult('serving', (), self)
         with self._changed:
+            if self._closed or self._admission_closed():
+                return
             self._startup_state = result.state
             self._start_result = result
             self._changed.notify_all()
@@ -1036,6 +1088,7 @@ class StoreWriter:
 
     def fence_for_stop(self, attempt):
         with self._changed:
+            self._stop_deadline._arm(attempt.active)
             active = self._active_request
             for request in self._requests.values():
                 if request is not active:
@@ -1109,6 +1162,23 @@ class StoreWriter:
             with self._lock:
                 self._failed_closes.append(conn)
             raise
+
+    @staticmethod
+    def _report_hook(name, project, outcome):
+        try:
+            strings.report_diagnostic(RuntimeError(f'{name} {project or "none"} {outcome}'))
+        except Exception:
+            pass
+
+    def _close_catalogue(self, conn):
+        try:
+            if self._hooks is not None:
+                try:
+                    self._hooks.catalogue_closing(deadline=self._stop_deadline)
+                except BaseException:
+                    self._report_hook('catalogue_closing', None, 'raised')
+        finally:
+            self._close_handle(conn)
 
     def _permit_commit(self):
         while True:
@@ -1344,7 +1414,8 @@ class StoreWriter:
                 self._rollback_errors[label] = failure
                 self._connections.pop(label)
         try:
-            self._close_handle(conn)
+            close = self._close_catalogue if label == 'catalogue' else self._close_handle
+            close(conn)
         except Exception as close_error:
             failure.add_note(f'{label}: connection close failed: {type(close_error).__name__}')
 
@@ -1765,6 +1836,8 @@ class StoreWriter:
             self._finish_declared_read(request, conns, original)
 
     def _work(self):
+        conn = None
+        cause = 'catalogue_unopenable'
         try:
             path = store_layout.catalogue_path(self._root)
             if not path.exists() or path.stat().st_size == 0:
@@ -1777,15 +1850,27 @@ class StoreWriter:
                 arm = self._store_arm
                 conn = store_layout._open_catalogue(self._root, None, admission=(arm.store, arm.project),
                                                     check_admission=self._check_writer_admission)
-            try:
-                _require_identity(path, identity)
-            except BaseException:
-                self._close_handle(conn)
-                raise
+            _require_identity(path, identity)
             self._catalogue = conn
             self._bindings['catalogue'] = _FileBinding(conn, identity)
+            if self._hooks is not None:
+                cause = 'start_fault'
+                self._hooks.catalogue_opened()
         except BaseException as error:
-            self._start_error = error
+            if conn is not None:
+                try:
+                    self._close_handle(conn)
+                except BaseException as close_error:
+                    error.add_note(f'catalogue close failed: {type(close_error).__name__}')
+            with self._changed:
+                self._catalogue = None
+                self._bindings.pop('catalogue', None)
+                if self._startup_state is None:
+                    self._start_error = error
+                else:
+                    self._held_cause = cause
+                    self._held_error = error
+                    self._close_complete = not self._failed_closes
             return
         finally:
             with self._changed:
@@ -1850,7 +1935,7 @@ class StoreWriter:
             self._close_handle(conn)
             del self._connections[project_id]
         if self._catalogue is not None:
-            self._close_handle(self._catalogue)
+            self._close_catalogue(self._catalogue)
         self._catalogue = None
         self._conn = None
         with self._lock:

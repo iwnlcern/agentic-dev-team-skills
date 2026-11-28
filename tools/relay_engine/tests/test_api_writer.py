@@ -10,6 +10,8 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -1853,6 +1855,176 @@ class ProjectStopTests(ProjectWriterFixture):
         self.assertIn(P, writer.served_projects())
 
 
+class CatalogueHookTests(ProjectWriterFixture):
+    def make_writer(self, hooks=None):
+        writer = api_writer.StoreWriter(self.root, runtime_instance_id='r1', hooks=hooks)
+        self.addCleanup(writer.close)
+        return writer
+
+    def attempt(self, writer):
+        now = time.monotonic()
+        attempt = SimpleNamespace(active=now + 2, work=now + 3)
+        writer.bind_service_owner(None, SimpleNamespace(attempt=attempt, admission_closed=True))
+        return attempt
+
+    def test_no_hooks_keeps_writer_unchanged(self):
+        writer = self.make_writer()
+        writer.start()
+        self.assertTrue(writer.store_id())
+
+    def test_catalogue_hooks_called_on_worker(self):
+        writer = self.make_writer(hooks := mock.Mock())
+        seen = []
+        hooks.catalogue_opened.side_effect = lambda: seen.append(
+            (threading.current_thread().name, writer._started.is_set()))
+        hooks.catalogue_closing.side_effect = lambda **_: seen.append(
+            (threading.current_thread().name, writer._started.is_set()))
+        writer.start(mode='service')
+        self.assertEqual(writer.wait_started().state, 'serving')
+        writer.close()
+        self.assertEqual(seen, [('store-writer', False), ('store-writer', True)])
+
+    def test_catalogue_retirement_calls_closing(self):
+        writer = self.make_writer(hooks := mock.Mock())
+        seen = []
+
+        def before_close(**kwargs):
+            self.assertIsNone(kwargs['deadline'].at())
+            seen.append(threading.current_thread().name)
+
+        hooks.catalogue_closing.side_effect = before_close
+        writer.start()
+
+        def retire(_):
+            writer._retire_declared_file('catalogue', writer._catalogue, OSError('fault'))
+            return api_writer.JobOutcome(False, None)
+
+        with mock.patch.object(writer, '_run_declared', side_effect=retire):
+            writer.submit_declared(self.declared(lambda _: None))
+        writer.close()
+        self.assertEqual(seen, ['store-writer'])
+
+    def test_stop_deadline_armed_once_by_fence(self):
+        writer = self.make_writer()
+        writer.start()
+        attempt = self.attempt(writer)
+        self.assertIsNone(writer._stop_deadline.at())
+        self.assertTrue(writer.fence_for_stop(attempt))
+        self.assertEqual(writer._stop_deadline.at(), attempt.active)
+        self.assertTrue(writer.fence_for_stop(SimpleNamespace(active=0, work=attempt.work)))
+        self.assertEqual(writer._stop_deadline.at(), attempt.active)
+
+    def test_catalogue_closing_receives_the_stop_deadline(self):
+        writer = self.make_writer(hooks := mock.Mock())
+        hooks.catalogue_closing.return_value = False
+        writer.start()
+        attempt = self.attempt(writer)
+        self.assertTrue(writer.fence_for_stop(attempt))
+        self.assertTrue(writer.settle_service_stop(attempt))
+        hooks.catalogue_closing.assert_called_once_with(deadline=writer._stop_deadline)
+        self.assertEqual(hooks.catalogue_closing.call_args.kwargs['deadline'].at(), attempt.active)
+
+    def fault_result(self, writer, cause, error):
+        result = writer.wait_started()
+        self.assertEqual((result.state, result.causes), ('held', (cause,)))
+        self.assertIs(result.port.error, error)
+        for name, args in {
+            'submit': (P, None), 'submit_callee': (P, None), 'submit_declared': (None,),
+            'submit_transfer': (None,), 'read_declared': (None, None), 'read': (P, None),
+            'read_catalogue': (None,), 'ledger_file': (P,), 'store_id': (),
+            'served_projects': (), 'request_project_stop': (P, 'actor'),
+            'request_project_start': (P, 'actor'),
+        }.items():
+            with self.subTest(operation=name):
+                with self.assertRaises(api_writer.WriterUnavailable) as raised:
+                    getattr(result.port, name)(*args)
+                self.assertEqual(raised.exception.reason, cause)
+                self.assertIs(raised.exception.__cause__, error)
+
+    def test_start_fault_port_touches_nothing(self):
+        hooks = mock.Mock()
+        error = OSError('open hook failed')
+        hooks.catalogue_opened.side_effect = error
+        writer = self.make_writer(hooks)
+        ingest = mock.Mock()
+        writer.start(mode='service', before_joins=ingest)
+        self.fault_result(writer, 'start_fault', error)
+        ingest.assert_not_called()
+        hooks.catalogue_closing.assert_not_called()
+        self.assertIsNone(writer._catalogue)
+
+    def test_catalogue_unopenable_held_in_service_mode(self):
+        for error in (store_layout.LayoutFault('missing'), PermissionError(), sqlite3.DatabaseError()):
+            with self.subTest(error=type(error).__name__):
+                writer = self.make_writer(hooks := mock.Mock())
+                ingest = mock.Mock()
+                with mock.patch.object(store_layout, 'open_catalogue', side_effect=error):
+                    writer.start(mode='service', before_joins=ingest)
+                    self.fault_result(writer, 'catalogue_unopenable', error)
+                    with self.assertRaises(type(error)) as ordinary:
+                        self.make_writer().start()
+                self.assertIs(ordinary.exception, error)
+                hooks.catalogue_opened.assert_not_called()
+                hooks.catalogue_closing.assert_not_called()
+                ingest.assert_not_called()
+
+    def test_held_start_stops_clean(self):
+        for cause in ('start_fault', 'catalogue_unopenable'):
+            with self.subTest(cause=cause):
+                writer = self.make_writer(hooks := mock.Mock())
+                error = OSError('startup fault')
+                failure = (mock.patch.object(store_layout, 'open_catalogue', side_effect=error)
+                           if cause == 'catalogue_unopenable'
+                           else mock.patch.object(hooks, 'catalogue_opened', side_effect=error))
+                with failure:
+                    writer.start(mode='service')
+                    self.fault_result(writer, cause, error)
+                attempt = self.attempt(writer)
+                self.assertTrue(writer.fence_for_stop(attempt))
+                self.assertTrue(writer.settle_service_stop(attempt))
+                self.assertIsNone(writer._start_error)
+                self.assertIsNone(writer._catalogue)
+                self.assertFalse(writer._worker.is_alive())
+
+    def test_held_start_failed_close_stays_unclean(self):
+        writer = self.make_writer(hooks := mock.Mock())
+        error = OSError('open hook failed')
+        hooks.catalogue_opened.side_effect = error
+        open_catalogue = store_layout.open_catalogue
+        captured = []
+
+        class FailedClose:
+            def close(self):
+                raise OSError('injected close failure')
+
+        def open_with_close_failure(*args, **kwargs):
+            open_catalogue(*args, **kwargs).close()
+            captured.append(FailedClose())
+            return captured[-1]
+
+        with mock.patch.object(store_layout, 'open_catalogue', open_with_close_failure):
+            writer.start(mode='service')
+            self.fault_result(writer, 'start_fault', error)
+        attempt = self.attempt(writer)
+        self.assertTrue(writer.fence_for_stop(attempt))
+        self.assertFalse(writer.settle_service_stop(attempt))
+        self.assertEqual(writer._failed_closes, captured)
+        self.assertFalse(writer._close_complete)
+        self.assertIsNone(writer._start_error)
+
+    def test_closing_raise_reported_and_close_goes_on(self):
+        writer = self.make_writer(hooks := mock.Mock())
+        error = OSError('close hook failed')
+        hooks.catalogue_closing.side_effect = error
+        writer.start()
+        with mock.patch.object(strings, 'report_diagnostic') as report:
+            writer.close()
+        report.assert_called_once()
+        self.assertEqual(str(report.call_args.args[0]), 'catalogue_closing none raised')
+        self.assertTrue(writer._close_complete)
+        self.assertFalse(writer._failed_closes)
+
+
 class StartHookTests(ProjectWriterFixture):
     def service_writer(self, *, root=None, **hooks):
         writer = api_writer.StoreWriter(self.root if root is None else root,
@@ -2047,10 +2219,17 @@ class StartHookTests(ProjectWriterFixture):
                                      before_joins=calls.append)
         with self.pool(2) as pool:
             waiters = [pool.submit(writer.wait_started) for _ in range(2)]
-            for waiter in waiters:
-                with self.assertRaises(store_layout.LayoutFault) as error:
-                    waiter.result(2)
-                self.assertEqual(error.exception.cause, 'missing')
+            first, second = (waiter.result(2) for waiter in waiters)
+            self.assertIs(first, second)
+            self.assertIsInstance(first, api_writer.StartResult)
+            self.assertEqual((first.state, first.causes), ('held', ('catalogue_unopenable',)))
+            self.assertIsInstance(first.port, api_writer._FaultedPort)
+            self.assertIsInstance(first.port.error, store_layout.LayoutFault)
+            self.assertEqual(first.port.error.cause, 'missing')
+            with self.assertRaises(api_writer.WriterUnavailable) as unavailable:
+                first.port.store_id()
+            self.assertEqual(unavailable.exception.reason, 'catalogue_unopenable')
+            self.assertIs(unavailable.exception.__cause__, first.port.error)
         self.assertEqual(calls, [])
 
     def test_callables_need_service_mode(self):
