@@ -58,6 +58,21 @@ class CutoverStarted(ValueError):
     """A validated migration cannot be rebuilt after cutover starts."""
 
 
+class RestoreOpen(ValueError):
+    """A restore is open at the migration's hold or route step."""
+
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        super().__init__(f'{job_id}: this job is not finished: restart the engine to finish it, or '
+                         'abandon it if it has stopped for you')
+
+
+def _refuse_open_restore(root):
+    opened = store_backup.open_restores(root)
+    if opened:
+        raise RestoreOpen(opened[0])
+
+
 class HoldMissing(ValueError):
     """A migration operation lacks the maintenance hold it requires."""
 
@@ -1021,6 +1036,7 @@ def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> No
                     nonlocal backup
                     cat = conns['catalogue']
                     check(cat)
+                    _refuse_open_restore(root)
                     _cutover_before_reserve(cat, data, root)
                     observed = _cutover_holders(cat, scopes)
                     if observed:
@@ -1038,8 +1054,9 @@ def cutover(root, turns: store_steps.TurnRunner, job_id: str, now_ms: int) -> No
                     last = store_backup.last_complete(root, 'before-move')
                     stamp = now_ms if last is None else max(now_ms, last + 1)
                     try:
-                        store_backup.backup(turns, root, 'before-move', stamp,
-                                           then_hold=(job_id, 'cutover', scopes), before=before_backup)
+                        with store_backup.jobs_lock(root):
+                            store_backup.backup(turns, root, 'before-move', stamp,
+                                               then_hold=(job_id, 'cutover', scopes), before=before_backup)
                     except store_backup.BackupRefused as error:
                         if error.reason == 'creation-pending':
                             holder = turn('read', lambda cat: store_layout.name_holder(cat, name),
@@ -1220,6 +1237,7 @@ def undo(root, turns: store_steps.TurnRunner, job_id: str, *,
                 def route_and_queue(conns):
                     nonlocal route_intent
                     cat = checked_cat(conns)
+                    _refuse_open_restore(root)
                     current = observe(cat)
                     if current != before:
                         raise store_steps.StepStateUnknown(before, after, current)
@@ -1235,8 +1253,9 @@ def undo(root, turns: store_steps.TurnRunner, job_id: str, *,
                     store_layout.return_to_creating(cat, project, job_id)
 
                 try:
-                    turns.run(store_steps.Declared('written', {project: 'read'}), route_and_queue,
-                              fence_project=project)
+                    with store_backup.jobs_lock(root):
+                        turns.run(store_steps.Declared('written', {project: 'read'}), route_and_queue,
+                                  fence_project=project)
                 except UndoRefused as error:
                     items = json.loads(json.dumps(error.items, default=_undo_item_data))
                     refusal = {'route_intent': route_intent.id, 'reason': error.reason, 'items': items}
